@@ -42,6 +42,7 @@ use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumEvent;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DatumsRead;
+use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::doc::ReadDatums;
@@ -85,6 +86,7 @@ use big_cartridges_core::registry::sidecar_key;
 use big_cartridges_core::registry::version_key;
 use serde_json::Value as Json;
 use service_client_native_rs::Client;
+use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use service_utils_rs::Spawner;
 use sqlite_rs::Database;
@@ -728,6 +730,111 @@ impl Registry {
         let (id, version) = (id.clone(), version.clone());
         self.query(move |state| state.resolved_version(&id, &version))
             .await
+    }
+
+    /// The version `pin` selects, as [`Self::resolved`] serves it, provided the served envelope
+    /// is the exact revision the pin selects. The envelope is read at the pin's own document and
+    /// heads, which may be any frontier at or after the version's publish, so it is compared by
+    /// revision rather than by where it was read. The pin's document need not be the one served:
+    /// a duplicate document (two nodes created one before they met) carries the same immutable
+    /// envelope. The document may have synced in from a peer, so the envelope is checked as a
+    /// publish checks it before it is believed.
+    pub(crate) async fn resolved_at(
+        &self,
+        pin: &DatumPin,
+    ) -> Result<ResolvedCartridge, CartridgesError> {
+        let reference = pin.location().reference();
+        let key = reference.key();
+        let ReferenceDocId::Concrete(doc) = reference.document() else {
+            return Err(CartridgesError::Rejected(
+                "an install pins a registry document by id, not `self`".into(),
+            ));
+        };
+        // The envelope of a version sits at the slot of its own label (`version_key`).
+        let version: Version = (key.tag().as_str() == Cartridge::ID)
+            .then(|| std::str::from_utf8(key.slot_bytes()).ok()?.parse().ok())
+            .flatten()
+            .ok_or_else(|| {
+                CartridgesError::Rejected(format!(
+                    "an install pins the `{}` datum of a version, not `{key}`",
+                    Cartridge::ID
+                ))
+            })?;
+        let heads = reference.heads().to_vec();
+        if heads.is_empty() {
+            return Err(CartridgesError::Rejected(
+                "an install pin states the document heads it selects".into(),
+            ));
+        }
+        let unreadable = |reason: String| CartridgesError::PinnedEnvelopeUnreadable {
+            version: Box::new(version.clone()),
+            reason,
+        };
+        let mut read = self
+            .docs
+            .call(
+                RequestContext::root(),
+                ReadDatums {
+                    capability: self.capability,
+                    doc_id: doc.clone(),
+                    at: At::Heads(heads),
+                    datums: Some(BTreeSet::from([key.clone()])),
+                    optimistic: false,
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                // The document or the pinned heads have not reached this node yet.
+                ClientError::Method(
+                    error @ (DocsError::DocNotFound
+                    | DocsError::UnknownHeads { .. }
+                    | DocsError::Pending { .. }),
+                ) => unreadable(error.to_string()),
+                // The registry reads its own drawer: a pin elsewhere is no registry version.
+                ClientError::Method(DocsError::Denied) => CartridgesError::Rejected(
+                    "the pin names a document outside the registry".into(),
+                ),
+                error => docs_error(error),
+            })?;
+        let value = match read.datums.remove(key) {
+            Some(DatumRead::Accepted { value, .. }) => value,
+            Some(DatumRead::Pending { reason, .. }) => return Err(unreadable(reason)),
+            Some(DatumRead::Rejected { reason } | DatumRead::Undecodable { reason, .. }) => {
+                return Err(CartridgesError::Rejected(format!(
+                    "the pinned version datum is unusable: {reason}"
+                )));
+            }
+            Some(DatumRead::Absent { .. }) | None => {
+                return Err(CartridgesError::Rejected(
+                    "the version is not in the registry document at the pinned heads".into(),
+                ));
+            }
+        };
+        let pinned: Cartridge = serde_json::from_value(value).map_err(|error| {
+            CartridgesError::Rejected(format!("invalid cartridge envelope: {error}"))
+        })?;
+        pinned
+            .validate()
+            .map_err(|error| CartridgesError::Rejected(error.to_string()))?;
+        pinned.verify_signature()?;
+        if pinned.version != version {
+            return Err(CartridgesError::Rejected(format!(
+                "the pinned datum sits at a slot other than its own version {}",
+                pinned.version
+            )));
+        }
+        let resolved = self.resolved(&pinned.id, &pinned.version).await?;
+        let (served, selected) = (resolved.cartridge.revision(), pinned.revision());
+        if served != selected {
+            return Err(CartridgesError::PinnedRevisionMismatch {
+                id: pinned.id,
+                version: Box::new(version),
+                reason: format!(
+                    "the registry serves revision {served}, the pin selects {selected}"
+                ),
+            });
+        }
+        Ok(resolved)
     }
 
     pub(crate) async fn changes_after(

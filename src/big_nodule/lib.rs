@@ -72,7 +72,9 @@ use big_cartridges_core::CartridgeId;
 use big_cartridges_core::protocol::AWAIT_MAX_HOLD_MS;
 use big_cartridges_core::protocol::AnswerCartridgeGrantRequest;
 use big_cartridges_core::protocol::AwaitCartridgeGrantRequest;
+use big_cartridges_core::protocol::AwaitCartridgeGrants;
 use big_cartridges_core::protocol::CartridgeGrants;
+use big_cartridges_core::protocol::CartridgeGrantsAt;
 use big_cartridges_core::protocol::CartridgeInstallRecord;
 use big_cartridges_core::protocol::CartridgeInstalls;
 use big_cartridges_core::protocol::CartridgesError;
@@ -463,6 +465,43 @@ impl NoduleService {
         Ok(CartridgeGrants { grants })
     }
 
+    /// The long poll over one cartridge's grants: the operator's, as the list is.
+    async fn await_cartridge_grants(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: AwaitCartridgeGrants,
+    ) -> Res<CartridgeGrantsAt> {
+        let caller = self.caller(context, authorization).await?;
+        if self.scope_of(&caller)?.is_some() {
+            return Err(NodulesError::Denied);
+        }
+        let deadline = Instant::now()
+            + Duration::from_millis(u64::from(params.hold_ms.min(AWAIT_MAX_HOLD_MS)));
+        let mut feed = self.state.grants.clone();
+        // The sender lives as long as the state actor: a closed channel is the service stopping,
+        // which ends the hold like an expiry.
+        let mut closed = false;
+        loop {
+            {
+                let current = feed.borrow_and_update();
+                let revision = current.revision(&params.cartridge_id);
+                if params.since.as_ref() != Some(&revision) || closed || Instant::now() >= deadline
+                {
+                    return Ok(CartridgeGrantsAt {
+                        grants: current.grants(&params.cartridge_id).to_vec(),
+                        revision,
+                    });
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            closed = matches!(
+                tokio::time::timeout(remaining, feed.changed()).await,
+                Ok(Err(_))
+            );
+        }
+    }
+
     /// What the caller may administer: everything for the operator's identity, the scope of a
     /// handle this domain minted, nothing for any other identity. Another actor is refused
     /// rather than looked up in a grant table: this domain has no entitlements beyond the
@@ -812,6 +851,7 @@ handlers! {
     ListCartridgeGrantRequests => list_grant_requests: GrantRequests;
     AnswerCartridgeGrantRequest => answer_grant_request: GrantRequestAnswer;
     ListCartridgeGrants => list_cartridge_grants: CartridgeGrants;
+    AwaitCartridgeGrants => await_cartridge_grants: CartridgeGrantsAt;
 }
 
 impl Handler<ObserveCartridgeInstalls> for NoduleService {
@@ -843,6 +883,7 @@ service_utils_rs::bind_service_protocol! {
             ListCartridgeGrantRequests(ListCartridgeGrantRequests),
             AnswerCartridgeGrantRequest(AnswerCartridgeGrantRequest),
             ListCartridgeGrants(ListCartridgeGrants),
+            AwaitCartridgeGrants(AwaitCartridgeGrants),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
             SetNoduleDevTakeover(SetNoduleDevTakeover),
             SetMethodRoute(SetMethodRoute),

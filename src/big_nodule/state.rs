@@ -16,6 +16,7 @@ use crate::executor::ReensureQueue;
 use crate::executor::RoutineCapabilities;
 use crate::executor::RoutineSpec;
 use crate::requests::GrantRequests;
+use crate::requests::GrantsFeed;
 use crate::requests::MissingAuthorityLookup;
 use crate::requests::Requests;
 use crate::store;
@@ -314,6 +315,9 @@ pub(crate) struct Handle {
     pub(crate) installs: watch::Receiver<Vec<CartridgeInstallRecord>>,
     /// The grant requests of this boot, for the service's list and its long polls to follow.
     pub(crate) requests: watch::Receiver<Requests>,
+    /// Each cartridge's grants as the last reconcile left them, for the service's
+    /// `awaitCartridgeGrants` to follow.
+    pub(crate) grants: watch::Receiver<GrantsFeed>,
 }
 
 impl Handle {
@@ -1150,7 +1154,7 @@ impl State {
         )
         .await?;
         let (installs, installs_rx) = watch::channel(Vec::new());
-        let (grant_requests, requests_rx) = GrantRequests::new();
+        let (grant_requests, requests_rx, grants_rx) = GrantRequests::new();
 
         let mut state = Self {
             stores,
@@ -1268,6 +1272,7 @@ impl State {
                 commands,
                 installs: installs_rx,
                 requests: requests_rx,
+                grants: grants_rx,
             },
             stop,
         ))
@@ -2043,6 +2048,8 @@ impl State {
                 true
             }
         });
+        self.grant_requests
+            .publish_grants(snapshot.value.cartridge_docs());
         self.observed_heads = snapshot.heads;
         self.records = new_records;
         Ok(revoke_errors)
