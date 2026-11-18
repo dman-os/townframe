@@ -709,8 +709,28 @@ impl Backend {
                 "an in-process micro has no node transport yet: only guest micros call node \
                  methods (over wasi:http to dispatch.local)"
             ),
+            // The `wasi:http` request is a component-model future, which can only be polled
+            // inside a component-model task. A Dioxus task (a `use_resource` in a view) is
+            // polled by `render_immediate` from the synchronous `mount` and `dispatch` exports,
+            // where there is none, and wit-bindgen asserts on it. So the request runs as
+            // incarnation-owned work on the guest's own executor, and the caller awaits its
+            // answer over a channel, which any executor can poll. Nothing polls Dioxus tasks in
+            // a guest on their own wake, so once the answer is sent the views are marked dirty:
+            // the render pass that follows polls the woken caller.
             #[cfg(feature = "guest")]
-            Self::Guest(_) => crate::guest::call(input).await,
+            Self::Guest(runtime) => {
+                let (answer, answered) = futures::channel::oneshot::channel();
+                let views = Rc::clone(runtime);
+                runtime.spawn(Box::pin(async move {
+                    // A caller that stopped waiting (its view unmounted and dropped the
+                    // resource) has no use for the answer, so a closed channel is not an error.
+                    drop(answer.send(crate::guest::call(input).await));
+                    views.notify_views();
+                }));
+                answered
+                    .await
+                    .expect("a call's task lives until the incarnation closes, with its callers")
+            }
         }
     }
 
@@ -826,6 +846,10 @@ impl Context {
     /// be one the manifest declares as a presentation; admission checks that once `activate`
     /// returns, and nothing is reachable by other micros before then. Any number of
     /// presentations may be published, one per declared name.
+    ///
+    /// `render` runs once per mount, in a component scope of its own (like one instance of a
+    /// custom element): the hooks it calls are that mount's, and what it captures (collections,
+    /// facets, the micro's store) is shared by every mount.
     pub fn publish<P: ComponentDecl>(
         &self,
         render: impl Fn() -> dioxus_core::Element + 'static,
@@ -873,8 +897,9 @@ impl Context {
     /// the host granted it, and anything else is [`ClientError::Method`] carrying dispatch's
     /// denial.
     ///
-    /// Only an async context may call. The synchronous `mount` and `dispatch` exports cannot
-    /// suspend, so an event handler spawns the call with [`Self::spawn`].
+    /// The returned future may be polled by any executor, a view's Dioxus resource included: in
+    /// a guest the request itself runs on the incarnation's own task, and this future only
+    /// awaits its answer.
     pub async fn call<M: Unary>(&self, input: M) -> Result<M::Output, ClientError<M::Error>> {
         self.0.backend.call(input).await
     }

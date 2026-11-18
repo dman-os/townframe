@@ -41,4 +41,4 @@ sqlite_rs.workspace = true
 async-trait.workspace = true
 keyring-core = { version = "1.0", default-features = false }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }

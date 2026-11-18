@@ -10,7 +10,9 @@
 //!   that carries a made-up bearer still answers as the micro (the guest never holds capability
 //!   bytes, and cannot substitute one);
 //! - `refused`: a request to any authority other than `dispatch.local` is refused by the
-//!   runtime, not routed anywhere.
+//!   runtime, not routed anywhere;
+//! - `resource`: the granted call made from the view's Dioxus `use_resource`, which Dioxus polls
+//!   outside any component-model task, answers like `granted` (rendered once it resolves).
 
 use big_ndk::WasiHttp;
 use big_ndk::wit::wasi::http::client;
@@ -152,7 +154,29 @@ async fn activate(cx: Context) -> Result<(), Error> {
         format!("refused={}", other_origin().await),
     ]
     .join("\n");
-    cx.publish::<Report>(move || rsx! { "{report}" })
+    let view_cx = cx.clone();
+    cx.publish::<Report>(move || {
+        // The same granted call from a view's Dioxus resource: Dioxus polls it from the
+        // synchronous `mount` and `dispatch` exports, where no component-model task exists.
+        let view_cx = view_cx.clone();
+        let resource = use_resource(move || {
+            let cx = view_cx.clone();
+            async move {
+                outcome(
+                    cx.call(Echo {
+                        text: "resource".to_owned(),
+                    })
+                    .await,
+                )
+            }
+        });
+        rsx! {
+            "{report}"
+            if let Some(answer) = resource() {
+                "resource={answer}"
+            }
+        }
+    })
 }
 
 clay_mdk::export_micro!(activate, manifest);
