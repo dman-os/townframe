@@ -36,8 +36,8 @@ const isolated = ["--config", 'resolver.feature-unification="selected"'];
 // the `trapper` micro the e2e's sync-export trap spec opens, served when the e2e asks for it
 // (`DAYFRAME_WEB_TRAPPER=1`, which `playwright.config.ts` sets) and never in a plain serve.
 // Likewise `DAYFRAME_WEB_REVIEW_FIXTURE=1` swaps the review package for its `fixture`-feature
-// build, which shows a sample node; a plain serve serves the shipped guest, which is Unconfigured
-// here because the web composition has no node.
+// build, which shows a sample node, and links no node calls; a plain serve serves the shipped guest,
+// which the browser host cannot load yet (it imports `wasi:http`).
 const packageDirectory = (await prepareDayframePackages({
   testFixtures: false,
   trapper: Deno.env.get("DAYFRAME_WEB_TRAPPER") === "1",

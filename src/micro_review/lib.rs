@@ -20,10 +20,14 @@ pub mod node;
 use clay_dioxus_kit::AppBar;
 use clay_mdk::Context;
 use clay_mdk::Error;
+#[cfg(not(feature = "fixture"))]
 use clay_mdk::Facet;
+#[cfg(not(feature = "fixture"))]
 use clay_mdk::hooks::use_facet;
 use dioxus::prelude::*;
+#[cfg(not(feature = "fixture"))]
 use micro_review_manifest::ReviewConfig;
+#[cfg(not(feature = "fixture"))]
 use micro_review_manifest::ReviewConfigDecl;
 use micro_review_manifest::ReviewView;
 use model::Content;
@@ -37,6 +41,7 @@ use model::Read;
 use model::Review;
 use model::Screen;
 use node::CallError;
+#[cfg(not(feature = "fixture"))]
 use node::ContextNode;
 use node::NodeCalls;
 use pierre_diffs_dioxus::DiffInput;
@@ -50,46 +55,45 @@ const ROW: &str = "block min-h-12 w-full rounded-md px-4 py-3 text-left text-tex
 /// granted it publishes the "Unconfigured" alert: sample pull requests on a phone would read as
 /// real, so the fixture node ([`fixture`], behind the `fixture` feature and tests) is never a
 /// fallback here.
+#[cfg(not(feature = "fixture"))]
 async fn activate(context: Context) -> Result<(), Error> {
     match context.config::<ReviewConfigDecl>()? {
         Some(facet) => context.publish::<ReviewView>({
             let context = context.clone();
             move || configured_view(context.clone(), facet.clone())
         })?,
-        None => publish_unconfigured(&context)?,
+        None => context.publish::<ReviewView>(|| {
+            rsx! {
+                Failed {
+                    error: CallError::Unconfigured(
+                        "grant the micro the org.example.dayframe.review.config entry (githubDrawer, intxtDrawers, docCap)"
+                            .to_owned(),
+                    ),
+                }
+            }
+        })?,
     }
     Ok(())
 }
 
-/// No configuration entry was granted. A shipped guest publishes the "Unconfigured" alert. The
-/// `fixture` feature, which only the browser e2e's guest is built with (`DAYFRAME_WEB_REVIEW_FIXTURE`
-/// in `x/dayframe-web.ts`), publishes the view over [`fixture::Fixture::showcase`] instead, because
-/// the web composition has no node to configure the micro against. The node is built once, outside
-/// the publication, so every render reads the same node: a fresh one per render would restart the
+/// The activation of the guest the browser e2e is built with (`DAYFRAME_WEB_REVIEW_FIXTURE` in
+/// `x/dayframe-web.ts`): the view over [`fixture::Fixture::showcase`], whatever the composition
+/// granted, because the web composition has no node to configure the micro against. It replaces
+/// the real activation instead of branching inside it, so this guest never links the node calls
+/// (`wasi:http`) a browser host does not provide. The node is built once, outside the
+/// publication, so every render reads the same node: a fresh one per render would restart the
 /// reads forever.
-fn publish_unconfigured(context: &Context) -> Result<(), Error> {
-    #[cfg(feature = "fixture")]
-    {
-        let node = fixture::Fixture::showcase();
-        context.publish::<ReviewView>(move || view(node.clone()))
-    }
-    #[cfg(not(feature = "fixture"))]
-    context.publish::<ReviewView>(|| {
-        rsx! {
-            Failed {
-                error: CallError::Unconfigured(
-                    "grant the micro the org.example.dayframe.review.config entry (githubDrawer, intxtDrawers, docCap)"
-                        .to_owned(),
-                ),
-            }
-        }
-    })
+#[cfg(feature = "fixture")]
+async fn activate(context: Context) -> Result<(), Error> {
+    let node = fixture::Fixture::showcase();
+    context.publish::<ReviewView>(move || view(node.clone()))
 }
 
 clay_mdk::export_micro!(activate, micro_review_manifest::manifest);
 
 /// [`view`] over the real node. Binding the facet to reactivity makes a configuration entry
 /// written, or changed, after mount re-render the view over a node that reads the new one.
+#[cfg(not(feature = "fixture"))]
 fn configured_view(context: Context, facet: Facet<ReviewConfig>) -> Element {
     let snapshot = use_facet(&facet);
     view(ContextNode::new(context, snapshot.state))
