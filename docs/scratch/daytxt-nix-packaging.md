@@ -153,3 +153,11 @@ Result: it did not finish. After 15 minutes (my `timeout 900`) it was still fetc
 3. Disk: `/` (the Nix store) is at 15 GB free, so a first desktop dep layer (wasmtime, Dioxus, webkit) would force a `nix store gc` mid-lane; not attempted.
 
 Nothing else was built. The worktree has only this doc committed. The first hours of whoever implements step 1 of "Recommended order" are the hash refresh; do it on a machine with disk headroom (mothership).
+
+## Implementation notes (steps 1 and 2, operator scope update 2026-11-18)
+
+- Shipping package set: `daytxt-packages` is the lab micro plus `intxt.guest.wasm`. The shell micro is compiled into the host and has no package file. The hosted desktop refuses to boot without `intxt.guest.wasm` (`hosted_runtime` in `dayframe_desktop/composition.rs`), so the guest ships. `daytxt-packages-dev` holds counter, layout, lab and review; `daytxt-web` reads it.
+- `daytxt-web` is a static dev and Playwright-testing artifact. It is not a release artifact until the web node lands, and is not wired into `builds.yml`.
+- `x/dayframe-site.ts` is the one site-assembly implementation: `x/dayframe-web.ts` and the Nix package both run it (it has no imports, shells out to `wasm-bindgen` and `b3sum`).
+- Caching is the existing Swatinem/rust-cache and flakehub-cache-action; no new cache.
+- Android signing already exists as `x/build-a-dayb.ts` (`DAYBOOK_ANDROID_RELEASE_KEYSTORE_*` env, `apksigner`); the APK step reuses it. No APK is built now.
