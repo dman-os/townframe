@@ -765,6 +765,39 @@ ordered-KV shape. One shared substrate (ordered KV + atomic batch) is noted, not
 - Q20: the disabled tasks still name the removed traits.
 - Q21: `add_members` and `grant_access` create parts implicitly.
 
+### FutureForm, wasm, blake3 digest, `added_at` (2026-11-18; lane-verified)
+
+**Status:** 126/126 on mothership. Native clippy 0 errors; the wasm32-unknown-unknown clippy
+is clean apart from dead code.
+
+**Operator decisions applied:**
+- FutureForm now (`#[future_form(Sendable, Local)]`, as in subduction).
+- No trap.rs.
+- blake3 `PayloadDigest` over canonical JSON (keys sorted; streamed into the hasher).
+- Leaf fingerprints over the digest (`big-sync-obj-fp-v2`).
+- Access rows stay in the log, after reading the RPC: verdicts are recomputed every round from
+  current state, and `RevWatch` already wakes on every commit.
+
+**`added_at`:**
+- The rule lives in `LogSelector::selects`: skip a removal when the membership's
+  `first_added_at > max(after, route bound)`.
+- It uses the *first* add, not the latest: under a collapsed log the latest-add rule drops a
+  needed removal (live 5, removed 6, re-added 7, removed 8: a reader at 5 misses the removal).
+- Cost: a reader whose cursor sits in a gap between incarnations gets a harmless extra
+  removal.
+- Possible refinement: also keep `prev_removed_at` and skip when
+  `prev_removed_at <= cursor < latest_added_at`.
+
+**Open:**
+- `check-matrix` fails only on `-D warnings` over the disabled machine's dead code (97
+  warnings).
+- Six legacy findings are baselined in the new `guardrails.toml`.
+- The canonical-JSON form is our own, not RFC 8785; `1` and `1.0` digest differently.
+- `lib.rs` `Clock` is still `std::time::Instant`.
+- The combinators are named types (`RevMap`/`RevFilterMap`/`RevFilterKeys`); their scratch
+  page is `Box<dyn Any + Send>`, so projected keys and values must be `Send` even under
+  `Local`.
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a
