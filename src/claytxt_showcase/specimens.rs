@@ -10,11 +10,13 @@ mod app_bar;
 mod button;
 mod card;
 mod chip;
+mod drawer;
 mod list_row;
 mod nav_button;
 mod panel_page;
 mod scrub_strip;
 mod separator;
+mod sheet;
 mod tabs;
 
 pub(super) use alert::AlertSpecimens;
@@ -22,11 +24,13 @@ pub(super) use app_bar::AppBarSpecimens;
 pub(super) use button::ButtonSpecimens;
 pub(super) use card::CardSpecimens;
 pub(super) use chip::ChipSpecimens;
+pub(super) use drawer::DrawerSpecimens;
 pub(super) use list_row::ListRowSpecimens;
 pub(super) use nav_button::NavButtonSpecimens;
 pub(super) use panel_page::PanelPageSpecimens;
 pub(super) use scrub_strip::ScrubStripSpecimens;
 pub(super) use separator::SeparatorSpecimens;
+pub(super) use sheet::SheetSpecimens;
 pub(super) use tabs::TabsSpecimens;
 
 use clay_dioxus_kit::Renderer;
@@ -47,6 +51,7 @@ pub(super) fn renderer() -> Renderer {
 }
 
 pub(crate) const COMPACT_PX: f64 = 390.0;
+pub(crate) const MEDIUM_PX: f64 = 700.0;
 pub(crate) const EXPANDED_PX: f64 = 960.0;
 const FRAME_HEIGHT_PX: f64 = 260.0;
 

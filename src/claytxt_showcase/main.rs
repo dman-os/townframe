@@ -275,6 +275,8 @@ enum LabTab {
     AppBar,
     ListRow,
     PanelPage,
+    Sheet,
+    Drawer,
     Layout,
     Tokens,
     Colors,
@@ -282,7 +284,7 @@ enum LabTab {
 }
 
 impl LabTab {
-    const ALL: [LabTab; 15] = [
+    const ALL: [LabTab; 17] = [
         LabTab::Button,
         LabTab::Tabs,
         LabTab::Card,
@@ -294,6 +296,8 @@ impl LabTab {
         LabTab::AppBar,
         LabTab::ListRow,
         LabTab::PanelPage,
+        LabTab::Sheet,
+        LabTab::Drawer,
         LabTab::Layout,
         LabTab::Tokens,
         LabTab::Colors,
@@ -314,6 +318,8 @@ impl LabTab {
             LabTab::AppBar => "app-bar",
             LabTab::ListRow => "list-row",
             LabTab::PanelPage => "panel-page",
+            LabTab::Sheet => "sheet",
+            LabTab::Drawer => "drawer",
             LabTab::Layout => "layout",
             LabTab::Tokens => "tokens",
             LabTab::Colors => "colors",
@@ -338,6 +344,8 @@ impl LabTab {
             LabTab::AppBar => "AppBar",
             LabTab::ListRow => "ListRow",
             LabTab::PanelPage => "PanelPage",
+            LabTab::Sheet => "Sheet",
+            LabTab::Drawer => "Drawer",
             LabTab::Layout => "Layout kit",
             LabTab::Tokens => "Tokens",
             LabTab::Colors => "Colors",
@@ -377,6 +385,8 @@ impl LabTab {
             LabTab::AppBar => &[("app-bar-slots", "Slots")],
             LabTab::ListRow => &[("list-row-states", "States")],
             LabTab::PanelPage => &[("panel-page-scroll", "Scroll")],
+            LabTab::Sheet => &[("sheet-widths", "Widths")],
+            LabTab::Drawer => &[("drawer-widths", "Widths")],
             LabTab::Layout => &[("kit", "Layout kit")],
             LabTab::Tokens => &[
                 ("typography", "Typography"),
@@ -405,6 +415,8 @@ impl LabTab {
             LabTab::AppBar => rsx! { specimens::AppBarSpecimens {} },
             LabTab::ListRow => rsx! { specimens::ListRowSpecimens {} },
             LabTab::PanelPage => rsx! { specimens::PanelPageSpecimens {} },
+            LabTab::Sheet => rsx! { specimens::SheetSpecimens {} },
+            LabTab::Drawer => rsx! { specimens::DrawerSpecimens {} },
             LabTab::Layout => rsx! {
                 FoundationSection {
                     id: "kit".to_string(),

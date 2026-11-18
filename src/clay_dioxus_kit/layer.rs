@@ -49,11 +49,6 @@ impl Layer {
     }
 }
 
-/// The dim layer behind an overlay's panel: the `scrim` colour role, which is a fixed black at
-/// 32% (Material's value) and so darkens a light and a dark theme alike. It fades in with the
-/// overlay (`KIT-108`). Shared by every overlay so they cannot disagree.
-pub(crate) const SCRIM: &str = "cursor-default bg-scrim animate-fade-in motion-reduce:animate-none";
-
 #[cfg(test)]
 mod tests {
     use super::*;

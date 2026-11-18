@@ -8,16 +8,13 @@
 //! claytxt skin as Tailwind classes) until the contract reaches them.
 pub mod headless;
 
-mod drawer;
 #[cfg(feature = "host")]
 mod foundation;
 mod layer;
 mod list_details;
 mod sections;
-mod sheet;
 mod width;
 
-pub use drawer::Drawer;
 #[cfg(feature = "host")]
 pub use foundation::FoundationStyles;
 #[cfg(feature = "host")]
@@ -40,6 +37,7 @@ pub use headless::card::CardHeader;
 pub use headless::card::CardVariant;
 pub use headless::chip::Chip;
 pub use headless::chip::ChipVariant;
+pub use headless::drawer::Drawer;
 pub use headless::list_details::ListDetailsActions;
 pub use headless::list_details::use_list_details;
 pub use headless::list_row::ListRow;
@@ -53,13 +51,13 @@ pub use headless::sections::SizeRule;
 pub use headless::sections::Snap;
 pub use headless::sections::Split;
 pub use headless::separator::Separator;
+pub use headless::sheet::Sheet;
 pub use headless::tabs::TabItem;
 pub use headless::tabs::TabPanel;
 pub use headless::tabs::Tabs;
 pub use layer::Layer;
 pub use list_details::ListDetails;
 pub use sections::Sections;
-pub use sheet::Sheet;
 pub use width::WidthClass;
 
 #[cfg(test)]

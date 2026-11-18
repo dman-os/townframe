@@ -8,16 +8,12 @@ use crate::specimens::COMPACT_PX;
 use crate::specimens::EXPANDED_PX;
 use clay_dioxus_kit::use_list_details;
 use clay_dioxus_kit::AppBar;
-use clay_dioxus_kit::Button;
-use clay_dioxus_kit::ButtonVariant;
-use clay_dioxus_kit::Drawer;
 use clay_dioxus_kit::ListDetails;
 use clay_dioxus_kit::ListRow;
 use clay_dioxus_kit::NavButton;
 use clay_dioxus_kit::NavButtonMode;
 use clay_dioxus_kit::SectionPane;
 use clay_dioxus_kit::Sections;
-use clay_dioxus_kit::Sheet;
 use clay_dioxus_kit::SizeRule;
 use clay_dioxus_kit::Snap;
 use clay_dioxus_kit::Split;
@@ -25,7 +21,7 @@ use clay_dioxus_kit::WidthClass;
 use dioxus::prelude::*;
 
 /// Which specimen groups to show: all of them, or the one a screenshot run names through
-/// `DAYTXT_SHOWCASE_KIT` (`sections`, `list`, `sheet`, `drawer`). The native window cannot scroll
+/// `DAYTXT_SHOWCASE_KIT` (`sections`, `list`). The native window cannot scroll
 /// under automation, so a group per run is how every specimen gets captured.
 #[component]
 pub fn KitSpecimens(only: Option<String>) -> Element {
@@ -55,30 +51,6 @@ pub fn KitSpecimens(only: Option<String>) -> Element {
                     }
                     Frame { title: "ListDetails", width_px: EXPANDED_PX,
                         ListDetailsSpecimen { width_px: EXPANDED_PX, initially_open: Some("Appearance") }
-                    }
-                }
-            }
-            if shows("sheet") {
-                div {
-                    class: "flex flex-wrap items-start gap-8",
-                    Frame { title: "Sheet", width_px: COMPACT_PX,
-                        SheetSpecimen { width_px: COMPACT_PX }
-                    }
-                    Frame { title: "Sheet", width_px: EXPANDED_PX,
-                        SheetSpecimen { width_px: EXPANDED_PX }
-                    }
-                }
-            }
-            if shows("drawer") {
-                div {
-                    class: "flex flex-wrap items-start gap-8",
-                    Frame { title: "Drawer", width_px: COMPACT_PX,
-                        DrawerSpecimen { width_px: COMPACT_PX }
-                    }
-                    // Wide hosts show the sidebar beside the content, never a drawer: this frame
-                    // stays empty on purpose (`KIT-101`).
-                    Frame { title: "Drawer (never shown at this width)", width_px: EXPANDED_PX,
-                        DrawerSpecimen { width_px: EXPANDED_PX }
                     }
                 }
             }
@@ -206,49 +178,6 @@ fn ListDetailsSpecimen(width_px: f64, initially_open: Option<&'static str>) -> E
             on_resize: move |next| weights.set(next),
             on_open: move |key| open.set(Some(key)),
             on_back: move |()| open.set(None),
-        }
-    }
-}
-
-#[component]
-fn SheetSpecimen(width_px: f64) -> Element {
-    let width = WidthClass::from_px(width_px);
-    let mut open = use_signal(|| true);
-    rsx! {
-        div {
-            class: "p-4",
-            Button { variant: ButtonVariant::Outline, onclick: move |()| open.set(true), "Open sheet" }
-        }
-        if open() {
-            Sheet { width, name: "Choose a theme", on_dismiss: move |()| open.set(false),
-                div {
-                    class: "p-4",
-                    h3 { class: "m-0 mb-2 text-lg font-semibold", "Choose a theme" }
-                    p { class: "text-text-muted", "A sheet belongs to its panel and is dismissed by its scrim or Escape." }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn DrawerSpecimen(width_px: f64) -> Element {
-    let width = WidthClass::from_px(width_px);
-    let mut open = use_signal(|| true);
-    rsx! {
-        div {
-            class: "p-4",
-            Button { variant: ButtonVariant::Outline, onclick: move |()| open.set(true), "Open drawer" }
-        }
-        Drawer { width, name: "Sidebar", open: open(), on_dismiss: move |()| open.set(false),
-            nav {
-                class: "flex flex-col gap-1 p-2",
-                "aria-label": "Specimen sidebar",
-                AppBar { title: "claytxt" }
-                for title in ["Home", "Settings", "Layout"] {
-                    Button { key: "{title}", variant: ButtonVariant::Ghost, onclick: |()| {}, "{title}" }
-                }
-            }
         }
     }
 }

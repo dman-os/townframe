@@ -25,11 +25,11 @@ components (the rest) are a headless part and a styled Rust part of Tailwind cla
 | `ScrubStrip` (Niagara-style index strip) | `headless::scrub_strip` | `styles/kit/scrub_strip.css` | `specimens/scrub_strip.rs` |
 | `Sections` (resizable split) | `headless::sections` | `Sections` (Rust, Tailwind) | `claytxt_showcase/kit.rs` |
 | `ListDetails` (list/details scaffold) | `headless::list_details` | `ListDetails` | same |
-| `Sheet` (bottom/side sheet) | `headless::sheet` | `Sheet` | same |
+| `Sheet` (bottom/side sheet) | `headless::sheet` | `styles/kit/sheet.css` | `specimens/sheet.rs` |
 | `NavButton` (back / open sidebar) | `headless::nav_button` | `styles/kit/nav_button.css` | `specimens/nav_button.rs` |
 | `PanelPage` (app bar pinned over a scrolling body) | `headless::panel_page` | `styles/kit/panel_page.css` | `specimens/panel_page.rs` |
 | `AppBar` (leading slot, title, trailing actions) | `headless::app_bar` | `styles/kit/app_bar.css` | `specimens/app_bar.rs` |
-| `Drawer` (left drawer of a compact host) | `headless::drawer` | `Drawer` | same |
+| `Drawer` (left drawer of a compact host) | `headless::drawer` | `styles/kit/drawer.css` | `specimens/drawer.rs` |
 | `ListRow` (openable, highlighted-when-open list row) | `headless::list_row` | `styles/kit/list_row.css` | `specimens/list_row.rs` |
 
 ## Conventions
@@ -199,13 +199,14 @@ named after it.
   the previous constants (10, 20, 40, 50) were each local choices, and an app bar needing a layer
   of its own would have collided with them.
 - **KIT-103** The scrim. An overlay (`Drawer` while open, every `Sheet`) renders one: a button
-  named `Dismiss <name>` filling the overlay, under the panel by tree order (no `z-index` of its
-  own). It is always shown, dims with the `scrim` colour role (a fixed 32% black, so it darkens a
-  light and a dark theme alike, where `text` at low opacity would lighten a dark one), and a press
-  on it calls `on_dismiss`, the same as Escape. Reason: dismissal by tapping outside is the one
-  path every renderer delivers (Escape needs a focused element; Blitz can focus one via `set_focus`, but nothing focuses a freshly opened sheet yet). The
-  consequence for sizing: no panel covers its overlay (`KIT-104`), or the scrim could not be
-  reached. A skin takes the shared `SCRIM` classes and may not restyle them.
+  named `Dismiss <name>` (`data-part="scrim"`) filling the overlay, under the panel by tree order
+  (no `z-index` of its own). It is always shown, dims with the `scrim` colour role (a fixed 32%
+  black, so it darkens a light and a dark theme alike, where `text` at low opacity would lighten a
+  dark one), and a press on it calls `on_dismiss`, the same as Escape. Reason: dismissal by tapping
+  outside is the one path every renderer delivers (Escape needs a focused element; Blitz can focus
+  one via `set_focus`, but nothing focuses a freshly opened sheet yet). The consequence for
+  sizing: no panel covers its overlay (`KIT-104`), or the scrim could not be reached. The scrim is
+  one rule for both overlays, in `styles/kit/overlay.css`.
 - **KIT-104** Sheet size follows the width class (`KIT-101`): a bottom sheet is 5/6 of the host
   height and the full width; a side sheet is 24rem (`Medium`) or 32rem (`Expanded`), at most 5/6
   of the width. Reason: a phone sheet is a task, so it takes most of the screen, but leaves the
@@ -230,15 +231,16 @@ named after it.
   wire vocabulary carries `aria-current` and `data-state`, so a guest's row can say the same.
 - **KIT-108** Motion. Overlays enter, they do not exit: the drawer slides in from the leading
   edge, a bottom sheet rises, a side sheet slides in from the trailing edge, and every scrim fades
-  in (`animate-slide-in-*`, `animate-fade-in` in `ui/styles/motion.css`; durations and easing are
-  the `motion.*` tokens: 250 ms for panels, 150 ms for the scrim, one decelerate curve). Every
-  animation class is paired with `motion-reduce:animate-none` (INTERACTION-007). Reason for no
-  exit: an exit keeps the closed surface mounted until its animation ends, which needs
-  `animationend`, and neither Blitz nor the guest wire delivers it; a timer standing in for it is
-  forbidden (`KIT-071`). A dismissed surface disappears at once. Blitz does not evaluate
-  `prefers-reduced-motion`, so natively the entry animation always plays. Checked: skin tests
-  pin the classes; whether Blitz renders the keyframes is a screenshot matter (the ledger's K1
-  notes).
+  in (the `ct-overlay-*` keyframes in `styles/kit/overlay.css` and the `animation` of each panel in
+  `drawer.css` and `sheet.css`; durations and easing are the `motion.*` tokens: 250 ms for
+  panels, 150 ms for the scrim, one decelerate curve). Every animation is removed under
+  `prefers-reduced-motion: reduce` (INTERACTION-007). Reason for no exit: an exit keeps the closed
+  surface mounted until its animation ends, which needs `animationend`, and neither Blitz nor the
+  guest wire delivers it; a timer standing in for it is forbidden (`KIT-071`). A dismissed surface
+  disappears at once. Blitz does not evaluate `prefers-reduced-motion`, so natively the entry
+  animation always plays. Checked: `conventions::contract_skins_are_stylesheets_in_the_kit_layer`
+  pins the reduced-motion guard; whether Blitz renders the keyframes is a screenshot matter (the
+  ledger's K1 notes).
 - **KIT-109** Safe areas never reach the kit. A host pads its whole frame by the system insets
   (`daytxt_core::Application` does) and hands the shell the size that remains, so every
   surface, including an overlay and its scrim, lies inside the safe rectangle and the system bars
