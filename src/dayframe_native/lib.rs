@@ -3,11 +3,13 @@
 //! demo seed (ADR 018 §7). A shell supplies only what differs per platform: where the store
 //! file lives and where package bytes come from (a scanned directory on desktop, the APK's
 //! assets on Android).
+use clay_docs::FacetRoute;
+use clay_guest_session::egress::DispatchEgress;
 use clay_host::Factory;
-use clay_mdk::host::factory;
 use clay_mdk::host::CapabilityPublication;
 use clay_mdk::host::CollectionBindings;
 use clay_mdk::host::Resources;
+use clay_mdk::host::factory;
 use clay_store::OrderedStore;
 #[cfg(feature = "blitz")]
 use dayframe_composition::Application;
@@ -144,6 +146,7 @@ pub trait PackageEngine:
         clay_mdk::MicroId,
         clay_mdk::MicroManifest,
         CollectionBindings,
+        Option<Arc<dyn DispatchEgress>>,
         Vec<u8>,
     ) -> Rc<dyn Factory<CapabilityPublication>>
     + Clone
@@ -157,6 +160,7 @@ impl<F> PackageEngine for F where
             clay_mdk::MicroId,
             clay_mdk::MicroManifest,
             CollectionBindings,
+            Option<Arc<dyn DispatchEgress>>,
             Vec<u8>,
         ) -> Rc<dyn Factory<CapabilityPublication>>
         + Clone
@@ -173,23 +177,60 @@ pub fn wasmtime_engine(
     id: clay_mdk::MicroId,
     manifest: clay_mdk::MicroManifest,
     bindings: CollectionBindings,
+    egress: Option<Arc<dyn DispatchEgress>>,
     bytes: Vec<u8>,
 ) -> Rc<dyn Factory<CapabilityPublication>> {
-    // No micro has a `dispatch.local` egress until the composition boots the node and supplies one
-    // per micro (Clay on the node §3).
-    clay_mdk::host::wasm_factory(resources, id, manifest, bindings, None, move || {
+    clay_mdk::host::wasm_factory(resources, id, manifest, bindings, egress, move || {
         let bytes = bytes.clone();
         async move { clay_mdk::host::WasmPackage::from_bytes(bytes).await }
     })
 }
 
+/// The ids (`<did>/<name>`) of the micros `packages` install, for a composition that opens one
+/// node actor per micro. A package that does not parse is skipped here, and reported by
+/// [`native_runtime`].
+pub fn package_micro_ids(packages: &[PackageFiles]) -> Vec<String> {
+    packages
+        .iter()
+        .filter_map(|files| {
+            // Only the identity is wanted, so the component bytes are not copied in.
+            clay_mdk::package::Package::from_json(
+                clay_mdk::LOCAL_NAMESPACE,
+                &files.manifest_json,
+                Vec::new(),
+            )
+            .ok()
+            .map(|package| package.id().as_str().to_owned())
+        })
+        .collect()
+}
+
+/// The `dispatch.local` egress a composition holds for a micro, by its id text (`<did>/<name>`):
+/// `None` for a micro with no node access. A host with no node (desktop today) answers `None` for
+/// every micro, so none can call a node method (Clay on the node §3).
+pub type MicroEgresses<'a> = &'a dyn Fn(&str) -> Option<Arc<dyn DispatchEgress>>;
+
+/// The configuration datum a composition's install writes for a micro, by its id text: `(tag,
+/// key, value)`, as `dayframe_node::NodeComposition::config_datum` produces it. `None` for a micro
+/// with none. A host with no node answers `None` for every micro.
+pub type MicroConfigs<'a> = &'a dyn Fn(&str) -> Option<(String, String, serde_json::Value)>;
+
 /// Parse each package and make it a catalog entry run by `engine`. An unparseable package is
-/// reported per entry and never stops the shell.
+/// reported per entry and never stops the shell. Also answers the routes and values of the
+/// configuration datums `configs` holds for the packages, to write once the composition has
+/// bound the configuration documents.
 fn package_micros(
     packages: Vec<PackageFiles>,
     engine: impl PackageEngine,
-) -> (Vec<InstalledMicro>, Vec<String>) {
+    egresses: MicroEgresses<'_>,
+    configs: MicroConfigs<'_>,
+) -> (
+    Vec<InstalledMicro>,
+    Vec<(FacetRoute, serde_json::Value)>,
+    Vec<String>,
+) {
     let mut installed = Vec::new();
+    let mut config_writes = Vec::new();
     let mut errors = Vec::new();
     for files in packages {
         let parsed = clay_mdk::package::Package::from_json(
@@ -201,12 +242,53 @@ fn package_micros(
             Ok(package) => {
                 let sidecar = package.sidecar().clone();
                 let bytes = package.bytes().to_vec();
+                let egress = egresses(package.id().as_str());
+                if let Some((tag, key, value)) = configs(package.id().as_str()) {
+                    // A manifest names the facets it reads by tag and never the document, and
+                    // the composition keeps one document per configuration binding, so the
+                    // datum goes in the document of the binding whose request asks for its tag.
+                    // An install that states a datum the micro does not request is a
+                    // composition mistake, not something to skip.
+                    let request = sidecar
+                        .manifest
+                        .configuration_requests
+                        .iter()
+                        .find(|request| {
+                            request.facets.iter().any(|facet| {
+                                facet.tag.as_str() == tag
+                                    && facet.key_id.as_deref().is_none_or(|id| id == key)
+                            })
+                        })
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{}'s install writes the config datum {tag}/{key}, which its \
+                                 manifest does not request",
+                                package.id()
+                            )
+                        });
+                    config_writes.push((
+                        FacetRoute {
+                            document: dayframe_composition::config_document(&request.binding),
+                            branch: dayframe_composition::CONFIG_BRANCH.into(),
+                            tag,
+                            key_id: key,
+                        },
+                        value,
+                    ));
+                }
                 let engine = engine.clone();
                 let micro = InstalledMicro::new(
                     package.id().clone(),
                     sidecar.clone(),
                     move |id, resources, bindings| {
-                        engine(resources, id, sidecar.manifest, bindings, bytes)
+                        engine(
+                            resources,
+                            id,
+                            sidecar.manifest,
+                            bindings,
+                            egress.clone(),
+                            bytes,
+                        )
                     },
                 )
                 // A package may require the shell's publications (the layout's app bar
@@ -223,23 +305,35 @@ fn package_micros(
             Err(error) => errors.push(format!("{}: {error}", files.origin)),
         }
     }
-    (installed, errors)
+    (installed, config_writes, errors)
 }
 
 /// Assemble the native composition over `store` with `packages` installed beside the linked
 /// built-ins. `package_errors` are the shell's own discovery failures (an unreadable
 /// directory, a missing asset), reported beside the parse failures. Async because durable
-/// collections load before they report bootstrap, which parks on a disk-backed store.
+/// collections load before they report bootstrap, which parks on a disk-backed store. `egresses`
+/// is each package micro's node access (see [`MicroEgresses`]), and `configs` the configuration
+/// datum its install states (see [`MicroConfigs`]), which is written into the micro's
+/// configuration document on every start: an install's datum carries what the node minted for
+/// this boot (a document capability), so it replaces whatever an earlier start persisted.
 pub async fn native_runtime<St: OrderedStore + Send + Sync + 'static>(
     store: Arc<St>,
     packages: Vec<PackageFiles>,
     package_errors: Vec<String>,
     engine: impl PackageEngine,
+    egresses: MicroEgresses<'_>,
+    configs: MicroConfigs<'_>,
 ) -> Result<CompositionRuntime, clay_store::StoreError> {
     let mut installed = native_micros();
-    let (packages, errors) = package_micros(packages, engine);
+    let (packages, config_writes, errors) = package_micros(packages, engine, egresses, configs);
     installed.extend(packages);
     let mut runtime = CompositionRuntime::new(store, installed).await?;
+    for (route, value) in config_writes {
+        runtime
+            .documents()
+            .mock_documents()
+            .external_change(route, Some(value));
+    }
     runtime.installation_errors.extend(package_errors);
     runtime.installation_errors.extend(errors);
     micro_sample::seed_mock_defaults(runtime.documents());
@@ -464,5 +558,48 @@ mod tests {
         assert!(back.request());
         // The permit is stored, so a request made before the shell's task waits is not lost.
         back.requested.notified().await;
+    }
+
+    /// An install's configuration datum is written into the document the composition bound the
+    /// micro's configuration binding to, so the micro reads it through its `Context`; a micro
+    /// whose install states none gets no write.
+    #[tokio::test]
+    async fn an_installs_config_datum_lands_where_the_micro_reads_its_config() {
+        let review = |origin: &str| PackageFiles {
+            origin: origin.to_owned(),
+            manifest_json: serde_json::to_vec(&micro_review_manifest::sidecar()).unwrap(),
+            component: Vec::new(),
+        };
+        let id = package_micro_ids(&[review("review")]).remove(0);
+        let datum = serde_json::json!({ "githubDrawer": "g", "intxtDrawers": [], "docCap": "c" });
+        let runtime = native_runtime(
+            Arc::new(clay_store::MemoryStore::default()),
+            vec![review("review")],
+            Vec::new(),
+            wasmtime_engine,
+            &|_| None,
+            &|micro| {
+                (micro == id).then(|| {
+                    (
+                        micro_review_manifest::CONFIG_TAG.to_owned(),
+                        micro_review_manifest::CONFIG_KEY.to_owned(),
+                        datum.clone(),
+                    )
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert!(runtime.installation_errors.is_empty());
+        let route = FacetRoute {
+            document: dayframe_composition::config_document(micro_review_manifest::CONFIG_NAME),
+            branch: dayframe_composition::CONFIG_BRANCH.into(),
+            tag: micro_review_manifest::CONFIG_TAG.into(),
+            key_id: micro_review_manifest::CONFIG_KEY.into(),
+        };
+        assert_eq!(
+            runtime.documents().mock_documents().get(&route),
+            Some(datum)
+        );
     }
 }

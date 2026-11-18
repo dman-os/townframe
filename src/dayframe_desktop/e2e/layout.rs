@@ -107,7 +107,7 @@ impl Layout {
 async fn wasmi_runtime() -> CompositionRuntime {
     assemble(
         std::sync::Arc::new(clay_store::MemoryStore::new()),
-        |resources, id, manifest, bindings, bytes| {
+        |resources, id, manifest, bindings, _egress, bytes| {
             clay_mdk::host::wcmp_factory(resources, id, manifest, bindings, move || {
                 let bytes = bytes.clone();
                 async move {

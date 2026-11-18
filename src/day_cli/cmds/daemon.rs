@@ -86,7 +86,7 @@ async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
         dir,
         |booted| {
             let socket = booted
-                .node
+                .node()
                 .listeners
                 .unix_socket
                 .as_ref()

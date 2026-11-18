@@ -76,6 +76,23 @@ pub(crate) enum Named {
     Change(String),
 }
 
+impl Named {
+    /// The one thing `add`'s `--commits`, `--branch` and `--change` flags name; clap requires
+    /// exactly one of them, so any other combination is a bug in the command's definition.
+    pub(crate) fn from_flags(
+        commits: Option<String>,
+        branch: Option<String>,
+        change: Option<String>,
+    ) -> Self {
+        match (commits, branch, change) {
+            (Some(range), None, None) => Self::Commits(range),
+            (None, Some(branch), None) => Self::Branch(branch),
+            (None, None, Some(change)) => Self::Change(change),
+            _ => unreachable!("clap requires exactly one of --commits, --branch and --change"),
+        }
+    }
+}
+
 /// What `add` named, resolved now: the entry that names the commits, the commits, and what the
 /// pack is made of.
 struct Resolved {
@@ -192,7 +209,8 @@ impl View {
     }
 }
 
-/// The key an entry names a commit by, until the cabinet resolves `#keyRef` (ADR 035 §2.9).
+/// The key an entry names a commit by. Entries hold it as a plain string that intxt resolves
+/// itself; finding the intxt that holds a commit comes later, from a cartridge index.
 pub(super) fn commit_key(sha: &str) -> String {
     format!("{}/{sha}", work::GitCommit::ID)
 }
@@ -1012,7 +1030,7 @@ impl<'a> Packaging<'a> {
 
     /// Puts `pack` in the blob store and answers the blob datum that names it: its key and value.
     async fn put_pack(&self, pack: Vec<u8>) -> Res<(DatumKey, Value)> {
-        let info = super::put_blob(self.client, &pack).await?;
+        let info = intxt_core::install::put_blob(&self.caller, &pack).await?;
         let digest = info.blob_id.digest_str();
         Ok((
             key(big_blobs_core::Blob::ID, &digest)?,

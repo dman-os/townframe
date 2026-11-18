@@ -4239,10 +4239,10 @@ dependencies = [
  "big_dispatch_core",
  "big_node",
  "big_nodule_core",
- "big_repo",
  "clap",
  "clap_complete",
  "data-encoding",
+ "day_node",
  "directories",
  "futures",
  "http",
@@ -4259,13 +4259,31 @@ dependencies = [
  "service_client_core_rs",
  "service_utils_rs",
  "short_ids",
- "sqlite_rs",
  "tempfile",
  "tokio",
  "tokio-util",
  "tower",
  "tracing",
  "trycmd",
+ "utils_rs",
+]
+
+[[package]]
+name = "day_node"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet",
+ "big_cabinet_core",
+ "big_node",
+ "big_repo",
+ "data-encoding",
+ "rand 0.9.5",
+ "secrets_rs",
+ "serde",
+ "serde_json",
+ "sqlite_rs",
+ "tempfile",
+ "tokio",
  "utils_rs",
 ]
 
@@ -4530,8 +4548,10 @@ dependencies = [
  "anyrender_vello",
  "anyrender_vello_cpu 0.17.0",
  "anyrender_vello_hybrid 0.10.0",
+ "big_cabinet",
  "dayframe_composition",
  "dayframe_native",
+ "dayframe_node",
  "dioxus",
  "dioxus-native",
  "jni 0.21.1",
@@ -4544,6 +4564,7 @@ name = "dayframe_native"
 version = "0.1.0"
 dependencies = [
  "clay_docs",
+ "clay_guest_session",
  "clay_host",
  "clay_mdk",
  "clay_store",
@@ -4551,6 +4572,7 @@ dependencies = [
  "dioxus",
  "dioxus-native",
  "micro_counter_manifest",
+ "micro_review_manifest",
  "micro_sample",
  "micro_settings",
  "micro_settings_manifest",
@@ -4562,6 +4584,40 @@ dependencies = [
  "sqlite_rs",
  "tokio",
  "ui",
+]
+
+[[package]]
+name = "dayframe_node"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "big_cabinet",
+ "big_cabinet_core",
+ "big_dispatch",
+ "big_dispatch_core",
+ "big_node",
+ "blake3",
+ "bytes",
+ "clay_guest_session",
+ "clay_host",
+ "clay_node_egress",
+ "clay_rt_wasmtime",
+ "clay_surface",
+ "day_node",
+ "http",
+ "http-body-util",
+ "intxt_core",
+ "method_core",
+ "micro_review_manifest",
+ "secrets_rs",
+ "serde_json",
+ "service_client_core_rs",
+ "service_utils_rs",
+ "tempfile",
+ "tokio",
+ "tower",
+ "utils_rs",
 ]
 
 [[package]]
@@ -8256,6 +8312,7 @@ name = "intxt_core"
 version = "0.1.0"
 dependencies = [
  "automerge",
+ "big_blobs_core",
  "big_cabinet_core",
  "big_cartridges_core",
  "big_nodule_core",

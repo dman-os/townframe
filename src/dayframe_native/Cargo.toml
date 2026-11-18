@@ -7,6 +7,10 @@ edition = "2021"
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
+clay_guest_session = { workspace = true }
+
 clay_docs = { workspace = true }
 clay_host = { workspace = true }
 clay_mdk = { workspace = true, features = ["in_process", "view", "wasmtime", "package"] }
@@ -33,4 +37,10 @@ tokio = { workspace = true, features = ["sync"] }
 blitz = ["dep:dioxus-native"]
 
 [dev-dependencies]
+#
+# internal
+micro_review_manifest = { workspace = true }
+
+#
+# misc
 tokio = { workspace = true, features = ["rt", "macros"] }
