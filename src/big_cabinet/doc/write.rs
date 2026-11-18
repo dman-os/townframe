@@ -77,7 +77,7 @@ impl DocsService {
                 params.command.as_ref(),
             )
             .await;
-        tracing::debug!(?instr_authorized, total = ?instr_start.elapsed(), "INSTR write timing"); // INSTR
+        tracing::debug!(target: "instr", ?instr_authorized, total = ?instr_start.elapsed(), "INSTR write timing"); // INSTR
         match (&params.command, result) {
             (Some(command), Ok(heads)) => {
                 self.commands.advance(command, State::Done, &heads).await?;
@@ -137,7 +137,7 @@ impl DocsService {
                 let tx = Self::begin(doc, &base);
                 let (tx, claims) = self.stage(tx, plan, None)?;
                 tx.rollback();
-                tracing::debug!(changes = doc.get_changes(&[]).len(), ?instr_verified, staged = ?instr_inner.elapsed(), "INSTR commit_write stage split"); // INSTR
+                tracing::debug!(target: "instr", changes = doc.get_changes(&[]).len(), ?instr_verified, staged = ?instr_inner.elapsed(), "INSTR commit_write stage split"); // INSTR
                 Ok((base, claims))
             })
             .await
@@ -164,7 +164,7 @@ impl DocsService {
                 Some(denied) => Failure::Refused(denied),
                 None => Failure::Ambiguous(repository(error)),
             })?;
-        tracing::debug!(?instr_handle, ?instr_staged, ?instr_signed, committed = ?instr_start.elapsed(), "INSTR commit_write timing"); // INSTR
+        tracing::debug!(target: "instr", ?instr_handle, ?instr_staged, ?instr_signed, committed = ?instr_start.elapsed(), "INSTR commit_write timing"); // INSTR
         Ok(committed?)
     }
 }

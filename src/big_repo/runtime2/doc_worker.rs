@@ -890,7 +890,7 @@ impl<F: FutureForm> DocWorker2<F> {
             blockers,
             blocked_refs,
         );
-        tracing::info!(doc_id = %self.doc_id, order_len = order.len(), instr_cached, instr_covered, instr_causal, instr_causal_complete, instr_bytes, ?instr_walk, wall = ?instr_start.elapsed(), "INSTR load_doc_snapshot"); // INSTR
+        tracing::info!(target: "instr", doc_id = %self.doc_id, order_len = order.len(), instr_cached, instr_covered, instr_causal, instr_causal_complete, instr_bytes, ?instr_walk, wall = ?instr_start.elapsed(), "INSTR load_doc_snapshot"); // INSTR
         instr_result
     }
 
@@ -978,7 +978,7 @@ impl<F: FutureForm> DocWorker2<F> {
             DocState::Unloaded | DocState::PendingMaterialization => {
                 let materialization_ops_count = self.io.current_cgka_ops_count(self.sed_id).await?;
                 self.cgka_ops_count = materialization_ops_count;
-                tracing::info!(doc_id = %self.doc_id, was_pending, "INSTR load_doc_snapshot caller=take_or_load_transient_doc"); // INSTR
+                tracing::info!(target: "instr", doc_id = %self.doc_id, was_pending, "INSTR load_doc_snapshot caller=take_or_load_transient_doc"); // INSTR
                 match self.load_doc_snapshot().await? {
                     LoadedDocSnapshot::Ready {
                         doc,
@@ -1613,7 +1613,7 @@ impl<F: FutureForm> DocWorker2<F> {
         }
 
         debug!(%self.doc_id, ?current_epoch, ?covered_frontier, "persisting causal coverage checkpoint");
-        tracing::info!(doc_id = %self.doc_id, cur = ?current_epoch.map(|e| format!("{:02x?}", &e[..4])), heads = covered_frontier.len(), known = self.causal_checkpoints.len(), known_epochs = ?self.causal_checkpoints.values().map(|c| format!("{:02x?}", &c.epoch[..4])).collect::<Vec<_>>(), "INSTR causal checkpoint persisting"); // INSTR
+        tracing::info!(target: "instr", doc_id = %self.doc_id, cur = ?current_epoch.map(|e| format!("{:02x?}", &e[..4])), heads = covered_frontier.len(), known = self.causal_checkpoints.len(), known_epochs = ?self.causal_checkpoints.values().map(|c| format!("{:02x?}", &c.epoch[..4])).collect::<Vec<_>>(), "INSTR causal checkpoint persisting"); // INSTR
         let Some((head, checkpoint, _heads_observed)) = self
             .io
             .persist_causal_checkpoint(self.sed_id, covered_frontier)
@@ -2230,7 +2230,7 @@ impl<F: FutureForm> DocWorker2<F> {
             pre_load_ops_count = self.cgka_ops_count,
             "retry_materialization: loading snapshot"
         );
-        tracing::info!(doc_id = %self.doc_id, was_pending, origin = ?origin, "INSTR load_doc_snapshot caller=retry_materialization"); // INSTR
+        tracing::info!(target: "instr", doc_id = %self.doc_id, was_pending, origin = ?origin, "INSTR load_doc_snapshot caller=retry_materialization"); // INSTR
         match self.load_doc_snapshot().await? {
             LoadedDocSnapshot::Ready {
                 doc,

@@ -148,7 +148,7 @@ async fn assert_sedimentree_parity_nodes(
                         node.label, &state,
                     ));
                 }
-                tracing::warn!(summaries = %summaries.join(" | "), "INSTR sedimentree parity violated"); // INSTR
+                tracing::warn!(target: "instr", summaries = %summaries.join(" | "), "INSTR sedimentree parity violated"); // INSTR
                 return Err(crate::ferr!(
                     "sedimentree-heads parity violated at node {} — {:?} vs {:?}",
                     idx,
@@ -749,7 +749,7 @@ async fn tier3_partition_then_heal() -> crate::Res<()> {
     // Tier 0: sedimentree parity.
     let a_state = a.repo.doc_head_state(doc_id.clone()).await?;
     let b_state = b.repo.doc_head_state(doc_id).await?;
-    tracing::warn!(
+    tracing::warn!(target: "instr",
         a = %crate::test2::harness::heads::state_summary(a.label, &a_state),
         b = %crate::test2::harness::heads::state_summary(b.label, &b_state),
         a_ledger = %kh_snap::describe_ledger(&a.repo).await?,
@@ -1306,7 +1306,7 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
     for idx in 0..4 {
         let node = guard.node(idx);
         let state = node.repo.doc_head_state(doc_id.clone()).await?;
-        tracing::warn!(
+        tracing::warn!(target: "instr",
             state = %crate::test2::harness::heads::state_summary(node.label, &state),
             ledger = %kh_snap::describe_ledger(&node.repo).await?,
             "INSTR partial_mesh heal state"

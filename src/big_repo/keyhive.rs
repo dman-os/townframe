@@ -1435,7 +1435,7 @@ async fn instr_explain_member_add_failure(
         Some(BigKeyhiveAgent::Document(..)) => "document",
         None => "none",
     };
-    tracing::warn!(
+    tracing::warn!(target: "instr",
         %id,
         %err,
         kind,

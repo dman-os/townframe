@@ -51,7 +51,7 @@ impl WorkQueue {
             tx.rollback().await?;
             return Ok(());
         }
-        tracing::info!(
+        tracing::info!(target: "instr",
             source,
             revision,
             documents = documents.len(),
