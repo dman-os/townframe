@@ -652,7 +652,7 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
     let nested = !path.surfaces.is_empty();
     let mut sheet = tree.stylesheet().to_owned();
     // The end user's theme follows the micro's own sheet, in `@layer user`: the kit's document
-    // sheets are adopted into this root as `@layer kit`, which the fork's interpreter declares
+    // sheets are adopted into this root as `@layer host`, which the fork's interpreter declares
     // ahead of `user`, so a theme outranks the kit and every host-wide rule. The micro's own
     // unlayered rules still outrank a layered theme, which is what lets a micro that previews
     // a draft theme (the theme lab) see the draft and not the applied sheet. Reading the signal
