@@ -19,6 +19,7 @@
 use super::Caller;
 use super::to_value;
 use crate::capture::Batch;
+use crate::capture::CauseBackfill;
 use crate::capture::Cause;
 use crate::capture::Imported;
 use crate::capture::RecordedIds;
@@ -566,6 +567,58 @@ impl<H: HttpTransport> Recorder<'_, H> {
         Ok(())
     }
 
+    /// Sets the causes the batch backfills on the ops an earlier batch recorded without one (the
+    /// transcript did not show their tool call yet), rewriting each op datum in its log with the
+    /// `Location` the cause names. An op log has one writer, the recorder, which is what makes
+    /// rewriting a recorded op safe: no other writer's value is replaced, and readers read the
+    /// current value of an op.
+    async fn write_cause_backfills(
+        &self,
+        worktree: &WorktreeBatch,
+        state: &WorktreeState,
+        sessions: &SessionDocs,
+    ) -> Result<(), IntxtError> {
+        let mut by_log: BTreeMap<&str, Vec<&CauseBackfill>> = BTreeMap::new();
+        for backfill in &worktree.cause_backfills {
+            let log = state
+                .datum
+                .op_logs
+                .iter()
+                .rfind(|log| log.from <= backfill.seq)
+                .ok_or_else(|| invalid(format!("no op log holds op {}", backfill.seq)))?;
+            by_log.entry(&log.doc).or_default().push(backfill);
+        }
+        for (log, backfills) in by_log {
+            let doc = doc_id(log)?;
+            let keys = backfills
+                .iter()
+                .map(|backfill| key(work::WorktreeOp::ID, &backfill.seq.to_string()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut ops = self.read(&doc, &keys).await?;
+            for (backfill, key) in backfills.iter().zip(&keys) {
+                let value = ops
+                    .get_mut(key)
+                    .ok_or_else(|| invalid(format!("{key} is not in {doc}")))?;
+                let mut op: work::WorktreeOp = serde_json::from_value(value.clone())
+                    .map_err(|error| invalid(format!("{key} in {doc}: {error}")))?;
+                op.cause = Some(sessions.cause(&backfill.cause)?.ok_or_else(|| {
+                    invalid(format!(
+                        "the cause of {} still names no turn",
+                        backfill.cause.tool_use_id
+                    ))
+                })?);
+                *value = to_value(&op);
+            }
+            self.write(
+                &format!("{}/causes-{doc}", worktree.identity.worktree_id),
+                &doc,
+                ops,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn record_worktree(
         &self,
         worktree: &WorktreeBatch,
@@ -588,6 +641,8 @@ impl<H: HttpTransport> Recorder<'_, H> {
         }
         self.write_git(worktree, repo.as_ref(), &clone).await?;
         self.write_ops(worktree, &mut state, sessions).await?;
+        self.write_cause_backfills(worktree, &state, sessions)
+            .await?;
         if state.changed {
             self.write(
                 &format!("{}/worktree", worktree.identity.worktree_id),

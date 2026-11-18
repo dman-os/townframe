@@ -32,6 +32,7 @@ use crate::transcript::TranscriptImporter;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::datum::DatumMember;
 use intxt_core::capture::Batch;
+use intxt_core::capture::CauseBackfill;
 use intxt_core::capture::Cause;
 use intxt_core::capture::Op;
 use intxt_core::capture::RecordedIds;
@@ -193,6 +194,20 @@ struct SessionHost {
     /// Tool call id → (agent id, turn id), for the calls the transcript has shown, to name a
     /// post hook's cause. An entry goes when its post hook is committed.
     tool_turns: BTreeMap<String, (Option<String>, String)>,
+    /// Ops recorded without a cause because the transcript did not show their tool call yet,
+    /// waiting for a later hook's import to show it (see [`observe_worktree`]). Dropped, and
+    /// counted as uncaused, by the `Stop` or `SessionEnd` that finds them still unresolved.
+    #[serde(default)]
+    withheld_causes: Vec<WithheldCause>,
+}
+
+/// An op whose cause is owed: the op `seq` of the log of the worktree at `root`, made by the tool
+/// call `tool_use_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WithheldCause {
+    root: PathBuf,
+    seq: u64,
+    tool_use_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,8 +393,9 @@ fn import_transcripts(
 }
 
 /// One worktree's part of a hook: a pre-snapshot on `PreToolUse`, otherwise the ops of the
-/// window. `None` when there is nothing to record. Also how many of its ops should have had a
-/// cause but could not, because the transcript did not show the tool call's turn yet.
+/// window and the `reported` cause backfills for it. `None` when there is nothing to record. Also
+/// which of its ops (by sequence number and call) should have had a cause but could not, because the
+/// transcript did not show the tool call's turn yet.
 ///
 /// `Stop` and `SessionEnd` drop every pending pre-snapshot: no tool is in flight then, so those
 /// belong to calls that never reported.
@@ -391,7 +407,7 @@ fn observe_worktree(
     tool_turns: &BTreeMap<String, (Option<String>, String)>,
     reported: &Reported,
     host: &mut WorktreeHost,
-) -> Result<(Option<WorktreeBatch>, u64), Error> {
+) -> Result<(Option<WorktreeBatch>, Vec<WithheldCause>), Error> {
     if let (Event::PreToolUse, Some(tool_use_id)) = (event, tool_use_id) {
         host.clock += 1;
         host.pre.insert(
@@ -404,7 +420,7 @@ fn observe_worktree(
                     .clone(),
             },
         );
-        return Ok((None, 0));
+        return Ok((None, Vec::new()));
     }
     let ends_session = matches!(event, Event::Stop | Event::SessionEnd);
     let closing = tool_use_id.filter(|_| !ends_session);
@@ -421,14 +437,23 @@ fn observe_worktree(
     }
 
     let git = observation.git;
+    let found_root = observation.identity.root.clone();
     let mut ops = Vec::new();
-    let mut uncaused = 0;
-    // A sole call whose turn is still unknown (the transcript lags) leaves its ops uncaused and
-    // counted, as for the closing call.
-    let mut segment_cause = |sole: &Option<Cause>, ops_added: usize| {
+    let mut withheld = Vec::new();
+    // Claude Code fires a tool's post hook before it has always written the call to the
+    // transcript, so the call's turn, which the cause names, can be unknown here. Waiting for it
+    // would block the hook on a file the harness writes whenever it likes, so the op is recorded
+    // now without its cause and the call is remembered in `withheld`: the session's next hook
+    // imports the transcript again and, once it shows the call, the caller backfills the cause
+    // onto the op (`WorktreeBatch::cause_backfills`).
+    let mut segment_cause = |sole: &Option<Cause>, op_index: usize| {
         let cause = sole.as_ref()?;
         if cause.turn.is_none() {
-            uncaused += ops_added as u64;
+            withheld.push(WithheldCause {
+                root: found_root.clone(),
+                seq: host.next_seq + op_index as u64,
+                tool_use_id: cause.tool_use_id.clone(),
+            });
             return None;
         }
         Some(cause.clone())
@@ -440,7 +465,7 @@ fn observe_worktree(
         ops.push(Op {
             at: Timestamp::now(),
             kind: OpKind::Edit,
-            cause: segment_cause(sole, 1),
+            cause: segment_cause(sole, ops.len()),
             changes,
             git: None,
             extra: Default::default(),
@@ -476,9 +501,8 @@ fn observe_worktree(
             extra: Default::default(),
         });
     }
-    let last_cause = segment_cause(&last_sole, last_ops.len());
-    for op in &mut last_ops {
-        op.cause = last_cause.clone();
+    for (index, op) in last_ops.iter_mut().enumerate() {
+        op.cause = segment_cause(&last_sole, ops.len() + index);
     }
     ops.extend(last_ops);
     // Every blob an op names stays reachable from the worktree's keep ref before the op is
@@ -489,12 +513,19 @@ fn observe_worktree(
         .filter_map(|change| change.blob.as_deref())
         .collect();
     Git::new(&observation.identity.root).keep(&observation.identity.worktree_id, &blobs)?;
+    let cause_backfills: Vec<CauseBackfill> = reported
+        .backfills
+        .iter()
+        .filter(|(root, _)| *root == found_root)
+        .map(|(_, backfill)| backfill.clone())
+        .collect();
     if ops.is_empty()
+        && cause_backfills.is_empty()
         && git.commits.is_empty()
         && git.refs.is_empty()
         && reported.rewrites.is_empty()
     {
-        return Ok((None, uncaused));
+        return Ok((None, withheld));
     }
     Ok((
         Some(WorktreeBatch {
@@ -506,15 +537,18 @@ fn observe_worktree(
             refs: git.refs,
             reflog_gap: git.reflog_gap,
             rewrites: reported.rewrites.to_vec(),
+            cause_backfills,
             extra: Default::default(),
         }),
-        uncaused,
+        withheld,
     ))
 }
 
 /// What a caller reports to an observation that git state alone does not show.
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct Reported<'a> {
+    /// Causes owed to ops recorded earlier, by the root of the worktree whose log holds them.
+    backfills: &'a [(PathBuf, CauseBackfill)],
     /// Commits to record although no reflog move made them ([`git::observe`]).
     import: &'a [String],
     /// Pairs git's `post-rewrite` hook reported.
@@ -532,7 +566,7 @@ fn observe_worktrees(
     candidates: &BTreeSet<PathBuf>,
     stored: &BTreeSet<PathBuf>,
     reported: &Reported,
-) -> Result<(Vec<PendingWorktree>, Vec<WorktreeBatch>, u64), Error> {
+) -> Result<Observed, Error> {
     let mut identities: BTreeMap<PathBuf, Identity> = BTreeMap::new();
     for candidate in candidates {
         if let Some(found) = identity::resolve(candidate)?
@@ -543,7 +577,7 @@ fn observe_worktrees(
     }
     let mut worktrees = Vec::new();
     let mut batches = Vec::new();
-    let mut uncaused_tool_calls = 0;
+    let mut withheld_causes = Vec::new();
     for (root, found) in identities {
         // Sorted by root: every window takes worktree locks in the same order.
         let worktree_lock = lock(&found.git_dir.join("intxt/lock"))?;
@@ -562,7 +596,7 @@ fn observe_worktrees(
                 },
             });
         }
-        let (batch, uncaused) = observe_worktree(
+        let (batch, withheld) = observe_worktree(
             event,
             tool_use_id,
             found,
@@ -571,7 +605,7 @@ fn observe_worktrees(
             reported,
             &mut host,
         )?;
-        uncaused_tool_calls += uncaused;
+        withheld_causes.extend(withheld);
         let batched = batch.is_some();
         batches.extend(batch);
         worktrees.push(PendingWorktree {
@@ -582,7 +616,19 @@ fn observe_worktrees(
             _lock: worktree_lock,
         });
     }
-    Ok((worktrees, batches, uncaused_tool_calls))
+    Ok(Observed {
+        worktrees,
+        batches,
+        withheld: withheld_causes,
+    })
+}
+
+/// What [`observe_worktrees`] found.
+struct Observed {
+    worktrees: Vec<PendingWorktree>,
+    batches: Vec<WorktreeBatch>,
+    /// The ops recorded without a cause because their call's turn was unknown.
+    withheld: Vec<WithheldCause>,
 }
 
 /// What capture holds for one worktree on this machine: the documents it recorded the worktree
@@ -723,19 +769,69 @@ pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
         }
         _ => None,
     };
-    let (worktrees, batches, uncaused_tool_calls) = observe_worktrees(
+    // The import above may have shown calls whose ops were recorded without a cause: those ops are
+    // owed their cause now.
+    let (resolved, mut owed): (Vec<_>, Vec<_>) = std::mem::take(&mut session.withheld_causes)
+        .into_iter()
+        .partition(|withheld| session.tool_turns.contains_key(&withheld.tool_use_id));
+    let backfills: Vec<(PathBuf, CauseBackfill)> = resolved
+        .iter()
+        .map(|withheld| {
+            let (agent_id, turn) = &session.tool_turns[&withheld.tool_use_id];
+            (
+                withheld.root.clone(),
+                CauseBackfill {
+                    seq: withheld.seq,
+                    cause: Cause {
+                        agent_id: agent_id.clone(),
+                        turn: Some(turn.clone()),
+                        tool_use_id: withheld.tool_use_id.clone(),
+                        extra: Default::default(),
+                    },
+                    extra: Default::default(),
+                },
+            )
+        })
+        .collect();
+    let Observed {
+        worktrees,
+        batches,
+        withheld,
+    } = observe_worktrees(
         &hook.event,
         hook.tool_use_id.as_deref(),
         cause.as_ref(),
         &session.tool_turns,
         &candidates,
         &session.worktrees,
-        &Reported::default(),
+        &Reported {
+            backfills: &backfills,
+            ..Reported::default()
+        },
     )?;
     session.worktrees = worktrees
         .iter()
         .map(|pending| pending.root.clone())
         .collect();
+    // A resolved entry whose worktree was not observed (its root is gone) cannot be written to:
+    // it stays owed. A written one leaves `tool_turns`: its call's post hook already passed, so
+    // nothing else would clear the entry the import just made.
+    for entry in resolved {
+        if session.worktrees.contains(&entry.root) {
+            session.tool_turns.remove(&entry.tool_use_id);
+        } else {
+            owed.push(entry);
+        }
+    }
+    owed.extend(withheld);
+    // `Stop` and `SessionEnd` are the last import of the session's calls: what is still owed then
+    // never gets a cause.
+    let uncaused_tool_calls = if matches!(hook.event, Event::Stop | Event::SessionEnd) {
+        std::mem::take(&mut owed).len() as u64
+    } else {
+        0
+    };
+    session.withheld_causes = owed;
 
     Ok(Prepared {
         batch: Batch {
@@ -827,7 +923,11 @@ pub fn prepare_acp(
     // within their session, so the pre-snapshot is keyed by both. (A hook's `tool_use_id` is
     // globally unique, so hooks key by it alone.)
     let key = cause.map(|cause| format!("{}/{}", session.session_id, cause.tool_use_id));
-    let (worktrees, batches, uncaused_tool_calls) = observe_worktrees(
+    let Observed {
+        worktrees,
+        batches,
+        withheld,
+    } = observe_worktrees(
         &event,
         key.as_deref(),
         cause,
@@ -836,11 +936,13 @@ pub fn prepare_acp(
         known,
         &Reported::default(),
     )?;
+    // An ACP call's cause is complete (its turn is the recorder's own), so none is ever withheld.
+    assert!(withheld.is_empty(), "an ACP window withheld a cause");
     Ok(Prepared {
         batch: Batch {
             session,
             worktrees: batches,
-            uncaused_tool_calls,
+            uncaused_tool_calls: 0,
             extra: Default::default(),
         },
         session: None,
@@ -859,15 +961,25 @@ fn prepare_worktree(
     rewrites: &[RewritePair],
 ) -> Result<Prepared, Error> {
     let candidates = BTreeSet::from([identity.root.clone()]);
-    let (worktrees, batches, uncaused_tool_calls) = observe_worktrees(
+    let Observed {
+        worktrees,
+        batches,
+        withheld,
+    } = observe_worktrees(
         &event,
         None,
         None,
         &BTreeMap::new(),
         &candidates,
         &BTreeSet::new(),
-        &Reported { import, rewrites },
+        &Reported {
+            import,
+            rewrites,
+            ..Reported::default()
+        },
     )?;
+    // No call, so no cause to withhold.
+    assert!(withheld.is_empty(), "a sessionless window withheld a cause");
     Ok(Prepared {
         batch: Batch {
             session: SessionBatch {
@@ -878,7 +990,7 @@ fn prepare_worktree(
                 extra: Default::default(),
             },
             worktrees: batches,
-            uncaused_tool_calls,
+            uncaused_tool_calls: 0,
             extra: Default::default(),
         },
         session: None,
