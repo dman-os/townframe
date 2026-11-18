@@ -15,6 +15,7 @@ fixture = []
 [dependencies]
 #
 # internal
+big_blobs_core = { workspace = true }
 big_cabinet_core = { workspace = true }
 clay_dioxus_kit = { workspace = true }
 intxt_core = { workspace = true }

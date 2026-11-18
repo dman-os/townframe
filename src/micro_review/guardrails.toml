@@ -2,6 +2,7 @@ version = 1
 role = "plugin"
 dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top; the review micro reads intxt's and the cabinet's wire vocabularies and shows a patch through the diff view"
 allowed_dependencies = [
+    "big_blobs_core",
     "big_cabinet_core",
     "clay_dioxus_kit",
     "clay_mdk",

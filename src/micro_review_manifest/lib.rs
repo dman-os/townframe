@@ -34,6 +34,8 @@ pub const INTERIM_METHODS_KEY: &str = "interimMethods";
 pub const READ_DATUMS: &str = "org.example.daybook.docs.readDatums";
 /// `org.example.daybook.docs.pollDatums`: which documents of the GitHub drawer hold a `githubPull`.
 pub const POLL_DATUMS: &str = "org.example.daybook.docs.pollDatums";
+/// `org.example.daybook.blobs.read`: the bytes of a blob, such as the diff a commit entry names.
+pub const READ_BLOB: &str = "org.example.daybook.blobs.read";
 
 /// The review package's identity.
 pub struct Review;
@@ -68,6 +70,10 @@ pub struct ReviewConfig {
     /// drawers above, with read rights. It is passed to `readDatums` and `pollDatums`; the micro
     /// never mints one.
     pub doc_cap: String,
+    /// A blobs capability (a `CapId`) the composition minted for this micro's actor, with read
+    /// scope over the patch blobs of the intxts above. It is passed to `blobs.read`; the micro
+    /// never mints one.
+    pub blob_cap: String,
 }
 
 /// The review configuration facet, requested through [`ReviewConfig`].
@@ -97,7 +103,7 @@ pub fn manifest() -> MicroManifest {
     // is whatever the composition gives the micro's `Context`.
     manifest.extra.insert(
         INTERIM_METHODS_KEY.into(),
-        serde_json::json!([READ_DATUMS, POLL_DATUMS]),
+        serde_json::json!([READ_DATUMS, POLL_DATUMS, READ_BLOB]),
     );
     manifest
 }
