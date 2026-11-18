@@ -440,50 +440,7 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
             schema,
             dry_run,
             json,
-        } => {
-            if schema {
-                println!("{}", intxt_core::edit::EditDocument::json_schema());
-                return Ok(ExitCode::SUCCESS);
-            }
-            if let Some(source) = apply {
-                return with_packaging_exit(async |packaging| {
-                    packaging
-                        .edit_apply(
-                            &mut std::io::stdout(),
-                            &mut std::io::stderr(),
-                            intxt.as_deref(),
-                            &source,
-                            json,
-                            dry_run,
-                        )
-                        .await
-                })
-                .await;
-            }
-            if print {
-                return with_packaging(async |packaging| {
-                    packaging
-                        .edit_print(&mut std::io::stdout(), intxt.as_deref())
-                        .await
-                })
-                .await;
-            }
-            use std::io::IsTerminal;
-            edit::ensure_interactive(
-                std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
-            )?;
-            with_packaging_exit(async |packaging| {
-                packaging
-                    .edit_interactive(
-                        &mut std::io::stdout(),
-                        intxt.as_deref(),
-                        &edit::editor_command(),
-                        dry_run,
-                    )
-                    .await
-            })
-            .await
-        }
+        } => edit(intxt, print, apply, schema, dry_run, json).await,
         IntxtCommands::New {
             title,
             description,
@@ -602,6 +559,58 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
             capture::CaptureCommands::run(command, verbose).await
         }
     }
+}
+
+/// `day x intxt edit`: the document printed, applied from a file, or edited in `$EDITOR`.
+async fn edit(
+    intxt: Option<String>,
+    print: bool,
+    apply: Option<String>,
+    schema: bool,
+    dry_run: bool,
+    json: bool,
+) -> Res<ExitCode> {
+    use std::io::IsTerminal;
+
+    if schema {
+        println!("{}", intxt_core::edit::EditDocument::json_schema());
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(source) = apply {
+        return with_packaging_exit(async |packaging| {
+            packaging
+                .edit_apply(
+                    &mut std::io::stdout(),
+                    &mut std::io::stderr(),
+                    intxt.as_deref(),
+                    &source,
+                    json,
+                    dry_run,
+                )
+                .await
+        })
+        .await;
+    }
+    if print {
+        return with_packaging(async |packaging| {
+            packaging
+                .edit_print(&mut std::io::stdout(), intxt.as_deref())
+                .await
+        })
+        .await;
+    }
+    edit::ensure_interactive(std::io::stdin().is_terminal() && std::io::stdout().is_terminal())?;
+    with_packaging_exit(async |packaging| {
+        packaging
+            .edit_interactive(
+                &mut std::io::stdout(),
+                intxt.as_deref(),
+                &edit::editor_command(),
+                dry_run,
+            )
+            .await
+    })
+    .await
 }
 
 /// `day x intxt install`: reads the handler component at `handler` and installs it on the node
