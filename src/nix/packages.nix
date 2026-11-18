@@ -238,6 +238,8 @@
       # micro's manifest crate emits its own through a native example (host build).
       manifestsArgs = wasmArgs // {
         pname = "daytxt-manifests";
+        # Host binaries: clay_store links the system sqlite.
+        buildInputs = [ pkgs.sqlite ];
         # Isolated features: workspace unification would build the desktop
         # renderer's GTK stack (glib-sys) for a manifest emitter.
         cargoExtraArgs = "--locked ${isolated} ${
