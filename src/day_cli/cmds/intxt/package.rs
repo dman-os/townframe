@@ -212,7 +212,7 @@ impl View {
     /// and `reply` print short ids from and that `reply` and `rm` resolve them against. It is
     /// scoped to one intxt, so a printed prefix means the same thing when it is typed back.
     pub(super) fn names<'a>(
-        &self,
+        &'a self,
         comments: impl IntoIterator<Item = &'a DatumKey>,
     ) -> ShortIds<String> {
         ShortIds::new(
