@@ -210,6 +210,14 @@ crosses IPC. Cost: window-level conveniences (native menus, window events, file 
 through a small host bridge. Android stays on Blitz (no IPC). This option is what the 2026-11-17 decision above
 adopts.
 
+**Update (operator, 2026-11-18): Android moves to the webview (Wry, the Android System WebView) by default.**
+Blitz on Android had no touch scrolling and partial CSS, and the intxt review was unusable there. The first port
+(`feat/phone-viewer-app`) uses Dioxus mobile: the Rust UI in the app process, the page in the WebView, so it pays
+the same per-edit IPC as the Wry desktop. The consistent end state is the desktop option above applied to
+Android too: the WebView runs the web build of the shell (wasm in the page, no UI IPC) and talks to the
+in-process node through a host bridge. Not decided yet; for the operator. Under either, Wasmtime on Android is no
+longer how the shell's micros run once they move into the page (wcmp, as on the web).
+
 ## Work, once accepted
 
 Lanes that can run in parallel (files don't collide):
