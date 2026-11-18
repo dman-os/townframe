@@ -439,7 +439,11 @@ impl NodeComposition {
             None,
             "intxt-install".to_owned(),
         );
-        intxt_core::install::install(&operator, guest_wasm).await
+        // MERGE-QUESTION: intxt's install now takes the drawers its cartridge is granted (the
+        // intxts the node holds at Write, ADR 049 §4.1); the `install_intxt` this host had was
+        // written before that and grants none, as `day`'s own install call does. Whether the host
+        // should grant the node's intxt drawers here is a design choice, not a merge one.
+        intxt_core::install::install(&operator, guest_wasm, &[]).await
     }
 
     /// This node's dialable endpoint ticket: what another node puts in its bootstrap list to dial
