@@ -176,3 +176,11 @@ What the host does with it. At install: admit (every `uses` key is a permbind, t
 6. **Install.** The row appears; the micro is not started. Uninstall retracts it.
 
 Open points: (1) `MicroInitializer` omits `target` because the installer interface is one export called with the key; if initializers should name separate exports, give them `ExportRef` like routines; (2) the `everyUpgrade` run mode is a new known value on `RunMode`; (3) `collections` could live cartridge-level (a nodule might own one) and is micro-level only because the manager review put it there; (4) `{"$link": 0}` replaces `{"$attachment": n}` in values and needs the same CBOR tag.
+
+## Operator sign-off (2026-11-18)
+
+Signed off as the direction ("keep it as it is and improve it as we go"), with these alignments folded in:
+- **One `Initializer { key, mode }` and one `RunMode` for both surfaces** (`once`, `everyStart`, and new `everyUpgrade`), and one typed input record for both, `{ key, trigger: install | upgrade | start, previous, current }`, closing the nodule to-do that initializers receive `{}`. A nodule initializer targets one of its routines; a micro initializer calls the micro's installer export with the record.
+- **Supply goes through dispatch for both** (ADR 045): a call to an NSID goes to its only claimant, several claimants are `Ambiguous` until a node route picks one. A micro's `#call` endpoint registers as a dispatch provider like a routine, so micros and nodules supply each other under one rule. No separate "default supplier".
+- **Collections stay in the micro section** until a nodule needs one.
+- **Naming:** what other cartridges refer to without knowing the provider is an NSID or `nsid#def` (methods, collection definitions); what only this manifest refers to is a local key (permbinds, endpoints, initializer keys), which the host turns into ids under the cartridge; runtime ids are the host's and never authored.
