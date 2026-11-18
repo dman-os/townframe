@@ -96,13 +96,14 @@ pub fn refuse_fetching_stylesheet(sheet: &str) -> Result<(), String> {
                 // A block that stops at its first refusal is not exhausted, which
                 // `parse_nested_block` reports as an error: the refusal travels beside it.
                 let mut refusal = None;
-                let _ = input.parse_nested_block(|inner| {
+                let outcome = input.parse_nested_block(|inner| {
                     refusal = first_refusal(inner);
                     Ok::<_, ParseError<()>>(())
                 });
                 if refusal.is_some() {
                     return refusal;
                 }
+                debug_assert!(outcome.is_ok(), "a block read to its end cannot fail");
             }
         }
         None

@@ -21,6 +21,7 @@ use clay_dioxus_kit::WidthClass;
 use clay_mdk::FacetSnapshot;
 use clay_mdk::FacetState;
 use clay_mdk::Row;
+use clay_mdk::host::UserStylesheet;
 use clay_mdk::hooks::PresentationSlot;
 use clay_mdk::hooks::use_facet;
 use clay_mdk::hooks::use_rows;
@@ -297,9 +298,52 @@ fn details_pane(
     (slot, name)
 }
 
+/// What the frame applies of the end user's theme, checked once per change.
+struct AppliedTheme {
+    /// The CSS the facet held when it was last checked.
+    raw: String,
+    /// `raw` in `@layer user`, or empty when it is empty or was refused: the host document's copy.
+    document_sheet: String,
+}
+
+/// Applies the end user's theme (see [`Shell::set_theme`]) host-wide and live: returns the
+/// sheet the frame puts in the host's own document, and provides every mount below it the same
+/// CSS as [`UserStylesheet`], which a mount adopts as the last layer of its shadow root. The
+/// facet is document-backed and so can arrive from another device, so what it holds is
+/// checked again here, once per change rather than per render, and a sheet that could make the
+/// host fetch is not applied.
+fn use_theme(shell: &Shell) -> String {
+    let snapshot = use_facet(&shell.theme);
+    let raw = match &snapshot.state {
+        FacetState::Present(sheet) => sheet.css.as_str(),
+        FacetState::Loading | FacetState::Absent => "",
+    };
+    let mut mounts = use_signal(String::new);
+    use_context_provider(|| UserStylesheet(mounts.into()));
+    let applied = use_hook(|| {
+        Rc::new(std::cell::RefCell::new(AppliedTheme {
+            raw: String::new(),
+            document_sheet: String::new(),
+        }))
+    });
+    let mut applied = applied.borrow_mut();
+    if applied.raw != raw {
+        let accepted = clay_mdk::host::refuse_fetching_stylesheet(raw).is_ok() && !raw.is_empty();
+        applied.raw = raw.to_owned();
+        applied.document_sheet = if accepted {
+            format!("@layer user {{\n{raw}\n}}")
+        } else {
+            String::new()
+        };
+        mounts.set(if accepted { raw.to_owned() } else { String::new() });
+    }
+    applied.document_sheet.clone()
+}
+
 #[component]
 fn Frame(shell: Shell) -> Element {
     let host = use_context::<HostInputs>();
+    let document_theme = use_theme(&shell);
     let width_px = *host.width.read();
     let width = WidthClass::from_px(width_px);
     let state = use_state(&shell);
@@ -417,6 +461,10 @@ fn Frame(shell: Shell) -> Element {
             height: "100%",
             min_width: "0",
             min_height: "0",
+            // The theme for the host's own document, ahead of everything the frame draws.
+            if !document_theme.is_empty() {
+                style { "{document_theme}" }
+            }
             if let Some(problem) = failure() {
                 p { role: "alert", "{problem}" }
             }

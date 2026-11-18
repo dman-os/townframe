@@ -698,6 +698,8 @@ pub struct LightDomStylesheets;
 /// sheet, in `@layer user` (see `MountedSurface`). The provider owns the rule that theme CSS may
 /// not make the host fetch: what it publishes here has been refused or sanitized once, at the
 /// change, because a mount reads it on every render.
+pub use clay_surface::refuse_fetching_stylesheet;
+
 #[derive(Clone, Copy, PartialEq)]
 pub struct UserStylesheet(pub ReadSignal<String>);
 

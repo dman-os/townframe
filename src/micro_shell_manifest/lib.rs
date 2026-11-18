@@ -39,6 +39,7 @@ pub use declarations::ShellFrame;
 pub use declarations::ShellHome;
 pub use declarations::ShellNavButton;
 pub use declarations::ShellPanels;
+pub use declarations::ShellTheme;
 
 pub const ID: &str = "dayframe.shell";
 pub const PACKAGE_VERSION: u32 = 1;
@@ -49,6 +50,13 @@ pub const AUTHORITY: &str = "org.example.dayframe.shell";
 pub const CONFIG_NAME: &str = "shell";
 pub const CONFIG_TAG: &str = "org.example.dayframe.shell.config";
 pub const CONFIG_KEY: &str = "main";
+/// The end user's theme sheet, a second configuration facet of the shell: the CSS the host
+/// applies to its own document and to every micro's mount as the last layer. It is a separate
+/// facet from the arrangement because it is written by a different party (the theme editor)
+/// and replaced wholesale. This facet is the one place the applied theme is stored.
+pub const THEME_CONFIG_NAME: &str = "shell-theme";
+pub const THEME_CONFIG_TAG: &str = "org.example.dayframe.shell.theme";
+pub const THEME_CONFIG_KEY: &str = "main";
 
 /// The shell's frame presentation, which the composition mounts as a (non-pinned) root.
 pub const FRAME: &str = "frame";
@@ -75,12 +83,22 @@ pub const CLOSE_SHEET: &str = "close-sheet";
 /// [`OPENED`]: a panel key (CBOR text) in, the key of the row that panel has open in the
 /// details position (CBOR `text` or null) out.
 pub const OPENED: &str = "opened";
+/// [`GET_THEME`]: `()` in, [`ThemeSheet`] out, the CSS the host currently applies. [`SET_THEME`]:
+/// [`ThemeSheet`] in, `()` out, applies the CSS to the host's document and every micro's mount
+/// live and keeps it across restarts, or is rejected when the CSS could make the host fetch
+/// anything (`url(`, `@import`, `image-set(` and the rest: the rule that refuses a guest's
+/// markup and stylesheet from fetching applies to the end user's theme too). The pair is all a
+/// theme editor needs of the host; there is no call that runs arbitrary host actions.
+pub const GET_THEME: &str = "get-theme";
+pub const SET_THEME: &str = "set-theme";
 pub const NAVIGATE_CONTRACT: &str = "org.example.dayframe.shell.navigate";
 pub const BACK_CONTRACT: &str = "org.example.dayframe.shell.back";
 pub const FORWARD_CONTRACT: &str = "org.example.dayframe.shell.forward";
 pub const OPEN_SHEET_CONTRACT: &str = "org.example.dayframe.shell.openSheet";
 pub const CLOSE_SHEET_CONTRACT: &str = "org.example.dayframe.shell.closeSheet";
 pub const OPENED_CONTRACT: &str = "org.example.dayframe.shell.opened";
+pub const GET_THEME_CONTRACT: &str = "org.example.dayframe.shell.getTheme";
+pub const SET_THEME_CONTRACT: &str = "org.example.dayframe.shell.setTheme";
 
 /// The contract NSID, and so the declared collection's id, of the panels collection.
 pub const PANELS: &str = "org.example.dayframe.shell.panels";
@@ -183,8 +201,16 @@ impl Default for ShellConfig {
     }
 }
 
+/// The end user's theme: one stylesheet, an empty one meaning no theme. It is the [`SET_THEME`]
+/// request, the [`GET_THEME`] answer and the value of the [`ShellTheme`] facet.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThemeSheet {
+    #[serde(default)]
+    pub css: String,
+}
+
 /// The shell's package declaration: it declares the panels collection, publishes its frame, its
-/// home panel, its sidebar/back button and its navigation calls, contributes the home panel to
+/// home panel, its sidebar/back button, its navigation and theme calls, contributes the home panel to
 /// its own collection, and registers the frame as a shell root.
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
@@ -197,7 +223,10 @@ pub fn manifest() -> MicroManifest {
         .call(OPEN_SHEET, OPEN_SHEET_CONTRACT)
         .call(CLOSE_SHEET, CLOSE_SHEET_CONTRACT)
         .call(OPENED, OPENED_CONTRACT)
+        .call(GET_THEME, GET_THEME_CONTRACT)
+        .call(SET_THEME, SET_THEME_CONTRACT)
         .config::<ShellArrangement>()
+        .config::<ShellTheme>()
         .declares::<ShellPanels>()
         // The shell reads panels through a binding configuration resolves; a second write
         // binding to the same contract carries its own home panel. It also registers its frame
