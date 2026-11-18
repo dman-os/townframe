@@ -3,17 +3,17 @@
 //! crate and never on the Toolbar micro itself; Clay knows nothing of toolbars (ADR 031 §13).
 //!
 //! A button row is keyed by its contributor's chosen id (CBOR text) and holds a [`Button`]:
-//! static metadata (a label and an icon name) and an attachment naming the call the button
+//! static metadata (a label and an icon name) and a link naming the call the button
 //! performs, a call of the [`ACTION_CONTRACT`] contract (empty request and response) that the
 //! toolbar owns and contributors implement. A micro whose button should exist while it is stopped declares the row in its
 //! manifest, which stores a lazy endpoint to its own call publication: the toolbar renders the
 //! metadata without starting the contributor, and pressing the button calls the endpoint, which
 //! activates or joins the contributor for the length of the call.
-use clay_mdk::Attachment;
 use clay_mdk::CollectionCapability;
 use clay_mdk::CollectionDecl;
 use clay_mdk::ComponentDecl;
 use clay_mdk::DeclaredCollection;
+use clay_mdk::Link;
 use clay_mdk::ManifestBuilder;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
@@ -29,7 +29,7 @@ pub const PACKAGE_VERSION: u32 = 1;
 /// The NSID prefix the toolbar holds: every NSID it declares (its collection contract and
 /// schemas) lies under it, everything else it names is a request.
 pub const AUTHORITY: &str = "org.example.dayframe.toolbar";
-/// The contract NSID of the call a button's attachment performs: empty request, empty response
+/// The contract NSID of the call a button's link performs: empty request, empty response
 /// (CBOR `()` in and out). The toolbar defines it and a contributor's call publication
 /// implements it; implementing is not owning (ADR 028 §5), so the contributor needs no request
 /// and the NSID is under the toolbar's authority.
@@ -49,15 +49,15 @@ pub const BUTTON_KEY_SCHEMA: &str = "org.example.dayframe.toolbar.buttonKey";
 pub const BUTTON_VALUE_SCHEMA: &str = "org.example.dayframe.toolbar.button";
 pub const BUTTON_SELECTOR_SCHEMA: &str = "org.example.dayframe.toolbar.buttonSelector";
 
-/// One toolbar button: what it shows, and the call it performs, as an attachment of the row.
-/// The attachment is a call of the [`ACTION_CONTRACT`] contract: an empty request and an empty
+/// One toolbar button: what it shows, and the call it performs, as a link of the row.
+/// The link is a call of the [`ACTION_CONTRACT`] contract: an empty request and an empty
 /// response.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Button {
     pub label: String,
     /// A name from the toolbar's icon vocabulary (`"plus"`); the toolbar decides how it draws.
     pub icon: String,
-    pub action: Attachment,
+    pub action: Link,
 }
 
 /// The Toolbar package's identity.
@@ -98,7 +98,7 @@ impl DeclaredCollection for ToolbarButtons {
 /// wherever the sidebar is, whatever the main position shows.
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
-        .component::<ToolbarView>()
+        .view::<ToolbarView>()
         .declares::<ToolbarButtons>()
         // The toolbar reads buttons through a binding configuration resolves; with one declared
         // buttons collection the default binds it. It also writes its panel row into the shell's
@@ -139,7 +139,7 @@ mod tests {
             &Button {
                 label: "Increment".into(),
                 icon: "plus".into(),
-                action: Attachment::at(0),
+                action: Link::at(0),
             },
             &mut bytes,
         )

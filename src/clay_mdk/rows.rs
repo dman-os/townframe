@@ -1,14 +1,14 @@
 //! Typed access to declared registration collections, shared by every backend (ADR 017 §9,
 //! ADR 031 §4). Rows are the same CBOR bytes a guest reads and writes: an in-process micro and
 //! a guest see one collection through the same host sessions, so one reads rows the other wrote
-//! (attachments included).
+//! (links included).
 //!
 //! A [`Collection`] mirrors one collection into the micro's incarnation: a task the backend
 //! owns long-polls the projection lease and folds pages into a [`Mirror`], then reports the
 //! change through [`Feed::applied`]. A [`Registration`] adds a writer whose default basis is
 //! that mirror's stamp for the key, so a write supersedes what this micro has seen (tombstones
 //! included). Everything here is backend-neutral; only how a page is fetched, how a row's
-//! attachments become references, and how a write crosses to the host differ, and each is one
+//! links become references, and how a write crosses to the host differ, and each is one
 //! arm of [`Stored`], [`Minter`] and [`Writer`].
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -28,20 +28,19 @@ use serde::de::DeserializeOwned;
 
 use crate::Capability;
 use crate::Error;
-use crate::RowAttachment;
+use crate::RowLink;
 
 #[cfg(feature = "in_process")]
-const _: () = assert!(
-    crate::CAPABILITY_ATTACHMENT_TAG == clay_guest_session::collections::CAPABILITY_ATTACHMENT_TAG
-);
+const _: () =
+    assert!(crate::LINK_TAG == clay_guest_session::collections::CAPABILITY_ATTACHMENT_TAG);
 
 /// One live row of a collection: its decoded key and value, its writer's stamp, and the
-/// recipient-local references its value attaches (indexed by [`crate::Attachment`]).
+/// recipient-local references its value links (indexed by [`crate::Link`]).
 pub struct Row<K, V> {
     pub key: K,
     pub value: V,
     pub stamp: Stamp,
-    pub attachments: Vec<Capability>,
+    pub links: Vec<Capability>,
 }
 
 /// One row value as its backend's page carried it, kept until a reader asks for the rows.
@@ -53,7 +52,7 @@ pub(crate) enum Stored {
     Guest(Rc<crate::guest::GuestValue>),
 }
 
-/// What turns a [`Stored`] row's attachments into references recipient-local to this
+/// What turns a [`Stored`] row's links into references recipient-local to this
 /// incarnation: the in-process session mints them from the host's records, while a guest's
 /// arrive from the host already minted.
 pub(crate) enum Minter {
@@ -79,7 +78,7 @@ impl Minter {
             (Self::InProcess(session), Stored::InProcess(value)) => value
                 .attachments
                 .iter()
-                .map(|attachment| Ok(Capability::in_process(session.mint_attachment(attachment)?)))
+                .map(|link| Ok(Capability::in_process(session.mint_attachment(link)?)))
                 .collect(),
             #[cfg(feature = "guest")]
             (Self::Guest, Stored::Guest(value)) => Ok(value
@@ -261,7 +260,7 @@ impl<K: DeserializeOwned, V: DeserializeOwned> Collection<K, V> {
         )
     }
 
-    /// Every live row (tombstoned keys are hidden), attachments minted for this incarnation.
+    /// Every live row (tombstoned keys are hidden), links minted for this incarnation.
     /// Rows are decoded once per mirror revision: the feed folds a page and bumps the revision
     /// with no await in between, so a revision read here names exactly the mirror state read
     /// next, and every reader of that revision shares the decoded rows.
@@ -282,7 +281,7 @@ impl<K: DeserializeOwned, V: DeserializeOwned> Collection<K, V> {
                 key: decode(&key),
                 value: decode(self.minter.body(stored)),
                 stamp: stamped.stamp.clone(),
-                attachments: self.minter.mint(stored)?,
+                links: self.minter.mint(stored)?,
             });
         }
         let rows: Rc<[Row<K, V>]> = rows.into();
@@ -362,16 +361,11 @@ impl<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> Registrat
         self.collection.mirror.borrow().write_basis(&key.to_vec())
     }
 
-    /// Put `value` at `key`, superseding what this micro's mirror holds for it. `attachments`
-    /// are the publications [`Attachment`] indices in `value` refer to. The write is complete
+    /// Put `value` at `key`, superseding what this micro's mirror holds for it. `links`
+    /// are the endpoints the [`Link`] indices in `value` refer to. The write is complete
     /// when the future resolves: in-process it already is by the first poll, while a guest's
     /// crosses the component boundary.
-    pub async fn put(
-        &self,
-        key: &K,
-        value: &V,
-        attachments: Vec<RowAttachment>,
-    ) -> Result<Stamp, Error> {
+    pub async fn put(&self, key: &K, value: &V, links: Vec<RowLink>) -> Result<Stamp, Error> {
         let key = encode(key);
         let basis = self.basis(&key);
         let body = encode(value);
@@ -387,9 +381,9 @@ impl<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> Registrat
                 let Minter::InProcess(capabilities) = &*self.collection.minter else {
                     unreachable!("an in-process writer belongs to an in-process collection")
                 };
-                let attachments = attachments
+                let attachments = links
                     .into_iter()
-                    .map(|attachment| attachment.into_in_process(capabilities))
+                    .map(|link| link.into_in_process(capabilities))
                     .collect::<Result<_, _>>()?;
                 Ok(writer.put_value(
                     key,
@@ -398,7 +392,7 @@ impl<K: Serialize + DeserializeOwned, V: Serialize + DeserializeOwned> Registrat
                 )?)
             }
             #[cfg(feature = "guest")]
-            Writer::Guest(writer) => crate::guest::put(writer, key, basis, body, attachments).await,
+            Writer::Guest(writer) => crate::guest::put(writer, key, basis, body, links).await,
         }
     }
 

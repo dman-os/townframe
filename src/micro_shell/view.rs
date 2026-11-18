@@ -88,19 +88,19 @@ fn PlacedSlot(
     rsx! { PresentationSlot { reference, placeholder_chrome } }
 }
 
-/// `row`'s `attachment` mounted in `placement`, keyed by `key` (a different key is a fresh mount).
+/// `row`'s `link` mounted in `placement`, keyed by `key` (a different key is a fresh mount).
 fn placed_slot(
     shell: &Shell,
     placement: Placement,
     key: String,
     row: &Row<String, Panel>,
-    attachment: clay_mdk::Attachment,
+    link: clay_mdk::Link,
 ) -> Element {
     rsx! {
         PlacedSlot {
             key: "{key}",
             placement,
-            reference: row.attachments[attachment.index()].clone(),
+            reference: row.links[link.index()].clone(),
             title: row.value.title.clone(),
             shell: shell.clone(),
         }
@@ -179,8 +179,8 @@ fn with_inner_weights(config: ShellConfig, weights: &[f64]) -> ShellConfig {
     }
 }
 
-fn panel_slot(row: &Row<String, Panel>, attachment: clay_mdk::Attachment) -> Element {
-    rsx! { PresentationSlot { reference: row.attachments[attachment.index()].clone() } }
+fn panel_slot(row: &Row<String, Panel>, link: clay_mdk::Link) -> Element {
+    rsx! { PresentationSlot { reference: row.links[link.index()].clone() } }
 }
 
 /// The panels that are destinations: the home panel first, then every other list panel by
@@ -281,15 +281,15 @@ fn sheet_element(
 /// The details position's mounted panel and its accessible name.
 fn details_pane(
     shell: &Shell,
-    details: Option<(&Row<String, Panel>, Option<&str>, clay_mdk::Attachment)>,
+    details: Option<(&Row<String, Panel>, Option<&str>, clay_mdk::Link)>,
 ) -> (Option<Element>, String) {
-    let slot = details.map(|(row_panel, row, attachment)| {
+    let slot = details.map(|(row_panel, row, link)| {
         placed_slot(
             shell,
             Placement::Details,
             format!("{}/{row:?}", row_panel.key),
             row_panel,
-            attachment,
+            link,
         )
     });
     let name = details.map_or_else(
@@ -403,11 +403,11 @@ fn Frame(shell: Shell) -> Element {
     // the shell prunes it.
     let details = frame.details.and_then(|(panel, row)| {
         let row_panel = find(panel)?;
-        let attachment = match row {
+        let link = match row {
             Some(_) => row_panel.value.details?,
             None => row_panel.value.content,
         };
-        Some((row_panel, row, attachment))
+        Some((row_panel, row, link))
     });
 
     let on_open = {

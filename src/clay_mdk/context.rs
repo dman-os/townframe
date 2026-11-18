@@ -115,8 +115,8 @@ pub struct OperationReceipt {
     pub status: OperationStatus,
 }
 
-/// A reference another micro's publication minted for this one: a resolved requirement or a
-/// row attachment. Holding it does not keep the provider running unless it is redeemed (a slot
+/// A reference another micro's endpoint minted for this one: a resolved requirement or a
+/// row link. Holding it does not keep the provider running unless it is redeemed (a slot
 /// mounting a presentation) or retained; [`Self::status`] never activates anything.
 pub struct Capability(CapabilityInner);
 
@@ -360,7 +360,7 @@ impl Clone for Capability {
     }
 }
 
-/// Two references are equal when they store back as the same attachment (in-process) or are the
+/// Two references are equal when they store back as the same link (in-process) or are the
 /// same held reference (guest), so a re-rendered row that still names the same target does not
 /// remount its slot.
 impl PartialEq for Capability {
@@ -390,28 +390,28 @@ pub(crate) fn encode<T: Serialize>(value: &T) -> Vec<u8> {
     bytes
 }
 
-/// What one row of a registration attaches to its value (indexed by [`crate::Attachment`]):
-/// one of this micro's own publications, named as the manifest declares it.
+/// What one row of a registration links its value to (indexed by [`crate::Link`]): one of this
+/// micro's own endpoints, named as the manifest declares it.
 ///
 /// A durable row persists endpoints, never references (ADR 031 §7), so the host turns the name
-/// into the endpoint `(micro, publication, contract)` when the row is written. That needs no
-/// live publication, so a row may be written at any time: from `activate`, from a spawned task
+/// into the endpoint `(micro, endpoint, contract)` when the row is written. That needs no
+/// live endpoint, so a row may be written at any time: from `activate`, from a spawned task
 /// or from a call handler, and a reader that redeems it activates the micro as for any lazy
 /// endpoint. A name the manifest does not declare fails the write.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RowAttachment(String);
+pub struct RowLink(String);
 
-impl RowAttachment {
-    /// The presentation `P` this micro publishes.
+impl RowLink {
+    /// The view `P` this micro serves.
     pub fn own<P: ComponentDecl>() -> Self {
         Self(P::NAME.into())
     }
 
-    /// One of this micro's publications named by data instead of by declaration: a call
-    /// publication (calls stay named by string until they are declared by their `Method`
-    /// request type), or a name the caller does not control.
-    pub fn by_name(publication: impl Into<String>) -> Self {
-        Self(publication.into())
+    /// One of this micro's endpoints named by data instead of by declaration: a method or
+    /// callback (those stay named by string until they are declared by their `Method` request
+    /// type), or a name the caller does not control.
+    pub fn by_name(endpoint: impl Into<String>) -> Self {
+        Self(endpoint.into())
     }
 
     #[cfg(feature = "guest")]
@@ -419,7 +419,7 @@ impl RowAttachment {
         self.0
     }
 
-    /// The endpoint the host stores for this attachment.
+    /// The endpoint the host stores for this link.
     #[cfg(feature = "in_process")]
     pub(crate) fn into_in_process(
         self,

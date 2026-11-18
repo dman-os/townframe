@@ -124,7 +124,7 @@ fn view(
                             match row {
                                 Some(row) => rsx! {
                                     PresentationSlot {
-                                        reference: row.attachments[row.value.content.index()].clone(),
+                                        reference: row.links[row.value.content.index()].clone(),
                                     }
                                 },
                                 None => rsx! {

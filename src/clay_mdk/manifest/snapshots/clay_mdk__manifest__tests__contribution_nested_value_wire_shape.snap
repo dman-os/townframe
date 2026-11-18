@@ -6,7 +6,7 @@ expression: "serde_json::to_string_pretty(&nested_contribution()).unwrap()"
   "id": "toolbar-button",
   "binding": "tally-book",
   "key": "counter",
-  "payload": {
+  "value": {
     "badges": [
       1,
       null,
@@ -19,10 +19,10 @@ expression: "serde_json::to_string_pretty(&nested_contribution()).unwrap()"
     "order": 2,
     "slot": "toolbar"
   },
-  "attachments": [
+  "links": [
     {
       "index": 0,
-      "publication": "view"
+      "endpoint": "view"
     }
   ]
 }

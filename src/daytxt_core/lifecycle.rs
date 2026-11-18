@@ -14,17 +14,16 @@ use clay_host::MicroId as SupervisorId;
 use clay_host::MicroState;
 use clay_mdk::host::factory;
 use clay_mdk::Access;
-use clay_mdk::AttachmentDeclaration;
 use clay_mdk::BindingResolution;
 use clay_mdk::ComponentDecl;
 use clay_mdk::ContributionDeclaration;
+use clay_mdk::Endpoint;
 use clay_mdk::Entrypoints;
+use clay_mdk::LinkDeclaration;
 use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
 use clay_mdk::Nsid;
-use clay_mdk::PublicationDeclaration;
-use clay_mdk::PublicationKind;
 use clay_mdk::Request;
 use clay_mdk::Sidecar;
 use dioxus::prelude::*;
@@ -33,7 +32,7 @@ use std::rc::Rc;
 
 pub const ID: &str = "dayframe.lifecycle";
 const AUTHORITY: &str = "org.example.dayframe.lifecycle";
-/// The one publication: the presentation the Settings section attaches.
+/// The one endpoint: the view the Settings section links.
 const VIEW: &str = "view";
 
 /// The lifecycle controls' one presentation, published as [`VIEW`].
@@ -47,11 +46,7 @@ const SECTIONS_BINDING: &str = "sections";
 fn manifest() -> MicroManifest {
     MicroManifest {
         entrypoints: Entrypoints::micro_client(),
-        publications: vec![PublicationDeclaration {
-            name: VIEW.into(),
-            kind: PublicationKind::Presentation,
-            contract: None,
-        }],
+        endpoints: [(VIEW.into(), Endpoint::View { implements: None })].into(),
         requires: vec![],
         configuration_requests: vec![],
         collection_contracts: vec![],
@@ -67,13 +62,13 @@ fn manifest() -> MicroManifest {
             id: "section".into(),
             binding: SECTIONS_BINDING.into(),
             key: ID.into(),
-            payload: serde_json::json!({
+            value: serde_json::json!({
                 "title": "Micro lifecycle",
-                "detail": { "$attachment": 0 },
+                "detail": { "$link": 0 },
             }),
-            attachments: vec![AttachmentDeclaration {
+            links: vec![LinkDeclaration {
                 index: 0,
-                publication: VIEW.into(),
+                endpoint: VIEW.into(),
             }],
         }],
         extra: Default::default(),

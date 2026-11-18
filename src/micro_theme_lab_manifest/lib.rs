@@ -22,9 +22,9 @@ pub const AUTHORITY: &str = "org.example.dayframe.themelab";
 pub const VIEW: &str = "view";
 /// The local binding name under which the theme lab contributes its shell panel.
 pub const PANELS_BINDING: &str = "panels";
-/// The local binding names under which it requires what it uses of the shell: each is the name
-/// of the shell publication it binds, so a catalog satisfies all of them from the shell
-/// (`InstalledMicro::satisfied_by`).
+/// The local binding names under which it requires what it uses of the shell. They are local
+/// names: the catalog resolves each requirement by the contract it names to the micro serving
+/// it.
 pub const SHELL_NAV_BUTTON: &str = micro_shell_manifest::NAV_BUTTON;
 pub const SHELL_GET_THEME: &str = micro_shell_manifest::GET_THEME;
 pub const SHELL_SET_THEME: &str = micro_shell_manifest::SET_THEME;
@@ -49,7 +49,7 @@ impl ComponentDecl for ThemeLabView {
 /// while it is stopped, and opening it is what starts it.
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
-        .component::<ThemeLabView>()
+        .view::<ThemeLabView>()
         .requires(
             SHELL_NAV_BUTTON,
             micro_shell_manifest::NAV_BUTTON_CONTRACT,
@@ -94,22 +94,28 @@ mod tests {
     }
 
     #[test]
-    fn the_manifest_declares_a_shell_panel_row_and_is_satisfied_by_the_shell() {
+    fn the_manifest_declares_a_shell_panel_row_and_is_served_by_the_shell() {
         sidecar().validate().unwrap();
         let rows = declared_rows(&clay_mdk::MicroId::local(ID), &sidecar()).unwrap();
         assert_eq!(rows.keys().collect::<Vec<_>>(), [PANELS_BINDING]);
-        // Every requirement names a publication of the shell, which is what `satisfied_by`
-        // needs to bind it.
+        // Every requirement names a contract the shell serves, as a method or as a view, which
+        // is what the catalog resolves it by.
         let shell = micro_shell_manifest::sidecar();
         for request in &sidecar().manifest.requires {
             assert!(
                 shell
                     .manifest
-                    .publications
-                    .iter()
-                    .any(|publication| publication.name == request.binding),
-                "the shell publishes no {:?}",
-                request.binding
+                    .endpoints
+                    .values()
+                    .any(|endpoint| match endpoint {
+                        clay_mdk::Endpoint::Method { nsid } => *nsid == request.contract,
+                        clay_mdk::Endpoint::View { implements } => {
+                            implements.as_ref() == Some(&request.contract)
+                        }
+                        _ => false,
+                    }),
+                "the shell serves no {}",
+                request.contract
             );
         }
     }

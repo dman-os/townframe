@@ -107,8 +107,6 @@ fn native_micros() -> Vec<InstalledMicro> {
                     )
                 },
             )
-            .satisfied_by(&shell, &micro_shell_manifest::sidecar())
-            .expect("the shell publishes what Settings requires")
         },
         InstalledMicro {
             enabled_on_admission: true,
@@ -175,9 +173,10 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
                         }
                     };
                     let sidecar = entry.sidecar.clone();
-                    let location = entry.location.clone();
-                    let micro =
-                        InstalledMicro::new(id, sidecar.clone(), move |id, resources, bindings| {
+                    installed.push(InstalledMicro::new(
+                        id,
+                        sidecar.clone(),
+                        move |id, resources, bindings| {
                             clay_mdk::host::wcmp_factory(
                                 resources,
                                 id,
@@ -185,17 +184,8 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
                                 bindings,
                                 move || indexed_package(entry.clone()),
                             )
-                        })
-                        // A package may require the shell's publications (the layout's app bar
-                        // button); the shell is the only provider a package can name today.
-                        .satisfied_by(
-                            &clay_mdk::MicroId::local(micro_shell_manifest::ID),
-                            &micro_shell_manifest::sidecar(),
-                        );
-                    match micro {
-                        Ok(micro) => installed.push(micro),
-                        Err(error) => errors.push(format!("{location}: {error}")),
-                    }
+                        },
+                    ));
                 }
             }
             Err(error) => errors.push(format!("package index is not an index: {error}")),

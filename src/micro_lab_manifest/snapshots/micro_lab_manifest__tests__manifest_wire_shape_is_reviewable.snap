@@ -9,10 +9,9 @@ entrypoints:
   initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
   presentation: "townframe:dayframe/presentation-events@0.4.0"
   installer: ~
-publications:
-  - name: view
-    kind: presentation
-    contract: ~
+endpoints:
+  view:
+    $type: "org.example.clay.micro.manifest#viewEndpoint"
 requires: []
 configuration_requests: []
 collection_contracts: []
@@ -25,10 +24,10 @@ contributions:
   - id: layout-panel
     binding: panels
     key: dayframe.lab
-    payload:
+    value:
       content:
-        $attachment: 0
+        $link: 0
       title: Lab
-    attachments:
+    links:
       - index: 0
-        publication: view
+        endpoint: view

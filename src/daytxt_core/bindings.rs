@@ -200,7 +200,7 @@ mod tests {
     fn manifest(requests: Vec<Request>) -> MicroManifest {
         MicroManifest {
             entrypoints: Entrypoints::micro_client(),
-            publications: vec![],
+            endpoints: BTreeMap::new(),
             requires: vec![],
             configuration_requests: vec![],
             collection_contracts: vec![],

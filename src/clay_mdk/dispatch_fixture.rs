@@ -22,11 +22,10 @@ use big_ndk::wit::wasi::http::types::Request;
 use big_ndk::wit::wasi::http::types::Scheme;
 use clay_mdk::ComponentDecl;
 use clay_mdk::Context;
+use clay_mdk::Endpoint;
 use clay_mdk::Entrypoints;
 use clay_mdk::Error;
 use clay_mdk::MicroManifest;
-use clay_mdk::PublicationDeclaration;
-use clay_mdk::PublicationKind;
 use clay_mdk::method_core::ContextError;
 use dioxus::prelude::*;
 use serde::Deserialize;
@@ -84,11 +83,7 @@ impl ComponentDecl for Report {
 fn manifest() -> MicroManifest {
     MicroManifest {
         entrypoints: Entrypoints::micro_client(),
-        publications: vec![PublicationDeclaration {
-            name: Report::NAME.into(),
-            kind: PublicationKind::Presentation,
-            contract: None,
-        }],
+        endpoints: [(Report::NAME.into(), Endpoint::View { implements: None })].into(),
         requires: vec![],
         configuration_requests: vec![],
         collection_contracts: vec![],
