@@ -246,15 +246,6 @@ impl NodeClient {
         }
     }
 
-    /// The node this client booted, for tests that need what the socket does not expose.
-    #[cfg(test)]
-    pub(crate) fn booted_node(&self) -> &big_node::BigNode {
-        match &self.transport {
-            Transport::Holder(running) => &running.0.node,
-            Transport::Socket(_) => panic!("the node is held by another process"),
-        }
-    }
-
     pub fn mode(&self) -> Mode {
         self.mode
     }

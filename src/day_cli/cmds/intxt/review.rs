@@ -5,8 +5,9 @@
 //! The datums are ADR 041's. They live in the intxt drawer's notes document (a meta document
 //! named `notes/annotations`, ADR 041 §6), which the first comment creates and enters with an
 //! `annotationsEntry/main`. Like the packaging verbs these are client code: the caller writes with
-//! the operator's own authority, and what makes two readers two sides is the actor the cabinet
-//! attests wrote each datum, not anything a comment carries.
+//! the operator's own authority, so the cabinet attests the operator for every caller on a node;
+//! what makes two readers two sides is the `creator` a comment claims, detected by
+//! [`super::participant`] (ADR 041 §2).
 //!
 //! A comment's code target is read in the git repository of the worktree the verb runs in, so the
 //! commits an intxt holds must be objects there; carrying a comment to the intxt's current
@@ -70,12 +71,12 @@ struct Notes {
     posted: Vec<Posted>,
     /// Thread state by the root comment's slot.
     resolved: BTreeMap<String, bool>,
-    /// This reader's `seen` slots.
+    /// This participant's `seen` slots.
     seen: BTreeMap<DatumKey, annotation::Seen>,
 }
 
 impl Notes {
-    /// Every datum key of one reader's seen record: comment key to the heads last read.
+    /// Every datum key of one participant's seen record: comment key to the heads last read.
     fn seen_heads(&self) -> BTreeMap<String, Vec<String>> {
         self.seen
             .values()
@@ -190,9 +191,8 @@ impl Packaging<'_> {
         if comments.is_empty() {
             return Ok(comments);
         }
-        let me = self.caller.actor().await?;
         let notes = self
-            .read_notes(drawer, &me)
+            .read_notes(drawer)
             .await?
             .ok_or_else(|| eyre::eyre!("{drawer} has no notes document to remove comments from"))?;
         let mut remove = comments.clone();
@@ -211,8 +211,19 @@ impl Packaging<'_> {
         Ok(remove)
     }
 
-    /// The notes document with `me`'s seen records; none when the intxt has no notes document.
-    async fn read_notes(&self, drawer: &DrawerId, me: &Uuid7) -> Res<Option<Notes>> {
+    /// The slot prefix of this participant's `seen` records: `<actor uuid>/` for the operator's
+    /// `Person`, `<actor uuid>.<scope>/` for any other participant (see [`annotation::Seen`]).
+    async fn seen_prefix(&self) -> Res<String> {
+        let actor = self.caller.actor().await?;
+        Ok(match self.participant.creator.seen_scope() {
+            None => format!("{actor}/"),
+            Some(scope) => format!("{actor}.{scope}/"),
+        })
+    }
+
+    /// The notes document with this participant's seen records; none when the intxt has no notes
+    /// document.
+    async fn read_notes(&self, drawer: &DrawerId) -> Res<Option<Notes>> {
         let Some(doc) = self.notes_doc(drawer).await? else {
             return Ok(None);
         };
@@ -223,7 +234,7 @@ impl Packaging<'_> {
             resolved: BTreeMap::new(),
             seen: BTreeMap::new(),
         };
-        let mine = format!("{me}/");
+        let mine = self.seen_prefix().await?;
         for (datum_key, read) in datums {
             let tag = datum_key.tag().as_str();
             let slot = String::from_utf8_lossy(datum_key.slot_bytes()).into_owned();
@@ -450,6 +461,8 @@ impl Packaging<'_> {
             },
             motivation,
             reply_to: None,
+            creator: self.participant.creator.clone(),
+            generator: self.participant.generator.clone(),
             extra: Default::default(),
         };
         let comment_key = key(annotation::Comment::ID, &Uuid7::new().to_string())?;
@@ -514,9 +527,8 @@ impl Packaging<'_> {
                 )
             })?
             .parse::<DatumKey>()?;
-        let me = self.caller.actor().await?;
         let notes = self
-            .read_notes(&drawer, &me)
+            .read_notes(&drawer)
             .await?
             .ok_or_else(|| eyre::eyre!("{drawer} has no notes document"))?;
         let thread = Thread::group(notes.posted)
@@ -542,6 +554,8 @@ impl Packaging<'_> {
                         ReferenceDocId::Concrete(notes.doc.clone()),
                         parent_key.clone(),
                     )),
+                    creator: self.participant.creator.clone(),
+                    generator: self.participant.generator.clone(),
                     extra: Default::default(),
                 }),
             );
@@ -700,24 +714,27 @@ impl Packaging<'_> {
 
     /// `day x intxt inbox`: the unresolved threads of the intxt that the caller has not seen, or
     /// whose last comment someone else wrote, each placed on the intxt's current revision. Marks
-    /// them seen afterwards.
+    /// them seen afterwards. "Someone else" and "seen" are the detected participant's: an agent and
+    /// the operator are one actor but two sides.
     pub(crate) async fn inbox(&self, out: &mut impl Write, intxt: Option<&str>) -> Res<()> {
         let (drawer, intxts) = self.resolve(intxt).await?;
         let heading = shown(&intxts, &drawer.to_string());
-        let me = self.caller.actor().await?;
-        let Some(notes) = self.read_notes(&drawer, &me).await? else {
+        let me = &self.participant.creator;
+        let seen_prefix = self.seen_prefix().await?;
+        let Some(notes) = self.read_notes(&drawer).await? else {
             writeln!(out, "inbox {heading}: no comments yet")?;
             return Ok(());
         };
         let seen = notes.seen_heads();
         let view = self.load(&drawer).await?;
+        let actor = self.caller.actor().await?;
         let ids = view.names(notes.posted.iter().map(|post| &post.key));
         let waiting: Vec<Thread> = Thread::group(notes.posted.clone())
             .into_iter()
             .filter(|thread| {
                 let slot = String::from_utf8_lossy(thread.root.slot_bytes());
                 !notes.resolved.get(slot.as_ref()).copied().unwrap_or(false)
-                    && (thread.waiting_on(&me) || thread.unseen_by(&me, &seen))
+                    && (thread.waiting_on(me) || thread.unseen_by(me, &seen))
             })
             .collect();
         if waiting.is_empty() {
@@ -756,7 +773,7 @@ impl Packaging<'_> {
                 out,
                 "thread {}  {place}{}",
                 shown(&ids, &thread.root.to_string()),
-                if thread.waiting_on(&me) {
+                if thread.waiting_on(me) {
                     "  waiting on you"
                 } else {
                     ""
@@ -767,11 +784,11 @@ impl Packaging<'_> {
                     out,
                     "  {}  {}: {}",
                     shown(&ids, &post.key.to_string()),
-                    if post.authors.contains(&me) {
-                        "you"
-                    } else {
-                        "them"
-                    },
+                    self.participant.name(
+                        &post.comment.creator,
+                        post.comment.generator.as_ref(),
+                        post.authors.contains(&actor),
+                    ),
                     post.comment.body.content.replace('\n', "\n      ")
                 )?;
                 // One seen slot per range of comment slots, UUIDv7's first four hex digits: its
@@ -786,7 +803,7 @@ impl Packaging<'_> {
 
         let mut write = BTreeMap::new();
         for (range, datums) in now_seen {
-            let seen_key = key(annotation::Seen::ID, &format!("{me}/{range}"))?;
+            let seen_key = key(annotation::Seen::ID, &format!("{seen_prefix}{range}"))?;
             let mut record =
                 notes
                     .seen

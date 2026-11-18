@@ -1153,3 +1153,21 @@ fn a_failed_install_is_recorded_and_tried_again_at_the_next_observation() {
         Some(HookState::Installed)
     );
 }
+
+#[test]
+fn session_doc_reads_the_document_a_recorded_session_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(session_doc(dir.path(), "s1").unwrap(), None);
+    save(
+        &dir.path().join("s1.json"),
+        &SessionHost {
+            doc: Some(DOC.to_owned()),
+            ..SessionHost::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(session_doc(dir.path(), "s1").unwrap().as_deref(), Some(DOC));
+    for unsafe_id in ["", "../s1", "a/b", "a.b"] {
+        assert!(session_doc(dir.path(), unsafe_id).is_err(), "{unsafe_id}");
+    }
+}
