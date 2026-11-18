@@ -4,6 +4,7 @@ use method_core::ContextError;
 use method_core::Method;
 use serde::Deserialize;
 use serde::Serialize;
+use service_core_rs::CallOrigin;
 use service_core_rs::HttpMetadata;
 use service_core_rs::RequestContext;
 use service_core_rs::ResponseMetadata;
@@ -71,7 +72,7 @@ impl InlineRoute<Protocol> for Route {
 
 #[tokio::test]
 async fn protocol_and_direct_client_need_no_server_dependencies() {
-    let client = Client::<Protocol>::new(Transport::direct(Arc::new(Route)));
+    let client = Client::<Protocol>::new(Transport::direct(Arc::new(Route), CallOrigin::LocalNode));
     assert_eq!(Protocol::METHODS.unary, &[Echo::XRPC]);
     assert_eq!(Protocol::METHODS.stream, &[SubscribeEvents::XRPC]);
     assert_eq!(Echo::XRPC.output_schema, "String");
@@ -122,7 +123,8 @@ impl InlineRoute<Protocol> for Silent {
 
 #[tokio::test(start_paused = true)]
 async fn the_transport_enforces_the_deadline_the_client_does_not() {
-    let client = Client::<Protocol>::new(Transport::direct(Arc::new(Silent)));
+    let client =
+        Client::<Protocol>::new(Transport::direct(Arc::new(Silent), CallOrigin::LocalNode));
     let context = RequestContext::root().with_time_budget(std::time::Duration::from_secs(5));
     let started = tokio::time::Instant::now();
     let error = client

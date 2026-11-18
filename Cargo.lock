@@ -14514,16 +14514,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "service_client_iroh_rs"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "http",
+ "http-body-util",
+ "hyper",
+ "iroh",
+ "method_core",
+ "n0-future",
+ "serde",
+ "serde_json",
+ "service_client_core_rs",
+ "service_core_rs",
+ "tokio",
+]
+
+[[package]]
 name = "service_client_native_rs"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "futures",
  "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "iroh",
  "irpc",
  "method_core",
  "reqwest 0.12.28",
@@ -14531,6 +14545,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "service_client_core_rs",
+ "service_client_iroh_rs",
  "service_core_rs",
  "sha1",
  "tokio",
@@ -14548,6 +14563,7 @@ dependencies = [
  "http",
  "irpc",
  "method_core",
+ "n0-future",
  "opentelemetry",
  "opentelemetry_sdk",
  "serde",
@@ -14578,6 +14594,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "service_client_core_rs",
+ "service_client_iroh_rs",
  "service_client_native_rs",
  "service_core_rs",
  "tempfile",

@@ -268,15 +268,23 @@ where
             outcome_unknown: operation.kind == MethodKind::Procedure,
         });
     }
-    let value =
-        serde_json::from_slice::<Value>(body).map_err(|error| XrpcClientError::Protocol {
-            message: format!("invalid JSON XRPC response: {error}"),
-            outcome_unknown: operation.kind == MethodKind::Procedure,
-        })?;
+    let invalid_json = |error: serde_json::Error| XrpcClientError::Protocol {
+        message: format!("invalid JSON XRPC response: {error}"),
+        outcome_unknown: operation.kind == MethodKind::Procedure,
+    };
     if status.is_success() {
-        let output = serde_json::from_value(value).map_err(|error| XrpcClientError::Protocol {
-            message: format!("invalid XRPC success payload: {error}"),
-            outcome_unknown: operation.kind == MethodKind::Procedure,
+        // The output decodes straight from the body. Only an error response goes through a
+        // `Value`, which it needs to find the typed error inside the envelope and to keep an
+        // untyped body.
+        let output = serde_json::from_slice::<O>(body).map_err(|error| {
+            if error.is_data() {
+                XrpcClientError::Protocol {
+                    message: format!("invalid XRPC success payload: {error}"),
+                    outcome_unknown: operation.kind == MethodKind::Procedure,
+                }
+            } else {
+                invalid_json(error)
+            }
         })?;
         let metadata = ResponseMetadata::read_headers(headers).map_err(|message| {
             XrpcClientError::Protocol {
@@ -286,6 +294,7 @@ where
         })?;
         return Ok(ResponseEnvelope { output, metadata });
     }
+    let value = serde_json::from_slice::<Value>(body).map_err(invalid_json)?;
     let envelope = match serde_json::from_value::<XrpcErrorEnvelope>(value.clone()) {
         Ok(envelope) => envelope,
         Err(error) => {

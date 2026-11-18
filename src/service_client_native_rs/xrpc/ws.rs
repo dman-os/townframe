@@ -28,10 +28,15 @@ pub struct WsIo<S> {
     client: bool,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> WsIo<S> {
+impl<S> WsIo<S> {
     pub fn new(stream: S, client: bool) -> Self {
         Self { stream, client }
     }
+}
+
+/// Writing needs only the write half, so a server can write events while another future
+/// watches the read half for the client's close.
+impl<S: AsyncWrite + Unpin> WsIo<S> {
     pub async fn write_text(&mut self, text: &str) -> io::Result<()> {
         self.write_frame(0x1, text.as_bytes()).await
     }
@@ -71,7 +76,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsIo<S> {
         }
         self.stream.flush().await
     }
+}
 
+impl<S: AsyncRead + AsyncWrite + Unpin> WsIo<S> {
     pub async fn read_message(&mut self) -> io::Result<Option<WsMessage>> {
         let mut assembled: Vec<u8> = Vec::new();
         loop {

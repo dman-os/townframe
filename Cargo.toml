@@ -41,6 +41,7 @@ members = [
   "./src/service_core_rs/",
   "./src/service_client_core_rs/",
   "./src/service_client_native_rs/",
+  "./src/service_client_iroh_rs/",
   "./src/service_utils_rs/",
   "./src/sqlite_rs/",
   "./src/utils_rs",
@@ -119,6 +120,7 @@ method_core = { path = "./src/method_core", default-features = false }
 service_core_rs = { path = "./src/service_core_rs", default-features = false }
 service_client_core_rs = { path = "./src/service_client_core_rs", default-features = false }
 service_client_native_rs = { path = "./src/service_client_native_rs", default-features = false }
+service_client_iroh_rs = { path = "./src/service_client_iroh_rs", default-features = false }
 service_utils_rs = { path = "./src/service_utils_rs", default-features = false }
 # daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
@@ -369,6 +371,9 @@ iroh-blobs = { git = "https://github.com/dman-os/iroh-blobs", rev = "b3d641036c8
 # actors
 irpc = { version = "0.17.0", features = ["derive"] }
 irpc-iroh = "0.17.0"
+# Sleep and clocks that are tokio's natively and the browser's on wasm32-unknown-unknown; irpc
+# already depends on it.
+n0-future = "0.3.2"
 
 #
 # gui

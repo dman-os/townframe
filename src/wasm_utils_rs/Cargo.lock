@@ -3674,6 +3674,7 @@ dependencies = [
  "http",
  "irpc",
  "method_core",
+ "n0-future",
  "opentelemetry",
  "opentelemetry_sdk",
  "serde",

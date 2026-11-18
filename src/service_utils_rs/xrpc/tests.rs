@@ -1907,7 +1907,12 @@ async fn the_fallback_serves_unregistered_nsids_and_registered_operations_win() 
                 Ok::<_, XrpcHandlerError>(json!({
                     "nsid": request.nsid,
                     "verb": format!("{:?}", request.verb),
-                    "input": request.params,
+                    // A GET carries no body; a POST's is the JSON input.
+                    "input": if request.body.is_empty() {
+                        Value::Null
+                    } else {
+                        serde_json::from_slice::<Value>(&request.body).unwrap()
+                    },
                     "rawQuery": request.raw_query,
                 }))
             },

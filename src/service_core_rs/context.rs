@@ -7,11 +7,13 @@ use opentelemetry::trace::TraceContextExt;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use serde::Deserialize;
 use serde::Serialize;
+// n0-future's clock is tokio's natively (so paused-time tests drive deadlines) and the
+// browser's (`web-time` plus `setTimeout`) on wasm32-unknown-unknown, where `std::time`'s clocks
+// and tokio's timer panic.
+use n0_future::time::Instant;
+use n0_future::time::SystemTime;
 use std::collections::HashMap;
 use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
-use tokio::time::Instant;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
@@ -182,7 +184,7 @@ impl RequestContext {
 
     pub async fn expired(&self) {
         match self.remaining_budget() {
-            Some(budget) => tokio::time::sleep(budget).await,
+            Some(budget) => n0_future::time::sleep(budget).await,
             None => std::future::pending().await,
         }
     }
@@ -206,7 +208,7 @@ impl RequestContext {
 
 fn wall_clock_millis() -> u64 {
     SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+        .duration_since(SystemTime::UNIX_EPOCH)
         .expect("clock before UNIX epoch")
         .as_millis()
         .try_into()

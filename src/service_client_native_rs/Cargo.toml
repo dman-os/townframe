@@ -11,12 +11,14 @@ path = "lib.rs"
 
 [features]
 default = []
-iroh-http = ["dep:iroh", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
+# The `Transport::Iroh` variant: XRPC to a peer over iroh streams.
+iroh = ["dep:service_client_iroh_rs"]
 
 [dependencies]
 method_core.workspace = true
 service_core_rs.workspace = true
 service_client_core_rs.workspace = true
+service_client_iroh_rs = { workspace = true, optional = true }
 futures.workspace = true
 tokio = { workspace = true, features = ["sync", "macros", "rt", "time", "net", "io-util"] }
 irpc.workspace = true
@@ -28,10 +30,6 @@ reqwest.workspace = true
 serde_urlencoded = "0.7"
 base64 = "0.22"
 sha1 = "0.10"
-iroh = { workspace = true, optional = true }
-hyper = { version = "1", features = ["http1", "client"], optional = true }
-hyper-util = { version = "0.1", features = ["tokio"], optional = true }
-http-body-util = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tracing.workspace = true

@@ -15,6 +15,7 @@ use big_sync::MemoryPartStore;
 use futures::future::BoxFuture;
 use service_client_native_rs::InlineRoute;
 use service_client_native_rs::Transport;
+use service_utils_rs::CallOrigin;
 use service_utils_rs::StopToken;
 use sqlite_rs::SqliteRuntime;
 use std::sync::Mutex;
@@ -268,7 +269,10 @@ impl Harness {
         let (blobs, stop) = crate::boot(crate::Config {
             storage: crate::Storage::memory().unwrap(),
             sql: sql.clone(),
-            authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+            authority: Client::new(Transport::direct(
+                Arc::new(UnusedAuthority),
+                CallOrigin::LocalNode,
+            )),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: capability(),
@@ -288,7 +292,10 @@ impl Harness {
         Retention::new(
             self.sql.clone(),
             Arc::clone(&self.service),
-            Client::new(Transport::direct(Arc::clone(&self.docs))),
+            Client::new(Transport::direct(
+                Arc::clone(&self.docs),
+                CallOrigin::LocalNode,
+            )),
             self.docs.metadata(),
             self.docs.writable(),
             Arc::clone(&self.parts) as SharedPartStore,
@@ -784,7 +791,10 @@ async fn denied_writer_effects_survive_restart_and_pin_uncertainty() -> Res<()> 
     let mut retention = Retention::new(
         sql,
         Arc::clone(&h.service),
-        Client::new(Transport::direct(Arc::clone(&h.docs))),
+        Client::new(Transport::direct(
+            Arc::clone(&h.docs),
+            CallOrigin::LocalNode,
+        )),
         h.docs.metadata(),
         h.docs.writable(),
         Arc::clone(&h.parts) as SharedPartStore,

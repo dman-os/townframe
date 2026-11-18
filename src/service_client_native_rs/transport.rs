@@ -13,6 +13,7 @@ use method_core::Unary;
 use service_client_core_rs::Subscribed;
 use service_client_core_rs::SubscriptionTransport;
 use service_client_core_rs::UnaryTransport;
+use service_core_rs::CallOrigin;
 use service_core_rs::ClientError;
 use service_core_rs::Envelope;
 use service_core_rs::EventFrame;
@@ -20,6 +21,7 @@ use service_core_rs::EventReply;
 use service_core_rs::Reply;
 use service_core_rs::RequestContext;
 use service_core_rs::ResponseEnvelope;
+use service_core_rs::TransportContext;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -31,33 +33,63 @@ pub trait InlineRoute<Proto: Service>: Send + Sync {
     fn route_inline(self: Arc<Self>, message: Proto::Message) -> BoxFuture<'static, ()>;
 }
 
+/// The in-process transports carry the [`CallOrigin`] their caller states, stamped on every
+/// request as its [`TransportContext`]; the host trusts it because the message never left the
+/// process. XRPC carries none: the server derives the transport context from the connection.
 pub enum Transport<Proto: Service> {
     /// Messages are handed to a host in this process.
-    Direct(Arc<dyn InlineRoute<Proto>>),
-    Irpc(irpc::Client<Proto>),
+    Direct(Arc<dyn InlineRoute<Proto>>, CallOrigin),
+    /// Messages go through a same-node IRPC queue.
+    Irpc(irpc::Client<Proto>, CallOrigin),
     Xrpc(XrpcClient),
+    /// XRPC to a peer over iroh streams; unary only.
+    #[cfg(feature = "iroh")]
+    Iroh(service_client_iroh_rs::IrohHttp),
 }
 
 impl<Proto: Service> Transport<Proto> {
-    pub fn direct<R: InlineRoute<Proto> + 'static>(host: Arc<R>) -> Self {
-        Self::Direct(host)
+    pub fn direct<R: InlineRoute<Proto> + 'static>(host: Arc<R>, origin: CallOrigin) -> Self {
+        Self::Direct(host, origin)
     }
 
-    pub fn irpc(client: irpc::Client<Proto>) -> Self {
-        Self::Irpc(client)
+    pub fn irpc(client: irpc::Client<Proto>, origin: CallOrigin) -> Self {
+        Self::Irpc(client, origin)
     }
 
     pub fn xrpc(client: XrpcClient) -> Self {
         Self::Xrpc(client)
+    }
+
+    #[cfg(feature = "iroh")]
+    pub fn iroh(client: service_client_iroh_rs::IrohHttp) -> Self {
+        Self::Iroh(client)
+    }
+
+    /// Establishes how `request` reaches the host, overwriting whatever the caller put there:
+    /// only the transport says where a call comes from. XRPC sends no transport context at all.
+    fn stamp<P>(&self, request: &mut Envelope<P>) {
+        match self {
+            Self::Direct(_, origin) => {
+                request.set_transport(TransportContext::Direct { origin: *origin })
+            }
+            Self::Irpc(_, origin) => {
+                request.set_transport(TransportContext::Irpc { origin: *origin })
+            }
+            Self::Xrpc(_) => {}
+            #[cfg(feature = "iroh")]
+            Self::Iroh(_) => {}
+        }
     }
 }
 
 impl<Proto: Service> Clone for Transport<Proto> {
     fn clone(&self) -> Self {
         match self {
-            Self::Direct(host) => Self::Direct(Arc::clone(host)),
-            Self::Irpc(client) => Self::Irpc(client.clone()),
+            Self::Direct(host, origin) => Self::Direct(Arc::clone(host), *origin),
+            Self::Irpc(client, origin) => Self::Irpc(client.clone(), *origin),
             Self::Xrpc(client) => Self::Xrpc(client.clone()),
+            #[cfg(feature = "iroh")]
+            Self::Iroh(client) => Self::Iroh(client.clone()),
         }
     }
 }
@@ -65,9 +97,11 @@ impl<Proto: Service> Clone for Transport<Proto> {
 impl<Proto: Service> std::fmt::Debug for Transport<Proto> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::Direct(_) => "direct",
-            Self::Irpc(_) => "irpc",
+            Self::Direct(..) => "direct",
+            Self::Irpc(..) => "irpc",
             Self::Xrpc(_) => "xrpc",
+            #[cfg(feature = "iroh")]
+            Self::Iroh(_) => "iroh",
         })
     }
 }
@@ -81,14 +115,15 @@ where
 {
     async fn call(
         &self,
-        request: Envelope<P>,
+        mut request: Envelope<P>,
     ) -> Result<ResponseEnvelope<P::Output>, ClientError<P::Error>> {
         let context = request.context.clone();
+        self.stamp(&mut request);
         within_deadline(
             &context,
             Box::pin(async {
                 match self {
-                    Self::Direct(host) => {
+                    Self::Direct(host, _) => {
                         let (tx, rx) = oneshot::channel();
                         let message = Proto::Message::from(WithChannels::from((request, tx)));
                         Arc::clone(host).route_inline(message).await;
@@ -96,7 +131,7 @@ where
                             .map_err(|error| ClientError::transport(error, false))?
                             .map_err(ClientError::Method)
                     }
-                    Self::Irpc(client) => {
+                    Self::Irpc(client, _) => {
                         let _scope = request.context.cancellation.begin_transport_request()?;
                         client
                             .rpc(request)
@@ -127,6 +162,11 @@ where
                             .await
                             .map_err(ClientError::from)
                     }
+                    #[cfg(feature = "iroh")]
+                    Self::Iroh(client) => {
+                        request.context.validate()?;
+                        UnaryTransport::<P>::call(client, request).await
+                    }
                 }
             }),
         )
@@ -143,21 +183,22 @@ where
 {
     async fn subscribe(
         &self,
-        request: Envelope<P>,
+        mut request: Envelope<P>,
         buffer: usize,
     ) -> Result<Subscribed<P>, ClientError<P::Error>> {
         let context = request.context.clone();
+        self.stamp(&mut request);
         let subscribed = within_deadline(
             &context,
             Box::pin(async {
                 match self {
-                    Self::Direct(host) => {
+                    Self::Direct(host, _) => {
                         let (tx, rx) = mpsc::channel(buffer);
                         let message = Proto::Message::from(WithChannels::from((request, tx)));
                         Arc::clone(host).route_inline(message).await;
                         Ok(frames(rx, None))
                     }
-                    Self::Irpc(client) => {
+                    Self::Irpc(client, _) => {
                         let scope = request.context.cancellation.begin_transport_request()?;
                         let receiver = client
                             .server_streaming(request, buffer)
@@ -178,6 +219,12 @@ where
                             .map_err(ClientError::from)?;
                         Ok(frames(receiver, None))
                     }
+                    // `service_client_iroh_rs` carries unary calls only; see its crate docs.
+                    #[cfg(feature = "iroh")]
+                    Self::Iroh(_) => Err(ClientError::transport(
+                        "XRPC subscriptions are not carried over iroh",
+                        false,
+                    )),
                 }
             }),
         )

@@ -10,6 +10,7 @@
 
 #![recursion_limit = "256"]
 
+use service_utils_rs::CallOrigin;
 use sqlite_rs as sqlite_rs_alias;
 
 mod sqlite {
@@ -567,7 +568,10 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         state,
     });
     let (host, host_stop) = Host::new(Arc::clone(&service));
-    let client = Client::new(Transport::direct(NodulesBinding::new(Arc::clone(&host))));
+    let client = Client::new(Transport::direct(
+        NodulesBinding::new(Arc::clone(&host)),
+        CallOrigin::LocalNode,
+    ));
     Ok((
         Nodules { host, client },
         host_stop

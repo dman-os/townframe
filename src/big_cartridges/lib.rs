@@ -12,6 +12,7 @@
 
 #![recursion_limit = "256"]
 
+use service_utils_rs::CallOrigin;
 use sqlite_rs as sqlite_rs_alias;
 
 mod sqlite {
@@ -648,7 +649,10 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
         tasks,
     });
     let (host, host_stop) = Host::new(Arc::clone(&service));
-    let client = Client::new(Transport::direct(CartridgesBinding::new(Arc::clone(&host))));
+    let client = Client::new(Transport::direct(
+        CartridgesBinding::new(Arc::clone(&host)),
+        CallOrigin::LocalNode,
+    ));
     Ok((
         Cartridges {
             host,

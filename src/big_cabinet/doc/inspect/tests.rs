@@ -42,6 +42,7 @@ use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
 use service_client_native_rs::XrpcClient;
 use service_utils_rs::Admission;
+use service_utils_rs::CallOrigin;
 use service_utils_rs::ClientError;
 use service_utils_rs::IrpcAdapter;
 use service_utils_rs::RequestContext;
@@ -895,7 +896,7 @@ async fn direct_irpc_and_xrpc_share_exact_heads_evidence_and_denials() {
     let base = url::Url::parse(&format!("http://{address}/")).unwrap();
     let transports = [
         fixture.docs.client.clone(),
-        Client::new(Transport::irpc(irpc)),
+        Client::new(Transport::irpc(irpc, CallOrigin::LocalNode)),
         Client::new(Transport::xrpc(XrpcClient::new(base, BODY_LIMIT).unwrap())),
     ];
     for client in &transports {

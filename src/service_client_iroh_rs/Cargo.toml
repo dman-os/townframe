@@ -1,0 +1,33 @@
+[package]
+name = "service_client_iroh_rs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+method_core.workspace = true
+service_core_rs.workspace = true
+service_client_core_rs.workspace = true
+futures.workspace = true
+http.workspace = true
+hyper = { workspace = true, features = ["http1", "client"] }
+http-body-util = "0.1"
+# No default features: they pick a native TLS crypto provider and portmapping, neither of which
+# exists in a browser. Whoever builds the `Endpoint` this client is handed picks its provider.
+iroh = { version = "1", default-features = false }
+n0-future = "0.3"
+# The I/O traits iroh's streams implement, channels and `select!`; never `net`, which has no
+# browser build. The runtime is n0-future's.
+tokio = { workspace = true, features = ["sync", "macros"] }
+
+[dev-dependencies]
+# The default features give the test endpoints a crypto provider.
+iroh.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "io-util", "time"] }

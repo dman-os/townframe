@@ -52,6 +52,7 @@ use secrets_rs::SecretStore;
 use secrets_rs::SecretsError;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
+use service_utils_rs::CallOrigin;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
 use service_utils_rs::Host;
@@ -424,7 +425,7 @@ service_utils_rs::bind_service_protocol! {
 }
 
 /// The layered handler the host serves. Naming it lets a consumer write
-/// `Arc<Host<AuthorityHandler>>` and `Client::new(Transport::<AuthorityProtocol>::direct(host))`.
+/// `Arc<Host<AuthorityHandler>>` and `Client::new(Transport::<AuthorityProtocol>::direct(host, origin))`.
 pub type AuthorityHandler = Arc<AuthorityService>;
 
 /// A booted authority: the service, the host that fronts it, the client its
@@ -447,7 +448,10 @@ pub async fn boot(
 ) -> Result<(Authority, StopToken), AuthorityError> {
     let (service, service_stop) = AuthorityService::boot(secrets, node_id, sql).await?;
     let (host, host_stop) = Host::new(Arc::clone(&service) as AuthorityHandler);
-    let client = Client::new(Transport::direct(AuthorityBinding::new(Arc::clone(&host))));
+    let client = Client::new(Transport::direct(
+        AuthorityBinding::new(Arc::clone(&host)),
+        CallOrigin::LocalNode,
+    ));
     let authority = Authority {
         root: service.root_cap(),
         node_issuer: service.node_issuer(),

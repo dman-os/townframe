@@ -10,6 +10,7 @@ use big_cabinet_core::reference::head_text;
 use futures::future::BoxFuture;
 use service_client_native_rs::InlineRoute;
 use service_client_native_rs::Transport;
+use service_utils_rs::CallOrigin;
 use sqlite_rs::SqliteRuntime;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -211,7 +212,10 @@ impl Harness {
 
     fn reconciler(&self) -> DocumentBlobs {
         DocumentBlobs::new(
-            Client::new(Transport::direct(Arc::clone(&self.docs))),
+            Client::new(Transport::direct(
+                Arc::clone(&self.docs),
+                CallOrigin::LocalNode,
+            )),
             self.docs.capability,
             self.store.clone(),
             Arc::clone(&self.provider),
