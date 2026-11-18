@@ -326,11 +326,20 @@ pub struct NetTarget {
 /// Why text is not a [`NetTarget`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "`{0}` is not a network target: expected `<host>` or `<host>:<port>` with a DNS name, an IPv4 address or a bracketed IPv6 address (`[::1]:8000`), and no scheme"
+    "`{0}` is not a network target: expected `<host>` or `<host>:<port>` with a DNS name, an IPv4 address or a bracketed IPv6 address (`[::1]:8000`), and no scheme; the node's loopback sentinel needs a port"
 )]
 pub struct InvalidNetTarget(pub String);
 
 impl NetTarget {
+    /// The host a guest names to reach the machine's own loopback, which is otherwise
+    /// unreachable: a guest's `127.0.0.1` and `localhost` never leave its sandbox, so the
+    /// machine's own services are reached through this reserved name only, as wasmCloud's
+    /// `host.wasmcloud.internal` does for `wasi:sockets`. `.internal` is the TLD reserved for
+    /// private-use names, so no public DNS answers for it. A target names it only with a port,
+    /// since a grant of the whole loopback would be too coarse a thing to give by accident; the
+    /// node also keeps it closed unless its `net.allow_host_loopback` is set.
+    pub const HOST_LOOPBACK: &'static str = "host.daybook.internal";
+
     /// `host` (any case) and `port`. The host must be a DNS name or an IPv4 address (letters,
     /// digits, `-` and `.`) or an IPv6 address in brackets. `None` is every port.
     pub fn new(host: &str, port: Option<u16>) -> Result<Self, InvalidNetTarget> {
@@ -355,7 +364,7 @@ impl NetTarget {
             }
             host.to_ascii_lowercase()
         };
-        if port == Some(0) {
+        if port == Some(0) || (host == Self::HOST_LOOPBACK && port.is_none()) {
             return Err(invalid());
         }
         Ok(Self { host, port })
@@ -369,6 +378,36 @@ impl NetTarget {
     /// The one port this names, `None` for every port.
     pub fn port(&self) -> Option<u16> {
         self.port
+    }
+
+    /// Whether the host is `localhost` or an address in a range a node never lets a guest dial:
+    /// loopback, unspecified, link-local, multicast, private, CGNAT or unique-local. A permbind
+    /// for one is refused at admission, since the egress would refuse every request to it.
+    pub fn names_this_machine_or_lan(&self) -> bool {
+        use std::net::IpAddr;
+        let host = self.host.trim_start_matches('[').trim_end_matches(']');
+        if host == "localhost" || host.ends_with(".localhost") {
+            return true;
+        }
+        match host.parse::<IpAddr>().map(|address| address.to_canonical()) {
+            Ok(IpAddr::V4(v4)) => {
+                v4.is_loopback()
+                    || v4.is_unspecified()
+                    || v4.is_link_local()
+                    || v4.is_multicast()
+                    || v4.is_broadcast()
+                    || v4.is_private()
+                    || (v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]))
+            }
+            Ok(IpAddr::V6(v6)) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00
+            }
+            Err(_) => false,
+        }
     }
 
     /// Whether this target names `host` on `port`, as a request resolved them (the port is the

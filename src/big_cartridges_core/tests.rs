@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::NetTarget;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::doc::ChangeHash;
@@ -221,7 +222,10 @@ fn net_permbinds_name_a_host_and_verbs_and_a_use_asks_for_nothing_more() {
     };
     validated(net("api.example.org", Some(8443), Some(&["GET", "POST"]))).unwrap();
     validated(net("API.Example.org", None, None)).unwrap();
-    validated(net("[::1]", Some(8000), None)).unwrap();
+    validated(net("[2001:db8::1]", Some(8000), None)).unwrap();
+    validated(net(NetTarget::HOST_LOOPBACK, Some(8000), None)).unwrap();
+    // The sentinel needs the port: a whole-loopback grant is too coarse.
+    validated(net(NetTarget::HOST_LOOPBACK, None, None)).unwrap_err();
     for (permbind, why) in [
         (net("", None, None), "no host"),
         (net("example.org/path", None, None), "a path is not a host"),
@@ -230,6 +234,11 @@ fn net_permbinds_name_a_host_and_verbs_and_a_use_asks_for_nothing_more() {
             "a URL is not a host",
         ),
         (net("*.example.org", None, None), "no wildcards"),
+        (net("localhost", Some(80), None), "the machine, by name"),
+        (net("127.0.0.1", Some(80), None), "the machine"),
+        (net("[::1]", None, None), "the machine, in IPv6"),
+        (net("10.0.0.5", None, None), "a private address"),
+        (net("169.254.169.254", None, None), "the metadata address"),
         (
             net("example.org:8000", None, None),
             "the port is its own field",
@@ -629,7 +638,6 @@ fn a_pinned_datum_pin_tampering_breaks_verification() {
 #[test]
 fn net_targets_follow_deno_allow_net() {
     use crate::config::GrantKey;
-    use crate::config::NetTarget;
     let target = |text: &str| text.parse::<NetTarget>().unwrap();
     assert_eq!(target("Example.ORG"), target("example.org"));
     assert_eq!(target("example.org").port(), None);
