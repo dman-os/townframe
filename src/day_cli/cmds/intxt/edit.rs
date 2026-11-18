@@ -446,7 +446,7 @@ impl Packaging<'_> {
             removals.push(removal_undo(&short, &summary, key, value)?);
         }
         if !removed.is_empty() && !applied.dry_run {
-            self.remove_held(drawer, view, &removed).await?;
+            self.remove_held(drawer, &removed).await?;
         }
 
         let mut added_undo = Vec::new();
