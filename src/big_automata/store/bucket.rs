@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 use crate::fingerprint::Fingerprint;
 use crate::fingerprint::FingerprintSeed;
-use crate::store::ObjPayload;
+use crate::part_store::PayloadDigest;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketSummary {
@@ -37,10 +37,13 @@ impl BucketFingerprint {
     }
 }
 
+/// A member's place in its bucket: a live member counts by its payload digest (stored when the
+/// payload was written, so a summary never rereads payloads and a withheld payload still
+/// counts), a removed member by its key alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BucketMemberKind<'a> {
+pub enum BucketMemberKind {
     Absent,
-    Live(&'a ObjPayload),
+    Live(PayloadDigest),
     Dead,
 }
 
@@ -59,18 +62,18 @@ impl BucketSummaryState {
         buck_id: BuckId,
         obj_id: ObjKey,
         cursor: CursorIndex,
-        old: BucketMemberKind<'_>,
-        new: BucketMemberKind<'_>,
+        old: BucketMemberKind,
+        new: BucketMemberKind,
     ) {
         self.changed_at = cursor;
         match old {
             BucketMemberKind::Absent => {}
-            BucketMemberKind::Live(payload) => self.remove_live(buck_id, obj_id.clone(), payload),
+            BucketMemberKind::Live(digest) => self.remove_live(buck_id, obj_id.clone(), digest),
             BucketMemberKind::Dead => self.remove_dead(buck_id, obj_id.clone()),
         }
         match new {
             BucketMemberKind::Absent => {}
-            BucketMemberKind::Live(payload) => self.add_live(buck_id, obj_id, payload),
+            BucketMemberKind::Live(digest) => self.add_live(buck_id, obj_id, digest),
             BucketMemberKind::Dead => self.add_dead(buck_id, obj_id),
         }
     }
@@ -89,20 +92,20 @@ impl BucketSummaryState {
         self.changed_at
     }
 
-    fn add_live(&mut self, buck_id: BuckId, obj_id: ObjKey, payload: &ObjPayload) {
+    fn add_live(&mut self, buck_id: BuckId, obj_id: ObjKey, digest: PayloadDigest) {
         self.live_count = self.live_count.checked_add(1).expect(ERROR_IMPOSSIBLE);
         self.live_fp.add(
             &BUCKET_LIVE_FP_SEED,
-            &("big-sync-bucket-live-v1", buck_id, obj_id, payload),
+            &("big-sync-bucket-live-v2", buck_id, obj_id, digest),
         );
     }
 
-    fn remove_live(&mut self, buck_id: BuckId, obj_id: ObjKey, payload: &ObjPayload) {
+    fn remove_live(&mut self, buck_id: BuckId, obj_id: ObjKey, digest: PayloadDigest) {
         assert!(self.live_count > 0, "fishy");
         self.live_count -= 1;
         self.live_fp.remove(
             &BUCKET_LIVE_FP_SEED,
-            &("big-sync-bucket-live-v1", buck_id, obj_id, payload),
+            &("big-sync-bucket-live-v2", buck_id, obj_id, digest),
         );
     }
 

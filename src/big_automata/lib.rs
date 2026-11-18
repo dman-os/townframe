@@ -19,6 +19,7 @@ mod ids;
 mod mpsc;
 pub mod okv;
 mod outbox;
+pub mod part_store;
 // FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
 #[cfg(any())]
 mod peer;

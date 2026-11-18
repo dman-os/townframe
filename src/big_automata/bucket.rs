@@ -6,11 +6,12 @@ use crate::interlude::*;
 
 use crate::fingerprint::Fingerprint;
 use crate::fingerprint::FingerprintSeed;
+use crate::part_store::PartStoreRead;
+use crate::part_store::PayloadState;
 use crate::rpc::bucket::LeafBucketPage as RawLeafBucketPage;
 use crate::rpc::bucket::LeafBucketRequest;
 use crate::store::CursorIndex;
 use crate::store::ObjPayload;
-use crate::store::PartStoreReadOnly;
 use crate::store::bucket::BucketSummary;
 
 structstruck::strike! {
@@ -202,9 +203,9 @@ impl BucketMachine {
 
     #[tracing::instrument(skip_all)]
     pub fn on_obj_sync_completed(&mut self, obj_key: &ObjKey, out: &mut Vec<BucketMachineCommand>) {
-        let buck_id = BuckId::from_obj_key(self.working_level, &obj_key);
+        let buck_id = BuckId::from_obj_key(self.working_level, obj_key);
         if let Some(state) = self.working_buckets.get_mut(&buck_id) {
-            let had_active_obj = self.active_obj_jobs.remove(&obj_key).is_some();
+            let had_active_obj = self.active_obj_jobs.remove(obj_key).is_some();
             tracing::debug!(
                 buck_id = ?buck_id,
                 obj_key = %obj_key,
@@ -212,7 +213,7 @@ impl BucketMachine {
                 "bucket completion active obj lookup"
             );
             if had_active_obj {
-                let old = state.active_objs.remove(&obj_key);
+                let old = state.active_objs.remove(obj_key);
                 if old.is_none() {
                     warn!(
                         buck_id = ?buck_id,
@@ -433,25 +434,31 @@ fn summaries_agree(local: &BucketSummary, remote: &BucketSummary) -> bool {
 
 /// Use the part store and the local bucket fingerprins to filter out
 /// buckets that are identical to local.
-pub async fn filter_buckets<K: FutureForm, S: PartStoreReadOnly<K>>(
+///
+/// The local summaries of every bucket the scan can reach (the prefix at or above the working
+/// level) are read in one batch.
+pub async fn filter_buckets<S: PartStoreRead>(
     part_key: PartKey,
     working_lvl: BuckLevel,
     buckets: Vec<BucketSummary>,
     part_store: &S,
-) -> FilteredBuckets {
+) -> Res<FilteredBuckets> {
     if buckets.is_empty() {
-        return FilteredBuckets::Done;
+        return Ok(FilteredBuckets::Done);
     }
+    let reachable = buckets
+        .iter()
+        .take_while(|buck| buck.id.level() <= working_lvl)
+        .map(|buck| buck.id)
+        .collect::<Vec<_>>();
+    let local_summaries = part_store.bucket_summaries(&part_key, &reachable).await?;
     let mut last_id = BuckId::ROOT;
     let in_len = buckets.len();
 
     let mut out = vec![];
     let mut clean_bucks = HashSet::new();
     let mut clean_ctr = 0;
-    'b: for buck in buckets {
-        if buck.id.level() > working_lvl {
-            break;
-        }
+    'b: for (buck, local_summary) in buckets.into_iter().zip(&local_summaries) {
         last_id = buck.id;
         for level in 0..buck.id.level() {
             let ancestor = buck.id.to_level(level);
@@ -460,10 +467,7 @@ pub async fn filter_buckets<K: FutureForm, S: PartStoreReadOnly<K>>(
                 continue 'b;
             }
         }
-        let local_summary = part_store
-            .get_bucket_summary(part_key.clone(), buck.id)
-            .await;
-        if summaries_agree(&local_summary, &buck) {
+        if summaries_agree(local_summary, &buck) {
             clean_bucks.insert(buck.id);
             clean_ctr += 1;
             continue;
@@ -472,7 +476,7 @@ pub async fn filter_buckets<K: FutureForm, S: PartStoreReadOnly<K>>(
             out.push(buck);
         }
     }
-    if out.is_empty() {
+    Ok(if out.is_empty() {
         if working_lvl == 0 {
             // No dirty bucket at the working level: at level 0 a bucket is a leaf range and
             // there is nothing beneath it left to look at.
@@ -492,7 +496,7 @@ pub async fn filter_buckets<K: FutureForm, S: PartStoreReadOnly<K>>(
         }
     } else {
         FilteredBuckets::Handoff(out)
-    }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -516,19 +520,32 @@ pub struct BucketObjLeafPage {
 }
 
 // FIXME: this is too expensive
-pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
+/// The local side of every requested bucket is read in two batches: the summaries of all the
+/// buckets, then the states of every object listed in a bucket that is not empty locally.
+pub async fn filter_objects<S: PartStoreRead>(
     part_key: PartKey,
     bucks: Map<BuckId, RawLeafBucketPage>,
     seed: FingerprintSeed,
     part_store: &S,
-) -> Map<BuckId, BucketObjLeafPage> {
+) -> Res<Map<BuckId, BucketObjLeafPage>> {
+    let buck_ids = bucks.keys().copied().collect::<Vec<_>>();
+    let summaries = part_store.bucket_summaries(&part_key, &buck_ids).await?;
+    let lens = buck_ids
+        .into_iter()
+        .zip(summaries.iter().map(|summary| summary.len))
+        .collect::<Map<_, _>>();
+    let objs = bucks
+        .iter()
+        .filter(|(buck_id, _)| lens[buck_id] != 0)
+        .flat_map(|(_, page)| page.entries.iter().map(|entry| entry.obj_key.clone()))
+        .collect::<Vec<_>>();
+    let states = part_store.obj_states(&objs).await?;
+    let states = objs.into_iter().zip(states).collect::<Map<_, _>>();
+
     let mut out = Map::new();
     for (buck_id, page) in bucks {
-        let summary = part_store
-            .get_bucket_summary(part_key.clone(), buck_id)
-            .await;
         let mut out_objs = vec![];
-        if summary.len == 0 {
+        if lens[&buck_id] == 0 {
             out_objs.extend(page.entries.into_iter().filter_map(|ee| {
                 if !ee.dead {
                     Some(BucketObjEntry {
@@ -550,31 +567,35 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
             continue;
         }
         for obj in page.entries {
-            match part_store.obj_payload(obj.obj_key.clone()).await {
-                Some(payload) => {
-                    if !obj.dead {
-                        let local_fp = Fingerprint::new(
-                            &seed,
-                            &("big-sync-obj-fp-v1", obj.obj_key.clone(), payload),
-                        );
-                        if local_fp != obj.fp {
-                            out_objs.push(BucketObjEntry {
-                                obj_key: obj.obj_key,
-                                delta: PartObjDelta::Change,
-                            });
-                        } else {
-                            let local_parts = part_store.obj_parts(obj.obj_key.clone()).await;
-                            if !local_parts.contains(&part_key) {
-                                out_objs.push(BucketObjEntry {
-                                    obj_key: obj.obj_key,
-                                    delta: PartObjDelta::New,
-                                });
-                            }
-                        }
-                    } else {
+            match &states[&obj.obj_key] {
+                Some(state) => {
+                    if obj.dead {
                         out_objs.push(BucketObjEntry {
                             obj_key: obj.obj_key,
                             delta: PartObjDelta::Delete,
+                        });
+                        continue;
+                    }
+                    let changed = match &state.payload {
+                        PayloadState::Payload(payload) => {
+                            Fingerprint::new(
+                                &seed,
+                                &("big-sync-obj-fp-v1", obj.obj_key.clone(), payload.clone()),
+                            ) != obj.fp
+                        }
+                        // The payload is not held here, so it can't match the remote one:
+                        // fetch it.
+                        PayloadState::Withheld(_) => true,
+                    };
+                    if changed {
+                        out_objs.push(BucketObjEntry {
+                            obj_key: obj.obj_key,
+                            delta: PartObjDelta::Change,
+                        });
+                    } else if !state.parts.contains(&part_key) {
+                        out_objs.push(BucketObjEntry {
+                            obj_key: obj.obj_key,
+                            delta: PartObjDelta::New,
                         });
                     }
                 }
@@ -597,15 +618,16 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
             },
         );
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::part_store::ObjState;
+    use crate::rev::Rev;
     use crate::store::bucket::BucketFingerprint;
-    use future_form::Local;
     use std::collections::HashMap;
 
     fn part() -> PartKey {
@@ -629,40 +651,42 @@ mod tests {
         summaries: HashMap<BuckId, BucketSummary>,
     }
 
-    impl PartStoreReadOnly<Local> for SummaryStore {
-        fn get_peer_part_cursor<'a>(
-            &'a self,
-            _peer_key: PeerKey,
-            _part_key: PartKey,
-        ) -> <Local as FutureForm>::Future<'a, Option<CursorIndex>> {
+    #[async_trait]
+    impl PartStoreRead for SummaryStore {
+        async fn obj_states(&self, _objs: &[ObjKey]) -> Res<Vec<Option<ObjState>>> {
+            unreachable!("filter_buckets does not read objects")
+        }
+
+        async fn bucket_summaries(
+            &self,
+            _part: &PartKey,
+            ids: &[BuckId],
+        ) -> Res<Vec<BucketSummary>> {
+            Ok(ids
+                .iter()
+                .map(|id| {
+                    self.summaries
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| panic!("no local summary for {id:?}"))
+                })
+                .collect())
+        }
+
+        async fn member_count(&self, _part: &PartKey) -> Res<u64> {
+            unreachable!("filter_buckets does not count members")
+        }
+
+        async fn peer_part_cursors(
+            &self,
+            _peer: &PeerKey,
+            _parts: &[PartKey],
+        ) -> Res<Vec<Option<Rev>>> {
             unreachable!("filter_buckets does not read peer cursors")
         }
 
-        fn get_bucket_summary<'a>(
-            &'a self,
-            _part_key: PartKey,
-            id: BuckId,
-        ) -> <Local as FutureForm>::Future<'a, BucketSummary> {
-            let summary = self
-                .summaries
-                .get(&id)
-                .cloned()
-                .unwrap_or_else(|| panic!("no local summary for {id:?}"));
-            Local::from_future(async move { summary })
-        }
-
-        fn obj_payload<'a>(
-            &'a self,
-            _obj_key: ObjKey,
-        ) -> <Local as FutureForm>::Future<'a, Option<ObjPayload>> {
-            unreachable!("filter_buckets does not read payloads")
-        }
-
-        fn obj_parts<'a>(
-            &'a self,
-            _obj_key: ObjKey,
-        ) -> <Local as FutureForm>::Future<'a, Vec<PartKey>> {
-            unreachable!("filter_buckets does not read object parts")
+        async fn set_peer_part_cursors(&self, _cursors: &[(PeerKey, PartKey, Rev)]) -> Res<()> {
+            unreachable!("filter_buckets does not write peer cursors")
         }
     }
 
@@ -694,7 +718,9 @@ mod tests {
         };
         let remote = vec![summary(clean, 5, 3, 7), summary(dirty, 5, 3, 7)];
 
-        match futures::executor::block_on(filter_buckets::<Local, _>(part(), 1, remote, &store)) {
+        match futures::executor::block_on(filter_buckets(part(), 1, remote, &store))
+            .expect("the summary store reads infallibly")
+        {
             FilteredBuckets::Handoff(out) => {
                 assert_eq!(out.len(), 1, "only the count-mismatched bucket is dirty");
                 assert_eq!(out[0].id, dirty);
@@ -716,7 +742,9 @@ mod tests {
         };
         let remote = vec![summary(buck, 5, 3, 7)];
 
-        match futures::executor::block_on(filter_buckets::<Local, _>(part(), 0, remote, &store)) {
+        match futures::executor::block_on(filter_buckets(part(), 0, remote, &store))
+            .expect("the summary store reads infallibly")
+        {
             FilteredBuckets::Done => {}
             FilteredBuckets::Handoff(out) => {
                 panic!("identical bucket was not pruned, handed off {out:?}")
