@@ -98,6 +98,7 @@ pub struct intxt_core::annotation::Thread  { root: DatumKey, comments: Vec < Pos
 pub struct intxt_core::annotation::ThreadState  { resolved: bool, extra: Extra }
 pub struct intxt_core::capture::Batch  { session: SessionBatch, worktrees: Vec < WorktreeBatch >, uncaused_tool_calls: u64, extra: Extra }
 pub struct intxt_core::capture::Cause  { agent_id: Option < String >, turn: Option < String >, tool_use_id: String, extra: Extra }
+pub struct intxt_core::capture::CauseBackfill  { seq: u64, cause: Cause, extra: Extra }
 pub struct intxt_core::capture::Change  { path: String, kind: ChangeKind, blob: Option < String >, extra: Extra }
 pub struct intxt_core::capture::Imported  { session: Option < AgentSession >, turns: BTreeMap < String , PromptTurn >, plan: Option < Plan >, extra: Extra }
 pub struct intxt_core::capture::Op  { at: Timestamp, kind: OpKind, cause: Option < Cause >, changes: Vec < Change >, git: Option < GitObservation >, extra: Extra }
@@ -106,7 +107,7 @@ pub struct intxt_core::capture::RecordedWorktree  { docs: WorktreeDocs, next_seq
 pub struct intxt_core::capture::RewritePair  { old: String, new: String, extra: Extra }
 pub struct intxt_core::capture::SessionBatch  { session_id: String, doc: Option < String >, imported: Imported, subagents: Vec < SubagentBatch >, extra: Extra }
 pub struct intxt_core::capture::SubagentBatch  { agent_id: String, doc: Option < String >, imported: Imported, extra: Extra }
-pub struct intxt_core::capture::WorktreeBatch  { identity: WorktreeIdentity, docs: WorktreeDocs, next_seq: u64, ops: Vec < Op >, commits: BTreeMap < String , GitCommit >, refs: BTreeMap < String , GitRef >, reflog_gap: bool, rewrites: Vec < RewritePair >, extra: Extra }
+pub struct intxt_core::capture::WorktreeBatch  { identity: WorktreeIdentity, docs: WorktreeDocs, next_seq: u64, ops: Vec < Op >, commits: BTreeMap < String , GitCommit >, refs: BTreeMap < String , GitRef >, reflog_gap: bool, rewrites: Vec < RewritePair >, cause_backfills: Vec < CauseBackfill >, extra: Extra }
 pub struct intxt_core::capture::WorktreeDocs  { worktree: Option < String >, clone: Option < String >, repo: Option < String >, extra: Extra }
 pub struct intxt_core::capture::WorktreeIdentity  { root: String, clone_path: String, clone_id: String, worktree_id: String, remotes: Vec < String >, roots: Vec < String >, extra: Extra }
 pub struct intxt_core::client::Caller< H >  {  }
