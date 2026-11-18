@@ -69,6 +69,15 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
   3. `status` (worktree: what capture recorded) and `show` (intxt: what it holds) are confusing. Proposal: `capture status`; `show` stays.
   4. An experimental section for unstable verbs: `day x intxt exp …` and `day exp …`, with a stderr notice; a verb graduates after operator sign-off from use (D66). `day`'s convention to be agreed with nodules.
   5. Comments target only code (`<commit>:<path>:<lines>`, `op<seq>:…`), though ADR 041 allows any location. Proposal: every intxt object gets a short id (entries, sessions and turns, tool calls, comments, later FDR 010's intents and tasks), and `comment <short id>` targets any of them.
+  7. **Operator, follow-ups (2026-11-19):**
+     - layers get command families instead of a loaded `add`/`rm`: `git`, `jj`, `session` and `comment`, which takes subcommands, with today's `inbox` as `comment list`; several things at once.
+     - bare `day x intxt` is jj-style status that also ingests what it can (tracked refs' new commits, sessions).
+     - `show` is a family for details (`show session`, `show file`).
+     - unstable commands live at their final path behind a cargo-style `-Z` gate, so stabilizing breaks nothing.
+     - **Comments and recording are wider than intxt:** the operator wants comments across daytxt, and recording/ACP for vibe-coded micros by end users. Design them as generic vocabularies (D28; the D39 move out of intxt before beta). Proposed family name: `record` (hook, acp, install, status, git-rewrite), under `day x intxt record` until it moves out.
+     - The `intxt keep` commits show in `git log --all`; an alternates object store would hide them (after the alpha).
+     
+     These go into a revision of FDR 008.
   6. `inbox` and several agents on one machine: layer 29 makes "me" the calling participant (operator, or an agent session), with per-participant seen state. Left: a lane spanning sessions is several participants (D69's identity layer); and there is no addressing a thread to a participant. Proposal: mentions or assignment, using ADR 041's "whose turn a thread is waiting on"; `inbox` shows what's addressed to me plus what's unaddressed.
 - **2026-11-18, the main checkout is on the stack tip** (`stack/intxt-25-cartridge`); feat/intxt's newer intxt docs were carried over, and the clean `-restack` worktree was removed.
 
