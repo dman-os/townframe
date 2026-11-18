@@ -6,8 +6,8 @@ use super::init_repo;
 use super::read_at;
 use super::with_intxt_node;
 use crate::client::NodeClient;
-use crate::cmds::intxt::package::Named;
 use crate::cmds::intxt::package::Packaging;
+use intxt_core::edit::Named;
 use method_core::Method;
 use std::path::Path;
 
