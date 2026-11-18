@@ -3,21 +3,21 @@
 
 use crate::interlude::*;
 
-use crate::store::CursorIndex;
-use crate::store::ObjPayload;
+use crate::part_store::ObjPayload;
+use crate::rev::Rev;
 use crate::watermark::WatermarkMachine;
 
 strike! {
     pub enum CursorEvent {
         ObjChanged(pub struct {
-            pub cursor: CursorIndex,
+            pub cursor: Rev,
             // if empty, this came from an object only replay
             pub parts: Vec<PartKey>,
             pub obj_key: ObjKey,
             pub payload: ObjPayload,
         }),
         ObjRemovedFromPart(pub struct {
-            pub cursor: CursorIndex,
+            pub cursor: Rev,
             pub part_key: PartKey,
             pub obj_key: ObjKey,
         }),
@@ -30,19 +30,19 @@ structstruck::strike! {
         SyncObj {
             obj_key: ObjKey,
             remote_payload: ObjPayload,
-            cursor: CursorIndex,
+            cursor: Rev,
             /// Upsert the object at the sync backend to these
             /// parts
             parts: Vec<PartKey>,
         },
         SetPartCursor {
             part_key: PartKey,
-            cursor: CursorIndex
+            cursor: Rev
         },
         RemoveObjFromParts {
             obj_key: ObjKey,
             part_key: PartKey,
-            cursor: CursorIndex,
+            cursor: Rev,
         },
         PartIdle {
             part_key: PartKey,
@@ -74,16 +74,16 @@ structstruck::strike! {
         object_replays: Map<ObjKey, struct ObjectReplay {
             #![derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
             /// The newest cursor the backend has acknowledged as applied.
-            acknowledged: CursorIndex,
+            acknowledged: Rev,
             /// The newest cursor the replay responder has scanned for this object route.
             /// This may be ahead of `acknowledged` while work is pending.
-            replay_cursor: CursorIndex,
-            in_flight: Option<CursorIndex>,
+            replay_cursor: Rev,
+            in_flight: Option<Rev>,
         }>,
         /// The newest cursor scanned for each part route. This is a scheduling cursor,
         /// distinct from the applied watermark owned by `jobs`.
-        part_replay_cursors: Map<PartKey, CursorIndex>,
-        jobs: WatermarkMachine<JobKey, PartKey, CursorIndex>,
+        part_replay_cursors: Map<PartKey, Rev>,
+        jobs: WatermarkMachine<JobKey, PartKey, Rev>,
     }
 }
 
@@ -106,11 +106,7 @@ impl CursorSyncMachine {
                 .count()
     }
 
-    pub(crate) fn part_replay_cursor(
-        &self,
-        part_key: &PartKey,
-        applied: CursorIndex,
-    ) -> CursorIndex {
+    pub(crate) fn part_replay_cursor(&self, part_key: &PartKey, applied: Rev) -> Rev {
         self.part_replay_cursors
             .get(part_key)
             .copied()
@@ -118,7 +114,7 @@ impl CursorSyncMachine {
             .max(applied)
     }
 
-    pub(crate) fn advance_part_replay_cursor(&mut self, part_key: PartKey, cursor: CursorIndex) {
+    pub(crate) fn advance_part_replay_cursor(&mut self, part_key: PartKey, cursor: Rev) {
         let entry = self.part_replay_cursors.entry(part_key).or_default();
         *entry = (*entry).max(cursor);
     }
@@ -138,21 +134,21 @@ impl CursorSyncMachine {
     /// travel with the route. A store that is not told it replays the object's
     /// derived part from the start on every page, which re-reads the first page
     /// forever and never reaches the second.
-    pub(crate) fn obj_resume_cursor(&self, obj_key: &ObjKey) -> CursorIndex {
+    pub(crate) fn obj_resume_cursor(&self, obj_key: &ObjKey) -> Rev {
         self.object_replays
             .get(obj_key)
             .map(|replay| replay.replay_cursor)
             .unwrap_or_default()
     }
 
-    pub(crate) fn advance_obj_replay_cursor(&mut self, obj_key: ObjKey, cursor: CursorIndex) {
+    pub(crate) fn advance_obj_replay_cursor(&mut self, obj_key: ObjKey, cursor: Rev) {
         let replay = self.object_replays.entry(obj_key).or_default();
         replay.replay_cursor = replay.replay_cursor.max(cursor);
     }
 
     /// Whether the job still waits on `cursor`. A completion can ask this first: a removal
     /// releases an object's earlier syncs on its part while the sync task stays in flight.
-    pub(crate) fn owes_obj_job(&self, job: &JobKey, cursor: CursorIndex) -> bool {
+    pub(crate) fn owes_obj_job(&self, job: &JobKey, cursor: Rev) -> bool {
         self.jobs.owes(job, &cursor)
     }
 
@@ -267,7 +263,7 @@ impl CursorSyncMachine {
     pub fn on_obj_sync_job_evt(
         &mut self,
         job: JobKey,
-        cursor: CursorIndex,
+        cursor: Rev,
         out: &mut Vec<CursorMachineCommand>,
     ) {
         if let JobKey::Sync(obj_key) = &job {
@@ -299,7 +295,7 @@ impl CursorSyncMachine {
     /// un-advanced cursors left.
     fn emit_advances(
         &mut self,
-        advances: impl IntoIterator<Item = (PartKey, Option<CursorIndex>)>,
+        advances: impl IntoIterator<Item = (PartKey, Option<Rev>)>,
         out: &mut Vec<CursorMachineCommand>,
     ) {
         for (part_key, reached) in advances {

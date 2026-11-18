@@ -10,23 +10,27 @@ use std::num::NonZeroUsize;
 
 use crate::interlude::*;
 use crate::part_store::AccessLevel;
+use crate::part_store::AuthorizedPage;
 use crate::part_store::LeafEntry;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
+use crate::part_store::LogRoutes;
 use crate::part_store::LogSelector;
 use crate::part_store::Membership;
+use crate::part_store::ObjPayload;
 use crate::part_store::ObjState;
 use crate::part_store::PartDirtyCount;
-use crate::part_store::PayloadState;
+use crate::part_store::PartSummary;
+use crate::part_store::PayloadDigest;
 use crate::part_store::ReadVerdict;
+use crate::part_store::bucket_summary::BucketMemberKind;
+use crate::part_store::bucket_summary::BucketSummary;
+use crate::part_store::bucket_summary::BucketSummaryState;
 use crate::part_store::log_row_bytes;
 use crate::rev::Entry;
 use crate::rev::Limits;
 use crate::rev::Page;
 use crate::rev::Rev;
-use crate::store::bucket::BucketMemberKind;
-use crate::store::bucket::BucketSummary;
-use crate::store::bucket::BucketSummaryState;
 
 strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq)]]
@@ -34,7 +38,7 @@ strike! {
     /// takes it.
     pub enum PartWrite {
         EnsureParts(Vec<PartKey>),
-        SetPayloads(Vec<(ObjKey, PayloadState)>),
+        SetPayloads(Vec<(ObjKey, ObjPayload)>),
         AddMembers(Vec<(ObjKey, PartKey)>),
         RemoveMembers(Vec<(ObjKey, PartKey)>),
         GrantAccess(Vec<(PartKey, PeerKey, AccessLevel)>),
@@ -46,7 +50,7 @@ strike! {
 pub struct PartOracle {
     rev: Rev,
     parts: BTreeSet<PartKey>,
-    payloads: BTreeMap<ObjKey, PayloadState>,
+    payloads: BTreeMap<ObjKey, ObjPayload>,
     /// Memberships asked for and not removed, live or pending.
     intended: BTreeSet<(ObjKey, PartKey)>,
     access: BTreeMap<(PartKey, PeerKey), AccessLevel>,
@@ -207,13 +211,38 @@ impl PartOracle {
             .copied()
     }
 
+    /// With a payload, the content and the live parts; without, the parts it was added to,
+    /// which are all still pending.
     pub fn obj_state(&self, obj: &ObjKey) -> Option<ObjState> {
-        let payload = self.payloads.get(obj)?;
-        Some(ObjState {
-            payload: payload.clone(),
-            digest: payload.digest().expect("generated payloads are canonical"),
-            parts: self.live_parts_of(obj),
-        })
+        match self.payloads.get(obj) {
+            Some(payload) => Some(ObjState {
+                content: Some((
+                    payload.clone(),
+                    PayloadDigest::of(payload).expect("generated payloads are canonical"),
+                )),
+                parts: self.live_parts_of(obj),
+            }),
+            None => {
+                let pending = self
+                    .intended
+                    .iter()
+                    .filter(|(intended_obj, _)| intended_obj == obj)
+                    .map(|(_, part)| part.clone())
+                    .collect::<BTreeSet<_>>();
+                (!pending.is_empty()).then_some(ObjState {
+                    content: None,
+                    parts: pending,
+                })
+            }
+        }
+    }
+
+    /// The object's state cut down to the live parts `principal` may read; `None` without one.
+    pub fn readable_obj_state(&self, principal: &PeerKey, obj: &ObjKey) -> Option<ObjState> {
+        let mut state = self.obj_state(obj)?;
+        state.content.as_ref()?;
+        state.parts.retain(|part| self.permits(principal, part));
+        (!state.parts.is_empty()).then_some(state)
     }
 
     fn live_parts_of(&self, obj: &ObjKey) -> BTreeSet<PartKey> {
@@ -252,7 +281,9 @@ impl PartOracle {
         let mut buckets = BTreeMap::<BuckId, BucketSummaryState>::new();
         for (obj, rev, live) in rows {
             let kind = if live {
-                BucketMemberKind::Live(self.payloads[obj].digest().expect(ERROR_IMPOSSIBLE))
+                BucketMemberKind::Live(
+                    PayloadDigest::of(&self.payloads[obj]).expect(ERROR_IMPOSSIBLE),
+                )
             } else {
                 BucketMemberKind::Dead
             };
@@ -283,22 +314,53 @@ impl PartOracle {
         self.member_rows(part).filter(|(_, _, live)| *live).count() as u64
     }
 
+    /// `None` when `principal` may not read the part.
     pub fn bucket_list(
         &self,
+        principal: &PeerKey,
         part: &PartKey,
         from: BuckId,
         to_level: BuckLevel,
+        since: Rev,
         limit: usize,
-    ) -> Vec<BucketSummary> {
-        self.buckets(part)
-            .into_iter()
-            .filter(|(id, _)| *id >= from && id.level() <= to_level)
-            .map(|(id, state)| state.summary(id))
-            .take(limit)
-            .collect()
+    ) -> Option<Vec<BucketSummary>> {
+        self.permits(principal, part).then(|| {
+            self.buckets(part)
+                .into_iter()
+                .filter(|(id, state)| {
+                    *id >= from && id.level() <= to_level && state.changed_at() > since
+                })
+                .map(|(id, state)| state.summary(id))
+                .take(limit)
+                .collect()
+        })
     }
 
+    /// `None` when `principal` may not read the part.
     pub fn bucket_leaves(
+        &self,
+        principal: &PeerKey,
+        part: &PartKey,
+        bucks: &[(BuckId, Option<ObjKey>)],
+        since: Rev,
+        limit: usize,
+    ) -> Option<Vec<Vec<LeafEntry>>> {
+        self.permits(principal, part).then(|| {
+            bucks
+                .iter()
+                .map(|(buck, after)| {
+                    if self.bucket_summary(part, *buck).changed_at <= since {
+                        return default();
+                    }
+                    self.members_of(part, *buck, after.as_ref(), limit)
+                })
+                .collect()
+        })
+    }
+
+    /// The part's members (live and dead) in `buck` after `after`, at most `limit`, whoever
+    /// asks.
+    pub fn members_of(
         &self,
         part: &PartKey,
         buck: BuckId,
@@ -320,7 +382,8 @@ impl PartOracle {
             })
             .take(limit)
             .map(|(_, obj, live)| LeafEntry {
-                live: live.then(|| self.payloads[&obj].digest().expect(ERROR_IMPOSSIBLE)),
+                live: live
+                    .then(|| PayloadDigest::of(&self.payloads[&obj]).expect(ERROR_IMPOSSIBLE)),
                 obj,
             })
             .collect()
@@ -330,7 +393,7 @@ impl PartOracle {
         self.access.contains_key(&(part.clone(), principal.clone()))
     }
 
-    pub fn read_verdict(&self, principal: &PeerKey, part: &PartKey) -> ReadVerdict {
+    fn read_verdict(&self, principal: &PeerKey, part: &PartKey) -> ReadVerdict {
         if !self.parts.contains(part) {
             ReadVerdict::UnknownPart
         } else if self.permits(principal, part) {
@@ -340,34 +403,43 @@ impl PartOracle {
         }
     }
 
-    pub fn readable_parts_of(&self, principal: &PeerKey, obj: &ObjKey) -> Vec<PartKey> {
+    fn readable_parts_of(&self, principal: &PeerKey, obj: &ObjKey) -> Vec<PartKey> {
         self.live_parts_of(obj)
             .into_iter()
             .filter(|part| self.permits(principal, part))
             .collect()
     }
 
-    pub fn part_dirty_count(
+    /// `None` when `principal` may not read the part.
+    pub fn part_summary(
         &self,
+        principal: &PeerKey,
         part: &PartKey,
-        principal: Option<&PeerKey>,
         since: Rev,
-    ) -> PartDirtyCount {
-        PartDirtyCount {
-            member_changes: self
+    ) -> Option<PartSummary> {
+        let access = LogKey::Access {
+            part: part.clone(),
+            principal: principal.clone(),
+        };
+        self.permits(principal, part).then(|| PartSummary {
+            latest_cursor: self
                 .member_rows(part)
-                .filter(|(_, rev, _)| *rev > since)
-                .count() as u64,
-            access_changes: principal.map_or(0, |principal| {
-                let key = LogKey::Access {
-                    part: part.clone(),
-                    principal: principal.clone(),
-                };
-                self.log
-                    .get(&key)
-                    .map_or(0, |(rev, _)| u64::from(*rev > since))
-            }),
-        }
+                .map(|(_, rev, _)| rev)
+                .max()
+                .unwrap_or(0),
+            member_count: self.member_count(part),
+            deepest_bucket_level: BuckId::MAX_LEVEL,
+            dirty: PartDirtyCount {
+                member_changes: self
+                    .member_rows(part)
+                    .filter(|(_, rev, _)| *rev > since)
+                    .count() as u64,
+                access_changes: self
+                    .log
+                    .get(&access)
+                    .map_or(0, |(rev, _)| u64::from(*rev > since)),
+            },
+        })
     }
 
     /// The current live memberships.
@@ -393,6 +465,74 @@ impl PartOracle {
         until: Rev,
         limits: Limits,
     ) -> Page<LogKey, LogEntry> {
+        self.read_where(after, until, limits, |key, rev, removed_added_at| {
+            selector.selects(key, rev, after, removed_added_at)
+        })
+    }
+
+    /// What an authorized read must return, by brute force: the verdicts from current access,
+    /// then the plain read of only the routes those verdicts permit, with every row of a part
+    /// the principal cannot read now filtered out.
+    pub fn read_authorized(
+        &self,
+        principal: &PeerKey,
+        routes: &LogRoutes,
+        after: Rev,
+        until: Rev,
+        limits: Limits,
+    ) -> AuthorizedPage {
+        let object_permitted = |obj: &ObjKey| !self.readable_parts_of(principal, obj).is_empty();
+        let permitted = LogSelector::Routes(LogRoutes {
+            parts: routes
+                .parts
+                .iter()
+                .filter(|(part, _)| self.permits(principal, part))
+                .map(|(part, bound)| (part.clone(), *bound))
+                .collect(),
+            objects: routes
+                .objects
+                .iter()
+                .filter(|(obj, _)| object_permitted(obj))
+                .map(|(obj, bound)| (obj.clone(), *bound))
+                .collect(),
+        });
+        AuthorizedPage {
+            parts: routes
+                .parts
+                .keys()
+                .map(|part| self.read_verdict(principal, part))
+                .collect(),
+            objects: routes
+                .objects
+                .keys()
+                .map(|obj| {
+                    if object_permitted(obj) {
+                        ReadVerdict::Permitted
+                    } else {
+                        ReadVerdict::Denied
+                    }
+                })
+                .collect(),
+            rows: self.read_where(after, until, limits, |key, rev, removed_added_at| {
+                let readable_part = match key {
+                    LogKey::Member { part, .. } | LogKey::Access { part, .. } => {
+                        self.permits(principal, part)
+                    }
+                };
+                readable_part && permitted.selects(key, rev, after, removed_added_at)
+            }),
+        }
+    }
+
+    /// The rows `selects(key, rev, removed_added_at)` keeps with a rev in `(after, until]`, in
+    /// `(rev, key)` order, cut after the last whole revision that fits the limits.
+    fn read_where(
+        &self,
+        after: Rev,
+        until: Rev,
+        limits: Limits,
+        selects: impl Fn(&LogKey, Rev, Option<Rev>) -> bool,
+    ) -> Page<LogKey, LogEntry> {
         let mut window = self
             .log
             .iter()
@@ -403,9 +543,7 @@ impl PartOracle {
                     }
                     _ => None,
                 };
-                *rev > after
-                    && *rev <= until
-                    && selector.selects(key, *rev, after, removed_added_at)
+                *rev > after && *rev <= until && selects(key, *rev, removed_added_at)
             })
             .map(|(key, (rev, value))| Entry {
                 key: key.clone(),

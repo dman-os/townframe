@@ -288,6 +288,9 @@ impl BuckId {
         Self::deepest_from_obj_key(obj_key).to_level(level)
     }
 
+    /// The next id in bucket order. It does not roll over to the next level: the last bucket of
+    /// a level steps to a non-canonical id past it (`(1, 15)` to `(1, 16)`), which still sorts
+    /// before the next level and lists nothing at its own.
     #[inline]
     pub fn increment(&self) -> Self {
         if *self == Self::new(Self::MAX_LEVEL, u16::MAX) {

@@ -5,13 +5,14 @@
 use crate::interlude::*;
 
 use crate::fingerprint::FingerprintSeed;
+use crate::part_store::ObjPayload;
+use crate::part_store::ObjState;
 use crate::part_store::PartStoreRead;
+use crate::part_store::bucket_summary::BucketSummary;
+use crate::rev::Rev;
 use crate::rpc::bucket::BucketObjPageEntry as RawLeafBucketEntry;
 use crate::rpc::bucket::LeafBucketPage as RawLeafBucketPage;
 use crate::rpc::bucket::LeafBucketRequest;
-use crate::store::CursorIndex;
-use crate::store::ObjPayload;
-use crate::store::bucket::BucketSummary;
 
 structstruck::strike! {
     #[derive(Debug)]
@@ -28,12 +29,12 @@ structstruck::strike! {
         ListBuckets {
             part_key: PartKey,
             offset: BuckId,
-            since: CursorIndex,
+            since: Rev,
             working_level: BuckLevel,
         }
         LeafBuckets {
             part_key: PartKey,
-            since: CursorIndex,
+            since: Rev,
             buckets: Vec<LeafBucketRequest>,
         }
         UpgradeToCursor {
@@ -107,10 +108,10 @@ impl BucketMachine {
         part_key: PartKey,
         remote_depth: BuckLevel,
         remote_size: u64,
-        last_cursor: CursorIndex,
+        last_cursor: Rev,
     ) -> Self {
         let working_level = calc_working_level(remote_size, remote_depth);
-        let bucket_width = remote_size / (BuckId::ARITY.pow(working_level as _) as u64);
+        let bucket_width = remote_size / u64::from(BuckId::ARITY).pow(u32::from(working_level));
         let initial_working_set = (Self::ACTIVE_SYNC_JOB_TARGET as u64)
             .div_ceil(bucket_width.max(1))
             .max(1) as _;
@@ -173,10 +174,11 @@ impl BucketMachine {
                 warn!("on_obj_page on an unexpected bucket: {buck_id:?}");
                 continue;
             };
-            state.leaf_after = page.next_after;
             state.leaf_seen += page.entries.len() as u64;
             state.leaf_inflight = false;
-            state.leaf_exhausted = page.done || state.leaf_seen >= state.summary.len as u64;
+            state.leaf_exhausted =
+                page.next_after.is_none() || state.leaf_seen >= state.summary.len as u64;
+            state.leaf_after = page.next_after;
             // state.pending_objs.extend(page.entries);
             // FIXME: the following code is uncessary and is too defensive
             // we should trust that the remote only returns items after the requested offset
@@ -395,14 +397,18 @@ impl BucketMachine {
     }
 }
 
+/// The level the walk leafs at: the shallowest whose *child* buckets each hold at most
+/// `ACTIVE_SYNC_JOB_TARGET` members (`remote_size / ARITY^(level + 1)`), capped at
+/// `remote_depth`. So a part below `ACTIVE_SYNC_JOB_TARGET * ARITY` members is walked as its one
+/// root bucket, and every deeper level is reached in turn as the part grows by `ARITY`.
 pub fn calc_working_level(remote_size: u64, remote_depth: u8) -> u8 {
+    let arity = u64::from(BuckId::ARITY);
+    let target = u64::from(BucketMachine::ACTIVE_SYNC_JOB_TARGET);
     let mut working_level = 0;
-    let mut bucket_width = remote_size / (BuckId::ARITY as u64);
     while working_level < remote_depth
-        && bucket_width > BucketMachine::ACTIVE_SYNC_JOB_TARGET as u64
+        && remote_size / arity.pow(u32::from(working_level) + 1) > target
     {
         working_level += 1;
-        bucket_width = remote_size / (BuckId::ARITY.pow(working_level as _) as u64);
     }
     working_level
 }
@@ -514,13 +520,17 @@ pub struct BucketObjEntry {
 #[derive(Debug, Clone)]
 pub struct BucketObjLeafPage {
     pub entries: Vec<BucketObjEntry>,
+    /// Where the bucket's next page starts; `None` when this page finished it.
     pub next_after: Option<ObjKey>,
-    pub done: bool,
 }
 
 // FIXME: this is too expensive
 /// The local side of every requested bucket is read in two batches: the summaries of all the
-/// buckets, then the states of every object listed in a bucket that is not empty locally.
+/// buckets, then the states of the objects whose delta depends on them: every entry of a bucket
+/// that is not empty locally, and the dead entries of one that is. A pending membership has no
+/// bucket entry, so an empty local bucket can still hold one, and a peer's removal must cancel
+/// it: the dead entry becomes a removal whenever the local object is a member of the part, live
+/// or pending.
 pub async fn filter_objects<K: FutureForm, S: PartStoreRead<K>>(
     part_key: PartKey,
     bucks: Map<BuckId, RawLeafBucketPage>,
@@ -529,83 +539,65 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreRead<K>>(
 ) -> Res<Map<BuckId, BucketObjLeafPage>> {
     let buck_ids = bucks.keys().copied().collect::<Vec<_>>();
     let summaries = part_store.bucket_summaries(&part_key, &buck_ids).await?;
-    let lens = buck_ids
+    let local_empty = buck_ids
         .into_iter()
-        .zip(summaries.iter().map(|summary| summary.len))
+        .zip(summaries.iter().map(|summary| summary.len == 0))
         .collect::<Map<_, _>>();
     let objs = bucks
         .iter()
-        .filter(|(buck_id, _)| lens[buck_id] != 0)
-        .flat_map(|(_, page)| page.entries.iter().map(|entry| entry.obj_key.clone()))
+        .flat_map(|(buck_id, page)| {
+            let empty = local_empty[buck_id];
+            page.entries
+                .iter()
+                .filter(move |entry| !empty || entry.fp.is_none())
+                .map(|entry| entry.obj_key.clone())
+        })
         .collect::<Vec<_>>();
     let states = part_store.obj_states(&objs).await?;
     let states = objs.into_iter().zip(states).collect::<Map<_, _>>();
 
     let mut out = Map::new();
     for (buck_id, page) in bucks {
-        let mut out_objs = vec![];
-        if lens[&buck_id] == 0 {
-            out_objs.extend(page.entries.into_iter().filter_map(|ee| {
-                if !ee.dead {
-                    Some(BucketObjEntry {
-                        obj_key: ee.obj_key,
-                        delta: PartObjDelta::New,
-                    })
-                } else {
-                    None
-                }
-            }));
-            out.insert(
-                buck_id,
-                BucketObjLeafPage {
-                    entries: out_objs,
-                    next_after: page.next_after,
-                    done: page.done,
-                },
-            );
-            continue;
-        }
-        for obj in page.entries {
-            match &states[&obj.obj_key] {
-                Some(state) => {
-                    if obj.dead {
-                        out_objs.push(BucketObjEntry {
-                            obj_key: obj.obj_key,
-                            delta: PartObjDelta::Delete,
-                        });
-                        continue;
-                    }
-                    let changed =
-                        RawLeafBucketEntry::fingerprint(&seed, &obj.obj_key, state.digest)
-                            != obj.fp;
-                    if changed {
-                        out_objs.push(BucketObjEntry {
-                            obj_key: obj.obj_key,
-                            delta: PartObjDelta::Change,
-                        });
-                    } else if !state.parts.contains(&part_key) {
-                        out_objs.push(BucketObjEntry {
-                            obj_key: obj.obj_key,
-                            delta: PartObjDelta::New,
-                        });
-                    }
-                }
-                None => {
-                    if !obj.dead {
-                        out_objs.push(BucketObjEntry {
-                            obj_key: obj.obj_key,
-                            delta: PartObjDelta::New,
-                        });
-                    }
-                }
-            }
-        }
+        let empty = local_empty[&buck_id];
+        let entries = page
+            .entries
+            .into_iter()
+            .filter_map(|entry| {
+                let delta = match (entry.fp, empty) {
+                    (None, _) => states[&entry.obj_key]
+                        .as_ref()
+                        .is_some_and(|state| state.parts.contains(&part_key))
+                        .then_some(PartObjDelta::Delete)?,
+                    (Some(_), true) => PartObjDelta::New,
+                    (Some(fp), false) => match &states[&entry.obj_key] {
+                        Some(ObjState {
+                            content: Some((_, digest)),
+                            parts,
+                        }) => {
+                            if RawLeafBucketEntry::fingerprint(&seed, &entry.obj_key, *digest) != fp
+                            {
+                                PartObjDelta::Change
+                            } else if !parts.contains(&part_key) {
+                                PartObjDelta::New
+                            } else {
+                                return None;
+                            }
+                        }
+                        // No content yet, or no state at all: the sync brings it.
+                        Some(ObjState { content: None, .. }) | None => PartObjDelta::New,
+                    },
+                };
+                Some(BucketObjEntry {
+                    obj_key: entry.obj_key,
+                    delta,
+                })
+            })
+            .collect();
         out.insert(
             buck_id,
             BucketObjLeafPage {
-                entries: out_objs,
+                entries,
                 next_after: page.next_after,
-                done: page.done,
             },
         );
     }
@@ -613,210 +605,4 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreRead<K>>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::part_store::ObjState;
-    use crate::rev::Rev;
-    use crate::store::bucket::BucketFingerprint;
-    use future_form::Local;
-    use std::collections::HashMap;
-
-    fn part() -> PartKey {
-        PartKey(ByteKey::new(&[1; 32]))
-    }
-
-    /// `calc_working_level` must never return a level exceeding `remote_depth`, even at
-    /// extreme `remote_size`.
-    #[test]
-    fn calc_working_level_never_exceeds_remote_depth() {
-        assert_eq!(calc_working_level(20_000, 0), 0);
-        assert_eq!(calc_working_level(1_000_000, 0), 0);
-        assert!(calc_working_level(10_000, 5) <= 5);
-        assert_eq!(calc_working_level(0, 0), 0);
-        assert_eq!(calc_working_level(0, 10), 0);
-    }
-
-    /// A part store that answers bucket summaries from a table. `filter_buckets` reads
-    /// nothing else, so the remaining methods are unreachable rather than stubbed.
-    struct SummaryStore {
-        summaries: HashMap<BuckId, BucketSummary>,
-    }
-
-    impl PartStoreRead<Local> for SummaryStore {
-        fn obj_states<'a>(
-            &'a self,
-            _objs: &'a [ObjKey],
-        ) -> <Local as FutureForm>::Future<'a, Res<Vec<Option<ObjState>>>> {
-            unreachable!("filter_buckets does not read objects")
-        }
-
-        fn bucket_summaries<'a>(
-            &'a self,
-            _part: &'a PartKey,
-            ids: &'a [BuckId],
-        ) -> <Local as FutureForm>::Future<'a, Res<Vec<BucketSummary>>> {
-            Local::ready(Ok(ids
-                .iter()
-                .map(|id| {
-                    self.summaries
-                        .get(id)
-                        .cloned()
-                        .unwrap_or_else(|| panic!("no local summary for {id:?}"))
-                })
-                .collect()))
-        }
-
-        fn member_count<'a>(
-            &'a self,
-            _part: &'a PartKey,
-        ) -> <Local as FutureForm>::Future<'a, Res<u64>> {
-            unreachable!("filter_buckets does not count members")
-        }
-
-        fn peer_part_cursors<'a>(
-            &'a self,
-            _peer: &'a PeerKey,
-            _parts: &'a [PartKey],
-        ) -> <Local as FutureForm>::Future<'a, Res<Vec<Option<Rev>>>> {
-            unreachable!("filter_buckets does not read peer cursors")
-        }
-
-        fn set_peer_part_cursors<'a>(
-            &'a self,
-            _cursors: &'a [(PeerKey, PartKey, Rev)],
-        ) -> <Local as FutureForm>::Future<'a, Res<()>> {
-            unreachable!("filter_buckets does not write peer cursors")
-        }
-    }
-
-    fn summary(id: BuckId, len: u32, live_count: u32, changed_at: CursorIndex) -> BucketSummary {
-        BucketSummary {
-            id,
-            // only equality matters here, and both sides carry the same pair
-            fp: (BucketFingerprint::default(), BucketFingerprint::default()),
-            len,
-            live_count,
-            changed_at,
-        }
-    }
-
-    /// Pruning must not rest on fingerprint equality alone. Both buckets below agree on their
-    /// fingerprint pair, but the second disagrees on the materialized counts, so it is dirty
-    /// and must be handed off. Fingerprint-only pruning called it clean, left `out` empty and
-    /// returned `Relist`, silently dropping the difference.
-    #[test]
-    fn filter_buckets_equal_fp_different_counts_is_dirty() {
-        let clean = BuckId::new(1, 0);
-        let dirty = BuckId::new(1, 1);
-        let store = SummaryStore {
-            summaries: HashMap::from([
-                // Counts agree; the watermark disagrees and must not matter.
-                (clean, summary(clean, 5, 3, 99)),
-                (dirty, summary(dirty, 4, 3, 7)),
-            ]),
-        };
-        let remote = vec![summary(clean, 5, 3, 7), summary(dirty, 5, 3, 7)];
-
-        match futures::executor::block_on(filter_buckets::<Local, _>(part(), 1, remote, &store))
-            .expect("the summary store reads infallibly")
-        {
-            FilteredBuckets::Handoff(out) => {
-                assert_eq!(out.len(), 1, "only the count-mismatched bucket is dirty");
-                assert_eq!(out[0].id, dirty);
-            }
-            FilteredBuckets::Done => panic!("count-mismatched bucket was pruned as clean"),
-            FilteredBuckets::Relist(id) => {
-                panic!("count-mismatched bucket was pruned as clean, relisting {id:?}")
-            }
-        }
-    }
-
-    /// The guard for the test above: equal counts still prune, even when the two sides
-    /// disagree on `changed_at`.
-    #[test]
-    fn filter_buckets_equal_counts_different_watermark_is_clean() {
-        let buck = BuckId::ROOT;
-        let store = SummaryStore {
-            summaries: HashMap::from([(buck, summary(buck, 5, 3, 99))]),
-        };
-        let remote = vec![summary(buck, 5, 3, 7)];
-
-        match futures::executor::block_on(filter_buckets::<Local, _>(part(), 0, remote, &store))
-            .expect("the summary store reads infallibly")
-        {
-            FilteredBuckets::Done => {}
-            FilteredBuckets::Handoff(out) => {
-                panic!("identical bucket was not pruned, handed off {out:?}")
-            }
-            FilteredBuckets::Relist(id) => {
-                panic!("identical bucket was not pruned, relisted {id:?}")
-            }
-        }
-    }
-
-    /// Leaf entries compare by payload digest, so a local object whose payload is withheld
-    /// matches a remote entry for the same content and is not fetched again; a different digest
-    /// is a change. Runs the memory part store through the `Local` form.
-    #[test]
-    fn filter_objects_compares_withheld_payloads_by_digest() {
-        use crate::part_store::PartStoreWrite;
-        use crate::part_store::PayloadDigest;
-        use crate::part_store::PayloadState;
-        use crate::part_store::memory::MemoryPartStore;
-        use crate::rpc::bucket::BucketObjPageEntry;
-
-        let store = MemoryPartStore::default();
-        let obj = ObjKey::new(&[7]);
-        let digest =
-            PayloadDigest::of(&serde_json::json!({"held": "elsewhere"})).expect(ERROR_IMPOSSIBLE);
-        let mut tx = store.begin();
-        futures::executor::block_on(PartStoreWrite::<Local>::set_payloads(
-            &store,
-            &mut tx,
-            vec![(obj.clone(), PayloadState::Withheld(digest))],
-        ))
-        .expect("staging is infallible");
-        futures::executor::block_on(PartStoreWrite::<Local>::add_members(
-            &store,
-            &mut tx,
-            &[(obj.clone(), part())],
-        ))
-        .expect("staging is infallible");
-        tx.commit();
-
-        let seed = FingerprintSeed::new(1, 2);
-        let leaf = |digest| {
-            Map::from([(
-                BuckId::ROOT,
-                RawLeafBucketPage {
-                    entries: vec![BucketObjPageEntry {
-                        obj_key: obj.clone(),
-                        dead: false,
-                        fp: BucketObjPageEntry::fingerprint(&seed, &obj, digest),
-                    }],
-                    next_after: None,
-                    done: true,
-                },
-            )])
-        };
-        let deltas = |bucks| {
-            futures::executor::block_on(filter_objects::<Local, _>(part(), bucks, seed, &store))
-                .expect("the memory store reads infallibly")
-                .remove(&BuckId::ROOT)
-                .expect("the bucket was asked for")
-                .entries
-                .into_iter()
-                .map(|entry| (entry.obj_key, entry.delta))
-                .collect::<Vec<_>>()
-        };
-
-        assert_eq!(deltas(leaf(digest)), vec![], "same content, held or not");
-        let other =
-            PayloadDigest::of(&serde_json::json!({"held": "changed"})).expect(ERROR_IMPOSSIBLE);
-        assert_eq!(
-            deltas(leaf(other)),
-            vec![(obj.clone(), PartObjDelta::Change)]
-        );
-    }
-}
+mod tests;

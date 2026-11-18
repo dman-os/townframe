@@ -6,8 +6,6 @@ mod interlude {
     pub use crate::ids::*;
     pub use structstruck::strike;
 
-    pub use crate::store::CursorIndex;
-    pub use crate::store::ObjPayload;
     pub use std::collections::HashMap as Map;
     pub use std::collections::HashSet as Set;
 }
@@ -29,7 +27,6 @@ mod scheduler;
 // FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
 #[cfg(any())]
 mod stat;
-mod store;
 // FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
 #[cfg(any())]
 mod tasks;

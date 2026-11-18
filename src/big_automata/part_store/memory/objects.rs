@@ -9,11 +9,11 @@ use crate::interlude::*;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
 use crate::part_store::Membership;
+use crate::part_store::ObjPayload;
 use crate::part_store::ObjState;
 use crate::part_store::PayloadDigest;
-use crate::part_store::PayloadState;
+use crate::part_store::bucket_summary::BucketMemberKind;
 use crate::rev::Rev;
-use crate::store::bucket::BucketMemberKind;
 
 /// Where an object's member rows start in the log: the smallest part key.
 fn first_member_key(obj: &ObjKey) -> LogKey {
@@ -51,12 +51,39 @@ impl State {
         }
     }
 
+    /// With content, the live parts; without, the pending ones (an object never has both).
     pub(super) fn obj_state(&self, obj: &ObjKey) -> Option<ObjState> {
+        match self.objs.get(obj) {
+            Some(row) => Some(ObjState {
+                content: Some((row.payload.clone(), row.digest)),
+                parts: self.live_parts_of(obj).cloned().collect(),
+            }),
+            None => {
+                let pending = self
+                    .pending
+                    .range((obj.clone(), PartKey::new(&[]))..)
+                    .take_while(|(pending_obj, _)| pending_obj == obj)
+                    .map(|(_, part)| part.clone())
+                    .collect::<BTreeSet<_>>();
+                (!pending.is_empty()).then_some(ObjState {
+                    content: None,
+                    parts: pending,
+                })
+            }
+        }
+    }
+
+    /// The object's content and the live parts `principal` may read, when there is one.
+    pub(super) fn readable_obj_state(&self, principal: &PeerKey, obj: &ObjKey) -> Option<ObjState> {
         let row = self.objs.get(obj)?;
-        Some(ObjState {
-            payload: row.payload.clone(),
-            digest: row.digest,
-            parts: self.live_parts_of(obj).cloned().collect(),
+        let parts = self
+            .live_parts_of(obj)
+            .filter(|part| self.permits(principal, part))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        (!parts.is_empty()).then(|| ObjState {
+            content: Some((row.payload.clone(), row.digest)),
+            parts,
         })
     }
 
@@ -98,7 +125,7 @@ impl State {
     pub(super) fn set_payloads(
         &mut self,
         rev: Rev,
-        payloads: Vec<(ObjKey, PayloadState, PayloadDigest)>,
+        payloads: Vec<(ObjKey, ObjPayload, PayloadDigest)>,
     ) -> bool {
         let mut stamped = false;
         for (obj, payload, digest) in payloads {
@@ -119,7 +146,7 @@ impl State {
                 let (_, value) = self.log.get(&key).expect(ERROR_IMPOSSIBLE);
                 let membership = value.clone();
                 self.stamp(rev, key, membership);
-                let old_digest = old_digest.expect("a live member without a payload state");
+                let old_digest = old_digest.expect("a live member without a payload");
                 self.bucket_transition(
                     part,
                     &obj,
@@ -130,7 +157,7 @@ impl State {
                 stamped = true;
             }
 
-            // The first payload state promotes every pending membership, in the same buffer.
+            // The first payload promotes every pending membership, in the same buffer.
             parts.clear();
             parts.extend(
                 self.pending

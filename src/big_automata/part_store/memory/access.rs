@@ -3,10 +3,15 @@
 use super::State;
 use crate::interlude::*;
 use crate::part_store::AccessLevel;
+use crate::part_store::AuthorizedPage;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
+use crate::part_store::LogRoutes;
 use crate::part_store::PartDirtyCount;
+use crate::part_store::PartSummary;
 use crate::part_store::ReadVerdict;
+use crate::part_store::log_row_bytes;
+use crate::rev::Limits;
 use crate::rev::Rev;
 
 fn access_key(part: &PartKey, principal: &PeerKey) -> LogKey {
@@ -48,14 +53,14 @@ impl State {
         stamped
     }
 
-    fn permits(&self, principal: &PeerKey, part: &PartKey) -> bool {
+    pub(super) fn permits(&self, principal: &PeerKey, part: &PartKey) -> bool {
         matches!(
             self.log.get(&access_key(part, principal)),
             Some((_, Some(LogEntry::Access(_))))
         )
     }
 
-    pub(super) fn read_verdict(&self, principal: &PeerKey, part: &PartKey) -> ReadVerdict {
+    fn read_verdict(&self, principal: &PeerKey, part: &PartKey) -> ReadVerdict {
         if !self.parts.contains_key(part) {
             ReadVerdict::UnknownPart
         } else if self.permits(principal, part) {
@@ -65,21 +70,84 @@ impl State {
         }
     }
 
-    pub(super) fn readable_parts_of(&self, principal: &PeerKey, obj: &ObjKey) -> Vec<PartKey> {
-        self.live_parts_of(obj)
-            .filter(|part| self.permits(principal, part))
-            .cloned()
-            .collect()
+    /// An object route's verdict: whether the object is a live member of a part the principal
+    /// may read.
+    fn object_verdict(&self, principal: &PeerKey, obj: &ObjKey) -> ReadVerdict {
+        if self
+            .live_parts_of(obj)
+            .any(|part| self.permits(principal, part))
+        {
+            ReadVerdict::Permitted
+        } else {
+            ReadVerdict::Denied
+        }
+    }
+
+    /// Every route's verdict first, then the log rows they let through, all against this one
+    /// state. A member row passes when the principal may read its part *now*, and it rides a
+    /// permitted route: its part's route (permitted exactly when its part is readable), or its
+    /// object's route when that route is permitted. Access rows ride no route.
+    pub(super) fn read_authorized(
+        &self,
+        principal: &PeerKey,
+        routes: &LogRoutes,
+        after: Rev,
+        until: Rev,
+        limits: Limits,
+        page: &mut AuthorizedPage,
+    ) {
+        let AuthorizedPage {
+            parts,
+            objects,
+            rows,
+        } = page;
+        parts.clear();
+        parts.extend(
+            routes
+                .parts
+                .keys()
+                .map(|part| self.read_verdict(principal, part)),
+        );
+        objects.clear();
+        objects.extend(
+            routes
+                .objects
+                .keys()
+                .map(|obj| self.object_verdict(principal, obj)),
+        );
+        let readable_objects = routes
+            .objects
+            .keys()
+            .zip(objects.iter())
+            .filter(|(_, verdict)| **verdict == ReadVerdict::Permitted)
+            .map(|(obj, _)| obj)
+            .collect::<BTreeSet<_>>();
+        self.log.read_into(
+            |key, rev, value| match key {
+                LogKey::Member { obj, part } => {
+                    let (on_part, on_object) =
+                        routes.carriers(obj, part, rev, after, self.removed_added_at(key, value));
+                    (on_part || (on_object && readable_objects.contains(obj)))
+                        && self.permits(principal, part)
+                }
+                LogKey::Access { .. } => false,
+            },
+            log_row_bytes,
+            after,
+            until,
+            limits,
+            rows,
+        );
     }
 
     /// Counts the part's member rows through the member index (every member with a row, live
     /// or removed), not by scanning the log window.
-    pub(super) fn part_dirty_count(
+    pub(super) fn part_summary(
         &self,
+        principal: &PeerKey,
         part: &PartKey,
-        principal: Option<&PeerKey>,
         since: Rev,
-    ) -> PartDirtyCount {
+    ) -> PartSummary {
         let member_changes = self
             .members
             .range((part.clone(), 0, ObjKey::new(&[]))..)
@@ -93,14 +161,18 @@ impl State {
                 rev > since
             })
             .count() as u64;
-        let access_changes = principal.map_or(0, |principal| {
-            self.log
-                .get(&access_key(part, principal))
-                .map_or(0, |(rev, _)| u64::from(rev > since))
-        });
-        PartDirtyCount {
-            member_changes,
-            access_changes,
+        let access_changes = self
+            .log
+            .get(&access_key(part, principal))
+            .map_or(0, |(rev, _)| u64::from(rev > since));
+        PartSummary {
+            latest_cursor: self.parts.get(part).map_or(0, |row| row.latest_cursor),
+            member_count: self.member_count(part),
+            deepest_bucket_level: BuckId::MAX_LEVEL,
+            dirty: PartDirtyCount {
+                member_changes,
+                access_changes,
+            },
         }
     }
 }
