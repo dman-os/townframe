@@ -19,6 +19,7 @@ mod tree;
 mod wire;
 
 pub use replay::replay;
+pub use stylesheet::refuse_fetching_stylesheet;
 pub use stylesheet::wrap_in_media_query;
 pub use tree::SurfaceTree;
 pub use wire::AttributeValue;

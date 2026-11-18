@@ -17,6 +17,7 @@ allowed_dependencies = [
     "micro_settings_manifest",
     "micro_shell",
     "micro_shell_manifest",
+    "micro_theme_lab_manifest",
     "micro_toolbar",
     "micro_toolbar_manifest",
     "sqlite_rs",

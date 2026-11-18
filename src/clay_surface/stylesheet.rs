@@ -54,6 +54,66 @@ pub(crate) fn sanitize_stylesheet(sheet: &str) -> String {
     rules.join("\n")
 }
 
+/// Refuses a stylesheet that could make the renderer fetch, instead of repairing it as
+/// [`sanitize_stylesheet`] does for a guest's: the end user's theme is text a person wrote and is
+/// about to apply, so a `url(` the host would silently drop is a mistake to report. Every token at
+/// any nesting depth is checked: `url(`, the [`FETCHING_FUNCTIONS`] (`image-set(`, `src(`, ...),
+/// a bad url, and any at-rule outside [`KEPT_AT_RULES`] (`@import`, `@font-face`, `@namespace`
+/// and the rest, which fetch or have no reviewed meaning). The error names the first offender.
+pub fn refuse_fetching_stylesheet(sheet: &str) -> Result<(), String> {
+    fn first_refusal(input: &mut Parser<'_>) -> Option<String> {
+        while let Ok(token) = input.next() {
+            let nested = match token {
+                Token::UnquotedUrl(_) | Token::BadUrl(_) => {
+                    return Some("`url(` would make the host fetch a resource".to_owned());
+                }
+                Token::AtKeyword(name) => {
+                    if !KEPT_AT_RULES
+                        .iter()
+                        .any(|kept| name.eq_ignore_ascii_case(kept))
+                    {
+                        return Some(format!(
+                            "`@{name}` is not allowed: it can fetch a resource or has no reviewed meaning"
+                        ));
+                    }
+                    false
+                }
+                Token::Function(name) => {
+                    if FETCHING_FUNCTIONS
+                        .iter()
+                        .any(|fetching| name.eq_ignore_ascii_case(fetching))
+                    {
+                        return Some(format!("`{name}(` would make the host fetch a resource"));
+                    }
+                    true
+                }
+                Token::ParenthesisBlock | Token::SquareBracketBlock | Token::CurlyBracketBlock => {
+                    true
+                }
+                _ => false,
+            };
+            if nested {
+                // A block that stops at its first refusal is not exhausted, which
+                // `parse_nested_block` reports as an error: the refusal travels beside it.
+                let mut refusal = None;
+                let outcome = input.parse_nested_block(|inner| {
+                    refusal = first_refusal(inner);
+                    Ok::<_, ParseError<()>>(())
+                });
+                if refusal.is_some() {
+                    return refusal;
+                }
+                debug_assert!(outcome.is_ok(), "a block read to its end cannot fail");
+            }
+        }
+        None
+    }
+    match first_refusal(&mut Parser::new(sheet)) {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    }
+}
+
 /// Wraps `sheet` in `@media <query> { ... }` so a `document::Style { media }` keeps its meaning.
 /// The query is checked token by token first: anything that could end the `@media` prelude or
 /// its block early (a brace, semicolon, unbalanced bracket, bad string or url, at-keyword) would

@@ -191,8 +191,28 @@ impl Capability {
         let response = match &self.0 {
             #[cfg(feature = "in_process")]
             CapabilityInner::InProcess(reference) => reference.call(request).await?,
+            // A call is a component-model future, which can only be polled inside a
+            // component-model task. A view awaits through Dioxus, which `render_immediate`
+            // polls from the synchronous `mount` and `dispatch` exports, where there is none,
+            // and wit-bindgen asserts. So the call runs as incarnation-owned work and the
+            // caller awaits its answer over a channel; nothing polls Dioxus tasks in a guest on
+            // their own wake, so the views are marked dirty once the answer is sent and the
+            // render pass that follows polls the woken caller (see `Context::call`).
             #[cfg(feature = "guest")]
-            CapabilityInner::Guest(reference) => reference.call(request).await?,
+            CapabilityInner::Guest(reference) => {
+                let (answer, answered) = futures::channel::oneshot::channel();
+                let runtime = crate::guest::Runtime::current();
+                let reference = Rc::clone(reference);
+                let views = Rc::clone(&runtime);
+                runtime.spawn(Box::pin(async move {
+                    // A caller that stopped waiting has no use for the answer.
+                    drop(answer.send(reference.call(request).await));
+                    views.notify_views();
+                }));
+                answered
+                    .await
+                    .expect("a call's task lives until the incarnation closes, with its callers")?
+            }
         };
         decode(&response)
     }

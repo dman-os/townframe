@@ -1012,6 +1012,65 @@ fn a_guest_stylesheet_reaches_the_mount_as_its_shadow_sheet_or_a_light_dom_style
     assert_eq!(blitz.text_content(), ".btn {\ncolor: red;\n}0");
 }
 
+/// The end user's theme follows the micro's own sheet in `@layer user`, in the same adopted
+/// sheet (or light-DOM `<style>`), and applying a new one restyles the live mount without a
+/// remount. Blitz mode shows the sheet text, which a browser mount keeps in an attribute (the
+/// recording tree re-emits the `<style>` text through the sanitizer, hence its layout).
+#[test]
+fn a_user_theme_is_the_last_layer_of_a_mount_and_applies_live() {
+    let (_host, owner, mount, _writer) = mounted_writer();
+    let factory = SurfaceFactory(Rc::new(|_mount, writer| {
+        let mut batch = counter_initial_batch();
+        batch.push(Mutation::SetStyleSheet(".btn { color: red; }".into()));
+        writer.apply(&batch)?;
+        Ok(SurfaceSession::new(|_| EventResponse::default()))
+    }));
+    #[derive(Clone)]
+    struct Props {
+        mount: SharedMount,
+        owner: Instance,
+        factory: SurfaceFactory,
+        theme: Rc<std::cell::Cell<Option<Signal<String>>>>,
+    }
+    impl PartialEq for Props {
+        fn eq(&self, _: &Self) -> bool {
+            true
+        }
+    }
+    fn app(props: Props) -> Element {
+        use_context_provider(|| LightDomStylesheets);
+        let theme = use_signal(String::new);
+        props.theme.set(Some(theme));
+        use_context_provider(|| UserStylesheet(theme.into()));
+        rsx! { MountedSurface { mount: props.mount, owner: props.owner, factory: props.factory } }
+    }
+    let theme = Rc::default();
+    let mut dom = VirtualDom::new_with_props(
+        app,
+        Props {
+            mount: SharedMount(mount),
+            owner,
+            factory,
+            theme: Rc::clone(&theme),
+        },
+    );
+    let mut tree = SurfaceTree::new();
+    dom.rebuild(&mut tree);
+    // No theme applied: the micro's sheet alone, as before.
+    assert_eq!(tree.text_content(), ".btn {\ncolor: red;\n}0");
+    let mut applied = theme.get().expect("the app made the theme signal");
+    dom.in_runtime(|| applied.set(".btn { color: blue; }".to_owned()));
+    dom.render_immediate(&mut tree);
+    assert_eq!(
+        tree.text_content(),
+        ".btn {\ncolor: red;\n}\n@layer user {\n.btn {\ncolor: blue;\n}\n}0"
+    );
+    // Reverting to no theme drops the layer again.
+    dom.in_runtime(|| applied.set(String::new()));
+    dom.render_immediate(&mut tree);
+    assert_eq!(tree.text_content(), ".btn {\ncolor: red;\n}0");
+}
+
 /// A hostile parent presentation registers `input` and `keydown` on an ancestor of the slot that
 /// mounts a child presentation. Events that begin inside the child must reach only the child's
 /// listeners; the parent still receives events on its own elements.

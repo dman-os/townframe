@@ -39,6 +39,16 @@ pub use declarations::ShellFrame;
 pub use declarations::ShellHome;
 pub use declarations::ShellNavButton;
 pub use declarations::ShellPanels;
+mod theme;
+pub use theme::GET_THEME;
+pub use theme::GET_THEME_CONTRACT;
+pub use theme::SET_THEME;
+pub use theme::SET_THEME_CONTRACT;
+pub use theme::ShellTheme;
+pub use theme::THEME_CONFIG_KEY;
+pub use theme::THEME_CONFIG_NAME;
+pub use theme::THEME_CONFIG_TAG;
+pub use theme::ThemeSheet;
 
 pub const ID: &str = "dayframe.shell";
 pub const PACKAGE_VERSION: u32 = 1;
@@ -184,7 +194,7 @@ impl Default for ShellConfig {
 }
 
 /// The shell's package declaration: it declares the panels collection, publishes its frame, its
-/// home panel, its sidebar/back button and its navigation calls, contributes the home panel to
+/// home panel, its sidebar/back button, its navigation and theme calls, contributes the home panel to
 /// its own collection, and registers the frame as a shell root.
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
@@ -197,7 +207,10 @@ pub fn manifest() -> MicroManifest {
         .call(OPEN_SHEET, OPEN_SHEET_CONTRACT)
         .call(CLOSE_SHEET, CLOSE_SHEET_CONTRACT)
         .call(OPENED, OPENED_CONTRACT)
+        .call(GET_THEME, GET_THEME_CONTRACT)
+        .call(SET_THEME, SET_THEME_CONTRACT)
         .config::<ShellArrangement>()
+        .config::<ShellTheme>()
         .declares::<ShellPanels>()
         // The shell reads panels through a binding configuration resolves; a second write
         // binding to the same contract carries its own home panel. It also registers its frame

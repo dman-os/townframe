@@ -281,7 +281,6 @@ impl Fixture {
         Some(answer.expect("a method output is plain JSON"))
     }
 
-
     /// Every held pull request in one caught-up page, whatever the predicate says: the fixture
     /// holds one GitHub drawer.
     fn poll(&self, _input: PollDatums) -> DatumPage {
