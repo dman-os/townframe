@@ -798,6 +798,30 @@ is clean apart from dead code.
   page is `Box<dyn Any + Send>`, so projected keys and values must be `Send` even under
   `Local`.
 
+### Authorized read and bucket harness (2026-11-18; layer 09)
+
+**Delivered:**
+- `PartStoreServe::read_authorized` takes the verdicts and the rows in one snapshot, and checks
+  every row against current access.
+- Laws: revocation hides every row of the part, including unread older rows and a revoke
+  between two pages; a grant returns the backlog; differential over random principals.
+- Bucket harness: `bucket/tests/harness.rs` (responder, driver, convergence proptest).
+
+**Machine bugs the harness found, and the operator's decisions:**
+- `calc_working_level` never returned level 1: the loop recomputed level 1's width twice.
+  Fix: stay at L while level L+1's width (`size / 16^(L+1)`) is above the target.
+- A pending membership survived a peer's removal, depending on walk order. Decision: a pending
+  membership is a real membership whose payload is pending, so a remote removal cancels it.
+  `filter_objects` must see pending memberships.
+
+**Other decisions:**
+- Bucket reads take the principal and answer in one snapshot, with a `since` on
+  `bucket_list`.
+- Drop `RevSource` as a supertrait of `PartStoreServe`.
+- Dead leaf entries carry `Option` fingerprints.
+- `rpc/bucket.rs` is free to improve; it was a partial port.
+- A denied object route carries nothing; the part route carries the removal.
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a
