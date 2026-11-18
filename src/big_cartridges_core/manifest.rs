@@ -6,7 +6,6 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 use super::AUTHORITY;
 use super::Digest;
@@ -79,7 +78,7 @@ pub struct PermbindNet {
     pub port: Option<u16>,
     /// The HTTP verbs the routine may use; every verb when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub methods: Option<BTreeSet<String>>,
+    pub methods: Option<Vec<String>>,
     pub description: String,
     #[serde(flatten)]
     pub extra: Extra,
@@ -95,7 +94,7 @@ impl PermbindNet {
     pub fn allows_method(&self, method: &str) -> bool {
         self.methods
             .as_ref()
-            .is_none_or(|methods| methods.contains(method))
+            .is_none_or(|methods| methods.iter().any(|allowed| allowed == method))
     }
 }
 
