@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 pub fn Card(children: Element) -> Element {
     rsx! {
         div {
-            class: "df-card",
+            class: "ct-card",
             "data-slot": "card",
             {children}
         }
@@ -15,7 +15,7 @@ pub fn Card(children: Element) -> Element {
 pub fn CardHeader(children: Element) -> Element {
     rsx! {
         div {
-            class: "df-card-header",
+            class: "ct-card-header",
             "data-slot": "card-header",
             {children}
         }
@@ -26,7 +26,7 @@ pub fn CardHeader(children: Element) -> Element {
 pub fn CardContent(children: Element) -> Element {
     rsx! {
         div {
-            class: "df-card-content",
+            class: "ct-card-content",
             "data-slot": "card-content",
             {children}
         }
