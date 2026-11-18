@@ -60,6 +60,33 @@ where
     body
 }
 
+/// Where a request's `path` goes: `dispatch.local` for a relative path, else the scheme,
+/// authority and path-and-query of the absolute `http(s)` URL it is.
+fn destination(path: &str) -> Result<(Scheme, String, String), HttpTransportError> {
+    if !(path.starts_with("http://") || path.starts_with("https://")) {
+        return Ok((
+            Scheme::Http,
+            DISPATCH_AUTHORITY.to_owned(),
+            format!("/{path}"),
+        ));
+    }
+    let url: http::Uri = path.parse().map_err(|error| HttpTransportError {
+        message: format!("`{path}` is not a URL: {error}"),
+    })?;
+    let authority = url.authority().ok_or_else(|| HttpTransportError {
+        message: format!("`{path}` names no host"),
+    })?;
+    Ok((
+        match url.scheme_str() {
+            Some("https") => Scheme::Https,
+            _ => Scheme::Http,
+        },
+        authority.to_string(),
+        url.path_and_query()
+            .map_or("/".to_owned(), |target| target.to_string()),
+    ))
+}
+
 /// The [`HttpTransport`] of a guest: `wasi:http/client` to `http://dispatch.local`, or to the
 /// absolute URL a request's `path` names (see [`XrpcRequest::path`]). Wrapped in
 /// `service_client_core_rs::Xrpc` it is a `UnaryTransport` for every unary method.
@@ -99,35 +126,7 @@ impl HttpTransport for WasiHttp {
                 other => Method::Other(other.as_str().to_owned()),
             })
             .expect("a method token is valid");
-        let (scheme, authority, path) = if request.path.starts_with("http://")
-            || request.path.starts_with("https://")
-        {
-            let url: http::Uri = request
-                .path
-                .parse()
-                .map_err(|error| HttpTransportError {
-                    message: format!("`{}` is not a URL: {error}", request.path),
-                })?;
-            (
-                match url.scheme_str() {
-                    Some("https") => Scheme::Https,
-                    _ => Scheme::Http,
-                },
-                url.authority()
-                    .ok_or_else(|| HttpTransportError {
-                        message: format!("`{}` names no host", request.path),
-                    })?
-                    .to_string(),
-                url.path_and_query()
-                    .map_or("/".to_owned(), |target| target.to_string()),
-            )
-        } else {
-            (
-                Scheme::Http,
-                DISPATCH_AUTHORITY.to_owned(),
-                format!("/{}", request.path),
-            )
-        };
+        let (scheme, authority, path) = destination(&request.path)?;
         outgoing
             .set_scheme(Some(&scheme))
             .expect("http and https are valid schemes");
