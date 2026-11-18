@@ -54,17 +54,17 @@ pub(crate) fn sanitize_stylesheet(sheet: &str) -> String {
     rules.join("\n")
 }
 
-/// Validates a guest stylesheet without silently dropping rules. Presentation ingress refuses a
-/// batch containing a fetchable declaration or at-rule, so the caller gets a durable fault instead
-/// of relying on whichever renderer happens to interpret the sanitized result.
+/// Refuses a guest stylesheet that can make the renderer fetch: a `url()` or one of
+/// [`FETCHING_FUNCTIONS`] anywhere in it, at any nesting depth, or an `@import`. Presentation
+/// ingress refuses the whole batch on it, so a micro that tries to reach out gets a durable
+/// fault rather than a silently rewritten sheet. Everything else (an unknown at-rule, a
+/// malformed rule) is left to [`sanitize_stylesheet`], which still runs and drops it as a browser would.
 pub(crate) fn validate_stylesheet(sheet: &str) -> Result<(), &'static str> {
-    let mut parser = Parser::new(sheet);
-    let mut sanitizer = Sanitizer { nested: false };
-    StyleSheetParser::new(&mut parser, &mut sanitizer)
-        .find_map(|result| result.err())
-        .map_or(Ok(()), |_| {
-            Err("stylesheet contains a fetchable resource or unsupported rule")
-        })
+    if fetches(&mut Parser::new(sheet)) {
+        Err("stylesheet can fetch: url(), image-set(), @import and the like are refused")
+    } else {
+        Ok(())
+    }
 }
 
 /// Wraps `sheet` in `@media <query> { ... }` so a `document::Style { media }` keeps its meaning.
@@ -126,6 +126,8 @@ fn fetches(input: &mut Parser<'_>) -> bool {
     while let Ok(token) = input.next() {
         let nested = match token {
             Token::UnquotedUrl(_) | Token::BadUrl(_) => return true,
+            // Only a stylesheet has at-rules; in a declaration value this never matches.
+            Token::AtKeyword(name) if name.eq_ignore_ascii_case("import") => return true,
             Token::Function(name) => {
                 if FETCHING_FUNCTIONS
                     .iter()

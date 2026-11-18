@@ -1128,6 +1128,8 @@ fn guest_stylesheet_fetches_refuse_the_whole_batch_at_ingress() {
         "a { background: url(https://evil.example/p.png) }",
         "a { background: image-set('https://evil.example/p.png' 1x) }",
         "@import 'https://evil.example/style.css';",
+        // At any depth: a fetch nested in a kept at-rule refuses the batch too.
+        "@media (min-width: 1px) { a { background: url(https://evil.example/p.png) } }",
     ] {
         let error = SurfaceTree::new()
             .apply(&[Mutation::SetStyleSheet(sheet.into())])
@@ -1136,6 +1138,20 @@ fn guest_stylesheet_fetches_refuse_the_whole_batch_at_ingress() {
             matches!(error, PresentationError::InvalidBatch(ref reason) if reason.contains("guest stylesheet refused")),
             "{sheet}: {error}"
         );
+    }
+}
+
+#[test]
+fn a_stylesheet_with_rules_the_sanitizer_drops_but_no_fetch_is_admitted() {
+    // Only a fetch refuses the batch: an unknown at-rule and a malformed declaration are dropped by
+    // the sanitizer, as a browser would, and the rest of the sheet applies.
+    for sheet in [
+        "@property --x { syntax: '<length>'; inherits: false; initial-value: 0px; } a { color: red }",
+        "a { color: ; } b { color: red }",
+    ] {
+        SurfaceTree::new()
+            .apply(&[Mutation::SetStyleSheet(sheet.into())])
+            .unwrap_or_else(|error| panic!("{sheet}: {error}"));
     }
 }
 
