@@ -1,0 +1,24 @@
+[package]
+name = "micro_review_manifest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+#
+# internal
+clay_mdk = { workspace = true, features = ["contract"] }
+micro_layout_manifest = { workspace = true }
+#
+# external
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+
+[lints]
+workspace = true

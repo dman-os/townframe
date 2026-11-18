@@ -57,7 +57,12 @@ use clay_collection::Transaction;
 use clay_collection::Version;
 use clay_collection::WriteBasis;
 use dioxus::prelude::*;
+use method_core::Unary;
 use serde::de::DeserializeOwned;
+use service_client_core_rs::Client;
+use service_client_core_rs::xrpc::Xrpc;
+use service_core_rs::ClientError;
+use service_core_rs::RequestContext;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -84,22 +89,6 @@ pub(crate) struct ChangeTick(pub(crate) Signal<u64>);
 struct Presentation {
     dom: GuestDom,
     tick: Rc<Cell<Option<Signal<u64>>>>,
-}
-
-#[derive(Clone)]
-struct RootProps {
-    tick: Rc<Cell<Option<Signal<u64>>>>,
-    render: Rc<dyn Fn() -> Element>,
-}
-
-fn root(props: RootProps) -> Element {
-    let tick = use_hook(|| {
-        let signal = Signal::new(0_u64);
-        props.tick.set(Some(signal));
-        signal
-    });
-    use_context_provider(|| ChangeTick(tick));
-    (props.render)()
 }
 
 /// Local tasks an incarnation owns. A task is dropped at its next poll once the incarnation is
@@ -586,13 +575,20 @@ impl Runtime {
         name: &str,
         render: Rc<dyn Fn() -> Element>,
     ) -> Result<(), Error> {
-        let tick = Rc::default();
-        let dom = GuestDom::new_with_props(
-            root,
-            RootProps {
-                tick: Rc::clone(&tick),
-                render,
+        let tick: Rc<Cell<Option<Signal<u64>>>> = Rc::default();
+        let root_tick = Rc::clone(&tick);
+        // The change tick is the presentation's one shared reactive source, so it lives in the
+        // root; `render` runs below it, once per mount, and reads it through context.
+        let dom = GuestDom::with_setup(
+            move || {
+                let tick = use_hook(|| {
+                    let signal = Signal::new(0_u64);
+                    root_tick.set(Some(signal));
+                    signal
+                });
+                use_context_provider(|| ChangeTick(tick));
             },
+            render,
         );
         let published = capability_bank::publish_presentation(name)?;
         assert!(
@@ -898,4 +894,14 @@ impl From<documents::OperationReceipt> for OperationReceipt {
             },
         }
     }
+}
+
+/// Calls node method `M` over `wasi:http` to `dispatch.local`: the transport a nodule's
+/// `big_ndk::Cx::call` uses, the same [`big_ndk::WasiHttp`] value. The request carries no
+/// credential: the host drops any `authorization` a guest sets and presents the micro's own
+/// capability as the micro's actor.
+pub(crate) async fn call<M: Unary>(input: M) -> Result<M::Output, ClientError<M::Error>> {
+    Client::new(Xrpc(big_ndk::WasiHttp))
+        .call(RequestContext::root(), input)
+        .await
 }

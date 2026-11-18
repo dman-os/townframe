@@ -1,5 +1,3 @@
-use dayframe_composition::HostInputs;
-use dayframe_composition::Insets;
 use dayframe_composition::Renderer;
 use dioxus::prelude::*;
 
@@ -42,14 +40,9 @@ fn App() -> Element {
 #[component]
 fn ReadyApp(runtime: Signal<Option<composition::CompositionRuntime>>) -> Element {
     match use_context::<Renderer>() {
+        // A desktop window has no system chrome over its surface.
         Renderer::Browser => {
-            let initial = runtime
-                .read()
-                .clone()
-                .expect("ReadyApp mounts only with a built runtime");
-            let runtime = use_signal(|| initial);
-            let host = wry::use_host_inputs();
-            rsx! { dayframe_composition::Application { runtime, host } }
+            rsx! { dayframe_native::WryApplication { runtime, insets: None, scale: None } }
         }
         #[cfg(feature = "blitz")]
         Renderer::Blitz => rsx! { dayframe_native::BlitzApplication { runtime, insets: None } },
@@ -73,53 +66,6 @@ mod wry {
                     .with_menu(None),
             )
             .launch(App);
-    }
-
-    /// What the window tells the shell under Wry: its logical size, read from tao's resize events
-    /// (the shell never measures the DOM). The webview is a browser engine, so the shell's keyboard
-    /// paths are on and a split drag survives the pointer leaving the window. No platform back gesture reaches a desktop webview; the shell's own back button
-    /// is the only way back.
-    pub(crate) fn use_host_inputs() -> HostInputs {
-        use dioxus::desktop::tao::event::Event;
-        use dioxus::desktop::WindowEvent;
-        let window = dioxus::desktop::use_window();
-        let logical_size = move || {
-            let window = &dioxus::desktop::window().window;
-            let size = window.inner_size().to_logical::<f64>(window.scale_factor());
-            (size.width, size.height)
-        };
-        let initial = logical_size();
-        let mut width = use_signal(|| initial.0);
-        let mut height = use_signal(|| initial.1);
-        let platform_back = use_signal(|| 0_u64);
-        let can_back = use_signal(|| false);
-        // A desktop window has no system chrome over its surface.
-        let insets = use_signal(Insets::default);
-        dioxus::desktop::use_wry_event_handler(move |event, _| {
-            let Event::WindowEvent {
-                window_id,
-                event: WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. },
-                ..
-            } = event
-            else {
-                return;
-            };
-            if *window_id == window.window.id() {
-                let (w, h) = logical_size();
-                width.set(w);
-                height.set(h);
-            }
-        });
-        HostInputs {
-            width: width.into(),
-            height: height.into(),
-            insets: insets.into(),
-            platform_back,
-            can_back,
-            renderer: Renderer::Browser,
-            // The development seed: see `HostInputs::start`.
-            start: std::env::var("DAYFRAME_SHELL_OPEN").ok(),
-        }
     }
 }
 

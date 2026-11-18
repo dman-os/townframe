@@ -21,6 +21,9 @@ clay_surface = { workspace = true }
 wash-runtime = { workspace = true, default-features = false }
 blake3.workspace = true
 wasmtime-wasi.workspace = true
+wasmtime-wasi-http = { workspace = true, features = ["p3"] }
+http.workspace = true
+http-body-util = "0.1"
 futures.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

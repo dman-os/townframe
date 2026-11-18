@@ -95,16 +95,27 @@ switch (command) {
       guestProfile,
     });
     // The APK carries its packages as assets: `dayframe_mobile` bundles `packages/` with
-    // `asset!`, so stage the prepared counter and layout beside the crate (gitignored).
+    // `asset!`, so stage the prepared counter, layout and review beside the crate (gitignored).
     const staged = root.join("src/dayframe_mobile/packages");
     await Deno.mkdir(staged.toString(), { recursive: true });
-    for (const name of ["counter", "layout"]) {
+    for (const name of ["counter", "layout", "review"]) {
       for (const suffix of ["manifest.json", "component.wasm"]) {
         await $`cp ${
           $.path(env["DAYFRAME_PACKAGE_DIR"]).join(`${name}.${suffix}`)
         } ${staged.join(`${name}.${suffix}`)}`;
       }
     }
+    // intxt's nodule handler is not a micro: the phone's node installs it as a cartridge at boot
+    // (`dayframe_node::NodeComposition::install_intxt`). It is built where `day_cli`'s tests
+    // read it (the `wasm_utils_rs` workspace, `INTXT_GUEST_WASM`) and staged beside the packages.
+    await $`cargo build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest --target wasm32-wasip3 --release`;
+    const guestWorkspace = await $`cargo metadata --locked --no-deps --format-version 1 --manifest-path src/wasm_utils_rs/Cargo.toml`
+      .json<{ target_directory: string }>();
+    await $`cp ${
+      $.path(guestWorkspace.target_directory).join(
+        "wasm32-wasip3/release/intxt_nodule_guest.wasm",
+      )
+    } ${staged.join("intxt.guest.wasm")}`;
     const abiFlag = rest.indexOf("--abi");
     const abi = abiFlag >= 0 ? rest[abiFlag + 1] : "arm64";
     const androidTargets: Record<string, string> = {
@@ -133,7 +144,7 @@ switch (command) {
     // signing config in Dioxus.toml to yield a signed APK.
     await $`deno run --allow-all ${
       root.join("x/dx.ts")
-    } build --platform android --target ${androidTarget} --renderer native -p dayframe_mobile ${
+    } build --platform android --target ${androidTarget} --renderer webview -p dayframe_mobile ${
       flag("--release") ? ["--release"] : []
     }`.cwd(root);
     const metadata =

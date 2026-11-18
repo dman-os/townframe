@@ -39,13 +39,13 @@ export async function prepareDayframePackages(
   //
   // One cargo invocation per artifact kind, so cargo schedules the guests together.
   const guests = testFixtures
-    ? ["micro_counter", "micro_layout", "micro_lab", "micro_collection_probe"]
-    : ["micro_counter", "micro_layout", "micro_lab"];
+    ? ["micro_counter", "micro_layout", "micro_lab", "micro_review", "micro_collection_probe"]
+    : ["micro_counter", "micro_layout", "micro_lab", "micro_review"];
   await $`cargo build --locked ${isolated} ${
     guests.flatMap((guest) => ["-p", guest])
   } --target wasm32-wasip3 --profile ${guestProfile}`;
   if (testFixtures) {
-    await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --example egress --example overbudget --example lifecycle --example context --target wasm32-wasip3 --profile ${guestProfile}`;
+    await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --example egress --example dispatch --example overbudget --example lifecycle --example context --target wasm32-wasip3 --profile ${guestProfile}`;
   }
   if (trapper) {
     await $`cargo build --locked ${isolated} -p clay_mdk --example trapper --target wasm32-wasip3 --profile ${guestProfile}`;
@@ -63,6 +63,7 @@ export async function prepareDayframePackages(
     counter: [`wasm32-wasip3/${profileDirectory}/micro_counter.wasm`, "counter"],
     layout: [`wasm32-wasip3/${profileDirectory}/micro_layout.wasm`, "layout"],
     lab: [`wasm32-wasip3/${profileDirectory}/micro_lab.wasm`, "lab"],
+    review: [`wasm32-wasip3/${profileDirectory}/micro_review.wasm`, "review"],
     ...(testFixtures
       ? {
         collectionProbe: [
@@ -74,6 +75,10 @@ export async function prepareDayframePackages(
           "sleeper",
         ],
         egress: [`wasm32-wasip3/${profileDirectory}/examples/egress.wasm`, "egress"],
+        dispatch: [
+          `wasm32-wasip3/${profileDirectory}/examples/dispatch.wasm`,
+          "dispatch",
+        ],
         overbudget: [
           `wasm32-wasip3/${profileDirectory}/examples/overbudget.wasm`,
           "overbudget",
@@ -110,7 +115,7 @@ export async function prepareDayframePackages(
     console.log(`${variable}=${artifact}`);
   }
 
-  // The counter, the layout and the lab are also packages: the desktop shell scans a package directory for
+  // The counter, the layout, the lab and the review micro are also packages: the desktop shell scans a package directory for
   // `<name>.manifest.json` sidecars paired with `<name>.component.wasm`, so prepare that
   // directory beside the raw fixtures. STAND-IN until `big_cartridges` delivers manifests; each
   // sidecar is emitted from the package's manifest crate.
@@ -121,6 +126,7 @@ export async function prepareDayframePackages(
       ["counter", "micro_counter_manifest"],
       ["layout", "micro_layout_manifest"],
       ["lab", "micro_lab_manifest"],
+      ["review", "micro_review_manifest"],
     ]
   ) {
     await $`cp ${directory.join(`${name}.component.wasm`)} ${

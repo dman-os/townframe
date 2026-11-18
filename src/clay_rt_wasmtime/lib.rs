@@ -7,6 +7,7 @@
 
 mod collections;
 mod documents;
+mod egress;
 
 use clay_guest_session::DocumentSession;
 pub use clay_guest_session::InitialContext;
@@ -68,6 +69,9 @@ use tokio::sync::mpsc;
 use wasmtime_wasi::WasiCtx;
 use wasmtime_wasi::WasiCtxView;
 use wasmtime_wasi::WasiView;
+use wasmtime_wasi_http::WasiHttpCtx;
+use wasmtime_wasi_http::WasiHttpCtxView;
+use wasmtime_wasi_http::WasiHttpView;
 
 /// Marks a presentation call that suspended on its first poll: a guest contract violation
 /// (the sync exports promise a decision before the listener closure returns), handled at
@@ -301,6 +305,9 @@ impl wasmtime::component::AccessorTask<WasmStoreState> for GuestCallTask {
 
 struct WasmStoreState {
     wasi: WasiCtx,
+    /// `wasi:http/client`, which reaches only `dispatch.local` (see [`egress`]).
+    http: WasiHttpCtx,
+    http_hooks: egress::Hooks,
     table: ResourceTable,
     documents: DocumentSession,
     collections: clay_guest_session::collections::CollectionSession,
@@ -343,6 +350,16 @@ impl WasmStoreState {
     }
 }
 
+impl WasiHttpView for WasmStoreState {
+    fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: &mut self.http_hooks,
+        }
+    }
+}
+
 impl WasiView for WasmStoreState {
     fn ctx(&mut self) -> WasiCtxView<'_> {
         WasiCtxView {
@@ -376,6 +393,8 @@ impl WasmStoreState {
         Ok((
             Self {
                 wasi: wasi.build(),
+                http: WasiHttpCtx::new(),
+                http_hooks: egress::Hooks::default(),
                 table: ResourceTable::new(),
                 documents,
                 collections,
@@ -602,7 +621,7 @@ const RESERVED_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
 /// overflow a guest would otherwise write into its neighbour.
 const MEMORY_GUARD_BYTES: u64 = 64 * 1024;
 
-/// The linker is identical for every package on the shared engine (WASI p3 plus the micro
+/// The linker is identical for every package on the shared engine (WASI p3, `wasi:http` p3 plus the micro
 /// client), so it is built once rather than rebuilt per micro.
 fn linker(engine: &Engine) -> Result<Arc<Linker<WasmStoreState>>, String> {
     static LINKER: OnceLock<Result<Arc<Linker<WasmStoreState>>, String>> = OnceLock::new();
@@ -610,6 +629,8 @@ fn linker(engine: &Engine) -> Result<Arc<Linker<WasmStoreState>>, String> {
         .get_or_init(|| {
             let mut linker = Linker::new(engine);
             wasmtime_wasi::p3::add_to_linker(&mut linker).map_err(|error| error.to_string())?;
+            wasmtime_wasi_http::p3::add_to_linker(&mut linker)
+                .map_err(|error| error.to_string())?;
             MicroClient::add_to_linker::<_, HasSelf<WasmStoreState>>(&mut linker, |state| state)
                 .map_err(|error| error.to_string())?;
             Ok(Arc::new(linker))

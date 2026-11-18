@@ -81,5 +81,6 @@ where
     Fut: Future<Output = Result<WcmpPackage, String>> + 'static,
 {
     let package: PackageSource<Wcmp> = Rc::new(move || Box::pin(package()));
-    crate::engine::factory::<Wcmp>(resources, micro, manifest, bindings, package)
+    // The browser engine hosts no `wasi:http` yet, so no micro has a `dispatch.local` egress there.
+    crate::engine::factory::<Wcmp>(resources, micro, manifest, bindings, package, None)
 }
