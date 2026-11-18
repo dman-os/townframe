@@ -249,7 +249,7 @@ pub enum GrantKey {
     /// `cartridge:<cartridgeId>`: use of the data of another cartridge.
     Cartridge(CartridgeId),
     /// `net:<host[:port]>`: using the network to reach a host.
-    Net(String),
+    Net(NetTarget),
     /// `method:<nsid>`: one operation the cartridge may invoke through dispatch.
     Method(String),
     /// `authority:<prefix>`: every operation under an NSID authority prefix, or `*`.
@@ -279,7 +279,8 @@ impl GrantKey {
         let slot = match self {
             Self::Drawer(drawer) => drawer.to_string(),
             Self::Cartridge(cartridge) => cartridge.to_string(),
-            Self::Net(slot) | Self::Method(slot) | Self::Authority(slot) => slot.clone(),
+            Self::Net(target) => target.to_string(),
+            Self::Method(slot) | Self::Authority(slot) => slot.clone(),
         };
         DatumKey::from_text(self.tag(), slot).expect("a grant key is a valid datum key slot")
     }
@@ -291,7 +292,7 @@ impl GrantKey {
         Some(match key.tag().as_str() {
             Self::DRAWER => Self::Drawer(slot.parse().ok()?),
             Self::CARTRIDGE => Self::Cartridge(slot.parse().ok()?),
-            Self::NET if !slot.is_empty() => Self::Net(slot.to_owned()),
+            Self::NET => Self::Net(slot.parse().ok()?),
             Self::METHOD if is_nsid(slot) => Self::Method(slot.to_owned()),
             Self::AUTHORITY if slot == ALL_AUTHORITIES || is_nsid_authority(slot) => {
                 Self::Authority(slot.to_owned())
@@ -306,6 +307,87 @@ impl GrantKey {
         match self {
             Self::Drawer(_) | Self::Cartridge(_) => body.access.is_some(),
             Self::Net(_) | Self::Method(_) | Self::Authority(_) => body.access.is_none(),
+        }
+    }
+}
+
+/// A network host and, optionally, a port: what a `#net` permbind names and the slot of a
+/// `grant/net` datum (`host[:port]`). Matching is exact, with no wildcards: the host
+/// case-insensitively (it is stored lowercased, so two spellings are one grant), and the port as
+/// stated, where none means [`Self::DEFAULT_PORT`] (HTTPS). A plain `http:` URL on port 80 is
+/// therefore named by `host:80`, and a request's scheme is only ever compared through its port.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NetTarget {
+    host: String,
+    port: Option<u16>,
+}
+
+/// Why text is not a [`NetTarget`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "`{0}` is not a network target: expected `<host>` or `<host>:<port>` with a DNS name or IPv4 address"
+)]
+pub struct InvalidNetTarget(pub String);
+
+impl NetTarget {
+    /// The port a target without one names: the one `https:` uses.
+    pub const DEFAULT_PORT: u16 = 443;
+
+    /// `host` (any case) and `port`. The host must be a DNS name or an IPv4 address: letters,
+    /// digits, `-` and `.`.
+    pub fn new(host: &str, port: Option<u16>) -> Result<Self, InvalidNetTarget> {
+        let valid = !host.is_empty()
+            && host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
+            && !host.starts_with('.')
+            && !host.ends_with('.');
+        if !valid || port == Some(0) {
+            return Err(InvalidNetTarget(match port {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_owned(),
+            }));
+        }
+        Ok(Self {
+            host: host.to_ascii_lowercase(),
+            port,
+        })
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn port(&self) -> Option<u16> {
+        self.port
+    }
+
+    /// Whether this target names `host` on `port`, as a request resolved them (the port is the
+    /// URL's own or its scheme's default).
+    pub fn reaches(&self, host: &str, port: u16) -> bool {
+        self.host.eq_ignore_ascii_case(host) && self.port.unwrap_or(Self::DEFAULT_PORT) == port
+    }
+}
+
+impl fmt::Display for NetTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.port {
+            Some(port) => write!(formatter, "{}:{port}", self.host),
+            None => formatter.write_str(&self.host),
+        }
+    }
+}
+
+impl FromStr for NetTarget {
+    type Err = InvalidNetTarget;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let invalid = || InvalidNetTarget(value.to_owned());
+        match value.split_once(':') {
+            None => Self::new(value, None),
+            Some((host, port)) => {
+                Self::new(host, Some(port.parse().map_err(|_| invalid())?)).map_err(|_| invalid())
+            }
         }
     }
 }
@@ -337,7 +419,7 @@ impl FromStr for GrantKey {
         match kind {
             "drawer" => target.parse().map(Self::Drawer).map_err(|_| invalid()),
             "cartridge" => target.parse().map(Self::Cartridge).map_err(|_| invalid()),
-            "net" if !target.is_empty() => Ok(Self::Net(target.to_owned())),
+            "net" => target.parse().map(Self::Net).map_err(|_| invalid()),
             "method" if is_nsid(target) => Ok(Self::Method(target.to_owned())),
             "authority" if target == ALL_AUTHORITIES || is_nsid_authority(target) => {
                 Ok(Self::Authority(target.to_owned()))

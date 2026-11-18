@@ -322,6 +322,54 @@ impl Cx {
         self.transport.clone()
     }
 
+    /// Sends one request to `url`, an `http(s)` URL that is not the node's dispatch: network
+    /// access (ADR 049 §2). The host performs it only when the routine's `uses` take a `#net`
+    /// permbind naming the URL's host and port and allowing `method`, and the cartridge holds
+    /// the matching `grant/net`. Otherwise the answer is a 403 whose body is the XRPC error
+    /// `Denied` (nothing declared it) or the cartridge's `MissingAuthority` (declared, not yet
+    /// granted: a routine may then ask with `requestCartridgeGrant`). The routine's capability
+    /// goes with the request so the host can tell which routine asked, and is removed before
+    /// the request leaves the node. The response body is read whole.
+    pub async fn fetch(
+        &self,
+        method: http::Method,
+        url: &str,
+        mut headers: http::HeaderMap,
+        body: Vec<u8>,
+    ) -> Result<(http::StatusCode, http::HeaderMap, Vec<u8>), HttpTransportError> {
+        use futures::StreamExt;
+        if let Some(capability) = &self.nodule {
+            headers.insert(
+                NODULE_CAPABILITY_HEADER,
+                http::HeaderValue::from_str(capability)
+                    .expect("a capability id is valid header text"),
+            );
+        }
+        let response = HttpTransport::send(
+            &self.transport,
+            XrpcRequest {
+                method,
+                path: url.to_owned(),
+                headers,
+                body: XrpcBody::Json(body),
+            },
+        )
+        .await?;
+        let body = match response.body {
+            XrpcBody::Json(body) => body,
+            XrpcBody::Bytes(mut stream) => {
+                let mut body = Vec::new();
+                while let Some(chunk) = stream.next().await {
+                    body.extend_from_slice(&chunk.map_err(|error| HttpTransportError {
+                        message: format!("response body: {error}"),
+                    })?);
+                }
+                body
+            }
+        };
+        Ok((response.status, response.headers, body))
+    }
+
     /// Calls `M` through dispatch with the nodule's own capability, as the next hop of this
     /// call. Without a capability of its own (nothing granted) there is no credential to
     /// present, which is [`ContextError::Unauthenticated`].

@@ -8,9 +8,11 @@
 //!
 //! - the ingress still binds a loopback listener (the host requires one) but its [`Router`]
 //!   refuses every incoming request and declines every local-egress match;
-//! - the only egress a workload has is `dispatch.local` (a nodule calling an operation through
-//!   dispatch), served by [`Egress`]; [`Sealed::allow_outgoing_request`] refuses every other
-//!   authority, because nodule network facilities are not granted.
+//! - a workload's egress is `dispatch.local` (a nodule calling an operation through dispatch),
+//!   served by [`Egress`], and any `http(s)` URL its routine holds a `#net` permbind and grant
+//!   for (ADR 049 §2): [`Egress`] puts it through [`egress::authorize_net`] and performs an
+//!   allowed one with wash's pooled client, per workload. gRPC never goes out (wash would route
+//!   it around [`Egress`]).
 //!
 //! A nodule learns its own dispatch capability from the `x-nodule-capability` header of every
 //! request it serves and presents it as `authorization: Bearer <id>` on its outgoing calls. Identity is not
@@ -79,6 +81,7 @@ use wash_runtime::host::Host;
 use wash_runtime::host::HostApi;
 use wash_runtime::host::HostBuilder;
 use wash_runtime::host::allowed_hosts::AllowedHost;
+use wash_runtime::host::http::DefaultOutgoingHandler;
 use wash_runtime::host::http::HostHandler;
 use wash_runtime::host::http::Ingress;
 use wash_runtime::host::http::OutgoingHandler;
@@ -86,6 +89,7 @@ use wash_runtime::host::http::RequestIoFuture;
 use wash_runtime::host::http::RouteError;
 use wash_runtime::host::http::Router;
 use wash_runtime::host::http::SendFuture;
+use wash_runtime::host::http::SendResult;
 use wash_runtime::types::Component;
 use wash_runtime::types::Workload;
 use wash_runtime::types::WorkloadStartRequest;
@@ -200,6 +204,7 @@ pub async fn boot(
             .outgoing_handler(Egress {
                 dispatch,
                 signers: Arc::clone(&signers),
+                net: Arc::new(DefaultOutgoingHandler::default()),
             })
             .build()
             .await
@@ -652,8 +657,10 @@ impl Router for Sealed {
         Ok(())
     }
 
-    /// Only `dispatch.local` is allowed, and [`Egress`] answers it without any connection.
-    /// Nothing else ever is, because nodule network facilities are not granted.
+    /// Everything but gRPC is let through to [`Egress`], which is where a request is authorized:
+    /// a refusal here is an opaque transport error, and a routine needs the `Denied` or
+    /// `MissingAuthority` answer. gRPC is refused because wash sends it around [`Egress`] (it
+    /// needs HTTP/2), so its destination would never be checked.
     fn allow_outgoing_request(
         &self,
         _workload_id: &str,
@@ -665,11 +672,16 @@ impl Router for Sealed {
             .uri()
             .authority()
             .map(|authority| authority.as_str())
-            == Some(DISPATCH_AUTHORITY)
+            != Some(DISPATCH_AUTHORITY)
+            && request
+                .headers()
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("application/grpc"))
         {
-            return Ok(());
+            wash_runtime::wasmtime::anyhow::bail!("nodule handlers may not send gRPC requests")
         }
-        wash_runtime::wasmtime::anyhow::bail!("nodule handlers may only call {DISPATCH_AUTHORITY}")
+        Ok(())
     }
 
     fn route_incoming_request(
@@ -693,6 +705,24 @@ type Signers = Arc<Mutex<BTreeMap<String, WorkloadCaller>>>;
 struct Egress {
     dispatch: Client<DispatchProtocol>,
     signers: Signers,
+    /// Performs the requests [`egress::authorize_net`] allowed.
+    net: Arc<DefaultOutgoingHandler>,
+}
+
+fn answer((status, body): (hyper::StatusCode, XrpcBody)) -> SendResult {
+    let (body, mime, length) = wasi_body(body);
+    let mut builder = hyper::Response::builder().status(status);
+    if let Some(mime) = mime {
+        builder = builder.header(hyper::header::CONTENT_TYPE, mime);
+    }
+    if let Some(length) = length {
+        builder = builder.header(hyper::header::CONTENT_LENGTH, length);
+    }
+    let response = builder.body(body).expect("a well-formed response");
+
+    // Nothing is uploaded out of band: the request body was read in full above.
+    let io: RequestIoFuture = Box::new(async { Ok(()) });
+    Ok((response, io))
 }
 
 impl Egress {
@@ -760,27 +790,43 @@ impl OutgoingHandler for Egress {
     fn send_request(
         &self,
         workload_id: &str,
-        request: hyper::Request<WasiBody>,
-        _options: Option<RequestOptions>,
-        _fut: RequestIoFuture,
+        mut request: hyper::Request<WasiBody>,
+        options: Option<RequestOptions>,
+        fut: RequestIoFuture,
     ) -> SendFuture {
+        if request
+            .uri()
+            .authority()
+            .map(|authority| authority.as_str())
+            != Some(DISPATCH_AUTHORITY)
+        {
+            let caller = self
+                .signers
+                .lock()
+                .expect("signers lock")
+                .get(workload_id)
+                .cloned();
+            if let Err(refusal) = egress::authorize_net(
+                caller.as_ref(),
+                request.method(),
+                request.uri(),
+                request.headers(),
+            ) {
+                return Box::new(async move { answer(refusal) });
+            }
+            egress::strip_node_headers(request.headers_mut());
+            return self.net.send_request(workload_id, request, options, fut);
+        }
         let egress = self.clone();
         let workload_id = workload_id.to_owned();
-        Box::new(async move {
-            let (status, body) = egress.call(&workload_id, request).await;
-            let (body, mime, length) = wasi_body(body);
-            let mut builder = hyper::Response::builder().status(status);
-            if let Some(mime) = mime {
-                builder = builder.header(hyper::header::CONTENT_TYPE, mime);
-            }
-            if let Some(length) = length {
-                builder = builder.header(hyper::header::CONTENT_LENGTH, length);
-            }
-            let response = builder.body(body).expect("a well-formed response");
+        Box::new(async move { answer(egress.call(&workload_id, request).await) })
+    }
 
-            // Nothing is uploaded out of band: the request body was read in full above.
-            let io: RequestIoFuture = Box::new(async { Ok(()) });
-            Ok((response, io))
-        })
+    fn on_workload_bind(&self, workload_id: &str, call_concurrency: usize) {
+        self.net.on_workload_bind(workload_id, call_concurrency);
+    }
+
+    fn on_workload_unbind(&self, workload_id: &str) {
+        self.net.on_workload_unbind(workload_id);
     }
 }

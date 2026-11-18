@@ -145,15 +145,35 @@ impl HttpTransport for Egress {
             headers,
             body,
         } = request;
-        let (status, body) = egress::call(
-            &self.dispatch,
-            Some(&self.caller),
-            &method,
-            &format!("/{path}"),
-            &headers,
-            body,
-        )
-        .await;
+        let (status, body) = if path.starts_with("http://") || path.starts_with("https://") {
+            // The check is the host's own; this harness has no HTTP client of its own to
+            // perform an allowed request with, so one that passes is answered as unimplemented.
+            match egress::authorize_net(
+                Some(&self.caller),
+                &method,
+                &path.parse().expect("a test fixture sends a valid URL"),
+                &headers,
+            ) {
+                Ok(()) => (
+                    StatusCode::NOT_IMPLEMENTED,
+                    XrpcBody::json(
+                        br#"{"error":"NotImplemented","message":"the native harness performs no network requests"}"#
+                            .to_vec(),
+                    ),
+                ),
+                Err(refusal) => refusal,
+            }
+        } else {
+            egress::call(
+                &self.dispatch,
+                Some(&self.caller),
+                &method,
+                &format!("/{path}"),
+                &headers,
+                body,
+            )
+            .await
+        };
         Ok(XrpcResponse {
             status,
             headers: HeaderMap::new(),
