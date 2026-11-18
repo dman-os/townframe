@@ -743,13 +743,10 @@ fn routine_uses(
                         let target = net
                             .target()
                             .expect("admission refuses a net permbind that names no host");
-                        let port = target.port().unwrap_or(NetTarget::DEFAULT_PORT);
                         uses.nets.push(NetUse {
                             binding: binding.to_string(),
                             permbind: net.clone(),
-                            granted: desired_nets
-                                .iter()
-                                .any(|grant| grant.reaches(target.host(), port)),
+                            granted: desired_nets.iter().any(|grant| grant.covers(&target)),
                             target,
                         });
                     }

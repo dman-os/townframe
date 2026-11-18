@@ -170,8 +170,8 @@ pub struct CartridgeGrant {
 }
 
 /// `org.example.daybook.cartridges.grant.net/<host[:port]>`: the cartridge may use the network to
-/// reach the host (and port, when one is given). Nothing enforces it yet: there is no `#net`
-/// permbind.
+/// reach the host, on the one port when it is given and on any port otherwise (see
+/// [`NetTarget`]).
 #[macros::datum(authority = GRANT_AUTHORITY, name = "net")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,10 +312,11 @@ impl GrantKey {
 }
 
 /// A network host and, optionally, a port: what a `#net` permbind names and the slot of a
-/// `grant/net` datum (`host[:port]`). Matching is exact, with no wildcards: the host
-/// case-insensitively (it is stored lowercased, so two spellings are one grant), and the port as
-/// stated, where none means [`Self::DEFAULT_PORT`] (HTTPS). A plain `http:` URL on port 80 is
-/// therefore named by `host:80`, and a request's scheme is only ever compared through its port.
+/// `grant/net` datum, in the syntax of Deno's `--allow-net`: `host` is any port, `host:port` that
+/// port only, there is no scheme, and an IPv6 literal is bracketed (`[::1]:8000`). Matching is
+/// exact, with no wildcards: the host case-insensitively (it is stored lowercased, and an IPv6
+/// literal in its canonical form, so two spellings are one grant), and the port as stated. A
+/// request's scheme is only ever compared through its port: `http://host` is `host:80`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NetTarget {
     host: String,
@@ -325,39 +326,47 @@ pub struct NetTarget {
 /// Why text is not a [`NetTarget`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "`{0}` is not a network target: expected `<host>` or `<host>:<port>` with a DNS name or IPv4 address"
+    "`{0}` is not a network target: expected `<host>` or `<host>:<port>` with a DNS name, an IPv4 address or a bracketed IPv6 address (`[::1]:8000`), and no scheme"
 )]
 pub struct InvalidNetTarget(pub String);
 
 impl NetTarget {
-    /// The port a target without one names: the one `https:` uses.
-    pub const DEFAULT_PORT: u16 = 443;
-
-    /// `host` (any case) and `port`. The host must be a DNS name or an IPv4 address: letters,
-    /// digits, `-` and `.`.
+    /// `host` (any case) and `port`. The host must be a DNS name or an IPv4 address (letters,
+    /// digits, `-` and `.`) or an IPv6 address in brackets. `None` is every port.
     pub fn new(host: &str, port: Option<u16>) -> Result<Self, InvalidNetTarget> {
-        let valid = !host.is_empty()
-            && host
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
-            && !host.starts_with('.')
-            && !host.ends_with('.');
-        if !valid || port == Some(0) {
-            return Err(InvalidNetTarget(match port {
+        let invalid = || {
+            InvalidNetTarget(match port {
                 Some(port) => format!("{host}:{port}"),
                 None => host.to_owned(),
-            }));
+            })
+        };
+        let host = if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            let address: std::net::Ipv6Addr = inner.parse().map_err(|_| invalid())?;
+            format!("[{address}]")
+        } else {
+            let valid = !host.is_empty()
+                && host
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
+                && !host.starts_with('.')
+                && !host.ends_with('.');
+            if !valid {
+                return Err(invalid());
+            }
+            host.to_ascii_lowercase()
+        };
+        if port == Some(0) {
+            return Err(invalid());
         }
-        Ok(Self {
-            host: host.to_ascii_lowercase(),
-            port,
-        })
+        Ok(Self { host, port })
     }
 
+    /// The host as a URL spells it: lowercase, an IPv6 literal bracketed.
     pub fn host(&self) -> &str {
         &self.host
     }
 
+    /// The one port this names, `None` for every port.
     pub fn port(&self) -> Option<u16> {
         self.port
     }
@@ -365,7 +374,13 @@ impl NetTarget {
     /// Whether this target names `host` on `port`, as a request resolved them (the port is the
     /// URL's own or its scheme's default).
     pub fn reaches(&self, host: &str, port: u16) -> bool {
-        self.host.eq_ignore_ascii_case(host) && self.port.unwrap_or(Self::DEFAULT_PORT) == port
+        self.host.eq_ignore_ascii_case(host) && self.port.is_none_or(|own| own == port)
+    }
+
+    /// Whether this target, as a grant, covers everything `other`, as a permbind, can reach:
+    /// the same host, and either every port or exactly the permbind's one.
+    pub fn covers(&self, other: &Self) -> bool {
+        self.host == other.host && self.port.is_none_or(|own| other.port == Some(own))
     }
 }
 
@@ -383,12 +398,15 @@ impl FromStr for NetTarget {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let invalid = || InvalidNetTarget(value.to_owned());
-        match value.split_once(':') {
-            None => Self::new(value, None),
-            Some((host, port)) => {
-                Self::new(host, Some(port.parse().map_err(|_| invalid())?)).map_err(|_| invalid())
-            }
-        }
+        // The port follows the last `:` that is outside the brackets of an IPv6 literal.
+        let (host, port) = match value.rfind(':') {
+            Some(at) if !value[at..].contains(']') => (&value[..at], Some(&value[at + 1..])),
+            _ => (value, None),
+        };
+        let port = port
+            .map(|port| port.parse().map_err(|_| invalid()))
+            .transpose()?;
+        Self::new(host, port).map_err(|_| invalid())
     }
 }
 

@@ -86,8 +86,8 @@ pub enum RequestedAccess {
     /// Calling one operation through dispatch.
     #[serde(rename_all = "camelCase")]
     Method { nsid: String },
-    /// Using the network to reach `host`, on `port` when the `#net` permbind names one (else
-    /// the HTTPS port). Allowing it writes `grant/net/<host[:port]>`.
+    /// Using the network to reach `host`, on `port` when the `#net` permbind names one (else on
+    /// any port). Allowing it writes `grant/net/<host[:port]>`.
     #[serde(rename_all = "camelCase")]
     Net {
         host: String,
