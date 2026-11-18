@@ -321,6 +321,16 @@ impl<P> Drop for Waiting<'_, P> {
     }
 }
 
+/// What [`Supervisor::bind_supplied`] found of a consumer's supplied requirements.
+struct Bound<P> {
+    /// Binding -> the live publication it binds.
+    resolved: BTreeMap<String, P>,
+    /// The provider incarnations the consumer binds.
+    instances: Vec<Instance>,
+    /// Providers an optional requirement started but could not bind.
+    unbound: Vec<MicroId>,
+}
+
 struct Node<P> {
     config: ConfiguredMicro<P>,
     state: NodeState<P>,
@@ -666,59 +676,21 @@ impl<P: Clone + 'static> Supervisor<P> {
                 providers.push(provider.clone());
                 supplied.push((binding, requirement, provider));
             }
-            let mut resolved = BTreeMap::new();
-            let mut provider_instances = Vec::new();
-            let mut unprovided = None;
-            // Providers an optional requirement started and then could not bind. They are
-            // released once the consumer's own state no longer says it is starting.
-            let mut unbound = Vec::new();
-            for (binding, requirement, provider) in supplied {
-                let inner = self.inner.borrow();
-                // A provider started earlier in this loop may have been closed while a later
-                // one was starting; nothing binds it yet, so that is an ordinary unavailability.
-                let publication = match &inner.nodes[provider].state {
-                    NodeState::Active {
-                        instance,
-                        publications,
-                        ..
-                    } => publications
-                        .get(&requirement.publication)
-                        .map(|publication| (instance, publication))
-                        .ok_or_else(|| StartError::Unpublished {
-                            provider: provider.clone(),
-                            publication: requirement.publication.clone(),
-                        }),
-                    _ => Err(StartError::Faulted(format!(
-                        "{provider} closed while {identity} was starting"
-                    ))),
-                };
-                match publication {
-                    Ok((instance, publication)) => {
-                        resolved.insert(binding.clone(), publication.clone());
-                        provider_instances.push(instance.clone());
-                    }
-                    Err(_) if requirement.necessity == Necessity::Optional => {
-                        let held = providers
-                            .iter()
-                            .position(|held| held == provider)
-                            .expect("a supplied requirement's provider is held");
-                        unbound.push(providers.remove(held));
-                    }
-                    Err(cause) => {
-                        unprovided = Some((binding.clone(), cause));
-                        break;
-                    }
+            let Bound {
+                resolved,
+                instances: provider_instances,
+                unbound,
+            } = match self.bind_supplied(&identity, supplied, &mut providers) {
+                Ok(bound) => bound,
+                Err((binding, cause)) => {
+                    self.set(&identity, NodeState::Blocked(vec![binding.clone()]));
+                    self.release(providers).await;
+                    return Err(StartError::Unavailable {
+                        binding,
+                        cause: Box::new(cause),
+                    });
                 }
-            }
-            if let Some((binding, cause)) = unprovided {
-                self.set(&identity, NodeState::Blocked(vec![binding.clone()]));
-                providers.extend(unbound);
-                self.release(providers).await;
-                return Err(StartError::Unavailable {
-                    binding,
-                    cause: Box::new(cause),
-                });
-            }
+            };
             let host = self.host.clone();
             let initialized = host
                 .initialize(identity.as_str(), |instance| {
@@ -778,6 +750,66 @@ impl<P: Clone + 'static> Supervisor<P> {
                     Err(error)
                 }
             }
+        })
+    }
+
+    /// The live publication each supplied requirement of `consumer` binds, with the provider
+    /// incarnations to bind and the providers an optional requirement started but could not
+    /// bind (nothing retains them for this consumer, so the caller releases them once the
+    /// consumer's own state no longer says it is starting). A required requirement whose
+    /// provider closed meanwhile or does not publish what is required is the error, with
+    /// every held provider left in `providers` for the caller to release.
+    fn bind_supplied(
+        &self,
+        consumer: &MicroId,
+        supplied: Vec<(&String, &Requirement, &MicroId)>,
+        providers: &mut Vec<MicroId>,
+    ) -> Result<Bound<P>, (String, StartError)> {
+        let mut resolved = BTreeMap::new();
+        let mut instances = Vec::new();
+        let mut unbound = Vec::new();
+        for (binding, requirement, provider) in supplied {
+            let inner = self.inner.borrow();
+            // A provider started earlier in this loop may have been closed while a later one
+            // was starting; nothing binds it yet, so that is an ordinary unavailability.
+            let publication = match &inner.nodes[provider].state {
+                NodeState::Active {
+                    instance,
+                    publications,
+                    ..
+                } => publications
+                    .get(&requirement.publication)
+                    .map(|publication| (instance, publication))
+                    .ok_or_else(|| StartError::Unpublished {
+                        provider: provider.clone(),
+                        publication: requirement.publication.clone(),
+                    }),
+                _ => Err(StartError::Faulted(format!(
+                    "{provider} closed while {consumer} was starting"
+                ))),
+            };
+            match publication {
+                Ok((instance, publication)) => {
+                    resolved.insert(binding.clone(), publication.clone());
+                    instances.push(instance.clone());
+                }
+                Err(_) if requirement.necessity == Necessity::Optional => {
+                    let held = providers
+                        .iter()
+                        .position(|held| held == provider)
+                        .expect("a supplied requirement's provider is held");
+                    unbound.push(providers.remove(held));
+                }
+                Err(cause) => {
+                    providers.extend(unbound);
+                    return Err((binding.clone(), cause));
+                }
+            }
+        }
+        Ok(Bound {
+            resolved,
+            instances,
+            unbound,
         })
     }
 
