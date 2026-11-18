@@ -10,21 +10,27 @@ pub fn setup_tracing_once() {
     });
 }
 
-/// `instr=off`: `INSTR` probes log under the `instr` target; `RUST_LOG_TEST=info,instr=info` turns them on.
-pub(crate) const DEFAULT_TEST_FILTER: &str = "info,instr=off,cranelift_codegen=info,wasmtime_internal_cranelift=info,wasmtime=info,rustls=info,h2=info,hyper_util=info,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_quinn_proto::connection=error,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn";
+/// Filter string for a subscriber: `env` (the `RUST_LOG`/`RUST_LOG_TEST` value) or else
+/// `default`, with `instr=off,` prepended. `INSTR` investigation probes log under the `instr`
+/// target and stay silent even when the env filter is a plain `info` or `debug`; `EnvFilter`
+/// lets a later directive for the same target win, so an explicit `instr=info` in the env value
+/// turns them back on.
+pub(crate) fn instr_off_filter(env: Option<String>, default: &str) -> String {
+    format!("instr=off,{}", env.as_deref().unwrap_or(default))
+}
 
 fn setup_tracing() -> Res<()> {
-    let default_filter = DEFAULT_TEST_FILTER;
+    let default_filter = "info,cranelift_codegen=info,wasmtime_internal_cranelift=info,wasmtime=info,rustls=info,h2=info,hyper_util=info,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_quinn_proto::connection=error,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn";
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
         // if std::env::var("RUST_BACKTRACE_TEST").is_err() {
         //     std::env::set_var("RUST_BACKTRACE", "1");
         // }
-        std::env::var("RUST_LOG_TEST").unwrap_or_else(|_| default_filter.to_owned())
+        instr_off_filter(std::env::var("RUST_LOG_TEST").ok(), default_filter)
     };
 
     #[cfg(target_arch = "wasm32")]
-    let filter = default_filter;
+    let filter = instr_off_filter(None, default_filter);
 
     // #[cfg(test)]
     // console_subscriber::init();
@@ -172,12 +178,15 @@ mod tests {
 
     #[test]
     fn instr_target_is_off_by_default_and_on_by_filter() {
-        assert_eq!(admitted(super::DEFAULT_TEST_FILTER), (0, 1));
-        assert_eq!(admitted("info,instr=off,ort::logging=warn"), (0, 1));
-        // Explicit env filters replace the default entirely; `instr=info` turns the probes on.
-        assert_eq!(admitted("info,instr=info"), (1, 1));
-        assert_eq!(admitted("warn,instr=info"), (1, 0));
-        // Appended to a filter that already says `instr=off`, a later `instr=info` still wins.
-        assert_eq!(admitted("info,instr=off,instr=info"), (1, 1));
+        let default = "info,h2=info";
+        let built = |env: Option<&str>| super::instr_off_filter(env.map(str::to_owned), default);
+        // No env value: the default applies, probes off.
+        assert_eq!(admitted(&built(None)), (0, 1));
+        // A plain env filter replaces the default but cannot re-enable the probes.
+        assert_eq!(admitted(&built(Some("info"))), (0, 1));
+        assert_eq!(admitted(&built(Some("debug"))), (0, 1));
+        // An explicit `instr=info` in the env value turns them on.
+        assert_eq!(admitted(&built(Some("info,instr=info"))), (1, 1));
+        assert_eq!(admitted(&built(Some("warn,instr=info"))), (1, 0));
     }
 }
