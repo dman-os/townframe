@@ -424,28 +424,12 @@ pub fn Sections(
             "aria-label": "{label}",
             for (index, pane) in panes.iter().enumerate() {
                 if index > 0 || first_shown {
-                    {
-                        let collapsed = shut == Some(index);
-                        let rule = &split.rules[index];
-                        let weight = weights[index];
-                        // A collapsed pane lays out at 0 whatever its minimum says.
-                        let min = if collapsed { 0.0 } else { rule.min };
-                        let max = if rule.max.is_finite() {
-                            format!("; --ct-sections-max: {}px", rule.max)
-                        } else {
-                            String::new()
-                        };
-                        rsx! {
-                            div {
-                                key: "pane-{index}",
-                                "data-part": "pane",
-                                "data-state": if collapsed { "collapsed" } else { "open" },
-                                role: "region",
-                                "aria-label": "{pane.name}",
-                                style: "--ct-sections-weight: {weight}; --ct-sections-min: {min}px{max}",
-                                {pane.content.clone()}
-                            }
-                        }
+                    PaneView {
+                        key: "pane-{index}",
+                        pane: pane.clone(),
+                        weight: weights[index],
+                        rule: split.rules[index],
+                        collapsed: shut == Some(index),
                     }
                 }
                 if let Some(view) = handles.get(index).filter(|_| index > 0 || first_shown) {
@@ -526,6 +510,28 @@ pub fn Sections(
                     onpointercancel: move |_| abort.call(()),
                 }
             }
+        }
+    }
+}
+
+/// One pane: its content, and its geometry as the custom properties the stylesheet reads.
+#[component]
+fn PaneView(pane: SectionPane, weight: f64, rule: SizeRule, collapsed: bool) -> Element {
+    // A collapsed pane lays out at 0 whatever its minimum says.
+    let min = if collapsed { 0.0 } else { rule.min };
+    let max = if rule.max.is_finite() {
+        format!("; --ct-sections-max: {}px", rule.max)
+    } else {
+        String::new()
+    };
+    rsx! {
+        div {
+            "data-part": "pane",
+            "data-state": if collapsed { "collapsed" } else { "open" },
+            role: "region",
+            "aria-label": "{pane.name}",
+            style: "--ct-sections-weight: {weight}; --ct-sections-min: {min}px{max}",
+            {pane.content}
         }
     }
 }
