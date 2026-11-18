@@ -93,8 +93,8 @@ not before adding a log line.
   `Cargo.toml` and restore the `rev` pins once the patch is no longer needed.
 - Gate new logging behind the existing env switches (`DAYB_KEYHIVE_DIAG`, `INSTR`-style vars) so
   the hot path stays silent by default. `INSTR` probe events carry `target: "instr"`, which the
-  default filters silence (`instr=off`); read them with `RUST_LOG_TEST=info,instr=info` (or
-  `=debug`; plain `RUST_LOG_TEST=debug` already includes them). Mark suspicious sites even when they are only suspected.
+  setup always silences (`instr=off` is prepended, even to `RUST_LOG_TEST=debug`); read them with
+  `RUST_LOG_TEST=info,instr=info` (or `instr=debug`). Mark suspicious sites even when they are only suspected.
 - Keep instrumentation in its own commit, separate from fixes. Upstream forks move, and a pin
   bump must be able to drop the instrumentation and re-apply only the real fixes on top; a hunt
   whose instrumentation is interleaved with fixes cannot be rebased or pushed cleanly.

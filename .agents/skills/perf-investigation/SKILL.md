@@ -65,8 +65,9 @@ RUST_LOG_TEST="info,instr=debug,subduction_core=warn,keyhive_core=warn" \
 deno run --allow-read x/instr-summary.ts $S/run.log --skip 5
 ```
 
-INSTR lines log under the `instr` tracing target, which the default filters silence (`instr=off`).
-An explicit `RUST_LOG`/`RUST_LOG_TEST` replaces the default filter, so name the target in it:
+INSTR lines log under the `instr` tracing target. `setup_tracing` and the test setup always prepend
+`instr=off` to the filter, even when `RUST_LOG`/`RUST_LOG_TEST` replaces the default, so a plain
+`info` or `debug` stays quiet. Turn the probes on by naming the target in the env filter:
 `instr=info` for the info/warn probes, `instr=debug` to include the debug-level timing lines (a
 `big_cabinet=debug` directive does not reach them, the target is `instr`, not the crate).
 
@@ -93,8 +94,8 @@ let instr_a = instr_start.elapsed(); // INSTR
 tracing::info!(target: "instr", ?instr_a, total = ?instr_start.elapsed(), "INSTR <name> timing"); // INSTR
 ```
 
-- Give every INSTR event `target: "instr"` (the default filters set `instr=off`; the line is invisible
-  without it being opted in) and name it `INSTR <name> timing` so `x/instr-summary.ts` picks it up.
+- Give every INSTR event `target: "instr"` (the setup prepends `instr=off`; the line is invisible
+  unless the filter opts in) and name it `INSTR <name> timing` so `x/instr-summary.ts` picks it up.
 - Log at a level your `RUST_LOG_TEST` admits for the `instr` target (`instr=info` or `instr=debug`).
 - Bracket each sample with `tracing::info!(target: "instr", ordinal, "INSTR <op> begin")` so one sample's lines can be
   cut out with `awk '/begin ordinal=20$/,/INSTR <op> 20:/'`.
