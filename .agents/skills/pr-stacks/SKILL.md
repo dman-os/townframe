@@ -5,9 +5,13 @@ description: Run a lane's work as one stack of small draft PRs (gh stack): namin
 
 # One lane, one stack of small PRs
 
-The operator's rules for every lane (nodules #101 is the reference stack). They exist because big
-integration branches can't be reviewed, and because greening every intermediate layer wasted hours
-of builds.
+The operator's rules for every lane (nodules #101 is the reference stack). PRs exist so work stays small
+and easy to review; that is the whole point, so minimize coordination effort around them.
+
+**Operator, 2026-11-18:** don't spend effort making every PR clean; mechanical splits are fine. The
+operator does not use GitHub stack merging (it has problems): later they pick N PRs and merge them
+with their own tooling, which needs no rebasing of everything at once. So the restacking below is
+optional hygiene, not a requirement.
 
 ## Shape
 
@@ -30,10 +34,10 @@ of builds.
 - **Docs and ledger:** a substantial batch of decisions or a new ADR is its own docs layer. A small
   ledger update that records the work of one layer rides in that layer. Never edit an existing
   layer just to park unrelated docs.
-- **Fixing a lower layer** that isn't merged: amend that layer and restack everything above it. A
-  fixup layer on top hides the fix from the layer's reviewer. Once a layer is merged, fix on top.
+- **Fixing a lower layer** that isn't merged: amending it is nicest for its reviewer, but a fixup layer
+  on top is fine when restacking would cost more than it's worth.
 
-## Restacking
+## Restacking (optional)
 
 - Restack when you're about to push or submit, not on every move of the base.
 - `gh stack rebase` rebases the whole stack onto trunk. Afterwards check that lower layers didn't
@@ -61,8 +65,8 @@ that is never a PR base.
 
 ## Review and merge
 
-The operator reviews and merges; nothing merges before their review. `#84` went in as a squash.
-Ask the operator before anything else.
+The operator reviews and merges, choosing PRs with their own tooling; nothing merges before their
+review, and lanes don't merge with GitHub's stack merging. Ask the operator before anything else.
 
 ## Conventions
 
