@@ -336,10 +336,14 @@ manager routes capabilities it does not use itself.
 **A runtime grants itself first, then its children** (operator, 2026-11-18, D56). Every grant a
 cartridge actor holds sits on an explicit grant to the runtime's service actor, made while someone
 with the authority to give it is present:
-- **A drawer the cartridge creates** is created as the service actor, because the runtime makes the
-  create call on the cartridge's behalf anyway. The service actor owns the new drawer and grants the
+- **A drawer the cartridge creates** is owned by the service actor, and the service actor grants the
   cartridge actor access to it. So the cartridge reaches what it made, without a rule that the create
-  permission counts as consent to a grant nobody answered.
+  permission counts as consent to a grant nobody answered. Ownership already works this way: a
+  create records the handle chain's originating actor as owner (`big_cabinet/drawer/create.rs`), and
+  a routine's drawers handle is minted from the service actor's identity, so the owner's durable
+  Admin lands on the service actor. The missing step is the grant down: the runtime only sees the
+  create if it makes the call, so creation goes through the runtime rather than a raw `create` flag
+  on the routine's drawers handle (operator's call pending, 2026-11-18).
 - **An existing drawer granted to a cartridge** (`setGrant`, or Allow on a request) is granted to the
   service actor in that same call, using the granter's authority over the drawer. The runtime then
   grants it down to the cartridge actor (`apply_grant`). Before this, the runtime tried that second
@@ -349,8 +353,16 @@ with the authority to give it is present:
   mints their handles. That rule is about who may *act as* an actor. Keyhive and the authority still
   let an actor hand down only what it holds itself, so the parent's own grant is what makes the
   hand-down possible. Nothing depends on "a child's grant lets the parent act".
-- **It is cheap.** A drawer grant to a local actor is one row in the node-local authority ledger
-  (`GrantDrawer`, `big_cabinet/drawer/grant.rs`), not a keyhive delegation, and nothing about it syncs.
+- **The hold must outlive the call that made it.** A drawer grant made from a capability, which is
+  how `GrantDrawer` works, lives only in the grants actor's memory, tied to that capability
+  (`big_cabinet/grants.rs`, the `temporary` map). Capabilities die at restart (ADR 037), and at boot
+  nobody with authority over the person's drawer is present to make the grant again. So the service
+  actor's hold on a granted drawer has to be a durable grant, stored as an owner's Admin is (source
+  `None`, in SQLite). The grant call writes it with the granter's authority, and the runtime removes
+  it once no cartridge's grant needs the drawer (operator's call pending, 2026-11-18). It is still a
+  node-local row, not a keyhive delegation, so nothing about it syncs.
+- **The hold is Admin** whatever the cartridge gets, because `GrantDrawer` requires Admin of whoever
+  hands access down. That is the delegator role above, not access the service actor uses.
 - The same holds for the `micros` service actor.
 
 ### 6.2 Every service domain, not only dispatch
