@@ -7,7 +7,6 @@ use big_cabinet_core::DocId;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::reference::DatumReference;
 use method_core::ContextError;
-use method_core::Method;
 use serde::Deserialize;
 use serde::Serialize;
 
