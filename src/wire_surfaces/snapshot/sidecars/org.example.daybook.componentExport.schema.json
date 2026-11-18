@@ -1,0 +1,25 @@
+{
+  "$defs": {
+    "ComponentExport": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "export": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "export"
+      ],
+      "title": "ComponentExport",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.componentExport"
+    }
+  },
+  "$ref": "#/$defs/ComponentExport",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

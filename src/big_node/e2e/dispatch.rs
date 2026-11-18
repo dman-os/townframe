@@ -134,6 +134,22 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
             (cartridge_methods::SetCartridgeGrant::XRPC.nsid, true),
             (cartridge_methods::ClearCartridgeConfig::XRPC.nsid, true),
             (cartridge_methods::ListCartridgeInstalls::XRPC.nsid, false),
+            // Filing a request and awaiting its answer are a cartridge's own and reachable by its
+            // routines; answering and listing the answers are the operator's.
+            (cartridge_methods::RequestCartridgeGrant::XRPC.nsid, false),
+            (
+                cartridge_methods::AwaitCartridgeGrantRequest::XRPC.nsid,
+                false,
+            ),
+            (
+                cartridge_methods::ListCartridgeGrantRequests::XRPC.nsid,
+                true,
+            ),
+            (
+                cartridge_methods::AnswerCartridgeGrantRequest::XRPC.nsid,
+                true,
+            ),
+            (cartridge_methods::ListCartridgeGrants::XRPC.nsid, true),
             (nodule_methods::SetNoduleDevTakeover::XRPC.nsid, true),
             (nodule_methods::ListNodules::XRPC.nsid, false),
             (nodule_methods::MintNoduleCapability::XRPC.nsid, false),

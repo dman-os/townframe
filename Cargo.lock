@@ -1761,6 +1761,7 @@ dependencies = [
  "irpc",
  "keyring-core",
  "method_core",
+ "method_lexicon",
  "secrets_rs",
  "serde",
  "serde_json",
@@ -20043,6 +20044,20 @@ checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
 dependencies = [
  "bitflags 2.13.2",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "wire_surfaces"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet",
+ "big_cabinet_core",
+ "big_node",
+ "clap",
+ "method_lexicon",
+ "serde_json",
+ "tempfile",
+ "utils_rs",
 ]
 
 [[package]]

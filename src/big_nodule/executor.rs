@@ -39,8 +39,11 @@ pub struct RoutineSpec {
 #[derive(Clone, Default)]
 pub struct RoutineCapabilities {
     pub dispatch: Option<CapId>,
-    pub config: Option<CapId>,
+    /// The docs handle: the cartridge config document and the routine's `#datum` kinds in each
+    /// drawer it was granted.
+    pub docs: Option<CapId>,
     pub drawers: Option<CapId>,
+    pub blobs: Option<CapId>,
 }
 
 /// Everything an executor needs to host one nodule revision's routine components.

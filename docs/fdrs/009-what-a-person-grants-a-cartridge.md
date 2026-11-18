@@ -1,9 +1,8 @@
-# FDR (number to be assigned): What a person grants a cartridge, and how they are asked
+# FDR 009: What a person grants a cartridge, and how they are asked
 
-Status: Proposal (draft, not accepted)
-Owner: Townframe maintainers (nodules and claytxt lanes)
-Updated: 2026-11-17
-Scope: The person-facing side of the permission model: the questions a cartridge's access is asked in, where and when they are asked (install, runtime, the CLI), what is shown beside them (risks), and how a person reviews and takes access back. The mechanism is `docs/scratch/permission-model.md` (#155); this record says what people observe and is the bar that mechanism is judged against.
+**Status:** Accepted (operator, 2026-11-17). The functional side of the permission model; the mechanism is
+[ADR 049](../adrs/049-one-permission-model-for-nodules-and-micros.md), and this record is the bar that mechanism is
+judged against.
 
 ## Purpose
 
@@ -57,7 +56,7 @@ handles. An advanced view may show the declarations for people who ask.
 ## Risks are shown, not only permissions
 
 Beside the questions the person sees what the combination allows, from the static analysis
-(proposal §9a), in plain words and only when it says something:
+(ADR 049 §9a), in plain words and only when it says something:
 
 - "Can send your Photos to `api.example.com`", when some part of the cartridge reads Photos and some
   part talks to the internet and the two can pass data between them.

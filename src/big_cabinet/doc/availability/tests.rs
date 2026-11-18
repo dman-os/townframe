@@ -541,7 +541,9 @@ async fn scoped_drawer_membership_loss_ends_availability_quietly() {
         .capability(DocScope {
             drawers: BTreeMap::from([(
                 drawer_id.clone(),
-                big_cabinet_core::drawer::DrawerAccess::Read,
+                big_cabinet_core::doc::DrawerReach::all_kinds(
+                    big_cabinet_core::drawer::DrawerAccess::Read,
+                ),
             )]),
             ..DocScope::default()
         })

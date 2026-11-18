@@ -19,8 +19,14 @@ use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::OpenedActor;
+use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::operation::OperationKind;
+use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CommandId;
+use big_cabinet_core::doc::CreateDoc;
+use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::MintDocCapability;
+use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::drawer::DrawerAccess;
@@ -44,6 +50,7 @@ use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::Readiness;
 use serde_json::json;
+use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -206,10 +213,10 @@ async fn a_write_is_refused_for_the_routine_that_did_not_declare_it() {
     uses(&mut cartridge, SETUP, PREFS, writes());
     let (node, executor, _) = hosted(cartridge, &[]).await;
     let ping = executor.routine_capabilities()[PING]
-        .config
+        .docs
         .expect("ping writes notes");
     let setup = executor.routine_capabilities()[SETUP]
-        .config
+        .docs
         .expect("setup writes prefs");
 
     assert!(
@@ -308,10 +315,19 @@ async fn a_narrowed_grant_retracts_the_old_handle_and_calls_wait_for_the_new_one
         "the revoked grant does not"
     );
 
-    // Revoking the rest leaves the routine with no handle at all.
+    // Revoking the rest leaves the routine only the right to ask for access (ADR 049 §4.2), on
+    // a handle minted afresh: it reaches no operation.
     node.grant_operations(ALPHA, &[]).await;
-    assert!(executor.routine_capabilities()[PING].dispatch.is_none());
+    let asking = dispatch_of(&executor, PING);
+    assert_ne!(asking, new);
     assert!(!node.is_live(new).await);
+    assert!(
+        matches!(
+            node.invoke_as_nodule(asking, REMOTE).await,
+            Err(DispatchError::Denied)
+        ),
+        "the routine can ask, and call nothing"
+    );
     node.shutdown().await;
 }
 
@@ -335,7 +351,7 @@ async fn a_reconcile_that_changes_nothing_mints_and_retracts_nothing() {
         executor
             .routine_capabilities()
             .into_iter()
-            .map(|(routine, held)| (routine, [held.dispatch, held.config, held.drawers]))
+            .map(|(routine, held)| (routine, [held.dispatch, held.docs, held.drawers]))
             .collect::<BTreeMap<_, _>>()
     };
     let before = handles(&executor);
@@ -412,6 +428,27 @@ async fn an_empty_use_of_a_method_permbind_grants_that_method() {
     node.invoke_as_nodule(dispatch_of(&executor, PING), REMOTE)
         .await
         .expect("listing the binding is the use");
+    node.shutdown().await;
+}
+
+/// A routine whose `#method` permbind names an operation that needs a service handle is minted
+/// that handle with the operation's flags (ADR 049 §6.2); its sibling, which does not bind the
+/// operation, holds none.
+#[tokio::test]
+async fn only_the_routine_binding_blobs_put_is_minted_a_blobs_handle() {
+    const BLOBS_PUT: &str = "org.example.daybook.blobs.put";
+    let mut cartridge = alpha(&[PING, SETUP], &[BLOBS_PUT], &[]);
+    uses(&mut cartridge, PING, BLOBS_PUT, RoutineUse::default());
+    let (node, executor, _) = hosted(cartridge, &[BLOBS_PUT]).await;
+    let capabilities = executor.routine_capabilities();
+    let blobs = capabilities[PING]
+        .blobs
+        .expect("the routine binding blobs.put holds a blobs handle");
+    assert!(node.is_live(blobs).await);
+    assert_eq!(
+        capabilities[SETUP].blobs, None,
+        "its sibling binds no blobs operation"
+    );
     node.shutdown().await;
 }
 
@@ -515,4 +552,819 @@ async fn a_create_only_drawers_use_makes_drawers_but_writes_no_existing_one() {
         .await
         .expect_err("a create use confers no write on an existing drawer");
     node.shutdown().await;
+}
+
+/// A grant is the cartridge's, not a permbind's (ADR 049 §4.1): granting a drawer once reaches
+/// every routine whose `uses` take a `#drawers` permbind that needs it, a routine whose `uses`
+/// do not take one does not reach the drawer however it is granted, and revoking the grant
+/// retracts the handles of every routine that held it.
+#[tokio::test]
+async fn one_drawer_grant_reaches_every_routine_that_uses_it_and_revoking_retracts_them_all() {
+    const PEEK: &str = "org.example.alpha.peek";
+    let mut cartridge = alpha(&[PING, SETUP, PEEK], &[], &[]);
+    for (binding, read, write) in [
+        ("readable", Some(Necessity::Optional), None),
+        ("writable", None, Some(Necessity::Optional)),
+    ] {
+        cartridge.permbinds.insert(
+            binding.into(),
+            Permbind::Drawers(PermbindDrawers {
+                description: binding.into(),
+                resolution: Default::default(),
+                read,
+                write,
+                create: None,
+                delete: None,
+                extra: Default::default(),
+            }),
+        );
+    }
+    // Two routines hold different permbinds over drawers, and PEEK holds none: its `uses` do
+    // not take the drawers, so the grant does not reach it.
+    uses(
+        &mut cartridge,
+        PING,
+        "readable",
+        RoutineUse {
+            read: true,
+            ..Default::default()
+        },
+    );
+    uses(&mut cartridge, SETUP, "writable", writes());
+    let (node, executor, _) = hosted(cartridge, &[]).await;
+    let present = node.drawers.local().present_id.clone();
+    crate::e2e::grant_drawer(
+        &node.drawers,
+        &node.drawers_actor,
+        &present,
+        node.nodules_actor.actor.actor_id,
+        DrawerAccess::Admin,
+    )
+    .await;
+    assert!(
+        executor
+            .routine_capabilities()
+            .values()
+            .all(|held| held.drawers.is_none()),
+        "no grant, no drawers"
+    );
+
+    // One grant of the drawer at Write satisfies both permbinds, each at what it declares.
+    node.set_drawers(
+        ALPHA,
+        BTreeMap::from([(present.clone(), DrawerAccess::Write)]),
+    )
+    .await;
+    let held = executor.routine_capabilities();
+    let ping = held[PING].drawers.expect("ping reads the granted drawer");
+    let setup = held[SETUP]
+        .drawers
+        .expect("setup writes the granted drawer");
+    assert_ne!(ping, setup, "each routine holds a handle of its own");
+    assert!(
+        held[PEEK].drawers.is_none(),
+        "a routine whose `uses` do not take the drawers does not reach a granted one"
+    );
+    assert!(node.is_live(ping).await && node.is_live(setup).await);
+
+    // Revoking the one grant retracts both routines' handles.
+    node.set_drawers(ALPHA, BTreeMap::new()).await;
+    assert!(!node.is_live(ping).await, "ping's handle is retracted");
+    assert!(!node.is_live(setup).await, "setup's handle is retracted");
+    assert!(
+        executor
+            .routine_capabilities()
+            .values()
+            .all(|held| held.drawers.is_none()),
+        "no routine holds drawers once the grant is revoked"
+    );
+    node.shutdown().await;
+}
+
+/// A routine whose `uses` take a `#drawers` permbind and `#datum` kinds reaches the documents of
+/// each granted drawer for those kinds and no others (ADR 049 §2): a reader of one kind cannot
+/// read another or write the one it reads, a writer of that kind cannot write another, and a
+/// routine that names no `#datum` kind reaches no document in any drawer.
+#[tokio::test]
+async fn a_routine_reaches_granted_drawers_only_for_its_datum_kinds() {
+    const LOG: &str = "org.example.alpha.log";
+    const SECRET: &str = "org.example.alpha.secret";
+    const PEEK: &str = "org.example.alpha.peek";
+    const KEEP: &str = "org.example.alpha.keep";
+    const SPLIT: &str = "org.example.alpha.split";
+    let mut cartridge = alpha(&[PING, SETUP, PEEK, KEEP, SPLIT], &[], &[]);
+    for kind in [LOG, SECRET] {
+        cartridge.with_lexicon(lexicon(json!({
+            "lexicon": 1,
+            "id": kind,
+            "defs": { "main": { "type": "object", "properties": {} } }
+        })));
+    }
+    for (binding, kind) in [("log", LOG), ("secret", SECRET)] {
+        cartridge.permbinds.insert(
+            binding.into(),
+            Permbind::Datum(PermbindDatum {
+                nsid: kind.parse().unwrap(),
+                description: binding.into(),
+                read: Some(Necessity::Optional),
+                write: Some(Necessity::Optional),
+                create: None,
+                delete: None,
+                extra: Default::default(),
+            }),
+        );
+    }
+    cartridge.permbinds.insert(
+        "drawers".into(),
+        Permbind::Drawers(PermbindDrawers {
+            description: "drawers".into(),
+            resolution: Default::default(),
+            read: Some(Necessity::Optional),
+            write: Some(Necessity::Optional),
+            create: None,
+            delete: None,
+            extra: Default::default(),
+        }),
+    );
+    let reads = || RoutineUse {
+        read: true,
+        ..Default::default()
+    };
+    // PING reads log from the drawers, KEEP writes it, SETUP reads the drawers and names no
+    // datum kind, and PEEK reads log without any drawers permbind.
+    uses(&mut cartridge, PING, "drawers", reads());
+    uses(&mut cartridge, PING, "log", reads());
+    uses(&mut cartridge, KEEP, "drawers", writes());
+    uses(&mut cartridge, KEEP, "log", writes());
+    uses(&mut cartridge, SETUP, "drawers", reads());
+    uses(&mut cartridge, PEEK, "log", reads());
+    // SPLIT reads log and writes secret: the kinds are held per direction.
+    uses(&mut cartridge, SPLIT, "drawers", writes());
+    uses(&mut cartridge, SPLIT, "log", reads());
+    uses(&mut cartridge, SPLIT, "secret", writes());
+    let (node, executor, _) = hosted(cartridge, &[]).await;
+    let present = node.drawers.local().present_id.clone();
+    crate::e2e::grant_drawer(
+        &node.drawers,
+        &node.drawers_actor,
+        &present,
+        node.nodules_actor.actor.actor_id,
+        DrawerAccess::Admin,
+    )
+    .await;
+    node.set_drawers(
+        ALPHA,
+        BTreeMap::from([(present.clone(), DrawerAccess::Write)]),
+    )
+    .await;
+    let held = executor.routine_capabilities();
+    assert!(
+        held[SETUP].docs.is_none(),
+        "a drawers use without a datum kind reaches no document"
+    );
+    assert!(
+        held[PEEK].docs.is_none(),
+        "a datum kind that is not a settings kind reaches nothing without a drawers use"
+    );
+    let reader = held[PING].docs.expect("ping reads log from the drawers");
+    let keeper = held[KEEP].docs.expect("keep writes log into the drawers");
+    let split = held[SPLIT].docs.expect("split reads log and writes secret");
+
+    // The nodule's actor puts one document of each kind into the granted drawer.
+    let actor = node.actor_at(&id(ALPHA)).await;
+    let placement = format!("drawer {present}");
+    let create = node
+        .docs
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(actor.capability).metadata(),
+            MintDocCapability {
+                scope: DocScope {
+                    create: BTreeSet::from([placement.clone()]),
+                    ..DocScope::default()
+                },
+                rights: Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap();
+    let log_key = DatumKey::from_text(LOG, "main").unwrap();
+    let secret_key = DatumKey::from_text(SECRET, "main").unwrap();
+    let doc_id = node
+        .docs
+        .client
+        .call(
+            RequestContext::root(),
+            CreateDoc {
+                capability: create.capability_id,
+                command: CommandId::try_from("drawer-doc".to_owned()).unwrap(),
+                placement,
+                datums: BTreeMap::from([
+                    (log_key.clone(), json!({ "$type": LOG })),
+                    (secret_key.clone(), json!({ "$type": SECRET })),
+                ]),
+            },
+        )
+        .await
+        .unwrap()
+        .doc_id;
+    let authorization = |capability| {
+        Authorization {
+            authority: capability,
+            signer: actor.capability,
+        }
+        .metadata()
+    };
+    let read = async |capability, datums: Option<BTreeSet<DatumKey>>| {
+        node.docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                authorization(capability),
+                ReadDatums {
+                    capability,
+                    doc_id: doc_id.clone(),
+                    at: At::Current,
+                    datums,
+                    optimistic: false,
+                },
+            )
+            .await
+    };
+    let write = async |capability, key: &DatumKey, kind: &str| {
+        node.docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                authorization(capability),
+                WriteDatums {
+                    capability,
+                    command: None,
+                    doc_id: doc_id.clone(),
+                    mode: WriteMode::AtCurrent,
+                    set: BTreeMap::from([(key.clone(), json!({ "$type": kind }))]),
+                    remove: BTreeSet::new(),
+                },
+            )
+            .await
+    };
+    let denied = ClientError::Method(big_cabinet_core::doc::DocsError::Denied);
+
+    // The reader sees the log kind of the drawer's document and not the secret kind.
+    let seen = read(reader, None).await.unwrap();
+    assert!(seen.datums.contains_key(&log_key));
+    assert!(!seen.datums.contains_key(&secret_key));
+    assert_eq!(
+        read(reader, Some(BTreeSet::from([secret_key.clone()])))
+            .await
+            .unwrap_err(),
+        denied
+    );
+    // Its drawers use only reads, so the log kind is not writable either.
+    assert_eq!(write(reader, &log_key, LOG).await.unwrap_err(), denied);
+    // The keeper writes the log kind and no other.
+    write(keeper, &log_key, LOG).await.unwrap();
+    assert_eq!(
+        write(keeper, &secret_key, SECRET).await.unwrap_err(),
+        denied
+    );
+    // The split routine reads log, writes secret, and is refused writing log (which it only
+    // reads) and reading secret (which it only writes).
+    let seen = read(split, None).await.unwrap();
+    assert!(seen.datums.contains_key(&log_key));
+    assert!(!seen.datums.contains_key(&secret_key));
+    write(split, &secret_key, SECRET).await.unwrap();
+    assert_eq!(write(split, &log_key, LOG).await.unwrap_err(), denied);
+    node.shutdown().await;
+}
+
+/// Runtime grant requests (ADR 049 §4.2): a routine files a request through the cartridges
+/// service presenting its dispatch handle, a person answers, and the routine's handles follow.
+mod grant_requests {
+    use super::*;
+    use big_cabinet_core::drawer::protocol::DrawerId;
+    use big_cartridges_core::config::GrantKey;
+    use big_cartridges_core::protocol::AnswerCartridgeGrantRequest;
+    use big_cartridges_core::protocol::AwaitCartridgeGrantRequest;
+    use big_cartridges_core::protocol::CartridgesError;
+    use big_cartridges_core::protocol::FiledGrantRequest;
+    use big_cartridges_core::protocol::GrantAnswer;
+    use big_cartridges_core::protocol::GrantRequestState;
+    use big_cartridges_core::protocol::ListCartridgeGrantRequests;
+    use big_cartridges_core::protocol::ListCartridgeGrants;
+    use big_cartridges_core::protocol::RequestCartridgeGrant;
+    use big_cartridges_core::protocol::RequestedAccess;
+    use big_cartridges_core::protocol::SetCartridgeGrant;
+    use big_dispatch_core::DispatchError;
+    use big_dispatch_core::DispatchScope;
+
+    const BETA: &str = example_cartridge!("beta");
+
+    /// Alpha's `ping` routine uses a drawers permbind (`drawers`, which writes) and the remote
+    /// method. The cartridge also declares a datum permbind and a drawers permbind that only
+    /// creates, neither of which has an answer of its own.
+    fn requesting() -> FixtureCartridge {
+        let mut cartridge = alpha(&[PING], &[REMOTE], &[NOTES]);
+        for (binding, write, create) in [("drawers", true, false), ("makes", false, true)] {
+            cartridge.permbinds.insert(
+                binding.into(),
+                Permbind::Drawers(PermbindDrawers {
+                    description: format!("{binding} description"),
+                    resolution: Default::default(),
+                    read: None,
+                    write: write.then_some(Necessity::Optional),
+                    create: create.then_some(Necessity::Optional),
+                    delete: None,
+                    extra: Default::default(),
+                }),
+            );
+        }
+        uses(&mut cartridge, PING, "drawers", writes());
+        uses(&mut cartridge, PING, REMOTE, RoutineUse::default());
+        cartridge
+    }
+
+    /// Alpha hosted with no grants at all, and the drawer a person would pick.
+    async fn asking() -> (Node, Arc<FakeExecutor>, DrawerId) {
+        let (node, executor, _) = hosted(requesting(), &[]).await;
+        let drawer = node.drawers.local().present_id.clone();
+        crate::e2e::grant_drawer(
+            &node.drawers,
+            &node.drawers_actor,
+            &drawer,
+            node.nodules_actor.actor.actor_id,
+            DrawerAccess::Admin,
+        )
+        .await;
+        (node, executor, drawer)
+    }
+
+    impl Node {
+        /// What a call from alpha's `ping` routine presents: the dispatch handle minted for it,
+        /// signed by the nodule's actor, as dispatch forwards it to a provider. Read at the call
+        /// because a restart mints it afresh.
+        async fn as_ping(&self, executor: &FakeExecutor) -> Authorization {
+            Authorization {
+                authority: dispatch_of(executor, PING),
+                signer: self.actor_at(&id(ALPHA)).await.capability,
+            }
+        }
+
+        async fn file(
+            &self,
+            from: Authorization,
+            permbind: &str,
+            drawer: Option<DrawerId>,
+        ) -> Result<FiledGrantRequest, CartridgesError> {
+            self.call(
+                from,
+                RequestCartridgeGrant {
+                    permbind: permbind.into(),
+                    drawer,
+                },
+            )
+            .await
+        }
+
+        async fn answer(
+            &self,
+            request: big_cabinet_core::dmeta::Uuid7,
+            answer: GrantAnswer,
+            drawer: Option<DrawerId>,
+        ) -> Result<GrantRequestState, CartridgesError> {
+            self.call(
+                self.operator(),
+                AnswerCartridgeGrantRequest {
+                    request,
+                    answer,
+                    drawer,
+                },
+            )
+            .await
+            .map(|answered| answered.state)
+        }
+
+        async fn pending(&self) -> Vec<big_cartridges_core::protocol::GrantRequestRecord> {
+            self.call(self.operator(), ListCartridgeGrantRequests {})
+                .await
+                .unwrap()
+                .requests
+        }
+
+        async fn grant_datum_present(&self, grant: GrantKey) -> bool {
+            self.cartridge_doc(ALPHA)
+                .await
+                .datums
+                .contains_key(&grant.datum_key())
+        }
+
+        /// Whether alpha's `ping` routine can call the remote method now.
+        async fn ping_reaches_remote(&self, executor: &FakeExecutor) -> bool {
+            match self
+                .invoke_as_nodule(dispatch_of(executor, PING), REMOTE)
+                .await
+            {
+                Ok(_) => true,
+                Err(DispatchError::Denied) => false,
+                Err(other) => panic!("unexpected dispatch failure: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn filing_is_refused_for_an_unrequestable_permbind_and_for_anyone_but_the_cartridge() {
+        let (node, executor, drawer) = asking().await;
+        let ping = node.as_ping(&executor).await;
+
+        // The cartridge may file only for a permbind its manifest declares, and only a method
+        // or a drawers permbind that grants something has an answer of its own.
+        for permbind in ["undeclared", NOTES, "makes"] {
+            assert!(
+                matches!(
+                    node.file(ping, permbind, None).await,
+                    Err(CartridgesError::Rejected(_))
+                ),
+                "{permbind}"
+            );
+        }
+        assert!(
+            matches!(
+                node.file(ping, REMOTE, Some(drawer.clone())).await,
+                Err(CartridgesError::Rejected(_))
+            ),
+            "a method request names no drawer"
+        );
+
+        // The cartridge is the caller's, never a field: the operator and a stranger run for
+        // none, and another cartridge's actor files only for what that cartridge declares.
+        node.admit(
+            node.operator(),
+            init_cartridge("beta", "1.0.0", &[], &[], &[]),
+        )
+        .await
+        .unwrap();
+        let beta = Authorization::identity(node.actor_at(&id(BETA)).await.capability);
+        let stranger = node.bystander().await;
+        let handle_under_another_signer = Authorization {
+            signer: beta.signer,
+            ..ping
+        };
+        for (presenter, expected) in [
+            (node.operator(), CartridgesError::Denied),
+            (stranger, CartridgesError::Denied),
+            (handle_under_another_signer, CartridgesError::Denied),
+        ] {
+            assert_eq!(
+                node.file(presenter, "drawers", Some(drawer.clone()))
+                    .await
+                    .unwrap_err(),
+                expected
+            );
+        }
+        assert!(
+            matches!(
+                node.file(beta, "drawers", Some(drawer)).await,
+                Err(CartridgesError::Rejected(_))
+            ),
+            "beta declares no `drawers`; it cannot file alpha's"
+        );
+        assert!(node.pending().await.is_empty());
+        node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn listing_answering_and_listing_grants_are_the_operators_alone() {
+        let (node, executor, _) = asking().await;
+        let ping = node.as_ping(&executor).await;
+        let filed = node.file(ping, REMOTE, None).await.unwrap();
+        let request = filed.request.expect("a request was filed");
+        for presenter in [ping, node.bystander().await] {
+            assert_eq!(
+                node.call(presenter, ListCartridgeGrantRequests {})
+                    .await
+                    .unwrap_err(),
+                CartridgesError::Denied
+            );
+            assert_eq!(
+                node.call(
+                    presenter,
+                    AnswerCartridgeGrantRequest {
+                        request,
+                        answer: GrantAnswer::Allow,
+                        drawer: None,
+                    }
+                )
+                .await
+                .unwrap_err(),
+                CartridgesError::Denied
+            );
+            assert_eq!(
+                node.call(presenter, ListCartridgeGrants::default())
+                    .await
+                    .unwrap_err(),
+                CartridgesError::Denied
+            );
+        }
+        assert_eq!(node.pending().await.len(), 1, "nothing was answered");
+        node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn allowing_a_drawer_request_writes_the_grant_and_the_routines_handle_appears() {
+        let (node, executor, drawer) = asking().await;
+        let ping = node.as_ping(&executor).await;
+        assert_eq!(executor.routine_capabilities()[PING].drawers, None);
+
+        let filed = node
+            .file(ping, "drawers", Some(drawer.clone()))
+            .await
+            .unwrap();
+        let request = filed.request.expect("a request was filed");
+        assert_eq!(filed.state, GrantRequestState::Pending);
+        assert_eq!(
+            node.file(ping, "drawers", None).await.unwrap(),
+            filed,
+            "filing the same permbind again returns the pending request"
+        );
+        let [waiting] = node.pending().await.try_into().unwrap();
+        assert_eq!(waiting.id, request);
+        assert_eq!(waiting.cartridge_id, id(ALPHA));
+        assert_eq!(
+            waiting.access,
+            RequestedAccess::Drawers {
+                access: DrawerAccess::Write,
+                drawer: Some(drawer.clone()),
+            }
+        );
+        assert_eq!(waiting.description, "drawers description");
+
+        // The await is held while pending and resolves when the answer lands: the awaiter is
+        // never answered before the handles are re-minted.
+        let held = node
+            .call(
+                ping,
+                AwaitCartridgeGrantRequest {
+                    request,
+                    hold_ms: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(held.state, GrantRequestState::Pending);
+        let (awaited, answered) = tokio::join!(
+            node.call(
+                ping,
+                AwaitCartridgeGrantRequest {
+                    request,
+                    hold_ms: 10_000,
+                },
+            ),
+            node.answer(request, GrantAnswer::Allow, None),
+        );
+        assert_eq!(answered.unwrap(), GrantRequestState::Allowed);
+        assert_eq!(awaited.unwrap().state, GrantRequestState::Allowed);
+
+        assert!(
+            executor.routine_capabilities()[PING].drawers.is_some(),
+            "the routine's drawers handle was minted from the grant"
+        );
+        assert!(
+            node.grant_datum_present(GrantKey::Drawer(drawer.clone()))
+                .await,
+            "an allow writes the grant datum"
+        );
+        assert!(node.pending().await.is_empty());
+        let granted = node
+            .call(node.operator(), ListCartridgeGrants::default())
+            .await
+            .unwrap()
+            .grants;
+        let [record] = granted.try_into().unwrap();
+        assert_eq!(record.grant, GrantKey::Drawer(drawer.clone()));
+        assert!(!record.this_boot);
+        assert!(
+            matches!(
+                node.answer(request, GrantAnswer::Decline, None).await,
+                Err(CartridgesError::Rejected(reason)) if reason.contains("already answered")
+            ),
+            "a request is answered once"
+        );
+
+        // Only the cartridge that filed it may ask after it.
+        node.admit(
+            node.operator(),
+            init_cartridge("beta", "1.0.0", &[], &[], &[]),
+        )
+        .await
+        .unwrap();
+        let beta = Authorization::identity(node.actor_at(&id(BETA)).await.capability);
+        assert!(matches!(
+            node.call(
+                beta,
+                AwaitCartridgeGrantRequest {
+                    request,
+                    hold_ms: 0
+                }
+            )
+            .await,
+            Err(CartridgesError::Rejected(_))
+        ));
+        node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_drawers_request_naming_no_drawer_is_answered_with_the_drawer_the_person_picks() {
+        let (node, executor, drawer) = asking().await;
+        let ping = node.as_ping(&executor).await;
+        let request = node
+            .file(ping, "drawers", None)
+            .await
+            .unwrap()
+            .request
+            .unwrap();
+        assert!(matches!(
+            node.answer(request, GrantAnswer::Allow, None).await,
+            Err(CartridgesError::Rejected(_))
+        ));
+        assert_eq!(
+            node.answer(request, GrantAnswer::Allow, Some(drawer.clone()))
+                .await
+                .unwrap(),
+            GrantRequestState::Allowed
+        );
+        assert!(node.grant_datum_present(GrantKey::Drawer(drawer)).await);
+        assert!(executor.routine_capabilities()[PING].drawers.is_some());
+        node.shutdown().await;
+    }
+
+    /// Allow writes a datum that outlives the boot; only-this-boot grants the same handle and
+    /// writes nothing, so it is gone after a restart and a routine refiles.
+    #[tokio::test]
+    async fn only_this_boot_grants_without_a_datum_and_is_gone_after_a_restart() {
+        for (answer, written) in [
+            (GrantAnswer::Allow, true),
+            (GrantAnswer::OnlyThisBoot, false),
+        ] {
+            let (mut node, executor, _) = asking().await;
+            let ping = node.as_ping(&executor).await;
+            assert!(!node.ping_reaches_remote(&executor).await);
+            let request = node
+                .file(ping, REMOTE, None)
+                .await
+                .unwrap()
+                .request
+                .unwrap();
+            node.answer(request, answer, None).await.unwrap();
+
+            assert!(
+                node.ping_reaches_remote(&executor).await,
+                "{answer:?}: the handle is minted from the answer"
+            );
+            assert_eq!(
+                node.grant_datum_present(GrantKey::Method(REMOTE.into()))
+                    .await,
+                written,
+                "{answer:?}"
+            );
+            let listed = node
+                .call(node.operator(), ListCartridgeGrants::default())
+                .await
+                .unwrap()
+                .grants;
+            let [record] = listed.try_into().unwrap();
+            assert_eq!(record.this_boot, !written, "{answer:?}");
+
+            node.restart_nodules().await.unwrap();
+            assert_eq!(
+                node.ping_reaches_remote(&executor).await,
+                written,
+                "{answer:?}: only the datum survives a restart"
+            );
+            assert!(node.pending().await.is_empty(), "the queue is in memory");
+            if !written {
+                let ping = node.as_ping(&executor).await;
+                let refiled = node.file(ping, REMOTE, None).await.unwrap();
+                assert_eq!(refiled.state, GrantRequestState::Pending);
+                assert_ne!(refiled.request, Some(request), "a refile is a new request");
+            }
+            node.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn revoking_takes_back_an_only_this_boot_grant_too() {
+        let (node, executor, _) = asking().await;
+        let ping = node.as_ping(&executor).await;
+        let request = node
+            .file(ping, REMOTE, None)
+            .await
+            .unwrap()
+            .request
+            .unwrap();
+        node.answer(request, GrantAnswer::OnlyThisBoot, None)
+            .await
+            .unwrap();
+        assert!(node.ping_reaches_remote(&executor).await);
+        node.call(
+            node.operator(),
+            SetCartridgeGrant {
+                cartridge_id: id(ALPHA),
+                grant: GrantKey::Method(REMOTE.into()),
+                value: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!node.ping_reaches_remote(&executor).await);
+        node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_decline_suppresses_a_refile_for_the_boot_and_ends_with_it() {
+        let (mut node, executor, drawer) = asking().await;
+        let ping = node.as_ping(&executor).await;
+        let request = node
+            .file(ping, REMOTE, None)
+            .await
+            .unwrap()
+            .request
+            .unwrap();
+        assert_eq!(
+            node.answer(request, GrantAnswer::Decline, None)
+                .await
+                .unwrap(),
+            GrantRequestState::Declined
+        );
+        assert!(!node.ping_reaches_remote(&executor).await);
+        assert!(
+            !node
+                .grant_datum_present(GrantKey::Method(REMOTE.into()))
+                .await
+        );
+
+        // Filing again is answered at once, with no new pending request.
+        assert_eq!(
+            node.file(ping, REMOTE, None).await.unwrap(),
+            FiledGrantRequest {
+                request: None,
+                state: GrantRequestState::Declined,
+            }
+        );
+        assert!(node.pending().await.is_empty());
+        // What awaited the declined request is told so, and the decline is the permbind's alone.
+        let awaited = node
+            .call(
+                ping,
+                AwaitCartridgeGrantRequest {
+                    request,
+                    hold_ms: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(awaited.state, GrantRequestState::Declined);
+        assert_eq!(
+            node.file(ping, "drawers", Some(drawer))
+                .await
+                .unwrap()
+                .state,
+            GrantRequestState::Pending
+        );
+
+        node.restart_nodules().await.unwrap();
+        let ping = node.as_ping(&executor).await;
+        assert_eq!(
+            node.file(ping, REMOTE, None).await.unwrap().state,
+            GrantRequestState::Pending,
+            "a decline lasts until the node next starts"
+        );
+        node.shutdown().await;
+    }
+
+    /// A grant already in force settles a request at once, so a routine that files on every
+    /// start is not prompted again for what the person already allowed.
+    #[tokio::test]
+    async fn filing_for_what_is_already_granted_files_nothing() {
+        let (node, executor, _) = asking().await;
+        node.set_methods(
+            ALPHA,
+            DispatchScope {
+                operations: [REMOTE.to_owned()].into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let ping = node.as_ping(&executor).await;
+        assert_eq!(
+            node.file(ping, REMOTE, None).await.unwrap(),
+            FiledGrantRequest {
+                request: None,
+                state: GrantRequestState::Allowed,
+            }
+        );
+        assert!(node.pending().await.is_empty());
+        node.shutdown().await;
+    }
 }

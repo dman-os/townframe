@@ -26,6 +26,7 @@ pub const service_core_rs::xrpc::AUTHORIZATION_HEADER: & str
 pub const service_core_rs::xrpc::DOMAIN_ERROR_FIELD: & str
 pub const service_core_rs::xrpc::DOMAIN_ERROR_STATUS: StatusCode
 pub const service_core_rs::xrpc::IDEMPOTENCY_KEY_HEADER: & str
+pub const service_core_rs::xrpc::NODULE_BLOBS_CAPABILITY_HEADER: & str
 pub const service_core_rs::xrpc::NODULE_CAPABILITY_HEADER: & str
 pub const service_core_rs::xrpc::NODULE_CONFIG_CAPABILITY_HEADER: & str
 pub const service_core_rs::xrpc::NODULE_CONFIG_DOC_HEADER: & str
@@ -86,7 +87,7 @@ pub impl service_core_rs::xrpc::XrpcErrorEnvelope::fn new (error : String , mess
 pub impl service_core_rs::xrpc::crate :: ResponseMetadata::fn read_headers (headers : & HeaderMap) -> Result < Self , String >
 pub impl service_core_rs::xrpc::crate :: ResponseMetadata::fn write_headers (& self , headers : & mut HeaderMap)
 pub macro service_core_rs::declare_service_protocol! { ($ vis : vis enum $ protocol : ident => $ message : ident { unary { $ ($ variant : ident ($ params : ty)) ,* $ (,) ? } stream { $ ($ stream_variant : ident ($ stream_params : ty)) ,* $ (,) ? } }) }
-pub macro service_core_rs::service_method! { ($ params : ty => $ output : ty , $ error : ty , $ kind : ident ($ nsid : literal) $ (, $ attribute : ident) *); ($ params : ty => stream $ event : ty , $ error : ty , $ nsid : literal) }
+pub macro service_core_rs::service_method! { ($ params : ty => $ output : ty , $ error : ty , $ kind : ident ($ nsid : literal) $ (, $ attribute : ident $ (($ ($ argument : expr) ,*)) ?) *); ($ params : ty => stream $ event : ty , $ error : ty , $ nsid : literal) }
 pub mod service_core_rs::cancellation
 pub mod service_core_rs::context
 pub mod service_core_rs::descriptor

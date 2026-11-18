@@ -938,7 +938,11 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
             ..Default::default()
         },
         DocScope {
-            drawers: [(drawer.clone(), Access::Write)].into(),
+            drawers: [(
+                drawer.clone(),
+                big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+            )]
+            .into(),
             ..Default::default()
         },
     ];

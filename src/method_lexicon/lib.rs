@@ -199,21 +199,40 @@ type Assemble = fn() -> Result<Value, MethodLexiconError>;
 /// Every built-in method with the function that assembles its Lexicon. One list, so a method
 /// added to a service is one line here; a router that registers a built-in operation missing from
 /// it refuses to start (`big_dispatch::ServiceProvider::register`), so a new method cannot go
-/// unlisted unnoticed.
-pub fn builtin_methods() -> impl Iterator<Item = (&'static str, Assemble)> {
+/// unlisted unnoticed. Each is `(nsid, owning crate, assemble)`: the owner is the crate that
+/// defines the method type, which is how the wire-surface snapshot attributes a Lexicon.
+pub fn builtin_methods() -> impl Iterator<Item = (&'static str, &'static str, Assemble)> {
     builtin_list()
         .iter()
-        .map(|(nsid, assemble, _)| (*nsid, *assemble))
+        .map(|(method, owner, assemble, _)| (method.nsid, *owner, *assemble))
 }
 
-type Builtin = (&'static str, Assemble, fn() -> MethodSchemas);
+/// The built-in method `nsid` names, as its service declares it: what a runtime reads the
+/// operation's [`method_core::HandleNeed`] from (ADR 049 §6.2).
+pub fn builtin_method(nsid: &str) -> Option<method_core::XrpcMethod> {
+    builtin_list()
+        .iter()
+        .find(|(method, _, _, _)| method.nsid == nsid)
+        .map(|(method, _, _, _)| *method)
+}
+
+type Builtin = (
+    method_core::XrpcMethod,
+    &'static str,
+    Assemble,
+    fn() -> MethodSchemas,
+);
 
 /// [`builtin_methods`] with each method's schemas too, which the tests read the error enums from.
 fn builtin_list() -> &'static [Builtin] {
     static LIST: std::sync::LazyLock<Vec<Builtin>> = std::sync::LazyLock::new(|| {
         macro_rules! group {
                 ($($method:path),* $(,)?) => { vec![$((
-                    <$method as Method>::XRPC.nsid,
+                    <$method as Method>::XRPC,
+                    std::any::type_name::<$method>()
+                        .split("::")
+                        .next()
+                        .expect("a type name starts with its crate"),
                     lexicon::<$method> as Assemble,
                     <$method as MethodSchema>::schemas as fn() -> MethodSchemas,
                 )),*] };
@@ -300,6 +319,11 @@ fn builtin_list() -> &'static [Builtin] {
             cartridges::SetCartridgeGrant,
             cartridges::ClearCartridgeConfig,
             cartridges::ListCartridgeInstalls,
+            cartridges::RequestCartridgeGrant,
+            cartridges::AwaitCartridgeGrantRequest,
+            cartridges::ListCartridgeGrantRequests,
+            cartridges::AnswerCartridgeGrantRequest,
+            cartridges::ListCartridgeGrants,
             cartridges::ObserveCartridgeInstalls,
         ]
     });
@@ -521,8 +545,21 @@ pub fn lexicon<M: MethodSchema>() -> Result<Value, MethodLexiconError> {
     let mut defs = Map::new();
     defs.insert("main".to_owned(), Value::Object(main));
     defs.extend(carried);
-    let file = json!({ "lexicon": 1, "id": nsid, "defs": Value::Object(defs) });
+    let mut file = json!({ "lexicon": 1, "id": nsid, "defs": Value::Object(defs) });
     admit(nsid, kind, &file)?;
+    // The method's own stability (ADR 021): the file's `revision` is the highest revision the
+    // method names, and an unstable or deprecated method says so beside it, which is where the
+    // wire-surface check reads it from (a method has no sidecar to carry the keywords).
+    let stability = M::XRPC.stability;
+    if let Some(revision) = stability.revision() {
+        file["revision"] = json!(revision);
+    }
+    if let Some(feature) = stability.unstable {
+        file["x-unstable"] = json!(feature);
+    }
+    if let Some(deprecated) = stability.deprecated {
+        file["x-deprecated"] = json!({ "since": deprecated.since, "note": deprecated.note });
+    }
     Ok(file)
 }
 

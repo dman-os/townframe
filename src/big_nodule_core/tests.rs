@@ -1356,92 +1356,104 @@ mod admission_tests {
     fn each_grant_is_a_datum_of_its_own_and_revoking_one_leaves_the_rest() {
         let mut docs = CartridgeConfig::default();
         let drawer = DocId::random();
-        let scope = |operations: &[&str], authorities: &[&str]| DispatchScope {
-            operations: operations.iter().map(|nsid| (*nsid).to_owned()).collect(),
-            authorities: authorities.iter().map(|nsid| (*nsid).to_owned()).collect(),
-            privileged: false,
-        };
+        let other: CartridgeId = example_cartridge!("other").parse().unwrap();
         let drawer_grant = GrantKey::Drawer(drawer.clone());
+        let cartridge_grant = GrantKey::Cartridge(other.clone());
+        let origin = GrantKey::Origin("https://api.example.org".into());
         let method = GrantKey::Method("org.example.search.query".into());
         let authority = GrantKey::Authority("org.example.callee".into());
 
-        // Two grants made separately both apply, and each wrote a datum of its own.
+        // Grants made separately all apply, and each wrote a datum of its own.
         docs.set_grant(
-            Component::Nodule,
             drawer_grant.clone(),
-            Some(GrantBody::drawer(EntryAccess::Read)),
+            Some(GrantBody::access(EntryAccess::Read)),
         )
         .unwrap();
         docs.set_grant(
-            Component::Nodule,
-            method.clone(),
-            Some(GrantBody::method(false)),
+            cartridge_grant.clone(),
+            Some(GrantBody::access(EntryAccess::Write)),
         )
         .unwrap();
-        docs.set_grant(
-            Component::Nodule,
-            authority.clone(),
-            Some(GrantBody::method(false)),
-        )
-        .unwrap();
-        let (drawers, methods) = docs.resolve_grants(Component::Nodule).unwrap();
+        for key in [&origin, &method, &authority] {
+            docs.set_grant(key.clone(), Some(GrantBody::present()))
+                .unwrap();
+        }
+        let resolved = docs.resolve_grants().unwrap();
         assert_eq!(
-            drawers,
+            resolved.drawers,
             BTreeMap::from([(drawer.clone(), DrawerAccess::Read)])
         );
         assert_eq!(
-            methods,
-            scope(&["org.example.search.query"], &["org.example.callee"])
+            resolved.cartridges,
+            BTreeMap::from([(other, DrawerAccess::Write)])
+        );
+        assert_eq!(
+            resolved.origins,
+            BTreeSet::from(["https://api.example.org".to_owned()])
+        );
+        assert_eq!(
+            resolved.operations,
+            DispatchScope {
+                operations: BTreeSet::from(["org.example.search.query".to_owned()]),
+                authorities: BTreeSet::from(["org.example.callee".to_owned()]),
+                privileged: false,
+            }
         );
         let patch = CartridgeConfig::diff(&CartridgeConfig::default(), &docs).unwrap();
-        assert_eq!(patch.set.len(), 3);
+        assert_eq!(patch.set.len(), 5);
         assert!(patch.remove.is_empty());
-
-        // The nodule's grants are not the micro's.
+        // A grant that states nothing carries `empty`, and the others state their access.
+        assert_eq!(patch.set[&method.datum_key()], json!({"empty": true}));
         assert_eq!(
-            docs.resolve_grants(Component::Micro).unwrap(),
-            (BTreeMap::new(), DispatchScope::default())
+            patch.set[&drawer_grant.datum_key()],
+            json!({"access": "Read"})
         );
-        docs.set_grant(
-            Component::Micro,
-            method.clone(),
-            Some(GrantBody::method(true)),
-        )
-        .unwrap();
-        assert!(docs.resolve_grants(Component::Micro).unwrap().1.privileged);
-        assert!(!docs.resolve_grants(Component::Nodule).unwrap().1.privileged);
+
+        // The grants are read back from the datums they wrote.
+        let read = DatumsRead {
+            heads: Vec::new(),
+            datums: patch
+                .set
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        DatumRead::Accepted {
+                            value: value.clone(),
+                            version: DatumVersion::default(),
+                            authors: Vec::new(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        assert_eq!(
+            CartridgeConfig::hydrate(&read).resolve_grants().unwrap(),
+            resolved
+        );
 
         // Revoking one grant deletes its datum alone.
         let before = docs.clone();
-        docs.set_grant(Component::Nodule, method, None).unwrap();
+        docs.set_grant(method.clone(), None).unwrap();
         let patch = CartridgeConfig::diff(&before, &docs).unwrap();
         assert!(patch.set.is_empty());
+        assert_eq!(patch.remove, BTreeSet::from([method.datum_key()]));
         assert_eq!(
-            patch.remove,
-            BTreeSet::from([
-                GrantKey::Method("org.example.search.query".into()).datum_key(Component::Nodule)
-            ])
-        );
-        assert_eq!(
-            docs.resolve_grants(Component::Nodule).unwrap().1,
-            scope(&[], &["org.example.callee"])
+            docs.resolve_grants().unwrap().operations.operations,
+            BTreeSet::new()
         );
 
         // A grant states what its kind takes.
         assert!(matches!(
-            docs.set_grant(
-                Component::Nodule,
-                drawer_grant,
-                Some(GrantBody::method(false))
-            ),
+            docs.set_grant(drawer_grant, Some(GrantBody::present())),
             Err(InventoryError::InvalidGrant { .. })
         ));
         assert!(matches!(
-            docs.set_grant(
-                Component::Nodule,
-                authority,
-                Some(GrantBody::drawer(EntryAccess::Read))
-            ),
+            docs.set_grant(cartridge_grant, Some(GrantBody::present())),
+            Err(InventoryError::InvalidGrant { .. })
+        ));
+        assert!(matches!(
+            docs.set_grant(authority, Some(GrantBody::access(EntryAccess::Read))),
             Err(InventoryError::InvalidGrant { .. })
         ));
     }
@@ -1775,10 +1787,13 @@ mod declaration {
         use crate::config::MethodRoute;
         use crate::config::NoduleDevTakeover;
         use crate::config::config_universe;
+        use big_cartridges_core::config::AuthorityGrant;
         use big_cartridges_core::config::CartridgeConfigIdentity;
+        use big_cartridges_core::config::CartridgeGrant;
         use big_cartridges_core::config::CartridgeInstall;
-        use big_cartridges_core::config::MicroGrant;
-        use big_cartridges_core::config::NoduleGrant;
+        use big_cartridges_core::config::DrawerGrant;
+        use big_cartridges_core::config::MethodGrant;
+        use big_cartridges_core::config::OriginGrant;
 
         let universe = config_universe();
         let ids: Vec<&str> = universe
@@ -1791,15 +1806,18 @@ mod declaration {
             [
                 CartridgeInstall::ID,
                 CartridgeConfigIdentity::ID,
-                NoduleGrant::ID,
-                MicroGrant::ID,
+                DrawerGrant::ID,
+                CartridgeGrant::ID,
+                OriginGrant::ID,
+                MethodGrant::ID,
+                AuthorityGrant::ID,
                 NoduleDevTakeover::ID,
                 MethodRoute::ID
             ]
         );
         let bundle = Bundle::new(&universe, Vec::new());
         let lexicons = bundle.lexicons().unwrap();
-        assert_eq!(lexicons.len(), 6);
+        assert_eq!(lexicons.len(), 9);
 
         // The install pins its version by reference: a `#datumPin` position, which indexes find
         // from the schema alone.
@@ -1845,17 +1863,16 @@ mod config_tests {
     use big_cabinet_core::doc::DatumStore;
     use big_cabinet_core::doc::DatumVersion;
     use big_cabinet_core::doc::DatumsRead;
-    use big_cabinet_core::drawer::DrawerAccess;
     use big_cabinet_core::drawer::EntryAccess;
     use big_cartridges_core::CartridgeId;
     use big_cartridges_core::Digest;
     use big_cartridges_core::config::CartridgeConfigIdentity;
     use big_cartridges_core::config::CartridgeInstall;
     use big_cartridges_core::config::Component;
+    use big_cartridges_core::config::DrawerGrant;
     use big_cartridges_core::config::GrantBody;
     use big_cartridges_core::config::GrantKey;
-    use big_cartridges_core::config::MicroGrant;
-    use big_cartridges_core::config::NoduleGrant;
+    use big_cartridges_core::config::MethodGrant;
     use big_cartridges_core::config::config_identity_key;
     use big_cartridges_core::config::install_key;
     use big_cartridges_core::example_cartridge;
@@ -1906,37 +1923,37 @@ mod config_tests {
         assert_eq!(serde_json::to_value(&decoded).unwrap(), install_json);
 
         let grant_json = json!({ "access": "SuperAdmin", "futureGrantField": true });
-        let decoded: NoduleGrant = serde_json::from_value(grant_json.clone()).unwrap();
-        assert_eq!(
-            decoded.access,
-            Some(EntryAccess::Unknown("SuperAdmin".into()))
-        );
+        let decoded: DrawerGrant = serde_json::from_value(grant_json.clone()).unwrap();
+        assert_eq!(decoded.access, EntryAccess::Unknown("SuperAdmin".into()));
         assert_eq!(serde_json::to_value(&decoded).unwrap(), grant_json);
-        let micro: MicroGrant = serde_json::from_value(json!({ "privileged": true })).unwrap();
-        assert!(micro.privileged && micro.access.is_none());
+        let method_json = json!({ "empty": true, "futureGrantField": 1 });
+        let decoded: MethodGrant = serde_json::from_value(method_json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), method_json);
 
         assert!(NoduleConfig::owns(&install_key(&cartridge_id)));
         // The grants and the settings are the cartridge document's, not the node's.
         let grant = GrantKey::Method("org.example.x.y".into());
-        assert!(!NoduleConfig::owns(&grant.datum_key(Component::Nodule)));
-        assert!(CartridgeConfig::owns(&grant.datum_key(Component::Nodule)));
+        assert!(!NoduleConfig::owns(&grant.datum_key()));
+        assert!(CartridgeConfig::owns(&grant.datum_key()));
         assert!(CartridgeConfig::owns(
             &DatumKey::from_text("org.example.photos.settings", "main").unwrap()
         ));
     }
 
     #[test]
-    fn grant_keys_name_drawers_operations_and_authorities_and_nothing_else() {
+    fn grant_keys_name_the_five_kinds_of_grant_and_nothing_else() {
         let drawer = DocId::random();
         for text in [
             format!("drawer:{drawer}"),
+            format!("cartridge:{}", example_cartridge!("other")),
+            "origin:https://api.example.org".to_owned(),
             "method:org.example.tags.apply".to_owned(),
             "authority:org.example.tags".to_owned(),
             "authority:*".to_owned(),
         ] {
             let key: GrantKey = text.parse().unwrap();
             assert_eq!(key.to_string(), text);
-            assert_eq!(GrantKey::from_slot(text.as_bytes()), Some(key));
+            assert_eq!(GrantKey::from_datum_key(&key.datum_key()), Some(key));
         }
         // An NSID-shaped name is an operation and an authority at once, so the kind is in the key.
         assert_ne!(
@@ -1947,6 +1964,8 @@ mod config_tests {
             "",
             "drawer",
             "drawer:not-a-doc",
+            "cartridge:not-a-cartridge",
+            "origin:",
             "method:org.example",
             "method:*",
             "authority:tags",
@@ -2074,7 +2093,7 @@ mod config_tests {
         let settings = DatumKey::from_text("org.example.photos.settings", "main").unwrap();
         let damaged = GrantKey::Method("org.example.damaged.op".into());
         let kept = GrantKey::Drawer(drawer.clone());
-        let notes = DatumKey::from_text(NoduleGrant::ID, "free-form-note").unwrap();
+        let notes = DatumKey::from_text(DrawerGrant::ID, "free-form-note").unwrap();
         let mut read = DatumsRead {
             heads: Vec::new(),
             datums: BTreeMap::new(),
@@ -2086,18 +2105,14 @@ mod config_tests {
         read.datums
             .insert(settings.clone(), accepted(json!({ "thumbnails": false })));
         read.datums.insert(
-            kept.datum_key(Component::Nodule),
+            kept.datum_key(),
             accepted(json!({ "access": "Write", "futureField": 1 })),
         );
         read.datums.insert(
-            damaged.datum_key(Component::Nodule),
+            damaged.datum_key(),
             DatumRead::Rejected {
                 reason: "unauthorized writer".into(),
             },
-        );
-        read.datums.insert(
-            kept.datum_key(Component::Micro),
-            accepted(json!({ "access": "Read" })),
         );
         // A grant-tagged datum whose slot names no grant is carried, like a setting.
         read.datums
@@ -2109,49 +2124,31 @@ mod config_tests {
             Some(CartridgeConfigIdentity { cartridge, .. })
                 if cartridge.to_string() == example_cartridge!("photos")
         ));
-        let nodule: Vec<_> = stored.grants(Component::Nodule).collect();
-        assert_eq!(nodule.len(), 2);
+        assert_eq!(stored.grants().count(), 2);
         assert!(matches!(
-            stored.resolve_grants(Component::Nodule),
+            stored.resolve_grants(),
             Err(reason) if reason.contains("org.example.damaged.op")
         ));
-        let (micro_drawers, _) = stored.resolve_grants(Component::Micro).unwrap();
-        assert_eq!(
-            micro_drawers,
-            BTreeMap::from([(drawer.clone(), DrawerAccess::Read)])
-        );
 
         // Rewriting a grant keeps the members of the stored datum this build does not know, and
         // replaces the damaged one outright.
         let mut after = stored.clone();
         after
-            .set_grant(
-                Component::Nodule,
-                kept.clone(),
-                Some(GrantBody::drawer(EntryAccess::Admin)),
-            )
+            .set_grant(kept.clone(), Some(GrantBody::access(EntryAccess::Admin)))
             .unwrap();
         after
-            .set_grant(
-                Component::Nodule,
-                damaged.clone(),
-                Some(GrantBody::method(false)),
-            )
+            .set_grant(damaged.clone(), Some(GrantBody::present()))
             .unwrap();
         let patch = CartridgeConfig::diff(&stored, &after).unwrap();
         assert!(patch.remove.is_empty());
         assert_eq!(
-            patch.set[&kept.datum_key(Component::Nodule)],
+            patch.set[&kept.datum_key()],
             json!({ "access": "Admin", "futureField": 1 })
         );
-        assert_eq!(patch.set[&damaged.datum_key(Component::Nodule)], json!({}));
-        assert_eq!(
-            patch.set.len(),
-            2,
-            "the settings and the micro's grant are untouched"
-        );
+        assert_eq!(patch.set[&damaged.datum_key()], json!({ "empty": true }));
+        assert_eq!(patch.set.len(), 2, "the settings are untouched");
 
-        // Clearing deletes the settings and every grant of both components, and keeps the
+        // Clearing deletes the settings and every grant, and keeps the
         // identity that lets the document be found again.
         let mut cleared = stored.clone();
         cleared.clear();
@@ -2159,13 +2156,7 @@ mod config_tests {
         assert!(patch.set.is_empty());
         assert_eq!(
             patch.remove,
-            BTreeSet::from([
-                settings,
-                notes,
-                kept.datum_key(Component::Nodule),
-                damaged.datum_key(Component::Nodule),
-                kept.datum_key(Component::Micro),
-            ])
+            BTreeSet::from([settings, notes, kept.datum_key(), damaged.datum_key(),])
         );
         assert!(!patch.remove.contains(&identity));
         assert_eq!(cleared.identity(), stored.identity());
@@ -2297,7 +2288,16 @@ mod config_tests {
             datums: patch
                 .set
                 .iter()
-                .map(|(key, value)| (key.clone(), accepted(value.clone())))
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        DatumRead::Accepted {
+                            value: value.clone(),
+                            version: DatumVersion::default(),
+                            authors: Vec::new(),
+                        },
+                    )
+                })
                 .collect(),
         };
         let other_blob = json!({"mime": "image/png", "lengthOctets": 1, "digest": "zQm"});
