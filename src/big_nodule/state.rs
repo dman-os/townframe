@@ -16,6 +16,8 @@ use crate::executor::ReensureQueue;
 use crate::executor::RoutineCapabilities;
 use crate::executor::RoutineSpec;
 use crate::requests::GrantRequests;
+use crate::requests::GrantsFeed;
+use crate::requests::MissingAuthorityLookup;
 use crate::requests::Requests;
 use crate::store;
 use big_cabinet::DatumStore;
@@ -315,6 +317,9 @@ pub(crate) struct Handle {
     pub(crate) installs: watch::Receiver<Vec<CartridgeInstallRecord>>,
     /// The grant requests of this boot, for the service's list and its long polls to follow.
     pub(crate) requests: watch::Receiver<Requests>,
+    /// Each cartridge's grants as the last reconcile left them, for the service's
+    /// `awaitCartridgeGrants` to follow.
+    pub(crate) grants: watch::Receiver<GrantsFeed>,
 }
 
 impl Handle {
@@ -372,6 +377,9 @@ pub(crate) struct State {
     installs: watch::Sender<Vec<CartridgeInstallRecord>>,
     /// The runtime grant requests of this boot and the grants that last as long (ADR 049 §4.2).
     grant_requests: GrantRequests,
+    /// Each cartridge's refusal attribution, shared with its executor (see
+    /// [`MissingAuthorityLookup`]).
+    missing_authority: BTreeMap<CartridgeId, MissingAuthorityLookup>,
 }
 
 fn nodule_actor(actor: &OpenedActor) -> NoduleActor {
@@ -536,7 +544,7 @@ impl AppliedRoutine {
     }
 }
 
-/// Each routine's desired scopes: [`lower_uses`] over its `uses`.
+/// Each routine's desired scopes: [`RoutineScopes::lower`] over its `uses`.
 fn desired_routine_scopes(
     installed: &InstalledNodule,
     desired_grants: &BTreeMap<DrawerId, DrawerAccess>,
@@ -549,7 +557,7 @@ fn desired_routine_scopes(
         .map(|(routine_key, routine)| {
             (
                 routine_key.clone(),
-                lower_uses(
+                RoutineScopes::lower(
                     &installed.resolved,
                     &installed.config_doc,
                     &routine.uses,
@@ -561,160 +569,206 @@ fn desired_routine_scopes(
         .collect()
 }
 
-/// The scopes of the service handles a holder of `uses` should have: what `uses` lists,
-/// intersected with what the cartridge was granted (`effective_operations` for methods,
-/// `desired_grants` for drawers; ADR 049 §4.1) and with what the permbind declares. A grant is the
-/// cartridge's, so one grant of a drawer satisfies every holder whose `uses` take a `#drawers`
-/// permbind that needs it, and a holder whose `uses` do not take one reaches no drawer however many
-/// are granted. A routine and a micro are lowered by this one function (ADR 049 §3), so the two
-/// runtimes cannot disagree about what a `uses` entry confers.
-///
-/// `effective_operations` is the cartridge's granted operations bound to its method permbinds
-/// (`NoduleAdmission::bind_operations`), and `config_doc` the cartridge's configuration document,
-/// where its settings datums live.
-pub fn lower_uses(
-    resolved: &ResolvedCartridge,
-    config_doc: &DocId,
-    uses: &BTreeMap<String, RoutineUse>,
-    desired_grants: &BTreeMap<DrawerId, DrawerAccess>,
-    effective_operations: &DispatchScope,
-) -> RoutineScopes {
-    let settings_kinds = resolved.settings_kinds();
-    let mut operations = BTreeSet::new();
-    let mut read = BTreeSet::new();
-    let mut write = BTreeSet::new();
-    // Every `#datum` kind the routine's `uses` take, settings or not: the kinds its docs
-    // handle reaches inside the drawers it was granted.
-    let mut datum_read = BTreeSet::new();
-    let mut datum_write = BTreeSet::new();
-    let mut drawers = BTreeMap::new();
-    let mut create_drawer = false;
-    // The operation-level flags of the blobs handle the routine's operations need, stated
-    // beside each operation's definition (ADR 049 §6.2).
-    let mut blobs_flags = serde_json::Map::new();
-    for (binding, usage) in uses {
-        let permbind = resolved
-            .cartridge
-            .permbinds
-            .get(binding)
-            .expect("admission refuses a use without its permbind");
-        match permbind {
-            // Listing a method permbind is the use: method access has no
-            // read/write/create/delete to inspect.
-            Permbind::Method(method) => {
-                if effective_operations
-                    .operations
-                    .contains(method.nsid.as_str())
-                {
-                    operations.insert(method.nsid.to_string());
-                    if let Some(need) = method_lexicon::builtin_method(method.nsid.as_str())
-                        .and_then(|built_in| built_in.handle)
+impl RoutineScopes {
+    /// The scopes of the service handles a holder of `uses` should have: what `uses` lists,
+    /// intersected with what the cartridge was granted (`effective_operations` for methods,
+    /// `desired_grants` for drawers; ADR 049 §4.1) and with what the permbind declares. A grant is
+    /// the cartridge's, so one grant of a drawer satisfies every holder whose `uses` take a
+    /// `#drawers` permbind that needs it, and a holder whose `uses` do not take one reaches no
+    /// drawer however many are granted. A routine and a micro are lowered by this one function
+    /// (ADR 049 §3), so the two runtimes cannot disagree about what a `uses` entry confers.
+    ///
+    /// `effective_operations` is the cartridge's granted operations bound to its method permbinds
+    /// (`NoduleAdmission::bind_operations`), and `config_doc` the cartridge's configuration
+    /// document, where its settings datums live.
+    pub fn lower(
+        resolved: &ResolvedCartridge,
+        config_doc: &DocId,
+        uses: &BTreeMap<String, RoutineUse>,
+        desired_grants: &BTreeMap<DrawerId, DrawerAccess>,
+        effective_operations: &DispatchScope,
+    ) -> Self {
+        let settings_kinds = resolved.settings_kinds();
+
+        let mut operations = BTreeSet::new();
+        let mut read = BTreeSet::new();
+        let mut write = BTreeSet::new();
+        // Every `#datum` kind the routine's `uses` take, settings or not: the kinds its docs
+        // handle reaches inside the drawers it was granted.
+        let mut datum_read = BTreeSet::new();
+        let mut datum_write = BTreeSet::new();
+        let mut drawers = BTreeMap::new();
+        let mut create_drawer = false;
+        // The operation-level flags of the blobs handle the routine's operations need, stated
+        // beside each operation's definition (ADR 049 §6.2).
+        let mut blobs_flags = serde_json::Map::new();
+        for (binding, usage) in uses {
+            let permbind = resolved
+                .cartridge
+                .permbinds
+                .get(binding)
+                .expect("admission refuses a use without its permbind");
+            match permbind {
+                // Listing a method permbind is the use: method access has no
+                // read/write/create/delete to inspect.
+                Permbind::Method(method) => {
+                    if effective_operations
+                        .operations
+                        .contains(method.nsid.as_str())
                     {
-                        assert_eq!(
-                            need.mint, BLOBS_MINT,
-                            "a built-in operation's handle need names a domain the nodule runtime mints"
-                        );
-                        blobs_flags.extend(
-                            need.flags
-                                .iter()
-                                .map(|flag| ((*flag).to_owned(), serde_json::Value::Bool(true))),
-                        );
+                        operations.insert(method.nsid.to_string());
+                        if let Some(need) = method_lexicon::builtin_method(method.nsid.as_str())
+                            .and_then(|built_in| built_in.handle)
+                        {
+                            assert_eq!(
+                                need.mint, BLOBS_MINT,
+                                "a built-in operation's handle need names a domain the nodule runtime mints"
+                            );
+                            blobs_flags.extend(
+                                need.flags.iter().map(|flag| {
+                                    ((*flag).to_owned(), serde_json::Value::Bool(true))
+                                }),
+                            );
+                        }
                     }
                 }
+                Permbind::Datum(datum) => {
+                    let tag = DatumTag::new(datum.nsid.to_string())
+                        .expect("an admitted datum binding has a valid tag");
+                    if usage.read {
+                        datum_read.insert(tag.clone());
+                    }
+                    if usage.write || usage.create || usage.delete {
+                        datum_write.insert(tag.clone());
+                    }
+                    // What the cartridge-wide capabilities this replaces reached, and so
+                    // all a datum permbind reaches: the cartridge config document, whole
+                    // for reads and the declared settings kinds for writes. No code ever
+                    // turned a non-settings `#datum` permbind into a document scope, and
+                    // no document set is named for one yet, so such a permbind confers
+                    // nothing here rather than a document this change invented.
+                    if !settings_kinds
+                        .covers(&DatumKinds::Only(std::iter::once(tag.clone()).collect()))
+                    {
+                        continue;
+                    }
+                    if usage.read {
+                        read.insert(tag.clone());
+                    }
+                    if usage.write || usage.create || usage.delete {
+                        write.insert(tag);
+                    }
+                }
+                Permbind::Drawers(drawer) => {
+                    // What the routine uses on existing drawers, as far as the permbind
+                    // declares it and a drawer was granted that far. `create` is not
+                    // among them: it sets only the scope's create flag below, so a
+                    // create-only routine can make drawers without any access to the
+                    // ones that exist (grants never widen silently, ADR 028). Deleting
+                    // has no access level of its own, so it needs Write.
+                    let access = [
+                        (usage.read && drawer.read.is_some(), DrawerAccess::Read),
+                        (usage.write && drawer.write.is_some(), DrawerAccess::Write),
+                        (usage.delete && drawer.delete.is_some(), DrawerAccess::Write),
+                    ]
+                    .into_iter()
+                    .filter_map(|(used, access)| used.then_some(access))
+                    .max();
+                    if let Some(access) = access {
+                        drawers.extend(
+                            desired_grants
+                                .iter()
+                                .filter(|(_, granted)| **granted >= access)
+                                .map(|(id, _)| (id.clone(), access)),
+                        );
+                    }
+                    create_drawer |= usage.create && drawer.create.is_some();
+                }
+                Permbind::Unknown(_) => {}
             }
-            Permbind::Datum(datum) => {
-                let tag = DatumTag::new(datum.nsid.to_string())
-                    .expect("an admitted datum binding has a valid tag");
-                if usage.read {
-                    datum_read.insert(tag.clone());
-                }
-                if usage.write || usage.create || usage.delete {
-                    datum_write.insert(tag.clone());
-                }
-                // What the cartridge-wide capabilities this replaces reached, and so
-                // all a datum permbind reaches: the cartridge config document, whole
-                // for reads and the declared settings kinds for writes. No code ever
-                // turned a non-settings `#datum` permbind into a document scope, and
-                // no document set is named for one yet, so such a permbind confers
-                // nothing here rather than a document this change invented.
-                if !settings_kinds.covers(&DatumKinds::Only(std::iter::once(tag.clone()).collect()))
-                {
-                    continue;
-                }
-                if usage.read {
-                    read.insert(tag.clone());
-                }
-                if usage.write || usage.create || usage.delete {
-                    write.insert(tag);
-                }
-            }
-            Permbind::Drawers(drawer) => {
-                // What the routine uses on existing drawers, as far as the permbind
-                // declares it and a drawer was granted that far. `create` is not
-                // among them: it sets only the scope's create flag below, so a
-                // create-only routine can make drawers without any access to the
-                // ones that exist (grants never widen silently, ADR 028). Deleting
-                // has no access level of its own, so it needs Write.
-                let access = [
-                    (usage.read && drawer.read.is_some(), DrawerAccess::Read),
-                    (usage.write && drawer.write.is_some(), DrawerAccess::Write),
-                    (usage.delete && drawer.delete.is_some(), DrawerAccess::Write),
+        }
+        // A routine with something in its `uses` may always ask for it and wait for the
+        // answer: filing confers nothing, and the grant that would admit the call is the very
+        // thing the request is for, so it cannot be a precondition of it (ADR 049 §4.2).
+        if !uses.is_empty() {
+            operations.extend(
+                [
+                    RequestCartridgeGrant::XRPC.nsid,
+                    AwaitCartridgeGrantRequest::XRPC.nsid,
                 ]
-                .into_iter()
-                .filter_map(|(used, access)| used.then_some(access))
-                .max();
-                if let Some(access) = access {
-                    drawers.extend(
-                        desired_grants
-                            .iter()
-                            .filter(|(_, granted)| **granted >= access)
-                            .map(|(id, _)| (id.clone(), access)),
-                    );
-                }
-                create_drawer |= usage.create && drawer.create.is_some();
-            }
-            Permbind::Unknown(_) => {}
+                .map(str::to_owned),
+            );
+        }
+        let docs = routine_docs_scope(
+            config_doc,
+            &drawers,
+            [read, write],
+            [datum_read, datum_write],
+            &mut operations,
+        );
+        let blobs = (!blobs_flags.is_empty()).then(|| {
+            serde_json::from_value(serde_json::Value::Object(blobs_flags))
+                .expect("a handle need's flags are fields of the blobs scope")
+        });
+        let drawers = (!drawers.is_empty() || create_drawer).then_some(DrawerScope {
+            drawers,
+            create: create_drawer,
+        });
+        let dispatch = (!operations.is_empty()).then(|| DispatchScope {
+            operations,
+            authorities: effective_operations.authorities.clone(),
+            privileged: effective_operations.privileged,
+        });
+        Self {
+            dispatch,
+            docs,
+            drawers,
+            blobs,
         }
     }
-    // A routine with something in its `uses` may always ask for it and wait for the
-    // answer: filing confers nothing, and the grant that would admit the call is the very
-    // thing the request is for, so it cannot be a precondition of it (ADR 049 §4.2).
-    if !uses.is_empty() {
-        operations.extend(
-            [
-                RequestCartridgeGrant::XRPC.nsid,
-                AwaitCartridgeGrantRequest::XRPC.nsid,
-            ]
-            .map(str::to_owned),
-        );
-    }
-    let docs = routine_docs_scope(
-        config_doc,
-        &drawers,
-        [read, write],
-        [datum_read, datum_write],
-        &mut operations,
-    );
-    let blobs = (!blobs_flags.is_empty()).then(|| {
-        serde_json::from_value(serde_json::Value::Object(blobs_flags))
-            .expect("a handle need's flags are fields of the blobs scope")
-    });
-    let drawers = (!drawers.is_empty() || create_drawer).then_some(DrawerScope {
-        drawers,
-        create: create_drawer,
-    });
-    let dispatch = (!operations.is_empty()).then(|| DispatchScope {
-        operations,
-        authorities: effective_operations.authorities.clone(),
-        privileged: effective_operations.privileged,
-    });
-    RoutineScopes {
-        dispatch,
-        docs,
-        drawers,
-        blobs,
-    }
 }
+
+/// Per routine, the operations its `uses` declare through a method permbind that
+/// `effective_operations` (the cartridge's grants) do not cover, and the permbind of each: the
+/// calls that are refused for want of a grant someone may still give, not for want of a
+/// declaration (ADR 049 §4.3). Drawer and docs calls are not here: they pass the handle and are
+/// refused by their own service, which cannot be traced to one permbind from the call alone.
+fn ungranted_uses(
+    installed: &InstalledNodule,
+    effective_operations: &DispatchScope,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    installed
+        .nodule
+        .routines
+        .iter()
+        .map(|(routine_key, routine)| {
+            let ungranted = routine
+                .uses
+                .keys()
+                .filter_map(|binding| {
+                    match installed
+                        .resolved
+                        .cartridge
+                        .permbinds
+                        .get(binding)
+                        .expect("admission refuses a use without its permbind")
+                    {
+                        Permbind::Method(method)
+                            if !effective_operations
+                                .operations
+                                .contains(method.nsid.as_str()) =>
+                        {
+                            Some((method.nsid.to_string(), binding.to_string()))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+            (routine_key.clone(), ungranted)
+        })
+        .collect()
+}
+
 /// The docs handle's scope for one routine: the cartridge config document's settings kinds
 /// (`config`, as `[read, write]`) and each drawer the routine's `#drawers` use reaches
 /// (`drawers`), at the routine's `#datum` kinds (`datum`, as `[read, write]`). Adds the docs
@@ -1042,6 +1096,24 @@ async fn apply_nodule_capabilities(
             )
         })
         .collect();
+    // What a routine's refused call is attributed from: only while its handle is the one now
+    // minted for it, and none at all when the mint failed and no routine holds a handle.
+    let ungranted = if installed.enabled {
+        ungranted_uses(installed, effective_operations)
+    } else {
+        BTreeMap::new()
+    };
+    state.missing_authority(cartridge_id).set(
+        routines
+            .iter()
+            .filter_map(|(routine_key, applied)| {
+                Some((
+                    applied.handles.dispatch?,
+                    ungranted.get(routine_key)?.clone(),
+                ))
+            })
+            .collect(),
+    );
     state
         .routine_capabilities
         .insert(cartridge_id.clone(), routines);
@@ -1109,7 +1181,7 @@ impl State {
         )
         .await?;
         let (installs, installs_rx) = watch::channel(Vec::new());
-        let (grant_requests, requests_rx) = GrantRequests::new();
+        let (grant_requests, requests_rx, grants_rx) = GrantRequests::new();
 
         let mut state = Self {
             stores,
@@ -1137,6 +1209,7 @@ impl State {
             docs_changed,
             installs,
             grant_requests,
+            missing_authority: BTreeMap::new(),
         };
         let context = RequestContext::root();
         // The boot reconcile may already have started initializers, and the config documents it
@@ -1226,6 +1299,7 @@ impl State {
                 commands,
                 installs: installs_rx,
                 requests: requests_rx,
+                grants: grants_rx,
             },
             stop,
         ))
@@ -1780,6 +1854,15 @@ impl State {
         Ok(())
     }
 
+    /// The cartridge's refusal attribution, which its executor keeps and the next reconcile
+    /// updates in place.
+    fn missing_authority(&mut self, cartridge_id: &CartridgeId) -> MissingAuthorityLookup {
+        self.missing_authority
+            .entry(cartridge_id.clone())
+            .or_insert_with(|| self.grant_requests.lookup(cartridge_id.clone()))
+            .clone()
+    }
+
     async fn any_applied_grant_dead(&self, context: &RequestContext) -> Res<bool> {
         let grant_caps = self
             .applied_grants
@@ -1992,6 +2075,8 @@ impl State {
                 true
             }
         });
+        self.grant_requests
+            .publish_grants(snapshot.value.cartridge_docs());
         self.observed_heads = snapshot.heads;
         self.records = new_records;
         Ok(revoke_errors)
@@ -2288,6 +2373,7 @@ impl State {
             config_doc: installed.config_doc.clone(),
 
             reensure: self.reensure.handle(cartridge_id.clone()),
+            missing_authority: self.missing_authority(&cartridge_id),
         };
         self.hosted.insert(cartridge_id.clone(), installed.revision);
         let state = match executor.ensure(&spec).await {
@@ -2823,6 +2909,9 @@ impl State {
             self.stores.retract_grant_cap(context, capability).await?;
         }
         self.routine_capabilities.remove(cartridge_id);
+        if let Some(lookup) = self.missing_authority.remove(cartridge_id) {
+            lookup.set(Default::default());
+        }
         Ok(())
     }
 

@@ -23,6 +23,7 @@ use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::Nsid;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::reference::DatumPin;
 use indexmap::IndexMap;
 use method_core::ContextError;
 use serde::Deserialize;
@@ -169,6 +170,20 @@ pub struct GetCartridgeVersion {
 pub struct ResolveCartridgeVersion {
     pub id: CartridgeId,
     pub version: Version,
+}
+
+/// Resolve the exact revision `pin` selects, as [`ResolveCartridgeVersion`] resolves its version.
+/// An install records such a pin (`version_pin`), so its holder resolves what it installed with
+/// this one call instead of reading the envelope itself. The registry reads the envelope at the
+/// pin's document and heads, checks that it is well formed, signed by its namespace and at the
+/// slot of its own version, and answers [`CartridgesError::PinnedRevisionMismatch`] when the
+/// version it serves under that label is another revision. A procedure only because XRPC query
+/// parameters are primitives and a pin is an object; it changes nothing.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveCartridgePin {
+    pub pin: DatumPin,
 }
 
 /// Drops one version's envelope and artifact references from the cartridge's document. The bytes are
@@ -353,6 +368,21 @@ pub enum CartridgesError {
         key: String,
         reason: String,
     },
+    /// The envelope a [`ResolveCartridgePin`] pin selects is not available at its heads yet;
+    /// this is recoverable when sync catches up.
+    #[error("the pinned envelope of version {version} is not yet readable: {reason}")]
+    PinnedEnvelopeUnreadable {
+        version: Box<Version>,
+        reason: String,
+    },
+    /// The envelope a [`ResolveCartridgePin`] pin selects is not the revision the registry
+    /// serves under its label.
+    #[error("cartridge `{id}` {version} is not the pinned revision: {reason}")]
+    PinnedRevisionMismatch {
+        id: CartridgeId,
+        version: Box<Version>,
+        reason: String,
+    },
     /// A published version never changes content: the label is taken by another envelope.
     #[error(
         "cartridge `{id}` {version} is already published at revision {existing}; this envelope is \
@@ -435,6 +465,7 @@ service_method!(ListCartridges => CartridgeList, CartridgesError, query("org.exa
 service_method!(GetCartridge => CartridgeRecord, CartridgesError, query("org.example.daybook.cartridges.getCartridge"));
 service_method!(GetCartridgeVersion => CartridgeVersionRecord, CartridgesError, query("org.example.daybook.cartridges.getCartridgeVersion"));
 service_method!(ResolveCartridgeVersion => ResolvedCartridge, CartridgesError, query("org.example.daybook.cartridges.resolveCartridgeVersion"));
+service_method!(ResolveCartridgePin => ResolvedCartridge, CartridgesError, procedure("org.example.daybook.cartridges.resolveCartridgePin"));
 service_method!(WatchCartridges => CartridgeChanges, CartridgesError, procedure("org.example.daybook.cartridges.watchCartridges"));
 
 declare_service_protocol! {
@@ -451,6 +482,7 @@ declare_service_protocol! {
             GetCartridge(GetCartridge),
             GetCartridgeVersion(GetCartridgeVersion),
             ResolveCartridgeVersion(ResolveCartridgeVersion),
+            ResolveCartridgePin(ResolveCartridgePin),
             WatchCartridges(WatchCartridges)
         }
         stream {}
@@ -472,8 +504,10 @@ pub use installs::UninstallCartridge;
 pub use requests::AWAIT_MAX_HOLD_MS;
 pub use requests::AnswerCartridgeGrantRequest;
 pub use requests::AwaitCartridgeGrantRequest;
+pub use requests::AwaitCartridgeGrants;
 pub use requests::CartridgeGrantRecord;
 pub use requests::CartridgeGrants;
+pub use requests::CartridgeGrantsAt;
 pub use requests::FiledGrantRequest;
 pub use requests::GrantAnswer;
 pub use requests::GrantRequestAnswer;

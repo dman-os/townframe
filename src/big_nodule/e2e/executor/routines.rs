@@ -846,8 +846,10 @@ mod grant_requests {
     use super::*;
     use big_cabinet_core::drawer::protocol::DrawerId;
     use big_cartridges_core::config::GrantKey;
+    use big_cartridges_core::protocol::AWAIT_MAX_HOLD_MS;
     use big_cartridges_core::protocol::AnswerCartridgeGrantRequest;
     use big_cartridges_core::protocol::AwaitCartridgeGrantRequest;
+    use big_cartridges_core::protocol::AwaitCartridgeGrants;
     use big_cartridges_core::protocol::CartridgesError;
     use big_cartridges_core::protocol::FiledGrantRequest;
     use big_cartridges_core::protocol::GrantAnswer;
@@ -971,6 +973,155 @@ mod grant_requests {
                 Err(other) => panic!("unexpected dispatch failure: {other:?}"),
             }
         }
+    }
+
+    impl Node {
+        /// What alpha's `ping` routine sees when it calls the query `operation` through the host's
+        /// egress with its dispatch handle: the HTTP status and JSON body its guest is served.
+        async fn ping_calls(
+            &self,
+            executor: &FakeExecutor,
+            operation: &str,
+        ) -> (http::StatusCode, serde_json::Value) {
+            let caller = crate::egress::WorkloadCaller {
+                signer: self.actor_at(&id(ALPHA)).await.capability,
+                missing_authority: Some(executor.missing_authority()),
+            };
+            let mut headers = http::HeaderMap::new();
+            headers.insert(
+                http::header::AUTHORIZATION,
+                service_core_rs::xrpc::bearer_header_value(&Authorization::id_text(dispatch_of(
+                    executor, PING,
+                )))
+                .parse()
+                .unwrap(),
+            );
+            let (status, body) = crate::egress::call(
+                &self.dispatch.client,
+                Some(&caller),
+                &http::Method::GET,
+                &format!("/xrpc/{operation}"),
+                &headers,
+                crate::XrpcBody::json(Vec::new()),
+            )
+            .await;
+            let crate::XrpcBody::Json(body) = body else {
+                panic!("an XRPC error is JSON")
+            };
+            (status, serde_json::from_slice(&body).unwrap())
+        }
+    }
+
+    /// The error a guest decodes, as every method's error wraps `ContextError` (ADR 049 §4.3).
+    fn missing_authority(
+        cartridge: &str,
+        permbind: &str,
+        request: Option<String>,
+    ) -> serde_json::Value {
+        json!({
+            "Context": {
+                "MissingAuthority": {
+                    "cartridge": cartridge,
+                    "permbind": permbind,
+                    "request": request,
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn a_declared_but_ungranted_call_is_missing_authority_and_an_undeclared_one_is_denied() {
+        let (node, executor, _) = asking().await;
+        let alpha_id = id(ALPHA).to_string();
+
+        // Declared (`uses` takes the permbind that names it) but not granted: nobody has said
+        // yes yet, which no request has been filed for, since nothing files one implicitly.
+        let (status, body) = node.ping_calls(&executor, REMOTE).await;
+        assert_eq!(status, http::StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "MissingAuthority");
+        assert_eq!(
+            body["operationError"],
+            missing_authority(&alpha_id, REMOTE, None)
+        );
+        assert!(
+            node.pending().await.is_empty(),
+            "the failed call filed nothing"
+        );
+
+        // Never declared by this routine: the rules forbid it, so it stays a denial.
+        let (status, body) = node.ping_calls(&executor, OTHER).await;
+        assert_eq!(status, http::StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "Denied");
+        assert!(body.get("operationError").is_none());
+
+        // Once the routine has filed a request, the same call names it.
+        let ping = node.as_ping(&executor).await;
+        let request = node
+            .file(ping, REMOTE, None)
+            .await
+            .unwrap()
+            .request
+            .unwrap();
+        let (_, body) = node.ping_calls(&executor, REMOTE).await;
+        assert_eq!(
+            body["operationError"],
+            missing_authority(&alpha_id, REMOTE, Some(request.to_string()))
+        );
+
+        // Declined, the call is still the cartridge's missing authority, with no request left.
+        node.answer(request, GrantAnswer::Decline, None)
+            .await
+            .unwrap();
+        let (_, body) = node.ping_calls(&executor, REMOTE).await;
+        assert_eq!(
+            body["operationError"],
+            missing_authority(&alpha_id, REMOTE, None)
+        );
+
+        // Allowed, the routine's handle is re-minted and the call goes through.
+        node.set_methods(
+            ALPHA,
+            DispatchScope {
+                operations: [REMOTE.to_owned()].into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (status, _) = node.ping_calls(&executor, REMOTE).await;
+        assert_eq!(status, http::StatusCode::OK);
+        node.shutdown().await;
+    }
+
+    /// Cartridge X's routine calls an operation another cartridge Y serves, and Y's own call
+    /// failed for want of a grant. Y's handler answered with Y's `MissingAuthority` (a domain
+    /// error, as a guest's method error is served); it reaches X as it was, naming Y.
+    #[tokio::test]
+    async fn another_cartridges_missing_authority_reaches_the_caller_unchanged() {
+        let (node, executor, remote) = hosted(requesting(), &["org.example.remote"]).await;
+        let beta = id(BETA).to_string();
+        let served = serde_json::to_value(service_core_rs::xrpc::domain_error_envelope(
+            &DispatchError::Context(method_core::ContextError::MissingAuthority {
+                cartridge: beta.clone(),
+                permbind: "its-binding".to_owned(),
+                request: Some("018f0000-0000-7000-8000-000000000001".to_owned()),
+            }),
+        ))
+        .unwrap();
+        remote.refuse_with(REMOTE, 400, served.clone());
+
+        let (status, body) = node.ping_calls(&executor, REMOTE).await;
+        assert_eq!(status, http::StatusCode::BAD_REQUEST);
+        assert_eq!(body, served, "the serving path rewrote Y's error");
+        assert_eq!(
+            body["operationError"],
+            missing_authority(
+                &beta,
+                "its-binding",
+                Some("018f0000-0000-7000-8000-000000000001".to_owned())
+            ),
+            "it names Y, not the caller"
+        );
+        node.shutdown().await;
     }
 
     #[tokio::test]
@@ -1251,6 +1402,64 @@ mod grant_requests {
             }
             node.shutdown().await;
         }
+    }
+
+    /// The grants feed answers at once without a revision, holds on the current one until an
+    /// answer moves it, and moves again when a revoke takes the grant back.
+    #[tokio::test]
+    async fn the_grants_feed_holds_until_an_answer_or_a_revoke_moves_it() {
+        let (node, executor, _) = asking().await;
+        let feed = |since: Option<&str>, hold_ms| {
+            node.call(
+                node.operator(),
+                AwaitCartridgeGrants {
+                    cartridge_id: id(ALPHA),
+                    since: since.map(str::to_owned),
+                    hold_ms,
+                },
+            )
+        };
+        let first = feed(None, 0).await.unwrap();
+        // An expired hold answers the unchanged grants at the same revision.
+        assert_eq!(feed(Some(&first.revision), 50).await.unwrap(), first);
+
+        let ping = node.as_ping(&executor).await;
+        let request = node
+            .file(ping, REMOTE, None)
+            .await
+            .unwrap()
+            .request
+            .unwrap();
+        let (moved, answered) = tokio::join!(
+            feed(Some(&first.revision), AWAIT_MAX_HOLD_MS),
+            node.answer(request, GrantAnswer::OnlyThisBoot, None)
+        );
+        answered.unwrap();
+        let moved = moved.unwrap();
+        assert_ne!(moved.revision, first.revision);
+        let added: Vec<_> = moved
+            .grants
+            .iter()
+            .filter(|record| !first.grants.contains(record))
+            .collect();
+        let [record] = added.try_into().unwrap();
+        assert_eq!(record.grant, GrantKey::Method(REMOTE.into()));
+        assert!(record.this_boot);
+
+        node.call(
+            node.operator(),
+            SetCartridgeGrant {
+                cartridge_id: id(ALPHA),
+                grant: GrantKey::Method(REMOTE.into()),
+                value: None,
+            },
+        )
+        .await
+        .unwrap();
+        let revoked = feed(Some(&moved.revision), 0).await.unwrap();
+        assert_eq!(revoked.grants, first.grants);
+        assert_ne!(revoked.revision, moved.revision);
+        node.shutdown().await;
     }
 
     #[tokio::test]

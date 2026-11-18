@@ -21,6 +21,7 @@ use big_dispatch_core::DispatchProtocol;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::MintDispatchCapability;
 use big_nodule::egress;
+use big_nodule::egress::WorkloadCaller;
 use clay_guest_session::egress::DispatchEgress;
 use clay_guest_session::egress::EgressBody;
 use futures::future::BoxFuture;
@@ -134,7 +135,12 @@ impl DispatchEgress for MicroEgress {
                     .expect("a bearer capability id is a valid header value"),
                 );
             }
-            let (status, body) = egress::call_http(&dispatch, Some(signer), request).await;
+            // A micro is not a nodule's routine, so no refusal is refined to a missing authority.
+            let caller = WorkloadCaller {
+                signer,
+                missing_authority: None,
+            };
+            let (status, body) = egress::call_http(&dispatch, Some(&caller), request).await;
             egress::http_response(status, body)
         })
     }

@@ -6,6 +6,7 @@
 //! through the [`watch`] receiver [`GrantRequests::new`] hands out, for its list and its long
 //! polls.
 
+use big_cabinet_core::authority::CapId;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cartridges_core::CartridgeId;
@@ -17,12 +18,17 @@ use big_cartridges_core::protocol::FiledGrantRequest;
 use big_cartridges_core::protocol::GrantRequestRecord;
 use big_cartridges_core::protocol::GrantRequestState;
 use big_cartridges_core::protocol::RequestedAccess;
+use big_dispatch_core::DispatchError;
 use big_nodule_core::config::CartridgeConfig;
 use big_nodule_core::config::DatumSlot;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesError;
+use method_core::ContextError;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::RwLock;
 use tokio::sync::watch;
 
 type Res<T> = Result<T, NodulesError>;
@@ -39,6 +45,8 @@ pub(crate) type Requests = BTreeMap<Uuid7, RequestEntry>;
 
 pub(crate) struct GrantRequests {
     queue: watch::Sender<Requests>,
+    /// Each cartridge's grants as the last reconcile left them (see [`Self::publish_grants`]).
+    grants: watch::Sender<GrantsFeed>,
     /// Grants in force for this boot only, which the state actor attaches to each cartridge's
     /// config document snapshot so a routine's handles are minted from them exactly as from a
     /// datum.
@@ -51,18 +59,104 @@ pub(crate) struct GrantRequests {
     declared: BTreeMap<CartridgeId, BTreeMap<String, Permbind>>,
 }
 
+/// How the nodule host tells a refusal of "nobody has said yes yet" from one of "the rules forbid
+/// it" (ADR 049 §4.3), for one cartridge. Dispatch alone cannot: it sees an operation outside the
+/// handle, and only the runtime knows the routine's `uses` and the grants.
+///
+/// The state actor rewrites [`Self::set`] at each reconcile, so every clone, which an executor
+/// keeps for the cartridge's life, sees the routines' current handles.
+#[derive(Clone)]
+pub struct MissingAuthorityLookup {
+    cartridge_id: CartridgeId,
+    /// Per routine, by the dispatch handle it was delivered: the operations its `uses` declare
+    /// through a method permbind that the cartridge's grants did not cover when the handle was
+    /// minted, and the permbind of each. An operation absent here was never declared (or is
+    /// granted, in which case dispatch did not refuse it for want of the handle).
+    ungranted: Arc<RwLock<HashMap<CapId, BTreeMap<String, String>>>>,
+    requests: watch::Receiver<Requests>,
+}
+
+impl MissingAuthorityLookup {
+    pub(crate) fn set(&self, ungranted: HashMap<CapId, BTreeMap<String, String>>) {
+        *self.ungranted.write().expect("ungranted uses lock") = ungranted;
+    }
+
+    /// `error`, as the routine holding the dispatch handle `capability` should see it for a call
+    /// of `operation`: a [`DispatchError::Denied`] for a declared but ungranted operation becomes
+    /// the cartridge's `MissingAuthority`, carrying the request already filed for its permbind
+    /// (nothing files one here: only the routine decides to ask). Any other refusal is returned
+    /// as it was.
+    pub fn refine(
+        &self,
+        capability: CapId,
+        operation: &str,
+        error: DispatchError,
+    ) -> DispatchError {
+        if error != DispatchError::Denied {
+            return error;
+        }
+        let Some(permbind) = self
+            .ungranted
+            .read()
+            .expect("ungranted uses lock")
+            .get(&capability)
+            .and_then(|operations| operations.get(operation))
+            .cloned()
+        else {
+            return error;
+        };
+        let request = self
+            .requests
+            .borrow()
+            .values()
+            .find(|entry| {
+                entry.state == GrantRequestState::Pending
+                    && entry.record.cartridge_id == self.cartridge_id
+                    && entry.record.permbind == permbind
+            })
+            .map(|entry| entry.record.id.to_string());
+        DispatchError::Context(ContextError::MissingAuthority {
+            cartridge: self.cartridge_id.to_string(),
+            permbind,
+            request,
+        })
+    }
+}
+
 impl GrantRequests {
-    pub(crate) fn new() -> (Self, watch::Receiver<Requests>) {
+    /// The attribution of refusals for `cartridge_id`, which starts out knowing nothing.
+    pub(crate) fn lookup(&self, cartridge_id: CartridgeId) -> MissingAuthorityLookup {
+        MissingAuthorityLookup {
+            cartridge_id,
+            ungranted: Arc::default(),
+            requests: self.queue.subscribe(),
+        }
+    }
+
+    /// The requests, and the receivers of the queue and of the grants feed the service follows.
+    pub(crate) fn new() -> (Self, watch::Receiver<Requests>, watch::Receiver<GrantsFeed>) {
         let (queue, receiver) = watch::channel(Requests::new());
+        let (grants, grants_receiver) = watch::channel(GrantsFeed::new());
         (
             Self {
                 queue,
+                grants,
                 boot_grants: BTreeMap::new(),
                 declined: BTreeSet::new(),
                 declared: BTreeMap::new(),
             },
             receiver,
+            grants_receiver,
         )
+    }
+
+    /// Publishes each cartridge's grants, the written ones in `docs` and this boot's, to the
+    /// feed `awaitCartridgeGrants` follows. The state actor calls it at the end of every
+    /// reconcile, which every grant change runs: a written grant moves a config document, and an
+    /// "only this time" answer or its revoke reconciles where it is made.
+    pub(crate) fn publish_grants(&self, docs: &BTreeMap<CartridgeId, CartridgeConfig>) {
+        let grants = self.list(docs, None);
+        self.grants.send_if_modified(|feed| feed.update(grants));
     }
 
     /// Records the permbinds the admitted cartridges declare, replacing what the last reconcile
@@ -338,5 +432,66 @@ fn covers(record: &NoduleRecord, access: &RequestedAccess) -> bool {
             .get(drawer)
             .is_some_and(|status| status.desired >= *access),
         RequestedAccess::Drawers { drawer: None, .. } => false,
+    }
+}
+
+/// Each cartridge's grants as the last reconcile left them, for `awaitCartridgeGrants` to follow:
+/// the written ones and the "only this time" ones, as [`GrantRequests::list`] lists them. A
+/// cartridge's revision is this boot and the feed sequence its grants last changed at, so a
+/// revision from an earlier boot never names the current grants even where the sequence repeats.
+#[derive(Debug)]
+pub(crate) struct GrantsFeed {
+    boot: Uuid7,
+    seq: u64,
+    cartridges: BTreeMap<CartridgeId, (u64, Vec<CartridgeGrantRecord>)>,
+}
+
+impl GrantsFeed {
+    pub(crate) fn new() -> Self {
+        Self {
+            boot: Uuid7::new(),
+            seq: 0,
+            cartridges: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn revision(&self, cartridge_id: &CartridgeId) -> String {
+        let seq = self.cartridges.get(cartridge_id).map_or(0, |(seq, _)| *seq);
+        format!("{}.{seq}", self.boot)
+    }
+
+    pub(crate) fn grants(&self, cartridge_id: &CartridgeId) -> &[CartridgeGrantRecord] {
+        self.cartridges
+            .get(cartridge_id)
+            .map_or(&[], |(_, grants)| grants.as_slice())
+    }
+
+    /// Takes every cartridge's grants from `grants`, moving the revision of each cartridge whose
+    /// grants changed. A cartridge whose grants are all gone keeps an empty entry, so its
+    /// revision moves too. Whether anything changed, for `watch::Sender::send_if_modified`.
+    pub(crate) fn update(&mut self, grants: Vec<CartridgeGrantRecord>) -> bool {
+        let mut next: BTreeMap<CartridgeId, Vec<CartridgeGrantRecord>> = BTreeMap::new();
+        for grant in grants {
+            next.entry(grant.cartridge_id.clone())
+                .or_default()
+                .push(grant);
+        }
+        let gone: Vec<CartridgeId> = self
+            .cartridges
+            .iter()
+            .filter(|(id, (_, held))| !held.is_empty() && !next.contains_key(*id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        next.extend(gone.into_iter().map(|id| (id, Vec::new())));
+        let mut changed = false;
+        for (id, grants) in next {
+            if self.grants(&id) == grants.as_slice() {
+                continue;
+            }
+            self.seq += 1;
+            changed = true;
+            self.cartridges.insert(id, (self.seq, grants));
+        }
+        changed
     }
 }

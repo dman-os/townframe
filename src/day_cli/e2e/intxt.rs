@@ -203,9 +203,14 @@ async fn installing_intxt_twice_changes_nothing() {
             .unwrap();
         assert!(again.already_installed);
         assert_eq!(again.record.readiness, big_dispatch_core::Readiness::Ready);
-        let after = crate::cmds::intxt::call(client, GetCartridge { id: before.id.clone() })
-            .await
-            .unwrap();
+        let after = crate::cmds::intxt::call(
+            client,
+            GetCartridge {
+                id: before.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(after, before);
         assert_eq!(after.versions.len(), 1);
     })

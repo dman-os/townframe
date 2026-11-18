@@ -312,6 +312,7 @@ fn builtin_list() -> &'static [Builtin] {
             cartridges::GetCartridge,
             cartridges::GetCartridgeVersion,
             cartridges::ResolveCartridgeVersion,
+            cartridges::ResolveCartridgePin,
             cartridges::WatchCartridges,
             cartridges::InstallCartridge,
             cartridges::SetCartridgeEnabled,
@@ -324,6 +325,7 @@ fn builtin_list() -> &'static [Builtin] {
             cartridges::ListCartridgeGrantRequests,
             cartridges::AnswerCartridgeGrantRequest,
             cartridges::ListCartridgeGrants,
+            cartridges::AwaitCartridgeGrants,
             cartridges::ObserveCartridgeInstalls,
         ]
     });

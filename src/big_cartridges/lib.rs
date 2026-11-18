@@ -75,6 +75,7 @@ use big_cartridges_core::protocol::PublishCartridgeVersion;
 use big_cartridges_core::protocol::PublishedCartridgeVersion;
 use big_cartridges_core::protocol::RemoveCartridge;
 use big_cartridges_core::protocol::RemoveCartridgeVersion;
+use big_cartridges_core::protocol::ResolveCartridgePin;
 use big_cartridges_core::protocol::ResolveCartridgeVersion;
 use big_cartridges_core::protocol::StageCartridgeVersion;
 use big_cartridges_core::protocol::WatchCartridges;
@@ -560,6 +561,16 @@ impl CartridgeService {
         self.registry.resolved(&params.id, &params.version).await
     }
 
+    async fn resolve_pin(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: ResolveCartridgePin,
+    ) -> Res<ResolvedCartridge> {
+        self.read_caller(context, authorization).await?;
+        self.registry.resolved_at(&params.pin).await
+    }
+
     /// The long poll of ADR 023: answers at once when there is a change past the cursor (or the
     /// caller must reset), otherwise holds until one lands, the hold expires, or the service
     /// stops. An expired hold is an ordinary empty page.
@@ -625,6 +636,7 @@ handlers! {
     GetCartridge => get: CartridgeRecord;
     GetCartridgeVersion => get_version: CartridgeVersionRecord;
     ResolveCartridgeVersion => resolve_version: ResolvedCartridge;
+    ResolveCartridgePin => resolve_pin: ResolvedCartridge;
     WatchCartridges => watch: CartridgeChanges;
 }
 
@@ -642,6 +654,7 @@ service_utils_rs::bind_service_protocol! {
             GetCartridge(GetCartridge),
             GetCartridgeVersion(GetCartridgeVersion),
             ResolveCartridgeVersion(ResolveCartridgeVersion),
+            ResolveCartridgePin(ResolveCartridgePin),
             WatchCartridges(WatchCartridges)
         }
         stream {}

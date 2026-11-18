@@ -28,7 +28,6 @@
 use async_trait::async_trait;
 use big_blobs::BlobService;
 use big_blobs_core::BlobId;
-use big_cabinet_core::authority::CapId;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Component as ManifestComponent;
 use big_cartridges_core::Digest;
@@ -43,6 +42,7 @@ use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Readiness;
 use big_nodule::XrpcBody;
 use big_nodule::egress;
+use big_nodule::egress::WorkloadCaller;
 use big_nodule::executor::HandlerSpec;
 use big_nodule::executor::Hosted;
 use big_nodule::executor::NoduleExecutor;
@@ -399,10 +399,13 @@ impl NoduleExecutor for WasmExecutor {
         let mut components = BTreeMap::new();
         for (key, (artifact, component_bytes)) in bytes {
             let workload_id = format!("nodule/{}/{}/{}", spec.cartridge_id, spec.revision, key);
-            self.signers
-                .lock()
-                .expect("signers lock")
-                .insert(workload_id.clone(), spec.actor.capability);
+            self.signers.lock().expect("signers lock").insert(
+                workload_id.clone(),
+                WorkloadCaller {
+                    signer: spec.actor.capability,
+                    missing_authority: Some(spec.missing_authority.clone()),
+                },
+            );
             let started = self
                 .host
                 .workload_start(WorkloadStartRequest {
@@ -679,7 +682,7 @@ impl Router for Sealed {
 /// The signer (the nodule actor's own capability) of each running workload's outgoing calls,
 /// by workload id. The id is chosen by the host and is not guest-controllable, which is what
 /// makes it the caller identity of a nested call.
-type Signers = Arc<Mutex<BTreeMap<String, CapId>>>;
+type Signers = Arc<Mutex<BTreeMap<String, WorkloadCaller>>>;
 
 /// The `dispatch.local` egress of the wash host: adapts a workload's outgoing `wasi:http`
 /// request to [`big_nodule::egress::call`], which authorizes it for every executor alike. What
@@ -697,13 +700,13 @@ impl Egress {
         workload_id: &str,
         request: hyper::Request<WasiBody>,
     ) -> (hyper::StatusCode, XrpcBody) {
-        let signer = self
+        let caller = self
             .signers
             .lock()
             .expect("signers lock")
             .get(workload_id)
-            .copied();
-        egress::call_http(&self.dispatch, signer, request).await
+            .cloned();
+        egress::call_http(&self.dispatch, caller.as_ref(), request).await
     }
 }
 

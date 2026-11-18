@@ -926,7 +926,8 @@ async fn call_method(egress: &Arc<dyn DispatchEgress>, nsid: &str, input: &Value
 /// names, and its egress is minted from its `uses` intersected with the cartridge's grants: a
 /// method it uses but was not granted is denied, one it was granted but does not use is denied
 /// (the grant is the cartridge's, and each component's `uses` narrows it), a grant that is
-/// revoked takes effect at the next sync, and a disabled micro is dropped.
+/// given or revoked reaches the running micro's egress through its grants follower, and a
+/// disabled micro is dropped on the next sync.
 #[tokio::test]
 async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
     let dir = tempfile::tempdir().unwrap();
@@ -1005,6 +1006,7 @@ async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
         "nothing is granted yet: {denied}"
     );
 
+    let mut changes = composition.handles_changed(&micro).unwrap();
     for method in [ECHO, REVEAL] {
         operator
             .grant(
@@ -1014,11 +1016,9 @@ async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
             )
             .await;
     }
-    // The handle was minted for the grants of the last sync: a grant is seen at the next one.
-    let (status, _) = call_method(&egress, ECHO, &json!({"text": "ping"})).await;
-    assert_eq!(status, 403, "the held capability does not widen by itself");
-    // The egress the micro holds is the same one: it presents the re-minted capability.
-    composition.sync_cartridge_micros().await.unwrap();
+    // The micro's grants follower mints its handles again, and the egress the micro holds
+    // presents the new capability from its next call.
+    changes.changed().await.unwrap();
     let (status, answer) = call_method(&egress, ECHO, &json!({"text": "ping"})).await;
     assert_eq!(
         (status, &answer),
@@ -1034,9 +1034,12 @@ async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
     operator
         .grant(&id, GrantKey::Method(ECHO.to_owned()), None)
         .await;
-    composition.sync_cartridge_micros().await.unwrap();
+    changes.changed().await.unwrap();
     let (status, _) = call_method(&egress, ECHO, &json!({"text": "ping"})).await;
-    assert_eq!(status, 403, "a revoked grant is gone after the next sync");
+    assert_eq!(
+        status, 403,
+        "a revoked grant is gone once the follower mints again"
+    );
 
     operator.set_micro_enabled(&id, false).await;
     assert!(
@@ -1115,6 +1118,7 @@ async fn a_cartridge_micros_document_capability_follows_the_granted_drawers() {
         "no drawer is granted, so the micro reaches no document"
     );
 
+    let mut changes = composition.handles_changed(&micro).unwrap();
     operator
         .grant(
             &id,
@@ -1129,7 +1133,7 @@ async fn a_cartridge_micros_document_capability_follows_the_granted_drawers() {
             Some(GrantBody::present()),
         )
         .await;
-    composition.sync_cartridge_micros().await.unwrap();
+    changes.changed().await.unwrap();
     let capability = composition
         .doc_capability(&micro)
         .expect("a granted drawer the micro uses mints it a document capability");

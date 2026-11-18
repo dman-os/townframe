@@ -4494,6 +4494,7 @@ dependencies = [
  "secrets_rs",
  "serde_json",
  "service_client_core_rs",
+ "service_client_native_rs",
  "service_utils_rs",
  "tempfile",
  "tokio",

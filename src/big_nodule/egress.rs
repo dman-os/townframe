@@ -18,6 +18,7 @@
 //! new. An executor adapts its transport to [`call`] and supplies the signer from its own table,
 //! so every executor authorizes a handler's calls the same way.
 
+use crate::requests::MissingAuthorityLookup;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_dispatch_core::Body;
@@ -45,6 +46,7 @@ use serde_json::json;
 use service_client_core_rs::xrpc::XrpcBody;
 use service_client_native_rs::Client;
 use service_core_rs::xrpc::bearer_token;
+use service_core_rs::xrpc::domain_error_envelope;
 use service_core_rs::xrpc::request_context;
 use service_utils_rs::ClientError;
 use service_utils_rs::HttpMetadata;
@@ -65,13 +67,24 @@ fn json_response(status: StatusCode, body: Value) -> (StatusCode, XrpcBody) {
     )
 }
 
+/// Who a handler's outgoing calls are made as, from the executor's table: never anything the
+/// handler said.
+#[derive(Clone)]
+pub struct WorkloadCaller {
+    /// The calling workload's own actor capability.
+    pub signer: CapId,
+    /// What refines a refused call of one of its routines (see [`call`]). `None` for a caller
+    /// that is not a nodule's routine, such as a micro, whose refusal stays dispatch's.
+    pub missing_authority: Option<MissingAuthorityLookup>,
+}
+
 /// [`call`] for an executor whose transport speaks `http` types: reads `request`'s body (a JSON
 /// body in full, under [`MAX_MESSAGE_OCTETS`]; any other as the pull-based byte stream ADR 042 §2
 /// describes) and takes its method, target and headers. Every executor adapts its request this
 /// one way, so the body rules are not restated per transport.
 pub async fn call_http<B>(
     dispatch: &Client<DispatchProtocol>,
-    signer: Option<CapId>,
+    caller: Option<&WorkloadCaller>,
     request: http::Request<B>,
 ) -> (StatusCode, XrpcBody)
 where
@@ -116,7 +129,7 @@ where
     };
     call(
         dispatch,
-        signer,
+        caller,
         &parts.method,
         parts
             .uri
@@ -164,14 +177,17 @@ pub fn http_response(status: StatusCode, body: XrpcBody) -> http::Response<HttpB
 /// Runs a handler's outgoing request through dispatch. A malformed request is answered like an
 /// XRPC server would, not refused as a transport failure.
 ///
-/// `signer` is the calling workload's own actor capability, from the executor's table: never
-/// anything the handler said. `None` means the workload has been stopped (its nodule disabled,
+/// `caller` is the calling workload's identity, from the executor's table. `None` means the workload has been stopped (its nodule disabled,
 /// upgraded or retired) while one of its requests was still running, so it has no identity left
 /// to call with. That is a lifecycle race, not a broken invariant, and is answered the way a
 /// proxy answers a call from a drained upstream rather than crashing the node.
+///
+/// A call dispatch refuses as [`DispatchError::Denied`] is refined by `missing_authority`: when
+/// the routine's `uses` declare the operation and no grant covers it yet, the answer is the
+/// cartridge's `MissingAuthority`, which the guest's typed client decodes (ADR 049 §4.3).
 pub async fn call(
     dispatch: &Client<DispatchProtocol>,
-    signer: Option<CapId>,
+    caller: Option<&WorkloadCaller>,
     method: &Method,
     path: &str,
     headers: &HeaderMap,
@@ -251,7 +267,7 @@ pub async fn call(
         },
         XrpcBody::Bytes(_) => Value::Null,
     };
-    let Some(signer) = signer else {
+    let Some(caller) = caller else {
         return bad(
             StatusCode::SERVICE_UNAVAILABLE,
             "WorkloadStopped",
@@ -264,6 +280,8 @@ pub async fn call(
         range: None,
         origin: Origin::Remote,
     };
+    // `Invoke` takes the operation, which a refusal is attributed by.
+    let called = operation.clone();
     let invoke = match body {
         XrpcBody::Json(_) => Invoke::json(operation, input, invocation),
         XrpcBody::Bytes(body) => Invoke {
@@ -278,7 +296,11 @@ pub async fn call(
             request_context,
             HttpMetadata {
                 idempotency_key: idempotency_key.clone(),
-                ..Authorization { authority, signer }.metadata()
+                ..Authorization {
+                    authority,
+                    signer: caller.signer,
+                }
+                .metadata()
             },
             invoke,
         )
@@ -294,7 +316,12 @@ pub async fn call(
                 "descriptor bodies are native-only",
             ),
         },
-        Err(ClientError::Method(error)) => dispatch_error_response(error),
+        Err(ClientError::Method(error)) => {
+            dispatch_error_response(match &caller.missing_authority {
+                Some(lookup) => lookup.refine(authority, &called, error),
+                None => error,
+            })
+        }
         Err(ClientError::Transport { message, .. }) => {
             panic!("in-process dispatch transport failed: {message}")
         }
@@ -315,6 +342,13 @@ fn dispatch_error_response(error: DispatchError) -> (StatusCode, XrpcBody) {
     };
     match &error {
         DispatchError::Denied => named(StatusCode::FORBIDDEN, "Denied"),
+        // Whole under `operationError`, so a guest's typed client decodes it as the method's
+        // error (every method error wraps `ContextError`) and a routine can match it.
+        DispatchError::Context(ContextError::MissingAuthority { .. }) => json_response(
+            StatusCode::FORBIDDEN,
+            serde_json::to_value(domain_error_envelope(&error))
+                .expect("an XRPC error envelope serializes"),
+        ),
         DispatchError::LocalOnly => named(StatusCode::FORBIDDEN, "LocalOnly"),
         DispatchError::BodyMismatch { .. } => json_response(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,

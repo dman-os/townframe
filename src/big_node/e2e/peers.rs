@@ -226,6 +226,52 @@ async fn node_info_reports_the_id_the_address_and_the_connected_peers() {
     shutdown(dialed, dialed_stop).await;
 }
 
+/// A pinned listen port is the port the endpoint binds and advertises, and it survives a restart,
+/// so a peer holding the node's ticket can still dial it; an unpinned node takes a free port.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pinned_listen_port_is_the_advertised_port_across_restarts() {
+    utils_rs::testing::setup_tracing_once();
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    // A port the OS just handed out and released: free for the boot that follows.
+    let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let pinned = || PeersConfig {
+        loopback_only: true,
+        listen_port: Some(port),
+        ..Default::default()
+    };
+    let ports = |node: &BigNode| -> Vec<u16> {
+        node.peers
+            .as_ref()
+            .unwrap()
+            .addr()
+            .ip_addrs()
+            .map(std::net::SocketAddr::port)
+            .collect()
+    };
+    for _ in 0..2 {
+        let (node, stop) = node(171, secrets().await, &runtime, pinned()).await;
+        assert_eq!(ports(&node), vec![port]);
+        shutdown(node, stop).await;
+    }
+    let (unpinned, stop) = node(
+        172,
+        secrets().await,
+        &runtime,
+        PeersConfig {
+            loopback_only: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(!ports(&unpinned).is_empty());
+    assert!(!ports(&unpinned).contains(&0));
+    shutdown(unpinned, stop).await;
+}
+
 /// Both nodes hold read access to both drawers; only the drawer the reader mirrors replicates,
 /// so what the reader lacks is the policy's doing, not access's. Flipping the intent replicates
 /// the other.

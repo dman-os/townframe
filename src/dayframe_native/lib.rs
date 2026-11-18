@@ -593,8 +593,8 @@ fn use_wry_host_inputs(
     insets_source: Option<InsetsSource>,
     viewport_source: Option<ViewportSource>,
 ) -> HostInputs {
-    use dioxus_desktop::WindowEvent;
     use dioxus_desktop::tao::event::Event;
+    use dioxus_desktop::WindowEvent;
     let window = dioxus_desktop::use_window();
     let viewport = move || {
         viewport_source.map_or_else(
