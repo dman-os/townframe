@@ -70,7 +70,7 @@ clay_collection = { workspace = true }
 wit-bindgen = { workspace = true, features = ["async", "macros", "realloc", "async-spawn", "inter-task-wakeup"] }
 serde_json.workspace = true
 serde = { workspace = true, features = ["derive"] }
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2", default-features = false, features = ["macro", "signals", "hooks", "html", "document"], optional = true }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "7f6251d8070f39e46cff33712395077a9606a43c", default-features = false, features = ["macro", "signals", "hooks", "html", "document"], optional = true }
 dioxus-core = { workspace = true, optional = true }
 dioxus-html = { workspace = true, optional = true }
 clay_host = { workspace = true, optional = true }
