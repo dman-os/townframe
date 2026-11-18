@@ -9692,6 +9692,7 @@ dependencies = [
 name = "micro_review"
 version = "0.1.0"
 dependencies = [
+ "big_blobs_core",
  "big_cabinet_core",
  "clay_dioxus_kit",
  "clay_mdk",

@@ -71,8 +71,9 @@ pub struct Configuration {
 
 /// A capability id from its configuration text.
 fn capability(text: &str) -> Result<CapId, CallError> {
-    serde_json::from_value(serde_json::Value::String(text.to_owned()))
-        .map_err(|error| CallError::Unconfigured(format!("capability {text:?} is not valid: {error}")))
+    serde_json::from_value(serde_json::Value::String(text.to_owned())).map_err(|error| {
+        CallError::Unconfigured(format!("capability {text:?} is not valid: {error}"))
+    })
 }
 
 impl Configuration {
