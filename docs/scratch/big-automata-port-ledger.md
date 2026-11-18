@@ -822,6 +822,20 @@ is clean apart from dead code.
 - `rpc/bucket.rs` is free to improve; it was a partial port.
 - A denied object route carries nothing; the part route carries the removal.
 
+**Follow-up applied (6a226821, 138/138 tests):**
+- The working-level fix; it also fixed a `u16` overflow of `16^4`.
+- `ObjState { content: Option<..>, parts }` reports pending-only objects.
+- `PartStoreServe` is principal-scoped: `read_authorized`, `part_summaries`,
+  `readable_obj_states`, `bucket_list(.., since, ..)`, and a batched `bucket_leaves`.
+  `read_verdicts` and `readable_parts_of` are removed.
+- Leaf entries carry `fp: Option`; the wire leaf page has `next_after`.
+
+**Open:**
+- `part_summaries` has no `latest_cursor`. That cursor moves on other principals' access
+  rows, so exposing it leaks when their access changes.
+- A revoked principal's summary is `None`, so `access_changes` only ever reports grants.
+- `ShallowBucket` is never produced.
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a
