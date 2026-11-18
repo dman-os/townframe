@@ -201,6 +201,64 @@ fn routine_uses_must_resolve_and_cannot_widen_a_permbind() {
     assert!(error.contains("does not declare"), "{error}");
 }
 
+/// A `#net` permbind names a host a grant datum can be keyed by and upper-case HTTP verbs, and a
+/// use of it asks for no more than it declares (it has no read, write, create or delete).
+#[test]
+fn net_permbinds_name_a_host_and_verbs_and_a_use_asks_for_nothing_more() {
+    let net = |host: &str, port: Option<u16>, methods: Option<&[&str]>| {
+        Permbind::Net(PermbindNet {
+            host: host.into(),
+            port,
+            methods: methods.map(|methods| methods.iter().map(|m| (*m).to_owned()).collect()),
+            description: "reaches the service".into(),
+            extra: Default::default(),
+        })
+    };
+    let validated = |permbind: Permbind| {
+        let mut cartridge = cartridge();
+        cartridge.permbinds.insert("api".into(), permbind);
+        cartridge.validate()
+    };
+    validated(net("api.example.org", Some(8443), Some(&["GET", "POST"]))).unwrap();
+    validated(net("API.Example.org", None, None)).unwrap();
+    for (permbind, why) in [
+        (net("", None, None), "no host"),
+        (net("example.org/path", None, None), "a path is not a host"),
+        (net("https://example.org", None, None), "a URL is not a host"),
+        (net("*.example.org", None, None), "no wildcards"),
+        (net("example.org", Some(0), None), "port 0"),
+        (net("example.org", None, Some(&["get"])), "lower-case verb"),
+        (net("example.org", None, Some(&[""])), "empty verb"),
+    ] {
+        validated(permbind).expect_err(why);
+    }
+
+    let mut cartridge = cartridge();
+    cartridge
+        .permbinds
+        .insert("api".into(), net("example.org", None, None));
+    let mut nodule = Nodule {
+        routines: BTreeMap::from([(
+            "sync".into(),
+            routine(BTreeMap::from([("api".into(), RoutineUse::default())])),
+        )]),
+        ..Default::default()
+    };
+    cartridge.nodule = Some(nodule.clone());
+    cartridge.validate().unwrap();
+    nodule
+        .routines
+        .get_mut("sync")
+        .unwrap()
+        .uses
+        .get_mut("api")
+        .unwrap()
+        .write = true;
+    cartridge.nodule = Some(nodule);
+    let error = cartridge.validate().unwrap_err().to_string();
+    assert!(error.contains("does not declare"), "{error}");
+}
+
 #[test]
 fn colliding_manifest_names_are_refused() {
     let mut cartridge = cartridge();

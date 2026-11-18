@@ -75,6 +75,11 @@ impl Spec {
         format!("{}.read", self.authority)
     }
 
+    /// Served by the guest: sends the request `{ url, method?, headers? }` it is given to the URL.
+    fn fetch(&self) -> String {
+        format!("{}.fetch", self.authority)
+    }
+
     /// Served by the guest: consumes a byte body and reports the chunks it saw.
     fn ingest(&self) -> String {
         format!("{}.ingest", self.authority)
@@ -217,6 +222,7 @@ fn cartridge_requiring(
         spec.read(),
         spec.ingest(),
         spec.emit(),
+        spec.fetch(),
     ];
     let settings = format!("{}.settings", spec.authority);
     // Each routine holds its own capability, built from what it uses: the settings kind it
@@ -1133,6 +1139,161 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
         record(&node, &a).await.methods.map(|status| status.granted),
         Some(false)
     );
+    shutdown(node, stop).await;
+}
+
+/// A one-thread HTTP/1.1 server on a loopback port: answers every request `hello from outside`
+/// and keeps the head (request line and headers, lower-cased) of each it served.
+struct Outside {
+    port: u16,
+    heads: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Outside {
+    fn start() -> Self {
+        use std::io::Read;
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let heads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = Arc::clone(&heads);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut head = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buf).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&buf[..read]);
+                }
+                kept.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&head).to_lowercase());
+                let body = "hello from outside";
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        Self { port, heads }
+    }
+
+    fn heads(&self) -> Vec<String> {
+        self.heads.lock().unwrap().clone()
+    }
+}
+
+/// A guest reaches the network only as a `#net` permbind and the cartridge's `grant/net` say
+/// (ADR 049 §2): declared but ungranted is its `MissingAuthority`, granting lets the request out
+/// without a restart and its body comes back, and nothing off the exact host, port or verb goes
+/// out. The routine's capability never reaches the server.
+#[tokio::test]
+async fn a_wasm_guest_reaches_only_the_network_hosts_it_declares_and_is_granted() {
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let spec = caller();
+    let outside = Outside::start();
+    let elsewhere = Outside::start();
+    put(&node, &bytes).await;
+    let mut fixture = cartridge(&spec, &bytes, &[]);
+    fixture.permbinds.insert(
+        "net".into(),
+        Permbind::Net(big_cartridges_core::PermbindNet {
+            host: "127.0.0.1".into(),
+            port: Some(outside.port),
+            methods: Some(["GET".to_owned()].into()),
+            description: "the test server".into(),
+            extra: Default::default(),
+        }),
+    );
+    for routine in fixture.nodule.as_mut().unwrap().routines.values_mut() {
+        routine.uses.insert("net".into(), RoutineUse::default());
+    }
+    admit(&node, fixture).await;
+    assert_eq!(
+        set_enabled(&node, &spec, true).await.readiness,
+        Readiness::Ready
+    );
+    let operation = spec.fetch();
+    let fetch = |url: String, method: &str| {
+        invoke(
+            &node,
+            &operation,
+            json!({ "url": url, "method": method, "headers": { "x-from-guest": "yes" } }),
+            InvocationContext::default(),
+        )
+    };
+    let url = format!("http://127.0.0.1:{}/thing?q=1", outside.port);
+
+    // Declared but ungranted.
+    let refused = fetch(url.clone(), "GET").await.unwrap();
+    assert_eq!(refused["status"], 403, "{refused}");
+    assert_eq!(refused["body"]["error"], "MissingAuthority", "{refused}");
+    assert_eq!(
+        refused["body"]["operationError"]["Context"]["MissingAuthority"]["permbind"],
+        "net"
+    );
+    assert!(outside.heads().is_empty());
+
+    // Granted, the same request goes out and its body comes back, with no restart.
+    let grant = GrantKey::Net(format!("127.0.0.1:{}", outside.port).parse().unwrap());
+    node.nodules
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
+            SetCartridgeGrant {
+                cartridge_id: spec.cartridge.clone(),
+                grant,
+                value: Some(GrantBody::present()),
+            },
+        )
+        .await
+        .unwrap();
+    let allowed = fetch(url.clone(), "GET").await.unwrap();
+    assert_eq!(allowed["status"], 200, "{allowed}");
+    assert_eq!(allowed["body"], "hello from outside");
+    let heads = outside.heads();
+    assert_eq!(heads.len(), 1);
+    assert!(heads[0].starts_with("get /thing?q=1 http/1.1"), "{}", heads[0]);
+    assert!(
+        heads[0].contains("x-from-guest: yes"),
+        "the guest's own headers are sent: {}",
+        heads[0]
+    );
+    assert!(
+        !heads[0].contains("x-nodule-capability"),
+        "the node's capability is never forwarded: {}",
+        heads[0]
+    );
+
+    // Everything else is refused as undeclared and never reaches a server.
+    for (url, method, why) in [
+        (url.clone(), "POST", "a verb the permbind does not list"),
+        (
+            format!("http://127.0.0.1:{}/", elsewhere.port),
+            "GET",
+            "another port",
+        ),
+        (
+            format!("http://localhost:{}/", outside.port),
+            "GET",
+            "another host",
+        ),
+    ] {
+        let refused = fetch(url, method).await.unwrap();
+        assert_eq!(refused["status"], 403, "{why}: {refused}");
+        assert_eq!(refused["body"]["error"], "Denied", "{why}: {refused}");
+    }
+    assert_eq!(outside.heads().len(), 1);
+    assert!(elsewhere.heads().is_empty());
     shutdown(node, stop).await;
 }
 
