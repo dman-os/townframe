@@ -7,6 +7,8 @@ use crate::State;
 use crate::navigation::Entry;
 use crate::navigation::Overlay;
 use clay_dioxus_kit::AppBar;
+use clay_dioxus_kit::Button;
+use clay_dioxus_kit::ButtonVariant;
 use clay_dioxus_kit::Drawer;
 use clay_dioxus_kit::ListDetails;
 use clay_dioxus_kit::NavButton;
@@ -55,7 +57,10 @@ const DETAILS_RULE: SizeRule = SizeRule {
     collapse_past: None,
 };
 
-const BUTTON: &str = "rounded-md border border-border px-4 py-2 text-left focus-visible:outline";
+/// The shell's own stylesheet: the layout of its frame, sidebar and home, which the kit has no
+/// component for. It names no colour, so a theme restyles the shell through the kit's tokens and
+/// parts.
+const STYLES: &str = include_str!("styles.css");
 
 /// Where in the arrangement a mounted panel sits. The sidebar/back button reads it: a details
 /// panel beside its list has no use for a second back button, but one over a compact list is the
@@ -475,12 +480,8 @@ fn Frame(shell: Shell) -> Element {
     let drawer_open = matches!(frame.overlay, Some(Overlay::Sidebar));
 
     rsx! {
-        div {
-            position: "relative",
-            width: "100%",
-            height: "100%",
-            min_width: "0",
-            min_height: "0",
+        div { class: "ct-shell",
+            document::Style { "{STYLES}" }
             // The theme for the host's own document, ahead of everything the frame draws.
             {document_theme}
             if let Some(problem) = failure() {
@@ -546,40 +547,38 @@ fn Sidebar(shell: Shell) -> Element {
                 .map(|row| row.key.clone())
         });
     rsx! {
-        nav { class: "flex flex-col gap-2", "aria-label": "Sidebar",
+        nav { "data-part": "sidebar", "aria-label": "Sidebar",
             AppBar { title: "daytxt" }
             if wide {
-                button {
-                    class: "{BUTTON} mx-2",
-                    r#type: "button",
-                    "aria-label": "Hide sidebar",
+                Button {
+                    variant: ButtonVariant::Outline,
+                    label: "Hide sidebar".to_owned(),
                     onclick: {
                         let shell = shell.clone();
-                        move |_| shell.set_sidebar_hidden(true)
+                        move |()| shell.set_sidebar_hidden(true)
                     },
                     "Hide sidebar"
                 }
             }
             for row in destinations(&panels) {
-                button {
+                Button {
                     key: "{row.key}",
-                    class: "{BUTTON} mx-2",
-                    r#type: "button",
-                    "aria-label": "Show {row.value.title}",
-                    "aria-current": (current.as_deref() == Some(row.key.as_str())).then_some("page"),
+                    variant: ButtonVariant::Outline,
+                    label: format!("Show {}", row.value.title),
+                    current: current.as_deref() == Some(row.key.as_str()),
                     onclick: {
                         let shell = shell.clone();
                         let key = row.key.clone();
-                        move |_| open_panel(&shell, key.clone(), None, failure)
+                        move |()| open_panel(&shell, key.clone(), None, failure)
                     },
                     "{row.value.title}"
                 }
             }
             if let Some(problem) = failure() {
-                p { class: "px-2", role: "alert", "{problem}" }
+                p { "data-part": "problem", role: "alert", "{problem}" }
             }
             for row in panels.iter().filter(|row| row.value.sockets.contains(&Socket::Sidebar)) {
-                div { key: "sidebar-{row.key}", class: "px-2", {panel_slot(row, row.value.content)} }
+                div { key: "sidebar-{row.key}", "data-part": "slot", {panel_slot(row, row.value.content)} }
             }
         }
     }
@@ -600,25 +599,24 @@ fn Home(shell: Shell) -> Element {
                     leading: rsx! { NavigationButton { shell: shell.clone() } },
                 }
             },
-        div { class: "flex flex-col gap-4",
-            nav { class: "flex flex-col gap-2 px-4", "aria-label": "Entry points",
+        div { "data-part": "home",
+            nav { "data-part": "entries", "aria-label": "Entry points",
                 for row in destinations(&panels).into_iter().filter(|row| !row.value.home) {
-                    button {
+                    Button {
                         key: "{row.key}",
-                        class: BUTTON,
-                        r#type: "button",
-                        "aria-label": "Open {row.value.title}",
+                        variant: ButtonVariant::Outline,
+                        label: format!("Open {}", row.value.title),
                         onclick: {
                             let shell = shell.clone();
                             let key = row.key.clone();
-                            move |_| open_panel(&shell, key.clone(), None, failure)
+                            move |()| open_panel(&shell, key.clone(), None, failure)
                         },
                         "{row.value.title}"
                     }
                 }
             }
             if let Some(problem) = failure() {
-                p { class: "px-4", role: "alert", "{problem}" }
+                p { "data-part": "problem", role: "alert", "{problem}" }
             }
         }
         }
