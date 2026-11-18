@@ -227,6 +227,15 @@
   {
     "crate": "big_cartridges",
     "kind": "object",
+    "nsid": "org.example.daybook.cartridge.net",
+    "revision": null,
+    "sidecar": true,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
+    "crate": "big_cartridges",
+    "kind": "object",
     "nsid": "org.example.daybook.cartridge.wasm",
     "revision": null,
     "sidecar": true,
@@ -344,7 +353,7 @@
   {
     "crate": "big_nodule",
     "kind": "object",
-    "nsid": "org.example.daybook.cartridges.grant.origin",
+    "nsid": "org.example.daybook.cartridges.grant.net",
     "revision": null,
     "sidecar": true,
     "stability": "unstable",
