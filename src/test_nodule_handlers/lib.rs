@@ -161,15 +161,30 @@ async fn fetch(cx: &Cx, body: XrpcBody) -> Reply {
             HeaderValue::from_str(&value).expect("a test gives a valid header value"),
         );
     }
-    match cx.fetch(method, &url, sent, Vec::new()).await {
-        Ok((status, _, body)) => reply(
-            http::StatusCode::OK,
-            json!({
-                "status": status.as_u16(),
-                "body": serde_json::from_slice::<Value>(&body)
-                    .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned())),
-            }),
-        ),
+    match cx
+        .fetch(method, &url, sent, XrpcBody::json(Vec::new()))
+        .await
+    {
+        Ok(response) => {
+            let body = match response.body {
+                XrpcBody::Json(body) => body,
+                XrpcBody::Bytes(mut stream) => {
+                    let mut body = Vec::new();
+                    while let Some(chunk) = stream.next().await {
+                        body.extend_from_slice(&chunk.expect("an upstream body chunk arrives"));
+                    }
+                    body
+                }
+            };
+            reply(
+                http::StatusCode::OK,
+                json!({
+                    "status": response.status.as_u16(),
+                    "body": serde_json::from_slice::<Value>(&body)
+                        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned())),
+                }),
+            )
+        }
         Err(error) => reply(
             http::StatusCode::BAD_GATEWAY,
             json!({"error": "UpstreamFailed", "message": error.message}),
