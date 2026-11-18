@@ -855,6 +855,32 @@ is clean apart from dead code.
   big_repo runtime2 (`automerge_frontier_worker`, `group_part_worker`, via big_sync_core) and
   daybook drawers (its own outbox).
 
+### Replay session protocol pass (2026-11-18; layer 10)
+
+**Decisions (operator):**
+- The protocol is one module, `big_automata::replay`, that owns its semantics: the laws are
+  in `replay.rs` and the messages in `replay/wire.rs`.
+- One target set per session: `subscription_id` is gone, and generation 0 opens a session.
+- The session-less `replay_page` is dropped.
+- Nouns: session, target, generation, round, verdict `Events | Refused`.
+- Lanes and credit are client policy, outside the protocol.
+- **Transport:** move big_sync RPC onto the service stack (`service_utils_rs` and friends):
+  XRPC over HTTP is canonical, reached over iroh streams; direct and IRPC calls are
+  in-process optimizations. A postcard or other binary encoding can come later.
+- `supersede` is replaced by the transport's request cancellation, pending the audit of how
+  well the stack implements cancellation.
+- **Web node:** iroh in the browser, relay-only, with iroh HTTP as the primary path. The
+  service stack may be changed to support it (operator's permission).
+
+**In flight:**
+- Quint spec plus TLC (`replay/spec/`);
+- sans-IO client and server machines, with a simulation proptest;
+- service stack audit: cancellation, iroh in the browser, encoding negotiation, sans-IO fit.
+
+**Then:** `quint-connect` conformance; the responder on `read_authorized`; the service
+binding; the bucket and summary RPCs on the same binding; the tasks (batched, coalesced
+cursor persistence).
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a
