@@ -42,3 +42,4 @@ contributions:
 interimMethods:
   - org.example.daybook.docs.readDatums
   - org.example.daybook.docs.pollDatums
+  - org.example.daybook.blobs.read
