@@ -11,7 +11,7 @@ fn part(seed: u8) -> PartKey {
 
 /// A membership touch: the object is present in `parts` as of `cursor`. There is no
 /// separate "added" kind, so a first membership and a changed one are the same event.
-fn touched(cursor: CursorIndex, obj_key: &ObjKey, parts: &[PartKey]) -> CursorEvent {
+fn touched(cursor: Rev, obj_key: &ObjKey, parts: &[PartKey]) -> CursorEvent {
     CursorEvent::ObjChanged(ObjChanged {
         cursor,
         parts: parts.to_vec(),
@@ -22,11 +22,11 @@ fn touched(cursor: CursorIndex, obj_key: &ObjKey, parts: &[PartKey]) -> CursorEv
 
 /// A touch that names no part cursor: the object is the target, so its own
 /// cursor is the only thing that can order the replay.
-fn touched_obj_only(cursor: CursorIndex, obj_key: &ObjKey) -> CursorEvent {
+fn touched_obj_only(cursor: Rev, obj_key: &ObjKey) -> CursorEvent {
     touched(cursor, obj_key, &[])
 }
 
-fn removed(cursor: CursorIndex, obj_key: &ObjKey, part_key: &PartKey) -> CursorEvent {
+fn removed(cursor: Rev, obj_key: &ObjKey, part_key: &PartKey) -> CursorEvent {
     CursorEvent::ObjRemovedFromPart(ObjRemovedFromPart {
         cursor,
         part_key: part_key.clone(),
@@ -34,7 +34,7 @@ fn removed(cursor: CursorIndex, obj_key: &ObjKey, part_key: &PartKey) -> CursorE
     })
 }
 
-fn sync_obj(obj_key: &ObjKey, cursor: CursorIndex, parts: Vec<PartKey>) -> CursorMachineCommand {
+fn sync_obj(obj_key: &ObjKey, cursor: Rev, parts: Vec<PartKey>) -> CursorMachineCommand {
     CursorMachineCommand::SyncObj {
         obj_key: obj_key.clone(),
         remote_payload: serde_json::json!({ "k": cursor }),
@@ -49,11 +49,7 @@ fn feed(machine: &mut CursorSyncMachine, evt: CursorEvent) -> Vec<CursorMachineC
     out
 }
 
-fn done(
-    machine: &mut CursorSyncMachine,
-    job: JobKey,
-    cursor: CursorIndex,
-) -> Vec<CursorMachineCommand> {
+fn done(machine: &mut CursorSyncMachine, job: JobKey, cursor: Rev) -> Vec<CursorMachineCommand> {
     let mut out = Vec::new();
     machine.on_obj_sync_job_evt(job, cursor, &mut out);
     out
@@ -62,7 +58,7 @@ fn done(
 fn sync_done(
     machine: &mut CursorSyncMachine,
     obj_key: &ObjKey,
-    cursor: CursorIndex,
+    cursor: Rev,
 ) -> Vec<CursorMachineCommand> {
     done(machine, JobKey::Sync(obj_key.clone()), cursor)
 }
@@ -70,12 +66,12 @@ fn sync_done(
 fn remove_done(
     machine: &mut CursorSyncMachine,
     obj_key: &ObjKey,
-    cursor: CursorIndex,
+    cursor: Rev,
 ) -> Vec<CursorMachineCommand> {
     done(machine, JobKey::RemoveFromPart(obj_key.clone()), cursor)
 }
 
-fn set_cursor(part_key: &PartKey, cursor: CursorIndex) -> CursorMachineCommand {
+fn set_cursor(part_key: &PartKey, cursor: Rev) -> CursorMachineCommand {
     CursorMachineCommand::SetPartCursor {
         part_key: part_key.clone(),
         cursor,
@@ -88,11 +84,7 @@ fn idle(part_key: &PartKey) -> CursorMachineCommand {
     }
 }
 
-fn removal_command(
-    obj_key: &ObjKey,
-    part_key: &PartKey,
-    cursor: CursorIndex,
-) -> CursorMachineCommand {
+fn removal_command(obj_key: &ObjKey, part_key: &PartKey, cursor: Rev) -> CursorMachineCommand {
     CursorMachineCommand::RemoveObjFromParts {
         obj_key: obj_key.clone(),
         part_key: part_key.clone(),

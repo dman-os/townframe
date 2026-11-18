@@ -7,9 +7,9 @@ use super::*;
 
 use crate::part_store::ObjState;
 use crate::part_store::PartStoreServe;
+use crate::part_store::bucket_summary::BucketFingerprint;
 use crate::part_store::memory::MemoryPartStore;
 use crate::rev::Rev;
-use crate::store::bucket::BucketFingerprint;
 use future_form::Local;
 use future_form::Sendable;
 use std::collections::HashMap;
@@ -104,7 +104,7 @@ impl PartStoreRead<Local> for SummaryStore {
     }
 }
 
-fn summary(id: BuckId, len: u32, live_count: u32, changed_at: CursorIndex) -> BucketSummary {
+fn summary(id: BuckId, len: u32, live_count: u32, changed_at: Rev) -> BucketSummary {
     BucketSummary {
         id,
         // only equality matters here, and both sides carry the same pair
@@ -169,26 +169,25 @@ fn filter_buckets_equal_counts_different_watermark_is_clean() {
     }
 }
 
-/// Leaf entries compare by payload digest, so a local object whose payload is withheld
-/// matches a remote entry for the same content and is not fetched again; a different digest
-/// is a change. Runs the memory part store through the `Local` form.
+/// Leaf entries compare by the stored payload digest: a local object whose payload matches a
+/// remote entry's content is not fetched again, and a different digest is a change. Runs the
+/// memory part store through the `Local` form.
 #[test]
-fn filter_objects_compares_withheld_payloads_by_digest() {
+fn filter_objects_compares_payloads_by_stored_digest() {
     use crate::part_store::PartStoreWrite;
     use crate::part_store::PayloadDigest;
-    use crate::part_store::PayloadState;
     use crate::part_store::memory::MemoryPartStore;
     use crate::rpc::bucket::BucketObjPageEntry;
 
     let store = MemoryPartStore::default();
     let obj = ObjKey::new(&[7]);
-    let digest =
-        PayloadDigest::of(&serde_json::json!({"held": "elsewhere"})).expect(ERROR_IMPOSSIBLE);
+    let payload = serde_json::json!({"held": "here"});
+    let digest = PayloadDigest::of(&payload).expect(ERROR_IMPOSSIBLE);
     let mut tx = store.begin();
     futures::executor::block_on(PartStoreWrite::<Local>::set_payloads(
         &store,
         &mut tx,
-        vec![(obj.clone(), PayloadState::Withheld(digest))],
+        vec![(obj.clone(), payload)],
     ))
     .expect("staging is infallible");
     futures::executor::block_on(PartStoreWrite::<Local>::add_members(
@@ -223,7 +222,7 @@ fn filter_objects_compares_withheld_payloads_by_digest() {
             .collect::<Vec<_>>()
     };
 
-    assert_eq!(deltas(leaf(digest)), vec![], "same content, held or not");
+    assert_eq!(deltas(leaf(digest)), vec![], "same content");
     let other = PayloadDigest::of(&serde_json::json!({"held": "changed"})).expect(ERROR_IMPOSSIBLE);
     assert_eq!(
         deltas(leaf(other)),
@@ -404,7 +403,7 @@ fn identical_stores_compare_only_the_root() -> Res<()> {
             parts: vec![Member::Live, Member::Dead, Member::Absent],
         },
         ObjSpec {
-            payload: Some(withheld(2)),
+            payload: Some(payload(2)),
             parts: vec![Member::Live, Member::Live, Member::Live],
         },
         ObjSpec {
@@ -516,12 +515,11 @@ fn a_pending_membership_misses_a_removal_its_payload_overtakes() -> Res<()> {
 /// buckets at the working level are leafed, and the listing pages through the levels once
 /// plus a relisting per handoff.
 ///
-/// At this size the walk is at level 1: 16 buckets of about 1_060 members, so the six changes
-/// dirty at most six of them, and the members of the clean ones are never leafed.
+/// At this size the walk is at level 1: 16 buckets of about 1_060 members, so the five changes
+/// dirty at most five of them, and the members of the clean ones are never leafed.
 ///
-/// The changes: a new payload (object 1), a payload withheld with the same digest (2, no
-/// sync), a member the requester lacks (3), a removal (4), another new payload (5) and a
-/// membership the requester lacks while holding the payload (6).
+/// The changes: a new payload (object 1), a member the requester lacks (3), a removal (4),
+/// another new payload (5) and a membership the requester lacks while holding the payload (6).
 #[test]
 fn a_large_part_walks_only_its_dirty_buckets() -> Res<()> {
     use harness::*;
@@ -541,7 +539,6 @@ fn a_large_part_walks_only_its_dirty_buckets() -> Res<()> {
     let requester = (0..MEMBERS)
         .map(|at| match at {
             1 | 5 => spec(Some(payload(1)), Member::Live),
-            2 => spec(Some(withheld(0)), Member::Live),
             3 => spec(None, Member::Absent),
             6 => spec(Some(payload(0)), Member::Absent),
             _ => spec(Some(payload(0)), Member::Live),

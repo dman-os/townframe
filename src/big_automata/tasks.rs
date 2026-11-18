@@ -6,9 +6,10 @@ mod set_peer_part_cursor;
 use set_peer_part_cursor::*;
 
 use crate::mpsc;
+use crate::part_store::ObjPayload;
+use crate::part_store::PartStoreRead;
 use crate::rpc::BigSyncRpcClient;
 use crate::scheduler::TaskId;
-use crate::store::PartStore;
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug)]]
@@ -111,7 +112,7 @@ impl MachineTask {
     pub async fn run<K, PStore, Rpc, Rng>(self, mut cx: TaskCtx<K, PStore, Rpc, Rng>)
     where
         K: FutureForm,
-        PStore: PartStore<K>,
+        PStore: PartStoreRead<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {

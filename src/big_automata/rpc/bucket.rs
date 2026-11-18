@@ -4,7 +4,8 @@ use crate::fingerprint::Fingerprint;
 use crate::fingerprint::FingerprintSeed;
 use crate::ids::BuckId;
 use crate::part_store::PayloadDigest;
-use crate::store::bucket::BucketSummary;
+use crate::part_store::bucket_summary::BucketSummary;
+use crate::rev::Rev;
 
 /// Changed buckets are returned for every level from [`Self::offset`].level()
 /// through to [`Self::to_level`], in bucket order.
@@ -18,7 +19,7 @@ pub struct GetChangedBucketsRequest {
     pub to_level: BuckLevel,
     /// A mutation stamps every level's `changed_at`, filtering on
     /// the last replay cursor returns only the buckets whose ranges would differ.
-    pub since: CursorIndex,
+    pub since: Rev,
     /// Soft limit on the number of buckets returned.
     /// Extra headroom of [`BuckId::ARITY`] is allowed to return
     /// all qualifying sibling buckets of the last one since that'd just be
@@ -42,7 +43,7 @@ structstruck::strike! {
     pub struct LeafBucketsRequest {
         pub part_key: PartKey,
         /// A bucket unchanged past this cursor answers no entries.
-        pub since: CursorIndex,
+        pub since: Rev,
         pub buckets: Vec<pub struct LeafBucketRequest {
             pub buck_id: BuckId,
             pub after: Option<ObjKey>,
@@ -78,8 +79,7 @@ structstruck::strike! {
 
 impl BucketObjPageEntry {
     /// A leaf entry's fingerprint: the object and its payload digest under the request's seed.
-    /// Both sides compute it from the digest stored at write time, so neither rereads payloads
-    /// and a withheld payload compares like a held one.
+    /// Both sides compute it from the digest stored at write time, so neither rereads payloads.
     pub fn fingerprint(
         seed: &FingerprintSeed,
         obj_key: &ObjKey,

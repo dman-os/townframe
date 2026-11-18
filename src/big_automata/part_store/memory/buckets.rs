@@ -7,10 +7,10 @@ use super::State;
 use crate::interlude::*;
 use crate::part_store::LeafEntry;
 use crate::part_store::LogKey;
+use crate::part_store::bucket_summary::BucketMemberKind;
+use crate::part_store::bucket_summary::BucketSummary;
+use crate::part_store::bucket_summary::BucketSummaryState;
 use crate::rev::Rev;
-use crate::store::bucket::BucketMemberKind;
-use crate::store::bucket::BucketSummary;
-use crate::store::bucket::BucketSummaryState;
 
 /// The deepest bucket indices a bucket covers, as a half-open range (the last bucket's end is
 /// past `u16::MAX`).

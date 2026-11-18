@@ -5,14 +5,14 @@
 use crate::interlude::*;
 
 use crate::fingerprint::FingerprintSeed;
+use crate::part_store::ObjPayload;
 use crate::part_store::ObjState;
 use crate::part_store::PartStoreRead;
+use crate::part_store::bucket_summary::BucketSummary;
+use crate::rev::Rev;
 use crate::rpc::bucket::BucketObjPageEntry as RawLeafBucketEntry;
 use crate::rpc::bucket::LeafBucketPage as RawLeafBucketPage;
 use crate::rpc::bucket::LeafBucketRequest;
-use crate::store::CursorIndex;
-use crate::store::ObjPayload;
-use crate::store::bucket::BucketSummary;
 
 structstruck::strike! {
     #[derive(Debug)]
@@ -29,12 +29,12 @@ structstruck::strike! {
         ListBuckets {
             part_key: PartKey,
             offset: BuckId,
-            since: CursorIndex,
+            since: Rev,
             working_level: BuckLevel,
         }
         LeafBuckets {
             part_key: PartKey,
-            since: CursorIndex,
+            since: Rev,
             buckets: Vec<LeafBucketRequest>,
         }
         UpgradeToCursor {
@@ -108,7 +108,7 @@ impl BucketMachine {
         part_key: PartKey,
         remote_depth: BuckLevel,
         remote_size: u64,
-        last_cursor: CursorIndex,
+        last_cursor: Rev,
     ) -> Self {
         let working_level = calc_working_level(remote_size, remote_depth);
         let bucket_width = remote_size / u64::from(BuckId::ARITY).pow(u32::from(working_level));

@@ -84,11 +84,6 @@ fn grant_returns_the_backlog() -> Res<()> {
 }
 
 #[test]
-fn withheld_is_not_deleted() -> Res<()> {
-    block_on(laws::withheld_is_not_deleted(&Memory))
-}
-
-#[test]
 fn removals_skip_routes_that_never_saw_the_member() -> Res<()> {
     block_on(laws::removals_skip_routes_that_never_saw_the_member(
         &Memory,
@@ -266,7 +261,7 @@ fn the_local_form_drives_the_memory_part_store() -> Res<()> {
     assert_eq!(
         states,
         vec![Some(ObjState {
-            content: Some((laws::payload(1), laws::payload(1).digest()?)),
+            content: Some((laws::payload(1), PayloadDigest::of(&laws::payload(1))?)),
             parts: [part.clone()].into(),
         })]
     );

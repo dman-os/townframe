@@ -9,11 +9,11 @@ use crate::interlude::*;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
 use crate::part_store::Membership;
+use crate::part_store::ObjPayload;
 use crate::part_store::ObjState;
 use crate::part_store::PayloadDigest;
-use crate::part_store::PayloadState;
+use crate::part_store::bucket_summary::BucketMemberKind;
 use crate::rev::Rev;
-use crate::store::bucket::BucketMemberKind;
 
 /// Where an object's member rows start in the log: the smallest part key.
 fn first_member_key(obj: &ObjKey) -> LogKey {
@@ -125,7 +125,7 @@ impl State {
     pub(super) fn set_payloads(
         &mut self,
         rev: Rev,
-        payloads: Vec<(ObjKey, PayloadState, PayloadDigest)>,
+        payloads: Vec<(ObjKey, ObjPayload, PayloadDigest)>,
     ) -> bool {
         let mut stamped = false;
         for (obj, payload, digest) in payloads {
@@ -146,7 +146,7 @@ impl State {
                 let (_, value) = self.log.get(&key).expect(ERROR_IMPOSSIBLE);
                 let membership = value.clone();
                 self.stamp(rev, key, membership);
-                let old_digest = old_digest.expect("a live member without a payload state");
+                let old_digest = old_digest.expect("a live member without a payload");
                 self.bucket_transition(
                     part,
                     &obj,
@@ -157,7 +157,7 @@ impl State {
                 stamped = true;
             }
 
-            // The first payload state promotes every pending membership, in the same buffer.
+            // The first payload promotes every pending membership, in the same buffer.
             parts.clear();
             parts.extend(
                 self.pending

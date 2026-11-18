@@ -17,7 +17,6 @@
 //! | after a grant, an authorized read from the old cursor returns the backlog | [`grant_returns_the_backlog`] |
 //! | an object route follows the object's readable parts and carries only their rows | [`object_routes_follow_the_readable_parts`] |
 //! | an authorized read equals the oracle's filter of current access | every check, every authorized read in [`differential`] |
-//! | `Withheld` is distinct from deleted | [`withheld_is_not_deleted`] |
 //! | a route skips a removal of a membership added after its cursor | [`removals_skip_routes_that_never_saw_the_member`], every route read in [`differential`] |
 //! | incremental bucket summaries equal a recompute | every check |
 //! | part summaries (member count, dirt) equal a count over the oracle's log | every check, [`dirty_count_counts_log_rows`] |
@@ -43,11 +42,11 @@ use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
 use crate::part_store::LogSelector;
+use crate::part_store::ObjPayload;
 use crate::part_store::PartStoreRead;
 use crate::part_store::PartStoreServe;
 use crate::part_store::PartStoreWrite;
 use crate::part_store::PayloadDigest;
-use crate::part_store::PayloadState;
 use crate::part_store::ReadVerdict;
 use crate::part_store::oracle::PartOracle;
 use crate::part_store::oracle::PartWrite;
@@ -94,8 +93,8 @@ pub fn part(index: u8) -> PartKey {
 pub fn principal(index: u8) -> PeerKey {
     PeerKey::new(&[200 + index])
 }
-pub fn payload(value: u8) -> PayloadState {
-    PayloadState::Payload(serde_json::json!(value))
+pub fn payload(value: u8) -> ObjPayload {
+    serde_json::json!(value)
 }
 const OBJS: u8 = 4;
 const PARTS: u8 = 3;
@@ -950,42 +949,6 @@ pub async fn grant_returns_the_backlog<B: Backend>(backend: &B) -> Res<()> {
     Ok(())
 }
 
-/// Withholding a payload keeps the object a live member (its rows re-stamped, live in its
-/// buckets, with the digest it was withheld with); removing it from a part is what kills the
-/// membership.
-pub async fn withheld_is_not_deleted<B: Backend>(backend: &B) -> Res<()> {
-    let mut harness = Harness::open(backend).await?;
-    harness
-        .commit(vec![set(&[(0, 1)]), add(&[(0, 0)]), grant(&[(0, 0)])])
-        .await?;
-    let digest = PayloadDigest::of(&serde_json::json!(1))?;
-    let withheld = PartWrite::SetPayloads(vec![(obj(0), PayloadState::Withheld(digest))]);
-    assert_eq!(harness.commit(vec![withheld]).await?, Some(2));
-    let state = harness.store.obj_states(&[obj(0)]).await?.remove(0);
-    let state = state.expect("a withheld object still has a state");
-    assert_eq!(
-        (state.content, state.parts),
-        (
-            Some((PayloadState::Withheld(digest), digest)),
-            [part(0)].into()
-        )
-    );
-    assert_eq!(harness.store.member_count(&part(0)).await?, 1);
-    let summary = harness
-        .store
-        .part_summaries(&principal(0), &[(part(0), 1)])
-        .await?
-        .remove(0)
-        .expect("the part is readable");
-    assert_eq!(
-        summary.dirty.member_changes, 1,
-        "the withheld object's row was re-stamped, live"
-    );
-    harness.commit(vec![remove(&[(0, 0)])]).await?;
-    assert_eq!(harness.store.member_count(&part(0)).await?, 0);
-    Ok(())
-}
-
 /// RFC 8785 has no form for an integer beyond 2^53 - 1 in magnitude, so a payload holding one
 /// has no digest. The write is refused while staging, nothing of the batch is staged, and the
 /// transaction still commits what else it holds.
@@ -996,13 +959,7 @@ pub async fn a_payload_with_no_canonical_form_is_refused<B: Backend>(backend: &B
     let mut tx = backend.begin(&harness.store).await?;
     let refused = harness
         .store
-        .set_payloads(
-            &mut tx,
-            vec![
-                (obj(1), payload(1)),
-                (obj(0), PayloadState::Payload(unsafe_int)),
-            ],
-        )
+        .set_payloads(&mut tx, vec![(obj(1), payload(1)), (obj(0), unsafe_int)])
         .await;
     assert!(
         refused.is_err(),
@@ -1293,13 +1250,8 @@ fn any_part() -> impl Strategy<Value = PartKey> {
 fn any_principal() -> impl Strategy<Value = PeerKey> {
     (0..PRINCIPALS).prop_map(principal)
 }
-fn any_payload() -> impl Strategy<Value = PayloadState> {
-    prop_oneof![
-        3 => (0u8..3).prop_map(payload),
-        1 => (0u8..3).prop_map(|value| {
-            PayloadState::Withheld(PayloadDigest::of(&serde_json::json!(value)).expect(ERROR_IMPOSSIBLE))
-        }),
-    ]
+fn any_payload() -> impl Strategy<Value = ObjPayload> {
+    (0u8..3).prop_map(payload)
 }
 fn any_level() -> impl Strategy<Value = AccessLevel> {
     prop_oneof![
@@ -1398,7 +1350,7 @@ impl<B: Backend> LogStreams<B> {
                     let obj = ObjKey::new(&key);
                     writes.push(PartWrite::SetPayloads(vec![(
                         obj.clone(),
-                        PayloadState::Payload(serde_json::json!(value)),
+                        serde_json::json!(value),
                     )]));
                     writes.push(PartWrite::AddMembers(vec![(obj, part(STREAM_PART))]));
                 }
@@ -1415,7 +1367,7 @@ impl<B: Backend> LogStreams<B> {
             let next = self.with_oracle(|oracle| oracle.latest_rev() + 1);
             writes.push(PartWrite::SetPayloads(vec![(
                 obj(FILLER_OBJ),
-                PayloadState::Payload(serde_json::json!(next)),
+                serde_json::json!(next),
             )]));
             writes.push(PartWrite::AddMembers(vec![(
                 obj(FILLER_OBJ),

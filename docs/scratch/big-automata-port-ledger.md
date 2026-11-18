@@ -522,8 +522,12 @@ a separate key-only filter really drops entries. (2) accepted. (3) and (4) are c
   Whole-route loss is a verdict (`TargetVerdict::Unauthorized`), not an empty page.
 - **A hidden third value state:** a payload stripped to `null` means "exists, payload not
   advertised, fetch it". Consumers special-case it (`doc_revision_store` skips it; the cursor
-  machine treats it as "fetch"). The part store should model it explicitly (for example
-  `Payload | Withheld`), not as a magic `null`.
+  machine treats it as "fetch"). ~~The part store should model it explicitly (for example
+  `Payload | Withheld`), not as a magic `null`.~~ **Corrected (layer 09):** the null-payload
+  `Changed` is a bug, not a state (open items, "null payload"; ADR 012, "Membership removal is
+  not payload removal"): live membership implies a payload, and payload removal is explicit.
+  `Withheld` had no producer and was removed; an object's content is its payload plus its
+  stored digest.
 - **Example-scenario style only:** no generated grant/revoke/write sequences and no oracle.
   Revocation mid-stream is covered only as the `Unauthorized` verdict on later pages. The port
   should turn these into laws plus generated sequences checked against an oracle.
@@ -634,9 +638,9 @@ ordered-KV shape. One shared substrate (ordered KV + atomic batch) is noted, not
     construction*, and `part_dirty_count` becomes a count of log rows in a rev window.
 - **Plain KV tables** (a new non-revisioned table kind in `MemoryDb`: same lock and
   transaction, no rev, no rev index):
-  - `objs`: obj → `{ payload | Withheld, payload_digest, buck_index }`. An explicit `Withheld`
-    replaces the magic `null`; the digest is stored at write time for the bucket leaf
-    fingerprint.
+  - `objs`: obj → `{ payload, payload_digest, buck_index }`. The digest is stored at write
+    time for the bucket leaf fingerprint. (An explicit `Withheld` state was planned here and
+    later removed: see "A hidden third value state" above.)
   - `parts`: part → `{ latest_cursor }`.
   - `members_by_part`: (part, obj) → () — a derived index for `member_count`, part listing and
     bucket ranges. Membership's truth is the log; this index is maintained by the same single
@@ -680,7 +684,6 @@ ordered-KV shape. One shared substrate (ordered KV + atomic batch) is noted, not
   - pending → live on the payload's arrival, with exactly one event;
   - authorization filtering of the log equals the oracle's filter, pinned in both
     grant/revoke orders;
-  - `Withheld` is distinct from deleted;
   - the incremental bucket summary equals a recompute;
   - `part_dirty_count` equals a count over the oracle;
   - cursors only advance;
@@ -746,7 +749,7 @@ ordered-KV shape. One shared substrate (ordered KV + atomic batch) is noted, not
    SipHash isn't a stable cross-version or cross-platform encoding].
 5. The bucket live fingerprint now hashes the digest (`-v2`), but the leaf fingerprint still
    hashes the payload because of the wire type, so a locally `Withheld` object counts as
-   changed [**move the leaf fingerprint to `SipHash(seed, digest)`** as decided in the
+   changed (`Withheld` was later removed, but the leaf fingerprint still uses the digest) [**move the leaf fingerprint to `SipHash(seed, digest)`** as decided in the
    bucket review; a wire-type change in `rpc/bucket.rs`].
 6. With no object lane, object routes also replay membership tombstones; the old contract
    said they carry no membership [operator call].
@@ -844,8 +847,10 @@ is clean apart from dead code.
 - `ShallowBucket` is dropped (it was never produced).
 
 **Next cleanups:**
-- Fold `store.rs` into `part_store`: `CursorIndex` becomes `Rev`, `ObjPayload` moves to
-  `part_store`, and `store/bucket.rs` moves to `part_store/bucket_summary.rs`.
+- Done: `store.rs` folded into `part_store`: `CursorIndex` became `Rev`, `ObjPayload` moved
+  to `part_store`, and `store/bucket.rs` moved to `part_store/bucket_summary.rs`.
+- Done: `PayloadState::Withheld` removed (no producer); `ObjState.content` is
+  `Option<(ObjPayload, PayloadDigest)>` and `set_payloads` takes plain payloads.
 - The outbox in big_automata has no user until the machine is ported. Its users today are
   big_repo runtime2 (`automerge_frontier_worker`, `group_part_worker`, via big_sync_core) and
   daybook drawers (its own outbox).

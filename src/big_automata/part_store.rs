@@ -14,8 +14,9 @@
 //!   object's rows. There is no separate object lane; the cost is one row write per part the
 //!   object is in.
 //! - **Membership before payload is pending.** Adding an object that has no payload yet writes
-//!   no log row and no bucket entry; when the payload (or a [`PayloadState::Withheld`]) arrives,
-//!   every pending membership goes live in that transaction, stamped once.
+//!   no log row and no bucket entry; when the payload arrives, every pending membership goes
+//!   live in that transaction, stamped once. A live membership always has a payload; payload
+//!   removal is explicit: remove the object from every part, then drop the payload.
 //! - **A write that changes nothing stamps nothing:** re-writing the payload an object holds,
 //!   adding a live member, removing a non-member, granting the level a principal has.
 //!
@@ -25,11 +26,12 @@
 
 use crate::interlude::*;
 
+use crate::part_store::bucket_summary::BucketSummary;
 use crate::rev::Limits;
 use crate::rev::Page;
 use crate::rev::Rev;
-use crate::store::bucket::BucketSummary;
 
+pub mod bucket_summary;
 pub mod memory;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -40,9 +42,11 @@ pub mod oracle;
 #[cfg(test)]
 mod tests;
 
+/// An object's content.
+pub type ObjPayload = serde_json::Value;
+
 /// A payload's identity, computed once when the payload is written: the live fingerprint of a
-/// bucket sums its members' digests, so a summary never rereads payloads, and an object whose
-/// payload is [withheld](PayloadState::Withheld) still has one.
+/// bucket sums its members' digests, so a summary never rereads payloads.
 ///
 /// A blake3 hash of the payload's RFC 8785 (JCS) canonical JSON, the same canonicalization
 /// `utils_rs::hash::hash_obj` uses. Canonical, because map key order is otherwise insertion
@@ -63,25 +67,6 @@ impl PayloadDigest {
         json_canon::to_writer(&mut hasher, payload)
             .wrap_err("payload has no RFC 8785 canonical form")?;
         Ok(Self(*hasher.finalize().as_bytes()))
-    }
-}
-
-/// What the store holds of an object's content.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PayloadState {
-    Payload(ObjPayload),
-    /// The object exists and its content is known by digest, but this store does not hold or
-    /// advertise the payload: a reader fetches it elsewhere. Not a deletion: the object stays a
-    /// live member of its parts.
-    Withheld(PayloadDigest),
-}
-
-impl PayloadState {
-    pub fn digest(&self) -> Res<PayloadDigest> {
-        match self {
-            Self::Payload(payload) => PayloadDigest::of(payload),
-            Self::Withheld(digest) => Ok(*digest),
-        }
     }
 }
 
@@ -205,13 +190,13 @@ pub fn log_row_bytes(key: &LogKey, value: Option<&LogEntry>) -> usize {
 
 /// An object as the sync client sees it.
 ///
-/// A payload state promotes every pending membership in the transaction it arrives, so an
+/// A payload promotes every pending membership in the transaction it arrives, so an
 /// object's memberships are either all live (it has content) or all pending (it has none), and
 /// `parts` names them either way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjState {
-    /// The payload state and its digest; `None` while the object only has pending memberships.
-    pub content: Option<(PayloadState, PayloadDigest)>,
+    /// The payload and its stored digest; `None` while the object only has pending memberships.
+    pub content: Option<(ObjPayload, PayloadDigest)>,
     /// The parts the object is a member of: live with content, pending without.
     pub parts: BTreeSet<PartKey>,
 }
@@ -292,12 +277,12 @@ pub trait PartStoreWrite<Async: FutureForm> {
         tx: &'a mut Self::Tx,
         parts: &'a [PartKey],
     ) -> Async::Future<'a, Res<()>>;
-    /// Set or withhold objects' payloads. A changed payload re-stamps the object's member rows
-    /// and promotes its pending memberships; an unchanged one is a no-op.
+    /// Set objects' payloads. A changed payload re-stamps the object's member rows and promotes
+    /// its pending memberships; an unchanged one is a no-op.
     fn set_payloads<'a>(
         &'a self,
         tx: &'a mut Self::Tx,
-        payloads: Vec<(ObjKey, PayloadState)>,
+        payloads: Vec<(ObjKey, ObjPayload)>,
     ) -> Async::Future<'a, Res<()>>;
     /// Add objects to parts, `(obj, part)`. An object without a payload is pending in the part.
     fn add_members<'a>(
@@ -328,8 +313,8 @@ pub trait PartStoreWrite<Async: FutureForm> {
 
 /// The sync client's reads, batched, and its cursor writes.
 pub trait PartStoreRead<Async: FutureForm> {
-    /// The objects' states, in the order asked; `None` for an object with no payload state
-    /// (unknown, or only pending).
+    /// The objects' states, in the order asked; `None` for an object with no payload (unknown,
+    /// or only pending).
     fn obj_states<'a>(
         &'a self,
         objs: &'a [ObjKey],

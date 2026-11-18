@@ -5,7 +5,7 @@
 //! answer on the requester's read verdict and counting what it hands out per part. The
 //! [`Driver`] plays the requester's tasks: the strategy decision's first listing, then each
 //! machine command in order, with the machine's own `filter_buckets`/`filter_objects` between the
-//! wire and the machine. An object sync copies the object's payload state and its membership in
+//! wire and the machine. An object sync copies the object's payload and its membership in
 //! the walked part from responder to requester.
 
 use std::collections::VecDeque;
@@ -24,14 +24,16 @@ use crate::fingerprint::FingerprintSeed;
 use crate::interlude::*;
 use crate::part_store::AccessLevel;
 use crate::part_store::LeafEntry;
+use crate::part_store::ObjPayload;
 use crate::part_store::ObjState;
 use crate::part_store::PartStoreRead;
 use crate::part_store::PartStoreServe;
 use crate::part_store::PartStoreWrite;
 use crate::part_store::PayloadDigest;
-use crate::part_store::PayloadState;
+use crate::part_store::bucket_summary::BucketSummary;
 use crate::part_store::memory::MemoryPartStore;
 use crate::part_store::memory::MemoryPartTx;
+use crate::rev::Rev;
 use crate::rpc::bucket::BucketObjPageEntry;
 use crate::rpc::bucket::GetChangedBucketsError;
 use crate::rpc::bucket::GetChangedBucketsRequest;
@@ -40,7 +42,6 @@ use crate::rpc::bucket::LeafBucketRequest;
 use crate::rpc::bucket::LeafBucketsError;
 use crate::rpc::bucket::LeafBucketsRequest;
 use crate::rpc::bucket::LeafBucketsResponse;
-use crate::store::bucket::BucketSummary;
 
 /// Each side's store as the harness reaches it: through the part store traits, in the
 /// `Sendable` form (the memory store implements both forms, so a concrete call would have to
@@ -58,7 +59,7 @@ impl Store for MemoryPartStore {
 }
 
 /// The requester's cursor on the responder: a fresh peer has seen nothing.
-const SINCE: CursorIndex = 0;
+const SINCE: Rev = 0;
 /// Machine commands one walk may take before it is declared not to terminate. Far above what
 /// any generated walk needs: each object costs at most a sync and a share of a leaf page.
 const STEP_CAP: usize = 100_000;
@@ -80,11 +81,8 @@ pub fn requester_principal() -> PeerKey {
 fn inspector() -> PeerKey {
     PeerKey::new(&[201])
 }
-pub fn payload(value: u8) -> PayloadState {
-    PayloadState::Payload(serde_json::json!(value))
-}
-pub fn withheld(value: u8) -> PayloadState {
-    PayloadState::Withheld(PayloadDigest::of(&serde_json::json!(value)).expect(ERROR_IMPOSSIBLE))
+pub fn payload(value: u8) -> ObjPayload {
+    serde_json::json!(value)
 }
 
 /// An object's membership in one part, as a store ends up holding it.
@@ -92,7 +90,7 @@ pub fn withheld(value: u8) -> PayloadState {
 pub enum Member {
     Absent,
     Live,
-    /// Added, then removed: a tombstone, when the object had a payload state; nothing when the
+    /// Added, then removed: a tombstone, when the object had a payload; nothing when the
     /// membership was still pending.
     Dead,
 }
@@ -101,7 +99,7 @@ pub enum Member {
 #[derive(Debug, Clone)]
 pub struct ObjSpec {
     /// `None` leaves every membership pending.
-    pub payload: Option<PayloadState>,
+    pub payload: Option<ObjPayload>,
     /// Indexed by part: entry `p` is the membership in [`part(p)`](part).
     pub parts: Vec<Member>,
 }
@@ -319,10 +317,10 @@ impl<S: Store> Responder<S> {
         Ok(Ok(pages))
     }
 
-    /// The object's payload state, for a sync of its membership in `part`. The machine only
+    /// The object's payload, for a sync of its membership in `part`. The machine only
     /// asks for objects it found in a readable part's leaves, so anything else is a harness or
     /// machine bug.
-    pub async fn fetch(&mut self, obj: &ObjKey, part: &PartKey) -> Res<PayloadState> {
+    pub async fn fetch(&mut self, obj: &ObjKey, part: &PartKey) -> Res<ObjPayload> {
         self.traffic.entry(part.clone()).or_default().fetches += 1;
         let state = self
             .store
@@ -639,11 +637,10 @@ pub async fn membership<S: Store>(store: &S, part: &PartKey) -> Res<BTreeSet<(Ob
 
 pub const PARTS: u8 = 3;
 
-fn any_payload() -> impl Strategy<Value = Option<PayloadState>> {
+fn any_payload() -> impl Strategy<Value = Option<ObjPayload>> {
     prop_oneof![
         1 => Just(None),
-        3 => (0u8..3).prop_map(|value| Some(payload(value))),
-        1 => (0u8..3).prop_map(|value| Some(withheld(value))),
+        4 => (0u8..3).prop_map(|value| Some(payload(value))),
     ]
 }
 
@@ -687,9 +684,9 @@ impl Scenario {
     }
 }
 
-/// Overlapping states: each requester object copies the responder's payload state and each
-/// membership, or holds its own, independently, so stores come out identical, divergent in
-/// content, membership or both, with withheld payloads on either side.
+/// Overlapping states: each requester object copies the responder's payload and each
+/// membership, or holds its own, independently, so stores come out identical, or divergent in
+/// content, membership or both.
 pub fn scenarios() -> impl Strategy<Value = Scenario> {
     use proptest::collection::vec;
     let pair = (

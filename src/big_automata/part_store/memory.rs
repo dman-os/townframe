@@ -23,21 +23,21 @@ use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
 use crate::part_store::LogSelector;
+use crate::part_store::ObjPayload;
 use crate::part_store::ObjState;
 use crate::part_store::PartStoreRead;
 use crate::part_store::PartStoreServe;
 use crate::part_store::PartStoreWrite;
 use crate::part_store::PartSummary;
 use crate::part_store::PayloadDigest;
-use crate::part_store::PayloadState;
+use crate::part_store::bucket_summary::BucketSummary;
+use crate::part_store::bucket_summary::BucketSummaryState;
 use crate::part_store::log_row_bytes;
 use crate::rev::Limits;
 use crate::rev::Page;
 use crate::rev::Rev;
 use crate::rev::RevSource;
 use crate::rev::RevWatch;
-use crate::store::bucket::BucketSummary;
-use crate::store::bucket::BucketSummaryState;
 
 mod access;
 mod buckets;
@@ -51,7 +51,7 @@ strike! {
         /// `Member` and `Access` rows, stamped with the global cursor.
         log: OkvTable<LogKey, LogEntry>,
         objs: BTreeMap<ObjKey, struct ObjRow {
-            payload: PayloadState,
+            payload: ObjPayload,
             /// Computed when the payload was written.
             digest: PayloadDigest,
         }>,
@@ -71,8 +71,7 @@ strike! {
             /// skip the removal for a reader that never saw the membership ([`LogSelector`]).
             first_added_at: Rev,
         }>,
-        /// Memberships added before the object had a payload state: no log row, no bucket
-        /// entry.
+        /// Memberships added before the object had a payload: no log row, no bucket entry.
         pending: BTreeSet<(ObjKey, PartKey)>,
         /// Each part's bucket summaries, every level, maintained per transition.
         buckets: BTreeMap<(PartKey, BuckId), BucketSummaryState>,
@@ -105,7 +104,7 @@ enum Staged {
     EnsureParts(Vec<PartKey>),
     /// Each payload with its digest, computed while staging so the hashing stays outside the
     /// lock and a payload with no canonical form is refused before anything is staged.
-    SetPayloads(Vec<(ObjKey, PayloadState, PayloadDigest)>),
+    SetPayloads(Vec<(ObjKey, ObjPayload, PayloadDigest)>),
     AddMembers(Vec<(ObjKey, PartKey)>),
     RemoveMembers(Vec<(ObjKey, PartKey)>),
     GrantAccess(Vec<(PartKey, PeerKey, AccessLevel)>),
@@ -240,12 +239,12 @@ impl<Async: FutureForm> PartStoreWrite<Async> for MemoryPartStore {
     fn set_payloads<'a>(
         &'a self,
         tx: &'a mut MemoryPartTx,
-        payloads: Vec<(ObjKey, PayloadState)>,
+        payloads: Vec<(ObjKey, ObjPayload)>,
     ) -> Async::Future<'a, Res<()>> {
         let digested = payloads
             .into_iter()
             .map(|(obj, payload)| {
-                let digest = payload.digest()?;
+                let digest = PayloadDigest::of(&payload)?;
                 Ok((obj, payload, digest))
             })
             .collect::<Res<Vec<_>>>();

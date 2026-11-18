@@ -17,19 +17,20 @@ use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
 use crate::part_store::LogSelector;
 use crate::part_store::Membership;
+use crate::part_store::ObjPayload;
 use crate::part_store::ObjState;
 use crate::part_store::PartDirtyCount;
 use crate::part_store::PartSummary;
-use crate::part_store::PayloadState;
+use crate::part_store::PayloadDigest;
 use crate::part_store::ReadVerdict;
+use crate::part_store::bucket_summary::BucketMemberKind;
+use crate::part_store::bucket_summary::BucketSummary;
+use crate::part_store::bucket_summary::BucketSummaryState;
 use crate::part_store::log_row_bytes;
 use crate::rev::Entry;
 use crate::rev::Limits;
 use crate::rev::Page;
 use crate::rev::Rev;
-use crate::store::bucket::BucketMemberKind;
-use crate::store::bucket::BucketSummary;
-use crate::store::bucket::BucketSummaryState;
 
 strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq)]]
@@ -37,7 +38,7 @@ strike! {
     /// takes it.
     pub enum PartWrite {
         EnsureParts(Vec<PartKey>),
-        SetPayloads(Vec<(ObjKey, PayloadState)>),
+        SetPayloads(Vec<(ObjKey, ObjPayload)>),
         AddMembers(Vec<(ObjKey, PartKey)>),
         RemoveMembers(Vec<(ObjKey, PartKey)>),
         GrantAccess(Vec<(PartKey, PeerKey, AccessLevel)>),
@@ -49,7 +50,7 @@ strike! {
 pub struct PartOracle {
     rev: Rev,
     parts: BTreeSet<PartKey>,
-    payloads: BTreeMap<ObjKey, PayloadState>,
+    payloads: BTreeMap<ObjKey, ObjPayload>,
     /// Memberships asked for and not removed, live or pending.
     intended: BTreeSet<(ObjKey, PartKey)>,
     access: BTreeMap<(PartKey, PeerKey), AccessLevel>,
@@ -217,7 +218,7 @@ impl PartOracle {
             Some(payload) => Some(ObjState {
                 content: Some((
                     payload.clone(),
-                    payload.digest().expect("generated payloads are canonical"),
+                    PayloadDigest::of(payload).expect("generated payloads are canonical"),
                 )),
                 parts: self.live_parts_of(obj),
             }),
@@ -280,7 +281,9 @@ impl PartOracle {
         let mut buckets = BTreeMap::<BuckId, BucketSummaryState>::new();
         for (obj, rev, live) in rows {
             let kind = if live {
-                BucketMemberKind::Live(self.payloads[obj].digest().expect(ERROR_IMPOSSIBLE))
+                BucketMemberKind::Live(
+                    PayloadDigest::of(&self.payloads[obj]).expect(ERROR_IMPOSSIBLE),
+                )
             } else {
                 BucketMemberKind::Dead
             };
@@ -379,7 +382,8 @@ impl PartOracle {
             })
             .take(limit)
             .map(|(_, obj, live)| LeafEntry {
-                live: live.then(|| self.payloads[&obj].digest().expect(ERROR_IMPOSSIBLE)),
+                live: live
+                    .then(|| PayloadDigest::of(&self.payloads[&obj]).expect(ERROR_IMPOSSIBLE)),
                 obj,
             })
             .collect()
