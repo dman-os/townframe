@@ -25,7 +25,7 @@ use clay_dioxus_kit::WidthClass;
 use dioxus::prelude::*;
 
 /// Which specimen groups to show: all of them, or the one a screenshot run names through
-/// `DAYTXT_SHOWCASE_KIT` (`appbar`, `sections`, `list`, `sheet`, `drawer`). The native window cannot scroll
+/// `DAYTXT_SHOWCASE_KIT` (`sections`, `list`, `sheet`, `drawer`). The native window cannot scroll
 /// under automation, so a group per run is how every specimen gets captured.
 #[component]
 pub fn KitSpecimens(only: Option<String>) -> Element {
@@ -33,17 +33,6 @@ pub fn KitSpecimens(only: Option<String>) -> Element {
     rsx! {
         div {
             class: "flex flex-col gap-8",
-            if shows("appbar") {
-                div {
-                    class: "flex flex-wrap items-start gap-8",
-                    Frame { title: "AppBar", width_px: COMPACT_PX,
-                        AppBarSpecimen {}
-                    }
-                    Frame { title: "AppBar", width_px: EXPANDED_PX,
-                        AppBarSpecimen {}
-                    }
-                }
-            }
             if shows("sections") {
                 div {
                     class: "flex flex-wrap items-start gap-8",
@@ -238,19 +227,6 @@ fn SheetSpecimen(width_px: f64) -> Element {
                     p { class: "text-text-muted", "A sheet belongs to its panel and is dismissed by its scrim or Escape." }
                 }
             }
-        }
-    }
-}
-
-#[component]
-fn AppBarSpecimen() -> Element {
-    rsx! {
-        AppBar {
-            title: "Settings",
-            leading: rsx! { NavButton { mode: NavButtonMode::Sidebar, onclick: |_| {} } },
-            trailing: rsx! {
-                Button { variant: ButtonVariant::Ghost, onclick: |()| {}, "Search" }
-            },
         }
     }
 }

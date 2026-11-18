@@ -8,7 +8,6 @@
 //! claytxt skin as Tailwind classes) until the contract reaches them.
 pub mod headless;
 
-mod app_bar;
 mod drawer;
 #[cfg(feature = "host")]
 mod foundation;
@@ -20,7 +19,6 @@ mod sections;
 mod sheet;
 mod width;
 
-pub use app_bar::AppBar;
 pub use drawer::Drawer;
 #[cfg(feature = "host")]
 pub use foundation::FoundationStyles;
@@ -33,6 +31,7 @@ pub use foundation::ThemeStyles;
 pub use headless::Orientation;
 pub use headless::Status;
 pub use headless::alert::Alert;
+pub use headless::app_bar::AppBar;
 pub use headless::button::Button;
 pub use headless::button::ButtonSize;
 pub use headless::button::ButtonVariant;

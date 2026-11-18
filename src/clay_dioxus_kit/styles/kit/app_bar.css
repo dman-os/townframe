@@ -1,0 +1,49 @@
+/*
+ * ct-app-bar (headless/app_bar.rs). Parts: leading, title, trailing. State: the root's data-state
+ * (leading|bare). A bare bar has no leading slot, so its title is inset to the page's own gutter.
+ * Metrics (KIT-105): 56px tall and fixed, the title one line that ends in an ellipsis rather than
+ * growing the bar.
+ */
+.ct-app-bar {
+  position: relative;
+  z-index: var(--ct-layer-app-bar);
+  box-sizing: border-box;
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--ct-dimension-spacing-2);
+  min-width: 0;
+  height: 3.5rem;
+  padding-inline: var(--ct-dimension-spacing-2);
+  color: var(--ct-color-text);
+  font-family: var(--ct-font-family);
+}
+
+.ct-app-bar[data-state="bare"] {
+  padding-left: var(--ct-dimension-spacing-4);
+}
+
+.ct-app-bar [data-part="leading"] {
+  display: flex;
+  flex: none;
+  align-items: center;
+}
+
+.ct-app-bar [data-part="title"] {
+  flex: 1 1 0;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--ct-dimension-font-size-lg);
+  font-weight: var(--ct-font-weight-semibold);
+  line-height: 1.55;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ct-app-bar [data-part="trailing"] {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--ct-dimension-spacing-1);
+}

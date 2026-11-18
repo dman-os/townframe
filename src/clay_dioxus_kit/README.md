@@ -27,7 +27,7 @@ components (the rest) are a headless part and a styled Rust part of Tailwind cla
 | `ListDetails` (list/details scaffold) | `headless::list_details` | `ListDetails` | same |
 | `Sheet` (bottom/side sheet) | `headless::sheet` | `Sheet` | same |
 | `NavButton` (back / open sidebar) | `headless::nav_button` | `styles/kit/nav_button.css` | `specimens/nav_button.rs` |
-| `AppBar` (leading slot, title, trailing actions) | `headless::app_bar` | `AppBar` | same |
+| `AppBar` (leading slot, title, trailing actions) | `headless::app_bar` | `styles/kit/app_bar.css` | `specimens/app_bar.rs` |
 | `Drawer` (left drawer of a compact host) | `headless::drawer` | `Drawer` | same |
 | `ListRow` (openable, highlighted-when-open list row) | `headless::list_row` | `ListRow` | same |
 

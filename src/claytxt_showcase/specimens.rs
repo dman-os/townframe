@@ -6,6 +6,7 @@
 //! The pages are what a theme is judged against: every cell is a stable vocabulary
 //! (`docs/design-language/styling-contract.md`) that a `user`-layer stylesheet can restyle.
 mod alert;
+mod app_bar;
 mod button;
 mod card;
 mod chip;
@@ -15,6 +16,7 @@ mod separator;
 mod tabs;
 
 pub(super) use alert::AlertSpecimens;
+pub(super) use app_bar::AppBarSpecimens;
 pub(super) use button::ButtonSpecimens;
 pub(super) use card::CardSpecimens;
 pub(super) use chip::ChipSpecimens;

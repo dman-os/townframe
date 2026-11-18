@@ -17,6 +17,7 @@
 @import "./styles/kit/alert.css" layer(kit);
 @import "./styles/kit/chip.css" layer(kit);
 @import "./styles/kit/scrub_strip.css" layer(kit);
+@import "./styles/kit/app_bar.css" layer(kit);
 @import "./styles/kit/nav_button.css" layer(kit);
 
 /* Tailwind scans the whole repository; a WIT interface name in the nodule crates reads as an
