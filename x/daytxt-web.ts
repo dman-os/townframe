@@ -98,7 +98,7 @@ let guestBytes = 0;
   }
   await site.join("packages/index.json").writeText(JSON.stringify(index));
 }
-// `ui::ThemeRoot` loads `asset!("/assets/tailwind.css")`. Without `dx` the manganis
+// `clay_dioxus_kit::ThemeRoot` loads `asset!("/assets/tailwind.css")`. Without `dx` the manganis
 // `bundled_path` stays `BundledAsset::PLACEHOLDER_HASH`, so `Asset::resolve()` asks for
 // `/assets/This should be replaced by dx…` (404 + console error → e2e fail). Rewrite the
 // fixed-width `__ASSETS__` CBOR blob in place: patch bundled_path to `tailwind.css` and
@@ -170,7 +170,7 @@ const MANGANIS_SECTION_SIZE = 4096;
 }
 await Deno.mkdir(site.join("assets").toString(), { recursive: true });
 await Deno.copyFile(
-  root.join("src/ui/assets/tailwind.css").toString(),
+  root.join("src/clay_dioxus_kit/assets/tailwind.css").toString(),
   site.join("assets/tailwind.css").toString(),
 );
 

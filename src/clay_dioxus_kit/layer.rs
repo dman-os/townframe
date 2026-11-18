@@ -1,8 +1,8 @@
 //! The kit's z-order: one scale, so no component picks a `z-index` of its own (`KIT-102`).
 //!
 //! The values are the `layer.*` semantic tokens (`semantic.tokens.json`), emitted as
-//! `--df-layer-*` custom properties by `x/design-tokens.ts`. A component names a [`Layer`] and
-//! writes its [`css`](Layer::css) (`var(--df-layer-sheet)`) into its inline `style`; the number
+//! `--ct-layer-*` custom properties by `x/design-tokens.ts`. A component names a [`Layer`] and
+//! writes its [`css`](Layer::css) (`var(--ct-layer-sheet)`) into its inline `style`; the number
 //! lives only in the token file, where a theme or a host can read it, and the test below keeps the
 //! enum and the file in step.
 //!
@@ -38,13 +38,13 @@ impl Layer {
     /// The token's custom property as a CSS value, for an inline `z-index`.
     pub const fn css(self) -> &'static str {
         match self {
-            Self::Content => "var(--df-layer-content)",
-            Self::Raised => "var(--df-layer-raised)",
-            Self::AppBar => "var(--df-layer-app-bar)",
-            Self::Drawer => "var(--df-layer-drawer)",
-            Self::Sheet => "var(--df-layer-sheet)",
-            Self::Toast => "var(--df-layer-toast)",
-            Self::Gesture => "var(--df-layer-gesture)",
+            Self::Content => "var(--ct-layer-content)",
+            Self::Raised => "var(--ct-layer-raised)",
+            Self::AppBar => "var(--ct-layer-app-bar)",
+            Self::Drawer => "var(--ct-layer-drawer)",
+            Self::Sheet => "var(--ct-layer-sheet)",
+            Self::Toast => "var(--ct-layer-toast)",
+            Self::Gesture => "var(--ct-layer-gesture)",
         }
     }
 }
@@ -71,11 +71,11 @@ mod tests {
     #[test]
     fn the_enum_is_the_token_scale() {
         let tokens: serde_json::Value =
-            serde_json::from_str(include_str!("../ui/styles/tokens/semantic.tokens.json")).unwrap();
+            serde_json::from_str(include_str!("styles/tokens/semantic.tokens.json")).unwrap();
         let tokens = tokens["layer"].as_object().unwrap();
         let mut previous = None;
         for (layer, name) in LAYERS {
-            assert_eq!(layer.css(), format!("var(--df-layer-{name})"));
+            assert_eq!(layer.css(), format!("var(--ct-layer-{name})"));
             let z = tokens[name]["$value"].as_i64().unwrap();
             assert!(
                 previous < Some(z),

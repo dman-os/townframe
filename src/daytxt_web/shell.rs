@@ -3,6 +3,8 @@
 //! each component's statically-read manifest. A package's bytes are fetched only when an
 //! instance activates, and their digest is verified against the index before the browser
 //! engine (`wcmp`) ever sees them.
+use clay_dioxus_kit::ThemeMode;
+use clay_dioxus_kit::ThemeRoot;
 use clay_mdk::host::factory;
 use daytxt_core::CompositionRuntime;
 use daytxt_core::HostInputs;
@@ -12,8 +14,6 @@ use daytxt_core::Renderer;
 use dioxus::prelude::*;
 use serde::Deserialize;
 use std::rc::Rc;
-use ui::ThemeMode;
-use ui::ThemeRoot;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;

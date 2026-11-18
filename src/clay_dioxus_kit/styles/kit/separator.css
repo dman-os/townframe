@@ -1,0 +1,17 @@
+/* ct-separator (headless/separator.rs). Axis: data-orientation. */
+.ct-separator {
+  flex: none;
+  background: var(--ct-color-border);
+}
+
+.ct-separator[data-orientation="horizontal"] {
+  width: 100%;
+  height: var(--ct-dimension-border-width-hairline);
+  margin-block: var(--ct-dimension-spacing-4);
+}
+
+.ct-separator[data-orientation="vertical"] {
+  align-self: stretch;
+  width: var(--ct-dimension-border-width-hairline);
+  margin-inline: var(--ct-dimension-spacing-3);
+}

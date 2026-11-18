@@ -1,17 +1,25 @@
 mod diff_fixtures;
 mod diffs;
 mod foundations;
+mod kit;
+mod specimens;
 
 use foundations::ColorFoundation;
 use foundations::FoundationSection;
-use foundations::TileGrammarFoundation;
-mod kit;
 
 #[cfg(not(any(feature = "desktop", target_arch = "wasm32")))]
 compile_error!(
     "claytxt_showcase builds natively with the `desktop` feature and for the browser (wasm32) with the `web` feature"
 );
 
+use clay_dioxus_kit::Button;
+use clay_dioxus_kit::ButtonVariant;
+use clay_dioxus_kit::ScrubStrip;
+use clay_dioxus_kit::TabItem;
+use clay_dioxus_kit::TabPanel;
+use clay_dioxus_kit::Tabs;
+use clay_dioxus_kit::ThemeMode;
+use clay_dioxus_kit::ThemeRoot;
 #[cfg(feature = "desktop")]
 use dioxus::desktop::tao::event::Event as DesktopEvent;
 #[cfg(feature = "desktop")]
@@ -30,32 +38,10 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 #[cfg(feature = "desktop")]
 use std::sync::Arc;
-use ui::ArcIndex;
-use ui::Button;
-use ui::ButtonVariant;
-use ui::Card;
-use ui::CardContent;
-use ui::CardHeader;
-use ui::ColumnHeight;
-use ui::ColumnId;
-use ui::ColumnRack;
-use ui::ColumnRelation;
-use ui::ColumnSection;
-use ui::ColumnSource;
-use ui::ColumnSpec;
-use ui::ColumnState;
-use ui::SectionLayout;
-use ui::ThemeMode;
-use ui::ThemeRoot;
-use ui::TileChildren;
-use ui::TileContent;
-use ui::TileKind;
-use ui::TileListSpec;
-use ui::TileSpec;
 
 const MATERIAL_THEME_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../ui/styles/material-theme.json"
+    "/../clay_dioxus_kit/styles/material-theme.json"
 ));
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -193,10 +179,14 @@ fn App() -> Element {
     let theme: MaterialTheme = serde_json::from_str(MATERIAL_THEME_JSON)
         .expect("material-theme.json must match the Material theme schema");
     let mut mode = use_signal(|| ThemeMode::Dark);
-    // `DAYTXT_LAB_TAB=diffs` opens that tab, so a screenshot run needs no click.
-    let mut tab = use_signal(|| match lab_setting("DAYTXT_LAB_TAB", "tab").as_deref() {
-        Some("diffs") => LabTab::Diffs,
-        _ => LabTab::Components,
+    // `DAYTXT_LAB_TAB=scrub-strip` opens that tab, so a screenshot run needs no click.
+    let mut tab = use_signal(|| {
+        lab_setting("DAYTXT_LAB_TAB", "tab")
+            .map(|value| {
+                LabTab::from_value(&value)
+                    .unwrap_or_else(|| panic!("DAYTXT_LAB_TAB: no tab named {value:?}"))
+            })
+            .unwrap_or(LabTab::Button)
     });
     let available_width = use_available_width();
     let photo_preloads = use_memo(|| {
@@ -208,6 +198,7 @@ fn App() -> Element {
             .collect::<Vec<_>>()
     });
     use_context_provider(|| Signal::new(BTreeMap::<String, Rc<MountedData>>::new()));
+    let items = LabTab::ALL.map(|tab| TabItem::new(tab.value(), tab.label()));
 
     rsx! {
         for src in photo_preloads.read().iter() {
@@ -224,117 +215,149 @@ fn App() -> Element {
                 class: "min-h-screen box-border bg-background p-6 font-sans text-foreground lg:p-12",
                 h1 {
                     class: "mb-2 text-4xl font-bold leading-tight tracking-tight",
-                    "claytxt theme lab"
+                    "claytxt kit showcase"
                 }
                 p {
                     class: "mb-6 max-w-3xl text-foreground-muted leading-relaxed",
-                    "A legible reference for the foundations shared by claytxt. Change the mode, inspect each token family, and use these specimens as the contract for future themes and components."
+                    "One page per component of the styling contract, each showing every variant and state, then the legacy component specimens, the foundations and the diff view. Every cell is vocabulary a theme can restyle: see docs/design-language/styling-contract.md, and apply a theme from the theme lab micro."
                 }
-                button {
-                    class: "mb-6 cursor-pointer rounded-md border border-border bg-card px-4 py-2 font-sans text-foreground",
-                    onclick: move |_| {
-                        mode.set(match mode() {
-                            ThemeMode::Light => ThemeMode::Dark,
-                            ThemeMode::Dark => ThemeMode::Light,
-                        });
-                    },
-                    "Toggle {mode:?} mode"
+                div { class: "mb-6",
+                    Button {
+                        variant: ButtonVariant::Outline,
+                        onclick: move |()| {
+                            mode.set(match mode() {
+                                ThemeMode::Light => ThemeMode::Dark,
+                                ThemeMode::Dark => ThemeMode::Light,
+                            });
+                        },
+                        "Toggle {mode:?} mode"
+                    }
                 }
-                // A screenshot run names one kit specimen group; see `kit::KitSpecimens`.
+                // A screenshot run names one legacy kit specimen group; see `kit::KitSpecimens`.
                 if let Some(group) = lab_setting("DAYTXT_SHOWCASE_KIT", "kit") {
                     kit::KitSpecimens { only: Some(group) }
                 } else {
-                LabTabs { active: tab(), on_select: move |next| tab.set(next) }
-                ThemeLabNav { viewport: (available_width(), 860.0), tab: tab() }
-                div {
-                    id: "lab-panel",
-                    role: "tabpanel",
-                    "aria-labelledby": tab().tab_id(),
-                    match tab() {
-                        LabTab::Components => rsx! {
-                            FoundationSection {
-                                id: "kit".to_string(),
-                                title: "Component kit".to_string(),
-                                description: "clay_dioxus_kit components at a compact and an expanded host width. The kit never measures: each frame is the host, and hands the component its width class.".to_string(),
-                                kit::KitSpecimens { only: None }
-                            }
+                    Tabs {
+                        items: items.to_vec(),
+                        value: tab().value().to_string(),
+                        on_value_change: move |value: String| {
+                            tab.set(LabTab::from_value(&value).expect("the tab list is LabTab::ALL"));
                         },
-                        LabTab::Tokens => rsx! { foundations::TokenFoundations {} },
-                        LabTab::Colors => rsx! {
-                            FoundationSection {
-                                id: "colors".to_string(),
-                                title: "Existing colors".to_string(),
-                                description: "Material remains the baseline palette. Every source palette and generated scheme is rendered from the unchanged JSON fixture.".to_string(),
-                                ColorFoundation { theme }
+                        label: "Showcase pages".to_string(),
+                        renderer: specimens::renderer(),
+                        for each in LabTab::ALL {
+                            TabPanel { key: "{each.value()}", value: each.value().to_string(),
+                                if tab() == each {
+                                    ThemeLabNav { viewport: (available_width(), 860.0), tab: each }
+                                    {each.page(theme.clone(), available_width())}
+                                }
                             }
-                        },
-                        LabTab::Tiles => rsx! {
-                            FoundationSection {
-                                id: "tile-grammar".to_string(),
-                                title: "Feature grammar: Tiles".to_string(),
-                                description: "This feature grammar is executable evidence, not part of the foundation token language. Ordered lists combine App, Widget, and Group tiles; content variants and sublist presentation remain feature-specific.".to_string(),
-                                TileGrammarFoundation { available_width: available_width() }
-                            }
-                        },
-                        LabTab::Diffs => rsx! {
-                            FoundationSection {
-                                id: "diffs".to_string(),
-                                title: "Diff view".to_string(),
-                                description: "pierre_diffs_dioxus::FileDiffView, a plain Dioxus component over the Pierre port, in two views under one options bar: sample specimens (a split Rust diff, a unified TypeScript diff with a line annotation, a virtualized three-thousand-line diff) and a real 599-file PR diff. Syntax colours need the highlights lexer, which is not wired yet, so tokens render as plain text.".to_string(),
-                                diffs::DiffsFoundation {}
-                            }
-                        },
+                        }
                     }
-                }
                 }
             }
         }
     }
 }
 
-/// The lab's major sections, one tab each. Each tab lists the sections the `ArcIndex` jumps
-/// between, by the `FoundationSection` id they mount under.
+/// The showcase's pages, one tab each: a specimen page per contract component, then the legacy
+/// component specimens, the foundations and the diff view.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LabTab {
-    Components,
+    Button,
+    Tabs,
+    Card,
+    Separator,
+    Alert,
+    Chip,
+    ScrubStrip,
+    Layout,
     Tokens,
     Colors,
-    Tiles,
     Diffs,
 }
 
 impl LabTab {
-    const ALL: [LabTab; 5] = [
-        LabTab::Components,
+    const ALL: [LabTab; 11] = [
+        LabTab::Button,
+        LabTab::Tabs,
+        LabTab::Card,
+        LabTab::Separator,
+        LabTab::Alert,
+        LabTab::Chip,
+        LabTab::ScrubStrip,
+        LabTab::Layout,
         LabTab::Tokens,
         LabTab::Colors,
-        LabTab::Tiles,
         LabTab::Diffs,
     ];
 
+    /// The tab's `value`, also what `DAYTXT_LAB_TAB` and the page's `?tab=` name.
+    fn value(self) -> &'static str {
+        match self {
+            LabTab::Button => "button",
+            LabTab::Tabs => "tabs",
+            LabTab::Card => "card",
+            LabTab::Separator => "separator",
+            LabTab::Alert => "alert",
+            LabTab::Chip => "chip",
+            LabTab::ScrubStrip => "scrub-strip",
+            LabTab::Layout => "layout",
+            LabTab::Tokens => "tokens",
+            LabTab::Colors => "colors",
+            LabTab::Diffs => "diffs",
+        }
+    }
+
+    fn from_value(value: &str) -> Option<LabTab> {
+        LabTab::ALL.into_iter().find(|tab| tab.value() == value)
+    }
+
     fn label(self) -> &'static str {
         match self {
-            LabTab::Components => "Components",
+            LabTab::Button => "Button",
+            LabTab::Tabs => "Tabs",
+            LabTab::Card => "Card",
+            LabTab::Separator => "Separator",
+            LabTab::Alert => "Alert",
+            LabTab::Chip => "Chip",
+            LabTab::ScrubStrip => "ScrubStrip",
+            LabTab::Layout => "Layout kit",
             LabTab::Tokens => "Tokens",
             LabTab::Colors => "Colors",
-            LabTab::Tiles => "Tiles",
             LabTab::Diffs => "Diffs",
         }
     }
 
-    fn tab_id(self) -> &'static str {
-        match self {
-            LabTab::Components => "lab-tab-components",
-            LabTab::Tokens => "lab-tab-tokens",
-            LabTab::Colors => "lab-tab-colors",
-            LabTab::Tiles => "lab-tab-tiles",
-            LabTab::Diffs => "lab-tab-diffs",
-        }
-    }
-
+    /// The sections of the tab's page, by the `FoundationSection` id they mount under. A page
+    /// with more than one gets the index strip (`ThemeLabNav`); the `ScrubStrip` page mounts its
+    /// own, over the letters.
     fn sections(self) -> &'static [(&'static str, &'static str)] {
         match self {
-            LabTab::Components => &[("kit", "Component kit")],
+            LabTab::Button => &[
+                ("button-variants", "Variants"),
+                ("button-states", "States"),
+                ("button-toggle", "Toggle"),
+            ],
+            LabTab::Tabs => &[
+                ("tabs-horizontal", "Horizontal"),
+                ("tabs-vertical", "Vertical"),
+            ],
+            LabTab::Card => &[("card-variants", "Variants"), ("card-parts", "Parts")],
+            LabTab::Separator => &[
+                ("separator-orientations", "Orientations"),
+                ("separator-roles", "Roles"),
+            ],
+            LabTab::Alert => &[
+                ("alert-statuses", "Statuses"),
+                ("alert-dismissible", "Dismissible"),
+            ],
+            LabTab::Chip => &[
+                ("chip-statuses", "Statuses"),
+                ("chip-interactive", "Interactive"),
+            ],
+            LabTab::ScrubStrip => &[],
+            LabTab::Layout => &[("kit", "Layout kit")],
             LabTab::Tokens => &[
                 ("typography", "Typography"),
                 ("spacing", "Spacing"),
@@ -343,35 +366,46 @@ impl LabTab {
                 ("states", "Interaction states"),
             ],
             LabTab::Colors => &[("colors", "Existing colors")],
-            LabTab::Tiles => &[("tile-grammar", "Tile grammar")],
             LabTab::Diffs => &[("diffs", "Diff view")],
         }
     }
-}
 
-/// The tab bar. The active tab is `aria-selected` with `data-state="active"`, painted with the
-/// `selected` / `on-selected` roles the kit uses for its current row (`KIT-107`), and each tab is
-/// at least 48 px tall (`KIT-106`).
-#[component]
-fn LabTabs(active: LabTab, on_select: EventHandler<LabTab>) -> Element {
-    rsx! {
-        div {
-            role: "tablist",
-            "aria-label": "Theme lab sections",
-            class: "mb-6 flex flex-wrap gap-2",
-            for tab in LabTab::ALL {
-                button {
-                    key: "{tab.tab_id()}",
-                    id: tab.tab_id(),
-                    role: "tab",
-                    "aria-selected": tab == active,
-                    "aria-controls": "lab-panel",
-                    "data-state": if tab == active { "active" } else { "inactive" },
-                    class: "min-h-12 cursor-pointer rounded-md border border-border bg-card px-4 font-sans text-foreground-muted hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus data-[state=active]:bg-selected data-[state=active]:text-on-selected",
-                    onclick: move |_| on_select.call(tab),
-                    "{tab.label()}"
-                }
+    fn page(self, theme: MaterialTheme, available_width: f64) -> Element {
+        match self {
+            LabTab::Button => rsx! { specimens::ButtonSpecimens {} },
+            LabTab::Tabs => rsx! { specimens::TabsSpecimens {} },
+            LabTab::Card => rsx! { specimens::CardSpecimens {} },
+            LabTab::Separator => rsx! { specimens::SeparatorSpecimens {} },
+            LabTab::Alert => rsx! { specimens::AlertSpecimens {} },
+            LabTab::Chip => rsx! { specimens::ChipSpecimens {} },
+            LabTab::ScrubStrip => {
+                rsx! { specimens::ScrubStripSpecimens { viewport: (available_width, 860.0) } }
             }
+            LabTab::Layout => rsx! {
+                FoundationSection {
+                    id: "kit".to_string(),
+                    title: "Layout kit".to_string(),
+                    description: "The older clay_dioxus_kit components (Tailwind-skinned until the styling contract reaches them) at a compact and an expanded host width. The kit never measures: each frame is the host, and hands the component its width class.".to_string(),
+                    kit::KitSpecimens { only: None }
+                }
+            },
+            LabTab::Tokens => rsx! { foundations::TokenFoundations {} },
+            LabTab::Colors => rsx! {
+                FoundationSection {
+                    id: "colors".to_string(),
+                    title: "Existing colors".to_string(),
+                    description: "Material remains the baseline palette. Every source palette and generated scheme is rendered from the unchanged JSON fixture.".to_string(),
+                    ColorFoundation { theme }
+                }
+            },
+            LabTab::Diffs => rsx! {
+                FoundationSection {
+                    id: "diffs".to_string(),
+                    title: "Diff view".to_string(),
+                    description: "pierre_diffs_dioxus::FileDiffView, a plain Dioxus component over the Pierre port, in two views under one options bar: sample specimens (a split Rust diff, a unified TypeScript diff with a line annotation, a virtualized three-thousand-line diff) and a real 599-file PR diff. Syntax colours need the highlights lexer, which is not wired yet, so tokens render as plain text.".to_string(),
+                    diffs::DiffsFoundation {}
+                }
+            },
         }
     }
 }
@@ -401,29 +435,25 @@ fn content_width(width: f64) -> f64 {
     width - if width >= 1024.0 { 96.0 } else { 48.0 }
 }
 
-/// The section index of one tab. `ArcIndex` asserts a non-empty list, so every `LabTab` must list
-/// at least one section (`every_tab_lists_a_section` holds that).
+/// The index strip of a page with more than one section: it jumps between the sections the page
+/// lists, by the `FoundationSection` id they mount under. The `ScrubStrip` page mounts its own.
 #[component]
 fn ThemeLabNav(viewport: (f64, f64), tab: LabTab) -> Element {
     let anchors = use_context::<Signal<BTreeMap<String, Rc<MountedData>>>>();
     let sections = tab.sections();
+    if sections.len() < 2 {
+        return VNode::empty();
+    }
     rsx! {
         // Keyed by tab: each tab is its own index, so a tab's gesture state and selection never
         // carry over to a list of another length.
-        ArcIndex {
-            key: "{tab.tab_id()}",
+        ScrubStrip {
+            key: "{tab.value()}",
             viewport,
             items: sections.iter().map(|(_, label)| *label).collect::<Vec<_>>(),
-            on_select: move |index| {
-                let target = sections.get(index).and_then(|(id, _)| anchors.read().get(*id).cloned());
-                spawn(async move {
-                    if let Some(target) = target {
-                        if let Err(error) = target.scroll_to(ScrollBehavior::Instant).await {
-                            eprintln!("unable to scroll to showcase section: {error:?}");
-                        }
-                    }
-                });
-            },
+            renderer: specimens::renderer(),
+            label: "Sections of this page".to_string(),
+            on_select: move |index: usize| specimens::jump_to(anchors, sections[index].0.to_string()),
         }
     }
 }
@@ -433,11 +463,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_tab_lists_a_section() {
+    fn every_tab_has_a_unique_value_that_names_it() {
         for tab in LabTab::ALL {
-            assert!(
-                !tab.sections().is_empty(),
-                "{tab:?} would hand ArcIndex an empty list"
+            assert_eq!(LabTab::from_value(tab.value()), Some(tab));
+        }
+        let mut values: Vec<_> = LabTab::ALL.iter().map(|tab| tab.value()).collect();
+        values.sort_unstable();
+        values.dedup();
+        assert_eq!(values.len(), LabTab::ALL.len());
+    }
+
+    #[test]
+    fn every_page_but_the_scrub_strip_lists_a_section() {
+        for tab in LabTab::ALL {
+            assert_eq!(
+                tab.sections().is_empty(),
+                tab == LabTab::ScrubStrip,
+                "{tab:?}"
             );
         }
     }

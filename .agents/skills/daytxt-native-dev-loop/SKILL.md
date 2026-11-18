@@ -32,7 +32,7 @@ This builds the Wasm packages, exports `DAYTXT_PACKAGE_DIR`, then runs `x/dx.ts 
 
 - **Webview (Wry) is the default renderer** (operator, 2026-11-10: ship on Wry first, Blitz later). `daytxt_desktop`'s `desktop` feature is Wry; `--native` adds the Blitz launcher (feature `blitz`, additive) and starts it with `DAYTXT_RENDERER=blitz`. Before this split, `--webview` only changed the dx flag and the binary still launched Blitz; a window titled "daytxt" under the old code was Blitz.
 - **Webview for interaction checks.** Its AT-SPI tree exposes element titles, so `accessibility-cli --click '[title="..."]'` can verify real callbacks, which Blitz cannot dispatch.
-- **Do not pass `-p ui`.** `ui` is a lib crate, so the Dioxus CLI cannot target it. Target the binary crate `daytxt_desktop` (the script does).
+- **Do not pass `-p clay_dioxus_kit`.** The kit is a lib crate, so the Dioxus CLI cannot target it. Target the binary crate `daytxt_desktop` (the script does).
 - **Let the serve process own compilation.** Do not run `cargo build` alongside it. The wrapper forwards the arguments to the repository-local Dioxus CLI, and installs that CLI through `x/install-dx.ts` when needed.
 - Use the same wrapper for other Dioxus commands, for example `deno run --allow-all x/dx.ts check ...`.
 

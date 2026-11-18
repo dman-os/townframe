@@ -9,6 +9,7 @@ path = "lib.rs"
 [dependencies]
 #
 # internal
+clay_dioxus_kit = { workspace = true, features = ["host"] }
 clay_guest_session = { workspace = true }
 
 clay_docs = { workspace = true }
@@ -36,7 +37,6 @@ micro_toolbar_manifest = { workspace = true }
 serde_json = { workspace = true }
 service_utils_rs = { workspace = true }
 sqlite_rs = { workspace = true }
-ui = { workspace = true }
 utils_rs = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 

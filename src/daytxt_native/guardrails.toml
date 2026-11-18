@@ -4,11 +4,12 @@ dependency_reason = "claytxt microkernel layering: the native-engine half of the
 allowed_dependencies = [
     "big_cabinet",
     "big_cabinet_core",
-    "clay_node",
+    "clay_dioxus_kit",
     "clay_docs",
     "clay_guest_session",
     "clay_host",
     "clay_mdk",
+    "clay_node",
     "clay_store",
     "daytxt_core",
     "intxt_core",
@@ -24,7 +25,6 @@ allowed_dependencies = [
     "micro_toolbar_manifest",
     "service_utils_rs",
     "sqlite_rs",
-    "ui",
     "utils_rs",
 ]
 allow_external_api_types = false

@@ -1,0 +1,215 @@
+/*
+ * ct-scrub-strip (headless/scrub_strip.rs). Parts: scrim, marker (tick, label), bubble,
+ * grab-band, status. States: the root's data-state (idle|hover|engaged), a marker's data-state
+ * (active|inactive) and data-hover.
+ *
+ * Rust computes the geometry and hands it over as custom properties: on the root
+ * --ct-strip-cell, --ct-strip-inset, --ct-strip-anchor, --ct-strip-limit; on a marker and the
+ * bubble --ct-strip-push and --ct-strip-dy. This sheet turns them into positions, so a theme can
+ * restyle the strip without touching where things are.
+ *
+ * No `transform`: Blitz implements none, and positions as `right`/`top` work in every renderer.
+ */
+.ct-scrub-strip {
+  position: fixed;
+  inset: 0;
+  z-index: var(--ct-layer-gesture);
+  /* Inert at rest so what lies under the strip stays clickable; once a gesture starts the
+     overlay takes the whole window, which is how the strip keeps tracking a finger that has left
+     the grab band. */
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  font-family: var(--ct-font-family);
+}
+
+.ct-scrub-strip[data-state="engaged"] {
+  pointer-events: auto;
+}
+
+.ct-scrub-strip [data-part="scrim"] {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: calc(
+    var(--ct-strip-inset) +
+    var(--ct-strip-limit) +
+    var(--ct-strip-cell) *
+    2 +
+    90px
+  );
+  background: linear-gradient(
+    to left,
+    color-mix(in srgb, var(--ct-color-canvas) 92%, transparent),
+    transparent
+  );
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--ct-motion-duration-fade);
+}
+
+.ct-scrub-strip[data-state="engaged"] [data-part="scrim"] {
+  opacity: 1;
+  transition: none;
+}
+
+.ct-scrub-strip [data-part="marker"] {
+  position: absolute;
+  right: calc(
+    var(--ct-strip-inset) +
+    var(--ct-strip-push) -
+    var(--ct-strip-cell) /
+    2
+  );
+  top: calc(
+    var(--ct-strip-anchor) +
+    var(--ct-strip-dy) -
+    var(--ct-strip-cell) /
+    2
+  );
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ct-strip-cell);
+  min-width: var(--ct-strip-cell);
+  height: var(--ct-strip-cell);
+  border-radius: var(--ct-dimension-radius-md);
+  color: var(--ct-color-text-muted);
+  font-size: min(calc(var(--ct-strip-cell) * 0.78), 0.9375rem);
+  font-weight: var(--ct-font-weight-semibold);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Releasing unbends the strip: the properties return to rest at once and these transitions
+   carry the markers there. Only at rest: while a finger is down a marker must follow it. */
+.ct-scrub-strip:not([data-state="engaged"]) [data-part="marker"] {
+  transition:
+    right var(--ct-motion-duration-enter) var(--ct-motion-easing-enter),
+    top var(--ct-motion-duration-enter) var(--ct-motion-easing-enter);
+}
+
+.ct-scrub-strip [data-part="marker"][data-state="active"] {
+  color: var(--ct-color-primary);
+}
+
+.ct-scrub-strip [data-part="tick"] {
+  display: block;
+  width: 0.75rem;
+  height: 2px;
+  border-radius: var(--ct-dimension-radius-pill);
+  background: currentColor;
+}
+
+.ct-scrub-strip [data-part="label"] {
+  display: none;
+}
+
+/* The labels appear when the strip is being used: hovered, pressed or keyboard-focused. */
+.ct-scrub-strip:not([data-state="idle"]) [data-part="marker"],
+.ct-scrub-strip:focus-within [data-part="marker"] {
+  width: max-content;
+  padding-inline: var(--ct-dimension-spacing-2);
+  background: color-mix(
+    in srgb,
+    var(--ct-color-surface-raised) 94%,
+    transparent
+  );
+  color: var(--ct-color-text);
+}
+
+.ct-scrub-strip:not([data-state="idle"]) [data-part="tick"],
+.ct-scrub-strip:focus-within [data-part="tick"] {
+  display: none;
+}
+
+.ct-scrub-strip:not([data-state="idle"]) [data-part="label"],
+.ct-scrub-strip:focus-within [data-part="label"] {
+  display: block;
+}
+
+/* While pressed, the bubble names the active breakpoint, so its own marker is a tick again. */
+.ct-scrub-strip[data-state="engaged"]
+  [data-part="marker"][data-state="active"]
+  [data-part="tick"] {
+  display: block;
+}
+
+.ct-scrub-strip[data-state="engaged"]
+  [data-part="marker"][data-state="active"]
+  [data-part="label"] {
+  display: none;
+}
+
+.ct-scrub-strip [data-part="bubble"] {
+  position: absolute;
+  right: calc(
+    var(--ct-strip-inset) +
+    var(--ct-strip-push) +
+    var(--ct-strip-cell) *
+    0.6
+  );
+  top: calc(
+    var(--ct-strip-anchor) +
+    var(--ct-strip-dy) -
+    var(--ct-strip-cell) *
+    0.7
+  );
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: max-content;
+  min-width: calc(var(--ct-strip-cell) * 1.9);
+  height: calc(var(--ct-strip-cell) * 1.4);
+  padding-inline: var(--ct-dimension-spacing-3);
+  border-radius: var(--ct-dimension-radius-md);
+  background: var(--ct-color-surface-raised);
+  box-shadow: var(--ct-elevation-md);
+  color: var(--ct-color-text);
+  font-size: min(calc(var(--ct-strip-cell) * 0.86), 1rem);
+  font-weight: var(--ct-font-weight-semibold);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.ct-scrub-strip [data-part="grab-band"] {
+  position: fixed;
+  top: 0;
+  right: 16px;
+  bottom: 0;
+  width: 32px;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+/* A thumb is wide and starts far from the edge it aims at. */
+@media (pointer: coarse) {
+  .ct-scrub-strip [data-part="grab-band"] {
+    right: 0;
+    width: 150px;
+  }
+}
+
+.ct-scrub-strip [data-part="grab-band"]:focus-visible {
+  outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
+  outline-offset: -2px;
+  border-radius: var(--ct-dimension-radius-md);
+}
+
+.ct-scrub-strip [data-part="status"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ct-scrub-strip [data-part] {
+    transition: none;
+  }
+}

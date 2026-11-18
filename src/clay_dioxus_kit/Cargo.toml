@@ -10,6 +10,13 @@ path = "lib.rs"
 [lints]
 workspace = true
 
+[features]
+# The host-side stylesheet loader (`FoundationStyles`, `ThemeRoot`): links the generated bundle
+# as a manganis asset and injects it with `document::Link`, which a wasm guest (no renderer, no
+# document integration, no asset pipeline) must not link. Native hosts and the browser build
+# turn it on; a guest micro never does.
+host = ["dioxus/asset", "dioxus/document"]
+
 [dependencies]
 # Spelled out (not `dioxus.workspace = true`) so default features stay off: the wasip3 guest
 # build has no renderer, launcher or document integration to link, exactly like `clay_mdk`'s

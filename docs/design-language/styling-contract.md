@@ -1,0 +1,182 @@
+# Styling contract
+
+Status: approved by the operator 2026-11-18; first applied by the kit's contract components (`Button`, `Tabs`, `Card`, `Separator`, `Alert`, `Chip`, `ScrubStrip`) and not yet by the older kit components or the micros (see [Out of scope](#out-of-scope-the-next-lane)).
+
+A component's appearance is a stylesheet, and a stylesheet is something an end user can replace. The contract says what a component emits so that a stylesheet, any stylesheet, can restyle it without touching code. It is written for the DOM and CSS, not for Rust: a micro written in Solid or React meets the same contract by emitting the same vocabulary (see [Other frameworks](#other-frameworks)).
+
+The kit's own skin is one such stylesheet. If a visual change needs a Rust edit, the component broke the contract.
+
+## The five rules
+
+1. **Rust owns structure and behaviour; CSS owns every visual.** The headless part renders the DOM, ARIA, focus, keyboard handling and events. It names no colour, size, spacing, radius, font, shadow, motion or layout that is not needed to make the behaviour work.
+2. **The public theming surface is three things.** The `--ct-*` tokens, the stable part and state names (below), and CSS layers. Nothing else (a class a Rust file made up, the nesting depth of the DOM, a tag name) is promised to a theme.
+3. **Layers order the cascade: reset, tokens, kit, user.** A micro's own unlayered rules sit above all of them. See [Layers](#layers).
+4. **No inline styles.** Geometry that is computed at run time (a pointer position, a measured extent) reaches CSS as an inline CSS custom property (for example `style="--ct-strip-push: 12px"`) that the stylesheet reads. An inline declaration of any other property is a bug.
+5. **The kit's skin is a stylesheet keyed on part names and states.** It is not Tailwind utility strings in Rust and not a skin struct of class strings.
+
+Consequences a reviewer can check:
+
+- A headless part contains no class literal except its root's `ct-<component>`, and no utility string.
+- A skin selector is a root class, a `data-part` and a `data-*` state, never a tag or a position (`div > span:nth-child(2)`).
+- A skin never uses `!important`. Layers, not weight, decide who wins, so a user rule needs no weapon to beat the kit.
+- Every animation is a CSS `transition` or `animation` that the stylesheet declares and `prefers-reduced-motion` removes. Rust never runs a timer to animate.
+
+## Part naming
+
+One component is one root and some named parts.
+
+| Thing | Spelling | Example |
+|---|---|---|
+| Root | `class="ct-<component>"`, kebab-case, on the root element only | `ct-button`, `ct-scrub-strip` |
+| Internal part | `data-part="<part>"`, kebab-case, on the part's element | `data-part="tab"` |
+| The one enumerated state of a part | `data-state="<state>"` | `data-state="active"` |
+| Boolean state | a bare data attribute, present or absent | `data-disabled` |
+| Orientation | `data-orientation="horizontal" \| "vertical"` | on `ct-tabs`, `ct-separator` |
+| A stylistic axis the caller picks | `data-variant`, `data-size` | `data-variant="outline"` |
+| A semantic axis the caller picks | `data-status` | `data-status="warning"` |
+| A property computed at run time | an inline custom property, `--ct-<component>-<what>` | `--ct-strip-push` |
+
+Rules for the names:
+
+- Part names are the component's nouns, not its looks: `list`, `tab`, `panel`, `label`, `marker`, `bubble`; never `blue-bar` or `left`.
+- A part name is unique within its component and is selected as `.ct-<component> [data-part="<part>"]`. Components nest (a `Card` holds a `Button`), so a parent's rule that must not reach a child component's parts uses the child combinator or `:where()`.
+- States go on the element the user perceives as changing, and describe the state, not the cause (`active`, not `clicked`). Attributes that carry meaning to assistive technology stay ARIA (`aria-selected`, `aria-pressed`, `aria-current`); `data-state` mirrors them so a stylesheet has one vocabulary.
+- A native pseudo-class is used where one exists (`:hover`, `:active`, `:focus-visible`, `:disabled`), because a theme can then be written for a component it has never seen. State that has no pseudo-class gets a `data-*`.
+- Adding a part, state or axis value is compatible. Renaming or removing one is a breaking change to every theme and is treated like a public API change.
+
+### Examples
+
+```html
+<!-- Button: variants and sizes are axes, the label is a part. -->
+<button class="ct-button" type="button" data-variant="outline" data-size="md">
+  <span data-part="label">Save</span>
+</button>
+
+<!-- Tabs: the state is on the tab and on the panel it controls. -->
+<div class="ct-tabs" data-orientation="horizontal">
+  <div data-part="list" role="tablist" aria-label="Sections">
+    <button data-part="tab" role="tab" data-state="active"   aria-selected="true">Overview</button>
+    <button data-part="tab" role="tab" data-state="inactive" aria-selected="false" tabindex="-1">Activity</button>
+  </div>
+  <div data-part="panel" role="tabpanel" data-state="active">...</div>
+</div>
+
+<!-- Alert: the status is a semantic axis. -->
+<div class="ct-alert" role="status" data-status="success">
+  <span data-part="icon" aria-hidden="true"></span>
+  <div data-part="content"><p data-part="title">Saved</p><p data-part="body">...</p></div>
+</div>
+
+<!-- ScrubStrip: geometry is computed, so it arrives as custom properties. -->
+<div class="ct-scrub-strip" data-state="engaged" style="--ct-strip-thumb: 812px">
+  <span data-part="marker" data-state="active" style="--ct-strip-push: 96px; --ct-strip-dy: -34px">K</span>
+</div>
+```
+
+### What a theme can do
+
+Because every visual is a rule over this vocabulary, and a `user` layer rule beats a `kit` layer rule at any specificity:
+
+```css
+@layer user {
+  /* Lowercase every button. */
+  .ct-button { text-transform: lowercase; }
+
+  /* Replace the outline button's border highlight with an underline. */
+  .ct-button[data-variant="outline"]:hover {
+    border-color: transparent;
+    text-decoration: underline;
+    text-underline-offset: 0.3em;
+  }
+
+  /* Square tabs with a bottom rule on the active one. */
+  .ct-tabs [data-part="tab"] { border-radius: 0; }
+  .ct-tabs [data-part="tab"][data-state="active"] { box-shadow: inset 0 -2px 0 var(--ct-color-primary); background: none; }
+
+  /* A different success colour everywhere (alerts, chips, any later component). */
+  :root { --ct-color-success: oklch(0.62 0.17 150); }
+}
+```
+
+## Layers
+
+Order, lowest precedence first:
+
+| # | Layer | Contents | Where it comes from |
+|---|---|---|---|
+| 1 | Tailwind's own (`theme`, `base`, `components`, `utilities`) | utilities the not-yet-converted components still use | the Tailwind bundle (`src/clay_dioxus_kit/assets/tailwind.css`) |
+| 2 | `reset` | `box-sizing`, margin and padding resets | `styles/reset.css` in the same bundle |
+| 3 | `tokens` | every `--ct-*` custom property: the generated foundation, then the Material theme-provider adapter | `styles/tokens.generated.css` (from `src/clay_dioxus_kit/styles/tokens/*.tokens.json` by `x/design-tokens.ts`) and `styles/tokens.css` |
+| 4 | `kit` | the contract components' skins, one file per component | `styles/kit/<component>.css` in the same bundle |
+| 5 | `user` | the end user's theme | the shell's `ShellTheme` facet, applied by `micro_shell::view::use_theme` |
+| 6 | unlayered | a micro's own stylesheet | the micro, sanitized by `clay_surface` |
+
+`@layer reset, tokens, kit, user;` is declared once, after Tailwind's import, so Tailwind's layers sit below ours and `user` still outranks a utility (which is what a theme must do to restyle a component still on utilities).
+
+How each reaches a mount, as built today (`docs/scratch/theme-lab-micro.md` has the full account):
+
+- **Host document (the shell and native, light-DOM micros).** The bundle is linked once by `FoundationStyles` (`document::Link`, an `asset!`), so layers 1 to 4 are ordinary document layers. The theme is a `<style>` of `@layer user { ... }` that `use_theme` renders at the top of the frame. Layer order is the one declared in the bundle.
+- **A micro mounted in a shadow root.** The Dioxus fork's interpreter (`packages/interpreter/src/ts/core.ts`, `rebuildKit`) flattens every stylesheet of the host document into one constructable sheet wrapped in `@layer kit { ... }`, declared as `@layer kit, user;`, and adopts it into every mount's root. Layers 1 to 4 therefore arrive as the sublayers `kit.theme ... kit.kit` in the same relative order. The micro's own sanitized sheet (the `data-dioxus-shadow-sheet` attribute that `clay_dioxus::MountedSurface` sets) follows, unlayered, and `MountedSurface` appends the theme to it as a top-level `@layer user { ... }` from the `UserStylesheet` context. A top-level layer declared after `kit` outranks everything inside `kit`, and unlayered rules outrank both.
+- **A renderer without shadow roots (Blitz).** The mount's sheet is a light-DOM `<style>` ahead of its content, in the same order.
+- **A micro in another framework.** It cannot bring the kit's stylesheet (a guest's stylesheet is its own, sanitized, unlayered sheet) and does not need to: the host document's sheets are adopted into its mount, so emitting the vocabulary is enough.
+
+Naming trap: inside a shadow root the host's `kit` layer is the layer that holds *all* host sheets (Tailwind, reset, tokens and the contract's own `kit` sublayer). They are different things that share a name; the contract's layer is `kit.kit` there.
+
+Where a theme sets tokens: custom properties inherit through shadow roots, so a token set on `:root` (or on `.ct-theme`, below) in the host document reaches every mount. The Material adapter sets the colour roles on `.ct-theme`, an element closer to the content than `:root`, so a theme that overrides a colour role must target `.ct-theme`, not `:root`, until the adapter is retired (see the blockers).
+
+## Other frameworks
+
+The contract is the attribute vocabulary and the stylesheet, so a Solid or React component is conforming when its DOM matches. Nothing here depends on Dioxus.
+
+```tsx
+// Solid
+<button class="ct-button" type="button" data-variant={props.variant ?? "primary"}
+        data-size={props.size ?? "md"} data-disabled={props.disabled ? "" : undefined}
+        disabled={props.disabled}>
+  <span data-part="label">{props.children}</span>
+</button>
+
+// React
+<div className="ct-scrub-strip" data-state={engaged ? "engaged" : "idle"}
+     style={{ "--ct-strip-thumb": `${thumbY}px` } as React.CSSProperties}>
+```
+
+What a port must do:
+
+- Emit the same root class, `data-part`, `data-state`, `data-*` axes and ARIA as the Rust part. Each headless module's docs (`src/clay_dioxus_kit/headless/<name>.rs`) list the parts, states and axes of its component, and its tests are the executable statement of them.
+- Set `data-*` booleans as present-or-absent (`data-disabled=""`), never `="false"`.
+- Compute dynamic geometry in JS and write it as an inline custom property of the documented name. The stylesheet decides what to do with it.
+- Own behaviour the same way: keyboard map, roving focus, `aria-*`. The kit's tests list the keys.
+- Not import or restate any skin. It gets the kit skin and the user theme from the host document.
+
+A guest micro (any language) sends its tree over the wire, whose vocabulary admits open `data-*` names and a raw `style` of custom properties (`clay_surface::render`), so the same markup is legal there.
+
+## Blockers to theming
+
+Things that stop a theme from restyling the app today, seeded 2026-11-18. Counts are approximate (grep over the source at the time; the point is the size of the job).
+
+| Blocker | Size | Status |
+|---|---|---|
+| The old `ui` crate's inline `style:` strings (tiles, `ArcIndex`, `CanvasProbe`) | 63 | Removed with the crate in the lane that wrote this contract. `ArcIndex` returns as `ScrubStrip` with no inline style. |
+| Tailwind utility strings as the skin of the existing kit components (`app_bar`, `drawer`, `list_row`, `nav_button`, `panel_page`, `sheet`, `sections`) and their `*Skin` structs | about 30 | Open. A theme reaches them only through the `utilities` layer's tokens, never by part. |
+| Tailwind utility strings in `micro_review` | about 37 | Open. |
+| Tailwind utility strings in `micro_theme_lab` | about 19 | Open. |
+| Tailwind utility strings in `micro_shell` | about 7 | Open. |
+| Tailwind utility strings in the other micros (`micro_settings`, `micro_sample`, `micro_counter`, `micro_lab`, `micro_layout`, `micro_toolbar`) | smaller | Open; not on the operator's seed list. |
+| The foundation had no type scale and no `success`, `warning` or `info` colour roles; the kit now carries `--ct-dimension-font-size-{sm,md,lg}` and the three roles (with `on-` pairs). The roles are provisional (FOUND-012: Material has no equivalent, so `info` follows its secondary colour and the other two keep their authored values in every Material scheme). | 2 token files | Open: review the roles' contrast in dark schemes. |
+| `url()` is refused in a theme and in a micro's sheet, and `@font-face` and `@import` with it. Custom fonts and images cannot be themed. | n/a | Open. Needs a design: `data:` or `blob:` font and image sources, admitted by `clay_surface::refuse_fetching_stylesheet` (which exists to stop the host fetching on a guest's behalf, so a payload carried inline is a different case). |
+| The Material adapter sets colour roles on `.ct-theme`, below `:root`, so a theme that sets `--ct-color-*` on `:root` loses silently. | 1 file | Open; a theme must target `.ct-theme` for now. |
+| The `reset` layer sits above Tailwind's `utilities` (the contract's layers are declared after Tailwind's so that `user` outranks a utility), so a reset rule beats a utility on the same property. The reset only sets `box-sizing` and zeroes `html`/`body` margin and padding. | 1 file | Open; harmless today, revisit if a utility must override it. |
+| Focus pseudo-classes (`:focus-visible`, `:focus-within`) did not show in the headless sway/WebKitGTK check, where the webview never becomes the active page, though the keys reached the focused element. The skins' focus rings and `ScrubStrip`'s keyboard reveal are therefore verified by unit tests only. | n/a | Open, verification gap. |
+| A micro's own unlayered rules outrank `user`, so a micro that hard-codes colours in its own sheet is not themeable. | by design | Decision recorded in `docs/scratch/theme-lab-micro.md`; revisit if micros start styling themselves. |
+| Blitz has no shadow roots, no `prefers-reduced-motion`, and its CSS transitions and `color-mix()` coverage is unverified. A theme's animation may not play there. | n/a | Open, renderer limit (never shapes the contract). |
+| The web shell's CSP (`style-src-elem 'self'`) refuses the host document's inline `<style>`, so the shell's own document is not themed there, only the mounts. | web shell | Open; the web shell is superseded. |
+| `x/design-tokens.ts` authors tokens only. A component-level token (`--ct-button-radius`) has no authoring path, so the kit's skins read foundation tokens directly. | n/a | Open; add component tokens only when a reusable primitive needs a stable contract (FOUND-011). |
+
+## Out of scope: the next lane
+
+Converting these to the contract is the next lane, not this one:
+
+- The existing kit components: `app_bar`, `drawer`, `list_row`, `nav_button`, `panel_page`, `sheet`, `sections` (and its resize handle), and `width` / `layer` (not components, but `layer` writes `z-index` inline and `width` classifies for the others). Each becomes a root class, parts and states, a stylesheet under `styles/kit/`, and loses its `*Skin` struct.
+- The micros: `micro_shell`, `micro_review`, `micro_theme_lab`, `micro_settings`, `micro_sample`, `micro_counter`, `micro_lab`, `micro_layout`, `micro_toolbar`.
+- The README's legacy rules (`KIT-011`, `KIT-012`, `KIT-013`) are superseded by the contract rules (`KIT-2xx`) once the last legacy component is converted.
