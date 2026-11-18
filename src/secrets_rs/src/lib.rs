@@ -126,7 +126,7 @@ impl SecretStore {
                         Ok(store as Arc<keyring_core::CredentialStore>)
                     }
                     Err(systemd_error) => {
-                        tracing::info!(
+                        tracing::warn!(
                             ?systemd_error,
                             "systemd credentials unavailable, using kernel keyring store; secrets will not survive a reboot"
                         );
