@@ -13,8 +13,9 @@
 //!   routing, admission and the error mapping are not reimplemented here. After its command the
 //!   holder stays up until the last client has disconnected.
 //!
-//! Commands see only [`NodeClient::call`]; the mode is a fact they can report, not a branch they
-//! take.
+//! Commands see only [`NodeClient::call`], which is typed by the method it calls; the mode is a
+//! fact they can report, not a branch they take. The untyped calls exist for `day exec`, which
+//! takes any NSID and JSON from its caller, and for tests of the wire itself.
 
 use crate::context::Booted;
 use crate::context::LockRole;
@@ -29,9 +30,11 @@ use big_dispatch_core::Invoke;
 #[cfg(unix)]
 use service_utils_rs::__client_native::DescriptorClient;
 use service_utils_rs::Body;
+use service_utils_rs::xrpc::DOMAIN_ERROR_FIELD;
 
 use big_dispatch::Edge;
 use method_core::HttpMethod;
+use method_core::Unary;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -93,6 +96,36 @@ pub struct Reply {
 impl Reply {
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
+    }
+}
+
+/// Why a typed [`NodeClient::call`] did not return the method's output.
+#[derive(Debug, thiserror::Error)]
+pub enum CallError<E> {
+    /// The method ran and failed with its own declared error.
+    #[error("{name}: {error}")]
+    Method {
+        status: u16,
+        /// The error's name as the node's XRPC envelope states it (the Lexicon's `errors` entry).
+        name: String,
+        error: E,
+    },
+    /// The node refused before the method could answer (an unclaimed NSID, input that is not the
+    /// method's, a denial): an XRPC error envelope that carries no typed error of the method.
+    #[error("{}: {}", body["error"].as_str().unwrap_or("unnamed error"), body["message"].as_str().unwrap_or_default())]
+    Refused { status: u16, body: Value },
+    /// The node could not be reached or answered something that is not XRPC.
+    #[error("{0:#}")]
+    Transport(eyre::Report),
+}
+
+impl<E> CallError<E> {
+    /// The HTTP status of an answer, if the node answered.
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            Self::Method { status, .. } | Self::Refused { status, .. } => Some(*status),
+            Self::Transport(_) => None,
+        }
     }
 }
 
@@ -221,11 +254,43 @@ impl NodeClient {
         self.socket
     }
 
-    /// Calls the operation `nsid` through the node's router. A procedure (`HttpMethod::Post`)
+    /// Calls method `M` through the node's router, decoding its output, or its declared error from
+    /// the XRPC error envelope's `operationError` detail.
+    pub async fn call<M: Unary>(&self, input: M) -> Result<M::Output, CallError<M::Error>> {
+        let input = serde_json::to_value(input).expect("a method input serializes");
+        let reply = self
+            .call_untyped(M::XRPC.nsid, M::XRPC.method, &input)
+            .await
+            .map_err(CallError::Transport)?;
+        if reply.is_success() {
+            return Ok(serde_json::from_value(reply.body).unwrap_or_else(|error| {
+                panic!("{} answered an unexpected shape: {error}", M::XRPC.nsid)
+            }));
+        }
+        let name = reply.body["error"].as_str().unwrap_or_default().to_owned();
+        match reply.body.get(DOMAIN_ERROR_FIELD) {
+            Some(typed) => Err(CallError::Method {
+                status: reply.status,
+                name,
+                error: serde_json::from_value(typed.clone()).unwrap_or_else(|error| {
+                    panic!(
+                        "{} answered an unexpected error shape: {error}",
+                        M::XRPC.nsid
+                    )
+                }),
+            }),
+            None => Err(CallError::Refused {
+                status: reply.status,
+                body: reply.body,
+            }),
+        }
+    }
+
+    /// The untyped escape hatch: calls the operation `nsid` through the node's router. A procedure (`HttpMethod::Post`)
     /// takes `input` as its JSON body; a query (`HttpMethod::Get`) takes it as its query string,
     /// so `input` must be an object of primitives (or arrays of them), the shape a query's
     /// Lexicon `parameters` take. The node holds the verb to the method's kind.
-    pub async fn call(&self, nsid: &str, verb: HttpMethod, input: &Value) -> Res<Reply> {
+    pub async fn call_untyped(&self, nsid: &str, verb: HttpMethod, input: &Value) -> Res<Reply> {
         ensure_nsid(nsid)?;
         match &self.transport {
             Transport::Socket(http) => {
@@ -266,11 +331,11 @@ impl NodeClient {
         }
     }
 
-    /// [`Self::call`] for a method whose body is bytes (ADR 042). `params` is an object of
+    /// [`Self::call_untyped`] for a method whose body is bytes (ADR 042). `params` is an object of
     /// primitives and is the query string for either verb, since the body is the file. An answer
     /// that is JSON is the [`Reply`]; one that is bytes is streamed to `raw.download` and the
     /// reply describes it (`contentType`, `contentRange` and `octets`).
-    pub async fn call_raw(
+    pub async fn call_untyped_bytes(
         &self,
         nsid: &str,
         verb: HttpMethod,

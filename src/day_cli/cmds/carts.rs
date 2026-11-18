@@ -1,7 +1,8 @@
+use crate::client::CallError;
 use crate::interlude::*;
 
+use big_cartridges_core::CartridgeId;
 use big_nodule_core::protocol::SetNoduleDevTakeover;
-use method_core::Method;
 
 /// Cartridges installed on the node.
 #[derive(Debug, clap::Subcommand)]
@@ -41,18 +42,23 @@ pub async fn run(command: CartsCommands) -> Res<ExitCode> {
 }
 
 async fn dev_takeover(slot: &str, by: Option<String>) -> Res<ExitCode> {
-    let reply = lazy::node()
+    let taken = lazy::node()
         .await?
-        .call(
-            SetNoduleDevTakeover::XRPC.nsid,
-            SetNoduleDevTakeover::XRPC.method,
-            &json!({ "cartridgeId": slot, "by": by }),
-        )
-        .await?;
-    if !reply.is_success() {
-        println!("{}", serde_json::to_string_pretty(&reply.body)?);
-        error!(status = reply.status, "the node refused the takeover");
-        return Ok(ExitCode::FAILURE);
+        .call(SetNoduleDevTakeover {
+            cartridge_id: parse_cartridge(slot)?,
+            by: by.as_deref().map(parse_cartridge).transpose()?,
+        })
+        .await;
+    match taken {
+        Ok(_) => {}
+        Err(CallError::Transport(error)) => return Err(error),
+        Err(refused) => {
+            error!(
+                status = refused.status(),
+                "the node refused the takeover: {refused}"
+            );
+            return Ok(ExitCode::FAILURE);
+        }
     }
     match by {
         Some(by) => println!(
@@ -62,4 +68,10 @@ async fn dev_takeover(slot: &str, by: Option<String>) -> Res<ExitCode> {
         None => println!("`{slot}` runs its own install again"),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn parse_cartridge(cartridge: &str) -> Res<CartridgeId> {
+    cartridge
+        .parse()
+        .map_err(|error| eyre::eyre!("`{cartridge}` is not a cartridge id: {error}"))
 }
