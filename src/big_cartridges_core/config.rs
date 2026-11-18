@@ -6,7 +6,7 @@
 //! are enabled here. The cartridge's own config document, one per cartridge in the shared config
 //! drawer, holds what follows the user to a sister node: the cartridge's settings datums, which are
 //! ordinary datums under the NSIDs the manifest declares, and one grant datum per grant
-//! ([`DrawerGrant`], [`CartridgeGrant`], [`OriginGrant`], [`MethodGrant`], [`AuthorityGrant`]),
+//! ([`DrawerGrant`], [`CartridgeGrant`], [`NetGrant`], [`MethodGrant`], [`AuthorityGrant`]),
 //! identified by [`GrantKey`].
 //!
 //! A cartridge's nodule and its micro ship in one envelope and run the same revision, so there is
@@ -169,13 +169,14 @@ pub struct CartridgeGrant {
     pub extra: Extra,
 }
 
-/// `org.example.daybook.cartridges.grant.origin/<origin>`: the cartridge may talk to services at
-/// the origin. Nothing enforces it yet: there is no `#origin` permbind.
-#[macros::datum(authority = GRANT_AUTHORITY, name = "origin")]
+/// `org.example.daybook.cartridges.grant.net/<host[:port]>`: the cartridge may use the network to
+/// reach the host (and port, when one is given). Nothing enforces it yet: there is no `#net`
+/// permbind.
+#[macros::datum(authority = GRANT_AUTHORITY, name = "net")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OriginGrant {
+pub struct NetGrant {
     /// A member with nothing to say states `true` (the empty-member convention).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub empty: Option<bool>,
@@ -239,7 +240,7 @@ impl GrantBody {
 
 /// What a grant is a grant of, and the slot of its datum: grants made on two devices for the same
 /// thing converge to one datum, and different grants never share one. The keys use only portable
-/// ids (drawer ids, cartridge ids, NSIDs, origins), never a per-node actor, so they mean the same
+/// ids (drawer ids, cartridge ids, NSIDs, hosts), never a per-node actor, so they mean the same
 /// thing on a sister. Each kind is its own datum (see [`GRANT_AUTHORITY`]).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GrantKey {
@@ -247,8 +248,8 @@ pub enum GrantKey {
     Drawer(DrawerId),
     /// `cartridge:<cartridgeId>`: use of the data of another cartridge.
     Cartridge(CartridgeId),
-    /// `origin:<origin>`: talking to services at a network origin.
-    Origin(String),
+    /// `net:<host[:port]>`: using the network to reach a host.
+    Net(String),
     /// `method:<nsid>`: one operation the cartridge may invoke through dispatch.
     Method(String),
     /// `authority:<prefix>`: every operation under an NSID authority prefix, or `*`.
@@ -258,7 +259,7 @@ pub enum GrantKey {
 impl GrantKey {
     const DRAWER: &'static str = DrawerGrant::ID;
     const CARTRIDGE: &'static str = CartridgeGrant::ID;
-    const ORIGIN: &'static str = OriginGrant::ID;
+    const NET: &'static str = NetGrant::ID;
     const METHOD: &'static str = MethodGrant::ID;
     const AUTHORITY: &'static str = AuthorityGrant::ID;
 
@@ -267,7 +268,7 @@ impl GrantKey {
         match self {
             Self::Drawer(_) => Self::DRAWER,
             Self::Cartridge(_) => Self::CARTRIDGE,
-            Self::Origin(_) => Self::ORIGIN,
+            Self::Net(_) => Self::NET,
             Self::Method(_) => Self::METHOD,
             Self::Authority(_) => Self::AUTHORITY,
         }
@@ -278,7 +279,7 @@ impl GrantKey {
         let slot = match self {
             Self::Drawer(drawer) => drawer.to_string(),
             Self::Cartridge(cartridge) => cartridge.to_string(),
-            Self::Origin(slot) | Self::Method(slot) | Self::Authority(slot) => slot.clone(),
+            Self::Net(slot) | Self::Method(slot) | Self::Authority(slot) => slot.clone(),
         };
         DatumKey::from_text(self.tag(), slot).expect("a grant key is a valid datum key slot")
     }
@@ -290,7 +291,7 @@ impl GrantKey {
         Some(match key.tag().as_str() {
             Self::DRAWER => Self::Drawer(slot.parse().ok()?),
             Self::CARTRIDGE => Self::Cartridge(slot.parse().ok()?),
-            Self::ORIGIN if !slot.is_empty() => Self::Origin(slot.to_owned()),
+            Self::NET if !slot.is_empty() => Self::Net(slot.to_owned()),
             Self::METHOD if is_nsid(slot) => Self::Method(slot.to_owned()),
             Self::AUTHORITY if slot == ALL_AUTHORITIES || is_nsid_authority(slot) => {
                 Self::Authority(slot.to_owned())
@@ -304,14 +305,14 @@ impl GrantKey {
     pub fn accepts(&self, body: &GrantBody) -> bool {
         match self {
             Self::Drawer(_) | Self::Cartridge(_) => body.access.is_some(),
-            Self::Origin(_) | Self::Method(_) | Self::Authority(_) => body.access.is_none(),
+            Self::Net(_) | Self::Method(_) | Self::Authority(_) => body.access.is_none(),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "`{0}` is not a grant key: expected `drawer:<drawerId>`, `cartridge:<cartridgeId>`, `origin:<origin>`, `method:<nsid>` or `authority:<prefix>`"
+    "`{0}` is not a grant key: expected `drawer:<drawerId>`, `cartridge:<cartridgeId>`, `net:<host[:port]>`, `method:<nsid>` or `authority:<prefix>`"
 )]
 pub struct InvalidGrantKey(pub String);
 
@@ -320,7 +321,7 @@ impl fmt::Display for GrantKey {
         match self {
             Self::Drawer(drawer) => write!(formatter, "drawer:{drawer}"),
             Self::Cartridge(cartridge) => write!(formatter, "cartridge:{cartridge}"),
-            Self::Origin(origin) => write!(formatter, "origin:{origin}"),
+            Self::Net(net) => write!(formatter, "net:{net}"),
             Self::Method(nsid) => write!(formatter, "method:{nsid}"),
             Self::Authority(prefix) => write!(formatter, "authority:{prefix}"),
         }
@@ -336,7 +337,7 @@ impl FromStr for GrantKey {
         match kind {
             "drawer" => target.parse().map(Self::Drawer).map_err(|_| invalid()),
             "cartridge" => target.parse().map(Self::Cartridge).map_err(|_| invalid()),
-            "origin" if !target.is_empty() => Ok(Self::Origin(target.to_owned())),
+            "net" if !target.is_empty() => Ok(Self::Net(target.to_owned())),
             "method" if is_nsid(target) => Ok(Self::Method(target.to_owned())),
             "authority" if target == ALL_AUTHORITIES || is_nsid_authority(target) => {
                 Ok(Self::Authority(target.to_owned()))
@@ -387,7 +388,7 @@ pub fn config_declarations() -> Vec<big_cabinet_core::datum::Declaration> {
             .expect("CartridgeConfigIdentity declaration is valid"),
         Declaration::of::<DrawerGrant>().expect("DrawerGrant declaration is valid"),
         Declaration::of::<CartridgeGrant>().expect("CartridgeGrant declaration is valid"),
-        Declaration::of::<OriginGrant>().expect("OriginGrant declaration is valid"),
+        Declaration::of::<NetGrant>().expect("NetGrant declaration is valid"),
         Declaration::of::<MethodGrant>().expect("MethodGrant declaration is valid"),
         Declaration::of::<AuthorityGrant>().expect("AuthorityGrant declaration is valid"),
     ]
