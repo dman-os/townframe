@@ -446,7 +446,6 @@ impl<C: NodeCalls> Review<C> {
         }))
     }
 
-
     /// The intxts `description` names, with the descriptor each node lets this micro read.
     /// One descriptor read is made per drawer, in the block's order.
     pub(crate) async fn links(&self, description: &str) -> Result<Links, CallError> {

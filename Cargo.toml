@@ -87,6 +87,8 @@ members = [
   "./src/micro_review",
   "./src/micro_lab_manifest",
   "./src/micro_lab",
+  "./src/micro_theme_lab_manifest",
+  "./src/micro_theme_lab",
   "./src/review_mock",
   "./src/ui",
   "./src/clay_dioxus_kit",
@@ -199,6 +201,7 @@ micro_toolbar_manifest = { path = "./src/micro_toolbar_manifest" }
 micro_toolbar = { path = "./src/micro_toolbar" }
 micro_layout_manifest = { path = "./src/micro_layout_manifest" }
 micro_lab_manifest = { path = "./src/micro_lab_manifest" }
+micro_theme_lab_manifest = { path = "./src/micro_theme_lab_manifest" }
 review_mock = { path = "./src/review_mock" }
 micro_sample = { path = "./src/micro_sample" }
 micro_counter = { path = "./src/micro_counter" }

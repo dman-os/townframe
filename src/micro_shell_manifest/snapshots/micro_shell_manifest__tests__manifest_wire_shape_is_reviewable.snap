@@ -37,11 +37,25 @@ publications:
   - name: opened
     kind: call
     contract: org.example.dayframe.shell.opened
+  - name: get-theme
+    kind: call
+    contract: org.example.dayframe.shell.getTheme
+  - name: set-theme
+    kind: call
+    contract: org.example.dayframe.shell.setTheme
 requires: []
 configuration_requests:
   - binding: shell
     facets:
       - tag: org.example.dayframe.shell.config
+        key_id: main
+        read: true
+        write: true
+        create: false
+        delete: false
+  - binding: shell-theme
+    facets:
+      - tag: org.example.dayframe.shell.theme
         key_id: main
         read: true
         write: true

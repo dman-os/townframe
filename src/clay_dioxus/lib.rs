@@ -513,6 +513,7 @@ fn RenderedMount(props: RenderedMountProps) -> Element {
 fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) -> Element {
     let path = use_hook(|| try_consume_context::<MountPath>().unwrap_or_default());
     let light_dom = use_hook(|| try_consume_context::<LightDomStylesheets>().is_some());
+    let user_sheet = use_hook(try_consume_context::<UserStylesheet>);
     let writer = use_hook(|| {
         let mut writer = SurfaceWriter::new(Arc::clone(&mount.0));
         writer.ancestors = path.mounts.clone();
@@ -649,7 +650,21 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
     // ahead of the content instead. `display: contents` keeps the wrapper out of layout.
     // A presentation mounted under another guest's surface is a child: its box stops bubbling.
     let nested = !path.surfaces.is_empty();
-    let sheet = tree.stylesheet().to_owned();
+    let mut sheet = tree.stylesheet().to_owned();
+    // The end user's theme follows the micro's own sheet, in `@layer user`: the kit's document
+    // sheets are adopted into this root as `@layer kit`, which the fork's interpreter declares
+    // ahead of `user`, so a theme outranks the kit and every host-wide rule. The micro's own
+    // unlayered rules still outrank a layered theme, which is what lets a micro that previews
+    // a draft theme (the theme lab) see the draft and not the applied sheet. Reading the signal
+    // here subscribes this mount, so applying a theme restyles it live.
+    if let Some(UserStylesheet(user)) = user_sheet {
+        let user = user.read();
+        if !user.is_empty() {
+            sheet.push_str("\n@layer user {\n");
+            sheet.push_str(&user);
+            sheet.push_str("\n}");
+        }
+    }
     let light_dom = light_dom && !sheet.is_empty();
     rsx! {
         div {
@@ -678,6 +693,15 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
 /// `MountedSurface`). Without it, mounts assume a browser engine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LightDomStylesheets;
+
+/// Provided by a host that has an end-user theme: the CSS every mount adopts after its own
+/// sheet, in `@layer user` (see `MountedSurface`). The provider owns the rule that theme CSS may
+/// not make the host fetch: what it publishes here has been refused or sanitized once, at the
+/// change, because a mount reads it on every render.
+pub use clay_surface::refuse_fetching_stylesheet;
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct UserStylesheet(pub ReadSignal<String>);
 
 #[cfg(test)]
 mod tests;

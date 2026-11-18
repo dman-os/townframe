@@ -40,7 +40,12 @@ pub(super) fn TokenFoundations() -> Element {
 }
 
 #[component]
-pub(super) fn FoundationSection(id: String, title: String, description: String, children: Element) -> Element {
+pub(super) fn FoundationSection(
+    id: String,
+    title: String,
+    description: String,
+    children: Element,
+) -> Element {
     let mut anchors = use_context::<Signal<BTreeMap<String, Rc<MountedData>>>>();
     let mount_id = id.clone();
     rsx! {

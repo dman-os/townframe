@@ -78,3 +78,46 @@ fn an_inert_sheet_sanitizes_to_itself_up_to_whitespace() {
     let squash = |text: &str| text.split_whitespace().collect::<String>();
     assert_eq!(squash(&sanitized), squash(sheet));
 }
+
+#[test]
+fn a_theme_with_any_fetch_path_is_refused_not_repaired() {
+    for fetching in [
+        "@import url(https://evil.example/a.css);",
+        "@import \"https://evil.example/b.css\";",
+        "@font-face { font-family: x; src: local(x); }",
+        "@namespace svg \"http://www.w3.org/2000/svg\";",
+        ".a { background: url(x.png); }",
+        ".a { background: URL( \"x.png\" ); }",
+        ".a { background: u\\72l(x.png); }",
+        ".a { background: image-set(\"a.png\" 1x); }",
+        ".a { background: -webkit-image-set(\"a.png\" 1x); }",
+        ".a { content: src(\"x\"); }",
+        ".a { background: cross-fade(red, blue, 50%); }",
+        ".a { --leak: url(x.png); }",
+        "@media (min-width: 1px) { .a { cursor: url(c.cur), auto; } }",
+        ".a { &:hover { mask-image: url(#m); } }",
+        "@media (min-width: 1px) { @font-face { src: url(x); } }",
+        "@unknown-thing foo { a { color: red } }",
+    ] {
+        assert!(
+            refuse_fetching_stylesheet(fetching).is_err(),
+            "{fetching:?} was accepted"
+        );
+    }
+    assert!(refuse_fetching_stylesheet(HOSTILE).is_err());
+}
+
+#[test]
+fn an_inert_theme_is_accepted_whole() {
+    // Text that merely mentions the words is not a fetch: strings and comments are inert.
+    let theme = r#"
+/* a comment about url(x) and @import */
+@layer base, theme;
+:root, .df-theme { --color-primary: #6750a4; --label: "url(x)"; }
+@media (prefers-color-scheme: dark) { :root { --color-primary: #d0bcff; } }
+@supports (display: grid) { .card { display: grid; background: linear-gradient(red, blue); } }
+@keyframes pulse { from { opacity: 0.5; } to { opacity: 1; } }
+.btn { color: var(--color-primary); &:hover { color: color-mix(in srgb, red 20%, blue); } }
+"#;
+    assert_eq!(refuse_fetching_stylesheet(theme), Ok(()));
+}

@@ -615,7 +615,9 @@ fn a_poll_page_with_present_and_removed_datums_passes_its_output_check() {
     }
     assert!(
         !validator
-            .violations(&page(json!({"state": "present", "docHeads": [1], "version": version})))
+            .violations(&page(
+                json!({"state": "present", "docHeads": [1], "version": version})
+            ))
             .is_empty(),
         "docHeads stays a string array, not any value"
     );

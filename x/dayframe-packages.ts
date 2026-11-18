@@ -45,8 +45,8 @@ export async function prepareDayframePackages(
   //
   // One cargo invocation per artifact kind, so cargo schedules the guests together.
   const guests = testFixtures
-    ? ["micro_counter", "micro_layout", "micro_lab", "micro_review", "micro_collection_probe"]
-    : ["micro_counter", "micro_layout", "micro_lab", "micro_review"];
+    ? ["micro_counter", "micro_layout", "micro_lab", "micro_review", "micro_theme_lab", "micro_collection_probe"]
+    : ["micro_counter", "micro_layout", "micro_lab", "micro_review", "micro_theme_lab"];
   await $`cargo build --locked ${isolated} ${
     guests.flatMap((guest) => ["-p", guest])
   } --target wasm32-wasip3 --profile ${guestProfile}`;
@@ -70,6 +70,7 @@ export async function prepareDayframePackages(
     layout: [`wasm32-wasip3/${profileDirectory}/micro_layout.wasm`, "layout"],
     lab: [`wasm32-wasip3/${profileDirectory}/micro_lab.wasm`, "lab"],
     review: [`wasm32-wasip3/${profileDirectory}/micro_review.wasm`, "review"],
+    themeLab: [`wasm32-wasip3/${profileDirectory}/micro_theme_lab.wasm`, "theme-lab"],
     ...(testFixtures
       ? {
         collectionProbe: [
@@ -121,7 +122,7 @@ export async function prepareDayframePackages(
     console.log(`${variable}=${artifact}`);
   }
 
-  // The counter, the layout, the lab and the review micro are also packages: the desktop shell scans a package directory for
+  // The counter, the layout, the lab, the review micro and the theme lab are also packages: the desktop shell scans a package directory for
   // `<name>.manifest.json` sidecars paired with `<name>.component.wasm`, so prepare that
   // directory beside the raw fixtures. STAND-IN until `big_cartridges` delivers manifests; each
   // sidecar is emitted from the package's manifest crate.
@@ -133,6 +134,7 @@ export async function prepareDayframePackages(
       ["layout", "micro_layout_manifest"],
       ["lab", "micro_lab_manifest"],
       ["review", "micro_review_manifest"],
+      ["theme-lab", "micro_theme_lab_manifest"],
     ]
   ) {
     await $`cp ${directory.join(`${name}.component.wasm`)} ${
