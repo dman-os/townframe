@@ -273,6 +273,9 @@
         // {
           cargoArtifacts = null;
           doInstallCargoArtifacts = false;
+          # crane's post-build binary scan runs cargo against the root manifest,
+          # whose git sources are not in this workspace's vendor set.
+          doNotPostBuildInstallCargoBinaries = true;
           installPhaseCommand = ''
             mkdir -p $out
             cp src/wasm_utils_rs/target/wasm32-wasip3/release/intxt_nodule_guest.wasm $out/intxt.guest.wasm
