@@ -27,7 +27,8 @@ use micro_theme_lab_manifest::SHELL_NAV_BUTTON;
 use micro_theme_lab_manifest::SHELL_SET_THEME;
 use micro_theme_lab_manifest::ThemeLabView;
 
-/// What the view asks of the host: the shell's sidebar/back button, and the two theme calls.
+/// What the view asks of the host: the shell's sidebar/back button, and the theme calls, which a
+/// view may await (`Capability::call` runs them on a task of the incarnation).
 #[derive(Clone)]
 struct Host {
     nav_button: Capability,
