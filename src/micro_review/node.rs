@@ -26,6 +26,18 @@ pub enum CallError {
     Unconfigured(String),
 }
 
+impl CallError {
+    /// What an alert says of the failure: a short heading, and the detail the node or the
+    /// transport gave.
+    pub fn parts(&self) -> (&'static str, &str) {
+        match self {
+            Self::Refused(detail) => ("The node refused the request", detail),
+            Self::Transport(detail) => ("The node could not be reached", detail),
+            Self::Unconfigured(detail) => ("The micro is not configured", detail),
+        }
+    }
+}
+
 impl<E: std::fmt::Display> From<ClientError<E>> for CallError {
     fn from(error: ClientError<E>) -> Self {
         match error {

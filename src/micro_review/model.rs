@@ -69,12 +69,7 @@ impl Pull {
 
     /// The state as the chip says it.
     pub fn state_label(&self) -> &str {
-        match &self.state {
-            PullState::Open => "Open",
-            PullState::Closed => "Closed",
-            PullState::Merged => "Merged",
-            PullState::Unknown(other) => other,
-        }
+        state_label(&self.state)
     }
 
     /// The description as a reader sees it: the intxt block (machine data) taken out, the rest in
@@ -90,6 +85,16 @@ impl Pull {
             paragraphs: paragraphs(&text),
             names: named,
         }
+    }
+}
+
+/// A pull request's state as the chip says it.
+pub fn state_label(state: &PullState) -> &str {
+    match state {
+        PullState::Open => "Open",
+        PullState::Closed => "Closed",
+        PullState::Merged => "Merged",
+        PullState::Unknown(other) => other,
     }
 }
 
@@ -115,7 +120,7 @@ impl PullReading {
 }
 
 /// `text` split at blank lines (LF or CRLF), each paragraph trimmed, none empty.
-fn paragraphs(text: &str) -> Vec<String> {
+pub fn paragraphs(text: &str) -> Vec<String> {
     let mut paragraphs = Vec::new();
     let mut current: Vec<&str> = Vec::new();
     for line in text.lines() {
