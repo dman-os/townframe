@@ -480,14 +480,39 @@ fn MountedComponent(
     // only after the close returns, so a render in that window finds the mount live and the
     // renderer gone: it shows what a withdrawn component shows.
     match render {
-        Some(render) => render(&mount),
+        Some(render) => rsx! { RenderedMount { render, mount } },
         None => rsx! { p { "Component withdrawn." } },
     }
+}
+
+/// What one mount's render scope is made of. Equal while it is the same renderer and the same
+/// mount, so a `MountedComponent` re-render (its liveness flipping, say) does not re-run the
+/// micro's render.
+#[derive(Props, Clone)]
+struct RenderedMountProps {
+    render: Renderer,
+    mount: Arc<Mount>,
+}
+
+impl PartialEq for RenderedMountProps {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.render, &other.render) && Arc::ptr_eq(&self.mount, &other.mount)
+    }
+}
+
+/// The scope a micro's render closure runs in, one per mount, like one instance of a custom
+/// element: the hooks the closure calls are this mount's own, and nothing shares them with
+/// another mount of the same publication. Being its own component, those hooks also run in a
+/// fixed order, unlike in `MountedComponent`, which returns early while the mount is withdrawn.
+#[expect(non_snake_case, reason = "Dioxus component naming")]
+fn RenderedMount(props: RenderedMountProps) -> Element {
+    (props.render)(&props.mount)
 }
 
 #[component]
 fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) -> Element {
     let path = use_hook(|| try_consume_context::<MountPath>().unwrap_or_default());
+    let light_dom = use_hook(|| try_consume_context::<LightDomStylesheets>().is_some());
     let writer = use_hook(|| {
         let mut writer = SurfaceWriter::new(Arc::clone(&mount.0));
         writer.ancestors = path.mounts.clone();
@@ -615,16 +640,25 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
     });
     let tree = writer.tree.lock().unwrap();
     // The mount's root element. `data-dioxus-shadow` asks the Dioxus interpreter to attach a
-    // shadow root to it and place its children (the sanitized `<style>` first, then the guest's
-    // content) inside, so a micro's stylesheet and `:host` rules apply to this mount only. An
-    // interpreter without that support leaves them as light-DOM children. `display: contents`
-    // keeps the wrapper out of layout.
+    // shadow root to it and place its children (the guest's content) inside, so a micro's
+    // stylesheet and `:host` rules apply to this mount only. The guest's sanitized stylesheet
+    // reaches that root as the `data-dioxus-shadow-sheet` attribute, which the interpreter adopts
+    // as a constructable sheet: a `<style>` element would be refused by a CSP without
+    // `'unsafe-inline'` in `style-src-elem` (the web shell's). A renderer without shadow roots
+    // (Blitz, which provides [`LightDomStylesheets`]) gets the sheet as a light-DOM `<style>`
+    // ahead of the content instead. `display: contents` keeps the wrapper out of layout.
     // A presentation mounted under another guest's surface is a child: its box stops bubbling.
     let nested = !path.surfaces.is_empty();
+    let sheet = tree.stylesheet().to_owned();
+    let light_dom = light_dom && !sheet.is_empty();
     rsx! {
         div {
             "data-dioxus-shadow": "",
+            "data-dioxus-shadow-sheet": if !light_dom { sheet.clone() },
             style: "display: contents",
+            if light_dom {
+                style { "{sheet}" }
+            }
             {tree.render(
                 &handler,
                 &|reference| {
@@ -638,6 +672,12 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
         }
     }
 }
+
+/// Provided by a host whose renderer has no shadow roots (Blitz): a mount's stylesheet is then
+/// a light-DOM `<style>` ahead of its content rather than its shadow root's adopted sheet (see
+/// `MountedSurface`). Without it, mounts assume a browser engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightDomStylesheets;
 
 #[cfg(test)]
 mod tests;

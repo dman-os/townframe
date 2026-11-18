@@ -586,6 +586,7 @@ mod virtual_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::CORE_CSS;
     use pierre_diffs::types::view::AnnotationSide;
 
     fn file(name: &str, contents: &str) -> Box<FileContents> {
@@ -636,32 +637,31 @@ mod tests {
         }
     }
 
-    /// The page with the two bulky constants elided: the 30 KB stylesheet (its presence and
-    /// position are what matter) and the icon sprite.
+    /// The page with the bulky constants elided: the shadow root's stylesheet (Pierre's 30 KB core
+    /// CSS and the theme CSS, carried by the host's `data-dioxus-shadow-sheet` attribute; their
+    /// presence and order are what matter) and the icon sprite.
     fn outline(dom: &VirtualDom) -> String {
         let html = dioxus_ssr::render(dom);
-        let (style_start, rest) = html
-            .split_once("<style>")
-            .expect("the shadow host starts with the core stylesheet");
-        let (css, rest) = rest.split_once("</style>").expect("the style closes");
+        const SHEET: &str = "data-dioxus-shadow-sheet=\"";
+        let (sheet_start, rest) = html
+            .split_once(SHEET)
+            .expect("the shadow host carries its stylesheet");
+        // The value's own quotes are escaped, so the first `"` closes the attribute.
+        let (sheet, rest) = rest.split_once('"').expect("the sheet attribute closes");
         assert!(
-            css.starts_with("@layer base, theme, rendered, unsafe;"),
-            "the first style is the core CSS, got {:?}",
-            &css[..css.len().min(60)]
+            sheet.starts_with("@layer base, theme, rendered, unsafe;"),
+            "the sheet starts with the core CSS, got {:?}",
+            &sheet[..sheet.len().min(60)]
+        );
+        assert!(
+            sheet.len() > CORE_CSS.len(),
+            "the theme CSS follows the core CSS in the sheet"
         );
         let sprite_start = rest.find("<svg aria-hidden").expect("the icon sprite");
         let sprite_end = rest[sprite_start..].find("</svg>").expect("sprite closes") + sprite_start;
         let (before, after) = (&rest[..sprite_start], &rest[sprite_end + "</svg>".len()..]);
-        // The theme style carries generated CSS of the same bulk.
-        let (theme_head, theme_tail) = after
-            .split_once("<style data-theme-css=\"\">")
-            .expect("the theme style");
-        let (_, theme_tail) = theme_tail.split_once("</style>").expect("the theme closes");
-        format!(
-            "{style_start}<style><core css></style>{before}<svg sprite></svg>{theme_head}\
-             <style data-theme-css=\"\"><theme css></style>{theme_tail}"
-        )
-        .replace("><", ">\n<")
+        format!("{sheet_start}{SHEET}<core css, theme css>\"{before}<svg sprite></svg>{after}")
+            .replace("><", ">\n<")
     }
 
     fn mounted() -> (VirtualDom, StyleSignal) {

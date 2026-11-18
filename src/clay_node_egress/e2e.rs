@@ -161,8 +161,8 @@ impl Node {
     }
 }
 
-/// Collects the text the guest renders.
-struct TextSink(Mutex<Vec<String>>);
+/// Collects the text the guest renders, and wakes a waiter on each batch.
+struct TextSink(Mutex<Vec<String>>, tokio::sync::Notify);
 
 impl SurfaceSink<ComponentRef> for TextSink {
     fn is_live(&self) -> bool {
@@ -175,6 +175,7 @@ impl SurfaceSink<ComponentRef> for TextSink {
             Mutation::CreateText(text) => Some(text.clone()),
             _ => None,
         }));
+        self.1.notify_one();
         Ok(0)
     }
 
@@ -206,7 +207,7 @@ async fn run_fixture(
     let (runtime, driver) = WasmRuntime::initialize(&host, instance.clone(), &package, context)
         .await
         .unwrap_or_else(|error| panic!("the fixture activates: {error}"));
-    let sink = Arc::new(TextSink(Mutex::new(Vec::new())));
+    let sink = Arc::new(TextSink(Mutex::new(Vec::new()), tokio::sync::Notify::new()));
     let session = runtime
         .mount("view", Arc::clone(&sink) as _)
         .unwrap_or_else(|error| {
@@ -215,12 +216,29 @@ async fn run_fixture(
                 host.fault(&instance)
             )
         });
-    let reports = sink.0.lock().unwrap().clone();
-    let [report] = reports.as_slice() else {
-        panic!("the fixture renders one report, got {reports:?}");
+    // The `resource` line renders once the view's call answers, which takes the driver: it runs
+    // the incarnation's spawned work after `initialize` returned.
+    let mut driver = Box::pin(driver);
+    let rendered = async {
+        loop {
+            let notified = sink.1.notified();
+            let texts = sink.0.lock().unwrap().clone();
+            if texts.iter().any(|text| text.starts_with("resource=")) {
+                return texts;
+            }
+            notified.await;
+        }
     };
-    let attempts = report
-        .lines()
+    let texts = tokio::select! {
+        texts = rendered => texts,
+        () = driver.as_mut() => panic!(
+            "the incarnation ended before the view's call answered, fault {:?}",
+            host.fault(&instance)
+        ),
+    };
+    let attempts = texts
+        .iter()
+        .flat_map(|text| text.lines())
         .map(|line| {
             let (name, outcome) = line.split_once('=').expect("name=outcome");
             (name.to_owned(), outcome.to_owned())
@@ -267,7 +285,11 @@ async fn a_micro_calls_granted_node_methods_as_its_own_actor() {
             .unwrap_or_else(|| panic!("{name} should answer: {outcome}"));
         serde_json::from_str(body).expect("the fixture prints the answer as JSON")
     };
-    for (name, echoed) in [("granted", "ping"), ("forged", "forged")] {
+    for (name, echoed) in [
+        ("granted", "ping"),
+        ("forged", "forged"),
+        ("resource", "resource"),
+    ] {
         assert_eq!(
             answer(name),
             json!({

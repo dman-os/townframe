@@ -23,7 +23,7 @@ micro_review_manifest = { workspace = true }
 pierre_diffs_dioxus = { workspace = true }
 #
 # external
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "1696518a2c449f44c0d2d4ac1fedd00127058d63", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 futures.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

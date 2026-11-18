@@ -352,10 +352,10 @@ impl FsKeyhiveStorage {
                 ));
             }
         }
-        let result = match tokio::fs::hard_link(&tmp, &dest).await {
+        let result = match publish_no_replace(&tmp, &dest).await {
             Ok(()) => {
                 if let Err(err) = Self::sync_dir(&parent_dir) {
-                    tracing::warn!(?parent_dir, error = %err, "failed to fsync keyhive storage dir after hard link");
+                    tracing::warn!(?parent_dir, error = %err, "failed to fsync keyhive storage dir after publishing");
                 }
                 Ok(true)
             }
@@ -561,10 +561,10 @@ impl FsKeyhiveStorage {
                 file.write_all(&dek).await?;
                 file.sync_all().await?;
                 drop(file);
-                let result = match tokio::fs::hard_link(&tmp, &path).await {
+                let result = match publish_no_replace(&tmp, &path).await {
                     Ok(()) => {
                         if let Err(err) = Self::sync_dir(&dir) {
-                            tracing::warn!(?dir, error = %err, "failed to fsync DEK directory after hard link");
+                            tracing::warn!(?dir, error = %err, "failed to fsync DEK directory after publishing");
                         }
                         Ok(dek)
                     }
@@ -1404,9 +1404,125 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
     }
 }
 
+/// Publishes the fully written `tmp` at `dest` only if nothing is there yet: atomic, the first
+/// writer wins, and a later writer gets `AlreadyExists` and keeps what is there (content-addressed
+/// blobs and the DEK rely on this).
+///
+/// Android's SELinux policy refuses apps the `link` syscall on their own data files (`EACCES`), so
+/// the portable no-clobber publish, a hard link, cannot be used there. On Linux and Android this is
+/// `renameat2(RENAME_NOREPLACE)`. Where that call is unsupported or refused (`EINVAL`: the
+/// filesystem rejects the flag; `ENOSYS`: no such syscall; `EPERM`/`EACCES`: a policy refuses it),
+/// it is a check for `dest` and a plain `rename`. Any other error is the publish's own failure and
+/// is returned. Other platforms publish with a hard link.
+async fn publish_no_replace(tmp: &Path, dest: &Path) -> io::Result<()> {
+    let (tmp, dest) = (tmp.to_owned(), dest.to_owned());
+    tokio::task::spawn_blocking(move || publish_no_replace_blocking(&tmp, &dest, true))
+        .await
+        .expect("the publish task does not panic")
+}
+
+/// [`publish_no_replace`] on a blocking thread. Every publish in the process holds one lock for
+/// its whole duration, whichever path it takes: the fallback's check-then-rename is only
+/// first-writer-wins if no other publish (fast path included) can create `dest` between the check
+/// and the rename. Only one process holds a node's directory (the holder lock), so a process-wide
+/// lock covers every writer. `try_renameat2: false` takes the fallback directly (tests).
+fn publish_no_replace_blocking(tmp: &Path, dest: &Path, try_renameat2: bool) -> io::Result<()> {
+    static PUBLISHING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _publishing = PUBLISHING
+        .lock()
+        .expect("no publish panics while holding the lock");
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use rustix::io::Errno;
+        static FALLBACK_REPORTED: std::sync::Once = std::sync::Once::new();
+        if try_renameat2 {
+            match rustix::fs::renameat_with(
+                rustix::fs::CWD,
+                tmp,
+                rustix::fs::CWD,
+                dest,
+                rustix::fs::RenameFlags::NOREPLACE,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(Errno::EXIST) => return Err(io::ErrorKind::AlreadyExists.into()),
+                Err(errno @ (Errno::INVAL | Errno::NOSYS | Errno::PERM | Errno::ACCESS)) => {
+                    FALLBACK_REPORTED.call_once(|| {
+                        tracing::warn!(%errno, "renameat2(RENAME_NOREPLACE) unsupported or refused; keyhive storage publishes with a locked check and rename");
+                    });
+                }
+                Err(errno) => return Err(errno.into()),
+            }
+        }
+        if dest.try_exists()? {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        std::fs::rename(tmp, dest)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        // No `renameat2` to skip: `try_renameat2` only selects a Linux path.
+        let _ = try_renameat2;
+        std::fs::hard_link(tmp, dest)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two publishes of different bytes to one `dest`, one on the fast path and one forced onto
+    /// the check-and-rename fallback, racing: exactly one wins, the other is told `AlreadyExists`,
+    /// and `dest` holds the winner's bytes (the DEK relies on first-writer-wins).
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn mixed_path_publishes_keep_the_first_writer() -> Res<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let dest = temp_dir.path().join("dek");
+        for round in 0..200 {
+            if dest.exists() {
+                std::fs::remove_file(&dest)?;
+            }
+            let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let racers: Vec<_> = [true, false]
+                .into_iter()
+                .map(|try_renameat2| {
+                    let tmp = temp_dir.path().join(format!("{round}.{try_renameat2}.tmp"));
+                    std::fs::write(&tmp, format!("{try_renameat2}"))?;
+                    let (dest, start) = (dest.clone(), std::sync::Arc::clone(&start));
+                    Ok(std::thread::spawn(move || {
+                        start.wait();
+                        (
+                            try_renameat2,
+                            publish_no_replace_blocking(&tmp, &dest, try_renameat2),
+                        )
+                    }))
+                })
+                .collect::<io::Result<_>>()?;
+            let outcomes: Vec<_> = racers
+                .into_iter()
+                .map(|racer| racer.join().expect("a publish does not panic"))
+                .collect();
+            let winners: Vec<_> = outcomes
+                .iter()
+                .filter(|(_, outcome)| outcome.is_ok())
+                .map(|(try_renameat2, _)| *try_renameat2)
+                .collect();
+            let [winner] = winners[..] else {
+                panic!("round {round}: exactly one publish wins, got {outcomes:?}");
+            };
+            for (_, outcome) in &outcomes {
+                if let Err(error) = outcome {
+                    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "round {round}");
+                }
+            }
+            assert_eq!(
+                std::fs::read_to_string(&dest)?,
+                format!("{winner}"),
+                "round {round}"
+            );
+        }
+        Ok(())
+    }
 
     use big_sync_core::BuckId;
     use sqlite_rs::SqliteRuntime;

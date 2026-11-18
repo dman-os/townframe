@@ -34,7 +34,9 @@ use big_cabinet_core::doc::DrawerReach;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cabinet_core::drawer::protocol::RememberDrawer;
 use big_dispatch_core::DispatchScope;
 use big_nodule::RoutineScopes;
 use big_nodule::executor::RoutineCapabilities;
@@ -512,6 +514,7 @@ async fn install_one(node: &big_node::BigNode, install: MicroInstall) -> Res<Ins
     )
     .await
     .wrap_err_with(|| format!("minting the capability of micro {micro}"))?;
+    mirror_drawers(node, drawers.iter().map(|(drawer, _)| drawer), &micro).await?;
     let doc_capability = if drawers.is_empty() {
         None
     } else {
@@ -545,6 +548,59 @@ async fn install_one(node: &big_node::BigNode, install: MicroInstall) -> Res<Ins
         config,
         minted: None,
     })
+}
+
+/// Remembers each of `drawers` as mirrored on this node. The micro reads its drawers through this
+/// node, and a node fetches from its peers only the drawers it mirrors: `big_node`'s peer policy
+/// wants only the `mirror` entries of the node's own known-drawers list, and another node's read
+/// grant makes a drawer available to this one without making it wanted. So every drawer granted to
+/// a micro is remembered here, mirrored, or the micro's reads stay empty forever. Remembering a
+/// remembered drawer changes nothing.
+async fn mirror_drawers<'a>(
+    node: &big_node::BigNode,
+    drawers: impl Iterator<Item = &'a DrawerId>,
+    micro: &str,
+) -> Res<()> {
+    let mut drawers = drawers.peekable();
+    if drawers.peek().is_none() {
+        return Ok(());
+    }
+    let registry = node
+        .drawers
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
+            MintDrawerCapability {
+                scope: DrawerScope {
+                    drawers: BTreeMap::from([(
+                        node.drawers.local().known_drawers_id,
+                        DrawerAccess::Admin,
+                    )]),
+                    create: false,
+                },
+                rights: Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .wrap_err("minting the known-drawers capability")?
+        .capability_id;
+    for drawer in drawers {
+        node.drawers
+            .client
+            .call(
+                RequestContext::root(),
+                RememberDrawer {
+                    capability: registry,
+                    drawer_id: drawer.clone(),
+                    mirror: true,
+                },
+            )
+            .await
+            .wrap_err_with(|| format!("mirroring drawer {drawer} for micro {micro}"))?;
+    }
+    Ok(())
 }
 
 /// Installs a cartridge's micro: its actor, and a handle for each service `scopes` reaches,
@@ -587,6 +643,7 @@ async fn install_with(
         ..RoutineCapabilities::default()
     };
     if let Some(scope) = scopes.docs.clone() {
+        mirror_drawers(node, scope.drawers.keys(), micro).await?;
         handles.docs = Some(mint_docs(node, &actor, scope).await?);
     }
     if let Some(scope) = scopes.drawers.clone() {
