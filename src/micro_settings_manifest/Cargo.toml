@@ -8,6 +8,7 @@ path = "lib.rs"
 
 [dependencies]
 clay_mdk = { workspace = true, features = ["contract"] }
+micro_shell_manifest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
@@ -17,3 +18,6 @@ serde_json.workspace = true
 clay_mdk = { workspace = true, features = ["in_process"] }
 ciborium.workspace = true
 insta.workspace = true
+
+[lints]
+workspace = true

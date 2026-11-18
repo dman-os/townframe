@@ -1,0 +1,17 @@
+[package]
+name = "micro_shell"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+clay_dioxus_kit = { workspace = true }
+clay_mdk = { workspace = true, features = ["in_process", "view"] }
+micro_shell_manifest = { workspace = true }
+dioxus.workspace = true
+tokio = { workspace = true, features = ["sync"] }
