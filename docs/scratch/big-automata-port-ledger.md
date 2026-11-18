@@ -900,6 +900,17 @@ is clean apart from dead code.
   is dropped. That's safe because the server keeps no cursor (law 9), but it costs a
   long-poll permit briefly.
 
+**Audit decisions (operator approved the lane's recommendations, 2026-11-18):**
+- No `supersede` field: transport cancel discards round N (safe by law 9).
+- Dropping the caller cancels the handler on every transport (fix admitted IRPC unary).
+- Typed peer identity: the iroh endpoint key *is* the peer identity (`PeerKey`). In-process
+  callers state their principal explicitly and never default to the local node.
+- The browser client goes in a new wasm-capable crate (`service_client_iroh_rs`).
+- Codec later: a fixed encoding per method, atproto-style, with CBOR as the binary option.
+- Session cleanup by TTL lease (law 5); a connection hook is optional later.
+- In flight: service stack fixes (cancellation, the WebSocket pump, identity, wasm clocks,
+  codec seam) and the wasm iroh client crate.
+
 **Then:** `quint-connect` conformance; the responder on `read_authorized`; the service
 binding; the bucket and summary RPCs on the same binding; the tasks (batched, coalesced
 cursor persistence).
