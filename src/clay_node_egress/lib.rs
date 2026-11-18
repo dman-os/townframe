@@ -96,7 +96,13 @@ impl DispatchEgress for MicroEgress {
         mut request: http::Request<EgressBody>,
     ) -> BoxFuture<'static, http::Response<EgressBody>> {
         let dispatch = self.dispatch.clone();
-        let (signer, capability) = (self.signer, self.capability);
+        let (caller, capability) = (
+            egress::WorkloadCaller {
+                signer: self.signer,
+                missing_authority: None,
+            },
+            self.capability,
+        );
         Box::pin(async move {
             // The engine already drops a guest's credential; the composition owns the header
             // regardless, so no engine can leak one through.
@@ -110,7 +116,7 @@ impl DispatchEgress for MicroEgress {
                     .expect("a bearer capability id is a valid header value"),
                 );
             }
-            let (status, body) = egress::call_http(&dispatch, Some(signer), request).await;
+            let (status, body) = egress::call_http(&dispatch, Some(&caller), request).await;
             egress::http_response(status, body)
         })
     }

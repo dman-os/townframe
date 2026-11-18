@@ -2556,23 +2556,27 @@ where
             .keyhive_waiters
             .get(&peer_id)
             .is_some_and(|waiters| !waiters.waiters.is_empty());
-        if let Some(active) = self.active_keyhive_syncs.get(&peer_id) {
-            // A round that survived an earlier connection to this peer. A replacement connection
-            // registers here without a `ConnLost` for the old one, and the branch below starts a
-            // round only when connect-time syncing or a queued waiter asks for one — so a round
-            // started on the old connection can outlive every party that could answer it.
-            debug!(
+        // A round can only be active here if it started on an earlier connection to this peer:
+        // rounds start only for registered peers, and a replacement connection registers without
+        // a `ConnLost` for the one it replaces. Its request went out on the old transport, so
+        // nothing is left that can answer it, and while it stays registered `start_keyhive_sync`
+        // refuses every new round and `handle_keyhive_change_notif` latches every push behind it:
+        // the peer's keyhive state would then only converge on a process restart. Retire it. Its
+        // waiters stay queued and are re-admitted by the round started below; a late answer on the
+        // new connection carries the old request id and is ignored as an inbound exchange. A
+        // change notification latched behind it is the push this peer is owed, so it starts that
+        // round too, even with connect-time syncing off.
+        let mut notification_pending = false;
+        if let Some(stale) = self.active_keyhive_syncs.remove(&peer_id) {
+            warn!(
                 %peer_id,
-                round_id = active.round_id,
-                ?active.request_id,
-                age_ms = active.started_at.elapsed().as_millis(),
-                admitted_waiters = active.admitted_ids.len(),
-                queued_waiters,
-                keyhive_sync_on_connect = self.keyhive_sync_on_connect,
-                "keyhive round from an earlier connection is still active at establishment"
+                round_id = stale.round_id,
+                age_ms = stale.started_at.elapsed().as_millis(),
+                "retiring a keyhive sync round left over from an earlier connection"
             );
+            notification_pending = self.keyhive_notif_pending.remove(&peer_id);
         }
-        if self.keyhive_sync_on_connect || queued_waiters {
+        if self.keyhive_sync_on_connect || queued_waiters || notification_pending {
             self.start_keyhive_sync(peer_id)?;
         }
         Ok(())
@@ -2779,7 +2783,24 @@ where
             );
             return Ok(());
         }
-        if self.active_keyhive_syncs.contains_key(&peer_id) {
+        if let Some(active) = self.active_keyhive_syncs.get(&peer_id) {
+            // INSTR: a notification latched behind a round that never
+            // completes is silent push death for the connection, so report
+            // the round's age and any held admission watermark at warn.
+            let age = self
+                .clock
+                .instant()
+                .saturating_duration_since(active.started_at);
+            if age > std::time::Duration::from_secs(30) {
+                warn!(
+                    %peer_id,
+                    round_id = active.round_id,
+                    age_ms = age.as_millis(),
+                    pending_admission_seq = ?active.pending_admission_seq,
+                    admitted_head = self.admitted_head,
+                    "INSTR keyhive change notification latched behind a stale round"
+                );
+            }
             self.keyhive_notif_pending.insert(peer_id.clone());
             debug!(
                 %peer_id,

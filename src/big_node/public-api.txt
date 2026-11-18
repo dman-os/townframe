@@ -10,6 +10,7 @@ impl ProtocolHandler for big_node::peers::ServeBlobs
 impl std :: fmt :: Debug for big_node::peers::Accept
 pub big_node::async fn delete_secrets (secrets : & SecretStore , identity_seed : & [u8 ; 32]) -> Res < usize >
 pub big_node::fn node_id (identity_seed : & [u8 ; 32]) -> String
+pub big_node::fn schema_groups () -> Vec < (& 'static str , big_cabinet :: SchemaRegistrationGroup < 'static >) >
 pub big_node::peers::fn parse_ticket (ticket : & str) -> Res < iroh :: EndpointAddr >
 pub enum big_node::peers::Direction { Incoming, Outgoing }
 pub enum big_node::peers::PeersEvent { Connected { peer : PeerKey , direction : Direction , }, Disconnected { peer : PeerKey , reason : String , }, # [doc = " A document this node subscribes to was synced with `peer`."] DocSynced { peer : PeerKey , doc : ObjKey , }, # [doc = " Everything `peer` has in `part` has been synced."] PartSynced { peer : PeerKey , part : PartKey , }, # [doc = " `peer` has changes this node has not caught up with."] Stale { peer : PeerKey , } }
@@ -31,7 +32,7 @@ pub struct big_node::Config  { repo: big_repo :: Config, sql: Database, schemas:
 pub struct big_node::ExecutorDeps  { blobs: Arc < BlobService >, dispatch: service_client_native_rs :: Client < DispatchProtocol > }
 pub struct big_node::StopToken  {  }
 pub struct big_node::peers::Peers  {  }
-pub struct big_node::peers::PeersConfig  { loopback_only: bool, policy: PolicyChoice, initial_backoff: Duration, max_backoff: Duration, sweep_interval: Duration }
+pub struct big_node::peers::PeersConfig  { loopback_only: bool, listen_port: Option < u16 >, policy: PolicyChoice, initial_backoff: Duration, max_backoff: Duration, sweep_interval: Duration }
 pub type big_node::HostedExecutor = (Arc < dyn NoduleExecutor > , service_utils_rs :: StopToken)
 pub use big_node::info :: GET_NODE_INFO
 pub use big_node::info :: NodeInfo

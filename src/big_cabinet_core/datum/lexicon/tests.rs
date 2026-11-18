@@ -514,3 +514,47 @@ fn reference_types_project_to_refs_to_the_reference_defs() {
     );
     assert_eq!(file["defs"]["main"]["nullable"], json!(["maybe"]));
 }
+
+/// The file's `revision` is the highest revision of the items the file carries, and a definition
+/// in scope that the datum does not reach says nothing about it.
+#[test]
+fn the_revision_is_the_highest_since_among_the_items_the_file_carries() {
+    let document = |reached: Value| {
+        json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string", "x-since": 2},
+                "b": reached,
+            },
+            "$defs": {
+                "Reached": {"type": "object", "properties": {"x": {"type": "string", "x-since": 4}}},
+                "Unreached": {"type": "object", "properties": {"y": {"type": "string", "x-since": 9}}},
+            },
+        })
+    };
+    let revision = |reached: Value| {
+        project_datum("org.example.test", &document(reached)).expect("projected")["revision"]
+            .clone()
+    };
+    assert_eq!(revision(json!({"type": "string"})), json!(2));
+    assert_eq!(revision(json!({"$ref": "#/$defs/Reached"})), json!(4));
+    assert_eq!(
+        project_datum(
+            "org.example.test",
+            &json!({"type": "object", "properties": {"a": {"type": "string"}}})
+        )
+        .unwrap()
+        .get("revision"),
+        None
+    );
+}
+
+#[test]
+fn a_malformed_stability_keyword_refuses_the_projection() {
+    let refused = project_datum(
+        "org.example.test",
+        &json!({"type": "object", "properties": {"a": {"type": "string", "x-since": "soon"}}}),
+    )
+    .unwrap_err();
+    assert!(refused.contains("`x-since` is a revision"), "{refused}");
+}

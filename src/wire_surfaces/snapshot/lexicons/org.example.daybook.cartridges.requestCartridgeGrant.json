@@ -1,0 +1,143 @@
+{
+  "defs": {
+    "FiledGrantRequest": {
+      "nullable": [
+        "request"
+      ],
+      "properties": {
+        "request": {
+          "type": "string"
+        },
+        "state": {
+          "ref": "#GrantRequestState",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "GrantRequestState": {
+      "enum": [
+        "pending",
+        "allowed",
+        "onlyThisBoot",
+        "declined"
+      ],
+      "type": "string"
+    },
+    "RequestCartridgeGrant": {
+      "nullable": [
+        "drawer"
+      ],
+      "properties": {
+        "drawer": {
+          "type": "string"
+        },
+        "permbind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "permbind"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "description": "Files a request for access one of the calling cartridge's permbinds declares, and returns at\nonce; [`AwaitCartridgeGrantRequest`] is how a caller waits for the answer. Filing never grants\nanything and never fails a call that was refused: nothing files implicitly (ADR 049 §4.2).\n\n`permbind` names the manifest's binding. Only a `#method` permbind and a `#drawers` permbind\nthat declares some read, write or delete are requestable: a `#datum` permbind follows the\ndrawer grants and has no answer of its own. For a `#drawers` permbind `drawer` is the drawer\nthe cartridge suggests; the person may pick another when answering.\n\nThe caller is the cartridge's runtime actor presenting the handle dispatch minted for it. A\nrequest that the cartridge's grants already satisfy comes back [`GrantRequestState::Allowed`]\nwith no request, and one the person declined this boot comes back\n[`GrantRequestState::Declined`] with none, so a routine that retries cannot prompt in a loop.\nFiling the same permbind again while it is pending returns the pending request.",
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "Rejected"
+        },
+        {
+          "description": "Staging refuses a version once its envelope has been published.",
+          "name": "AlreadyPublished"
+        },
+        {
+          "description": "A pinned datum is unavailable at its recorded frontier; this is recoverable when sync catches up.",
+          "name": "PinnedDatumUnreadable"
+        },
+        {
+          "description": "A pin must resolve inside the registry document that carries its envelope.",
+          "name": "PinnedDocumentMismatch"
+        },
+        {
+          "description": "A pinned datum was readable but did not decode as its declared manifest type.",
+          "name": "PinnedDatumInvalid"
+        },
+        {
+          "description": "The envelope a [`ResolveCartridgePin`] pin selects is not available at its heads yet;\nthis is recoverable when sync catches up.",
+          "name": "PinnedEnvelopeUnreadable"
+        },
+        {
+          "description": "The envelope a [`ResolveCartridgePin`] pin selects is not the revision the registry\nserves under its label.",
+          "name": "PinnedRevisionMismatch"
+        },
+        {
+          "description": "A published version never changes content: the label is taken by another envelope.",
+          "name": "VersionExists"
+        },
+        {
+          "description": "The envelope's signature is missing or does not verify against its namespace DID, or the\nDID's method cannot be verified without resolution (fail closed).",
+          "name": "Signature"
+        },
+        {
+          "description": "An unsigned envelope can be signed by the node only for the node's own DID.",
+          "name": "UnsignedForeignNamespace"
+        },
+        {
+          "description": "A new label must order after every label the cartridge has or had, so a validly signed older\nversion cannot be published as new (a downgrade attack). Taking an older version is an\nexplicit runtime action, not a registry one.",
+          "name": "Downgrade"
+        },
+        {
+          "description": "The handle's namespace scope does not include the cartridge's namespace.",
+          "name": "NamespaceNotPermitted"
+        },
+        {
+          "description": "The version exists in the drawer but its signature did not verify, so it is not served.",
+          "name": "Unverified"
+        },
+        {
+          "description": "An artifact's bytes are not in the local blob store, so the registry would pin bytes it\ncannot serve.",
+          "name": "ArtifactUnavailable"
+        },
+        {
+          "name": "UnknownCartridge"
+        },
+        {
+          "name": "UnknownVersion"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#RequestCartridgeGrant",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#FiledGrantRequest",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.cartridges.requestCartridgeGrant",
+  "lexicon": 1
+}

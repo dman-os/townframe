@@ -30,6 +30,22 @@ pub enum ContextError {
     DeadlineExceeded,
     #[error("request carries no valid Authorization credential")]
     Unauthenticated,
+    /// The call is one a declared permbind covers, but nobody has granted it yet (ADR 049 §4.3):
+    /// the conventional refusal of every service for an ungranted call, which dispatch and
+    /// cartridges pass on unchanged. It differs from a refusal by the rules, which no answer to a
+    /// request can lift.
+    ///
+    /// `cartridge` is the cartridge lacking the access, which is not necessarily the caller: when
+    /// X calls Y's routine and Y lacks a grant, X receives Y's. `permbind` is the declared
+    /// permbind that would cover the call. `request` is the id (a UUID's text) of the pending
+    /// grant request for that cartridge and permbind, when one was filed; nothing files one for
+    /// a failed call.
+    #[error("cartridge `{cartridge}` is not granted what its permbind `{permbind}` declares")]
+    MissingAuthority {
+        cartridge: String,
+        permbind: String,
+        request: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +103,63 @@ pub fn is_json_content_type(mime: &str) -> bool {
     content_type_essence(mime).eq_ignore_ascii_case("application/json")
 }
 
+/// The part of a service's own handle an operation needs beyond being allowed to call it (ADR 049
+/// §6.2). Dispatch admits the operation; the service then checks its own handle, whose
+/// operation-level flags only repeat that admission. Stating them here, once per operation, lets
+/// a runtime mint them for a routine whose `#method` permbind names the operation, so a cartridge
+/// declares the operation and never the service's capability domain.
+/// An item's declared stability, after WIT's `@since`/`@deprecated`/`@unstable` and Rust std's
+/// `#[stable]`/`#[deprecated]`/`#[unstable]` (ADR 021). A stable item is never removed or changed
+/// incompatibly; an unstable one is outside those rules until it is stabilized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct Stability {
+    /// The Lexicon revision that stabilized the item; `None` while it is unannotated (unstable).
+    pub since: Option<u32>,
+    /// The revision that deprecated the item, and why. A deprecated item stays in its schema.
+    pub deprecated: Option<Deprecation>,
+    /// The feature gate of an item that is not yet stable.
+    pub unstable: Option<&'static str>,
+}
+
+impl Stability {
+    /// No annotation. Pre-release this is UNSTABLE (ADR 021, operator 2026-11-17): the item is
+    /// outside the evolution rules until it states `since`, which needs the operator's sign-off.
+    pub const UNANNOTATED: Self = Self {
+        since: None,
+        deprecated: None,
+        unstable: None,
+    };
+
+    /// The highest revision this stability names: the file's `revision` is the highest of these
+    /// over every item it contains.
+    pub const fn revision(&self) -> Option<u32> {
+        match (self.since, self.deprecated) {
+            (Some(since), Some(deprecated)) => Some(if since > deprecated.since {
+                since
+            } else {
+                deprecated.since
+            }),
+            (Some(since), None) => Some(since),
+            (None, Some(deprecated)) => Some(deprecated.since),
+            (None, None) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Deprecation {
+    pub since: u32,
+    pub note: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct HandleNeed {
+    /// The service's mint operation, which names its capability domain.
+    pub mint: &'static str,
+    /// The operation-level flags of that domain's scope the operation needs, each `true`.
+    pub flags: &'static [&'static str],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XrpcMethod {
     pub nsid: &'static str,
@@ -108,6 +181,12 @@ pub struct XrpcMethod {
     /// from the node's own machine (ADR 042 §3). An exposure rule, not authority: a local caller
     /// still needs a capability.
     pub local_only: bool,
+    /// The service handle the operation needs beyond dispatch's admission, if any.
+    #[serde(skip_deserializing)]
+    pub handle: Option<HandleNeed>,
+    /// Whether the method is stable, and since which Lexicon revision (ADR 021, stability).
+    #[serde(skip_deserializing)]
+    pub stability: Stability,
 }
 
 impl XrpcMethod {
@@ -123,6 +202,8 @@ impl XrpcMethod {
             input_encoding: Encoding::Json,
             output_encoding: Encoding::Json,
             local_only: false,
+            handle: None,
+            stability: Stability::UNANNOTATED,
         }
     }
 
@@ -138,6 +219,8 @@ impl XrpcMethod {
             input_encoding: Encoding::Json,
             output_encoding: Encoding::Json,
             local_only: false,
+            handle: None,
+            stability: Stability::UNANNOTATED,
         }
     }
 
@@ -153,6 +236,8 @@ impl XrpcMethod {
             input_encoding: Encoding::Json,
             output_encoding: Encoding::Json,
             local_only: false,
+            handle: None,
+            stability: Stability::UNANNOTATED,
         }
     }
 
@@ -172,6 +257,48 @@ impl XrpcMethod {
     /// Marks the method as privileged: see [`Self::privileged`].
     pub const fn privileged(mut self) -> Self {
         self.privileged = true;
+        self
+    }
+
+    /// Declares the service handle the method needs: see [`HandleNeed`].
+    pub const fn needs_handle(
+        mut self,
+        mint: &'static str,
+        flags: &'static [&'static str],
+    ) -> Self {
+        self.handle = Some(HandleNeed { mint, flags });
+        self
+    }
+
+    /// Declares the Lexicon revision that introduced the method (`since = N`).
+    pub const fn since(mut self, revision: u32) -> Self {
+        assert!(revision > 0, "revisions start at 1");
+        assert!(
+            self.stability.unstable.is_none(),
+            "an unstable method has no `since`: stabilizing replaces `unstable` with `since`"
+        );
+        self.stability.since = Some(revision);
+        self
+    }
+
+    /// Declares the method deprecated as of `revision`: it stays in its schema.
+    pub const fn deprecated(mut self, revision: u32, note: &'static str) -> Self {
+        assert!(revision > 0, "revisions start at 1");
+        self.stability.deprecated = Some(Deprecation {
+            since: revision,
+            note,
+        });
+        self
+    }
+
+    /// Declares the method unstable behind `feature`: outside the evolution rules until it is
+    /// stabilized by replacing this with `since`.
+    pub const fn unstable(mut self, feature: &'static str) -> Self {
+        assert!(
+            self.stability.since.is_none(),
+            "a stable method cannot become unstable"
+        );
+        self.stability.unstable = Some(feature);
         self
     }
 

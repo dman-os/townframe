@@ -18,6 +18,8 @@ big_cabinet_core = { workspace = true, features = ["manifest", "schemars"] }
 big_dispatch.workspace = true
 big_dispatch_core.workspace = true
 big_nodule_core = { workspace = true, features = ["schemars"] }
+big_blobs_core.workspace = true
+method_lexicon.workspace = true
 big_cartridges_core.workspace = true
 service_client_core_rs.workspace = true
 service_client_native_rs.workspace = true

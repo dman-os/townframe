@@ -349,6 +349,69 @@ impl DatumKinds {
             (Self::Only(held), Self::Only(requested)) => requested.is_subset(held),
         }
     }
+
+    /// Returns whether no datum kind is permitted.
+    pub fn admits_nothing(&self) -> bool {
+        matches!(self, Self::Only(tags) if tags.is_empty())
+    }
+
+    /// The kinds permitted by either grant. A document reached through two grants (two drawers
+    /// that both hold it) is held at the union of what each lets through.
+    pub fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Only(mut held), Self::Only(more)) => {
+                held.extend(more);
+                Self::Only(held)
+            }
+            _ => Self::All,
+        }
+    }
+}
+
+/// What a document scope reaches through one granted drawer: the access it holds on the drawer
+/// and, mirroring `DocScope.read`/`write`, the datum kinds it may read and the kinds it may write
+/// in every document the drawer contains. `access` is kept beside the kinds because it carries
+/// more than they do: it is the ceiling the drawer policy proves and queries documents at
+/// (`Relay`, `Admin`), and creation in the drawer needs `Write` on it. A reach whose `write` kinds
+/// are empty never writes, whatever its `access`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DrawerReach {
+    pub access: DrawerAccess,
+    pub read: DatumKinds,
+    pub write: DatumKinds,
+}
+
+impl DrawerReach {
+    /// Builds a reach that admits every datum kind for reading and writing: broad access, an
+    /// explicit choice.
+    pub fn all_kinds(access: DrawerAccess) -> Self {
+        Self {
+            access,
+            read: DatumKinds::All,
+            write: DatumKinds::All,
+        }
+    }
+
+    /// The kinds this reach reads. As for a document named in `DocScope.read`/`write`, an
+    /// entry with `read` kinds reads those, and one with only `write` kinds reads its write
+    /// kinds.
+    pub fn readable(&self) -> &DatumKinds {
+        if self.read.admits_nothing() {
+            &self.write
+        } else {
+            &self.read
+        }
+    }
+
+    /// Returns whether the requested reach is covered by this one: no stronger drawer access,
+    /// and no read or write kind this reach does not hold.
+    pub fn covers(&self, other: &Self) -> bool {
+        self.access >= other.access
+            && self.read.covers(&other.read)
+            && self.write.covers(&other.write)
+    }
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -358,7 +421,7 @@ pub struct DocScope {
     pub read: BTreeMap<DocId, DatumKinds>,
     pub write: BTreeMap<DocId, DatumKinds>,
     pub create: BTreeSet<String>,
-    pub drawers: BTreeMap<DocId, DrawerAccess>,
+    pub drawers: BTreeMap<DocId, DrawerReach>,
 }
 
 impl DocScope {
@@ -627,5 +690,82 @@ declare_service_protocol! {
         stream {
             ObserveDocAvailability(ObserveDocAvailability)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn only(tags: &[&str]) -> DatumKinds {
+        DatumKinds::Only(
+            tags.iter()
+                .map(|tag| DatumTag::new(*tag).unwrap())
+                .collect(),
+        )
+    }
+
+    fn reach(access: DrawerAccess, read: &[&str], write: &[&str]) -> DrawerReach {
+        DrawerReach {
+            access,
+            read: only(read),
+            write: only(write),
+        }
+    }
+
+    #[test]
+    fn a_drawer_reach_covers_only_no_stronger_access_and_no_wider_kinds() {
+        let held = reach(
+            DrawerAccess::Write,
+            &["org.example.a", "org.example.b"],
+            &["org.example.a"],
+        );
+        for (requested, covered) in [
+            (DrawerReach::all_kinds(DrawerAccess::Read), false),
+            (reach(DrawerAccess::Read, &["org.example.a"], &[]), true),
+            (
+                reach(
+                    DrawerAccess::Write,
+                    &["org.example.a", "org.example.b"],
+                    &["org.example.a"],
+                ),
+                true,
+            ),
+            // A kind held only for reading is not held for writing.
+            (reach(DrawerAccess::Write, &[], &["org.example.b"]), false),
+            (reach(DrawerAccess::Write, &["org.example.c"], &[]), false),
+            (reach(DrawerAccess::Admin, &["org.example.a"], &[]), false),
+        ] {
+            assert_eq!(held.covers(&requested), covered, "{requested:?}");
+        }
+        assert!(DrawerReach::all_kinds(DrawerAccess::Write).covers(&held));
+    }
+
+    #[test]
+    fn a_reach_with_only_write_kinds_reads_them_and_one_with_read_kinds_reads_those() {
+        assert_eq!(
+            reach(DrawerAccess::Write, &[], &["org.example.y"]).readable(),
+            &only(&["org.example.y"])
+        );
+        assert_eq!(
+            reach(DrawerAccess::Write, &["org.example.x"], &["org.example.y"]).readable(),
+            &only(&["org.example.x"])
+        );
+    }
+
+    #[test]
+    fn kinds_union_is_the_widest_of_both() {
+        assert_eq!(
+            only(&["org.example.a"]).union(only(&["org.example.b"])),
+            only(&["org.example.a", "org.example.b"])
+        );
+        assert_eq!(
+            only(&["org.example.a"]).union(DatumKinds::All),
+            DatumKinds::All
+        );
+        assert_eq!(
+            DatumKinds::All.union(only(&["org.example.a"])),
+            DatumKinds::All
+        );
     }
 }

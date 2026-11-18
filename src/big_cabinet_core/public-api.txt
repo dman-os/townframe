@@ -87,6 +87,8 @@ impl std :: fmt :: Display for big_cabinet_core::doc::CommandId
 impl std :: ops :: BitOr for big_cabinet_core::authority::Rights
 pub big_cabinet_core::datum::lexicon::fn project_datum (id : & str , document : & Value) -> Result < Value , String >
 pub big_cabinet_core::datum::lexicon::fn project_position (schema : & Value , definitions : & Map < String , Value >) -> Result < Value , String >
+pub big_cabinet_core::datum::lexicon::stability::fn object_revision (object : & Map < String , Value > , skip : & [& str]) -> Result < Option < u64 > , String >
+pub big_cabinet_core::datum::lexicon::stability::fn revision (value : & Value) -> Result < Option < u64 > , String >
 pub big_cabinet_core::datum::operation::fn validate < 'a > (kind : OperationKind , defs : & 'a Map < String , Value > , path : & str ,) -> Result < Vec < SchemaRef < 'a > > >
 pub big_cabinet_core::dmeta::fn cid_of (bytes : & [u8]) -> Cid
 pub big_cabinet_core::drawer::protocol::fn drawer_object (access : Access , drawer : & DrawerId) -> String
@@ -99,6 +101,9 @@ pub big_cabinet_core::schema_compat::fn compare (old : & SchemaBundle , new : & 
 pub big_cabinet_core::schema_compat::fn compare_datum_bundles (old : & crate :: datum :: Bundle < '_ > , old_datum : & str , new : & crate :: datum :: Bundle < '_ > , new_datum : & str ,) -> Option < CompatibilityReport >
 pub big_cabinet_core::schema_compat::fn compare_schemas (old : & Value , new : & Value) -> CompatibilityReport
 pub const big_cabinet_core::authority::OPERATOR_OBJECT: & str
+pub const big_cabinet_core::datum::lexicon::stability::DEPRECATED: & str
+pub const big_cabinet_core::datum::lexicon::stability::SINCE: & str
+pub const big_cabinet_core::datum::lexicon::stability::UNSTABLE: & str
 pub const big_cabinet_core::drawer::protocol::CREATE_DRAWER_OBJECT: & str
 pub const big_cabinet_core::reference::CANONICAL_REFERENCE_UNICODE_VERSION: (u64 , u64 , u64)
 pub const big_cabinet_core::reference::REFERENCE_SCHEME: & str
@@ -150,6 +155,9 @@ pub impl big_cabinet_core::authority::Rights::const fn is_empty (self) -> bool
 pub impl big_cabinet_core::authority::Rights::const fn is_subset_of (self , other : Self) -> bool
 pub impl big_cabinet_core::authority::Rights::fn bits_i64 (self) -> i64
 pub impl big_cabinet_core::authority::Rights::fn from_bits (bits : i64) -> Option < Self >
+pub impl big_cabinet_core::datum::lexicon::stability::Declared::fn is_stable (& self) -> bool
+pub impl big_cabinet_core::datum::lexicon::stability::Declared::fn read (object : & Map < String , Value >) -> Result < Self , String >
+pub impl big_cabinet_core::datum::lexicon::stability::Declared::fn revision (& self) -> Option < u64 >
 pub impl big_cabinet_core::datum::operation::OperationKind::fn as_str (self) -> & 'static str
 pub impl big_cabinet_core::datum::operation::OperationKind::fn parse (kind : & str) -> Option < Self >
 pub impl big_cabinet_core::dmeta::Bytes::fn as_slice (& self) -> & [u8]
@@ -170,12 +178,17 @@ pub impl big_cabinet_core::dmeta::Uuid7::fn as_uuid (& self) -> & Uuid
 pub impl big_cabinet_core::dmeta::Uuid7::fn new () -> Self
 pub impl big_cabinet_core::dmeta::Uuid7::fn unix_millis (& self) -> u64
 pub impl big_cabinet_core::doc::CommandId::fn as_str (& self) -> & str
+pub impl big_cabinet_core::doc::DatumKinds::fn admits_nothing (& self) -> bool
 pub impl big_cabinet_core::doc::DatumKinds::fn allows (& self , key : & DatumKey) -> bool
 pub impl big_cabinet_core::doc::DatumKinds::fn covers (& self , other : & Self) -> bool
+pub impl big_cabinet_core::doc::DatumKinds::fn union (self , other : Self) -> Self
 pub impl big_cabinet_core::doc::DatumPatch::fn is_empty (& self) -> bool
 pub impl big_cabinet_core::doc::DocScope::fn ensure_doc_ids (& self) -> Result < () , DocsError >
 pub impl big_cabinet_core::doc::DocScope::fn read_all < I > (documents : I) -> BTreeMap < DocId , DatumKinds > where I : IntoIterator < Item = DocId > ,
 pub impl big_cabinet_core::doc::DocsError::fn ensure_doc_id (doc_id : & DocId) -> Result < () , Self >
+pub impl big_cabinet_core::doc::DrawerReach::fn all_kinds (access : DrawerAccess) -> Self
+pub impl big_cabinet_core::doc::DrawerReach::fn covers (& self , other : & Self) -> bool
+pub impl big_cabinet_core::doc::DrawerReach::fn readable (& self) -> & DatumKinds
 pub impl big_cabinet_core::drawer::Drawer::fn groups (& self) -> Option < DrawerGroups >
 pub impl big_cabinet_core::drawer::Drawer::fn self_doc () -> Self
 pub impl big_cabinet_core::drawer::Drawer::fn sensitive_root (& self) -> Option < DocId >
@@ -235,6 +248,7 @@ pub impl big_cabinet_core::schema_compat::SchemaBundle::fn with_definitions (roo
 pub mod big_cabinet_core::authority
 pub mod big_cabinet_core::datum
 pub mod big_cabinet_core::datum::lexicon
+pub mod big_cabinet_core::datum::lexicon::stability
 pub mod big_cabinet_core::datum::operation
 pub mod big_cabinet_core::dmeta
 pub mod big_cabinet_core::doc
@@ -263,6 +277,7 @@ pub struct big_cabinet_core::authority::ResolvedAuthority  { capability: Capabil
 pub struct big_cabinet_core::authority::RetractCapability  { via: CapId, capability: CapId }
 pub struct big_cabinet_core::authority::Rights  {  }
 pub struct big_cabinet_core::authority::SignDatumClaim  { via: CapId, claim: DatumClaim }
+pub struct big_cabinet_core::datum::lexicon::stability::Declared  { since: Option < u64 >, deprecated: Option < (u64 , String) >, unstable: Option < String > }
 pub struct big_cabinet_core::datum::operation::SchemaRef< 'a >  { path: String, target: & 'a str }
 pub struct big_cabinet_core::dmeta::ActorMetadata  { created_at: Vec < Timestamp >, pubkey: MultibaseKey, actor_url: String, delegation: Option < Bytes >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::BranchPath  { path: String, from: Option < crate :: DatumPin >, extra: crate :: datum :: Extra }
@@ -287,7 +302,8 @@ pub struct big_cabinet_core::doc::DatumPage  { events: Vec < DatumEvent >, throu
 pub struct big_cabinet_core::doc::DatumPatch  { set: BTreeMap < DatumKey , Json >, remove: BTreeSet < DatumKey > }
 pub struct big_cabinet_core::doc::DatumVersion  { heads: Vec < ChangeHash >, clock: u64 }
 pub struct big_cabinet_core::doc::DatumsRead  { heads: Vec < ChangeHash >, datums: BTreeMap < DatumKey , DatumRead > }
-pub struct big_cabinet_core::doc::DocScope  { read: BTreeMap < DocId , DatumKinds >, write: BTreeMap < DocId , DatumKinds >, create: BTreeSet < String >, drawers: BTreeMap < DocId , DrawerAccess > }
+pub struct big_cabinet_core::doc::DocScope  { read: BTreeMap < DocId , DatumKinds >, write: BTreeMap < DocId , DatumKinds >, create: BTreeSet < String >, drawers: BTreeMap < DocId , DrawerReach > }
+pub struct big_cabinet_core::doc::DrawerReach  { access: DrawerAccess, read: DatumKinds, write: DatumKinds }
 pub struct big_cabinet_core::doc::ListDatums  { capability: CapId, doc_id: DocId, at: At, with_authors: bool }
 pub struct big_cabinet_core::doc::MergeDoc  { capability: CapId, command: Option < CommandId >, source_id: DocId, at: At, target_id: DocId }
 pub struct big_cabinet_core::doc::MintDocCapability  { scope: DocScope, rights: Rights, subject: Option < Uuid7 > }
