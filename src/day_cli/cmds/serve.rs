@@ -1,10 +1,11 @@
 //! The node as a background server on its Unix socket (ADR 033 section 5).
 //!
-//! A daemon is the node booted with the socket attached, holding the node lock for as long as it
-//! lives. The lock is the daemon's identity: `stop` finds the pid in it and waits for its release
-//! to learn the process has exited, and a socket file nobody listens on while the lock is free
-//! is a leftover of a daemon that died without cleaning up. Nothing here sleeps or polls:
-//! `start` waits for the daemon's readiness line, `stop` blocks on the lock.
+//! Whoever holds the node serves it: the serving process is the node booted with the socket
+//! attached, holding the node lock for as long as it lives. The lock is its identity: `stop` finds
+//! the pid in it and waits for its release to learn the process has exited, and a socket file
+//! nobody listens on while the lock is free is a leftover of a server that died without cleaning
+//! up. Nothing here sleeps or polls: `start` waits for the server's readiness line, `stop` blocks
+//! on the lock.
 
 use crate::context::Booted;
 use crate::context::LockRole;
@@ -17,7 +18,7 @@ use std::io::Write;
 use tokio::io::AsyncBufReadExt;
 
 #[derive(Debug, clap::Subcommand)]
-pub enum DaemonCommands {
+pub enum ServeCommands {
     /// Serve the node on its socket in the foreground until SIGTERM or Ctrl-C
     Run,
     /// Start a background daemon and return once it is serving
@@ -26,16 +27,16 @@ pub enum DaemonCommands {
     Stop,
 }
 
-/// What the foreground daemon prints, once, when it is serving. `start` waits for this line.
+/// What the foreground server prints, once, when it is serving. `start` waits for this line.
 const READY_PREFIX: &str = "listening on ";
 
-pub async fn run(command: DaemonCommands) -> Res<ExitCode> {
+pub async fn run(command: ServeCommands) -> Res<ExitCode> {
     let conf = lazy::config().await?;
     let dir = &conf.node_dir;
     match command {
-        DaemonCommands::Run => run_foreground(dir).await,
-        DaemonCommands::Start => start(dir).await,
-        DaemonCommands::Stop => stop(dir).await,
+        ServeCommands::Run => run_foreground(dir).await,
+        ServeCommands::Start => start(dir).await,
+        ServeCommands::Stop => stop(dir).await,
     }
 }
 
@@ -48,7 +49,7 @@ pub async fn serve(
     shutdown: impl Future<Output = ()>,
 ) -> Res<()> {
     let lock = loop {
-        match dir.try_lock(LockRole::Daemon)? {
+        match dir.try_lock(LockRole::Serve)? {
             Ok(lock) => break lock,
             Err(held) if held.role == Some(LockRole::Command) => {
                 // A command has the node open for the length of its work: wait for it.
@@ -64,7 +65,7 @@ pub async fn serve(
         }
     };
     dir.ensure_run_dir()?;
-    let booted = Booted::boot(dir, lock, LockRole::Daemon).await?;
+    let booted = Booted::boot(dir, lock, LockRole::Serve).await?;
     let served = ready(&booted);
     if served.is_ok() {
         shutdown.await;
@@ -90,7 +91,7 @@ async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
                 .listeners
                 .unix_socket
                 .as_ref()
-                .expect("the daemon boots with its socket attached");
+                .expect("the server boots with its socket attached");
             let mut stdout = std::io::stdout().lock();
             writeln!(stdout, "{READY_PREFIX}{}", socket.display())?;
             stdout.flush()?;
@@ -108,11 +109,11 @@ async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
 }
 
 async fn start(dir: &NodeDir) -> Res<ExitCode> {
-    // A command that has the node open is not a daemon: wait for it to finish, then start one.
-    // A daemon that is still booting is awaited, so `start` never reports one that is not
+    // A command that has the node open is not the server: wait for it to finish, then start serving.
+    // A server that is still booting is awaited, so `start` never reports one that is not
     // serving.
     if let Err(held) = dir.try_lock(LockRole::Command)? {
-        if held.role == Some(LockRole::Daemon) {
+        if held.role == Some(LockRole::Serve) {
             let waiting = dir.clone();
             tokio::task::spawn_blocking(move || waiting.wait_until_serving())
                 .await
@@ -132,7 +133,7 @@ async fn start(dir: &NodeDir) -> Res<ExitCode> {
         .append(true)
         .open(&log_path)
         .wrap_err_with(|| format!("opening {}", log_path.display()))?;
-    // Its own process group, so a Ctrl-C at this terminal is not also delivered to the daemon.
+    // Its own process group, so a Ctrl-C at this terminal is not also delivered to the server.
     let mut child = tokio::process::Command::new(std::env::current_exe()?)
         .arg("--node")
         .arg(dir.root())
@@ -148,7 +149,7 @@ async fn start(dir: &NodeDir) -> Res<ExitCode> {
         .expect("a child that has not been waited on has a pid");
     let mut stdout = tokio::io::BufReader::new(child.stdout.take().expect("stdout is piped"));
     let mut line = String::new();
-    // Readiness is the daemon's first line. End of input before it means the daemon exited.
+    // Readiness is the server's first line. End of input before it means the server exited.
     if stdout.read_line(&mut line).await? == 0 {
         let status = child.wait().await?;
         eyre::bail!(
@@ -167,7 +168,7 @@ async fn start(dir: &NodeDir) -> Res<ExitCode> {
 async fn stop(dir: &NodeDir) -> Res<ExitCode> {
     let held = match dir.try_lock(LockRole::Command)? {
         Ok(_free) => {
-            // Nobody has the node. A socket file left behind is a daemon that died uncleanly.
+            // Nobody has the node. A socket file left behind is a server that died uncleanly.
             if dir.probe_socket().await? == SocketState::Stale {
                 std::fs::remove_file(dir.socket_path()?)?;
                 println!("daemon not running; removed its stale socket");
@@ -178,7 +179,7 @@ async fn stop(dir: &NodeDir) -> Res<ExitCode> {
         }
         Err(held) => held,
     };
-    if held.role != Some(LockRole::Daemon) {
+    if held.role != Some(LockRole::Serve) {
         println!("daemon not running; {held} has the node open for a command");
         return Ok(ExitCode::SUCCESS);
     }

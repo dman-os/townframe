@@ -24,7 +24,7 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
 
     let socket_path = conf.node_dir.socket_path()?;
     // Any exit but 0 means "no daemon serving", the convention `systemctl status` follows.
-    let exit = if client.mode() == crate::client::Mode::Daemon {
+    let exit = if client.mode() == crate::client::Mode::Serving {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(3)
