@@ -91,7 +91,8 @@ enforces them. They apply to a component that has a stylesheet in `styles/kit/`.
   compatible; renaming or removing one is a breaking change to every theme.
 - **KIT-202** The skin is `styles/kit/<name>.css`, imported with `layer(kit)` by
   `tailwind.css` and so part of the generated bundle (`assets/tailwind.css`, regenerated with
-  `tailwindcss -i src/clay_dioxus_kit/tailwind.css -o src/clay_dioxus_kit/assets/tailwind.css`).
+  `deno run --allow-all x/check-kit-bundle.ts --write`, which also regenerates the token CSS; the
+  same script without `--write` is the `kit-bundle` pre-commit hook and fails on any difference).
   Rules are keyed on the root class, `data-part` and `data-*`, read tokens as `--ct-*`, and use no
   `!important` (layers order the cascade), no `@apply` and no `url()`. Checked:
   `conventions::contract_skins_are_stylesheets_in_the_kit_layer`.
