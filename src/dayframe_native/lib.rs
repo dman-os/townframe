@@ -229,6 +229,10 @@ fn package_micros(
     let mut installed = Vec::new();
     let mut config_writes = Vec::new();
     let mut errors = Vec::new();
+    // A discovered package is admitted disabled until a user enables it (a stored install datum
+    // always wins over this). `DAYFRAME_ENABLE_MICROS=all` admits every package enabled instead,
+    // for a development or verification run on a fresh store, where nothing may be clicked.
+    let enable_all = std::env::var("DAYFRAME_ENABLE_MICROS").is_ok_and(|value| value == "all");
     for files in packages {
         let parsed = clay_mdk::package::Package::from_json(
             clay_mdk::LOCAL_NAMESPACE,
@@ -295,7 +299,10 @@ fn package_micros(
                     &micro_shell_manifest::sidecar(),
                 );
                 match micro {
-                    Ok(micro) => installed.push(micro),
+                    Ok(mut micro) => {
+                        micro.enabled_on_admission = enable_all;
+                        installed.push(micro);
+                    }
                     Err(error) => errors.push(format!("{}: {error}", files.origin)),
                 }
             }
