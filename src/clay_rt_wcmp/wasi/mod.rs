@@ -17,7 +17,6 @@
 mod cli;
 mod clocks;
 mod io;
-mod random;
 
 use wcmp::Error;
 use wcmp::InterfaceIdentifier;
@@ -42,7 +41,6 @@ pub fn define<T: 'static>(linker: &mut Linker<T>, label: &str) -> Result<(), Err
     clocks::define_monotonic_clock(linker)?;
     clocks::define_system_clock(linker)?;
     clocks::define_insecure_seed(linker)?;
-    random::define_random(linker)?;
     Ok(())
 }
 
