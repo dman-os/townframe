@@ -408,6 +408,7 @@ dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92
 dioxus-core-template = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
 dioxus-html = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
 dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
+dioxus-desktop = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
 dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
 dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
 blitz-dom = "=0.3.0-beta.4"

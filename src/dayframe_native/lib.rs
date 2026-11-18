@@ -11,12 +11,12 @@ use clay_mdk::host::CollectionBindings;
 use clay_mdk::host::Resources;
 use clay_mdk::host::factory;
 use clay_store::OrderedStore;
-#[cfg(feature = "blitz")]
+#[cfg(any(feature = "blitz", feature = "wry"))]
 use dayframe_composition::Application;
 pub use dayframe_composition::CompositionRuntime;
-#[cfg(feature = "blitz")]
+#[cfg(any(feature = "blitz", feature = "wry"))]
 use dayframe_composition::HostInputs;
-#[cfg(feature = "blitz")]
+#[cfg(any(feature = "blitz", feature = "wry"))]
 use dayframe_composition::Insets;
 use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
@@ -399,7 +399,7 @@ pub static SYSTEM_BACK: SystemBack = SystemBack {
 
 /// Reads the system chrome currently covering the window, in logical px, given the window's
 /// scale factor. Only a shell whose window has such chrome (Android) supplies one.
-#[cfg(feature = "blitz")]
+#[cfg(any(feature = "blitz", feature = "wry"))]
 pub type InsetsSource = Callback<f64, Insets>;
 
 /// What a shell mounts once the runtime exists: it reads the renderer's window events into
@@ -491,20 +491,7 @@ fn use_host_inputs(insets_source: Option<InsetsSource>) -> HostInputs {
         let window = window.clone();
         move || read_insets(&window)
     });
-    #[cfg(target_os = "android")]
-    {
-        use_future(move || async move {
-            loop {
-                SYSTEM_BACK.requested.notified().await;
-                platform_back += 1;
-            }
-        });
-        use_effect(move || {
-            SYSTEM_BACK
-                .can_back
-                .store(can_back(), std::sync::atomic::Ordering::Release);
-        });
-    }
+    use_system_back(platform_back, can_back);
     dioxus_native::use_window_event(move |event, _| match event {
         WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. } => {
             let (w, h) = logical_size(&window);
@@ -534,6 +521,121 @@ fn use_host_inputs(insets_source: Option<InsetsSource>) -> HostInputs {
         can_back,
         // Blitz has no keyboard focus (`tabindex` panics it) and no pointer capture.
         renderer: dayframe_composition::Renderer::Blitz,
+        // The development seed: see `HostInputs::start`.
+        start: std::env::var("DAYFRAME_SHELL_OPEN").ok(),
+    }
+}
+
+/// Ties the shell to [`SYSTEM_BACK`] on Android: each gesture the activity hands over counts as a
+/// platform back, and whether the shell has somewhere to go back to is published for the
+/// activity to read on its UI thread. Elsewhere no activity asks, so this does nothing.
+#[cfg(any(feature = "blitz", feature = "wry"))]
+fn use_system_back(platform_back: Signal<u64>, can_back: Signal<bool>) {
+    #[cfg(target_os = "android")]
+    {
+        let mut platform_back = platform_back;
+        use_future(move || async move {
+            loop {
+                SYSTEM_BACK.requested.notified().await;
+                platform_back += 1;
+            }
+        });
+        use_effect(move || {
+            SYSTEM_BACK
+                .can_back
+                .store(can_back(), std::sync::atomic::Ordering::Release);
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = (platform_back, can_back);
+}
+
+/// The device's CSS px per physical px, for a webview whose window reports none: tao's Android
+/// window answers a scale factor of 1.0 whatever the display density, so the Android shell reads
+/// the density itself. `None` takes the window's own scale factor (desktop).
+#[cfg(feature = "wry")]
+pub type ScaleSource = Callback<(), f64>;
+
+/// Mounts the shell under Wry once the runtime exists, on desktop or in an Android webview.
+/// `insets` is the system chrome source of a window that has some (Android); `scale` replaces a
+/// window scale factor that is wrong (Android, see [`ScaleSource`]).
+#[cfg(feature = "wry")]
+#[component]
+pub fn WryApplication(
+    runtime: Signal<Option<CompositionRuntime>>,
+    insets: Option<InsetsSource>,
+    scale: Option<ScaleSource>,
+) -> Element {
+    let initial = runtime
+        .read()
+        .clone()
+        .expect("WryApplication mounts only with a built runtime");
+    let runtime = use_signal(|| initial);
+    let host = use_wry_host_inputs(insets, scale);
+    rsx! { Application { runtime, host } }
+}
+
+/// What the window tells the shell under Wry: its logical size, read from tao's resize events
+/// (the shell never measures the DOM), the system chrome over it, and the platform back. The
+/// webview is a browser engine, so the shell's keyboard paths are on and a split drag survives
+/// the pointer leaving the window. A desktop webview gets no platform back gesture (the shell's
+/// own back button is the only way back); an Android one gets the activity's, through
+/// [`SYSTEM_BACK`].
+#[cfg(feature = "wry")]
+fn use_wry_host_inputs(
+    insets_source: Option<InsetsSource>,
+    scale_source: Option<ScaleSource>,
+) -> HostInputs {
+    use dioxus_desktop::WindowEvent;
+    use dioxus_desktop::tao::event::Event;
+    let window = dioxus_desktop::use_window();
+    let scale = move || {
+        scale_source.map_or_else(
+            || dioxus_desktop::window().window.scale_factor(),
+            |source| source.call(()),
+        )
+    };
+    let logical_size = move || {
+        let size = dioxus_desktop::window()
+            .window
+            .inner_size()
+            .to_logical::<f64>(scale());
+        (size.width, size.height)
+    };
+    // Re-read whenever the window changes: a rotation, a bar appearing or a cutout all change
+    // its size, and tao reports no inset change of its own.
+    let read_insets =
+        move || insets_source.map_or_else(Insets::default, |source| source.call(scale()));
+    let initial = logical_size();
+    let mut width = use_signal(|| initial.0);
+    let mut height = use_signal(|| initial.1);
+    let mut insets = use_signal(read_insets);
+    let platform_back = use_signal(|| 0_u64);
+    let can_back = use_signal(|| false);
+    use_system_back(platform_back, can_back);
+    dioxus_desktop::use_wry_event_handler(move |event, _| {
+        let Event::WindowEvent {
+            window_id,
+            event: WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. },
+            ..
+        } = event
+        else {
+            return;
+        };
+        if *window_id == window.window.id() {
+            let (w, h) = logical_size();
+            width.set(w);
+            height.set(h);
+            insets.set(read_insets());
+        }
+    });
+    HostInputs {
+        width: width.into(),
+        height: height.into(),
+        insets: insets.into(),
+        platform_back,
+        can_back,
+        renderer: dayframe_composition::Renderer::Browser,
         // The development seed: see `HostInputs::start`.
         start: std::env::var("DAYFRAME_SHELL_OPEN").ok(),
     }

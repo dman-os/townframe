@@ -144,7 +144,7 @@ switch (command) {
     // signing config in Dioxus.toml to yield a signed APK.
     await $`deno run --allow-all ${
       root.join("x/dx.ts")
-    } build --platform android --target ${androidTarget} --renderer native -p dayframe_mobile ${
+    } build --platform android --target ${androidTarget} --renderer webview -p dayframe_mobile ${
       flag("--release") ? ["--release"] : []
     }`.cwd(root);
     const metadata =
