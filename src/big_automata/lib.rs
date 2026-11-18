@@ -21,6 +21,7 @@ pub mod part_store;
 // FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
 #[cfg(any())]
 mod peer;
+pub mod replay;
 pub mod rev;
 mod rpc;
 mod scheduler;
