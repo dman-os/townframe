@@ -1,4 +1,6 @@
+pub use service_core_rs::operation::CallOrigin;
 pub use service_core_rs::operation::ClientError;
+pub use service_core_rs::operation::EndpointId;
 pub use service_core_rs::operation::Envelope;
 pub use service_core_rs::operation::EventFrame;
 pub use service_core_rs::operation::EventReply;

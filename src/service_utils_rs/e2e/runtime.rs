@@ -1,4 +1,5 @@
 use crate::Admission;
+use crate::CallOrigin;
 use crate::ClientError;
 use crate::Envelope;
 use crate::Handler;
@@ -113,12 +114,17 @@ impl Handler<Probe> for ProbeService {
                 .unwrap();
         }
         tracing::info!("probe handler");
+        // Every in-process client of this runtime states the local node as its origin.
         let transport = match request.transport() {
-            TransportContext::Direct => "direct".into(),
-            TransportContext::Irpc => "irpc".into(),
+            TransportContext::Direct {
+                origin: CallOrigin::LocalNode,
+            } => "direct".into(),
+            TransportContext::Irpc {
+                origin: CallOrigin::LocalNode,
+            } => "irpc".into(),
             TransportContext::Http => "http".into(),
-            TransportContext::Iroh { peer } => peer.clone(),
-            TransportContext::Unknown => panic!("transport was not established"),
+            TransportContext::Iroh { endpoint } => endpoint.to_string(),
+            other => panic!("unexpected transport {other:?}"),
         };
         Ok(ResponseEnvelope {
             output: Observation {
@@ -175,20 +181,21 @@ impl Runtime {
     fn boot() -> Self {
         let (sample, dependency_stop) = crate::sample::boot("initial");
         let service = Arc::new(ProbeService {
-            dependency: Client::new(Transport::direct(sample.host)),
+            dependency: Client::new(Transport::direct(sample.host, CallOrigin::LocalNode)),
             polls: Arc::new(Mutex::new(Vec::new())),
             polled: Arc::new(Notify::new()),
             dropped: Arc::new(Notify::new()),
         });
         let (host, host_stop) = Host::new(Arc::clone(&service));
-        let direct = Client::new(Transport::direct(Arc::clone(&host))).with_event_buffer(1);
+        let direct = Client::new(Transport::direct(Arc::clone(&host), CallOrigin::LocalNode))
+            .with_event_buffer(1);
         let (irpc, irpc_stop) =
             IrpcAdapter::local::<_, Protocol>(Arc::clone(&host), Admission::new(2, 2), 2);
         Self {
             service,
             host,
             direct,
-            irpc: Client::new(Transport::irpc(irpc)).with_event_buffer(1),
+            irpc: Client::new(Transport::irpc(irpc, CallOrigin::LocalNode)).with_event_buffer(1),
             stop: irpc_stop.then(host_stop).then(dependency_stop),
         }
     }
@@ -243,7 +250,7 @@ async fn response_metadata_and_established_identity_cross_native_and_http_transp
             Probe { nested: false },
         ))
         .unwrap();
-        wire["transport"] = serde_json::json!({ "Iroh": { "peer": "forged" } });
+        wire["transport"] = serde_json::json!({ "Iroh": { "endpoint": "forged" } });
         let request: Envelope<Probe> = serde_json::from_value(wire).unwrap();
         let response = client.call_with_metadata(request).await.unwrap();
         assert_eq!(response.metadata, response_metadata(), "{name}");
@@ -460,7 +467,10 @@ async fn idle_and_backpressured_streams_keep_the_request_span_and_deadline() {
 #[tokio::test(start_paused = true)]
 async fn deadlines_cover_client_queueing_and_subscription_establishment() {
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-    let client = Client::new(Transport::<Protocol>::irpc(irpc::Client::local(sender)));
+    let client = Client::new(Transport::<Protocol>::irpc(
+        irpc::Client::local(sender),
+        CallOrigin::LocalNode,
+    ));
     let pending_context = RequestContext::root();
     let pending = tokio::spawn({
         let client = client.clone();
@@ -506,33 +516,27 @@ async fn iroh_identity_comes_from_the_connection_and_response_metadata_survives(
     Protocol::mount(&mut router, Arc::clone(&runtime.host)).unwrap();
     let server_router = iroh::protocol::Router::builder(server.clone())
         .accept(
-            service_client_native_rs::xrpc::IROH_XRPC_HTTP_ALPN,
+            service_client_iroh_rs::IROH_XRPC_HTTP_ALPN,
             crate::xrpc::iroh_protocol_handler(router.into_router(), 2, 2),
         )
         .spawn();
-    let client = service_client_native_rs::xrpc::IrohXrpcClient::new(
+    let client = service_client_core_rs::Client::new(service_client_iroh_rs::IrohHttp::new(
         client_endpoint.clone(),
         server.addr(),
         4096,
-    )
-    .unwrap();
+    ));
     let response = client
-        .execute_with_metadata::<Probe, Observation, ContextError>(
-            Probe::XRPC,
+        .call_with_metadata(Envelope::new(
             RequestContext::root(),
-            &crate::HttpMetadata::default(),
-            &Probe { nested: false },
-        )
+            Probe { nested: false },
+        ))
         .await
         .unwrap();
     assert_eq!(response.output.transport, peer);
     assert_eq!(response.metadata, response_metadata());
 
     let connection = client_endpoint
-        .connect(
-            server.addr(),
-            service_client_native_rs::xrpc::IROH_XRPC_HTTP_ALPN,
-        )
+        .connect(server.addr(), service_client_iroh_rs::IROH_XRPC_HTTP_ALPN)
         .await
         .unwrap();
     let (mut send, mut recv) = connection.open_bi().await.unwrap();

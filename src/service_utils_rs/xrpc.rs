@@ -32,7 +32,6 @@ pub use iroh::iroh_protocol_handler;
 pub use router::XrpcMethodHandler;
 pub use router::XrpcRegistrationError;
 pub use router::XrpcRouter;
-pub use router::XrpcSubscriptionHandler;
 pub use serve::AcceptFuture;
 pub use serve::ConnectionAcceptor;
 pub use serve::serve;
@@ -49,11 +48,14 @@ pub struct XrpcRequest {
     /// one here; a registered handler already knows its own.
     pub nsid: String,
     /// The HTTP verb the request used. A fallback handler serves both: it is a GET's query
-    /// string (`raw_query`) or a POST's JSON body (`params`).
+    /// string (`raw_query`) or a POST's JSON body (`body`).
     pub verb: method_core::HttpMethod,
     pub context: RequestContext,
     pub metadata: HttpMetadata,
-    pub params: Value,
+    /// The request body as received: a procedure's JSON, which the router has only checked is
+    /// present and declared `application/json`; empty for a query. Handlers decode it straight
+    /// into their input type.
+    pub body: Vec<u8>,
     pub raw_query: Option<String>,
     pub transport: crate::TransportContext,
 }

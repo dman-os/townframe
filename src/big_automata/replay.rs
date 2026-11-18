@@ -51,10 +51,25 @@
 //!    with its whole wanted set. Nothing about a forgotten session can corrupt the new one,
 //!    because the ids differ.
 //!
+//!    *Revival.* A delayed copy of a session's opening update (generation 0) that arrives after
+//!    the server forgot the session opens it again under the same id, and nothing tells the
+//!    client. The revived session holds the opening's targets, not the client's current set:
+//!    - a target the client added since is missing: the next round naming it is answered
+//!      `UnknownTarget` (law 6), and the client recovers as from `UnknownSession`, with a new
+//!      session;
+//!    - a target the client removed since is held again, but the client never names it in a
+//!      round, so it carries nothing, and it goes when the revived session expires.
+//!
+//!    So a revival costs the server a stale session until its TTL and the client one reset,
+//!    and never delivers a row the client did not ask for. (The Quint model's `laws`
+//!    configuration and the Rust simulation both reach this interleaving; see `replay/spec`.)
+//!
 //! **Rounds**
 //!
 //! 6. *Ids.* A round names targets by id with a cursor each. A round naming an id the session
-//!    does not hold is a client bug, answered with [`wire::SessionError::UnknownTarget`].
+//!    does not hold is answered with [`wire::SessionError::UnknownTarget`]. That is a client bug,
+//!    except after a revival (law 5), when it is how the client learns its session is not the
+//!    one it believes, and it opens a new one.
 //! 7. *Current access, one snapshot.* Each target's verdict is decided from the client's access
 //!    at the time of the round, in the same snapshot as the rows the round reads. A target the
 //!    client may not read now is [`wire::Verdict::Refused`] and carries no rows, whatever the

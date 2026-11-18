@@ -42,7 +42,13 @@ impl<H: Send + Sync + 'static> Host<H> {
         (Arc::new(Self { handler, spawner }), stop)
     }
 
-    fn request_span<P: Method>(request: &Envelope<P>) -> tracing::Span {
+    /// The XRPC router spawns its WebSocket subscription pumps here, so stopping the host ends
+    /// and joins them.
+    pub(crate) fn spawner(&self) -> &Spawner {
+        &self.spawner
+    }
+
+    pub(crate) fn request_span<P: Method>(request: &Envelope<P>) -> tracing::Span {
         let span = tracing::info_span!("service.call", nsid = P::XRPC.nsid, request_id = %request.context.request_id, worker = P::XRPC.nsid); // INSTR worker=nsid so the census keys service calls by operation
         if let Some(parent) = request.context.trace.parent() {
             match span.set_parent(parent) {
@@ -88,12 +94,16 @@ impl<H: Send + Sync + 'static> Host<H> {
         // full size while constructing it. A handler that calls another service through a direct
         // client nests that chain once per hop, and in a debug build three in-process hops were
         // enough to overflow a 2 MiB test thread.
+        //
+        // The handler is polled first: a result that is ready in the same poll as a cancel or the
+        // deadline is the call's outcome, not discarded for a `Cancelled` the caller would have to
+        // treat as unknown.
         tokio::select! {
             biased;
+            result = Box::pin(self.handler.call(request)) => result,
             _ = self.spawner.cancelled() => Err(ContextError::Cancelled.into()),
             _ = context.cancellation.cancelled() => Err(ContextError::Cancelled.into()),
             _ = context.expired() => Err(ContextError::DeadlineExceeded.into()),
-            result = Box::pin(self.handler.call(request)) => result,
         }
     }
 
@@ -106,10 +116,11 @@ impl<H: Send + Sync + 'static> Host<H> {
         P: Method,
         H: Handler<P>,
     {
+        // The call is polled first for the same reason as in `invoke_inner`.
         tokio::select! {
             biased;
-            _ = owner.cancelled() => Err(ContextError::Cancelled.into()),
             result = self.invoke_inner(request) => result,
+            _ = owner.cancelled() => Err(ContextError::Cancelled.into()),
         }
     }
 
@@ -128,29 +139,32 @@ impl<H: Send + Sync + 'static> Host<H> {
             .cloned()
             .unwrap_or_else(tracing::Span::current);
         let WithChannels {
-            inner: mut request,
-            tx,
-            ..
+            inner: request, tx, ..
         } = message;
-        request.set_transport(match dispatch {
-            Dispatch::Inline => TransportContext::Direct,
-            Dispatch::Admitted { .. } => TransportContext::Irpc,
-        });
+        check_in_process_transport(&dispatch, request.transport());
         async move {
             match dispatch {
                 Dispatch::Inline => { drop(tx.send(self.invoke(request).await).await); }
                 Dispatch::Admitted { admission, spawner } => {
+                    // An IRPC queue is same-node, so the reply sender is a tokio oneshot, whose
+                    // `closed` resolves when the caller drops its receiver; irpc's own sender has
+                    // no such signal. A remote (boxed) sender here is a programming error.
+                    let mut tx: tokio::sync::oneshot::Sender<_> = tx
+                        .try_into()
+                        .expect("an IRPC adapter serves a same-node queue, whose replies are tokio oneshots");
                     let request = request.for_receiver();
+                    // The sends below fail only when the caller has already left.
                     let permit = tokio::select! {
                         biased;
-                        _ = spawner.cancelled() => { drop(tx.send(Err(ContextError::Cancelled.into())).await); return; }
-                        _ = request.context.cancellation.cancelled() => { drop(tx.send(Err(ContextError::Cancelled.into())).await); return; }
-                        _ = request.context.expired() => { drop(tx.send(Err(ContextError::DeadlineExceeded.into())).await); return; }
+                        _ = spawner.cancelled() => { drop(tx.send(Err(ContextError::Cancelled.into()))); return; }
+                        _ = request.context.cancellation.cancelled() => { drop(tx.send(Err(ContextError::Cancelled.into()))); return; }
+                        _ = request.context.expired() => { drop(tx.send(Err(ContextError::DeadlineExceeded.into()))); return; }
+                        () = tx.closed() => return,
                         permit = admission.acquire_unary() => permit,
                     };
                     let registration = match admission.register_cancellation(request.context.cancellation.clone()) {
                         Ok(registration) => registration,
-                        Err(error) => { drop(tx.send(Err(error.into())).await); return; }
+                        Err(error) => { drop(tx.send(Err(error.into()))); return; }
                     };
                     let activity = admission.activity();
                     let admitted = activity.admitted();
@@ -160,7 +174,15 @@ impl<H: Send + Sync + 'static> Host<H> {
                     let _task = spawner.spawn(async move {
                         let (_permit, _admitted, _spawned, _registration) = (permit, admitted, spawned, registration);
                         let _active = activity.active();
-                        drop(tx.send(self.invoke_owned(request, &owner).await).await);
+                        // A caller that drops its call cancels the handler, as dropping the future
+                        // does on a direct call and resetting the stream does on XRPC. The handler
+                        // is polled first, so a result ready in the same poll is still sent.
+                        let result = tokio::select! {
+                            biased;
+                            result = self.invoke_owned(request, &owner) => result,
+                            () = tx.closed() => return,
+                        };
+                        drop(tx.send(result));
                     }.instrument(span));
                 }
             }
@@ -182,14 +204,9 @@ impl<H: Send + Sync + 'static> Host<H> {
             .cloned()
             .unwrap_or_else(tracing::Span::current);
         let WithChannels {
-            inner: mut request,
-            tx,
-            ..
+            inner: request, tx, ..
         } = message;
-        request.set_transport(match dispatch {
-            Dispatch::Inline => TransportContext::Direct,
-            Dispatch::Admitted { .. } => TransportContext::Irpc,
-        });
+        check_in_process_transport(&dispatch, request.transport());
         async move {
             match dispatch {
                 Dispatch::Inline => {
@@ -255,7 +272,31 @@ impl<H: Send + Sync + 'static> Host<H> {
     }
 }
 
-async fn pump<P: Subscription>(
+/// Asserts that an in-process request was stamped by the client kind its dispatch implies:
+/// `Transport::direct` for inline routing, `Transport::irpc` for an admitted IRPC queue. Both
+/// stamp the origin their caller states, which is how an in-process call says where it comes
+/// from; a message that reaches a host without one was built around the client.
+fn check_in_process_transport(dispatch: &Dispatch, transport: &TransportContext) {
+    match (dispatch, transport) {
+        (Dispatch::Inline, TransportContext::Direct { .. })
+        | (Dispatch::Admitted { .. }, TransportContext::Irpc { .. }) => {}
+        (Dispatch::Inline, other) => {
+            panic!(
+                "an inline call must come from a direct client, which states its origin; got {other:?}"
+            )
+        }
+        (Dispatch::Admitted { .. }, other) => {
+            panic!(
+                "an IRPC call must come from an IRPC client, which states its origin; got {other:?}"
+            )
+        }
+    }
+}
+
+/// Delivers a subscription's frames to `tx` until the stream ends, the receiver closes, the
+/// owner stops, or the request is cancelled or runs out of budget; the last two end it with a
+/// terminal error frame. Every transport's stream is pumped here.
+pub(crate) async fn pump<P: Subscription>(
     response: crate::ResponseEnvelope<P::Output>,
     tx: EventReply<P>,
     context: RequestContext,
@@ -427,6 +468,66 @@ mod tests {
     use crate::ResponseMetadata;
     use crate::sample::SampleEvent;
     use crate::sample::SubscribeEvents;
+    use method_core::XrpcMethod;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::task::Poll;
+
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
+    struct Race;
+
+    impl Method for Race {
+        type Output = ();
+        type Error = ContextError;
+        const XRPC: XrpcMethod = XrpcMethod::query("org.example.race.get");
+    }
+
+    /// Pending until its flag is set, then done. A test sets the flag together with a cancel
+    /// between two polls, so the host's next poll finds both ready.
+    struct Racer(Arc<AtomicBool>);
+
+    impl Handler<Race> for Racer {
+        fn call(
+            &self,
+            _: Envelope<Race>,
+        ) -> impl Future<Output = Result<ResponseEnvelope<()>, ContextError>> + Send {
+            let ready = Arc::clone(&self.0);
+            std::future::poll_fn(move |_| {
+                if ready.load(Ordering::Acquire) {
+                    Poll::Ready(Ok(ResponseEnvelope::from(())))
+                } else {
+                    Poll::Pending
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_result_ready_in_the_same_poll_as_a_cancel_wins() {
+        // The request's own cancellation, which every call watches.
+        let ready = Arc::new(AtomicBool::new(false));
+        let (host, stop) = Host::new(Racer(Arc::clone(&ready)));
+        let context = RequestContext::root();
+        let mut call = std::pin::pin!(host.invoke(Envelope::new(context.clone(), Race)));
+        assert!(futures::poll!(&mut call).is_pending());
+        ready.store(true, Ordering::Release);
+        context.cancel();
+        assert_eq!(call.await, Ok(ResponseEnvelope::from(())));
+        stop.stop().await;
+
+        // The owner of an admitted call, its IRPC adapter, stopping. The owner tracks nothing
+        // here, so stopping it only cancels.
+        let ready = Arc::new(AtomicBool::new(false));
+        let (host, stop) = Host::new(Racer(Arc::clone(&ready)));
+        let (owner_stop, owner) = StopToken::new();
+        let mut call =
+            std::pin::pin!(host.invoke_owned(Envelope::new(RequestContext::root(), Race), &owner));
+        assert!(futures::poll!(&mut call).is_pending());
+        ready.store(true, Ordering::Release);
+        owner_stop.stop().await;
+        assert_eq!(call.await, Ok(ResponseEnvelope::from(())));
+        stop.stop().await;
+    }
 
     #[tokio::test]
     async fn finite_subscription_delivers_end_after_all_events() {

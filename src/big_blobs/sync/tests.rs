@@ -10,6 +10,7 @@ use futures::future::BoxFuture;
 use service_client_native_rs::Client;
 use service_client_native_rs::InlineRoute;
 use service_client_native_rs::Transport;
+use service_utils_rs::CallOrigin;
 use service_utils_rs::StopToken;
 use sqlite_rs::SqliteRuntime;
 
@@ -78,7 +79,10 @@ impl Harness {
                 None => crate::Storage::memory()?,
             },
             sql: sql.clone(),
-            authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+            authority: Client::new(Transport::direct(
+                Arc::new(UnusedAuthority),
+                CallOrigin::LocalNode,
+            )),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: CapId::from_bytes([102; 16]),

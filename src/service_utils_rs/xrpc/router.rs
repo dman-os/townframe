@@ -8,9 +8,9 @@ use super::XrpcRequest;
 use crate::context::HttpMetadata;
 use crate::context::RequestContext;
 use crate::host::Host;
+use crate::lifecycle::Spawner;
 use crate::middleware::Handler;
 use crate::operation::Envelope;
-use axum::Json;
 use axum::Router;
 use axum::extract::Path;
 use axum::extract::RawQuery;
@@ -23,7 +23,7 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::any;
-use futures::StreamExt as _;
+use hyper::upgrade::OnUpgrade;
 use method_core::HttpInput;
 use method_core::HttpMethod;
 use method_core::MethodKind;
@@ -34,9 +34,10 @@ use mime::Mime;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use serde_json::json;
 use service_client_native_rs::xrpc::ws::WsIo;
+use service_client_native_rs::xrpc::ws::WsMessage;
 use service_client_native_rs::xrpc::ws::accept_key;
+use service_core_rs::EventFrame;
 use service_core_rs::xrpc::domain_error_envelope;
 use service_core_rs::xrpc::request_context;
 use std::collections::BTreeMap;
@@ -44,7 +45,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
+use tracing::Instrument;
 
 /// A registered operation handler. [`XrpcRouter::mount`] builds one from a
 /// hosted [`Handler`]; [`XrpcMethodHandler::typed`] is the escape hatch for
@@ -55,8 +58,10 @@ pub struct XrpcMethodHandler {
     handler: Arc<dyn Fn(XrpcRequest) -> HandlerFuture + Send + Sync>,
 }
 
-type HandlerFuture =
-    Pin<Box<dyn Future<Output = Result<crate::ResponseEnvelope<Value>, XrpcHandlerError>> + Send>>;
+/// Resolves to the response body, already encoded as JSON, and its metadata.
+type HandlerFuture = Pin<
+    Box<dyn Future<Output = Result<crate::ResponseEnvelope<Vec<u8>>, XrpcHandlerError>> + Send>,
+>;
 
 impl std::fmt::Debug for XrpcMethodHandler {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -68,6 +73,8 @@ impl std::fmt::Debug for XrpcMethodHandler {
 }
 
 impl XrpcMethodHandler {
+    /// A handler over the raw request whose output is any JSON value: the shape of a proxy or
+    /// fallback, which does not know the operation's types.
     pub fn new<F, Fut, O>(operation: XrpcMethod, handler: F) -> Self
     where
         F: Fn(XrpcRequest) -> Fut + Send + Sync + 'static,
@@ -78,11 +85,12 @@ impl XrpcMethodHandler {
             operation,
             handler: Arc::new(move |request| {
                 let future = handler(request);
-                Box::pin(async move { future.await.map(Into::into) })
+                Box::pin(async move { future.await.map(|output| encode_output(output.into())) })
             }),
         }
     }
 
+    /// A handler over typed input and output, decoded from and encoded to the wire directly.
     pub fn typed<P, O, F, Fut>(operation: XrpcMethod, handler: F) -> Self
     where
         P: DeserializeOwned + Send + 'static,
@@ -91,25 +99,19 @@ impl XrpcMethodHandler {
         Fut: Future<Output = Result<O, XrpcHandlerError>> + Send + 'static,
     {
         let handler = Arc::new(handler);
-        Self::new(operation, move |request| {
-            let handler = Arc::clone(&handler);
-            let result = match operation.input {
-                HttpInput::Query => serde_urlencoded::from_str::<P>(
-                    request.raw_query.as_deref().unwrap_or_default(),
-                )
-                .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string())),
-                HttpInput::JsonBody => serde_json::from_value::<P>(request.params.clone())
-                    .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string())),
-            };
-            let context = request.context;
-            let metadata = request.metadata;
-            async move {
-                let params = result?;
-                let output = handler(context, metadata, params).await?;
-                serde_json::to_value(output)
-                    .map_err(|error| XrpcHandlerError::Internal(error.to_string()))
-            }
-        })
+        Self {
+            operation,
+            handler: Arc::new(move |request| {
+                let handler = Arc::clone(&handler);
+                let params = decode_params::<P>(operation.input, &request);
+                let context = request.context;
+                let metadata = request.metadata;
+                Box::pin(async move {
+                    let output = handler(context, metadata, params?).await?;
+                    Ok(encode_output(crate::ResponseEnvelope::from(output)))
+                })
+            }),
+        }
     }
 
     pub fn operation(&self) -> XrpcMethod {
@@ -119,32 +121,47 @@ impl XrpcMethodHandler {
     async fn call(
         &self,
         request: XrpcRequest,
-    ) -> Result<crate::ResponseEnvelope<Value>, XrpcHandlerError> {
+    ) -> Result<crate::ResponseEnvelope<Vec<u8>>, XrpcHandlerError> {
         (self.handler)(request).await
     }
 }
 
-/// A registered subscription handler, carried over a WebSocket upgrade of
-/// the same `/xrpc/{nsid}` route rather than the unary HTTP exchange.
+/// Decodes an operation's typed input straight from the wire: the query string, or the JSON body.
+fn decode_params<P: DeserializeOwned>(
+    input: HttpInput,
+    request: &XrpcRequest,
+) -> Result<P, XrpcHandlerError> {
+    match input {
+        HttpInput::Query => serde_urlencoded::from_str(
+            request.raw_query.as_deref().unwrap_or_default(),
+        )
+        .map_err(|error| {
+            XrpcHandlerError::InvalidInput(format!("invalid query parameters: {error}"))
+        }),
+        HttpInput::JsonBody => serde_json::from_slice(&request.body)
+            .map_err(|error| XrpcHandlerError::InvalidInput(format!("invalid JSON body: {error}"))),
+    }
+}
+
+/// Encodes an operation's output as the JSON response body. An output that does not serialize is
+/// a programming error in its type.
+fn encode_output<O: Serialize>(
+    response: crate::ResponseEnvelope<O>,
+) -> crate::ResponseEnvelope<Vec<u8>> {
+    crate::ResponseEnvelope {
+        output: serde_json::to_vec(&response.output).expect("operation output must serialize"),
+        metadata: response.metadata,
+    }
+}
+
+/// A mounted subscription, carried over a WebSocket upgrade of the same `/xrpc/{nsid}` route
+/// rather than the unary HTTP exchange. Opening it runs the hosted handler; what it returns is the
+/// pump that [`dispatch_subscription`] starts once the upgrade response is on its way.
 #[derive(Clone)]
-pub struct XrpcSubscriptionHandler {
+struct XrpcSubscriptionHandler {
     operation: XrpcMethod,
     handler: Arc<dyn Fn(XrpcRequest) -> SubscriptionFuture + Send + Sync>,
 }
-
-type SubscriptionFuture = Pin<
-    Box<
-        dyn Future<
-                Output = Result<
-                    (
-                        crate::ResponseMetadata,
-                        Pin<Box<dyn futures::Stream<Item = Result<Value, Value>> + Send>>,
-                    ),
-                    XrpcHandlerError,
-                >,
-            > + Send,
-    >,
->;
 
 impl std::fmt::Debug for XrpcSubscriptionHandler {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -155,56 +172,81 @@ impl std::fmt::Debug for XrpcSubscriptionHandler {
     }
 }
 
-impl XrpcSubscriptionHandler {
-    pub fn typed<P, E, F, Fut>(operation: XrpcMethod, handler: F) -> Self
-    where
-        P: DeserializeOwned + Send + 'static,
-        E: Serialize + Send + 'static,
-        F: Fn(RequestContext, HttpMetadata, P) -> Fut + Send + Sync + 'static,
-        Fut: Future<
-                Output = Result<
-                    Pin<Box<dyn futures::Stream<Item = Result<Value, E>> + Send>>,
-                    XrpcHandlerError,
-                >,
-            > + Send
-            + 'static,
-    {
-        let handler = Arc::new(handler);
-        Self {
-            operation,
-            handler: Arc::new(move |request| {
-                let handler = Arc::clone(&handler);
-                let result = match operation.input {
-                    HttpInput::Query => serde_urlencoded::from_str::<P>(
-                        request.raw_query.as_deref().unwrap_or_default(),
-                    )
-                    .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string())),
-                    HttpInput::JsonBody => serde_json::from_value::<P>(request.params.clone())
-                        .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string())),
-                };
-                let context = request.context;
-                let metadata = request.metadata;
-                Box::pin(async move {
-                    let params = result?;
-                    let stream = handler(context, metadata, params).await?;
-                    let stream = futures::StreamExt::map(stream, |item| match item {
-                        Ok(value) => Ok(value),
-                        Err(error) => Err(serde_json::to_value(error)
-                            .expect("subscription errors must serialize")),
-                    });
-                    Ok((
-                        crate::ResponseMetadata::default(),
-                        Box::pin(stream)
-                            as Pin<Box<dyn futures::Stream<Item = Result<Value, Value>> + Send>>,
-                    ))
-                })
-            }),
-        }
-    }
+type SubscriptionFuture =
+    Pin<Box<dyn Future<Output = Result<SocketPump, XrpcHandlerError>> + Send>>;
 
-    pub fn operation(&self) -> XrpcMethod {
-        self.operation
+/// Starts an opened subscription's pump on the upgraded socket, holding the admission permit for
+/// as long as it runs.
+type SocketPump = Box<dyn FnOnce(OnUpgrade, OwnedSemaphorePermit) + Send>;
+
+/// The text frames of a subscription socket. `End` has no frame: the server closes the socket.
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum SocketFrame<'a, E, R> {
+    Open {
+        metadata: &'a crate::ResponseMetadata,
+    },
+    Event(&'a E),
+    Error(&'a R),
+}
+
+/// Writes the frames the host's pump delivers to `frames` onto the WebSocket that `on_upgrade`
+/// yields, until they end, the client closes the socket, or `owner` stops. Returning drops
+/// `frames`, which the pump observes as a closed receiver and ends the stream on.
+async fn write_socket<P: Subscription>(
+    on_upgrade: OnUpgrade,
+    mut frames: irpc::channel::mpsc::Receiver<Result<EventFrame<P::Event>, P::Error>>,
+    owner: &Spawner,
+) {
+    let upgraded = tokio::select! {
+        upgraded = on_upgrade => match upgraded {
+            Ok(upgraded) => upgraded,
+            // The connection ended before the upgrade completed: no one to deliver to.
+            Err(_) => return,
+        },
+        _ = owner.cancelled() => return,
+    };
+    let (read, write) = tokio::io::split(hyper_util::rt::TokioIo::new(upgraded));
+    let mut socket = WsIo::new(write, false);
+    // The socket is server-to-client: the client sends nothing but its close, so the read half
+    // is only watched for that, or for the connection ending. A ping's pong would have to share
+    // the write half with the events; this protocol's clients do not ping, so pongs are dropped.
+    let closed = async {
+        let mut reader = WsIo::new(tokio::io::join(read, tokio::io::sink()), false);
+        while let Ok(Some(WsMessage::Text(_))) = reader.read_message().await {}
+    };
+    let delivery = async {
+        while let Ok(Some(frame)) = frames.recv().await {
+            let (text, terminal) = match &frame {
+                Ok(EventFrame::Open(metadata)) => {
+                    (to_frame::<P>(SocketFrame::Open { metadata }), false)
+                }
+                Ok(EventFrame::Event(event)) => (to_frame::<P>(SocketFrame::Event(event)), false),
+                Ok(EventFrame::End) => break,
+                Err(error) => (to_frame::<P>(SocketFrame::Error(error)), true),
+            };
+            if socket.write_text(&text).await.is_err() {
+                return;
+            }
+            if terminal {
+                break;
+            }
+        }
+        // The client may already be gone; the socket is dropped either way.
+        drop(socket.write_close().await);
+    };
+    // Delivery is polled first so that the pump's terminal error, queued as the owner stops, is
+    // still written when the socket takes it without waiting.
+    tokio::select! {
+        biased;
+        () = delivery => {}
+        () = closed => {}
+        _ = owner.cancelled() => {}
     }
+}
+
+fn to_frame<P: Subscription>(frame: SocketFrame<'_, P::Event, P::Error>) -> String {
+    serde_json::to_string(&frame).expect("subscription frames must serialize")
 }
 
 /// A bounded HTTP router for registered unary XRPC operations.
@@ -308,37 +350,30 @@ impl XrpcRouter {
         P: Unary,
         H: Handler<P>,
     {
-        self.register(XrpcMethodHandler::new(P::XRPC, move |request| {
-            let host = Arc::clone(&host);
-            async move {
-                let params: P = match P::XRPC.input {
-                    HttpInput::Query => {
-                        serde_urlencoded::from_str(request.raw_query.as_deref().unwrap_or_default())
-                            .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string()))?
-                    }
-                    HttpInput::JsonBody => serde_json::from_value(request.params)
-                        .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string()))?,
-                };
-                let mut envelope =
-                    Envelope::with_metadata(request.context, request.metadata, params);
-                envelope.set_transport(request.transport);
-                let response = host
-                    .invoke(envelope)
-                    .await
-                    .map_err(|error| domain_error(&error))?;
-                Ok(crate::ResponseEnvelope {
-                    output: serde_json::to_value(response.output)
-                        .expect("operation output must serialize"),
-                    metadata: response.metadata,
+        self.register(XrpcMethodHandler {
+            operation: P::XRPC,
+            handler: Arc::new(move |request| {
+                let host = Arc::clone(&host);
+                Box::pin(async move {
+                    let params = decode_params::<P>(P::XRPC.input, &request)?;
+                    let mut envelope =
+                        Envelope::with_metadata(request.context, request.metadata, params);
+                    envelope.set_transport(request.transport);
+                    let response = host
+                        .invoke(envelope)
+                        .await
+                        .map_err(|error| domain_error(&error))?;
+                    Ok(encode_output(response))
                 })
-            }
-        }))
+            }),
+        })
     }
 
-    /// Mounts a hosted subscription operation. It is served as a WebSocket
-    /// upgrade of the same route; the hosted handler's event stream is pumped
-    /// as JSON text frames, so direct, IRPC and XRPC consumers see one event
-    /// vocabulary.
+    /// Mounts a hosted subscription operation. It is served as a WebSocket upgrade of the same
+    /// route. The hosted handler's event stream runs through the host's pump, as on every other
+    /// transport, so it has the same cancellation and deadline and is tracked by the host's
+    /// [`StopToken`](crate::StopToken); its frames are written to the socket as JSON text, so
+    /// direct, IRPC and XRPC consumers see one event vocabulary.
     pub fn mount_subscription<P, H>(
         &mut self,
         host: Arc<Host<H>>,
@@ -347,55 +382,50 @@ impl XrpcRouter {
         P: Subscription,
         H: Handler<P>,
     {
-        self.register_subscription(XrpcSubscriptionHandler {
-            operation: P::XRPC,
+        let operation = P::XRPC;
+        let handler = XrpcSubscriptionHandler {
+            operation,
             handler: Arc::new(move |request| {
                 let host = Arc::clone(&host);
                 Box::pin(async move {
-                    let params: P = match P::XRPC.input {
-                        HttpInput::Query => serde_urlencoded::from_str(
-                            request.raw_query.as_deref().unwrap_or_default(),
-                        )
-                        .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string()))?,
-                        HttpInput::JsonBody => serde_json::from_value(request.params)
-                            .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string()))?,
-                    };
+                    let params = decode_params::<P>(P::XRPC.input, &request)?;
                     let mut envelope =
                         Envelope::with_metadata(request.context, request.metadata, params);
                     envelope.set_transport(request.transport);
+                    let context = envelope.context.clone();
+                    let span = Host::<H>::request_span(&envelope);
                     let response = host
                         .invoke(envelope)
                         .await
                         .map_err(|error| domain_error(&error))?;
-                    let stream = futures::StreamExt::map(response.output, |item| match item {
-                        Ok(event) => Ok(serde_json::to_value(event)
-                            .expect("subscription events must serialize")),
-                        Err(error) => Err(serde_json::to_value(error)
-                            .expect("subscription errors must serialize")),
+                    let pump: SocketPump = Box::new(move |on_upgrade, permit| {
+                        let owner = host.spawner().clone();
+                        let (tx, rx) = irpc::channel::mpsc::channel(1);
+                        // A host that is stopping refuses the task; dropping it drops the stream,
+                        // the permit and the upgrade, and the client sees the socket close.
+                        let _task = host.spawner().spawn(
+                            async move {
+                                let _permit = permit;
+                                futures::join!(
+                                    crate::host::pump::<P>(response, tx, context, owner.clone()),
+                                    write_socket::<P>(on_upgrade, rx, &owner),
+                                );
+                            }
+                            .instrument(span),
+                        );
                     });
-                    Ok((
-                        response.metadata,
-                        Box::pin(stream)
-                            as Pin<Box<dyn futures::Stream<Item = Result<Value, Value>> + Send>>,
-                    ))
+                    Ok(pump)
                 })
             }),
-        })
-    }
-
-    pub fn register_subscription(
-        &mut self,
-        handler: XrpcSubscriptionHandler,
-    ) -> Result<(), XrpcRegistrationError> {
-        if handler.operation().kind != MethodKind::Subscription {
-            return Err(XrpcRegistrationError::SubscriptionUnsupported);
+        };
+        if self.subscriptions.contains_key(operation.nsid)
+            || self.operations.contains_key(operation.nsid)
+        {
+            return Err(XrpcRegistrationError::DuplicateOperation(
+                operation.nsid.to_owned(),
+            ));
         }
-        let subscriptions = Arc::make_mut(&mut self.subscriptions);
-        let nsid = handler.operation().nsid.to_owned();
-        if subscriptions.contains_key(&nsid) || self.operations.contains_key(&nsid) {
-            return Err(XrpcRegistrationError::DuplicateOperation(nsid));
-        }
-        subscriptions.insert(nsid, handler);
+        Arc::make_mut(&mut self.subscriptions).insert(operation.nsid.to_owned(), handler);
         Ok(())
     }
 
@@ -492,7 +522,7 @@ async fn dispatch(
     if let Some(subscription) = router.subscriptions.get(&nsid) {
         return dispatch_subscription(
             subscription.clone(),
-            router.admission_pool(subscription.operation().long_poll),
+            router.admission_pool(subscription.operation.long_poll),
             nsid,
             raw_query,
             parts,
@@ -577,32 +607,24 @@ async fn dispatch(
             );
         }
     };
-    // A fallback's GET hands over the raw query string alone.
-    let params = match if registered.is_none() && operation.input == HttpInput::Query {
-        if body.is_empty() {
-            Ok(Value::Null)
-        } else {
-            Err("query operations must not carry a request body".to_owned())
+    // The body is only checked for presence here; the handler decodes it straight into its
+    // input type (or, for the fallback, into whatever it relays).
+    let body_error = match operation.input {
+        HttpInput::Query if !body.is_empty() => {
+            Some("query operations must not carry a request body")
         }
-    } else {
-        decode_input(operation.input, raw_query.as_deref(), &body)
-    } {
-        Ok(params) => params,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                request_id,
-                "InvalidRequest",
-                &error,
-            );
-        }
+        HttpInput::JsonBody if body.is_empty() => Some("procedure requires a JSON body"),
+        HttpInput::Query | HttpInput::JsonBody => None,
     };
+    if let Some(error) = body_error {
+        return error_response(StatusCode::BAD_REQUEST, request_id, "InvalidRequest", error);
+    }
     let call = handler.call(XrpcRequest {
         nsid,
         verb: operation.method,
         context: context.clone(),
         metadata: metadata.clone(),
-        params,
+        body: body.into(),
         raw_query,
         transport: parts
             .extensions
@@ -689,7 +711,7 @@ async fn dispatch_subscription(
             );
         }
     };
-    let Some(on_upgrade) = parts.extensions.get::<hyper::upgrade::OnUpgrade>().cloned() else {
+    let Some(on_upgrade) = parts.extensions.get::<OnUpgrade>().cloned() else {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             request_id,
@@ -697,61 +719,27 @@ async fn dispatch_subscription(
             "websocket upgrade is not available on this listener",
         );
     };
-    let params = match decode_input(HttpInput::Query, raw_query.as_deref(), &[]) {
-        Ok(params) => params,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                request_id,
-                "InvalidRequest",
-                &error,
-            );
-        }
-    };
     let transport = parts
         .extensions
         .get::<crate::TransportContext>()
         .cloned()
         .unwrap_or(crate::TransportContext::Http);
-    let (metadata_out, mut stream) = match (subscription.handler)(XrpcRequest {
+    let pump = match (subscription.handler)(XrpcRequest {
         nsid,
         verb: HttpMethod::Get,
         context,
         metadata,
-        params,
+        body: Vec::new(),
         raw_query,
         transport,
     })
     .await
     {
-        Ok(value) => value,
+        Ok(pump) => pump,
         Err(error) => return handler_error_response(error, request_id),
     };
     let accept = accept_key(&key);
-    tokio::spawn(async move {
-        let _permit = permit;
-        let Ok(upgraded) = on_upgrade.await else {
-            return;
-        };
-        let mut socket = WsIo::new(hyper_util::rt::TokioIo::new(upgraded), false);
-        let open = json!({ "open": { "metadata": metadata_out } });
-        if socket.write_text(&open.to_string()).await.is_err() {
-            return;
-        }
-        while let Some(item) = stream.next().await {
-            let frame = match item {
-                Ok(event) => json!({ "event": event }),
-                Err(error) => json!({ "error": error }),
-            };
-            if socket.write_text(&frame.to_string()).await.is_err() {
-                return;
-            }
-            if frame.get("error").is_some() {
-                break;
-            }
-        }
-        drop(socket.write_close().await);
-    });
+    pump(on_upgrade, permit);
     let mut response = Response::new(axum::body::Body::empty());
     *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
     response
@@ -820,33 +808,6 @@ fn validate_json_content_type(headers: &HeaderMap) -> Result<(), String> {
     Ok(())
 }
 
-fn decode_input(input: HttpInput, raw_query: Option<&str>, body: &[u8]) -> Result<Value, String> {
-    match input {
-        HttpInput::Query => {
-            if !body.is_empty() {
-                return Err("query operations must not carry a request body".to_owned());
-            }
-            let query = raw_query.unwrap_or_default();
-            serde_urlencoded::from_str::<BTreeMap<String, String>>(query)
-                .map(|query| {
-                    Value::Object(
-                        query
-                            .into_iter()
-                            .map(|(key, value)| (key, Value::String(value)))
-                            .collect(),
-                    )
-                })
-                .map_err(|error| format!("invalid query parameters: {error}"))
-        }
-        HttpInput::JsonBody => {
-            if body.is_empty() {
-                return Err("procedure requires a JSON body".to_owned());
-            }
-            serde_json::from_slice(body).map_err(|error| format!("invalid JSON body: {error}"))
-        }
-    }
-}
-
 fn request_id_from_headers(headers: &HeaderMap) -> Option<uuid::Uuid> {
     headers
         .get(REQUEST_ID_HEADER)
@@ -897,21 +858,19 @@ fn error_response_with_details(
     message: Option<&str>,
     details: BTreeMap<String, Value>,
 ) -> Response {
+    let envelope = XrpcErrorEnvelope::new(error.to_owned(), message.map(str::to_owned), details)
+        .expect("XRPC details must not contain reserved fields");
     json_response(
         status,
         request_id,
-        json!(
-            XrpcErrorEnvelope::new(error.to_owned(), message.map(str::to_owned), details,)
-                .expect("XRPC details must not contain reserved fields")
-        ),
+        serde_json::to_vec(&envelope).expect("an XRPC error envelope serializes"),
     )
 }
 
-fn json_response(status: StatusCode, request_id: Option<uuid::Uuid>, body: Value) -> Response {
-    let content_length = serde_json::to_vec(&body)
-        .expect("XRPC JSON value must be serializable")
-        .len();
-    let mut response = (status, Json(body)).into_response();
+/// A response carrying `body`, which is already encoded JSON.
+fn json_response(status: StatusCode, request_id: Option<uuid::Uuid>, body: Vec<u8>) -> Response {
+    let content_length = body.len();
+    let mut response = (status, body).into_response();
     response.headers_mut().insert(
         header::CONTENT_LENGTH,
         HeaderValue::from_str(&content_length.to_string())

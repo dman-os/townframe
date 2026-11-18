@@ -1,6 +1,6 @@
 use super::serve::expected_peer_error;
 use axum::Router;
-use service_client_native_rs::xrpc::iroh::IrohHttpStream;
+use service_client_iroh_rs::IrohHttpStream;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::sync::watch;
@@ -40,7 +40,7 @@ async fn serve_iroh_stream(
     // transport for a peer reset.  Keep the send-side stop notification beside
     // the owned Hyper future so a client stream reset cancels that handler.
     let stopped = send.stopped();
-    let io = hyper_util::rt::TokioIo::new(IrohHttpStream::new(send, recv));
+    let io = IrohHttpStream::new(send, recv);
     tokio::select! {
         result = hyper::server::conn::http1::Builder::new()
             // HTTP/1 is deliberately one exchange per QUIC bi-stream.  The
@@ -68,7 +68,9 @@ impl iroh::protocol::ProtocolHandler for IrohXrpcProtocolHandler {
             .router
             .clone()
             .layer(axum::Extension(crate::TransportContext::Iroh {
-                peer: connection.remote_id().to_string(),
+                endpoint: service_core_rs::EndpointId::from_bytes(
+                    *connection.remote_id().as_bytes(),
+                ),
             }));
         let mut shutdown = self.shutdown_state.clone();
         let mut streams = JoinSet::new();

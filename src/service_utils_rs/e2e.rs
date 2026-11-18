@@ -4,6 +4,7 @@
 //! consumer would, so a regression in any adapter shows up as a parity break.
 
 use crate::Admission;
+use crate::CallOrigin;
 use crate::IrpcAdapter;
 use crate::ServerBinding;
 use crate::StopToken;
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use url::Url;
 
+mod cancellation;
 mod irpc;
 mod parity;
 mod runtime;
@@ -58,13 +60,16 @@ impl Stack {
         let (sample, stop) = boot("initial");
         let admission = Admission::new(max_handlers, max_stream_pumps);
         let binding = SampleBinding::new(Arc::clone(&sample.host));
-        let direct = Client::new(Transport::direct(Arc::clone(&binding)));
+        let direct = Client::new(Transport::direct(
+            Arc::clone(&binding),
+            CallOrigin::LocalNode,
+        ));
         let (irpc_client, irpc_stop) = IrpcAdapter::local::<_, SampleProtocol>(
             Arc::clone(&binding),
             Arc::clone(&admission),
             IRPC_QUEUE,
         );
-        let irpc = Client::new(Transport::irpc(irpc_client));
+        let irpc = Client::new(Transport::irpc(irpc_client, CallOrigin::LocalNode));
 
         let mut router = XrpcRouter::new(HTTP_BODY_LIMIT);
         SampleBinding::mount(&mut router, binding).expect("mount sample");

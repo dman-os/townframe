@@ -4,6 +4,7 @@
 
 use super::Stack;
 use super::wait_for_activity;
+use crate::CallOrigin;
 use crate::ClientError;
 use crate::RequestContext;
 use crate::sample::GetValue;
@@ -201,6 +202,15 @@ async fn adapter_stop_cancels_in_flight_work_and_joins_it() {
     drop(sample);
 }
 
+/// An envelope as `Transport::irpc` stamps it, for calls made on the raw irpc client.
+fn stamped<P>(context: RequestContext, params: P) -> crate::Envelope<P> {
+    let mut envelope = crate::Envelope::new(context, params);
+    envelope.set_transport(crate::TransportContext::Irpc {
+        origin: CallOrigin::LocalNode,
+    });
+    envelope
+}
+
 #[tokio::test(start_paused = true)]
 async fn expired_admission_does_not_run_the_waiting_handler() {
     let (sample, stop) = crate::sample::boot("initial");
@@ -217,7 +227,7 @@ async fn expired_admission_does_not_run_the_waiting_handler() {
         let context = context.clone();
         async move {
             client
-                .rpc(crate::Envelope::new(
+                .rpc(stamped(
                     context,
                     PutValue {
                         value: "first".into(),
@@ -228,7 +238,7 @@ async fn expired_admission_does_not_run_the_waiting_handler() {
     });
     wait_for_activity(&admission, |activity| activity.active_count() == 1).await;
     let response = client
-        .rpc(crate::Envelope::new(
+        .rpc(stamped(
             RequestContext::root().with_time_budget(std::time::Duration::from_secs(5)),
             PutValue {
                 value: "never admitted".into(),
@@ -253,9 +263,10 @@ async fn expired_admission_does_not_run_the_waiting_handler() {
 #[tokio::test]
 async fn a_lost_reply_is_outcome_unknown_only_for_procedures() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
-    let client = Client::new(Transport::<SampleProtocol>::irpc(irpc::Client::local(
-        sender,
-    )));
+    let client = Client::new(Transport::<SampleProtocol>::irpc(
+        irpc::Client::local(sender),
+        CallOrigin::LocalNode,
+    ));
     let dropper = tokio::spawn(async move {
         for _ in 0..2 {
             match receiver.recv().await {

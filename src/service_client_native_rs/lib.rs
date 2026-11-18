@@ -1,9 +1,10 @@
 //! The native transports of the typed service client: in-process routing to a host, irpc channels,
-//! and XRPC over HTTP (TCP or a Unix socket, plus iroh with the `iroh-http` feature).
+//! XRPC over HTTP (TCP or a Unix socket), and with the `iroh` feature XRPC over iroh streams
+//! (`service_client_iroh_rs`, which also builds for the browser).
 //!
 //! [`Transport<Proto>`] is the one concrete transport service code stores, whatever carries its
 //! calls, and [`Client<Proto>`] is the client over it:
-//! `Client::new(Transport::direct(host))`. The client core and the XRPC envelope codec live in
+//! `Client::new(Transport::direct(host, origin))`. The client core and the XRPC envelope codec live in
 //! `service_client_core_rs`, which also builds for wasm guests.
 
 mod transport;

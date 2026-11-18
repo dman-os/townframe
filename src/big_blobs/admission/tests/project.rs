@@ -1,5 +1,5 @@
-use crate::admission::project::*;
 use super::*;
+use crate::admission::project::*;
 use automerge::transaction::Transactable;
 use big_cabinet_core::authority::AuthorityMessage;
 use big_cabinet_core::authority::AuthorityProtocol;
@@ -11,6 +11,7 @@ use iroh_blobs::Hash;
 use service_client_native_rs::Client;
 use service_client_native_rs::InlineRoute;
 use service_client_native_rs::Transport;
+use service_utils_rs::CallOrigin;
 use service_utils_rs::StopToken;
 
 struct UnusedAuthority;
@@ -44,7 +45,10 @@ impl Harness {
         let (blobs, blobs_stop) = crate::boot(crate::Config {
             storage: crate::Storage::memory().unwrap(),
             sql: runtime.ephemeral(&[])?,
-            authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+            authority: Client::new(Transport::direct(
+                Arc::new(UnusedAuthority),
+                CallOrigin::LocalNode,
+            )),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: CapId::from_bytes([93; 16]),

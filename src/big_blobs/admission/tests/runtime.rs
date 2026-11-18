@@ -9,6 +9,7 @@ use futures::future::BoxFuture;
 use service_client_native_rs::Client;
 use service_client_native_rs::InlineRoute;
 use service_client_native_rs::Transport;
+use service_utils_rs::CallOrigin;
 
 struct UnusedAuthority;
 
@@ -35,7 +36,10 @@ async fn runtime_drains_257_dirty_pairs_from_one_coalesced_notification() -> Res
     let (blobs, blobs_stop) = crate::boot(crate::Config {
         storage: crate::Storage::memory().unwrap(),
         sql: sql.clone(),
-        authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+        authority: Client::new(Transport::direct(
+            Arc::new(UnusedAuthority),
+            CallOrigin::LocalNode,
+        )),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([125; 16]),

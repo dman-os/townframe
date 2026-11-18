@@ -146,6 +146,22 @@ liveness for `final`.
 
 **Not run to completion:** `amended`, and the `rows` configuration.
 
+**Decision (operator, 2026-11-18):** law 5 is amended to allow the revival (see `replay.rs`):
+the client resets on an `UnknownTarget` for a target it holds, and orphans expire with the
+revived session. The `amended` configuration models this. Its safety run (with the invariants
+the revival breaks by design, `law5NoRevival`, `noOrphans` and `agreement`, left out or
+restated) and its `liveCatchesUp` run are still to do.
+
+**`amended` results (2026-11-18, TLC):**
+- `safetyCore,law9InOrder,law6NoUnknownTarget,boundsHeld` hold: 4,447,966 distinct states,
+  exhaustive, 8m29s.
+- `liveCatchesUp` holds: exhaustive, 35m29s. Every wanted, readable route's cursor reaches its
+  head.
+- `liveConverges` fails, found in 1m07s; the counterexample hasn't been read yet. The expected
+  cause is the revived session's orphans, which the amended law accepts until the TTL while the
+  model has no fair TTL sweep. Confirm against the trace, then either give forgetting fairness or
+  restate the property per live session.
+
 ## Not checked
 
 * Law 10 (`drained`): a pacing hint with no correctness content; the model has

@@ -10,6 +10,7 @@ use super::SampleProtocol;
 use super::SubscribeEvents;
 use super::boot;
 use super::service::TEST_TASK_MARKER;
+use crate::CallOrigin;
 use crate::ClientError;
 use crate::RequestContext;
 use method_core::ContextError;
@@ -24,9 +25,10 @@ fn nsid_log(nsid: &str) -> Vec<String> {
 #[tokio::test]
 async fn direct_calls_run_inline_on_the_caller_task_through_the_layers() {
     let (sample, stop) = boot("initial");
-    let client = Client::new(Transport::<SampleProtocol>::direct(Arc::clone(
-        &sample.host,
-    )));
+    let client = Client::new(Transport::<SampleProtocol>::direct(
+        Arc::clone(&sample.host),
+        CallOrigin::LocalNode,
+    ));
     let root = RequestContext::root();
     let child = root.child();
 
@@ -49,9 +51,10 @@ async fn direct_calls_run_inline_on_the_caller_task_through_the_layers() {
 async fn local_and_external_source_changes_share_projector_and_coalesce() {
     let (sample, stop) = boot("initial");
     let gate = sample.service.block_projector();
-    let client = Client::new(Transport::<SampleProtocol>::direct(Arc::clone(
-        &sample.host,
-    )));
+    let client = Client::new(Transport::<SampleProtocol>::direct(
+        Arc::clone(&sample.host),
+        CallOrigin::LocalNode,
+    ));
     let mut events = sample.service.subscribe_events();
 
     sample.service.inject_source("A");
@@ -82,9 +85,10 @@ async fn local_and_external_source_changes_share_projector_and_coalesce() {
 #[tokio::test]
 async fn mutation_waits_for_projector_and_external_changes_are_not_mutation_events() {
     let (sample, stop) = boot("initial");
-    let client = Client::new(Transport::<SampleProtocol>::direct(Arc::clone(
-        &sample.host,
-    )));
+    let client = Client::new(Transport::<SampleProtocol>::direct(
+        Arc::clone(&sample.host),
+        CallOrigin::LocalNode,
+    ));
 
     let written = client
         .call(
@@ -133,9 +137,10 @@ async fn mutation_waits_for_projector_and_external_changes_are_not_mutation_even
 #[tokio::test]
 async fn concurrent_source_writers_get_distinct_monotonic_revisions() {
     let (sample, stop) = boot("initial");
-    let client = Client::new(Transport::<SampleProtocol>::direct(Arc::clone(
-        &sample.host,
-    )));
+    let client = Client::new(Transport::<SampleProtocol>::direct(
+        Arc::clone(&sample.host),
+        CallOrigin::LocalNode,
+    ));
     let (left, right) = tokio::join!(
         client.call(
             RequestContext::root(),
@@ -168,9 +173,10 @@ async fn concurrent_source_writers_get_distinct_monotonic_revisions() {
 #[tokio::test]
 async fn empty_value_is_rejected_before_the_source_is_touched() {
     let (sample, stop) = boot("initial");
-    let client = Client::new(Transport::<SampleProtocol>::direct(Arc::clone(
-        &sample.host,
-    )));
+    let client = Client::new(Transport::<SampleProtocol>::direct(
+        Arc::clone(&sample.host),
+        CallOrigin::LocalNode,
+    ));
     let rejected = client
         .call(
             RequestContext::root(),
@@ -207,9 +213,10 @@ async fn empty_value_is_rejected_before_the_source_is_touched() {
 #[tokio::test]
 async fn subscription_replays_current_state_then_live_events_and_skips_stale_ones() {
     let (sample, stop) = boot("initial");
-    let client = Client::new(Transport::<SampleProtocol>::direct(Arc::clone(
-        &sample.host,
-    )));
+    let client = Client::new(Transport::<SampleProtocol>::direct(
+        Arc::clone(&sample.host),
+        CallOrigin::LocalNode,
+    ));
     let first = sample.service.inject_source("first");
     client
         .call(
@@ -254,9 +261,10 @@ async fn subscription_replays_current_state_then_live_events_and_skips_stale_one
 #[tokio::test]
 async fn lagged_subscriber_gets_a_terminal_error_and_the_stream_ends() {
     let (sample, stop) = boot("initial");
-    let client = Client::new(Transport::<SampleProtocol>::direct(Arc::clone(
-        &sample.host,
-    )))
+    let client = Client::new(Transport::<SampleProtocol>::direct(
+        Arc::clone(&sample.host),
+        CallOrigin::LocalNode,
+    ))
     .with_event_buffer(1);
     let mut lagging = client
         .subscribe(
@@ -293,9 +301,10 @@ async fn lagged_subscriber_gets_a_terminal_error_and_the_stream_ends() {
 async fn stop_fails_a_write_waiting_on_the_projector_and_joins_everything() {
     let (sample, stop) = boot("initial");
     let gate = sample.service.block_projector();
-    let client = Client::new(Transport::<SampleProtocol>::direct(Arc::clone(
-        &sample.host,
-    )));
+    let client = Client::new(Transport::<SampleProtocol>::direct(
+        Arc::clone(&sample.host),
+        CallOrigin::LocalNode,
+    ));
     let mut subscription = client
         .subscribe(
             RequestContext::root(),

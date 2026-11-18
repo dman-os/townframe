@@ -1,8 +1,67 @@
-//! HTTP/1 over Iroh: the same wire, driven through Iroh endpoints.
+//! HTTP/1 over Iroh: the same wire, driven through Iroh endpoints and called through the typed
+//! client over `service_client_iroh_rs`.
 
 use super::*;
-use service_client_native_rs::xrpc::IROH_XRPC_HTTP_ALPN;
-use service_client_native_rs::xrpc::IrohXrpcClient;
+use method_core::ContextError;
+use service_client_core_rs::Client;
+use service_client_iroh_rs::IROH_XRPC_HTTP_ALPN;
+use service_client_iroh_rs::IrohHttp;
+use service_core_rs::ClientError;
+
+/// [`QUERY_OPERATION`] as a typed method.
+#[derive(Debug, Deserialize, Serialize)]
+struct EchoQuery {
+    value: String,
+}
+
+/// [`PROCEDURE_OPERATION`] as a typed method.
+#[derive(Debug, Deserialize, Serialize)]
+struct EchoProcedure {
+    value: String,
+}
+
+service_core_rs::service_method!(EchoQuery => Output, TestError, query("org.example.test.echo"));
+service_core_rs::service_method!(EchoProcedure => Output, TestError, procedure("org.example.test.write"));
+
+impl From<ContextError> for TestError {
+    fn from(error: ContextError) -> Self {
+        Self {
+            error: "Context".to_owned(),
+            message: error.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for TestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.error, self.message)
+    }
+}
+
+fn iroh_client(endpoint: &::iroh::Endpoint, server: &::iroh::Endpoint) -> Client<IrohHttp> {
+    Client::new(IrohHttp::new(endpoint.clone(), server.addr(), 1024))
+}
+
+fn procedure(value: &str) -> EchoProcedure {
+    EchoProcedure {
+        value: value.to_owned(),
+    }
+}
+
+/// A call that ends with its exchange torn down under it, by the connection closing or the
+/// server shutting down: the outcome of a procedure is unknown.
+fn assert_torn_down(result: Result<Output, ClientError<TestError>>) {
+    assert!(
+        matches!(
+            result,
+            Err(ClientError::Transport {
+                outcome_unknown: true,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+}
 
 const COEXISTING_ALPN: &[u8] = b"townframe/test-coexisting/1";
 
@@ -127,36 +186,20 @@ async fn iroh_http1_query_procedure_and_domain_error_use_shared_wire() {
         )
         .spawn();
     let client_endpoint = iroh_test_endpoint().await.expect("client endpoint");
-    let client = IrohXrpcClient::new(client_endpoint.clone(), server_endpoint.addr(), 1024)
-        .expect("Iroh client");
+    let client = iroh_client(&client_endpoint, &server_endpoint);
     let context = RequestContext::root();
     // Both exchanges must share the single admitted QUIC connection.  The
     // server allows only one connection, so a per-RPC connect path would
     // reject one of these concurrent streams.
-    let concurrent_metadata = HttpMetadata::default();
-    let concurrent_query_params = EchoParams {
-        value: "same-connection-query".to_owned(),
-    };
-    let concurrent_procedure_params = EchoParams {
-        value: "same-connection-procedure".to_owned(),
-    };
-    let concurrent_query_client = client.clone();
-    let concurrent_procedure_client = client.clone();
-    let concurrent_query = concurrent_query_client.execute::<EchoParams, Output, TestError>(
-        QUERY_OPERATION,
-        context.clone(),
-        &concurrent_metadata,
-        &concurrent_query_params,
-    );
-    let concurrent_procedure = concurrent_procedure_client
-        .execute::<EchoParams, Output, TestError>(
-            PROCEDURE_OPERATION,
+    let (concurrent_query, concurrent_procedure) = tokio::join!(
+        client.call(
             context.clone(),
-            &concurrent_metadata,
-            &concurrent_procedure_params,
-        );
-    let (concurrent_query, concurrent_procedure) =
-        tokio::join!(concurrent_query, concurrent_procedure);
+            EchoQuery {
+                value: "same-connection-query".to_owned(),
+            },
+        ),
+        client.call(context.clone(), procedure("same-connection-procedure")),
+    );
     assert_eq!(
         concurrent_query.expect("concurrent query").value,
         "same-connection-query"
@@ -165,15 +208,14 @@ async fn iroh_http1_query_procedure_and_domain_error_use_shared_wire() {
         concurrent_procedure.expect("concurrent procedure").value,
         "same-connection-procedure"
     );
-    let query: Output = client
-        .execute::<EchoParams, Output, TestError>(
-            QUERY_OPERATION,
+    let query = client
+        .call_with(
             context.clone(),
-            &HttpMetadata {
+            HttpMetadata {
                 authorization: Some("Capability iroh".to_owned()),
                 ..HttpMetadata::default()
             },
-            &EchoParams {
+            EchoQuery {
                 value: "iroh-query".to_owned(),
             },
         )
@@ -183,6 +225,7 @@ async fn iroh_http1_query_procedure_and_domain_error_use_shared_wire() {
     assert_eq!(query.authorization.as_deref(), Some("Capability iroh"));
     let deadline_context = context.clone().with_time_budget(Duration::from_millis(25));
     let deadline_connection = client
+        .transport()
         .active_connection()
         .await
         .expect("retained connection");
@@ -215,40 +258,22 @@ async fn iroh_http1_query_procedure_and_domain_error_use_shared_wire() {
     let (_, body) = deadline.split_once("\r\n\r\n").expect("HTTP body");
     let error: TestError = serde_json::from_str(body).expect("deadline error");
     assert_eq!(error.error, "DeadlineExceeded");
-    let limited: Result<Output, XrpcClientError<TestError>> = client
-        .execute(
-            PROCEDURE_OPERATION,
-            context.clone(),
-            &HttpMetadata::default(),
-            &EchoParams {
-                value: "large".to_owned(),
-            },
-        )
-        .await;
-    assert!(matches!(
-        limited,
-        Err(XrpcClientError::Protocol {
-            outcome_unknown: true,
-            ..
-        })
-    ));
-    let error: Result<Output, XrpcClientError<TestError>> = client
-        .execute(
-            PROCEDURE_OPERATION,
-            context,
-            &HttpMetadata::default(),
-            &EchoParams {
-                value: "bad".to_owned(),
-            },
-        )
-        .await;
+    // A response over the client's limit: the procedure ran, but its outcome is unread.
+    let limited = client.call(context.clone(), procedure("large")).await;
+    assert!(
+        matches!(
+            limited,
+            Err(ClientError::Transport {
+                outcome_unknown: true,
+                ..
+            })
+        ),
+        "{limited:?}"
+    );
+    let error = client.call(context, procedure("bad")).await;
     assert!(matches!(
         error,
-        Err(XrpcClientError::Domain {
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            outcome_unknown: false,
-            error: TestError { message, .. },
-        }) if message == "bad value"
+        Err(ClientError::Method(TestError { message, .. })) if message == "bad value"
     ));
     server_router
         .shutdown()
@@ -349,38 +374,21 @@ async fn iroh_http1_client_disconnect_drops_entered_handler() {
         )
         .spawn();
     let client_endpoint = iroh_test_endpoint().await.expect("client endpoint");
-    let client = IrohXrpcClient::new(client_endpoint.clone(), server_endpoint.addr(), 1024)
-        .expect("Iroh client");
+    let client = iroh_client(&client_endpoint, &server_endpoint);
     let request_client = client.clone();
     let request = tokio::spawn(async move {
         request_client
-            .execute::<EchoParams, Output, TestError>(
-                PROCEDURE_OPERATION,
-                RequestContext::root(),
-                &HttpMetadata::default(),
-                &EchoParams {
-                    value: "pending".to_owned(),
-                },
-            )
+            .call(RequestContext::root(), procedure("pending"))
             .await
     });
     started.notified().await;
     let connection = client
+        .transport()
         .active_connection()
         .await
         .expect("retained client connection");
     connection.close(0u32.into(), b"client disconnect");
-    let result = request.await.expect("disconnected request join");
-    assert!(matches!(
-        result,
-        Err(XrpcClientError::Transport {
-            outcome_unknown: true,
-            ..
-        }) | Err(XrpcClientError::Protocol {
-            outcome_unknown: true,
-            ..
-        })
-    ));
+    assert_torn_down(request.await.expect("disconnected request join"));
     dropped_rx
         .await
         .expect("handler drop after client disconnect");
@@ -449,24 +457,17 @@ async fn iroh_http1_client_stream_cancel_drops_only_entered_handler() {
         )
         .spawn();
     let client_endpoint = iroh_test_endpoint().await.expect("client endpoint");
-    let client = IrohXrpcClient::new(client_endpoint.clone(), server_endpoint.addr(), 1024)
-        .expect("Iroh client");
+    let client = iroh_client(&client_endpoint, &server_endpoint);
 
     let request_client = client.clone();
     let request = tokio::spawn(async move {
         request_client
-            .execute::<EchoParams, Output, TestError>(
-                PROCEDURE_OPERATION,
-                RequestContext::root(),
-                &HttpMetadata::default(),
-                &EchoParams {
-                    value: "pending".to_owned(),
-                },
-            )
+            .call(RequestContext::root(), procedure("pending"))
             .await
     });
     started.notified().await;
     let retained_connection = client
+        .transport()
         .active_connection()
         .await
         .expect("retained client connection");
@@ -475,20 +476,14 @@ async fn iroh_http1_client_stream_cancel_drops_only_entered_handler() {
     let survivor_client = client.clone();
     let survivor_request = tokio::spawn(async move {
         survivor_client
-            .execute::<EchoParams, Output, TestError>(
-                PROCEDURE_OPERATION,
-                RequestContext::root(),
-                &HttpMetadata::default(),
-                &EchoParams {
-                    value: "survivor".to_owned(),
-                },
-            )
+            .call(RequestContext::root(), procedure("survivor"))
             .await
     });
     survivor_started_wait.await;
 
-    // Cancel only the first HTTP exchange while the unrelated second
-    // exchange is already inside its handler on the retained connection.
+    // Drop only the first call while the unrelated second exchange is
+    // already inside its handler on the retained connection: the dropped
+    // call's stream is stopped (STOP_SENDING), which drops its handler.
     request.abort();
     assert!(
         request
@@ -502,7 +497,7 @@ async fn iroh_http1_client_stream_cancel_drops_only_entered_handler() {
     assert!(retained_connection.close_reason().is_none());
 
     survivor_release.notify_one();
-    let completed: Output = survivor_request
+    let completed = survivor_request
         .await
         .expect("surviving request join")
         .expect("unrelated same-connection request");
@@ -547,19 +542,11 @@ async fn iroh_http1_shutdown_reaps_pending_exchange() {
         )
         .spawn();
     let client_endpoint = iroh_test_endpoint().await.expect("client endpoint");
-    let client = IrohXrpcClient::new(client_endpoint.clone(), server_endpoint.addr(), 1024)
-        .expect("Iroh client");
+    let client = iroh_client(&client_endpoint, &server_endpoint);
     let started_wait = started.notified();
     let request = tokio::spawn(async move {
         client
-            .execute::<EchoParams, Output, TestError>(
-                PROCEDURE_OPERATION,
-                RequestContext::root(),
-                &HttpMetadata::default(),
-                &EchoParams {
-                    value: "pending".to_owned(),
-                },
-            )
+            .call(RequestContext::root(), procedure("pending"))
             .await
     });
     started_wait.await;
@@ -567,17 +554,71 @@ async fn iroh_http1_shutdown_reaps_pending_exchange() {
         .shutdown()
         .await
         .expect("Iroh router shutdown");
-    let result = request.await.expect("pending request join");
-    assert!(matches!(
-        result,
-        Err(XrpcClientError::Transport {
-            outcome_unknown: true,
-            ..
-        }) | Err(XrpcClientError::Protocol {
-            outcome_unknown: true,
-            ..
-        })
-    ));
+    assert_torn_down(request.await.expect("pending request join"));
     client_endpoint.close().await;
     server_endpoint.close().await;
+}
+
+/// A native service's `Client<Proto>` over `Transport::iroh`: unary calls reach the hosted
+/// service, and a subscription is refused up front, since the iroh transport is unary only.
+#[tokio::test]
+async fn native_transport_calls_a_hosted_protocol_over_iroh() {
+    use crate::Route;
+    use crate::sample::GetValue;
+    use crate::sample::PutValue;
+    use crate::sample::SampleProtocol;
+    use crate::sample::SubscribeEvents;
+    use service_client_native_rs::Transport;
+    let (sample, stop) = crate::sample::boot("initial");
+    let mut router = XrpcRouter::new(1024 * 1024);
+    SampleProtocol::mount(&mut router, Arc::clone(&sample.host)).expect("mount sample protocol");
+    let server_endpoint = iroh_test_endpoint().await.expect("server endpoint");
+    let server_router = ::iroh::protocol::Router::builder(server_endpoint.clone())
+        .accept(
+            IROH_XRPC_HTTP_ALPN,
+            iroh_protocol_handler(router.into_router(), 1, 8),
+        )
+        .spawn();
+    let client_endpoint = iroh_test_endpoint().await.expect("client endpoint");
+    let client = service_client_native_rs::Client::new(Transport::<SampleProtocol>::iroh(
+        IrohHttp::new(client_endpoint.clone(), server_endpoint.addr(), 1024 * 1024),
+    ));
+    let put = client
+        .call(
+            RequestContext::root(),
+            PutValue {
+                value: "over-iroh".into(),
+            },
+        )
+        .await
+        .expect("put value");
+    assert_eq!(put.snapshot.value, "over-iroh");
+    let got = client
+        .call(RequestContext::root(), GetValue {})
+        .await
+        .expect("get value");
+    assert_eq!(got.snapshot.value, "over-iroh");
+    let subscribed = client
+        .subscribe(
+            RequestContext::root(),
+            SubscribeEvents {
+                after_source_revision: 0,
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            subscribed,
+            Err(ClientError::Transport {
+                outcome_unknown: false,
+                ..
+            })
+        ),
+        "{subscribed:?}"
+    );
+    drop(client);
+    server_router.shutdown().await.expect("router shutdown");
+    client_endpoint.close().await;
+    server_endpoint.close().await;
+    stop.stop().await;
 }

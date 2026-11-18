@@ -896,3 +896,42 @@ Audit how well the system respects metadata privacy, especially when running thr
 
 **Deliverable:** a threat model (relay, peer, network observer, logs), an inventory of what each
 can link, and the changes ranked by cost.
+
+## Audits added 2026-11-19 (operator)
+
+**SQL audit.** Review every SQL file and query string: queries are simple and indexed, with no
+N+1, and every hot query has an `EXPLAIN QUERY PLAN` assertion. Migrations are reviewable.
+Formatting follows the commas-first house style.
+
+**UUID audit.** Inventory every UUID in the repo:
+- v4 vs v7: v7 where ordering or index locality matters (row ids, logs); v4 where ids must
+  not leak creation time or order (metadata privacy, see the metadata audit);
+- UUIDs derived from or standing in for public keys ("pubkey uuids"): is a UUID the right
+  type there, or should it be the key or a hash of it?
+- client-chosen ids on the wire, e.g. the replay `SessionId` (`Uuid::new_v4` in the client),
+  and what each id reveals.
+
+**Brittleness.** Hard to quantify, but a quality to review for:
+- timing-dependent tests and code; tests near nextest's timeout (big_cabinet's 16-boot test
+  was one);
+- implicit ordering assumptions and global state;
+- environment coupling, e.g. `wit/deps` existing only after `x/wit-fetch.ts`, and guest
+  crates failing clippy without it;
+- shared mutable infrastructure: the shared mothership mirror worktree and lane logs, which
+  several agents corrupted for each other;
+- fragile parsing of untrusted input;
+- error paths that are swallowed.
+
+**Benchmarks at every layer.** Each layer gets at least a sanity benchmark that would expose
+an accidental quadratic or worse code path, not a tuned performance suite. Candidates:
+- okv and the part store (writes, reads, log paging at 10k/100k rows);
+- the bucket walk (dirty vs clean parts);
+- the replay server (updates at the 16k-target cap: the reuse check was quadratic there);
+- the rev stream;
+- the scheduler;
+- big_repo commit and read paths;
+- the service stack (JSON encoding of large pages).
+
+Start with scaling checks: time at n and 10n, asserting a bound on the ratio, run in CI.
+Existing harness to look at first: `.agents/skills/perf-investigation` (costs.rs).
+

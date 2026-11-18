@@ -52,6 +52,7 @@ use method_lexicon::MethodContract;
 use serde_json::Value;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
+use service_utils_rs::CallOrigin;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
@@ -363,7 +364,10 @@ pub fn boot(config: DispatchConfig) -> (Dispatch, StopToken) {
         router: Arc::clone(&router),
     });
     let (host, host_stop) = Host::new(service);
-    let client = Client::new(Transport::direct(DispatchBinding::new(Arc::clone(&host))));
+    let client = Client::new(Transport::direct(
+        DispatchBinding::new(Arc::clone(&host)),
+        CallOrigin::LocalNode,
+    ));
     (
         Dispatch {
             host,

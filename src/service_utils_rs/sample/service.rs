@@ -362,7 +362,7 @@ impl<P: Method, H: Handler<P>> Handler<P> for Logged<H> {
 }
 
 /// The layered handler [`boot`] hosts. Naming it lets consumers write
-/// `Arc<Host<SampleHandler>>` and `Client::new(Transport::<SampleProtocol>::direct(host))`.
+/// `Arc<Host<SampleHandler>>` and `Client::new(Transport::<SampleProtocol>::direct(host, origin))`.
 pub type SampleHandler = Logged<Arc<SampleService>>;
 
 /// A booted sample: the implementation, the host that fronts it, and the log

@@ -174,6 +174,7 @@ use method_core::EventStream;
 use serde_json::Value as Json;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
+use service_utils_rs::CallOrigin;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
@@ -627,7 +628,10 @@ pub async fn prepare(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsEr
         .then(mint_stop)
         .then(service_stop)
         .then(service.capabilities.stop_token());
-    let client = Client::new(Transport::direct(DocsBinding::new(Arc::clone(&host))));
+    let client = Client::new(Transport::direct(
+        DocsBinding::new(Arc::clone(&host)),
+        CallOrigin::LocalNode,
+    ));
     Ok((
         DocsRepo {
             service,

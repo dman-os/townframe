@@ -1103,7 +1103,10 @@ pub async fn boot(config: DrawerConfig<'_>) -> Result<(Drawers, StopToken), Draw
         .sync_discovered(&RequestContext::root())
         .await?;
     let (host, host_stop) = Host::new(Arc::clone(&service));
-    let client = Client::new(Transport::direct(DrawersBinding::new(Arc::clone(&host))));
+    let client = Client::new(Transport::direct(
+        DrawersBinding::new(Arc::clone(&host)),
+        service_utils_rs::CallOrigin::LocalNode,
+    ));
     Ok((
         Drawers {
             host,

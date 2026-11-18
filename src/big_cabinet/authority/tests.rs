@@ -41,6 +41,7 @@ use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
 use service_client_native_rs::XrpcClient;
 use service_utils_rs::Admission;
+use service_utils_rs::CallOrigin;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::IrpcAdapter;
@@ -1946,7 +1947,10 @@ async fn the_protocol_answers_alike_over_every_transport() {
     let base = url::Url::parse(&format!("http://{address}/")).expect("base URL");
     let transports = [
         ("direct", test.authority.client.clone()),
-        ("irpc", Client::new(Transport::irpc(irpc_client))),
+        (
+            "irpc",
+            Client::new(Transport::irpc(irpc_client, CallOrigin::LocalNode)),
+        ),
         (
             "xrpc",
             Client::new(Transport::xrpc(

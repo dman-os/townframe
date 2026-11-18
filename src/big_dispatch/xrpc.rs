@@ -74,7 +74,16 @@ pub fn xrpc_router(
                     // admits it (a malformed token is `Unauthenticated`, see `refusal`).
                     let idempotency_key = metadata.idempotency_key.clone();
                     let (input, http) = match request.verb {
-                        HttpMethod::Post => (request.params, HttpForm::Post),
+                        // The relayed input stays a JSON value: dispatch routes it to an
+                        // operation this router does not know the types of.
+                        HttpMethod::Post => (
+                            serde_json::from_slice::<Value>(&request.body).map_err(|error| {
+                                XrpcHandlerError::InvalidInput(format!(
+                                    "invalid JSON body: {error}"
+                                ))
+                            })?,
+                            HttpForm::Post,
+                        ),
                         HttpMethod::Get => (
                             Value::Null,
                             HttpForm::Get {

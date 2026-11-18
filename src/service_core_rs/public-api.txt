@@ -15,6 +15,8 @@ impl Serialize for service_core_rs::cancellation::CancellationSignal
 impl StreamMethod for service_core_rs::protocol::P
 impl UnaryMethod for service_core_rs::protocol::P
 impl fmt :: Debug for service_core_rs::cancellation::CancellationSignal
+impl fmt :: Debug for service_core_rs::operation::EndpointId
+impl fmt :: Display for service_core_rs::operation::EndpointId
 impl serde :: Deserialize < 'de > for service_core_rs::xrpc::XrpcErrorEnvelope
 pub const service_core_rs::xrpc::AUTHORIZATION_HEADER: & str
 pub const service_core_rs::xrpc::DOMAIN_ERROR_FIELD: & str
@@ -24,9 +26,10 @@ pub const service_core_rs::xrpc::NODULE_CAPABILITY_HEADER: & str
 pub const service_core_rs::xrpc::REQUEST_ID_HEADER: & str
 pub const service_core_rs::xrpc::TIMEOUT_HEADER: & str
 pub const service_core_rs::xrpc::TRACEPARENT_HEADER: & str
+pub enum service_core_rs::operation::CallOrigin { # [doc = " The node itself."] LocalNode, # [doc = " A request from a remote endpoint that the caller relays."] Endpoint (EndpointId) }
 pub enum service_core_rs::operation::ClientError< E > { # [error ("transport failed: {message}")] Transport { message : String , outcome_unknown : bool , }, # [error ("method failed: {0}")] Method (E) }
 pub enum service_core_rs::operation::EventFrame< E > { Open (ResponseMetadata), Event (E), End }
-pub enum service_core_rs::operation::TransportContext { # [default] Unknown, Direct, Irpc, Http, Iroh { peer : String , } }
+pub enum service_core_rs::operation::TransportContext { # [doc = " Not yet stamped by a transport. A host refuses to dispatch such a request."] # [default] Unknown, # [doc = " Routed inline from an in-process client, with the origin that client states."] Direct { origin : CallOrigin }, # [doc = " Admitted from a same-node IRPC queue, with the origin its client states."] Irpc { origin : CallOrigin }, # [doc = " XRPC over HTTP (TCP or a Unix socket): the transport vouches for no one."] Http, # [doc = " XRPC over an iroh connection from `endpoint`, which the connection authenticated."] Iroh { endpoint : EndpointId } }
 pub enum service_core_rs::xrpc::XrpcDomainDetailsError { # [error ("XRPC domain details cannot redefine reserved field {0}")] ReservedField (& 'static str) }
 pub impl service_core_rs::cancellation::CancellationReceiver::fn register_cancellation (& self , signal : CancellationSignal ,) -> Result < CancellationRegistration , ContextError >
 pub impl service_core_rs::cancellation::CancellationSignal::async fn cancelled (& self)
@@ -54,6 +57,8 @@ pub impl service_core_rs::context::TraceContext::fn parent (& self) -> Option < 
 pub impl service_core_rs::context::TraceContext::fn traceparent (& self) -> Option < & str >
 pub impl service_core_rs::context::TraceContext::fn tracestate (& self) -> Option < & str >
 pub impl service_core_rs::operation::ClientError < E >::fn transport (error : impl fmt :: Display , outcome_unknown : bool) -> Self
+pub impl service_core_rs::operation::EndpointId::const fn as_bytes (& self) -> & [u8 ; 32]
+pub impl service_core_rs::operation::EndpointId::const fn from_bytes (bytes : [u8 ; 32]) -> Self
 pub impl service_core_rs::operation::Envelope < P >::fn for_receiver (mut self) -> Self
 pub impl service_core_rs::operation::Envelope < P >::fn new (context : RequestContext , params : P) -> Self
 pub impl service_core_rs::operation::Envelope < P >::fn set_transport (& mut self , transport : TransportContext)
@@ -86,6 +91,7 @@ pub struct service_core_rs::cancellation::CancellationTransport  {  }
 pub struct service_core_rs::context::HttpMetadata  { authorization: Option < String >, idempotency_key: Option < String > }
 pub struct service_core_rs::context::RequestContext  { request_id: Uuid, trace: TraceContext, command_id: Option < Uuid >, cancellation: CancellationSignal }
 pub struct service_core_rs::context::TraceContext  {  }
+pub struct service_core_rs::operation::EndpointId  {  }
 pub struct service_core_rs::operation::Envelope< P >  { context: RequestContext, metadata: HttpMetadata, params: P }
 pub struct service_core_rs::operation::ResponseEnvelope< T >  { output: T, metadata: ResponseMetadata }
 pub struct service_core_rs::operation::ResponseMetadata  { etag: Option < String >, location: Option < String >, retry_after: Option < String >, cache_control: Option < String >, warnings: Vec < String > }
@@ -108,7 +114,9 @@ pub use service_core_rs::context :: HttpMetadata
 pub use service_core_rs::context :: RequestContext
 pub use service_core_rs::context :: TraceContext
 pub use service_core_rs::irpc as __irpc
+pub use service_core_rs::operation :: CallOrigin
 pub use service_core_rs::operation :: ClientError
+pub use service_core_rs::operation :: EndpointId
 pub use service_core_rs::operation :: Envelope
 pub use service_core_rs::operation :: EventFrame
 pub use service_core_rs::operation :: EventReply
