@@ -19,7 +19,6 @@ pub mod node;
 mod view;
 
 use clay_dioxus_kit::AppBar;
-use clay_dioxus_kit::PanelPage;
 use clay_mdk::Context;
 use clay_mdk::Error;
 use clay_mdk::Facet;
@@ -31,6 +30,7 @@ use micro_review_manifest::ReviewView;
 use node::CallError;
 use node::ContextNode;
 use view::Failed;
+use view::Frame;
 
 /// Publish the presentation over the node the micro is configured to read: the real node
 /// through the micro's `Context` when the composition granted the configuration entry. With none
@@ -45,14 +45,12 @@ async fn activate(context: Context) -> Result<(), Error> {
         })?,
         None => context.publish::<ReviewView>(|| {
             rsx! {
-                PanelPage { app_bar: rsx! { AppBar { title: "Review" } },
-                    div { class: "px-4 pb-4",
-                        Failed {
-                            error: CallError::Unconfigured(
-                                "grant the micro the org.example.dayframe.review.config entry (githubDrawer, intxtDrawers, docCap, blobCap)"
-                                    .to_owned(),
-                            ),
-                        }
+                Frame { app_bar: rsx! { AppBar { title: "Review" } },
+                    Failed {
+                        error: CallError::Unconfigured(
+                            "grant the micro the org.example.dayframe.review.config entry (githubDrawer, intxtDrawers, docCap, blobCap)"
+                                .to_owned(),
+                        ),
                     }
                 }
             }

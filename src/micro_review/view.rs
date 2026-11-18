@@ -1,8 +1,9 @@
 //! The review micro's three screens, drawn: the pull requests, one pull request, one intxt.
-//! [`crate::model`] decides what a row is and says; this file only lays it out, with the
-//! semantic roles of the design language (`docs/design-language`): surfaces and text roles, the
-//! `danger` role for failures, the hairline border for dividers, 48 px targets for rows that open
-//! something.
+//! [`crate::model`] decides what a row is and says; this file only lays it out, in the styling
+//! contract's vocabulary (`docs/design-language/styling-contract.md`): the kit's `Button`,
+//! `Alert`, `Chip`, `Card` and `Separator` where they fit, and for the rest a root class
+//! (`micro-review`) with `data-part` and `data-*` names that [`STYLE`] (`review.css`) and any
+//! theme key on. No class here but the root, and no inline style.
 use crate::model::Changes;
 use crate::model::Content;
 use crate::model::Entry;
@@ -22,20 +23,42 @@ use crate::model::state_label;
 use crate::model::teaser;
 use crate::node::CallError;
 use crate::node::NodeCalls;
+use clay_dioxus_kit::Alert;
 use clay_dioxus_kit::AppBar;
+use clay_dioxus_kit::Button;
+use clay_dioxus_kit::ButtonVariant;
+use clay_dioxus_kit::Card;
+use clay_dioxus_kit::CardContent;
+use clay_dioxus_kit::CardVariant;
+use clay_dioxus_kit::Chip;
+use clay_dioxus_kit::ChipVariant;
 use clay_dioxus_kit::PanelPage;
+use clay_dioxus_kit::Separator;
+use clay_dioxus_kit::Status;
 use dioxus::prelude::*;
 use intxt_core::work::PullState;
 use pierre_diffs_dioxus::DiffInput;
 use pierre_diffs_dioxus::DiffStyle;
 use pierre_diffs_dioxus::FileDiffView;
 
-/// A row that opens something: a 48 px target, quiet until hovered or focused.
-const OPENS: &str = "block min-h-12 w-full cursor-pointer text-left hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus";
-/// The words under a title: secondary text.
-const SECONDARY: &str = "text-sm text-text-muted break-words";
-/// A section's heading.
-const HEADING: &str = "text-sm font-semibold text-text-muted";
+/// The micro's own stylesheet: what the kit has no component or token for (the page's rhythm,
+/// text roles, wrapping and the rows that open something). It is the micro's unlayered sheet
+/// above the host's kit layers, never the `user` layer, which is the end user's theme.
+const STYLE: &str = include_str!("review.css");
+
+/// The micro's root: its stylesheet, then the page. `app_bar` stays put and the body scrolls (a
+/// micro's root clips at its pane, `PanelPage`).
+#[component]
+pub(crate) fn Frame(app_bar: Element, children: Element) -> Element {
+    rsx! {
+        section { class: "micro-review", "aria-label": "Review",
+            document::Style { "{STYLE}" }
+            PanelPage { app_bar,
+                div { "data-part": "page", {children} }
+            }
+        }
+    }
+}
 
 /// The whole micro in one root-scope render: a stack of screens, the top one read from the node.
 pub(crate) fn screens<C: NodeCalls>(node: C) -> Element {
@@ -95,10 +118,10 @@ pub(crate) fn screens<C: NodeCalls>(node: C) -> Element {
             AppBar {
                 title,
                 leading: rsx! {
-                    button {
-                        class: "min-h-12 rounded-md px-4 focus-visible:outline",
-                        "aria-label": "Back",
-                        onclick: move |_| stack.with_mut(|stack| {
+                    Button {
+                        variant: ButtonVariant::Ghost,
+                        label: "Back".to_owned(),
+                        onclick: move |()| stack.with_mut(|stack| {
                             stack.pop();
                         }),
                         "Back"
@@ -109,13 +132,8 @@ pub(crate) fn screens<C: NodeCalls>(node: C) -> Element {
     } else {
         rsx! { AppBar { title } }
     };
-    // The bar stays put and the body scrolls: a micro's root clips at its pane (`PanelPage`).
     rsx! {
-        section { "aria-label": "Review", height: "100%",
-            PanelPage { app_bar,
-                div { class: "flex flex-col gap-6 px-4 pb-6", {page} }
-            }
-        }
+        Frame { app_bar, {page} }
     }
 }
 
@@ -123,20 +141,19 @@ pub(crate) fn screens<C: NodeCalls>(node: C) -> Element {
 #[component]
 fn Loading(what: String) -> Element {
     rsx! {
-        p { role: "status", "aria-busy": "true", class: "py-8 text-center text-text-muted",
+        p { role: "status", "aria-busy": "true", "data-part": "placeholder",
             "Loading {what}…"
         }
     }
 }
 
-/// A failure the reader must see: a heading and the detail. `danger` is the only failure role,
-/// so the border and the words carry it; the heading is bold so it does not rest on colour.
+/// A failure the reader must see: the kit's danger `Alert`, a heading and the detail. The
+/// heading is bold so the failure does not rest on colour.
 #[component]
-pub(crate) fn Alert(heading: String, detail: String) -> Element {
+pub(crate) fn Failure(heading: String, detail: String) -> Element {
     rsx! {
-        div { role: "alert", class: "rounded-md border border-danger px-4 py-3 text-danger",
-            p { class: "font-semibold", "{heading}" }
-            p { class: "text-sm break-words", "{detail}" }
+        Alert { status: Status::Danger, title: heading,
+            span { "data-part": "detail", "{detail}" }
         }
     }
 }
@@ -145,24 +162,22 @@ pub(crate) fn Alert(heading: String, detail: String) -> Element {
 #[component]
 pub(crate) fn Failed(error: CallError) -> Element {
     let (heading, detail) = error.parts();
-    rsx! { Alert { heading: heading.to_owned(), detail: detail.to_owned() } }
+    rsx! { Failure { heading: heading.to_owned(), detail: detail.to_owned() } }
 }
 
-/// The state of a pull request as a chip. The words carry the state; the roles only reinforce
-/// it: open is the accent container, merged the selected role, closed the quiet sunken surface.
+/// The state of a pull request as a chip. The words carry the state; the status only reinforces
+/// it: open is `success`, merged `info`, an unrecognised state `warning`, and closed has none
+/// (a neutral chip).
 #[component]
 fn StateChip(state: PullState) -> Element {
-    let tone = match state {
-        PullState::Open => "bg-accent-container text-on-accent-container",
-        PullState::Merged => "bg-selected text-on-selected",
-        PullState::Closed | PullState::Unknown(_) => {
-            "border border-border bg-surface-sunken text-text-muted"
-        }
+    let status = match state {
+        PullState::Open => Some(Status::Success),
+        PullState::Merged => Some(Status::Info),
+        PullState::Closed => None,
+        PullState::Unknown(_) => Some(Status::Warning),
     };
     rsx! {
-        span { class: "inline-flex shrink-0 rounded-pill px-2 py-1 text-xs font-semibold {tone}",
-            "{state_label(&state)}"
-        }
+        Chip { label: state_label(&state).to_owned(), variant: ChipVariant::Filled, status }
     }
 }
 
@@ -170,8 +185,8 @@ fn StateChip(state: PullState) -> Element {
 #[component]
 fn PullMeta(reference: String, state: PullState) -> Element {
     rsx! {
-        div { class: "flex flex-wrap items-center gap-2",
-            span { class: SECONDARY, "{reference}" }
+        div { "data-part": "meta",
+            span { "data-part": "secondary", "{reference}" }
             StateChip { state }
         }
     }
@@ -189,20 +204,23 @@ pub(crate) fn PullList(
     };
     if pulls.is_empty() {
         return rsx! {
-            div { class: "flex flex-col gap-2 py-8 text-center",
-                p { class: "text-lg font-semibold", "No pull requests yet" }
-                p { class: SECONDARY,
+            div { "data-part": "empty",
+                p { "data-part": "name", "No pull requests yet" }
+                p { "data-part": "secondary",
                     "They arrive with "
-                    code { class: "rounded-sm bg-surface-sunken px-1 text-text", "day x intxt github pull" }
+                    code { "data-part": "code", "day x intxt github pull" }
                     "."
                 }
             }
         };
     }
     rsx! {
-        ul { class: "flex flex-col", "aria-label": "Pull requests",
+        ul { "data-part": "items", "aria-label": "Pull requests",
             for read in pulls {
-                li { class: "border-b border-border", {pull_row(read, on_open)} }
+                li {
+                    {pull_row(read, on_open)}
+                    Separator { decorative: true }
+                }
             }
         }
     }
@@ -219,13 +237,13 @@ fn pull_row(read: Read<Pull>, on_open: EventHandler<Screen>) -> Element {
             );
             rsx! {
                 button {
-                    class: "{OPENS} flex flex-col gap-1 px-2 py-3",
+                    "data-part": "row",
                     "aria-label": "{label}",
                     onclick: {
                         let pull = pull.clone();
                         move |_| on_open.call(Screen::Pull(pull.clone()))
                     },
-                    span { class: "font-semibold text-text break-words", "{pull.title}" }
+                    span { "data-part": "name", "{pull.title}" }
                     PullMeta { reference: pull.repo_ref(), state: pull.state.clone() }
                 }
             }
@@ -236,21 +254,25 @@ fn pull_row(read: Read<Pull>, on_open: EventHandler<Screen>) -> Element {
     }
 }
 
-/// Something the node holds but this micro cannot show: bordered like a failure (it is one for
-/// the reader), but not an alert, because nothing the reader did is wrong. `name` is what names
-/// it, empty when nothing does.
+/// Something the node holds but this micro cannot show: a card marked as a failure (it is one
+/// for the reader), but not an alert, because nothing the reader did is wrong. `name` is what
+/// names it, empty when nothing does.
 #[component]
 fn Unreadable(what: String, name: String, reason: String) -> Element {
     rsx! {
         div {
             role: "group",
             "aria-label": "{what} cannot be read",
-            class: "flex flex-col gap-1 rounded-md border border-danger px-4 py-3",
-            if !name.is_empty() {
-                p { class: "font-semibold text-text break-all", "{name}" }
+            "data-part": "unreadable",
+            Card { variant: CardVariant::Outline,
+                CardContent {
+                    if !name.is_empty() {
+                        p { "data-part": "id", "{name}" }
+                    }
+                    p { "data-part": "failure", "{what} cannot be read" }
+                    p { "data-part": "secondary", "{reason}" }
+                }
             }
-            p { class: "text-sm font-semibold text-danger", "{what} cannot be read" }
-            p { class: SECONDARY, "{reason}" }
         }
     }
 }
@@ -261,21 +283,21 @@ fn Unreadable(what: String, name: String, reason: String) -> Element {
 fn PullHeader(pull: Pull) -> Element {
     let reading = pull.reading();
     rsx! {
-        header { class: "flex flex-col gap-2",
-            h2 { class: "text-lg font-semibold break-words", "{pull.title}" }
+        header { "data-part": "section",
+            h2 { "data-part": "headline", "{pull.title}" }
             PullMeta { reference: pull.repo_ref(), state: pull.state.clone() }
             // Shown as text: the shell has no way to open a link from a micro.
-            p { class: "text-sm text-text-muted break-all", "{pull.url}" }
+            p { "data-part": "id", "{pull.url}" }
         }
-        section { class: "flex flex-col gap-3", "aria-label": "Description",
+        section { "data-part": "section", "aria-label": "Description",
             for paragraph in reading.paragraphs.iter() {
-                p { class: "whitespace-pre-wrap break-words", "{paragraph}" }
+                p { "data-part": "prose", "{paragraph}" }
             }
             if reading.paragraphs.is_empty() {
-                p { class: SECONDARY, "No description." }
+                p { "data-part": "secondary", "No description." }
             }
             if let Some(line) = reading.names_line() {
-                p { class: SECONDARY, "{line}" }
+                p { "data-part": "secondary", "{line}" }
             }
         }
     }
@@ -290,18 +312,18 @@ fn PullIntxts(links: Result<Links, CallError>, on_open: EventHandler<Screen>) ->
         Err(error) => return rsx! { Failed { error } },
         Ok(Links::Malformed(problem)) => {
             return rsx! {
-                Alert { heading: "The intxt block in this description cannot be read", detail: problem }
+                Failure { heading: "The intxt block in this description cannot be read", detail: problem }
             };
         }
         Ok(Links::Named(rows)) => rows,
     };
     if rows.is_empty() {
-        return rsx! { p { class: SECONDARY, "This pull request names no intxts." } };
+        return rsx! { p { "data-part": "secondary", "This pull request names no intxts." } };
     }
     rsx! {
-        section { class: "flex flex-col gap-2", "aria-label": "Intxts",
-            h3 { class: HEADING, "Intxts" }
-            ul { class: "flex flex-col gap-2",
+        section { "data-part": "section", "aria-label": "Intxts",
+            h3 { "data-part": "heading", "Intxts" }
+            ul { "data-part": "items", "data-variant": "spaced",
                 for row in rows {
                     li { {link_row(row, on_open)} }
                 }
@@ -322,27 +344,29 @@ fn link_row(row: LinkRow, on_open: EventHandler<Screen>) -> Element {
             entries,
         } => rsx! {
             button {
-                class: "{OPENS} flex flex-col gap-1 rounded-md border border-border px-4 py-3",
+                "data-part": "row",
+                "data-variant": "outline",
                 "aria-label": "Open intxt {title}",
                 onclick: {
                     let drawer = row.drawer.clone();
                     let title = title.clone();
                     move |_| on_open.call(Screen::Intxt { drawer: drawer.clone(), title: title.clone() })
                 },
-                span { class: "font-semibold text-text break-words", "{title}" }
+                span { "data-part": "name", "{title}" }
                 if let Some(description) = description {
-                    span { class: SECONDARY, "{teaser(&description)}" }
+                    span { "data-part": "secondary", "{teaser(&description)}" }
                 }
-                span { class: SECONDARY, "{entries_label(entries)}" }
+                span { "data-part": "secondary", "{entries_label(entries)}" }
             }
         },
         LinkOutcome::NotFound => rsx! {
-            div {
-                role: "group",
-                "aria-label": "Not an intxt",
-                class: "flex flex-col gap-1 rounded-md border border-border px-4 py-3 text-text-muted",
-                span { class: "break-all", "{name}" }
-                span { class: "text-sm", "Not an intxt" }
+            div { role: "group", "aria-label": "Not an intxt", "data-part": "unlisted",
+                Card { variant: CardVariant::Outline,
+                    CardContent {
+                        p { "data-part": "id", "{name}" }
+                        p { "data-part": "secondary", "Not an intxt" }
+                    }
+                }
             }
         },
         LinkOutcome::Unreadable(reason) => rsx! {
@@ -357,28 +381,31 @@ fn IntxtPage<C: NodeCalls>(intxt: Result<Read<Intxt>, CallError>, node: C) -> El
     let intxt = match intxt {
         Ok(Read::Ready(intxt)) => intxt,
         Ok(Read::Unreadable(reason)) => {
-            return rsx! { Alert { heading: "This intxt cannot be read", detail: reason } };
+            return rsx! { Failure { heading: "This intxt cannot be read", detail: reason } };
         }
         Err(error) => return rsx! { Failed { error } },
     };
     rsx! {
-        header { class: "flex flex-col gap-3",
-            h2 { class: "text-lg font-semibold break-words", "{intxt.title}" }
+        header { "data-part": "section",
+            h2 { "data-part": "headline", "{intxt.title}" }
             if let Some(description) = &intxt.description {
                 for paragraph in paragraphs(description) {
-                    p { class: "whitespace-pre-wrap break-words", "{paragraph}" }
+                    p { "data-part": "prose", "{paragraph}" }
                 }
             }
         }
         if intxt.entries.is_empty() {
-            p { class: SECONDARY, "Nothing in it yet." }
+            p { "data-part": "secondary", "Nothing in it yet." }
         }
         for group in intxt.groups() {
-            section { key: "{group.heading}", class: "flex flex-col", "aria-label": "{group.heading}",
-                h3 { class: "{HEADING} pb-1", "{group.heading} · {group.entries.len()}" }
-                ul { class: "flex flex-col",
+            section { key: "{group.heading}", "data-part": "group", "aria-label": "{group.heading}",
+                h3 { "data-part": "heading", "{group.heading} · {group.entries.len()}" }
+                ul { "data-part": "items",
                     for entry in group.entries {
-                        li { class: "border-b border-border", EntryRow { entry: entry.clone(), node: node.clone() } }
+                        li {
+                            EntryRow { entry: entry.clone(), node: node.clone() }
+                            Separator { decorative: true }
+                        }
                     }
                 }
             }
@@ -391,23 +418,23 @@ fn IntxtPage<C: NodeCalls>(intxt: Result<Read<Intxt>, CallError>, node: C) -> El
 #[component]
 fn EntryRow<C: NodeCalls>(entry: Entry, node: C) -> Element {
     rsx! {
-        div { class: "flex flex-col gap-2 px-2 py-3",
-            span { class: "font-semibold break-all", "{entry.label}" }
+        div { "data-part": "entry",
+            span { "data-part": "id", "{entry.label}" }
             match &entry.kind {
                 EntryKind::Unreadable(reason) => rsx! {
-                    span { role: "alert", class: "text-sm text-danger break-words", "{reason}" }
+                    Alert { status: Status::Danger, "{reason}" }
                 },
-                EntryKind::Other(tag) => rsx! { span { class: SECONDARY, "{tag}" } },
+                EntryKind::Other(tag) => rsx! { span { "data-part": "secondary", "{tag}" } },
                 _ => rsx! {},
             }
             match entry.changes {
                 Changes::Absent => rsx! {},
                 Changes::TooLarge => rsx! {
-                    h4 { class: HEADING, "Changes" }
-                    p { class: SECONDARY, "No diff is shown: it was too large to carry with this entry." }
+                    h4 { "data-part": "heading", "Changes" }
+                    p { "data-part": "secondary", "No diff is shown: it was too large to carry with this entry." }
                 },
                 Changes::Blob(source) => rsx! {
-                    h4 { class: HEADING, "Changes" }
+                    h4 { "data-part": "heading", "Changes" }
                     PatchLoader { source, node }
                 },
             }
@@ -434,9 +461,9 @@ fn PatchLoader<C: NodeCalls>(source: PatchSource, node: C) -> Element {
     }));
     if !requested() {
         return rsx! {
-            button {
-                class: "{OPENS} rounded-md border border-border px-4 py-3 text-left",
-                onclick: move |_| requested.set(true),
+            Button {
+                variant: ButtonVariant::Outline,
+                onclick: move |()| requested.set(true),
                 "Show changes"
             }
         };
@@ -455,12 +482,12 @@ fn Patch(patch: String) -> Element {
     let input = use_hook(|| DiffInput::from_patch(&patch).map_err(|error| error.to_string()));
     match input {
         Ok(input) => rsx! {
-            div { class: "overflow-x-auto rounded-md border border-border",
+            div { "data-part": "diff",
                 FileDiffView::<()> { input, diff_style: DiffStyle::Unified }
             }
         },
         Err(problem) => {
-            rsx! { Alert { heading: "The patch cannot be read", detail: problem } }
+            rsx! { Failure { heading: "The patch cannot be read", detail: problem } }
         }
     }
 }
