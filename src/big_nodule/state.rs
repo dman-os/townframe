@@ -3083,6 +3083,7 @@ impl Stores {
                     drawer_id: drawer_id.clone(),
                     subject_id,
                     access,
+                    durable: false,
                 },
             )
             .await

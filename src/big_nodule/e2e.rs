@@ -586,6 +586,7 @@ async fn grant_drawer(
                 drawer_id: drawer_id.clone(),
                 subject_id,
                 access,
+                durable: false,
             },
         )
         .await

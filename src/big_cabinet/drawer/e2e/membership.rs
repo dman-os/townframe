@@ -125,6 +125,7 @@ async fn a_doc_created_in_a_drawer_belongs_to_it_and_to_the_local_drawers() {
                 drawer_id: drawer.clone(),
                 subject_id: bob.actor.actor_id,
                 access: Access::Read,
+                durable: false,
             },
         )
         .await
