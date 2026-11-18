@@ -221,7 +221,7 @@ impl NodeComposition {
                     }
                     None => (
                         Arc::new(
-                            clay_node_egress::MicroEgress::install(
+                            crate::MicroEgress::install(
                                 minting.dispatch.clone(),
                                 minting.operator(),
                                 &crate::open_micro_actor(&minting, &micro).await?,
@@ -280,7 +280,7 @@ struct Following {
     cartridge_id: CartridgeId,
     resolved: Arc<ResolvedCartridge>,
     config_doc: big_cabinet_core::dmeta::DocId,
-    egress: Arc<clay_node_egress::MicroEgress>,
+    egress: Arc<crate::MicroEgress>,
     state: Arc<MintedState>,
 }
 

@@ -2880,29 +2880,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "clay_node_egress"
+name = "clay_node"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
+ "big_blobs_core",
  "big_cabinet",
  "big_cabinet_core",
+ "big_cartridges_core",
  "big_dispatch",
  "big_dispatch_core",
+ "big_node",
  "big_nodule",
+ "big_nodule_core",
+ "blake3",
+ "bytes",
  "clay_guest_session",
  "clay_host",
  "clay_rt_wasmtime",
  "clay_surface",
+ "day_node",
  "futures",
  "http",
+ "http-body-util",
+ "intxt_core",
  "keyring-core",
+ "method_core",
  "secrets_rs",
  "serde_json",
+ "service_client_core_rs",
  "service_client_native_rs",
  "service_core_rs",
  "service_utils_rs",
  "sqlite_rs",
+ "tempfile",
  "tokio",
+ "tower",
+ "utils_rs",
 ]
 
 [[package]]
@@ -4341,40 +4356,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "daytxt_core"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "clay_collection",
- "clay_dioxus",
- "clay_docs",
- "clay_guest_session",
- "clay_host",
- "clay_mdk",
- "clay_store",
- "clay_surface",
- "daybook_types",
- "dioxus",
- "dioxus-core",
- "dioxus-html",
- "getrandom 0.4.3",
- "micro_counter",
- "micro_counter_manifest",
- "micro_sample",
- "micro_settings",
- "micro_settings_manifest",
- "micro_shell",
- "micro_shell_manifest",
- "micro_toolbar",
- "micro_toolbar_manifest",
- "serde",
- "serde_json",
- "sqlite_rs",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "dayframe_desktop"
 version = "0.1.0"
 dependencies = [
@@ -4438,76 +4419,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "daytxt_native"
-version = "0.1.0"
-dependencies = [
- "big_cabinet",
- "clay_docs",
- "clay_guest_session",
- "clay_host",
- "clay_mdk",
- "clay_store",
- "daytxt_core",
- "dayframe_node",
- "dioxus",
- "dioxus-desktop",
- "dioxus-native",
- "micro_counter_manifest",
- "micro_review_manifest",
- "micro_sample",
- "micro_settings",
- "micro_settings_manifest",
- "micro_shell",
- "micro_shell_manifest",
- "micro_theme_lab_manifest",
- "micro_toolbar",
- "micro_toolbar_manifest",
- "serde_json",
- "sqlite_rs",
- "tokio",
- "ui",
-]
-
-[[package]]
-name = "dayframe_node"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "big_blobs_core",
- "big_cabinet",
- "big_cabinet_core",
- "big_cartridges_core",
- "big_dispatch",
- "big_dispatch_core",
- "big_node",
- "big_nodule",
- "big_nodule_core",
- "blake3",
- "bytes",
- "clay_guest_session",
- "clay_host",
- "clay_node_egress",
- "clay_rt_wasmtime",
- "clay_surface",
- "day_node",
- "http",
- "http-body-util",
- "intxt_core",
- "method_core",
- "micro_review_manifest",
- "secrets_rs",
- "serde_json",
- "service_client_core_rs",
- "service_client_native_rs",
- "service_utils_rs",
- "tempfile",
- "tokio",
- "tower",
- "utils_rs",
-]
-
-[[package]]
 name = "dayframe_showcase"
 version = "0.1.0"
 dependencies = [
@@ -4558,6 +4469,79 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "daytxt_core"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "clay_collection",
+ "clay_dioxus",
+ "clay_docs",
+ "clay_guest_session",
+ "clay_host",
+ "clay_mdk",
+ "clay_store",
+ "clay_surface",
+ "daybook_types",
+ "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "getrandom 0.4.3",
+ "micro_counter",
+ "micro_counter_manifest",
+ "micro_sample",
+ "micro_settings",
+ "micro_settings_manifest",
+ "micro_shell",
+ "micro_shell_manifest",
+ "micro_toolbar",
+ "micro_toolbar_manifest",
+ "serde",
+ "serde_json",
+ "sqlite_rs",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "daytxt_native"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet",
+ "big_cabinet_core",
+ "bytes",
+ "clay_docs",
+ "clay_guest_session",
+ "clay_host",
+ "clay_mdk",
+ "clay_node",
+ "clay_store",
+ "daytxt_core",
+ "dioxus",
+ "dioxus-desktop",
+ "dioxus-native",
+ "http",
+ "http-body-util",
+ "intxt_core",
+ "micro_counter_manifest",
+ "micro_review_manifest",
+ "micro_sample",
+ "micro_settings",
+ "micro_settings_manifest",
+ "micro_shell",
+ "micro_shell_manifest",
+ "micro_theme_lab_manifest",
+ "micro_toolbar",
+ "micro_toolbar_manifest",
+ "serde_json",
+ "service_utils_rs",
+ "sqlite_rs",
+ "tempfile",
+ "tokio",
+ "ui",
+ "utils_rs",
 ]
 
 [[package]]

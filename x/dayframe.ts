@@ -113,7 +113,7 @@ switch (command) {
       }
     }
     // intxt's nodule handler is not a micro: the phone's node installs it as a cartridge at boot
-    // (`dayframe_node::NodeComposition::install_intxt`). `prepareDayframePackages` built it
+    // (`daytxt_native`'s `install_intxt`). `prepareDayframePackages` built it
     // beside the packages; stage it with them.
     await $`cp ${
       $.path(env["DAYFRAME_PACKAGE_DIR"]).join("intxt.guest.wasm")

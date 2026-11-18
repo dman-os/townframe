@@ -32,9 +32,6 @@ use service_utils_rs::RequestContext;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-#[cfg(test)]
-mod e2e;
-
 /// One micro's `dispatch.local` egress: calls are signed by the micro's actor and present the
 /// micro's capability. Clones share the capability, so the egress a host handed to the micro's
 /// incarnation follows [`Self::remint`].

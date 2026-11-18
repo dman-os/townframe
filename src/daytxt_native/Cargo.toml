@@ -16,12 +16,15 @@ clay_host = { workspace = true }
 clay_mdk = { workspace = true, features = ["in_process", "view", "wasmtime", "package"] }
 clay_store = { workspace = true }
 big_cabinet = { workspace = true }
-dayframe_node = { workspace = true }
+big_cabinet_core = { workspace = true }
+clay_node = { workspace = true }
 daytxt_core = { workspace = true }
 dioxus = { workspace = true }
 dioxus-native = { workspace = true, optional = true }
 dioxus-desktop = { workspace = true, optional = true }
+intxt_core = { workspace = true, features = ["install"] }
 micro_counter_manifest = { workspace = true }
+micro_review_manifest = { workspace = true }
 micro_sample = { workspace = true }
 micro_settings = { workspace = true }
 micro_settings_manifest = { workspace = true }
@@ -31,8 +34,10 @@ micro_shell_manifest = { workspace = true }
 micro_toolbar = { workspace = true }
 micro_toolbar_manifest = { workspace = true }
 serde_json = { workspace = true }
+service_utils_rs = { workspace = true }
 sqlite_rs = { workspace = true }
 ui = { workspace = true }
+utils_rs = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
 [features]
@@ -46,8 +51,12 @@ wry = ["dep:dioxus-desktop"]
 [dev-dependencies]
 #
 # internal
-micro_review_manifest = { workspace = true }
+clay_node = { workspace = true, features = ["test-support"] }
 
 #
 # misc
+bytes = { workspace = true }
+http = { workspace = true }
+http-body-util = "0.1"
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }

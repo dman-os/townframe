@@ -1,6 +1,6 @@
 //! Android composition root: the shared native composition (`daytxt_native`) with the store
 //! under the app's internal data directory and the Wasm packages read from the APK's assets, and
-//! the app's own in-process node (`dayframe_node`) that its Wasm micros reach by `dispatch.local`.
+//! the app's own in-process node (`clay_node`) that its Wasm micros reach by `dispatch.local`.
 //!
 //! The crate only means something on Android; a host build exists so `cargo clippy` and the
 //! guardrails see the manifest, and its `main` refuses to run.

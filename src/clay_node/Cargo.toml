@@ -1,5 +1,5 @@
 [package]
-name = "dayframe_node"
+name = "clay_node"
 version.workspace = true
 edition.workspace = true
 
@@ -8,6 +8,10 @@ workspace = true
 
 [lib]
 path = "lib.rs"
+
+[features]
+# `test_support`: the fixtures a host's tests boot a node with.
+test-support = ["dep:bytes", "dep:http-body-util", "dep:method_core"]
 
 [dependencies]
 #
@@ -22,12 +26,10 @@ big_node.workspace = true
 big_nodule.workspace = true
 big_nodule_core.workspace = true
 clay_guest_session.workspace = true
-clay_node_egress.workspace = true
 day_node.workspace = true
-intxt_core = { workspace = true, features = ["install"] }
-micro_review_manifest.workspace = true
 service_client_core_rs.workspace = true
 service_client_native_rs.workspace = true
+service_core_rs.workspace = true
 service_utils_rs.workspace = true
 utils_rs.workspace = true
 
@@ -35,7 +37,11 @@ utils_rs.workspace = true
 # misc
 axum = { workspace = true }
 blake3.workspace = true
+bytes = { workspace = true, optional = true }
+futures.workspace = true
 http.workspace = true
+http-body-util = { version = "0.1", optional = true }
+method_core = { workspace = true, optional = true }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tower = { workspace = true, features = ["util"] }
@@ -47,13 +53,16 @@ big_cartridges_core = { workspace = true, features = ["test-support"] }
 clay_host.workspace = true
 clay_rt_wasmtime.workspace = true
 clay_surface.workspace = true
+intxt_core = { workspace = true, features = ["install"] }
 method_core.workspace = true
 secrets_rs = { workspace = true, features = ["test-support"] }
+sqlite_rs.workspace = true
 
 #
 # misc
 async-trait.workspace = true
 bytes.workspace = true
 http-body-util = "0.1"
+keyring-core = { version = "1.0", default-features = false }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

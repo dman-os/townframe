@@ -1,6 +1,6 @@
 #![recursion_limit = "256"]
 
-//! The node-holding half of a native Dayframe host's composition root (Clay on the node,
+//! The node-holding half of a native Clay host's composition root (Clay on the node,
 //! sections 1 to 3).
 //!
 //! A host with no second process (Android) is always the holder of its node: [`NodeComposition`]
@@ -15,8 +15,8 @@
 //!
 //! Micros come from two places. A micro a cartridge contributes is loaded from the node's catalog
 //! and its handles are minted from its `uses` and the cartridge's grants ([`cartridge`]). A micro
-//! that is in no cartridge keeps the interim path below ([`MicroInstall`]) until it is published
-//! as one.
+//! that is in no cartridge keeps the interim path ([`MicroInstall`], which the host builds and
+//! names the grants of) until it is published as one.
 //!
 //! The node runs on a runtime of its own. Its tasks (the peers endpoint, dispatch, indexing) must
 //! not share a host's UI loop, and the host's runtime flavor is not the node's business.
@@ -49,7 +49,6 @@ use big_nodule::RoutineScopes;
 use big_nodule::executor::RoutineCapabilities;
 use big_nodule_core::protocol::NodulesProtocol;
 use clay_guest_session::egress::DispatchEgress;
-use clay_node_egress::MicroEgress;
 use day_node::Booted;
 use day_node::LockRole;
 use day_node::NodeDir;
@@ -76,19 +75,23 @@ use utils_rs::prelude::default;
 use utils_rs::prelude::ferr;
 
 mod cartridge;
+mod egress;
 #[cfg(test)]
 mod e2e;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use cartridge::CartridgeMicro;
 use cartridge::Follower;
+pub use egress::MicroEgress;
 
 /// One micro the composition installs, and what node access it is granted.
 ///
 /// INTERIM, for micros that are in no cartridge only. A micro a cartridge contributes is minted
 /// from its `uses` and the cartridge's grants ([`NodeComposition::sync_cartridge_micros`]), and
-/// this table never applies to it. Until `dayframe.review` is published as a cartridge, the
-/// composition names the granted NSIDs and drawers of each such micro here, and this table is the
-/// only place that does; empty grants nothing.
+/// this table never applies to it. Until such a micro is published as a cartridge, the host
+/// names the granted NSIDs and drawers of each here, and this table is the only place that does;
+/// empty grants nothing.
 #[derive(Debug, Clone)]
 pub struct MicroInstall {
     /// The micro's id text, `<did>/<name>`.
@@ -113,151 +116,6 @@ pub struct InstallConfig {
     pub tag: String,
     pub key: String,
     pub value: serde_json::Map<String, serde_json::Value>,
-}
-
-/// What one micro is granted by its plug name (the `<name>` of `<did>/<name>`), and the install
-/// file that configures it.
-///
-/// INTERIM: see [`MicroInstall`]. This table is the one place the composition names a micro's node
-/// access. A micro not listed here still gets an actor and an egress, but can call no method.
-struct InterimGrant {
-    name: &'static str,
-    /// The node methods the micro may call.
-    methods: &'static [&'static str],
-    /// The micro's install file, when it has a configuration datum an operator writes.
-    config: Option<InterimConfig>,
-}
-
-/// The configuration datum of an [`InterimGrant`]: the file an operator writes for it (a JSON
-/// object, which becomes the datum's value), where the datum goes, and which of the file's
-/// members name drawers. Each member in `drawers` is a drawer id or an array of them; the micro is
-/// granted `Read` over every drawer named.
-struct InterimConfig {
-    file: &'static str,
-    tag: &'static str,
-    key: &'static str,
-    drawers: &'static [&'static str],
-}
-
-const INTERIM_GRANTS: &[InterimGrant] = &[InterimGrant {
-    // intxt's review micro (D62): the linked intxts' summaries, and the PR and intxt datums it reads
-    // with the doc capability in its config.
-    name: "dayframe.review",
-    methods: &[
-        "org.example.intxt.summarizeIntxts",
-        "org.example.daybook.docs.readDatums",
-        "org.example.daybook.docs.pollDatums",
-    ],
-    config: Some(InterimConfig {
-        file: "review.json",
-        tag: micro_review_manifest::CONFIG_TAG,
-        key: micro_review_manifest::CONFIG_KEY,
-        drawers: &["githubDrawer", "intxtDrawers"],
-    }),
-}];
-
-impl MicroInstall {
-    /// The installs of the micros with these ids, each granted its [`INTERIM_GRANTS`].
-    ///
-    /// `install_file` answers the text of an install file by its name (`review.json`), `None` when
-    /// the operator has not written one. A micro whose file is absent installs unconfigured: no
-    /// drawers, no config datum, and so no document capability (the review micro shows
-    /// "Unconfigured"). A file that is not a JSON object, or names a drawer that is not a drawer
-    /// id, is an error: the operator wrote it, and a half-read file would grant the wrong drawers.
-    pub fn interim(
-        micros: impl IntoIterator<Item = String>,
-        install_file: impl Fn(&str) -> std::io::Result<Option<Vec<u8>>>,
-    ) -> Res<Vec<Self>> {
-        micros
-            .into_iter()
-            .map(|micro| {
-                let name = micro
-                    .split_once('/')
-                    .unwrap_or_else(|| panic!("micro id {micro:?} is not `<did>/<name>`"))
-                    .1;
-                let granted = INTERIM_GRANTS.iter().find(|granted| granted.name == name);
-                let (drawers, config) = match granted.and_then(|granted| granted.config.as_ref()) {
-                    Some(config) => match install_file(config.file)
-                        .wrap_err_with(|| format!("reading {}", config.file))?
-                    {
-                        Some(bytes) => {
-                            let (drawers, config) = parse_install_file(config, &bytes)
-                                .wrap_err_with(|| format!("reading {}", config.file))?;
-                            (drawers, Some(config))
-                        }
-                        None => (Vec::new(), None),
-                    },
-                    None => (Vec::new(), None),
-                };
-                Ok(Self {
-                    methods: granted
-                        .into_iter()
-                        .flat_map(|granted| granted.methods)
-                        .map(|nsid| (*nsid).to_owned())
-                        .collect(),
-                    drawers,
-                    config,
-                    micro,
-                })
-            })
-            .collect()
-    }
-}
-
-/// The bytes of the install file `name` from the first of `directories` that has it. Missing
-/// everywhere is `None`, which installs the micro unconfigured (see [`MicroInstall::interim`]);
-/// any other read failure is the operator's to see. The host decides where operators put install
-/// files (the phone's pairing directories, the desktop's data directory).
-pub fn read_install_file(directories: &[&Path], name: &str) -> std::io::Result<Option<Vec<u8>>> {
-    for directory in directories {
-        match std::fs::read(directory.join(name)) {
-            Ok(bytes) => return Ok(Some(bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(None)
-}
-
-/// The drawers (read) and the configuration datum `bytes` states for `config`.
-fn parse_install_file(
-    config: &InterimConfig,
-    bytes: &[u8],
-) -> Res<(Vec<(DrawerId, DrawerAccess)>, InstallConfig)> {
-    let serde_json::Value::Object(value) = serde_json::from_slice(bytes)? else {
-        return Err(ferr!("the file is not a JSON object"));
-    };
-    let mut drawers = Vec::new();
-    for member in config.drawers {
-        let listed: Vec<&str> = match value.get(*member) {
-            None => continue,
-            Some(serde_json::Value::String(id)) => vec![id.as_str()],
-            Some(serde_json::Value::Array(items)) => items
-                .iter()
-                .map(|item| {
-                    item.as_str()
-                        .ok_or_else(|| ferr!("{member} holds something that is not a drawer id"))
-                })
-                .collect::<Res<_>>()?,
-            Some(_) => return Err(ferr!("{member} is not a drawer id or an array of them")),
-        };
-        for id in listed {
-            let drawer = id
-                .parse::<DrawerId>()
-                .map_err(|error| ferr!("{member}: {id:?} is not a drawer id: {error}"))?;
-            if !drawers.iter().any(|(held, _)| *held == drawer) {
-                drawers.push((drawer, DrawerAccess::Read));
-            }
-        }
-    }
-    Ok((
-        drawers,
-        InstallConfig {
-            tag: config.tag.to_owned(),
-            key: config.key.to_owned(),
-            value,
-        },
-    ))
 }
 
 pub struct NodeConfig {
@@ -339,7 +197,7 @@ impl NodeComposition {
     pub async fn boot(config: NodeConfig) -> Res<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
-            .thread_name("dayframe-node")
+            .thread_name("clay-node")
             .enable_all()
             .build()?;
         let booted = runtime
@@ -462,27 +320,6 @@ impl NodeComposition {
             )
             .into_router(),
         }
-    }
-
-    /// Installs intxt on this node from its handler component `guest_wasm` and enables it, as the
-    /// node's operator, so the node admits intxt's datum Lexicons and serves its methods (the
-    /// review micro's `summarizeIntxts`). Idempotent by cartridge version, so a host calls it at
-    /// every boot.
-    pub async fn install_intxt(
-        &self,
-        guest_wasm: &[u8],
-    ) -> Result<intxt_core::install::Installed, intxt_core::methods::IntxtError> {
-        let operator = intxt_core::client::Caller::new(
-            self.operator_transport(),
-            RequestContext::root(),
-            None,
-            "intxt-install".to_owned(),
-        );
-        // MERGE-QUESTION: intxt's install now takes the drawers its cartridge is granted (the
-        // intxts the node holds at Write, ADR 049 §4.1); the `install_intxt` this host had was
-        // written before that and grants none, as `day`'s own install call does. Whether the host
-        // should grant the node's intxt drawers here is a design choice, not a merge one.
-        intxt_core::install::install(&operator, guest_wasm, &[]).await
     }
 
     /// This node's dialable endpoint ticket: what another node puts in its bootstrap list to dial

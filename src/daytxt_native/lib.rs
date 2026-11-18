@@ -3,6 +3,8 @@
 //! demo seed (ADR 018 §7). A shell supplies only what differs per platform: where the store
 //! file lives and where package bytes come from (a scanned directory on desktop, the APK's
 //! assets on Android).
+mod interim;
+
 use clay_docs::FacetRoute;
 use clay_guest_session::egress::DispatchEgress;
 use clay_host::Factory;
@@ -214,7 +216,7 @@ pub fn package_micro_id(files: &PackageFiles) -> Option<String> {
 pub type MicroEgresses<'a> = &'a dyn Fn(&str) -> Option<Arc<dyn DispatchEgress>>;
 
 /// The configuration datum a composition's install writes for a micro, by its id text: `(tag,
-/// key, value)`, as `dayframe_node::NodeComposition::config_datum` produces it. `None` for a micro
+/// key, value)`, as `clay_node::NodeComposition::config_datum` produces it. `None` for a micro
 /// with none. A host with no node answers `None` for every micro.
 pub type MicroConfigs<'a> = &'a dyn Fn(&str) -> Option<(String, String, serde_json::Value)>;
 
@@ -378,10 +380,10 @@ pub struct NodeHost {
     /// own data directory on Android.
     pub root: PathBuf,
     /// Whether the holder serves the node's socket so `day` can reach it (see
-    /// `dayframe_node::NodeConfig::serve`): a desktop does, Android has no second process.
+    /// `clay_node::NodeConfig::serve`): a desktop does, Android has no second process.
     pub serve: bool,
     /// Directories the operator's files are read from, first match winning: the install files
-    /// (`dayframe_node::MicroInstall::interim`) and `bootstrap.txt`, the endpoint tickets of the
+    /// (`interim::interim_installs`) and `bootstrap.txt`, the endpoint tickets of the
     /// nodes this host dials, one per line. The node's own ticket is written to
     /// `node-address.txt` in each, for the operator to put in the other node's bootstrap list.
     pub pairing_directories: Vec<PathBuf>,
@@ -407,7 +409,7 @@ pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
     /// a package whose component came out of the node's catalog, with the handles the node minted
     /// for it from its `uses` and the cartridge's grants.
     struct Hosted {
-        node: dayframe_node::NodeComposition,
+        node: clay_node::NodeComposition,
         cartridge_packages: Vec<PackageFiles>,
         /// Cartridge micros that could not be loaded, for the shell's installation errors.
         cartridge_errors: Vec<String>,
@@ -423,11 +425,11 @@ pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
             let mut bootstrap = Vec::new();
             for directory in &pairing {
                 bootstrap.extend(
-                    dayframe_node::read_tickets(&directory.join("bootstrap.txt"))
+                    clay_node::read_tickets(&directory.join("bootstrap.txt"))
                         .map_err(|error| format!("cannot read the bootstrap tickets: {error:#}"))?,
                 );
             }
-            let mut node = dayframe_node::NodeComposition::boot(dayframe_node::NodeConfig {
+            let mut node = clay_node::NodeComposition::boot(clay_node::NodeConfig {
                 root: host.root.clone(),
                 bootstrap,
                 // The node learns the datum vocabulary of intxt (the PR and intxt datums the
@@ -443,7 +445,7 @@ pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
             })
             .await
             .map_err(|error| format!("cannot boot the node: {error:#}"))?;
-            node.install_intxt(&host.intxt_guest)
+            interim::install_intxt(&node, &host.intxt_guest)
                 .await
                 .map_err(|error| format!("cannot install intxt on the node: {error}"))?;
             let mut cartridge_packages = Vec::new();
@@ -463,7 +465,7 @@ pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
                 }
             }
             // INTERIM: a bundled micro that no cartridge replaces is installed from the table in
-            // `dayframe_node`, until it is published as a cartridge.
+            // `interim`, until it is published as a cartridge.
             let uncovered = packages
                 .iter()
                 .filter_map(package_micro_id)
@@ -474,8 +476,8 @@ pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
                         .any(|loaded| plug_name(&loaded) == plug_name(id))
                 })
                 .collect::<Vec<_>>();
-            let installs = dayframe_node::MicroInstall::interim(uncovered, |name| {
-                dayframe_node::read_install_file(&pairing, name)
+            let installs = interim::interim_installs(uncovered, |name| {
+                interim::read_install_file(&pairing, name)
             })
             .map_err(|error| format!("cannot read the install files: {error:#}"))?;
             for install in installs {
