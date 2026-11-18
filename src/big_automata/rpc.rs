@@ -1,7 +1,6 @@
 use crate::interlude::*;
 
 pub mod bucket;
-pub mod replay;
 pub mod summary;
 
 pub trait BigSyncRpcClient<K: FutureForm> {
@@ -13,20 +12,32 @@ pub trait BigSyncRpcClient<K: FutureForm> {
         BigSyncRpcResult<Result<summary::PeerPartsSummaryResponse, summary::PeerPartsSummaryError>>,
     >;
 
+    // FIXME(port): the replay methods move onto the service stack binding; their types are in
+    // `crate::replay::wire`.
     fn update_replay_session<'a>(
         &'a self,
-        req: replay::UpdateReplaySessionRequest,
-    ) -> K::Future<'a, BigSyncRpcResult<replay::UpdateReplaySessionResponse>>;
+        req: crate::replay::wire::UpdateSession,
+    ) -> K::Future<
+        'a,
+        BigSyncRpcResult<
+            Result<crate::replay::wire::SessionUpdated, crate::replay::wire::SessionError>,
+        >,
+    >;
 
     fn page_replay_session<'a>(
         &'a self,
-        req: replay::PageReplaySessionRequest,
-    ) -> K::Future<'a, BigSyncRpcResult<replay::PageReplaySessionRequest>>;
+        req: crate::replay::wire::PageSession,
+    ) -> K::Future<
+        'a,
+        BigSyncRpcResult<
+            Result<crate::replay::wire::SessionPage, crate::replay::wire::SessionError>,
+        >,
+    >;
 
     fn close_replay_session<'a>(
         &'a self,
-        req: replay::CloseReplaySession,
-    ) -> K::Future<'a, BigSyncRpcResult<()>>;
+        req: crate::replay::wire::CloseSession,
+    ) -> K::Future<'a, BigSyncRpcResult<Result<(), crate::replay::wire::SessionError>>>;
 
     fn get_changed_buckets<'a>(
         &'a self,

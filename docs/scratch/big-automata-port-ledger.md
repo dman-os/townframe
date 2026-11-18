@@ -1,9 +1,10 @@
 # big_automata port ledger
 
 Status: Living ledger for the file-by-file port of big_sync into big_automata.
-Owner: operator + prod-readiness lane (pairing). Scope: `src/big_sync_core`,
-`src/big_sync`, `src/big_automata`. Companion to `prod-readiness-ledger.md` (W4,
-W7). Updated: 2026-11-17
+Owner: operator + prod-readiness lane (pairing). Companion to `prod-readiness-ledger.md` (W4,
+W7).
+Scope: `src/big_sync_core`, `src/big_sync`, `src/big_automata`.
+Updated: 2026-11-18 (replay session protocol pass)
 
 How we work: the operator reviews each file and leaves FIXMEs; the lane does the
 mechanical port and the reworks the operator approves. No cargo during pairing
@@ -854,6 +855,102 @@ is clean apart from dead code.
 - The outbox in big_automata has no user until the machine is ported. Its users today are
   big_repo runtime2 (`automerge_frontier_worker`, `group_part_worker`, via big_sync_core) and
   daybook drawers (its own outbox).
+
+### Replay session protocol pass (2026-11-18; layer 10)
+
+**Decisions (operator):**
+- The protocol is one module, `big_automata::replay`, that owns its semantics: the laws are
+  in `replay.rs` and the messages in `replay/wire.rs`.
+- One target set per session: `subscription_id` is gone, and generation 0 opens a session.
+- The session-less `replay_page` is dropped.
+- Nouns: session, target, generation, round, verdict `Events | Refused`.
+- Lanes and credit are client policy, outside the protocol.
+- **Transport:** move big_sync RPC onto the service stack (`service_utils_rs` and friends):
+  XRPC over HTTP is canonical, reached over iroh streams; direct and IRPC calls are
+  in-process optimizations. A postcard or other binary encoding can come later.
+- `supersede` is replaced by the transport's request cancellation, pending the audit of how
+  well the stack implements cancellation.
+- **Web node:** iroh in the browser, relay-only, with iroh HTTP as the primary path. The
+  service stack may be changed to support it (operator's permission).
+
+**In flight:**
+- Quint spec plus TLC (`replay/spec/`);
+- sans-IO client and server machines, with a simulation proptest;
+- service stack audit: cancellation, iroh in the browser, encoding negotiation, sans-IO fit.
+
+**Service stack audit (2026-11-18):**
+- **Browser.** iroh 1.4.1 supports the browser, relay-only. `service_core_rs` and
+  `service_client_core_rs` build for wasm. `service_client_native_rs` doesn't: it enables tokio
+  `net`, and its iroh client calls `tokio::spawn` (`xrpc/iroh.rs:238,366`) and
+  `tokio::time::timeout`. `service_core_rs/context.rs` uses `tokio::time::Instant` and
+  `SystemTime`. `IrohXrpcClient` isn't wired into `Client<Proto>`; unary only.
+- **Cancellation over XRPC is drop-only.** HTTP builds a root context
+  (`service_core_rs/xrpc.rs:85`); iroh cancel works via STOP_SENDING (tested).
+  - Admitted IRPC unary handlers ignore a dropped caller (`host.rs:160`).
+  - `Host::invoke`'s biased select throws away a result that is ready in the same poll as a
+    cancel (`host.rs:91`).
+  - The WebSocket subscription pump is a detached, untracked `tokio::spawn`
+    (`router.rs:731`).
+- **Identity.** The iroh peer comes from the authenticated connection, as an extension that
+  headers can't spoof (tested). It's a `String`, not a typed id. Direct and IRPC calls carry no
+  peer.
+- **Encoding.** JSON is hard-wired, with a `Value` intermediate and a double serialization
+  (`router.rs:911,914`). atproto fixes the encoding per method in the lexicon (no
+  negotiation). `[u8; 32]` needs byte adapters.
+- **Supersede with transport cancel.** The next round can be admitted before the previous one
+  is dropped. That's safe because the server keeps no cursor (law 9), but it costs a
+  long-poll permit briefly.
+
+**Audit decisions (operator approved the lane's recommendations, 2026-11-18):**
+- No `supersede` field: transport cancel discards round N (safe by law 9).
+- Dropping the caller cancels the handler on every transport (fix admitted IRPC unary).
+- **Identity (corrected by the operator):** the iroh endpoint id is a *transport* fact, not
+  the principal. big_node uses one key for both today (ADR 033 §6), but that's the embedding
+  layer's choice, and multiple principals per connection are coming.
+  - The service stack types `TransportContext::Iroh { endpoint }` and derives no principal.
+  - Mapping an endpoint to the principal(s) it may act as is a seam the layer above owns.
+  - The replay server takes the principal from that seam.
+  - In-process callers state who they are explicitly.
+- The browser client goes in a new wasm-capable crate (`service_client_iroh_rs`).
+- Codec later: a fixed encoding per method, atproto-style, with CBOR as the binary option.
+- Session cleanup by TTL lease (law 5); a connection hook is optional later.
+- In flight: service stack fixes (cancellation, the WebSocket pump, identity, wasm clocks,
+  codec seam) and the wasm iroh client crate.
+
+**Replay machines landed (8978c2b9; 171/171 tests; 9 planted bugs all caught):**
+`ReplayServer` (`update`, `close`, `sweep`, `resolve_round` → `Round { routes, after, limits,
+hold, content_keys, answer }`) and `ReplayClient` (`set_wanted`, `next_update`,
+`update_lost`, `update_answered`, `retry_blocked`, `round`, `round_answered`). There is a
+simulation proptest over a faulty network.
+
+**Open:**
+- **Law 5 gap.** A late duplicate of a session's opening update (generation 0) can revive a
+  session the server already forgot. The client is never told.
+  - Targets added since the opening are missing; the client detects that via
+    `UnknownTarget` and resets.
+  - Targets the client already removed become orphans. They're never paged, so they're
+    harmless apart from the resources they hold until the TTL.
+  - Fix options: amend law 5 to state this, bound message lifetime below the TTL, or have
+    the server keep tombstones of forgotten session ids.
+- **Store seams for the responder:**
+  - `read_authorized` asserts `after < until`, so a caught-up round can't get verdicts;
+  - payloads come from a second snapshot (`readable_obj_states`); return them in the same
+    snapshot instead;
+  - `PartStoreServe` exposes no `latest_rev` or watch for `until` and the hold.
+- **Privacy note:** a drained target's `resume` is the snapshot's global rev, which reveals
+  activity in other parts (metadata audit).
+- **Performance:** `update`'s reuse check calls `Vec::contains` per addition, which is
+  quadratic at 16k targets.
+- **Defaults the lane accepts:**
+  - a round naming one route under two ids is `Invalid`;
+  - an empty round is `Invalid`;
+  - a refusal in a round blocks the target and drops its id;
+  - `Limit` on an update is treated as possibly applied;
+  - limits are checked before admission.
+
+**Then:** `quint-connect` conformance; the responder on `read_authorized`; the service
+binding; the bucket and summary RPCs on the same binding; the tasks (batched, coalesced
+cursor persistence).
 
 ## Cross-cutting items
 
