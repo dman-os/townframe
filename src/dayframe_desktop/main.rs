@@ -42,7 +42,7 @@ fn ReadyApp(runtime: Signal<Option<composition::CompositionRuntime>>) -> Element
     match use_context::<Renderer>() {
         // A desktop window has no system chrome over its surface.
         Renderer::Browser => {
-            rsx! { dayframe_native::WryApplication { runtime, insets: None, scale: None } }
+            rsx! { dayframe_native::WryApplication { runtime, insets: None, viewport: None } }
         }
         #[cfg(feature = "blitz")]
         Renderer::Blitz => rsx! { dayframe_native::BlitzApplication { runtime, insets: None } },

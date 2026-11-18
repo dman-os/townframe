@@ -550,28 +550,37 @@ fn use_system_back(platform_back: Signal<u64>, can_back: Signal<bool>) {
     let _ = (platform_back, can_back);
 }
 
-/// The device's CSS px per physical px, for a webview whose window reports none: tao's Android
-/// window answers a scale factor of 1.0 whatever the display density, so the Android shell reads
-/// the density itself. `None` takes the window's own scale factor (desktop).
+/// What a webview host knows better than its window: the webview's own size in CSS px and the
+/// device's CSS px per physical px. tao's Android window answers a scale factor of 1.0 whatever
+/// the display density, and its size includes the status bar, which the WebView sits below, so
+/// the Android shell reads both from the activity itself. `None` takes the window's (desktop).
 #[cfg(feature = "wry")]
-pub type ScaleSource = Callback<(), f64>;
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Viewport {
+    pub width: f64,
+    pub height: f64,
+    pub scale: f64,
+}
+
+#[cfg(feature = "wry")]
+pub type ViewportSource = Callback<(), Viewport>;
 
 /// Mounts the shell under Wry once the runtime exists, on desktop or in an Android webview.
-/// `insets` is the system chrome source of a window that has some (Android); `scale` replaces a
-/// window scale factor that is wrong (Android, see [`ScaleSource`]).
+/// `insets` is the system chrome source of a window that has some (Android); `viewport` replaces
+/// a window size and scale factor that are wrong (Android, see [`Viewport`]).
 #[cfg(feature = "wry")]
 #[component]
 pub fn WryApplication(
     runtime: Signal<Option<CompositionRuntime>>,
     insets: Option<InsetsSource>,
-    scale: Option<ScaleSource>,
+    viewport: Option<ViewportSource>,
 ) -> Element {
     let initial = runtime
         .read()
         .clone()
         .expect("WryApplication mounts only with a built runtime");
     let runtime = use_signal(|| initial);
-    let host = use_wry_host_inputs(insets, scale);
+    let host = use_wry_host_inputs(insets, viewport);
     rsx! { Application { runtime, host } }
 }
 
@@ -584,23 +593,30 @@ pub fn WryApplication(
 #[cfg(feature = "wry")]
 fn use_wry_host_inputs(
     insets_source: Option<InsetsSource>,
-    scale_source: Option<ScaleSource>,
+    viewport_source: Option<ViewportSource>,
 ) -> HostInputs {
     use dioxus_desktop::WindowEvent;
     use dioxus_desktop::tao::event::Event;
     let window = dioxus_desktop::use_window();
-    let scale = move || {
-        scale_source.map_or_else(
-            || dioxus_desktop::window().window.scale_factor(),
+    let viewport = move || {
+        viewport_source.map_or_else(
+            || {
+                let window = &dioxus_desktop::window().window;
+                let scale = window.scale_factor();
+                let size = window.inner_size().to_logical::<f64>(scale);
+                Viewport {
+                    width: size.width,
+                    height: size.height,
+                    scale,
+                }
+            },
             |source| source.call(()),
         )
     };
+    let scale = move || viewport().scale;
     let logical_size = move || {
-        let size = dioxus_desktop::window()
-            .window
-            .inner_size()
-            .to_logical::<f64>(scale());
-        (size.width, size.height)
+        let Viewport { width, height, .. } = viewport();
+        (width, height)
     };
     // Re-read whenever the window changes: a rotation, a bar appearing or a cutout all change
     // its size, and tao reports no inset change of its own.

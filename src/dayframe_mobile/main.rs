@@ -251,9 +251,11 @@ mod android {
         .map_err(|error| format!("cannot load the store: {error}"))
     }
 
-    /// The display's CSS px per physical px (`DisplayMetrics.density`), which tao's Android window
-    /// does not report (its scale factor is 1.0 on every device).
-    fn display_density(_: ()) -> f64 {
+    /// The WebView's size in CSS px and the display's CSS px per physical px
+    /// (`DisplayMetrics.density`). The WebView fills the activity's content view, which sits below
+    /// the status bar when the activity is not drawn edge to edge, so the content view is the size
+    /// to lay out in; tao's window reports the whole window and a scale factor of 1.0.
+    fn webview_viewport(_: ()) -> dayframe_native::Viewport {
         dioxus::prelude::manganis::android::with_activity(|env, activity| {
             let resources = env
                 .call_method(
@@ -273,13 +275,39 @@ mod android {
                 )
                 .and_then(|value| value.l())
                 .expect("Resources.getDisplayMetrics");
-            Some(
+            let scale = f64::from(
                 env.get_field(&metrics, "density", "F")
                     .and_then(|value| value.f())
-                    .expect("DisplayMetrics.density") as f64,
-            )
+                    .expect("DisplayMetrics.density"),
+            );
+            let content = content_view(env, activity);
+            let mut dimension = |name: &str| {
+                f64::from(
+                    env.call_method(&content, name, "()I", &[])
+                        .and_then(|value| value.i())
+                        .expect("a View dimension"),
+                ) / scale
+            };
+            Some(dayframe_native::Viewport {
+                width: dimension("getWidth"),
+                height: dimension("getHeight"),
+                scale,
+            })
         })
         .expect("dioxus-desktop keeps the current activity set")
+    }
+
+    /// `android.R.id.content`, the view the WebView fills.
+    fn content_view<'local>(env: &mut JNIEnv<'local>, activity: &JObject) -> JObject<'local> {
+        const CONTENT_ID: i32 = 0x0102_0002;
+        env.call_method(
+            activity,
+            "findViewById",
+            "(I)Landroid/view/View;",
+            &[JValue::Int(CONTENT_ID)],
+        )
+        .and_then(|value| value.l())
+        .expect("Activity.findViewById")
     }
 
     /// The system bars and display cutout over the webview's content, in CSS px. The bars are
@@ -363,17 +391,8 @@ mod android {
                 int(env, &insets, "getSystemWindowInsetLeft"),
             ]
         };
-        // `android.R.id.content`, the view the webview fills, and its place in the window.
-        const CONTENT_ID: i32 = 0x0102_0002;
-        let content = env
-            .call_method(
-                activity,
-                "findViewById",
-                "(I)Landroid/view/View;",
-                &[JValue::Int(CONTENT_ID)],
-            )
-            .and_then(|value| value.l())
-            .expect("Activity.findViewById");
+        // Where the content view (the WebView) sits in the window.
+        let content = content_view(env, activity);
         let location = env.new_int_array(2).expect("a two-int array");
         env.call_method(
             &content,
@@ -408,7 +427,7 @@ mod android {
                         WryApplication {
                             runtime,
                             insets: Some(Callback::new(system_insets)),
-                            scale: Some(Callback::new(display_density)),
+                            viewport: Some(Callback::new(webview_viewport)),
                         }
                     }
                 }),
