@@ -101,7 +101,7 @@ impl DocsService {
             &heads,
         )
         .await?;
-        tracing::debug!(?instr_authorized, ?instr_staged, ?instr_committed, total = ?instr_start.elapsed(), "INSTR create timing"); // INSTR
+        tracing::debug!(target: "instr", ?instr_authorized, ?instr_staged, ?instr_committed, total = ?instr_start.elapsed(), "INSTR create timing"); // INSTR
         Ok(WriteReceipt { doc_id, heads })
     }
 

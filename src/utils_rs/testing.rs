@@ -10,8 +10,11 @@ pub fn setup_tracing_once() {
     });
 }
 
+/// `instr=off`: `INSTR` probes log under the `instr` target; `RUST_LOG_TEST=info,instr=info` turns them on.
+pub(crate) const DEFAULT_TEST_FILTER: &str = "info,instr=off,cranelift_codegen=info,wasmtime_internal_cranelift=info,wasmtime=info,rustls=info,h2=info,hyper_util=info,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_quinn_proto::connection=error,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn";
+
 fn setup_tracing() -> Res<()> {
-    let default_filter = "info,cranelift_codegen=info,wasmtime_internal_cranelift=info,wasmtime=info,rustls=info,h2=info,hyper_util=info,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_quinn_proto::connection=error,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn";
+    let default_filter = DEFAULT_TEST_FILTER;
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
         // if std::env::var("RUST_BACKTRACE_TEST").is_err() {
@@ -133,5 +136,51 @@ pub fn test_seed(default_seed: u64) -> u64 {
             }
         }
         Err(_) => default_seed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing_subscriber::prelude::*;
+
+    struct Count(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Count {
+        fn on_event(&self, _: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Events admitted by `filter`: one `instr` target event, one ordinary info event.
+    fn admitted(filter: &str) -> (usize, usize) {
+        let run = |instr: bool| {
+            let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let subscriber = tracing_subscriber::registry()
+                .with(tracing_subscriber::EnvFilter::new(filter))
+                .with(Count(std::sync::Arc::clone(&count)));
+            tracing::subscriber::with_default(subscriber, || {
+                if instr {
+                    tracing::info!(target: "instr", "INSTR probe");
+                } else {
+                    tracing::info!("ordinary");
+                }
+            });
+            count.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        (run(true), run(false))
+    }
+
+    #[test]
+    fn instr_target_is_off_by_default_and_on_by_filter() {
+        assert_eq!(admitted(super::DEFAULT_TEST_FILTER), (0, 1));
+        assert_eq!(admitted(crate::DEFAULT_FILTER), (0, 1));
+        // Explicit env filters replace the default entirely; `instr=info` turns the probes on.
+        assert_eq!(admitted("info,instr=info"), (1, 1));
+        assert_eq!(admitted("warn,instr=info"), (1, 0));
+        // Appended to a filter that already says `instr=off`, a later `instr=info` still wins.
+        assert_eq!(
+            admitted(&format!("{},instr=info", crate::DEFAULT_FILTER)),
+            (1, 1)
+        );
     }
 }
