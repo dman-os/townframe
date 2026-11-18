@@ -369,6 +369,17 @@ async fn reconcile_installs(
     }
 }
 
+/// The branch of every configuration document.
+pub const CONFIG_BRANCH: &str = "main";
+
+/// The document that holds the configuration datums a micro reads through its `binding`: a
+/// manifest request names facets by tag and never the document (ADR 028 §4), and the composition
+/// picks one per binding. A host that writes a micro's configuration (an install) addresses it
+/// here.
+pub fn config_document(binding: &str) -> String {
+    format!("{binding}-config")
+}
+
 /// Runtime for one composition: the host, the supervisor over the catalog, and the shell's
 /// mirror of the declared `shell.roots` collection.
 #[derive(Clone)]
@@ -541,8 +552,8 @@ impl CompositionRuntime {
             for request in &micro.sidecar.manifest.configuration_requests {
                 documents.mock_documents().bind_config(
                     request.binding.clone(),
-                    format!("{}-config", request.binding),
-                    "main".into(),
+                    config_document(&request.binding),
+                    CONFIG_BRANCH.into(),
                 );
             }
             for contract in &micro.sidecar.manifest.collection_contracts {

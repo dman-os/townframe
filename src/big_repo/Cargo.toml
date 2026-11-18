@@ -28,6 +28,8 @@ ed25519-dalek.workspace = true
 # async
 tokio = { workspace = true, features = ["sync", "macros", "rt", "rt-multi-thread", "time", "tracing"] }
 tokio-util = { workspace = true }
+# `renameat2(RENAME_NOREPLACE)` for keyhive storage's no-clobber publish (see `publish_no_replace`).
+rustix = { workspace = true }
 async-lock = { workspace = true }
 async-trait.workspace = true
 futures-buffered.workspace = true

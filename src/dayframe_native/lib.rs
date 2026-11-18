@@ -3,18 +3,20 @@
 //! demo seed (ADR 018 §7). A shell supplies only what differs per platform: where the store
 //! file lives and where package bytes come from (a scanned directory on desktop, the APK's
 //! assets on Android).
+use clay_docs::FacetRoute;
+use clay_guest_session::egress::DispatchEgress;
 use clay_host::Factory;
-use clay_mdk::host::factory;
 use clay_mdk::host::CapabilityPublication;
 use clay_mdk::host::CollectionBindings;
 use clay_mdk::host::Resources;
+use clay_mdk::host::factory;
 use clay_store::OrderedStore;
-#[cfg(feature = "blitz")]
+#[cfg(any(feature = "blitz", feature = "wry"))]
 use dayframe_composition::Application;
 pub use dayframe_composition::CompositionRuntime;
-#[cfg(feature = "blitz")]
+#[cfg(any(feature = "blitz", feature = "wry"))]
 use dayframe_composition::HostInputs;
-#[cfg(feature = "blitz")]
+#[cfg(any(feature = "blitz", feature = "wry"))]
 use dayframe_composition::Insets;
 use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
@@ -144,6 +146,7 @@ pub trait PackageEngine:
         clay_mdk::MicroId,
         clay_mdk::MicroManifest,
         CollectionBindings,
+        Option<Arc<dyn DispatchEgress>>,
         Vec<u8>,
     ) -> Rc<dyn Factory<CapabilityPublication>>
     + Clone
@@ -157,6 +160,7 @@ impl<F> PackageEngine for F where
             clay_mdk::MicroId,
             clay_mdk::MicroManifest,
             CollectionBindings,
+            Option<Arc<dyn DispatchEgress>>,
             Vec<u8>,
         ) -> Rc<dyn Factory<CapabilityPublication>>
         + Clone
@@ -173,23 +177,60 @@ pub fn wasmtime_engine(
     id: clay_mdk::MicroId,
     manifest: clay_mdk::MicroManifest,
     bindings: CollectionBindings,
+    egress: Option<Arc<dyn DispatchEgress>>,
     bytes: Vec<u8>,
 ) -> Rc<dyn Factory<CapabilityPublication>> {
-    // No micro has a `dispatch.local` egress until the composition boots the node and supplies one
-    // per micro (Clay on the node §3).
-    clay_mdk::host::wasm_factory(resources, id, manifest, bindings, None, move || {
+    clay_mdk::host::wasm_factory(resources, id, manifest, bindings, egress, move || {
         let bytes = bytes.clone();
         async move { clay_mdk::host::WasmPackage::from_bytes(bytes).await }
     })
 }
 
+/// The ids (`<did>/<name>`) of the micros `packages` install, for a composition that opens one
+/// node actor per micro. A package that does not parse is skipped here, and reported by
+/// [`native_runtime`].
+pub fn package_micro_ids(packages: &[PackageFiles]) -> Vec<String> {
+    packages
+        .iter()
+        .filter_map(|files| {
+            // Only the identity is wanted, so the component bytes are not copied in.
+            clay_mdk::package::Package::from_json(
+                clay_mdk::LOCAL_NAMESPACE,
+                &files.manifest_json,
+                Vec::new(),
+            )
+            .ok()
+            .map(|package| package.id().as_str().to_owned())
+        })
+        .collect()
+}
+
+/// The `dispatch.local` egress a composition holds for a micro, by its id text (`<did>/<name>`):
+/// `None` for a micro with no node access. A host with no node (desktop today) answers `None` for
+/// every micro, so none can call a node method (Clay on the node §3).
+pub type MicroEgresses<'a> = &'a dyn Fn(&str) -> Option<Arc<dyn DispatchEgress>>;
+
+/// The configuration datum a composition's install writes for a micro, by its id text: `(tag,
+/// key, value)`, as `dayframe_node::NodeComposition::config_datum` produces it. `None` for a micro
+/// with none. A host with no node answers `None` for every micro.
+pub type MicroConfigs<'a> = &'a dyn Fn(&str) -> Option<(String, String, serde_json::Value)>;
+
 /// Parse each package and make it a catalog entry run by `engine`. An unparseable package is
-/// reported per entry and never stops the shell.
+/// reported per entry and never stops the shell. Also answers the routes and values of the
+/// configuration datums `configs` holds for the packages, to write once the composition has
+/// bound the configuration documents.
 fn package_micros(
     packages: Vec<PackageFiles>,
     engine: impl PackageEngine,
-) -> (Vec<InstalledMicro>, Vec<String>) {
+    egresses: MicroEgresses<'_>,
+    configs: MicroConfigs<'_>,
+) -> (
+    Vec<InstalledMicro>,
+    Vec<(FacetRoute, serde_json::Value)>,
+    Vec<String>,
+) {
     let mut installed = Vec::new();
+    let mut config_writes = Vec::new();
     let mut errors = Vec::new();
     for files in packages {
         let parsed = clay_mdk::package::Package::from_json(
@@ -201,12 +242,53 @@ fn package_micros(
             Ok(package) => {
                 let sidecar = package.sidecar().clone();
                 let bytes = package.bytes().to_vec();
+                let egress = egresses(package.id().as_str());
+                if let Some((tag, key, value)) = configs(package.id().as_str()) {
+                    // A manifest names the facets it reads by tag and never the document, and
+                    // the composition keeps one document per configuration binding, so the
+                    // datum goes in the document of the binding whose request asks for its tag.
+                    // An install that states a datum the micro does not request is a
+                    // composition mistake, not something to skip.
+                    let request = sidecar
+                        .manifest
+                        .configuration_requests
+                        .iter()
+                        .find(|request| {
+                            request.facets.iter().any(|facet| {
+                                facet.tag.as_str() == tag
+                                    && facet.key_id.as_deref().is_none_or(|id| id == key)
+                            })
+                        })
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{}'s install writes the config datum {tag}/{key}, which its \
+                                 manifest does not request",
+                                package.id()
+                            )
+                        });
+                    config_writes.push((
+                        FacetRoute {
+                            document: dayframe_composition::config_document(&request.binding),
+                            branch: dayframe_composition::CONFIG_BRANCH.into(),
+                            tag,
+                            key_id: key,
+                        },
+                        value,
+                    ));
+                }
                 let engine = engine.clone();
                 let micro = InstalledMicro::new(
                     package.id().clone(),
                     sidecar.clone(),
                     move |id, resources, bindings| {
-                        engine(resources, id, sidecar.manifest, bindings, bytes)
+                        engine(
+                            resources,
+                            id,
+                            sidecar.manifest,
+                            bindings,
+                            egress.clone(),
+                            bytes,
+                        )
                     },
                 )
                 // A package may require the shell's publications (the layout's app bar
@@ -223,23 +305,35 @@ fn package_micros(
             Err(error) => errors.push(format!("{}: {error}", files.origin)),
         }
     }
-    (installed, errors)
+    (installed, config_writes, errors)
 }
 
 /// Assemble the native composition over `store` with `packages` installed beside the linked
 /// built-ins. `package_errors` are the shell's own discovery failures (an unreadable
 /// directory, a missing asset), reported beside the parse failures. Async because durable
-/// collections load before they report bootstrap, which parks on a disk-backed store.
+/// collections load before they report bootstrap, which parks on a disk-backed store. `egresses`
+/// is each package micro's node access (see [`MicroEgresses`]), and `configs` the configuration
+/// datum its install states (see [`MicroConfigs`]), which is written into the micro's
+/// configuration document on every start: an install's datum carries what the node minted for
+/// this boot (a document capability), so it replaces whatever an earlier start persisted.
 pub async fn native_runtime<St: OrderedStore + Send + Sync + 'static>(
     store: Arc<St>,
     packages: Vec<PackageFiles>,
     package_errors: Vec<String>,
     engine: impl PackageEngine,
+    egresses: MicroEgresses<'_>,
+    configs: MicroConfigs<'_>,
 ) -> Result<CompositionRuntime, clay_store::StoreError> {
     let mut installed = native_micros();
-    let (packages, errors) = package_micros(packages, engine);
+    let (packages, config_writes, errors) = package_micros(packages, engine, egresses, configs);
     installed.extend(packages);
     let mut runtime = CompositionRuntime::new(store, installed).await?;
+    for (route, value) in config_writes {
+        runtime
+            .documents()
+            .mock_documents()
+            .external_change(route, Some(value));
+    }
     runtime.installation_errors.extend(package_errors);
     runtime.installation_errors.extend(errors);
     micro_sample::seed_mock_defaults(runtime.documents());
@@ -305,7 +399,7 @@ pub static SYSTEM_BACK: SystemBack = SystemBack {
 
 /// Reads the system chrome currently covering the window, in logical px, given the window's
 /// scale factor. Only a shell whose window has such chrome (Android) supplies one.
-#[cfg(feature = "blitz")]
+#[cfg(any(feature = "blitz", feature = "wry"))]
 pub type InsetsSource = Callback<f64, Insets>;
 
 /// What a shell mounts once the runtime exists: it reads the renderer's window events into
@@ -397,20 +491,7 @@ fn use_host_inputs(insets_source: Option<InsetsSource>) -> HostInputs {
         let window = window.clone();
         move || read_insets(&window)
     });
-    #[cfg(target_os = "android")]
-    {
-        use_future(move || async move {
-            loop {
-                SYSTEM_BACK.requested.notified().await;
-                platform_back += 1;
-            }
-        });
-        use_effect(move || {
-            SYSTEM_BACK
-                .can_back
-                .store(can_back(), std::sync::atomic::Ordering::Release);
-        });
-    }
+    use_system_back(platform_back, can_back);
     dioxus_native::use_window_event(move |event, _| match event {
         WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. } => {
             let (w, h) = logical_size(&window);
@@ -445,6 +526,137 @@ fn use_host_inputs(insets_source: Option<InsetsSource>) -> HostInputs {
     }
 }
 
+/// Ties the shell to [`SYSTEM_BACK`] on Android: each gesture the activity hands over counts as a
+/// platform back, and whether the shell has somewhere to go back to is published for the
+/// activity to read on its UI thread. Elsewhere no activity asks, so this does nothing.
+#[cfg(any(feature = "blitz", feature = "wry"))]
+fn use_system_back(platform_back: Signal<u64>, can_back: Signal<bool>) {
+    #[cfg(target_os = "android")]
+    {
+        let mut platform_back = platform_back;
+        use_future(move || async move {
+            loop {
+                SYSTEM_BACK.requested.notified().await;
+                platform_back += 1;
+            }
+        });
+        use_effect(move || {
+            SYSTEM_BACK
+                .can_back
+                .store(can_back(), std::sync::atomic::Ordering::Release);
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = (platform_back, can_back);
+}
+
+/// What a webview host knows better than its window: the webview's own size in CSS px and the
+/// device's CSS px per physical px. tao's Android window answers a scale factor of 1.0 whatever
+/// the display density, and its size includes the status bar, which the WebView sits below, so
+/// the Android shell reads both from the activity itself. `None` takes the window's (desktop).
+#[cfg(feature = "wry")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Viewport {
+    pub width: f64,
+    pub height: f64,
+    pub scale: f64,
+}
+
+#[cfg(feature = "wry")]
+pub type ViewportSource = Callback<(), Viewport>;
+
+/// Mounts the shell under Wry once the runtime exists, on desktop or in an Android webview.
+/// `insets` is the system chrome source of a window that has some (Android); `viewport` replaces
+/// a window size and scale factor that are wrong (Android, see [`Viewport`]).
+#[cfg(feature = "wry")]
+#[component]
+pub fn WryApplication(
+    runtime: Signal<Option<CompositionRuntime>>,
+    insets: Option<InsetsSource>,
+    viewport: Option<ViewportSource>,
+) -> Element {
+    let initial = runtime
+        .read()
+        .clone()
+        .expect("WryApplication mounts only with a built runtime");
+    let runtime = use_signal(|| initial);
+    let host = use_wry_host_inputs(insets, viewport);
+    rsx! { Application { runtime, host } }
+}
+
+/// What the window tells the shell under Wry: its logical size, read from tao's resize events
+/// (the shell never measures the DOM), the system chrome over it, and the platform back. The
+/// webview is a browser engine, so the shell's keyboard paths are on and a split drag survives
+/// the pointer leaving the window. A desktop webview gets no platform back gesture (the shell's
+/// own back button is the only way back); an Android one gets the activity's, through
+/// [`SYSTEM_BACK`].
+#[cfg(feature = "wry")]
+fn use_wry_host_inputs(
+    insets_source: Option<InsetsSource>,
+    viewport_source: Option<ViewportSource>,
+) -> HostInputs {
+    use dioxus_desktop::WindowEvent;
+    use dioxus_desktop::tao::event::Event;
+    let window = dioxus_desktop::use_window();
+    let viewport = move || {
+        viewport_source.map_or_else(
+            || {
+                let window = &dioxus_desktop::window().window;
+                let scale = window.scale_factor();
+                let size = window.inner_size().to_logical::<f64>(scale);
+                Viewport {
+                    width: size.width,
+                    height: size.height,
+                    scale,
+                }
+            },
+            |source| source.call(()),
+        )
+    };
+    let scale = move || viewport().scale;
+    let logical_size = move || {
+        let Viewport { width, height, .. } = viewport();
+        (width, height)
+    };
+    // Re-read whenever the window changes: a rotation, a bar appearing or a cutout all change
+    // its size, and tao reports no inset change of its own.
+    let read_insets =
+        move || insets_source.map_or_else(Insets::default, |source| source.call(scale()));
+    let initial = logical_size();
+    let mut width = use_signal(|| initial.0);
+    let mut height = use_signal(|| initial.1);
+    let mut insets = use_signal(read_insets);
+    let platform_back = use_signal(|| 0_u64);
+    let can_back = use_signal(|| false);
+    use_system_back(platform_back, can_back);
+    dioxus_desktop::use_wry_event_handler(move |event, _| {
+        let Event::WindowEvent {
+            window_id,
+            event: WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. },
+            ..
+        } = event
+        else {
+            return;
+        };
+        if *window_id == window.window.id() {
+            let (w, h) = logical_size();
+            width.set(w);
+            height.set(h);
+            insets.set(read_insets());
+        }
+    });
+    HostInputs {
+        width: width.into(),
+        height: height.into(),
+        insets: insets.into(),
+        platform_back,
+        can_back,
+        renderer: dayframe_composition::Renderer::Browser,
+        // The development seed: see `HostInputs::start`.
+        start: std::env::var("DAYFRAME_SHELL_OPEN").ok(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,5 +676,48 @@ mod tests {
         assert!(back.request());
         // The permit is stored, so a request made before the shell's task waits is not lost.
         back.requested.notified().await;
+    }
+
+    /// An install's configuration datum is written into the document the composition bound the
+    /// micro's configuration binding to, so the micro reads it through its `Context`; a micro
+    /// whose install states none gets no write.
+    #[tokio::test]
+    async fn an_installs_config_datum_lands_where_the_micro_reads_its_config() {
+        let review = |origin: &str| PackageFiles {
+            origin: origin.to_owned(),
+            manifest_json: serde_json::to_vec(&micro_review_manifest::sidecar()).unwrap(),
+            component: Vec::new(),
+        };
+        let id = package_micro_ids(&[review("review")]).remove(0);
+        let datum = serde_json::json!({ "githubDrawer": "g", "intxtDrawers": [], "docCap": "c" });
+        let runtime = native_runtime(
+            Arc::new(clay_store::MemoryStore::default()),
+            vec![review("review")],
+            Vec::new(),
+            wasmtime_engine,
+            &|_| None,
+            &|micro| {
+                (micro == id).then(|| {
+                    (
+                        micro_review_manifest::CONFIG_TAG.to_owned(),
+                        micro_review_manifest::CONFIG_KEY.to_owned(),
+                        datum.clone(),
+                    )
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert!(runtime.installation_errors.is_empty());
+        let route = FacetRoute {
+            document: dayframe_composition::config_document(micro_review_manifest::CONFIG_NAME),
+            branch: dayframe_composition::CONFIG_BRANCH.into(),
+            tag: micro_review_manifest::CONFIG_TAG.into(),
+            key_id: micro_review_manifest::CONFIG_KEY.into(),
+        };
+        assert_eq!(
+            runtime.documents().mock_documents().get(&route),
+            Some(datum)
+        );
     }
 }

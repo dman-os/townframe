@@ -6,28 +6,24 @@ edition = "2021"
 [dependencies]
 dioxus = { workspace = true }
 
-dioxus-native = { workspace = true, features = ["scrollbars"] }
-anyrender = { version = "0.13.0" }
-anyrender_skia = { version = "0.11.0" }
-anyrender_vello = { version = "0.14.0" }
-anyrender_vello_cpu = { version = "0.17.0" }
-anyrender_vello_hybrid = { version = "0.10.0" }
-tokio = { version = "1", features = ["time", "rt"] }
+tokio = { version = "1", features = ["time", "rt", "sync"] }
 
 [features]
-default = ["desktop"]
-mobile = ["dioxus/mobile"]
-# Native windowing backend: a platform is selected by target, so the feature only turns on
-# the Dioxus desktop renderer rather than naming a platform.
-desktop = ["dioxus/native"]
+default = ["mobile"]
+# The Android system WebView (Wry), the app's renderer. `dx build --platform android --renderer
+# webview` selects this feature by its `dioxus/mobile`.
+mobile = ["dioxus/mobile", "dayframe_native/wry"]
 
 [target.'cfg(target_os = "android")'.dependencies]
+#
+# internal
+big_cabinet = { workspace = true }
+dayframe_node = { workspace = true }
+
 # The composition (Wasmtime, SQLite) is only built for the target that runs it.
-dayframe_native = { workspace = true, features = ["blitz"] }
-android-activity = { version = "0.6", features = ["native-activity"] }
+dayframe_native = { workspace = true }
 dayframe_composition = { workspace = true }
 jni = "0.21"
-winit = { version = "0.31.0-beta.3", features = ["android-native-activity"] }
 
 [[bin]]
 name = "dayframe_mobile"
