@@ -254,6 +254,15 @@
   {
     "crate": "big_cartridges_core",
     "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.awaitCartridgeGrants",
+    "revision": null,
+    "sidecar": false,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
     "nsid": "org.example.daybook.cartridges.clearCartridgeConfig",
     "revision": null,
     "sidecar": false,
@@ -453,6 +462,15 @@
     "crate": "big_cartridges_core",
     "kind": "procedure",
     "nsid": "org.example.daybook.cartridges.requestCartridgeGrant",
+    "revision": null,
+    "sidecar": false,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.resolveCartridgePin",
     "revision": null,
     "sidecar": false,
     "stability": "unstable",
