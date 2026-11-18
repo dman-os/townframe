@@ -272,14 +272,79 @@
         }
       );
 
-      # The directory DAYFRAME_PACKAGE_DIR points at: <name>.manifest.json,
-      # <name>.component.wasm and intxt.guest.wasm.
-      daytxt-packages = pkgs.runCommand "daytxt-packages" { } ''
-        mkdir -p $out
-        cp ${daytxt-micros}/*.component.wasm $out/
-        cp ${daytxt-manifests}/*.manifest.json $out/
-        cp ${intxt-guest}/intxt.guest.wasm $out/
-      '';
+      # The directories DAYFRAME_PACKAGE_DIR points at: <name>.manifest.json,
+      # <name>.component.wasm and intxt.guest.wasm. The shell micro is compiled
+      # into the host and ships no package file. The shipping set is the lab micro
+      # plus the intxt guest (the hosted desktop refuses to boot without
+      # intxt.guest.wasm); the dev set is every micro, which the web build and
+      # tests that open counter/layout/review read.
+      mkPackages =
+        name: names:
+        pkgs.runCommand name { } ''
+          mkdir -p $out
+          ${lib.concatMapStringsSep "\n" (n: ''
+            cp ${daytxt-micros}/${n}.component.wasm ${daytxt-manifests}/${n}.manifest.json $out/
+          '') names}
+          cp ${intxt-guest}/intxt.guest.wasm $out/
+        '';
+      daytxt-packages = mkPackages "daytxt-packages" [ "lab" ];
+      daytxt-packages-dev = mkPackages "daytxt-packages-dev" microNames;
+
+      # dayframe_web for the browser: the raw cargo wasm module, `wasm-release`,
+      # isolated features. wasm-bindgen and the site assembly are the next step.
+      webArgs = wasmArgs // {
+        pname = "daytxt-web-wasm";
+        CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+        CARGO_PROFILE = "wasm-release";
+        cargoExtraArgs = "--locked ${isolated} -p dayframe_web --bin dayframe_web";
+      };
+      daytxt-web-wasm = craneLib.buildPackage (
+        webArgs
+        // {
+          cargoArtifacts = craneLib.buildDepsOnly webArgs;
+          doInstallCargoArtifacts = false;
+          installPhaseCommand = ''
+            mkdir -p $out
+            cp target/wasm32-unknown-unknown/wasm-release/dayframe_web.wasm $out/
+          '';
+        }
+      );
+
+      # The static site, assembled by x/dayframe-site.ts: the same script
+      # x/dayframe-web.ts runs in the dev loop. Only static output; serving it
+      # (and its Content-Security-Policy header) is not part of this package.
+      daytxt-web =
+        let
+          siteSrc = lib.fileset.toSource {
+            root = repoRoot;
+            fileset = lib.fileset.unions [
+              (repoRoot + "/Cargo.lock")
+              (repoRoot + "/x/dayframe-site.ts")
+              (repoRoot + "/src/ui/assets/tailwind.css")
+            ];
+          };
+        in
+        pkgs.runCommand "daytxt-web"
+          {
+            nativeBuildInputs = [
+              pkgs.deno
+              # Must match the single wasm-bindgen crate in Cargo.lock; the site
+              # script asserts it. Same pin as the dev shells.
+              pkgs.wasm-bindgen-cli_0_2_127
+              pkgs.b3sum
+              pkgs.gzip
+            ];
+          }
+          ''
+            export DENO_DIR=$TMPDIR/deno
+            deno run --no-config --no-remote --allow-read --allow-write --allow-run \
+              ${siteSrc}/x/dayframe-site.ts \
+              --wasm ${daytxt-web-wasm}/dayframe_web.wasm \
+              --packages ${daytxt-packages-dev} \
+              --tailwind ${siteSrc}/src/ui/assets/tailwind.css \
+              --cargo-lock ${siteSrc}/Cargo.lock \
+              --out $out
+          '';
 
       commonArgs = {
         pname = "daybook-cli";
@@ -412,6 +477,9 @@
           daytxt-manifests
           intxt-guest
           daytxt-packages
+          daytxt-packages-dev
+          daytxt-web-wasm
+          daytxt-web
           ;
         wit-deps = witDeps;
         cargo-vendor-dir = cargoVendorDir;
