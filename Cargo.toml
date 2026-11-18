@@ -368,7 +368,7 @@ wasmtime-wasi-http = { version = "48.0.7", default-features = false }
 # async export task state in a libc `thread_local!`, which cannot be swapped per component-model
 # task. Without `std` it goes through the `wit_bindgen_0_62_0_{get,set}_task_context` hooks that
 # `clay_mdk` defines over context slot 0 (see `clay_mdk/lib.rs`). Each guest crate names the
-# features it needs; `x/check-dayframe.ts` fails if `std` comes back. The exact `=` pin is on
+# features it needs; `x/check-daytxt.ts` fails if `std` comes back. The exact `=` pin is on
 # purpose: `clay_mdk` defines `wit_bindgen_0_62_0_*` symbols, so a bump must be a visible edit there.
 wit-bindgen = { version = "=0.62.0", default-features = false }
 wstd = "0.6.8"

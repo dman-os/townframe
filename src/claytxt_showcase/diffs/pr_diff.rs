@@ -22,13 +22,13 @@ use super::Segmented;
 use review_mock::DiffOptions;
 use web_time::Instant;
 
-/// Where the diff comes from unless `DAYFRAME_LAB_DIFF` says otherwise: the gitignored `public/` beside the
+/// Where the diff comes from unless `DAYTXT_LAB_DIFF` says otherwise: the gitignored `public/` beside the
 /// crate, the same file the browser build serves (3.6 MB, so it is never committed).
 #[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/public/pr84.diff");
 
 /// Where the page fetches the diff from: the same gitignored `public/pr84.diff`, served beside the page
-/// by `x/dayframe.ts showcase-web` (which copies `DAYFRAME_LAB_DIFF` there when it is set).
+/// by `x/daytxt.ts showcase-web` (which copies `DAYTXT_LAB_DIFF` there when it is set).
 #[cfg(target_arch = "wasm32")]
 const FETCH_URL: &str = "pr84.diff";
 
@@ -76,9 +76,9 @@ static PR_DIFF: OnceLock<Result<PrDiff, String>> = OnceLock::new();
 /// The diff text and where it was read from.
 #[cfg(not(target_arch = "wasm32"))]
 async fn read_text() -> Result<(String, String), String> {
-    let path = std::env::var("DAYFRAME_LAB_DIFF").unwrap_or_else(|_| DEFAULT_PATH.to_owned());
+    let path = std::env::var("DAYTXT_LAB_DIFF").unwrap_or_else(|_| DEFAULT_PATH.to_owned());
     let text = std::fs::read_to_string(&path).map_err(|error| {
-        format!("Could not read {path}: {error}. Produce it with `{HOW_TO_PRODUCE}`, or point DAYFRAME_LAB_DIFF at another unified git diff.")
+        format!("Could not read {path}: {error}. Produce it with `{HOW_TO_PRODUCE}`, or point DAYTXT_LAB_DIFF at another unified git diff.")
     })?;
     Ok((path, text))
 }
@@ -91,7 +91,7 @@ async fn read_text() -> Result<(String, String), String> {
 
     let unavailable = |why: String| {
         format!(
-            "Could not fetch {FETCH_URL}: {why}. Produce it with `{HOW_TO_PRODUCE}` and serve the lab with `x/dayframe.ts showcase-web`, which copies it beside the page."
+            "Could not fetch {FETCH_URL}: {why}. Produce it with `{HOW_TO_PRODUCE}` and serve the lab with `x/daytxt.ts showcase-web`, which copies it beside the page."
         )
     };
     let window = web_sys::window().expect("the lab runs in a window");

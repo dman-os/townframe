@@ -1,4 +1,4 @@
-//! The Dayframe skin of [`headless::list_details::ListDetails`].
+//! The claytxt skin of [`headless::list_details::ListDetails`].
 use crate::WidthClass;
 use crate::headless::list_details::ListDetailsSkin;
 use crate::headless::list_details::{self};

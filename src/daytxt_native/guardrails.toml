@@ -1,6 +1,6 @@
 version = 1
 role = "application"
-dependency_reason = "dayframe microkernel layering: the native-engine half of the composition root (Wasmtime, SQLite, linked built-ins) shared by the desktop and mobile shells"
+dependency_reason = "claytxt microkernel layering: the native-engine half of the composition root (Wasmtime, SQLite, linked built-ins) shared by the desktop and mobile shells"
 allowed_dependencies = [
     "big_cabinet",
     "big_cabinet_core",

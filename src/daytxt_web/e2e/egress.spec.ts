@@ -2,7 +2,7 @@ import { expect, test, type Request } from "@playwright/test";
 import { installDeepQuery, showCounterPanel, watchFailures } from "./shell";
 
 // The web host's egress controls (`clay_surface` value policy, the presentation box, and the CSP
-// in `x/dayframe-web.ts`). The guest vocabulary refuses hostile values before they reach the DOM,
+// in `x/daytxt-web.ts`). The guest vocabulary refuses hostile values before they reach the DOM,
 // so these specs inject the hostile DOM directly: they pin what the browser does if a value ever
 // slips past validation, which is the CSP's and the presentation box's whole job.
 

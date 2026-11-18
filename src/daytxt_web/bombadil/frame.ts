@@ -1,4 +1,4 @@
-// The Dayframe shell's observable state, read from a page. Shared by the Bombadil properties
+// The daytxt shell's observable state, read from a page. Shared by the Bombadil properties
 // (`shell.ts`) and the Playwright pin of the reading itself (`e2e/frame.spec.ts`).
 
 export type Rect = { left: number; top: number; right: number; bottom: number };

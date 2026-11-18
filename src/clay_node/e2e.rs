@@ -1,5 +1,5 @@
 //! The composition end to end: it boots a real node from a directory, a Wasmtime micro (the
-//! `dispatch` fixture, prepared as `DAYFRAME_DISPATCH_COMPONENT`) calls a granted method through
+//! `dispatch` fixture, prepared as `DAYTXT_DISPATCH_COMPONENT`) calls a granted method through
 //! the egress the composition installed for it, a second node pairs with the first by a
 //! bootstrap ticket, and shutdown is clean.
 

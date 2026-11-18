@@ -1,4 +1,4 @@
-// Invariants of the Dayframe shell, explored by Bombadil (ADR 032 section 9: the browser build is
+// Invariants of the daytxt shell, explored by Bombadil (ADR 032 section 9: the browser build is
 // the broad integration surface; Playwright holds the scripted flows and Bombadil the properties
 // that must hold in every state it can reach by clicking). The shell's grammar is FDR 006.
 //

@@ -1,5 +1,5 @@
-//! Web composition shell for Dayframe (ADR 018 §7): native built-ins linked by this
-//! shell plus every package in `packages/index.json`, written by `x/dayframe-web.ts` from
+//! Web composition shell for daytxt (ADR 018 §7): native built-ins linked by this
+//! shell plus every package in `packages/index.json`, written by `x/daytxt-web.ts` from
 //! each component's statically-read manifest. A package's bytes are fetched only when an
 //! instance activates, and their digest is verified against the index before the browser
 //! engine (`wcmp`) ever sees them.
@@ -152,7 +152,7 @@ fn native_micros() -> Vec<InstalledMicro> {
 /// error in the lifecycle panel; the native built-ins still run. A store that cannot open or
 /// load (blocked or full browser storage) is an error the caller shows instead of a shell.
 async fn web_runtime() -> Result<CompositionRuntime, String> {
-    let store = clay_store::IndexedDbStore::open("dayframe")
+    let store = clay_store::IndexedDbStore::open("daytxt")
         .await
         .map_err(|error| format!("cannot open browser storage: {error}"))?;
     let mut installed = native_micros();
@@ -207,7 +207,7 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
         .map_err(|error| format!("cannot load browser storage: {error}"))?;
     runtime.installation_errors.extend(errors);
     micro_sample::seed_mock_defaults(runtime.documents());
-    // Demo seed for the counter package `x/dayframe-web.ts` installs: start its config
+    // Demo seed for the counter package `x/daytxt-web.ts` installs: start its config
     // at zero so the guest renders its value instead of the absent-config notice.
     runtime.documents().mock_documents().seed(
         clay_docs::FacetRoute {
@@ -337,11 +337,11 @@ fn App() -> Element {
             main {
                 class: "bg-background font-sans text-foreground",
                 if let Some(error) = failure() {
-                    p { role: "alert", "Dayframe cannot start: {error}" }
+                    p { role: "alert", "daytxt cannot start: {error}" }
                 } else if runtime.read().is_some() {
                     ReadyApp { runtime }
                 } else {
-                    p { role: "status", "Loading Dayframe packages…" }
+                    p { role: "status", "Loading daytxt packages…" }
                 }
             }
         }

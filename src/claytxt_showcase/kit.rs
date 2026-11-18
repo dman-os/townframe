@@ -48,7 +48,7 @@ fn Frame(title: String, width_px: f64, children: Element) -> Element {
 }
 
 /// Which specimen groups to show: all of them, or the one a screenshot run names through
-/// `DAYFRAME_SHOWCASE_KIT` (`nav`, `appbar`, `sections`, `list`, `sheet`, `drawer`). The native window cannot scroll
+/// `DAYTXT_SHOWCASE_KIT` (`nav`, `appbar`, `sections`, `list`, `sheet`, `drawer`). The native window cannot scroll
 /// under automation, so a group per run is how every specimen gets captured.
 #[component]
 pub fn KitSpecimens(only: Option<String>) -> Element {
@@ -310,7 +310,7 @@ fn DrawerSpecimen(width_px: f64) -> Element {
             nav {
                 class: "flex flex-col gap-1 p-2",
                 "aria-label": "Specimen sidebar",
-                AppBar { title: "Dayframe" }
+                AppBar { title: "claytxt" }
                 for title in ["Home", "Settings", "Layout"] {
                     button {
                         key: "{title}",

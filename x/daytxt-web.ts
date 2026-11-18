@@ -6,11 +6,11 @@
 // manifests) and is pinned with the BLAKE3 digest of the component bytes; the shell fetches a
 // package only when an instance activates and verifies the digest before `wcmp` compiles it.
 //
-//   deno run --allow-all x/dayframe-web.ts            build, then serve on HOST:PORT
-//   deno run --allow-all x/dayframe-web.ts --build    build only
+//   deno run --allow-all x/daytxt-web.ts            build, then serve on HOST:PORT
+//   deno run --allow-all x/daytxt-web.ts --build    build only
 
 import { crypto } from "jsr:@std/crypto@1.0.5";
-import { prepareDayframePackages } from "./dayframe-packages.ts";
+import { prepareDaytxtPackages } from "./daytxt-packages.ts";
 import { $ } from "./utils.ts";
 
 const buildOnly = Deno.args.includes("--build");
@@ -34,11 +34,11 @@ const isolated = ["--config", 'resolver.feature-unification="selected"'];
 
 // Only the shells' packages: the test-only guest fixtures are not served. The one exception is
 // the `trapper` micro the e2e's sync-export trap spec opens, served when the e2e asks for it
-// (`DAYFRAME_WEB_TRAPPER=1`, which `playwright.config.ts` sets) and never in a plain serve.
-const packageDirectory = (await prepareDayframePackages({
+// (`DAYTXT_WEB_TRAPPER=1`, which `playwright.config.ts` sets) and never in a plain serve.
+const packageDirectory = (await prepareDaytxtPackages({
   testFixtures: false,
-  trapper: Deno.env.get("DAYFRAME_WEB_TRAPPER") === "1",
-}))["DAYFRAME_PACKAGE_DIR"];
+  trapper: Deno.env.get("DAYTXT_WEB_TRAPPER") === "1",
+}))["DAYTXT_PACKAGE_DIR"];
 
 // BLAKE3, the digest big_blobs uses and `clay_mdk::package::Package::digest` computes (Deno's
 // Deno's own WebCrypto lacks it; `@std/crypto` adds it).
@@ -195,7 +195,7 @@ await site.join("index.html").writeText(`<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <title>Dayframe</title>
+    <title>daytxt</title>
   </head>
   <body>
     <div id="main"></div>

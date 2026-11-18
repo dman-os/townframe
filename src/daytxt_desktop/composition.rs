@@ -9,32 +9,32 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// The app's data directory: `$XDG_DATA_HOME/dayframe` (falling back to `~/.local/share`).
+/// The app's data directory: `$XDG_DATA_HOME/daytxt` (falling back to `~/.local/share`).
 fn data_directory() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
         })?;
-    Some(base.join("dayframe"))
+    Some(base.join("daytxt"))
 }
 
-/// The directory scanned for package files: `DAYFRAME_PACKAGE_DIR`, else
+/// The directory scanned for package files: `DAYTXT_PACKAGE_DIR`, else
 /// `<data directory>/packages`.
 fn package_directory() -> Option<PathBuf> {
-    if let Some(directory) = std::env::var_os("DAYFRAME_PACKAGE_DIR") {
+    if let Some(directory) = std::env::var_os("DAYTXT_PACKAGE_DIR") {
         return Some(PathBuf::from(directory));
     }
     Some(data_directory()?.join("packages"))
 }
 
-/// Open the durable store: the SQLite file named by `DAYFRAME_STORE_PATH`, else
+/// Open the durable store: the SQLite file named by `DAYTXT_STORE_PATH`, else
 /// `<data directory>/store.sqlite`.
 pub async fn open_store() -> Result<clay_store::SqliteStore, String> {
-    let path = match std::env::var_os("DAYFRAME_STORE_PATH") {
+    let path = match std::env::var_os("DAYTXT_STORE_PATH") {
         Some(path) => PathBuf::from(path),
         None => data_directory()
-            .ok_or("no DAYFRAME_STORE_PATH, XDG_DATA_HOME or HOME to place the store under")?
+            .ok_or("no DAYTXT_STORE_PATH, XDG_DATA_HOME or HOME to place the store under")?
             .join("store.sqlite"),
     };
     daytxt_native::open_store(&path).await
@@ -97,7 +97,7 @@ pub(crate) fn scan_packages() -> (Vec<PackageFiles>, Vec<String>) {
 }
 
 /// The file in the package directory holding intxt's nodule handler component, staged beside
-/// the packages by `x/dayframe.ts` (`prepareDayframePackages`).
+/// the packages by `x/daytxt.ts` (`prepareDaytxtPackages`).
 const INTXT_GUEST_FILE: &str = "intxt.guest.wasm";
 
 /// Assemble the desktop composition over `store`, its packages on Wasmtime, with no node: no

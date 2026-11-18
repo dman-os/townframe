@@ -15,7 +15,7 @@ pub(super) fn TokenFoundations() -> Element {
                 FoundationSection {
                     id: "spacing".to_string(),
                     title: "Spacing grid".to_string(),
-                    description: "Spacing uses Tailwind's native utilities, driven by the single Dayframe spacing unit.",
+                    description: "Spacing uses Tailwind's native utilities, driven by the single claytxt spacing unit.",
                     SpacingFoundation {}
                 }
                 FoundationSection {
@@ -90,7 +90,7 @@ fn TypographyFoundation() -> Element {
                     CardContent {
                         p {
                             class: "{utility}",
-                            "Aa — Dayframe foundations"
+                            "Aa — claytxt foundations"
                         }
                         code {
                             class: "mt-3 block text-sm text-foreground-muted",

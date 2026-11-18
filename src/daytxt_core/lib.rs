@@ -1,4 +1,4 @@
-//! Shared Dayframe composition: a catalog-driven composition root, its lifecycle controls, and
+//! Shared daytxt composition: a catalog-driven composition root, its lifecycle controls, and
 //! the `Application` shell UI. The root names no micro: launchers (desktop, web) hand it every
 //! installed micro as an [`InstalledMicro`], a manifest plus its static configuration and the
 //! engine-specific factory for it. Engine-specific guest factories (Wasmtime on desktop, `wcmp`

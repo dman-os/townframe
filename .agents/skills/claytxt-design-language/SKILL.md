@@ -1,11 +1,11 @@
 ---
-name: dayframe-design-language
-description: Apply and extend the Dayframe design language when implementing or reviewing UI. Use for any dayframe_dx UI work involving tokens, Tailwind classes, components, screens, layouts, states, or bespoke visual requests.
+name: claytxt-design-language
+description: Apply and extend the claytxt design language when implementing or reviewing UI. Use for any claytxt UI work involving tokens, Tailwind classes, components, screens, layouts, states, or bespoke visual requests.
 ---
 
-# Dayframe design language
+# claytxt design language
 
-Use this skill for UI work in `src`. It is the design-system counterpart to `dayframe-native-dev-loop`, which covers running, screenshotting, and semantically inspecting the native app.
+Use this skill for UI work in `src`. It is the design-system counterpart to `daytxt-native-dev-loop`, which covers running, screenshotting, and semantically inspecting the native app.
 
 The design language is a maintained implementation contract, not background prose. New UI MUST use it, and a request that exceeds its expressivity MUST be made explicit before being silently implemented as an ad-hoc value.
 
@@ -27,9 +27,9 @@ For token or Tailwind work, also inspect:
 - `x/design-tokens.ts`
 - `src/ui/tailwind.css`
 
-For native build or visual verification, also read `.agents/skills/dayframe-native-dev-loop/SKILL.md`.
+For native build or visual verification, also read `.agents/skills/daytxt-native-dev-loop/SKILL.md`.
 
-For any component that holds state, handles gestures, or writes signals from a task, also read `.agents/skills/dayframe-signal-idioms/SKILL.md`: Dioxus signals are borrowed at run time, and that skill is how the resulting crashes are made structurally impossible.
+For any component that holds state, handles gestures, or writes signals from a task, also read `.agents/skills/claytxt-signal-idioms/SKILL.md`: Dioxus signals are borrowed at run time, and that skill is how the resulting crashes are made structurally impossible.
 
 ## Source-of-truth rules
 
@@ -38,7 +38,7 @@ For any component that holds state, handles gestures, or writes signals from a t
 - Foundation tokens are application-agnostic. They MUST NOT contain tiles, columns, widgets, screens, routes, workflows, or other product-specific grammar.
 - Keep the dependency direction `primitive -> semantic -> optional reusable component`. A primitive MUST NOT depend on a semantic or feature token.
 - The showcase is curated executable evidence, not the normative source and not an exhaustive token catalog.
-- Material theme JSON is an external compatibility/theme-provider boundary, not the canonical Dayframe foundation source.
+- Material theme JSON is an external compatibility/theme-provider boundary, not the canonical claytxt foundation source.
 
 ## Vocabulary first
 

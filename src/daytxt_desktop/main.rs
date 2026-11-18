@@ -6,15 +6,15 @@ mod composition;
 #[cfg(test)]
 mod e2e;
 
-/// Wry unless `DAYFRAME_RENDERER=blitz` picks the Blitz launcher, which the `blitz` feature
+/// Wry unless `DAYTXT_RENDERER=blitz` picks the Blitz launcher, which the `blitz` feature
 /// compiles in next to it. Both launchers live in one binary so the feature stays additive.
 fn main() {
-    match std::env::var("DAYFRAME_RENDERER").as_deref() {
+    match std::env::var("DAYTXT_RENDERER").as_deref() {
         Err(std::env::VarError::NotPresent) | Ok("wry") => wry::launch(),
         #[cfg(feature = "blitz")]
         Ok("blitz") => blitz::launch(),
         other => panic!(
-            "DAYFRAME_RENDERER must be `wry` or (with the `blitz` feature) `blitz`, got {other:?}"
+            "DAYTXT_RENDERER must be `wry` or (with the `blitz` feature) `blitz`, got {other:?}"
         ),
     }
 }
@@ -59,7 +59,7 @@ mod wry {
             .with_context(Renderer::Browser)
             .with_cfg(
                 dioxus::desktop::Config::new()
-                    .with_window(dioxus::desktop::WindowBuilder::new().with_title("Dayframe"))
+                    .with_window(dioxus::desktop::WindowBuilder::new().with_title("daytxt"))
                     // The shell draws its own chrome; Wry's default menu bar adds nothing to it.
                     .with_menu(None),
             )
@@ -75,7 +75,7 @@ mod blitz {
     // through its own entry point.
     pub(crate) fn launch() {
         let config = dioxus_native::Config::new().with_window_attributes(
-            dioxus_native::winit::window::WindowAttributes::default().with_title("Dayframe"),
+            dioxus_native::winit::window::WindowAttributes::default().with_title("daytxt"),
         );
         dioxus_native::launch_cfg(
             App,

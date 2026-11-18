@@ -1,5 +1,5 @@
 {
-  "$description": "Dayframe foundation primitives. Values are DTCG-compatible and may be consumed by semantic.tokens.json.",
+  "$description": "claytxt foundation primitives. Values are DTCG-compatible and may be consumed by semantic.tokens.json.",
   "dimension": {
     "$type": "dimension",
     "spacing": {

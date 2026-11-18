@@ -64,11 +64,11 @@ struct MaterialTheme {
     palettes: BTreeMap<String, BTreeMap<String, String>>,
 }
 
-/// Wry unless `DAYFRAME_RENDERER=blitz`. `dioxus::launch` would pick Blitz whenever any crate in
+/// Wry unless `DAYTXT_RENDERER=blitz`. `dioxus::launch` would pick Blitz whenever any crate in
 /// the build turns on `dioxus/native` (feature unification), so each renderer is named.
 #[cfg(feature = "desktop")]
 fn main() {
-    match std::env::var("DAYFRAME_RENDERER").as_deref() {
+    match std::env::var("DAYTXT_RENDERER").as_deref() {
         Err(std::env::VarError::NotPresent) | Ok("wry") => dioxus::LaunchBuilder::desktop()
             .with_cfg(
                 dioxus::desktop::Config::new()
@@ -77,7 +77,7 @@ fn main() {
             )
             .launch(App),
         Ok("blitz") => dioxus_native::launch(App),
-        other => panic!("DAYFRAME_RENDERER must be `wry` or `blitz`, got {other:?}"),
+        other => panic!("DAYTXT_RENDERER must be `wry` or `blitz`, got {other:?}"),
     }
 }
 
@@ -193,8 +193,8 @@ fn App() -> Element {
     let theme: MaterialTheme = serde_json::from_str(MATERIAL_THEME_JSON)
         .expect("material-theme.json must match the Material theme schema");
     let mut mode = use_signal(|| ThemeMode::Dark);
-    // `DAYFRAME_LAB_TAB=diffs` opens that tab, so a screenshot run needs no click.
-    let mut tab = use_signal(|| match lab_setting("DAYFRAME_LAB_TAB", "tab").as_deref() {
+    // `DAYTXT_LAB_TAB=diffs` opens that tab, so a screenshot run needs no click.
+    let mut tab = use_signal(|| match lab_setting("DAYTXT_LAB_TAB", "tab").as_deref() {
         Some("diffs") => LabTab::Diffs,
         _ => LabTab::Components,
     });
@@ -224,11 +224,11 @@ fn App() -> Element {
                 class: "min-h-screen box-border bg-background p-6 font-sans text-foreground lg:p-12",
                 h1 {
                     class: "mb-2 text-4xl font-bold leading-tight tracking-tight",
-                    "Dayframe theme lab"
+                    "claytxt theme lab"
                 }
                 p {
                     class: "mb-6 max-w-3xl text-foreground-muted leading-relaxed",
-                    "A legible reference for the foundations shared by Dayframe. Change the mode, inspect each token family, and use these specimens as the contract for future themes and components."
+                    "A legible reference for the foundations shared by claytxt. Change the mode, inspect each token family, and use these specimens as the contract for future themes and components."
                 }
                 button {
                     class: "mb-6 cursor-pointer rounded-md border border-border bg-card px-4 py-2 font-sans text-foreground",
@@ -241,7 +241,7 @@ fn App() -> Element {
                     "Toggle {mode:?} mode"
                 }
                 // A screenshot run names one kit specimen group; see `kit::KitSpecimens`.
-                if let Some(group) = lab_setting("DAYFRAME_SHOWCASE_KIT", "kit") {
+                if let Some(group) = lab_setting("DAYTXT_SHOWCASE_KIT", "kit") {
                     kit::KitSpecimens { only: Some(group) }
                 } else {
                 LabTabs { active: tab(), on_select: move |next| tab.set(next) }

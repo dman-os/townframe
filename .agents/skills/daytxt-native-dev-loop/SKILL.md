@@ -1,9 +1,9 @@
 ---
-name: dayframe-native-dev-loop
-description: Run, screenshot, and semantically inspect the dayframe_dx Dioxus/Blitz native desktop app. Use when building or visually verifying src, when the wrapped Dioxus serve process misbehaves, when taking app screenshots under niri, or when driving the native app with accessibility-cli over AT-SPI.
+name: daytxt-native-dev-loop
+description: Run, screenshot, and semantically inspect the daytxt Dioxus/Blitz native desktop app. Use when building or visually verifying src, when the wrapped Dioxus serve process misbehaves, when taking app screenshots under niri, or when driving the native app with accessibility-cli over AT-SPI.
 ---
 
-# Dayframe native dev loop
+# daytxt native dev loop
 
 Use this for any build/run/screenshot/inspect cycle on `src` (the Dioxus 0.8-alpha
 native app). Read the repository `AGENTS.md` first.
@@ -25,12 +25,12 @@ least once. Read the **False signals** section before concluding a build failed.
 ## The one command
 
 ```sh
-deno run --allow-all x/dayframe.ts desktop
+deno run --allow-all x/daytxt.ts desktop
 ```
 
-This builds the Wasm packages, exports `DAYFRAME_PACKAGE_DIR`, then runs `x/dx.ts serve --desktop -p daytxt_desktop --renderer webview --hot-patch false`, printing the package dir and store path. `--fresh` starts from an empty temp store, `--store <path>` picks one, `--native` switches to Blitz. `x/dayframe.ts --help` lists the other commands (`web`, `showcase`, `packages`, `test`).
+This builds the Wasm packages, exports `DAYTXT_PACKAGE_DIR`, then runs `x/dx.ts serve --desktop -p daytxt_desktop --renderer webview --hot-patch false`, printing the package dir and store path. `--fresh` starts from an empty temp store, `--store <path>` picks one, `--native` switches to Blitz. `x/daytxt.ts --help` lists the other commands (`web`, `showcase`, `packages`, `test`).
 
-- **Webview (Wry) is the default renderer** (operator, 2026-11-10: ship on Wry first, Blitz later). `daytxt_desktop`'s `desktop` feature is Wry; `--native` adds the Blitz launcher (feature `blitz`, additive) and starts it with `DAYFRAME_RENDERER=blitz`. Before this split, `--webview` only changed the dx flag and the binary still launched Blitz; a window titled "Dayframe" under the old code was Blitz.
+- **Webview (Wry) is the default renderer** (operator, 2026-11-10: ship on Wry first, Blitz later). `daytxt_desktop`'s `desktop` feature is Wry; `--native` adds the Blitz launcher (feature `blitz`, additive) and starts it with `DAYTXT_RENDERER=blitz`. Before this split, `--webview` only changed the dx flag and the binary still launched Blitz; a window titled "daytxt" under the old code was Blitz.
 - **Webview for interaction checks.** Its AT-SPI tree exposes element titles, so `accessibility-cli --click '[title="..."]'` can verify real callbacks, which Blitz cannot dispatch.
 - **Do not pass `-p ui`.** `ui` is a lib crate, so the Dioxus CLI cannot target it. Target the binary crate `daytxt_desktop` (the script does).
 - **Let the serve process own compilation.** Do not run `cargo build` alongside it. The wrapper forwards the arguments to the repository-local Dioxus CLI, and installs that CLI through `x/install-dx.ts` when needed.
@@ -51,14 +51,14 @@ metadata to find `dioxus-cli` in that workspace; a Git patch requires both `git`
 substitutes a registry CLI when the local fork is absent. Validate the installer with
 `nix develop --command deno test --allow-all x/install-dx.ts`; its bounded local-workspace fixture
 checks package discovery, installation, spaced paths and the `no-downloads` feature without compiling
-Dioxus. Before launching the document-backed counter, `x/dayframe.ts desktop` prepares the packages itself (`x/dayframe.ts packages` prints the env for hand runs).
+Dioxus. Before launching the document-backed counter, `x/daytxt.ts desktop` prepares the packages itself (`x/daytxt.ts packages` prints the env for hand runs).
 
 ## Run it in tmux, not in the background
 
 The operator's convention is tmux session **`townframe`**, window **4**:
 
 ```sh
-tmux send-keys -t townframe:4 'deno run --allow-all x/dayframe.ts desktop' Enter
+tmux send-keys -t townframe:4 'deno run --allow-all x/daytxt.ts desktop' Enter
 ```
 
 Do not launch detached background processes. The tmux pane keeps the server's own keybindings
@@ -82,7 +82,7 @@ the current session directory. A native dev server's asset listener is not a bro
 Under niri, take **window-specific** captures rather than full-output `grim`:
 
 ```sh
-.agents/skills/dayframe-native-dev-loop/scripts/window-shot.sh /tmp/dayframe.png desktop
+.agents/skills/daytxt-native-dev-loop/scripts/window-shot.sh /tmp/daytxt.png desktop
 ```
 
 The script resolves a window id from `niri msg -j windows` by `app_id`/`title` match (or `--pid`) and
@@ -103,9 +103,9 @@ asynchronous). Check the file exists before reading it rather than concluding th
 `accessibility-cli` drives the app over the OS accessibility tree — no browser, no pixels. The local helper resolves a niri window and finds the CLI binary:
 
 ```sh
-.agents/skills/dayframe-native-dev-loop/scripts/a11y.sh desktop --llm-query
-.agents/skills/dayframe-native-dev-loop/scripts/a11y.sh --pid "$PID" --click '[title="Refresh configuration"]'
-.agents/skills/dayframe-native-dev-loop/scripts/a11y.sh --id "$NIRI_ID" --interactive
+.agents/skills/daytxt-native-dev-loop/scripts/a11y.sh desktop --llm-query
+.agents/skills/daytxt-native-dev-loop/scripts/a11y.sh --pid "$PID" --click '[title="Refresh configuration"]'
+.agents/skills/daytxt-native-dev-loop/scripts/a11y.sh --id "$NIRI_ID" --interactive
 ```
 
 Use `ACCESSIBILITY_CLI=/path/to/accessibility-cli` when the binary is outside the usual locations. Direct CLI calls still work; actions and queries poll (`--timeout`, `--poll-interval`), so they can wait for UI that appears after
@@ -132,19 +132,19 @@ guessing at them. The protocol is:
    tree, screenshots of the resting state, and unit tests on the pure geometry/state functions.
 2. Hand the operator **one named, bounded check** — "press `L`, the strip must not move until you
    drag" — rather than an open-ended "does it feel right".
-3. Add an env-var seed (e.g. `DAYFRAME_OPEN="0:0,2;1:2"`) to render the state that needs a click to
+3. Add an env-var seed (e.g. `DAYTXT_OPEN="0:0,2;1:2"`) to render the state that needs a click to
    reach, so a screenshot can stand in for the interaction.
 
-### Shell seed: `DAYFRAME_SHELL_OPEN`
+### Shell seed: `DAYTXT_SHELL_OPEN`
 
-The desktop launcher reads `DAYFRAME_SHELL_OPEN` into `HostInputs::start` and the shell opens that
+The desktop launcher reads `DAYTXT_SHELL_OPEN` into `HostInputs::start` and the shell opens that
 stack instead of home: comma-separated entries, each `panel`, `panel/row` or `@sidebar` (the
 compact drawer). A name without a dot is shorthand for `dayframe.<name>`.
 
 ```sh
-DAYFRAME_SHELL_OPEN=settings deno run --allow-all x/dayframe.ts desktop            # Settings list
-DAYFRAME_SHELL_OPEN=settings,settings/counter deno run --allow-all x/dayframe.ts desktop  # a section
-DAYFRAME_SHELL_OPEN=@sidebar deno run --allow-all x/dayframe.ts desktop            # drawer (narrow window)
+DAYTXT_SHELL_OPEN=settings deno run --allow-all x/daytxt.ts desktop            # Settings list
+DAYTXT_SHELL_OPEN=settings,settings/counter deno run --allow-all x/daytxt.ts desktop  # a section
+DAYTXT_SHELL_OPEN=@sidebar deno run --allow-all x/daytxt.ts desktop            # drawer (narrow window)
 ```
 
 Panel keys are plug ids (`dayframe.settings`, `dayframe.layout`); a Settings row key is the
@@ -189,7 +189,7 @@ The operator has interrupted this loop to ask for less noise. When inspecting a 
 - (2026-11) `x/dx.ts` and `x/install-dx.ts` no longer read `CARGO_TARGET_DIR` from `.env`. Builds go through mbx, which manages `./target` as a symlink into its cache (see AGENTS.md), so `dioxus-cli` lands at `target/dioxus-cli` unless `DIOXUS_CLI_ROOT` or `CARGO_TARGET_DIR` says otherwise. If mbx prunes an unused target, `x/dx.ts` reinstalls the CLI on its next run.
 - (2026-10) `blitz-dom 0.3.0-beta.4` has an inverted `BaseDocument::has_changes(&self)` (`self.changed_nodes.is_empty()`), so `blitz-shell 0.3.0-beta.4` only publishes the `InitialTreeRequested` accessibility snapshot from initial `dom.rebuild()` (`Heading`, `Button[title="Close Settings"]`, `Switch`) and never pushes later `use_future` micro-reconciliation or interaction updates to AT-SPI, even though the native window renders those updates visually.
 - (2026-09) `blitz-shell 0.3.0-beta.2` enables accessibility but depends on `accesskit_xplat 0.1.1` with defaults disabled. Without an explicit Linux dependency enabling xplat defaults, its Unix adapter is absent and the app never registers on AT-SPI even with the service configured. Desktop now enables that backend. This is distinct from missing `XDG_DATA_DIRS`.
-- The native window may have a CLI-generated title (`dioxus | ⛺`) and no app ID. Resolve it from `niri msg -j windows` rather than assuming `desktop` matches. Desktop now explicitly requests the title `Dayframe`.
+- The native window may have a CLI-generated title (`dioxus | ⛺`) and no app ID. Resolve it from `niri msg -j windows` rather than assuming `desktop` matches. Desktop now explicitly requests the title `daytxt`.
 - (2026-09) bare `dx` resolving to deno's shim; wrapped Dioxus checks being stale; CSS-only edits needing a Rust
   touch; tailwind watcher death; the wrapped serve process silently exiting after ~3.5h; misreading an overlapping
   glyph as a missing one.

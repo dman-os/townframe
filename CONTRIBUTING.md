@@ -68,7 +68,7 @@ Native is the third lane: the same guest crates' host-side tests
 (`clay_rt_wasmtime`, `clay_rt_wcmp_wasmi`) drive the prepared components under
 nextest. Feature unification must stay isolated per target: guest builds and
 matrix checks pass `--config resolver.feature-unification="selected"`.
-`x/check-dayframe.ts --prepare-only` rebuilds and exports `DAYFRAME_*_COMPONENT`
+`x/check-daytxt.ts --prepare-only` rebuilds and exports `DAYTXT_*_COMPONENT`
 paths for tests and the web shell.
 
 ## Rust target contracts

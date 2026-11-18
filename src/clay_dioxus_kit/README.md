@@ -1,6 +1,6 @@
 # clay_dioxus_kit
 
-The shared Dioxus component library for Clay compositions (Dayframe, the agentic IDE). It links
+The shared Dioxus component library for Clay compositions (claytxt, the agentic IDE). It links
 into native hosts, the browser build and Wasm guest micros alike, so it depends on Dioxus (default
 features off) and the design-token vocabulary only: no backend, no renderer, no `clay_*` crate.
 Design: [ADR 032 section 7](../../docs/adrs/032-shell-micro-and-component-kit.md); vocabulary:

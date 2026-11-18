@@ -39,14 +39,14 @@ mod android {
     /// pairing. `None` when the device has no external storage.
     static EXTERNAL_DIRECTORY: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-    /// The packages `x/dayframe.ts android` stages into `packages/` before the build. `dx`
+    /// The packages `x/daytxt.ts android` stages into `packages/` before the build. `dx`
     /// copies a folder asset into the APK's `assets/` keeping the file names, which is the only
     /// way to put bytes in the APK: it bundles what `asset!` names. Android offers no
     /// directory listing through the resolver, so the names are listed here.
     static PACKAGES: Asset = asset!("/packages");
     const PACKAGE_NAMES: [&str; 3] = ["counter", "layout", "review"];
 
-    /// intxt's nodule handler component, staged beside the packages (`x/dayframe.ts android`).
+    /// intxt's nodule handler component, staged beside the packages (`x/daytxt.ts android`).
     const INTXT_GUEST_FILE: &str = "intxt.guest.wasm";
 
     pub(super) fn main() {

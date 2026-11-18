@@ -1,5 +1,5 @@
 //! A guest micro calls node methods, end to end: the `dispatch` fixture (`clay_mdk`'s example,
-//! prepared as `DAYFRAME_DISPATCH_COMPONENT`) runs under Wasmtime and calls an in-process node's
+//! prepared as `DAYTXT_DISPATCH_COMPONENT`) runs under Wasmtime and calls an in-process node's
 //! dispatch with `Context::call`, over `wasi:http` to `dispatch.local`, answered by
 //! [`MicroEgress`] as the micro's own actor. The node is an authority and a dispatch with one
 //! provider, the way `big_dispatch`'s own tests build one.

@@ -1,19 +1,19 @@
 #!/usr/bin/env -S deno run --allow-all
 
-// One entry point for running Dayframe locally. `--help` lists the commands.
+// One entry point for running daytxt locally. `--help` lists the commands.
 
-import { prepareDayframePackages } from "./dayframe-packages.ts";
+import { prepareDaytxtPackages } from "./daytxt-packages.ts";
 import { $ } from "./utils.ts";
 
 const root = $.relativeDir("../");
 const [command, ...rest] = Deno.args;
 
-const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
+const help = `usage: deno run --allow-all x/daytxt.ts <command> [flags]
 
   desktop     build the Wasm packages and run the desktop shell in a webview (Wry)
                 --native         the Blitz renderer instead
                 --fresh          start from an empty store and an empty node directory (temp)
-                --store <path>   use this store file (DAYFRAME_STORE_PATH)
+                --store <path>   use this store file (DAYTXT_STORE_PATH)
   android     build the Android APK (daytxt_mobile)
                 --abi <arm64|x86_64>  target ABI, default arm64 (aarch64-linux-android);
                                  x86_64 is what an emulator on this host runs
@@ -29,11 +29,11 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
                 127.0.0.1:PORT, to compare its diff code in Firefox against Wry
                 --port <n>       default 8765
                 the lab's PR #84 view fetches pr84.diff from beside the page: it is copied
-                from DAYFRAME_LAB_DIFF, when set, into the gitignored
+                from DAYTXT_LAB_DIFF, when set, into the gitignored
                 src/claytxt_showcase/public/ at serve time. Start choices are URL
                 parameters: ?tab=diffs&diffs_view=pr84, ?kit=nav
-  packages    only (re)build the Wasm packages and print the DAYFRAME_* env lines
-  test        x/check-dayframe.ts, then the daytxt_web Playwright e2e
+  packages    only (re)build the Wasm packages and print the DAYTXT_* env lines
+  test        x/check-daytxt.ts, then the daytxt_web Playwright e2e
                 --no-e2e         skip the browser part
   bombadil    explore daytxt_web with Bombadil and check the shell invariants
                 (src/daytxt_web/bombadil/shell.ts); BOMBADIL_TIME_LIMIT=<n>s sets
@@ -51,7 +51,7 @@ function dx(...args: string[]) {
 
 switch (command) {
   case "desktop": {
-    const env = await prepareDayframePackages({
+    const env = await prepareDaytxtPackages({
       testFixtures: false,
       intxtGuest: true,
     });
@@ -65,16 +65,16 @@ switch (command) {
       if (!store) throw new Error("--store needs a path");
     } else if (flag("--fresh")) {
       // A path that does not exist yet: the app creates it, so the run starts empty.
-      store = `${await Deno.makeTempDir({ prefix: "dayframe-store-" })}/store`;
+      store = `${await Deno.makeTempDir({ prefix: "daytxt-store-" })}/store`;
       // The desktop's node is the one `day` uses (DAY_NODE, else the platform data directory):
       // a fresh run gets a fresh node directory too, not the operator's own.
-      env["DAY_NODE"] = await Deno.makeTempDir({ prefix: "dayframe-node-" });
+      env["DAY_NODE"] = await Deno.makeTempDir({ prefix: "daytxt-node-" });
     }
     // One binary carries both launchers; the variable picks Blitz (see daytxt_desktop/main.rs).
-    if (flag("--native")) env["DAYFRAME_RENDERER"] = "blitz";
-    if (store) env["DAYFRAME_STORE_PATH"] = $.path(store).resolve().toString();
-    console.log(`package dir: ${env["DAYFRAME_PACKAGE_DIR"]}`);
-    console.log(`store path: ${env["DAYFRAME_STORE_PATH"] ?? "(app default)"}`);
+    if (flag("--native")) env["DAYTXT_RENDERER"] = "blitz";
+    if (store) env["DAYTXT_STORE_PATH"] = $.path(store).resolve().toString();
+    console.log(`package dir: ${env["DAYTXT_PACKAGE_DIR"]}`);
+    console.log(`store path: ${env["DAYTXT_STORE_PATH"] ?? "(app default)"}`);
     await dx(
       "-p",
       "daytxt_desktop",
@@ -96,7 +96,7 @@ switch (command) {
         `--guest-profile must be dev or wasm-release, got ${guestProfile}`,
       );
     }
-    const env = await prepareDayframePackages({
+    const env = await prepareDaytxtPackages({
       testFixtures: false,
       intxtGuest: true,
       guestProfile,
@@ -108,15 +108,15 @@ switch (command) {
     for (const name of ["counter", "layout", "review"]) {
       for (const suffix of ["manifest.json", "component.wasm"]) {
         await $`cp ${
-          $.path(env["DAYFRAME_PACKAGE_DIR"]).join(`${name}.${suffix}`)
+          $.path(env["DAYTXT_PACKAGE_DIR"]).join(`${name}.${suffix}`)
         } ${staged.join(`${name}.${suffix}`)}`;
       }
     }
     // intxt's nodule handler is not a micro: the phone's node installs it as a cartridge at boot
-    // (`daytxt_native`'s `install_intxt`). `prepareDayframePackages` built it
+    // (`daytxt_native`'s `install_intxt`). `prepareDaytxtPackages` built it
     // beside the packages; stage it with them.
     await $`cp ${
-      $.path(env["DAYFRAME_PACKAGE_DIR"]).join("intxt.guest.wasm")
+      $.path(env["DAYTXT_PACKAGE_DIR"]).join("intxt.guest.wasm")
     } ${staged.join("intxt.guest.wasm")}`;
     const abiFlag = rest.indexOf("--abi");
     const abi = abiFlag >= 0 ? rest[abiFlag + 1] : "arm64";
@@ -183,7 +183,7 @@ switch (command) {
     break;
   }
   case "web":
-    await $`deno run --allow-all ${root.join("x/dayframe-web.ts")} ${
+    await $`deno run --allow-all ${root.join("x/daytxt-web.ts")} ${
       flag("--build") ? ["--build"] : []
     }`;
     break;
@@ -193,7 +193,7 @@ switch (command) {
       "claytxt_showcase",
       "--renderer",
       flag("--native") ? "native" : "webview",
-    ).env(flag("--native") ? { DAYFRAME_RENDERER: "blitz" } : {});
+    ).env(flag("--native") ? { DAYTXT_RENDERER: "blitz" } : {});
     break;
   case "showcase-web": {
     const portFlag = rest.indexOf("--port");
@@ -201,7 +201,7 @@ switch (command) {
     if (!port) throw new Error("--port needs a number");
     const served = root.join("src/claytxt_showcase/public");
     await Deno.mkdir(served.toString(), { recursive: true });
-    const override = Deno.env.get("DAYFRAME_LAB_DIFF");
+    const override = Deno.env.get("DAYTXT_LAB_DIFF");
     const diff = override ? $.path(override) : served.join("pr84.diff");
     if (override && await diff.exists()) {
       await diff.copyFile(served.join("pr84.diff"));
@@ -220,10 +220,10 @@ switch (command) {
     break;
   }
   case "packages":
-    await prepareDayframePackages({ testFixtures: true });
+    await prepareDaytxtPackages({ testFixtures: true });
     break;
   case "test":
-    await $`deno run --allow-all ${root.join("x/check-dayframe.ts")}`;
+    await $`deno run --allow-all ${root.join("x/check-daytxt.ts")}`;
     if (!flag("--no-e2e")) {
       await $`pnpm -C src/daytxt_web run e2e`.cwd(root);
     }

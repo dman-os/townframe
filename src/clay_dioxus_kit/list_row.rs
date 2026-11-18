@@ -1,4 +1,4 @@
-//! The Dayframe skin of [`headless::list_row::ListRow`].
+//! The claytxt skin of [`headless::list_row::ListRow`].
 use crate::headless::list_row::ListRowSkin;
 use crate::headless::list_row::{self};
 use dioxus::prelude::*;

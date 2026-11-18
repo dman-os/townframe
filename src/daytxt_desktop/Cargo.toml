@@ -45,8 +45,8 @@ accesskit_xplat = { version = "0.2.1", optional = true }
 default = ["desktop"]
 # The shipping renderer: the shell in a system webview (Wry).
 desktop = ["dioxus/desktop", "daytxt_native/wry"]
-# Blitz, opt-in and additive: compiled in next to Wry, launched by `DAYFRAME_RENDERER=blitz`
-# (`x/dayframe.ts desktop --native` sets both).
+# Blitz, opt-in and additive: compiled in next to Wry, launched by `DAYTXT_RENDERER=blitz`
+# (`x/daytxt.ts desktop --native` sets both).
 blitz = [
     "dioxus/native",
     "dep:dioxus-native",

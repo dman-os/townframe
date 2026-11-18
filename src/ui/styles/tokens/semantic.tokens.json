@@ -1,5 +1,5 @@
 {
-  "$description": "Dayframe semantic foundation roles. These values alias primitives and are the intended authoring vocabulary for generated runtime aliases.",
+  "$description": "claytxt semantic foundation roles. These values alias primitives and are the intended authoring vocabulary for generated runtime aliases.",
   "color": {
     "$type": "color",
     "canvas": { "$value": "{color.neutral.50}" },

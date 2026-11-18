@@ -702,13 +702,13 @@ pub fn set_component_cache_directory(directory: PathBuf) {
         .expect("the component cache directory is set once per process");
 }
 
-/// The directory set by [`set_component_cache_directory`], else `$DAYFRAME_COMPONENT_CACHE`,
+/// The directory set by [`set_component_cache_directory`], else `$DAYTXT_COMPONENT_CACHE`,
 /// else the XDG/home cache, keyed by content and engine compatibility. `None` means the process
 /// has no cache location at all; compilation then happens in memory only.
 fn cache_path(engine: &Engine, bytes: &[u8]) -> Option<PathBuf> {
     let directory = match CACHE_DIRECTORY.get() {
         Some(directory) => directory.clone(),
-        None => match std::env::var_os("DAYFRAME_COMPONENT_CACHE") {
+        None => match std::env::var_os("DAYTXT_COMPONENT_CACHE") {
             Some(directory) => PathBuf::from(directory),
             None => {
                 let base = std::env::var_os("XDG_CACHE_HOME")
@@ -716,7 +716,7 @@ fn cache_path(engine: &Engine, bytes: &[u8]) -> Option<PathBuf> {
                     .or_else(|| {
                         std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
                     })?;
-                base.join("dayframe").join("components")
+                base.join("claytxt").join("components")
             }
         },
     };
@@ -729,18 +729,18 @@ fn cache_path(engine: &Engine, bytes: &[u8]) -> Option<PathBuf> {
 }
 
 impl WasmPackage {
-    /// Load a component artifact prepared by `x/check-dayframe.ts`, named by the environment
-    /// variable `DAYFRAME_<name>_COMPONENT` (uppercased, `-` → `_`; e.g. `sleeper` →
-    /// `DAYFRAME_SLEEPER_COMPONENT`). Test and fixture code only: compositions that ship a package
+    /// Load a component artifact prepared by `x/check-daytxt.ts`, named by the environment
+    /// variable `DAYTXT_<name>_COMPONENT` (uppercased, `-` → `_`; e.g. `sleeper` →
+    /// `DAYTXT_SLEEPER_COMPONENT`). Test and fixture code only: compositions that ship a package
     /// embed or fetch it themselves.
     pub async fn from_env(name: &str) -> Result<Self, String> {
         let variable = format!(
-            "DAYFRAME_{}_COMPONENT",
+            "DAYTXT_{}_COMPONENT",
             name.to_uppercase().replace('-', "_")
         );
         let path = std::env::var(&variable).map_err(|_| {
             format!(
-                "{variable} must name a prepared {name} component; run deno run --allow-all x/check-dayframe.ts --prepare-only and export the printed path"
+                "{variable} must name a prepared {name} component; run deno run --allow-all x/check-daytxt.ts --prepare-only and export the printed path"
             )
         })?;
         let path = std::path::PathBuf::from(path);

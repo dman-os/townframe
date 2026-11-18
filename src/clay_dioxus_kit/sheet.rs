@@ -1,4 +1,4 @@
-//! The Dayframe skin of [`headless::sheet::Sheet`].
+//! The claytxt skin of [`headless::sheet::Sheet`].
 use crate::WidthClass;
 use crate::headless::sheet::SheetPlacement;
 use crate::headless::sheet::SheetSkin;

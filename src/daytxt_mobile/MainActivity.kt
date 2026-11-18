@@ -8,14 +8,14 @@ typealias BuildConfig = com.example.mobile.BuildConfig
 class MainActivity : WryActivity() {
     /**
      * Wry's own back handling navigates the WebView's history and, with none, finishes the
-     * activity. The Dayframe shell keeps no WebView history, so that would close the app on every
+     * activity. The daytxt shell keeps no WebView history, so that would close the app on every
      * back gesture; the shell's callback below replaces it.
      */
     override val handleBackNavigation: Boolean = false
 
     /**
      * Bound by name to `Java_dev_dioxus_main_MainActivity_requestSystemBack` in libmain.so:
-     * whether the Dayframe shell took the back gesture (it has somewhere to go back to).
+     * whether the daytxt shell took the back gesture (it has somewhere to go back to).
      */
     private external fun requestSystemBack(): Boolean
 

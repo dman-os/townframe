@@ -1,6 +1,6 @@
 #!/usr/bin/env -S deno run --allow-all
 
-import { prepareDayframePackages } from "./dayframe-packages.ts";
+import { prepareDaytxtPackages } from "./daytxt-packages.ts";
 import { $ } from "./utils.ts";
 
 const prepareOnly = Deno.args.includes("--prepare-only");
@@ -42,16 +42,16 @@ for (const resolved of await Promise.all(resolutions)) {
   }
 }
 
-const componentEnv = await prepareDayframePackages({ testFixtures: true });
+const componentEnv = await prepareDaytxtPackages({ testFixtures: true });
 
 if (!prepareOnly) {
   const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
     .json<{ packages: { name: string }[] }>();
-  // Every clay_*/micro_*/dayframe_* workspace crate is gated; a new micro crate joins by name,
+  // Every clay_*/claytxt_*/micro_*/daytxt_* workspace crate is gated; a new micro crate joins by name,
   // no allowlist edit.
   const packages = metadata.packages
     .map((pkg) => pkg.name)
-    .filter((name) => /^(clay|micro|dayframe)_/.test(name))
+    .filter((name) => /^(clay|claytxt|micro|daytxt)_/.test(name))
     .flatMap((name) => ["-p", name]);
   await $`cargo nextest run --locked ${packages} ${Deno.args}`.env(
     componentEnv,

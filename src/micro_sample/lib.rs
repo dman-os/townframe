@@ -1,4 +1,4 @@
-//! A configurable contributor micro used by Dayframe compositions. Authored against the MDK
+//! A configurable contributor micro used by claytxt compositions. Authored against the MDK
 //! only (ADR 015 §5): activation receives a [`Context`], never the registry or renderer.
 #[cfg(test)]
 mod tests;

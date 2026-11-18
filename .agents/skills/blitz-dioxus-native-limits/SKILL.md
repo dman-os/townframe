@@ -1,6 +1,6 @@
 ---
 name: blitz-dioxus-native-limits
-description: Check and work around the upstream limits of Blitz / dioxus-native that constrain what dayframe_dx can build. Use when an app idea depends on pointer capture, DOM measurement, keyboard focus, CSS transforms, custom widgets, scrolling, or accessibility bounds, or when a Blitz/dioxus-native API panics or silently does nothing.
+description: Check and work around the upstream limits of Blitz / dioxus-native that constrain what daytxt can build. Use when an app idea depends on pointer capture, DOM measurement, keyboard focus, CSS transforms, custom widgets, scrolling, or accessibility bounds, or when a Blitz/dioxus-native API panics or silently does nothing.
 ---
 
 # Blitz / dioxus-native limits
@@ -101,13 +101,13 @@ units. Use `page_coordinates()` for anything that spans a gesture.
   text, same roles. As a bonus, layout cost falls as you zoom out, which is the opposite of the naive
   argument against a layout-space camera.
 - Because there is **no pointer capture and no pointer injection**, anything drag-shaped must be
-  verified by the operator. See `.agents/skills/dayframe-native-dev-loop` for the protocol.
+  verified by the operator. See `.agents/skills/daytxt-native-dev-loop` for the protocol.
 - A patch to `blitz`/`dioxus-native` is viable (local `[patch]` precedents exist), but the bar should
   be "this blocks two features", not "this is annoying".
 
 ## Related
 
-- `.agents/skills/dayframe-native-dev-loop` — how to build, screenshot and inspect the app.
+- `.agents/skills/daytxt-native-dev-loop` — how to build, screenshot and inspect the app.
 - `docs/adrs/016-dayframe-dx-architecture.md` — renderer duality (Blitz ambition, wry prod) and the
   rule for when forking upstream is justified.
 

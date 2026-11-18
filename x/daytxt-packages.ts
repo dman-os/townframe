@@ -1,8 +1,8 @@
 import { $ } from "./utils.ts";
 
 // Builds the Wasm guests and lays out the package directory the desktop shell scans. Shared by
-// `check-dayframe.ts` and `dayframe.ts`; the target dir comes from `cargo metadata`. Prints the
-// `DAYFRAME_*` lines and returns them, with the package directory under `DAYFRAME_PACKAGE_DIR`.
+// `check-daytxt.ts` and `daytxt.ts`; the target dir comes from `cargo metadata`. Prints the
+// `DAYTXT_*` lines and returns them, with the package directory under `DAYTXT_PACKAGE_DIR`.
 //
 // `testFixtures` also builds the guests only tests load (the collection probe and the
 // `clay_mdk` example fixtures). The shells need just the packages; building the fixtures for
@@ -23,7 +23,7 @@ import { $ } from "./utils.ts";
 // workspace's optimized guest profile, the one `daytxt_web` also builds with. `dev` is opt-in, for
 // faster rebuilds while iterating: it emits 15 to 17 MB unoptimized components that Wasmtime needs
 // seconds to compile on a phone, and they burn about 10x the fuel (see below).
-export async function prepareDayframePackages(
+export async function prepareDaytxtPackages(
   { testFixtures, trapper = false, intxtGuest = false, guestProfile = "wasm-release" }: {
     testFixtures: boolean;
     trapper?: boolean;
@@ -61,7 +61,7 @@ export async function prepareDayframePackages(
   const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
     .json<{ target_directory: string; packages: { name: string }[] }>();
   const target = $.path(metadata.target_directory);
-  const directory = target.join("dayframe");
+  const directory = target.join("daytxt");
   await Deno.mkdir(directory.toString(), { recursive: true });
 
   // Prepared guest components, keyed by the guest name `component_package`/env vars use.
@@ -115,7 +115,7 @@ export async function prepareDayframePackages(
     const artifact = directory.join(`${variableName}.component.wasm`);
     // rustc's wasm32-wasip3 target already emits a component; no adapter step.
     await $`cp ${target.join(relative)} ${artifact}`;
-    const variable = `DAYFRAME_${
+    const variable = `DAYTXT_${
       variableName.toUpperCase().replaceAll("-", "_")
     }_COMPONENT`;
     componentEnv[variable] = artifact.toString();
@@ -163,7 +163,7 @@ export async function prepareDayframePackages(
       )
     } ${packagesDirectory.join("intxt.guest.wasm")}`;
   }
-  componentEnv["DAYFRAME_PACKAGE_DIR"] = packagesDirectory.toString();
-  console.log(`DAYFRAME_PACKAGE_DIR=${packagesDirectory}`);
+  componentEnv["DAYTXT_PACKAGE_DIR"] = packagesDirectory.toString();
+  console.log(`DAYTXT_PACKAGE_DIR=${packagesDirectory}`);
   return componentEnv;
 }

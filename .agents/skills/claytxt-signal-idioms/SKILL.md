@@ -1,13 +1,13 @@
 ---
-name: dayframe-signal-idioms
-description: Crash-proof Dioxus state idioms for Dayframe UI code. Use whenever writing or reviewing a component that holds state, a gesture handler, an async task that writes signals, or a component that takes props it also keeps in a signal. Also covers the event-storm test (dioxus_storm) that finds the panics these idioms prevent.
+name: claytxt-signal-idioms
+description: Crash-proof Dioxus state idioms for claytxt UI code. Use whenever writing or reviewing a component that holds state, a gesture handler, an async task that writes signals, or a component that takes props it also keeps in a signal. Also covers the event-storm test (dioxus_storm) that finds the panics these idioms prevent.
 ---
 
 # State and signals: crash-proof idioms
 
 Dioxus signals are borrow-checked at run time (`RefCell` semantics) and nothing in the type system sees it. The crashes it produces compile, pass the happy-path test and appear the first time a real pointer produces an unlucky event order. `ArcIndex` had three in two days: a `peek` guard alive across a `commit` that wrote the same signal (`AlreadyBorrowed`), a pointerup releasing a gesture it never started, and props frozen by `use_signal(|| items)`. The rules below make each structurally impossible. `clippy.toml` already denies a `read`/`write` guard held across `.await`; the rest is on you.
 
-This skill is the state counterpart to `dayframe-design-language` (tokens, layout) and `dayframe-native-dev-loop` (running it).
+This skill is the state counterpart to `claytxt-design-language` (tokens, layout) and `daytxt-native-dev-loop` (running it).
 
 ## 1. Copy values out; never hold a guard across a call
 
