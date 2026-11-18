@@ -25,6 +25,7 @@ pub mod replay;
 pub mod rev;
 mod rpc;
 mod scheduler;
+pub mod strategy;
 // FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
 #[cfg(any())]
 mod stat;
