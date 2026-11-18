@@ -118,11 +118,24 @@ pub struct ConfiguredMicro<P> {
     pub factory: Rc<dyn Factory<P>>,
 }
 
+/// Whether a requirement's supplier must be live for the consumer to start.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Necessity {
+    /// The consumer does not start while the supplier cannot be started and bound: it shows
+    /// as [`MicroState::Blocked`] on the binding.
+    Required,
+    /// The consumer starts without the supplier when it cannot be started or does not
+    /// publish what is required: the binding is absent from the `requirements` its
+    /// [`Factory::initialize`] is handed, and the consumer holds no edge to the supplier.
+    Optional,
+}
+
 /// A strong requirement: the configured `provider`'s named `publication` (ADR 031 §5).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Requirement {
     pub provider: MicroId,
     pub publication: String,
+    pub necessity: Necessity,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -607,6 +620,9 @@ impl<P: Clone + 'static> Supervisor<P> {
             };
             self.set(&identity, NodeState::Starting(Rc::default()));
             let mut providers = Vec::new();
+            // The requirements whose provider is live, in binding order. An optional one whose
+            // provider could not start is left out and the consumer starts without it.
+            let mut supplied = Vec::new();
             for (binding, requirement) in &requirements {
                 let waiting = self.waiting(&identity, &requirement.provider);
                 let started = self
@@ -618,6 +634,9 @@ impl<P: Clone + 'static> Supervisor<P> {
                     .await;
                 drop(waiting);
                 if let Err(cause) = started {
+                    if requirement.necessity == Necessity::Optional {
+                        continue;
+                    }
                     if matches!(cause, StartError::Cycle(_)) {
                         self.set(&identity, NodeState::Idle);
                         self.release(providers).await;
@@ -631,37 +650,48 @@ impl<P: Clone + 'static> Supervisor<P> {
                     });
                 }
                 providers.push(requirement.provider.clone());
+                supplied.push((binding, requirement));
             }
             let mut resolved = BTreeMap::new();
             let mut provider_instances = Vec::new();
             let mut unprovided = None;
-            for (binding, requirement) in &requirements {
+            // Providers an optional requirement started and then could not bind. They are
+            // released once the consumer's own state no longer says it is starting.
+            let mut unbound = Vec::new();
+            for (binding, requirement) in supplied {
                 let inner = self.inner.borrow();
                 // A provider started earlier in this loop may have been closed while a later
                 // one was starting; nothing binds it yet, so that is an ordinary unavailability.
-                let NodeState::Active {
-                    instance,
-                    publications,
-                    ..
-                } = &inner.nodes[&requirement.provider].state
-                else {
-                    let cause = format!(
+                let publication = match &inner.nodes[&requirement.provider].state {
+                    NodeState::Active {
+                        instance,
+                        publications,
+                        ..
+                    } => publications
+                        .get(&requirement.publication)
+                        .map(|publication| (instance, publication))
+                        .ok_or_else(|| StartError::Unpublished {
+                            provider: requirement.provider.clone(),
+                            publication: requirement.publication.clone(),
+                        }),
+                    _ => Err(StartError::Faulted(format!(
                         "{} closed while {identity} was starting",
                         requirement.provider
-                    );
-                    unprovided = Some((binding.clone(), StartError::Faulted(cause)));
-                    break;
+                    ))),
                 };
-                match publications.get(&requirement.publication) {
-                    Some(publication) => {
+                match publication {
+                    Ok((instance, publication)) => {
                         resolved.insert(binding.clone(), publication.clone());
                         provider_instances.push(instance.clone());
                     }
-                    None => {
-                        let cause = StartError::Unpublished {
-                            provider: requirement.provider.clone(),
-                            publication: requirement.publication.clone(),
-                        };
+                    Err(_) if requirement.necessity == Necessity::Optional => {
+                        let held = providers
+                            .iter()
+                            .position(|provider| *provider == requirement.provider)
+                            .expect("a supplied requirement's provider is held");
+                        unbound.push(providers.remove(held));
+                    }
+                    Err(cause) => {
                         unprovided = Some((binding.clone(), cause));
                         break;
                     }
@@ -669,6 +699,7 @@ impl<P: Clone + 'static> Supervisor<P> {
             }
             if let Some((binding, cause)) = unprovided {
                 self.set(&identity, NodeState::Blocked(vec![binding.clone()]));
+                providers.extend(unbound);
                 self.release(providers).await;
                 return Err(StartError::Unavailable {
                     binding,
@@ -715,6 +746,9 @@ impl<P: Clone + 'static> Supervisor<P> {
                         leases: Arc::default(),
                     };
                     self.set(&identity, state);
+                    // Only now does nothing hold them: a consumer still starting retains every
+                    // provider it configures.
+                    self.release(unbound).await;
                     Ok(())
                 }
                 Err(error) => {
@@ -726,6 +760,7 @@ impl<P: Clone + 'static> Supervisor<P> {
                     if !matches!(self.state(&identity), MicroState::Disabled) {
                         self.set(&identity, state);
                     }
+                    providers.extend(unbound);
                     self.release(providers).await;
                     Err(error)
                 }
@@ -1055,12 +1090,16 @@ impl<P: Clone + 'static> Supervisor<P> {
                 }
             }
             for (consumer, node) in &inner.nodes {
-                if !node
-                    .config
-                    .requirements
-                    .values()
-                    .any(|requirement| requirement.provider == *micro)
-                {
+                let holds = match &node.state {
+                    // An optional requirement whose provider was not live at start is not bound.
+                    NodeState::Active { providers, .. } => providers.contains(micro),
+                    _ => node
+                        .config
+                        .requirements
+                        .values()
+                        .any(|requirement| requirement.provider == *micro),
+                };
+                if !holds {
                     continue;
                 }
                 match node.state {
