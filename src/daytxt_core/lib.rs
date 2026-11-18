@@ -40,6 +40,7 @@ use clay_host::Instance;
 use clay_host::LocalFuture;
 use clay_host::MicroId as SupervisorId;
 use clay_host::MicroState;
+use clay_host::Necessity;
 use clay_host::Requirement;
 use clay_host::Supervisor;
 use clay_mdk::hooks::use_rows;
@@ -157,6 +158,7 @@ impl InstalledMicro {
                 Requirement {
                     provider: SupervisorId::from(provider),
                     publication: request.binding.clone(),
+                    necessity: Necessity::Required,
                 },
             );
         }

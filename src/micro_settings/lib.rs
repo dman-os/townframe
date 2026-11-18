@@ -114,6 +114,7 @@ mod tests {
     use clay_host::ConfiguredMicro;
     use clay_host::Host;
     use clay_host::MicroId;
+    use clay_host::Necessity;
     use clay_host::Requirement;
     use clay_host::Supervisor;
     use clay_mdk::Nsid;
@@ -230,6 +231,7 @@ mod tests {
                                 Requirement {
                                     provider: shell_id.clone(),
                                     publication: publication.to_owned(),
+                                    necessity: Necessity::Required,
                                 },
                             )
                         })

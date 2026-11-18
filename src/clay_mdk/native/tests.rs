@@ -514,6 +514,7 @@ fn provides(provider: &str, publication: &str) -> Requirement {
     Requirement {
         provider: host_id(provider),
         publication: publication.into(),
+        necessity: clay_host::Necessity::Required,
     }
 }
 

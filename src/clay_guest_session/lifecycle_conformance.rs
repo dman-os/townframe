@@ -40,6 +40,7 @@ use clay_host::Lifecycle;
 use clay_host::LocalFuture;
 use clay_host::MicroId;
 use clay_host::MicroState;
+use clay_host::Necessity;
 use clay_host::Requirement;
 use clay_host::Root;
 use clay_host::StartError;
@@ -565,6 +566,7 @@ impl<E: Incarnations> Harness<E> {
                     Requirement {
                         provider: MicroId::new("provider"),
                         publication: PUBLICATION.to_owned(),
+                        necessity: Necessity::Required,
                     },
                 ),
                 (
@@ -572,6 +574,7 @@ impl<E: Incarnations> Harness<E> {
                     Requirement {
                         provider: MicroId::new("provider"),
                         publication: ECHO.to_owned(),
+                        necessity: Necessity::Required,
                     },
                 ),
             ]),
