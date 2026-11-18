@@ -239,6 +239,7 @@ async fn a_wasmtime_micro_calls_a_granted_method_through_the_composition() {
         bootstrap: vec![],
         schemas: no_schemas(),
         installs: vec![install(FIXTURE, &[ECHO])],
+        serve: false,
     };
     let composition = NodeComposition::boot(config()).await.unwrap();
     let node_id = composition.node().node_id.clone();
@@ -292,6 +293,42 @@ async fn a_wasmtime_micro_calls_a_granted_method_through_the_composition() {
     again.stop().await.unwrap();
 }
 
+/// A serving host holds the node's socket where `day` finds it, so `day` and the host share one
+/// node; a second host on the same directory is refused with who holds it; the socket goes with
+/// the holder.
+#[tokio::test]
+async fn a_serving_composition_holds_the_node_where_day_finds_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = || NodeConfig {
+        root: dir.path().to_owned(),
+        bootstrap: vec![],
+        schemas: no_schemas(),
+        installs: vec![],
+        serve: true,
+    };
+    let composition = NodeComposition::boot(config()).await.unwrap();
+    let node_dir = day_node::NodeDir::new(dir.path().to_owned());
+    assert_eq!(
+        node_dir.probe_socket().await.unwrap(),
+        day_node::SocketState::Live
+    );
+
+    let refused = match NodeComposition::boot(config()).await {
+        Ok(_) => panic!("a second holder boots the same storage"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(
+        refused.contains(&format!("held by process {}", std::process::id())),
+        "{refused}"
+    );
+
+    composition.stop().await.unwrap();
+    assert_eq!(
+        node_dir.probe_socket().await.unwrap(),
+        day_node::SocketState::Absent
+    );
+}
+
 /// A micro whose install grants nothing can call nothing.
 #[tokio::test]
 async fn a_micro_installed_with_no_methods_calls_nothing() {
@@ -301,6 +338,7 @@ async fn a_micro_installed_with_no_methods_calls_nothing() {
         bootstrap: vec![],
         schemas: no_schemas(),
         installs: vec![install(FIXTURE, &[])],
+        serve: false,
     })
     .await
     .unwrap();
@@ -329,6 +367,7 @@ async fn a_node_dials_the_ticket_in_its_bootstrap_file() {
         bootstrap: vec![],
         schemas: no_schemas(),
         installs: vec![],
+        serve: false,
     })
     .await
     .unwrap();
@@ -347,6 +386,7 @@ async fn a_node_dials_the_ticket_in_its_bootstrap_file() {
         bootstrap: read_tickets(&tickets).unwrap(),
         schemas: no_schemas(),
         installs: vec![],
+        serve: false,
     })
     .await
     .unwrap();
@@ -511,6 +551,7 @@ async fn a_micro_reads_documents_only_from_its_granted_drawers() {
         bootstrap: vec![],
         schemas: note_schemas(),
         installs: vec![],
+        serve: false,
     })
     .await
     .unwrap();
@@ -613,6 +654,7 @@ async fn a_review_install_file_configures_the_micro_and_no_file_leaves_it_unconf
         bootstrap: vec![],
         schemas: note_schemas(),
         installs: vec![],
+        serve: false,
     })
     .await
     .unwrap();
@@ -725,6 +767,7 @@ async fn installing_intxt_at_boot_makes_summarize_intxts_reachable_for_the_revie
         bootstrap: vec![],
         schemas: no_schemas(),
         installs: vec![],
+        serve: false,
     })
     .await
     .unwrap();
@@ -936,6 +979,7 @@ async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
         bootstrap: vec![],
         schemas: no_schemas(),
         installs: vec![],
+        serve: false,
     })
     .await
     .unwrap();
@@ -1064,6 +1108,7 @@ async fn a_cartridge_micros_document_capability_follows_the_granted_drawers() {
         bootstrap: vec![],
         schemas: note_schemas(),
         installs: vec![],
+        serve: false,
     })
     .await
     .unwrap();

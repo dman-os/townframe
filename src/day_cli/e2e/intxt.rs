@@ -1586,17 +1586,17 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
 async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
     use crate::cmds::intxt::package::Packaging;
     use big_cabinet_core::DocId;
-    use big_cabinet_core::datum::DatumMember;
     use big_cabinet_core::authority::Rights;
+    use big_cabinet_core::datum::DatumMember;
     use big_cabinet_core::drawer::DrawerAccess;
     use big_cabinet_core::drawer::listing::KnownDrawers;
-    use big_cabinet_core::drawer::protocol::{
-        DrawerScope, ListKnownDrawers, MintDrawerCapability,
-    };
-    use method_core::Method;
+    use big_cabinet_core::drawer::protocol::DrawerScope;
+    use big_cabinet_core::drawer::protocol::ListKnownDrawers;
+    use big_cabinet_core::drawer::protocol::MintDrawerCapability;
     use intxt_core::client::Caller;
     use intxt_core::generic;
     use intxt_core::work;
+    use method_core::Method;
     use serde_json::Value;
     use service_utils_rs::RequestContext;
 

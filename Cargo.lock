@@ -4161,7 +4161,10 @@ dependencies = [
  "big_node",
  "big_repo",
  "data-encoding",
+ "directories",
+ "libc",
  "rand 0.9.5",
+ "reqwest 0.12.28",
  "secrets_rs",
  "serde",
  "serde_json",
@@ -4395,6 +4398,7 @@ dependencies = [
  "clay_rt_wcmp",
  "clay_store",
  "clay_surface",
+ "day_node",
  "daybook_types",
  "dayframe_composition",
  "dayframe_native",
@@ -4426,10 +4430,8 @@ dependencies = [
 name = "dayframe_mobile"
 version = "0.1.0"
 dependencies = [
- "big_cabinet",
  "dayframe_composition",
  "dayframe_native",
- "dayframe_node",
  "dioxus",
  "jni 0.21.1",
  "tokio",
@@ -4439,12 +4441,14 @@ dependencies = [
 name = "dayframe_native"
 version = "0.1.0"
 dependencies = [
+ "big_cabinet",
  "clay_docs",
  "clay_guest_session",
  "clay_host",
  "clay_mdk",
  "clay_store",
  "dayframe_composition",
+ "dayframe_node",
  "dioxus",
  "dioxus-desktop",
  "dioxus-native",

@@ -32,8 +32,9 @@ use big_cabinet_core::reference::ReferenceDocId;
 use intxt_core::client::key;
 use intxt_core::client::to_value;
 use intxt_core::generic;
+use intxt_core::methods::SummarizeIntxts;
+use intxt_core::methods::SummaryStatus;
 use intxt_core::work;
-use intxt_core::methods::{SummarizeIntxts, SummaryStatus};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -289,11 +290,7 @@ impl Packaging<'_> {
     }
 
     /// `day x intxt github show`: prints an imported pull request and summarizes its named intxts.
-    pub(crate) async fn github_show(
-        &self,
-        out: &mut impl Write,
-        target: &str,
-    ) -> Res<()> {
+    pub(crate) async fn github_show(&self, out: &mut impl Write, target: &str) -> Res<()> {
         let pull = PullRef::parse(target)?;
         let node = self.load_github()?.ok_or_else(|| {
             eyre::eyre!(
@@ -308,7 +305,13 @@ impl Packaging<'_> {
             )
         })?;
         let datum = self.read_github_pull(&doc, &pull).await?;
-        writeln!(out, "{}  {:?}  \"{}\"", pull.name(), datum.state, datum.title)?;
+        writeln!(
+            out,
+            "{}  {:?}  \"{}\"",
+            pull.name(),
+            datum.state,
+            datum.title
+        )?;
         writeln!(out, "url: {}", datum.url)?;
         writeln!(out, "{}", datum.body)?;
 
@@ -332,7 +335,9 @@ impl Packaging<'_> {
                     "{}  \"{}\"  {} entries",
                     summary.link.expect("found intxt summaries have a link"),
                     summary.title.expect("found intxt summaries have a title"),
-                    summary.entries.expect("found intxt summaries have an entry count")
+                    summary
+                        .entries
+                        .expect("found intxt summaries have an entry count")
                 )?,
                 SummaryStatus::NotFound => {
                     writeln!(out, "{}  not an intxt", link.reference)?;
@@ -341,7 +346,9 @@ impl Packaging<'_> {
                     out,
                     "{}  unreadable: {}",
                     link.reference,
-                    summary.reason.expect("unreadable intxt summaries have a reason")
+                    summary
+                        .reason
+                        .expect("unreadable intxt summaries have a reason")
                 )?,
             }
         }

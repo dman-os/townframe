@@ -176,8 +176,8 @@ impl NodeComposition {
             return Err(ferr!("the micro's component is not a wasm component"));
         };
         let component = match self
-            .held
-            .node
+            .booted
+            .node()
             .blobs
             .service
             .read_all(&BlobId::new(wasm.digest.0), MAX_COMPONENT_OCTETS)

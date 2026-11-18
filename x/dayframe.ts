@@ -12,7 +12,7 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
 
   desktop     build the Wasm packages and run the desktop shell in a webview (Wry)
                 --native         the Blitz renderer instead
-                --fresh          start from an empty store in a new temp file
+                --fresh          start from an empty store and an empty node directory (temp)
                 --store <path>   use this store file (DAYFRAME_STORE_PATH)
   android     build the Android APK (dayframe_mobile)
                 --abi <arm64|x86_64>  target ABI, default arm64 (aarch64-linux-android);
@@ -51,7 +51,10 @@ function dx(...args: string[]) {
 
 switch (command) {
   case "desktop": {
-    const env = await prepareDayframePackages({ testFixtures: false });
+    const env = await prepareDayframePackages({
+      testFixtures: false,
+      intxtGuest: true,
+    });
     const storeFlag = rest.indexOf("--store");
     if (flag("--fresh") && storeFlag >= 0) {
       throw new Error("--fresh and --store are mutually exclusive");
@@ -63,6 +66,9 @@ switch (command) {
     } else if (flag("--fresh")) {
       // A path that does not exist yet: the app creates it, so the run starts empty.
       store = `${await Deno.makeTempDir({ prefix: "dayframe-store-" })}/store`;
+      // The desktop's node is the one `day` uses (DAY_NODE, else the platform data directory):
+      // a fresh run gets a fresh node directory too, not the operator's own.
+      env["DAY_NODE"] = await Deno.makeTempDir({ prefix: "dayframe-node-" });
     }
     // One binary carries both launchers; the variable picks Blitz (see dayframe_desktop/main.rs).
     if (flag("--native")) env["DAYFRAME_RENDERER"] = "blitz";
@@ -92,6 +98,7 @@ switch (command) {
     }
     const env = await prepareDayframePackages({
       testFixtures: false,
+      intxtGuest: true,
       guestProfile,
     });
     // The APK carries its packages as assets: `dayframe_mobile` bundles `packages/` with
@@ -106,15 +113,10 @@ switch (command) {
       }
     }
     // intxt's nodule handler is not a micro: the phone's node installs it as a cartridge at boot
-    // (`dayframe_node::NodeComposition::install_intxt`). It is built where `day_cli`'s tests
-    // read it (the `wasm_utils_rs` workspace, `INTXT_GUEST_WASM`) and staged beside the packages.
-    await $`cargo build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest --target wasm32-wasip3 --release`;
-    const guestWorkspace = await $`cargo metadata --locked --no-deps --format-version 1 --manifest-path src/wasm_utils_rs/Cargo.toml`
-      .json<{ target_directory: string }>();
+    // (`dayframe_node::NodeComposition::install_intxt`). `prepareDayframePackages` built it
+    // beside the packages; stage it with them.
     await $`cp ${
-      $.path(guestWorkspace.target_directory).join(
-        "wasm32-wasip3/release/intxt_nodule_guest.wasm",
-      )
+      $.path(env["DAYFRAME_PACKAGE_DIR"]).join("intxt.guest.wasm")
     } ${staged.join("intxt.guest.wasm")}`;
     const abiFlag = rest.indexOf("--abi");
     const abi = abiFlag >= 0 ? rest[abiFlag + 1] : "arm64";

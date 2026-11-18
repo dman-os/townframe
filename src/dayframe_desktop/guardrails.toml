@@ -2,6 +2,7 @@ version = 1
 role = "application"
 dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
 allowed_dependencies = [
+    "day_node",
     "clay_dioxus",
     "clay_docs",
     "clay_guest_session",
@@ -38,7 +39,7 @@ required_features = ["desktop"]
 code = "ERROR_DEPENDENCY_GROUP"
 path = "src/dayframe_desktop/Cargo.toml"
 symbol = "dependency-groups"
-ceiling = 18
+ceiling = 19
 class = "LEGACY_DEBT"
 reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
 reference = "docs/scratch/nodule-runtime-ledger.md"

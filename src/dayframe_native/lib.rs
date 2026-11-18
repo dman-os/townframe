@@ -22,6 +22,7 @@ use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
 use std::future::Future;
 use std::path::Path;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -228,6 +229,10 @@ fn package_micros(
     let mut installed = Vec::new();
     let mut config_writes = Vec::new();
     let mut errors = Vec::new();
+    // A discovered package is admitted disabled until a user enables it (a stored install datum
+    // always wins over this). `DAYFRAME_ENABLE_MICROS=all` admits every package enabled instead,
+    // for a development or verification run on a fresh store, where nothing may be clicked.
+    let enable_all = std::env::var("DAYFRAME_ENABLE_MICROS").is_ok_and(|value| value == "all");
     for files in packages {
         let parsed = clay_mdk::package::Package::from_json(
             clay_mdk::LOCAL_NAMESPACE,
@@ -294,7 +299,10 @@ fn package_micros(
                     &micro_shell_manifest::sidecar(),
                 );
                 match micro {
-                    Ok(micro) => installed.push(micro),
+                    Ok(mut micro) => {
+                        micro.enabled_on_admission = enable_all;
+                        installed.push(micro);
+                    }
                     Err(error) => errors.push(format!("{}: {error}", files.origin)),
                 }
             }
@@ -350,6 +358,169 @@ pub async fn native_runtime<St: OrderedStore + Send + Sync + 'static>(
 /// Builds the runtime for [`Shell`]; the shell supplies the store location and package source.
 pub type RuntimeLoader =
     Callback<(), Pin<Box<dyn Future<Output = Result<CompositionRuntime, String>>>>>;
+
+/// What a GUI host says about its node; everything else about hosting one is the same on every
+/// platform (see [`hosted_runtime`]).
+pub struct NodeHost {
+    /// The node's directory (see `day_node::NodeDir`): the one `day` uses on a desktop, the app's
+    /// own data directory on Android.
+    pub root: PathBuf,
+    /// Whether the holder serves the node's socket so `day` can reach it (see
+    /// `dayframe_node::NodeConfig::serve`): a desktop does, Android has no second process.
+    pub serve: bool,
+    /// Directories the operator's files are read from, first match winning: the install files
+    /// (`dayframe_node::MicroInstall::interim`) and `bootstrap.txt`, the endpoint tickets of the
+    /// nodes this host dials, one per line. The node's own ticket is written to
+    /// `node-address.txt` in each, for the operator to put in the other node's bootstrap list.
+    pub pairing_directories: Vec<PathBuf>,
+    /// intxt's nodule handler component, which the node installs as a cartridge at every boot
+    /// (idempotent by cartridge version).
+    pub intxt_guest: Vec<u8>,
+}
+
+/// [`native_runtime`] on the node `host` describes: finds or becomes the holder of the node in
+/// `host.root` (booted once for the process, and living as long as it does: there is no hook
+/// that could stop it in order, and the OS reclaims the process), installs one actor per package
+/// micro and intxt, and gives each micro its egress and configuration datum. A node that cannot
+/// boot is an error the launcher shows: the micros' node access is part of what the app is. The
+/// node being held by another process is one of them: attaching to a running node is not built.
+pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
+    store: Arc<St>,
+    packages: Vec<PackageFiles>,
+    package_errors: Vec<String>,
+    engine: impl PackageEngine,
+    host: NodeHost,
+) -> Result<CompositionRuntime, String> {
+    /// The booted node and the micros its cartridges contribute, as the shell loads them: each is
+    /// a package whose component came out of the node's catalog, with the handles the node minted
+    /// for it from its `uses` and the cartridge's grants.
+    struct Hosted {
+        node: dayframe_node::NodeComposition,
+        cartridge_packages: Vec<PackageFiles>,
+        /// Cartridge micros that could not be loaded, for the shell's installation errors.
+        cartridge_errors: Vec<String>,
+    }
+    static NODE: tokio::sync::OnceCell<Hosted> = tokio::sync::OnceCell::const_new();
+    let pairing: Vec<&Path> = host
+        .pairing_directories
+        .iter()
+        .map(PathBuf::as_path)
+        .collect();
+    let hosted = NODE
+        .get_or_try_init(|| async {
+            let mut bootstrap = Vec::new();
+            for directory in &pairing {
+                bootstrap.extend(
+                    dayframe_node::read_tickets(&directory.join("bootstrap.txt"))
+                        .map_err(|error| format!("cannot read the bootstrap tickets: {error:#}"))?,
+                );
+            }
+            let mut node = dayframe_node::NodeComposition::boot(dayframe_node::NodeConfig {
+                root: host.root.clone(),
+                bootstrap,
+                // The node learns the datum vocabulary of intxt (the PR and intxt datums the
+                // review micro reads) from intxt's cartridge, whose Lexicons it admits when the
+                // cartridge is installed below. The review config datum is Clay's, not the
+                // node's, and needs no schema here.
+                schemas: Arc::new(
+                    big_cabinet::SchemaRepo::open(std::iter::empty())
+                        .expect("no registrations is a valid schema repo"),
+                ),
+                installs: Vec::new(),
+                serve: host.serve,
+            })
+            .await
+            .map_err(|error| format!("cannot boot the node: {error:#}"))?;
+            node.install_intxt(&host.intxt_guest)
+                .await
+                .map_err(|error| format!("cannot install intxt on the node: {error}"))?;
+            let mut cartridge_packages = Vec::new();
+            let mut cartridge_errors = Vec::new();
+            for loaded in node
+                .sync_cartridge_micros()
+                .await
+                .map_err(|error| format!("cannot load the cartridges' micros: {error:#}"))?
+            {
+                match loaded {
+                    Ok(micro) => cartridge_packages.push(PackageFiles {
+                        origin: format!("cartridge {}", micro.micro),
+                        manifest_json: micro.manifest_json,
+                        component: micro.component,
+                    }),
+                    Err(error) => cartridge_errors.push(format!("{error:#}")),
+                }
+            }
+            // INTERIM: a bundled micro that no cartridge replaces is installed from the table in
+            // `dayframe_node`, until it is published as a cartridge.
+            let uncovered = packages
+                .iter()
+                .filter_map(package_micro_id)
+                .filter(|id| {
+                    !cartridge_packages
+                        .iter()
+                        .filter_map(package_micro_id)
+                        .any(|loaded| plug_name(&loaded) == plug_name(id))
+                })
+                .collect::<Vec<_>>();
+            let installs = dayframe_node::MicroInstall::interim(uncovered, |name| {
+                dayframe_node::read_install_file(&pairing, name)
+            })
+            .map_err(|error| format!("cannot read the install files: {error:#}"))?;
+            for install in installs {
+                node.install_micro(install)
+                    .await
+                    .map_err(|error| format!("cannot install a micro on the node: {error:#}"))?;
+            }
+            let address = node.address();
+            for directory in &pairing {
+                let path = directory.join("node-address.txt");
+                std::fs::write(&path, &address)
+                    .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+            }
+            Ok::<_, String>(Hosted {
+                node,
+                cartridge_packages,
+                cartridge_errors,
+            })
+        })
+        .await?;
+    // A cartridge's micro replaces the bundled package of the same name.
+    let replaced = |files: &PackageFiles| {
+        package_micro_id(files).is_some_and(|id| {
+            hosted
+                .cartridge_packages
+                .iter()
+                .filter_map(package_micro_id)
+                .any(|loaded| plug_name(&loaded) == plug_name(&id))
+        })
+    };
+    let mut packages: Vec<PackageFiles> = packages
+        .into_iter()
+        .filter(|files| !replaced(files))
+        .collect();
+    packages.extend(hosted.cartridge_packages.iter().cloned());
+    let mut package_errors = package_errors;
+    package_errors.extend(hosted.cartridge_errors.iter().cloned());
+    let node = &hosted.node;
+    native_runtime(
+        store,
+        packages,
+        package_errors,
+        engine,
+        &|micro| node.egress(micro),
+        &|micro| node.config_datum(micro).cloned(),
+    )
+    .await
+    .map_err(|error| format!("cannot load the store: {error}"))
+}
+
+/// The `<name>` of a micro id `<did>/<name>`: a cartridge's micro is installed under its
+/// publisher's DID, a bundled package under the local namespace, and the name is what they share.
+fn plug_name(id: &str) -> &str {
+    id.split_once('/')
+        .unwrap_or_else(|| panic!("micro id {id:?} is not `<did>/<name>`"))
+        .1
+}
 
 /// A [`RuntimeLoader`] from an async constructor. Must be called inside a component, as a
 /// `Callback` is owned by the current scope.

@@ -17,8 +17,6 @@ mobile = ["dioxus/mobile", "dayframe_native/wry"]
 [target.'cfg(target_os = "android")'.dependencies]
 #
 # internal
-big_cabinet = { workspace = true }
-dayframe_node = { workspace = true }
 
 # The composition (Wasmtime, SQLite) is only built for the target that runs it.
 dayframe_native = { workspace = true }

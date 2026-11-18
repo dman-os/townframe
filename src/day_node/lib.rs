@@ -1,6 +1,6 @@
 //! A node's directory and the one way a process boots a node from it.
 //!
-//! The `day` CLI (which finds a running node or holds one) and the app shells that always hold
+//! The `day` CLI (which finds a running node or holds one) and the app shells that hold
 //! their own (Android has no second process) share this crate, so a node is booted from its
 //! directory the same way everywhere (ADR 033 sections 1 and 5).
 //!
@@ -11,6 +11,18 @@
 //!
 //! Every other secret a node keeps is in the platform keyring, under entries that carry the node
 //! id too.
+
+mod holder;
+
+pub use holder::Attached;
+pub use holder::Booted;
+pub use holder::CONNECT_DEADLINE;
+pub use holder::LockHeld;
+pub use holder::LockRole;
+pub use holder::NodeDir;
+pub use holder::NodeLock;
+pub use holder::Reached;
+pub use holder::SocketState;
 
 use big_node::BigNode;
 use big_node::Listeners;

@@ -4,6 +4,7 @@
 # exposed_external_crates: [serde_json, tokio]
 
 impl HttpTransport for dayframe_node::OperatorTransport
+pub dayframe_node::fn read_install_file (directories : & [& Path] , name : & str) -> std :: io :: Result < Option < Vec < u8 > > >
 pub dayframe_node::fn read_tickets (path : & Path) -> Res < Vec < String > >
 pub impl dayframe_node::MicroInstall::fn interim (micros : impl IntoIterator < Item = String > , install_file : impl Fn (& str) -> std :: io :: Result < Option < Vec < u8 > > > ,) -> Res < Vec < Self > >
 pub impl dayframe_node::NodeComposition::async fn boot (config : NodeConfig) -> Res < Self >
@@ -20,6 +21,6 @@ pub impl dayframe_node::NodeComposition::fn operator_transport (& self) -> Opera
 pub struct dayframe_node::InstallConfig  { tag: String, key: String, value: serde_json :: Map < String , serde_json :: Value > }
 pub struct dayframe_node::MicroInstall  { micro: String, methods: BTreeSet < String >, drawers: Vec < (DrawerId , DrawerAccess) >, config: Option < InstallConfig > }
 pub struct dayframe_node::NodeComposition  {  }
-pub struct dayframe_node::NodeConfig  { root: PathBuf, bootstrap: Vec < String >, schemas: Arc < big_cabinet :: SchemaRepo >, installs: Vec < MicroInstall > }
+pub struct dayframe_node::NodeConfig  { root: PathBuf, bootstrap: Vec < String >, schemas: Arc < big_cabinet :: SchemaRepo >, installs: Vec < MicroInstall >, serve: bool }
 pub struct dayframe_node::OperatorTransport  {  }
 pub use dayframe_node::cartridge :: CartridgeMicro

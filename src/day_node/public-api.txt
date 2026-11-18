@@ -18,3 +18,12 @@ pub struct day_node::DevSettings  { allow_slot_takeover: bool }
 pub struct day_node::HeldNode  { node: BigNode }
 pub struct day_node::NodeSettings  { peers: Option < PeerSettings >, relay: bool, dev: DevSettings }
 pub struct day_node::PeerSettings  { bootstrap: Vec < String >, loopback_only: bool, listen_port: Option < u16 > }
+pub use day_node::holder :: Attached
+pub use day_node::holder :: Booted
+pub use day_node::holder :: CONNECT_DEADLINE
+pub use day_node::holder :: LockHeld
+pub use day_node::holder :: LockRole
+pub use day_node::holder :: NodeDir
+pub use day_node::holder :: NodeLock
+pub use day_node::holder :: Reached
+pub use day_node::holder :: SocketState

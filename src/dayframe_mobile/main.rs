@@ -29,7 +29,6 @@ mod android {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::OnceLock;
-    use tokio::sync::OnceCell;
 
     /// The activity's `getFilesDir()`, captured in [`main`]. App-private storage that needs no
     /// permission and is removed with the app.
@@ -39,29 +38,6 @@ mod android {
     /// `adb push` and `adb pull` reach without a debuggable build: the operator's side of
     /// pairing. `None` when the device has no external storage.
     static EXTERNAL_DIRECTORY: OnceLock<Option<PathBuf>> = OnceLock::new();
-
-    /// The file in the external (or, failing that, internal) data directory that lists the
-    /// endpoint tickets of the nodes this phone dials, one per line.
-    const BOOTSTRAP_FILE: &str = "bootstrap.txt";
-
-    /// The file this phone's node writes its own endpoint ticket to at boot, for the operator to
-    /// put in the other node's bootstrap list.
-    const ADDRESS_FILE: &str = "node-address.txt";
-
-    /// The phone's node, booted once for the process. Android has no second process to hold a
-    /// node, so the app is the holder, and it lives as long as the process does: there is no
-    /// activity-destroy hook that could stop it in order, and the OS reclaims the process.
-    static NODE: OnceCell<Booted> = OnceCell::const_new();
-
-    /// The booted node and the micros its cartridges contribute, as the shell loads them: each is
-    /// a package whose component came out of the node's catalog, with the handles the node minted
-    /// for it from its `uses` and the cartridge's grants.
-    struct Booted {
-        node: dayframe_node::NodeComposition,
-        cartridge_packages: Vec<PackageFiles>,
-        /// Cartridge micros that could not be loaded, for the shell's installation errors.
-        cartridge_errors: Vec<String>,
-    }
 
     /// The packages `x/dayframe.ts android` stages into `packages/` before the build. `dx`
     /// copies a folder asset into the APK's `assets/` keeping the file names, which is the only
@@ -162,176 +138,41 @@ mod android {
             .collect()
     }
 
-    /// The text of the install file `name` (see `dayframe_node::MicroInstall::interim`): the
-    /// first of the pairing directories that has it. Missing everywhere is no file, which installs
-    /// the micro unconfigured; any other read failure is the operator's to see.
-    fn read_install_file(
-        data_directory: &std::path::Path,
-        name: &str,
-    ) -> std::io::Result<Option<Vec<u8>>> {
-        for directory in pairing_directories(data_directory) {
-            match std::fs::read(directory.join(name)) {
-                Ok(bytes) => return Ok(Some(bytes)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(None)
-    }
-
-    /// Boots the phone's node under `<data>/node`, dialing the tickets in the pairing files and
-    /// publishing its own ticket beside them, installs intxt on it, and loads the micros the
-    /// node's cartridges contribute. `bundled` are the ids of the packages in the APK: a micro a
-    /// cartridge contributes replaces the bundled package of the same name, and one that is in no
-    /// cartridge gets its node access from the interim install table. A node that cannot boot is
-    /// a failure the launcher shows: the micros' node access is part of what the app is.
-    async fn boot_node(
-        data_directory: &std::path::Path,
-        bundled: Vec<String>,
-    ) -> Result<Booted, String> {
-        let pairing_directories = pairing_directories(data_directory);
-        let mut bootstrap = Vec::new();
-        for directory in &pairing_directories {
-            bootstrap.extend(
-                dayframe_node::read_tickets(&directory.join(BOOTSTRAP_FILE))
-                    .map_err(|error| format!("cannot read the bootstrap tickets: {error:#}"))?,
-            );
-        }
-        let mut node = dayframe_node::NodeComposition::boot(dayframe_node::NodeConfig {
-            root: data_directory.join("node"),
-            bootstrap,
-            // The node learns the datum vocabulary of intxt (the PR and intxt datums the review
-            // micro reads) from intxt's cartridge, whose Lexicons it admits when the cartridge is
-            // installed below. The review config datum is Clay's, not the node's, and needs no
-            // schema here.
-            schemas: Arc::new(
-                big_cabinet::SchemaRepo::open(std::iter::empty())
-                    .expect("no registrations is a valid schema repo"),
-            ),
-            installs: Vec::new(),
-        })
-        .await
-        .map_err(|error| format!("cannot boot the node: {error:#}"))?;
-        // intxt's handler component ships in the APK beside the packages. The install is
-        // idempotent by cartridge version, so every boot runs it; the first one writes.
-        let guest_path = format!("{PACKAGES}/{INTXT_GUEST_FILE}");
-        let guest = dioxus::asset_resolver::read_asset_bytes(&guest_path)
-            .await
-            .map_err(|error| format!("cannot read bundled asset {guest_path}: {error}"))?;
-        node.install_intxt(&guest)
-            .await
-            .map_err(|error| format!("cannot install intxt on the node: {error}"))?;
-
-        let mut cartridge_packages = Vec::new();
-        let mut cartridge_errors = Vec::new();
-        for loaded in node
-            .sync_cartridge_micros()
-            .await
-            .map_err(|error| format!("cannot load the cartridges' micros: {error:#}"))?
-        {
-            match loaded {
-                Ok(micro) => cartridge_packages.push(PackageFiles {
-                    origin: format!("cartridge {}", micro.micro),
-                    manifest_json: micro.manifest_json,
-                    component: micro.component,
-                }),
-                Err(error) => cartridge_errors.push(format!("{error:#}")),
-            }
-        }
-        // INTERIM: a bundled micro that no cartridge replaces is installed from the table in
-        // `dayframe_node`, until it is published as a cartridge.
-        let uncovered = bundled
-            .into_iter()
-            .filter(|id| {
-                !cartridge_packages
-                    .iter()
-                    .filter_map(dayframe_native::package_micro_id)
-                    .any(|loaded| plug_name(&loaded) == plug_name(id))
-            })
-            .collect::<Vec<_>>();
-        let installs = dayframe_node::MicroInstall::interim(uncovered, |name| {
-            read_install_file(data_directory, name)
-        })
-        .map_err(|error| format!("cannot read the install files: {error:#}"))?;
-        for install in installs {
-            node.install_micro(install)
-                .await
-                .map_err(|error| format!("cannot install a micro on the node: {error:#}"))?;
-        }
-
-        let address = node.address();
-        for directory in pairing_directories {
-            let path = directory.join(ADDRESS_FILE);
-            std::fs::write(&path, &address)
-                .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-        }
-        Ok(Booted {
-            node,
-            cartridge_packages,
-            cartridge_errors,
-        })
-    }
-
-    /// The `<name>` of a micro id `<did>/<name>`: a cartridge's micro is installed under its
-    /// publisher's DID, a bundled package under the local namespace, and the name is what they
-    /// share.
-    fn plug_name(id: &str) -> &str {
-        id.split_once('/')
-            .unwrap_or_else(|| panic!("micro id {id:?} is not `<did>/<name>`"))
-            .1
-    }
-
     async fn load() -> Result<dayframe_native::CompositionRuntime, String> {
         let data_directory = DATA_DIRECTORY
             .get()
             .expect("main sets the data directory before launching");
         let store = dayframe_native::open_store(&data_directory.join("store.sqlite")).await?;
-        let mut bundled = Vec::new();
+        let mut packages = Vec::new();
         let mut errors = Vec::new();
         for name in PACKAGE_NAMES {
             match read_package(name).await {
-                Ok(files) => bundled.push(files),
+                Ok(files) => packages.push(files),
                 Err(error) => errors.push(error),
             }
         }
-        let booted = NODE
-            .get_or_try_init(|| {
-                boot_node(
-                    data_directory,
-                    bundled
-                        .iter()
-                        .filter_map(dayframe_native::package_micro_id)
-                        .collect(),
-                )
-            })
-            .await?;
-        // A cartridge's micro replaces the bundled package of the same name.
-        let replaced = |files: &PackageFiles| {
-            dayframe_native::package_micro_id(files).is_some_and(|id| {
-                booted
-                    .cartridge_packages
-                    .iter()
-                    .filter_map(dayframe_native::package_micro_id)
-                    .any(|loaded| plug_name(&loaded) == plug_name(&id))
-            })
-        };
-        let mut packages: Vec<PackageFiles> = bundled
-            .into_iter()
-            .filter(|files| !replaced(files))
-            .collect();
-        packages.extend(booted.cartridge_packages.iter().cloned());
-        errors.extend(booted.cartridge_errors.iter().cloned());
-        let node = &booted.node;
-        dayframe_native::native_runtime(
+        let guest_path = format!("{PACKAGES}/{INTXT_GUEST_FILE}");
+        let intxt_guest = dioxus::asset_resolver::read_asset_bytes(&guest_path)
+            .await
+            .map_err(|error| format!("cannot read bundled asset {guest_path}: {error}"))?;
+        dayframe_native::hosted_runtime(
             Arc::new(store),
             packages,
             errors,
             dayframe_native::wasmtime_engine,
-            &|micro| node.egress(micro),
-            &|micro| node.config_datum(micro).cloned(),
+            dayframe_native::NodeHost {
+                root: data_directory.join("node"),
+                // No second process on Android: nothing could reach a socket, and the data
+                // directory is too deep for a socket path.
+                serve: false,
+                pairing_directories: pairing_directories(data_directory)
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect(),
+                intxt_guest,
+            },
         )
         .await
-        .map_err(|error| format!("cannot load the store: {error}"))
     }
 
     /// The WebView's size in CSS px and the display's CSS px per physical px
