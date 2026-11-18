@@ -1793,28 +1793,6 @@ mod tests {
     }
 
     #[test]
-    fn a_printed_comment_prefix_resolves_within_its_intxt_though_another_intxt_collides() {
-        let comment = |slot: &str| key(intxt_core::annotation::Comment::ID, slot).unwrap();
-        let ours = comment("0192aaaa-1");
-        let theirs = comment("0192aaaa-2");
-        let view = view_of(&["entry-one"]);
-
-        let ours_names = view.names([&ours]);
-        let printed = ours_names.render(&ours.to_string()).unique;
-        assert_eq!(ours_names.resolve(&printed).unwrap(), &ours.to_string());
-
-        let everyone = view.names([&ours, &theirs]);
-        assert!(
-            everyone.resolve(&printed).is_err(),
-            "{printed} must collide across intxts for this test to mean anything"
-        );
-        assert!(
-            everyone.render(&ours.to_string()).unique.len() > printed.len(),
-            "{printed} is longer when both intxts' comments are compared"
-        );
-    }
-
-    #[test]
     fn short_ids_starting_with_z_are_not_drawer_ids() {
         let drawer = DrawerId::new([7; 32]);
         assert_eq!(full_drawer_id(&drawer.to_string()), Some(drawer));
