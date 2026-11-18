@@ -194,8 +194,20 @@ impl Cartridge {
     /// A `#net` permbind names a host the grant datum can be keyed by, and HTTP verbs.
     fn validate_net(binding: &str, net: &PermbindNet) -> Result<(), CartridgeError> {
         let path = format!("permbinds.{binding}");
-        if let Err(error) = net.target() {
-            return Err(CartridgeError::invalid(path, error.to_string()));
+        match net.target() {
+            Err(error) => return Err(CartridgeError::invalid(path, error.to_string())),
+            Ok(target) if target.names_this_machine_or_lan() => {
+                return Err(CartridgeError::invalid(
+                    path,
+                    format!(
+                        "`{target}` is this machine or a private network, which a guest never \
+                         reaches by its own address; the machine's loopback is \
+                         `{}:<port>` and needs the node's `net.allow_host_loopback`",
+                        config::NetTarget::HOST_LOOPBACK
+                    ),
+                ));
+            }
+            Ok(_) => {}
         }
         for method in net.methods.iter().flatten() {
             if method.is_empty() || !method.bytes().all(|byte| byte.is_ascii_uppercase()) {
