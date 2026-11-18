@@ -10,7 +10,7 @@ path = "main.rs"
 [dependencies]
 dioxus = { workspace = true }
 ui = { workspace = true }
-dayframe_composition = { workspace = true }
+daytxt_core = { workspace = true }
 dayframe_native = { workspace = true }
 day_node = { workspace = true }
 clay_docs = { workspace = true }

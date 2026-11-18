@@ -20,7 +20,7 @@ mobile = ["dioxus/mobile", "dayframe_native/wry"]
 
 # The composition (Wasmtime, SQLite) is only built for the target that runs it.
 dayframe_native = { workspace = true }
-dayframe_composition = { workspace = true }
+daytxt_core = { workspace = true }
 jni = "0.21"
 
 [[bin]]

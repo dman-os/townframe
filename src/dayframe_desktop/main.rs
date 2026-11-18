@@ -1,4 +1,4 @@
-use dayframe_composition::Renderer;
+use daytxt_core::Renderer;
 use dioxus::prelude::*;
 
 mod composition;

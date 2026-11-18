@@ -60,7 +60,7 @@ native, self-contained micro may keep `manifest()` inline (see `micro_sample`).
    package factory). Contribution targets are declared in *your* manifest; you never name
    another micro's contract from composition code.
 3. Add the instance's entry to the configuration maps in
-   `dayframe_composition::CompositionRuntime::new` (bindings route your requirements to
+   `daytxt_core::CompositionRuntime::new` (bindings route your requirements to
    providers by instance name).
 4. Name the crate `micro_<name>` (and `micro_<name>_manifest`) and it joins the gate
    automatically: `x/check-dayframe.ts` derives its package list from `cargo metadata` by

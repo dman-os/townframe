@@ -15,7 +15,7 @@ use crate::composition::CompositionRuntime;
 use clay_docs::FacetRoute;
 use clay_host::MicroState;
 use clay_mdk::MicroId;
-use dayframe_composition::HostInputs;
+use daytxt_core::HostInputs;
 
 const COUNTER_PANEL: &str = "section[aria-label=\"Counter (Wasm) panel\"]";
 const SAMPLE_PANEL: &str = "section[aria-label=\"Sample micro panel\"]";

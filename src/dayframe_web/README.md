@@ -1,7 +1,7 @@
 # Web
 
 Web composition root for Dayframe (ADR 018 §7). Shared design tokens and components live in
-`../ui`; the engine-neutral composition runtime lives in `../dayframe_composition`. This shell
+`../ui`; the engine-neutral composition runtime lives in `../daytxt_core`. This shell
 selects the `wcmp` browser engine and fetches each package's guest (the counter, the layout) as an asset during activation.
 
 ```sh

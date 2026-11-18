@@ -4,11 +4,11 @@
 //! instance activates, and their digest is verified against the index before the browser
 //! engine (`wcmp`) ever sees them.
 use clay_mdk::host::factory;
-use dayframe_composition::CompositionRuntime;
-use dayframe_composition::HostInputs;
-use dayframe_composition::Insets;
-use dayframe_composition::InstalledMicro;
-use dayframe_composition::Renderer;
+use daytxt_core::CompositionRuntime;
+use daytxt_core::HostInputs;
+use daytxt_core::Insets;
+use daytxt_core::InstalledMicro;
+use daytxt_core::Renderer;
 use dioxus::prelude::*;
 use serde::Deserialize;
 use std::rc::Rc;
@@ -143,7 +143,7 @@ fn native_micros() -> Vec<InstalledMicro> {
                 },
             )
         },
-        dayframe_composition::lifecycle::micro(),
+        daytxt_core::lifecycle::micro(),
     ]
 }
 
@@ -234,7 +234,7 @@ fn ReadyApp(runtime: Signal<Option<CompositionRuntime>>) -> Element {
         .expect("ReadyApp mounts only with a built runtime");
     let runtime = use_signal(|| initial);
     let host = use_host_inputs();
-    rsx! { dayframe_composition::Application { runtime, host } }
+    rsx! { daytxt_core::Application { runtime, host } }
 }
 
 fn inner_size() -> (f64, f64) {

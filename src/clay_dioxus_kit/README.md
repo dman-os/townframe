@@ -184,7 +184,7 @@ named after it.
   pin the classes; whether Blitz renders the keyframes is a screenshot matter (the ledger's K1
   notes).
 - **KIT-109** Safe areas never reach the kit. A host pads its whole frame by the system insets
-  (`dayframe_composition::Application` does) and hands the shell the size that remains, so every
+  (`daytxt_core::Application` does) and hands the shell the size that remains, so every
   surface, including an overlay and its scrim, lies inside the safe rectangle and the system bars
   show the window behind. Reason: a Wasm guest mounts `AppBar` and `ListRow` in its own tree, with
   no context to read an inset from, so a per-component inset prop would work only for the shell's

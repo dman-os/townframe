@@ -570,7 +570,7 @@ async fn a_reboot_over_the_same_sqlite_file_keeps_manifest_row_stamps() {
             let store = clay_store::SqliteStore::open(sqlite.database(
                 &path,
                 &[],
-                "_dayframe_composition_test_unused",
+                "_daytxt_core_test_unused",
             ))
             .await
             .unwrap();

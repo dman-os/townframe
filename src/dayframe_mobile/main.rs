@@ -240,7 +240,7 @@ mod android {
     /// activity's content view counts: an activity drawn edge to edge has its content under the
     /// bars, while one that is not (Android 14 and older default) already sits between them, and
     /// insetting it again would leave a band of empty chrome.
-    fn system_insets(scale: f64) -> dayframe_composition::Insets {
+    fn system_insets(scale: f64) -> daytxt_core::Insets {
         dioxus::prelude::manganis::android::with_activity(|env, activity| {
             Some(read_insets(env, activity, scale))
         })
@@ -251,7 +251,7 @@ mod android {
         env: &mut JNIEnv,
         activity: &JObject,
         scale: f64,
-    ) -> dayframe_composition::Insets {
+    ) -> daytxt_core::Insets {
         fn call<'local>(
             env: &mut JNIEnv<'local>,
             object: &JObject,
@@ -276,7 +276,7 @@ mod android {
             "()Landroid/view/WindowInsets;",
         );
         if insets.is_null() {
-            return dayframe_composition::Insets::default();
+            return daytxt_core::Insets::default();
         }
         let sdk = env
             .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
@@ -333,7 +333,7 @@ mod android {
         let bottom = int(env, &decor, "getHeight") - top - int(env, &content, "getHeight");
         let [bar_top, bar_right, bar_bottom, bar_left] = bars;
         let overlap = |bar: i32, offset: i32| f64::from((bar - offset).max(0)) / scale;
-        dayframe_composition::Insets {
+        daytxt_core::Insets {
             top: overlap(bar_top, top),
             right: overlap(bar_right, right),
             bottom: overlap(bar_bottom, bottom),

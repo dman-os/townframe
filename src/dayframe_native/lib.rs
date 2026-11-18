@@ -12,13 +12,13 @@ use clay_mdk::host::CollectionBindings;
 use clay_mdk::host::Resources;
 use clay_store::OrderedStore;
 #[cfg(any(feature = "blitz", feature = "wry"))]
-use dayframe_composition::Application;
-pub use dayframe_composition::CompositionRuntime;
+use daytxt_core::Application;
+pub use daytxt_core::CompositionRuntime;
 #[cfg(any(feature = "blitz", feature = "wry"))]
-use dayframe_composition::HostInputs;
+use daytxt_core::HostInputs;
 #[cfg(any(feature = "blitz", feature = "wry"))]
-use dayframe_composition::Insets;
-use dayframe_composition::InstalledMicro;
+use daytxt_core::Insets;
+use daytxt_core::InstalledMicro;
 use dioxus::prelude::*;
 use std::future::Future;
 use std::path::Path;
@@ -123,7 +123,7 @@ fn native_micros() -> Vec<InstalledMicro> {
                 },
             )
         },
-        dayframe_composition::lifecycle::micro(),
+        daytxt_core::lifecycle::micro(),
     ]
 }
 
@@ -275,8 +275,8 @@ fn package_micros(
                         });
                     config_writes.push((
                         FacetRoute {
-                            document: dayframe_composition::config_document(&request.binding),
-                            branch: dayframe_composition::CONFIG_BRANCH.into(),
+                            document: daytxt_core::config_document(&request.binding),
+                            branch: daytxt_core::CONFIG_BRANCH.into(),
                             tag,
                             key_id: key,
                         },
@@ -701,7 +701,7 @@ fn use_host_inputs(insets_source: Option<InsetsSource>) -> HostInputs {
         platform_back,
         can_back,
         // Blitz has no keyboard focus (`tabindex` panics it) and no pointer capture.
-        renderer: dayframe_composition::Renderer::Blitz,
+        renderer: daytxt_core::Renderer::Blitz,
         // The development seed: see `HostInputs::start`.
         start: std::env::var("DAYFRAME_SHELL_OPEN").ok(),
     }
@@ -832,7 +832,7 @@ fn use_wry_host_inputs(
         insets: insets.into(),
         platform_back,
         can_back,
-        renderer: dayframe_composition::Renderer::Browser,
+        renderer: daytxt_core::Renderer::Browser,
         // The development seed: see `HostInputs::start`.
         start: std::env::var("DAYFRAME_SHELL_OPEN").ok(),
     }
@@ -923,8 +923,8 @@ mod tests {
         .unwrap();
         assert!(runtime.installation_errors.is_empty());
         let route = FacetRoute {
-            document: dayframe_composition::config_document(micro_review_manifest::CONFIG_NAME),
-            branch: dayframe_composition::CONFIG_BRANCH.into(),
+            document: daytxt_core::config_document(micro_review_manifest::CONFIG_NAME),
+            branch: daytxt_core::CONFIG_BRANCH.into(),
             tag: micro_review_manifest::CONFIG_TAG.into(),
             key_id: micro_review_manifest::CONFIG_KEY.into(),
         };
