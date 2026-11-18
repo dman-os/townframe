@@ -1359,7 +1359,7 @@ mod admission_tests {
         let other: CartridgeId = example_cartridge!("other").parse().unwrap();
         let drawer_grant = GrantKey::Drawer(drawer.clone());
         let cartridge_grant = GrantKey::Cartridge(other.clone());
-        let net = GrantKey::Net("api.example.org".into());
+        let net = GrantKey::Net("api.example.org".parse().unwrap());
         let method = GrantKey::Method("org.example.search.query".into());
         let authority = GrantKey::Authority("org.example.callee".into());
 
@@ -1389,7 +1389,7 @@ mod admission_tests {
         );
         assert_eq!(
             resolved.nets,
-            BTreeSet::from(["api.example.org".to_owned()])
+            BTreeSet::from(["api.example.org".parse().unwrap()])
         );
         assert_eq!(
             resolved.operations,

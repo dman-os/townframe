@@ -6,8 +6,11 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use super::AUTHORITY;
+use crate::config::InvalidNetTarget;
+use crate::config::NetTarget;
 use super::Digest;
 use super::Necessity;
 use super::Resolution;
@@ -20,6 +23,7 @@ pub enum Permbind {
     Datum(PermbindDatum),
     Method(PermbindMethod),
     Drawers(PermbindDrawers),
+    Net(PermbindNet),
     #[datum(other)]
     Unknown(big_cabinet_core::datum::UnknownMember),
 }
@@ -56,6 +60,43 @@ pub struct PermbindMethod {
     pub min_revision: Option<u32>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// `#net { host, port?, methods? }`: a host a routine may use the network to reach (ADR 049 §2).
+/// It gates the routine's outgoing `wasi:http` requests to URLs that are not the node's own
+/// `dispatch.local`, and is the permbind raw `wasi:sockets` will use. A routine that takes it
+/// reaches the host only once the cartridge also holds the matching `grant/net` datum.
+///
+/// Matching is exact (no wildcards): the host case-insensitively, the port as stated (none means
+/// the HTTPS port, 443, see [`NetTarget`]), and `methods` (HTTP verbs, upper case) when present.
+#[macros::datum(authority = PERMBIND_AUTHORITY, name = "net")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermbindNet {
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// The HTTP verbs the routine may use; every verb when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub methods: Option<BTreeSet<String>>,
+    pub description: String,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+impl PermbindNet {
+    /// The host and port this permbind names, as [`Cartridge::validate`] checked them.
+    pub fn target(&self) -> Result<NetTarget, InvalidNetTarget> {
+        NetTarget::new(&self.host, self.port)
+    }
+
+    /// Whether `method` is among the verbs this permbind allows.
+    pub fn allows_method(&self, method: &str) -> bool {
+        self.methods
+            .as_ref()
+            .is_none_or(|methods| methods.contains(method))
+    }
 }
 
 #[macros::datum(authority = PERMBIND_AUTHORITY, name = "drawers")]

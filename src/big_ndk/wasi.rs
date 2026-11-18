@@ -60,7 +60,8 @@ where
     body
 }
 
-/// The [`HttpTransport`] of a guest: `wasi:http/client` to `http://dispatch.local`. Wrapped in
+/// The [`HttpTransport`] of a guest: `wasi:http/client` to `http://dispatch.local`, or to the
+/// absolute URL a request's `path` names (see [`XrpcRequest::path`]). Wrapped in
 /// `service_client_core_rs::Xrpc` it is a `UnaryTransport` for every unary method.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WasiHttp;
@@ -98,15 +99,44 @@ impl HttpTransport for WasiHttp {
                 other => Method::Other(other.as_str().to_owned()),
             })
             .expect("a method token is valid");
+        let (scheme, authority, path) = if request.path.starts_with("http://")
+            || request.path.starts_with("https://")
+        {
+            let url: http::Uri = request
+                .path
+                .parse()
+                .map_err(|error| HttpTransportError {
+                    message: format!("`{}` is not a URL: {error}", request.path),
+                })?;
+            (
+                match url.scheme_str() {
+                    Some("https") => Scheme::Https,
+                    _ => Scheme::Http,
+                },
+                url.authority()
+                    .ok_or_else(|| HttpTransportError {
+                        message: format!("`{}` names no host", request.path),
+                    })?
+                    .to_string(),
+                url.path_and_query()
+                    .map_or("/".to_owned(), |target| target.to_string()),
+            )
+        } else {
+            (
+                Scheme::Http,
+                DISPATCH_AUTHORITY.to_owned(),
+                format!("/{}", request.path),
+            )
+        };
         outgoing
-            .set_scheme(Some(&Scheme::Http))
-            .expect("http is a valid scheme");
+            .set_scheme(Some(&scheme))
+            .expect("http and https are valid schemes");
         outgoing
-            .set_authority(Some(DISPATCH_AUTHORITY))
-            .expect("a fixed authority is valid");
+            .set_authority(Some(&authority))
+            .expect("the authority of a parsed URL is valid");
         outgoing
-            .set_path_with_query(Some(&format!("/{}", request.path)))
-            .expect("an encoded XRPC path is valid");
+            .set_path_with_query(Some(&path))
+            .expect("the path of a parsed URL is valid");
 
         let body = request.body;
         wit_bindgen::spawn_local(async move {

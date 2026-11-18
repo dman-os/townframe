@@ -166,6 +166,10 @@ fn question(access: &RequestedAccess) -> String {
             }
         }
         RequestedAccess::Method { nsid } => format!("may use the operation `{nsid}`"),
+        RequestedAccess::Net { host, port } => match port {
+            Some(port) => format!("may use the network to reach {host}:{port}"),
+            None => format!("may use the network to reach {host}"),
+        },
     }
 }
 

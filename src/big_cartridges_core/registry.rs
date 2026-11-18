@@ -132,6 +132,7 @@ pub fn registry_universe() -> big_cabinet_core::datum::Universe {
     use crate::PermbindDatum;
     use crate::PermbindDrawers;
     use crate::PermbindMethod;
+    use crate::PermbindNet;
     use crate::WasmComponent;
 
     use big_cabinet_core::datum::Declaration;
@@ -139,6 +140,7 @@ pub fn registry_universe() -> big_cabinet_core::datum::Universe {
         Declaration::of::<Cartridge>().expect("Cartridge declaration is valid"),
         Declaration::of::<PermbindDatum>().expect("PermbindDatum declaration is valid"),
         Declaration::of::<PermbindMethod>().expect("PermbindMethod declaration is valid"),
+        Declaration::of::<PermbindNet>().expect("PermbindNet declaration is valid"),
         Declaration::of::<PermbindDrawers>().expect("PermbindDrawers declaration is valid"),
         Declaration::of::<ComponentExport>().expect("ComponentExport declaration is valid"),
         Declaration::of::<WasmComponent>().expect("WasmComponent declaration is valid"),
