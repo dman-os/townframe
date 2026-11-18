@@ -1,4 +1,4 @@
-//! The Dayframe skin of [`headless::sections::Sections`]. See that module for behaviour and
+//! The claytxt skin of [`headless::sections::Sections`]. See that module for behaviour and
 //! renderer limits.
 use crate::headless::sections::SectionPane;
 use crate::headless::sections::SectionsSkin;

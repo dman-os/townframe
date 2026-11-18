@@ -479,7 +479,7 @@ impl WcmpPackage {
             |state| state,
         )
         .map_err(|error| error.to_string())?;
-        wasi::define(&mut linker, &component, "dayframe").map_err(|error| error.to_string())?;
+        wasi::define(&mut linker, &component, "claytxt").map_err(|error| error.to_string())?;
         Ok(Self {
             engine,
             component,

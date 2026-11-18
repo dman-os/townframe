@@ -17,7 +17,7 @@ impl ThemeMode {
     }
 }
 
-/// Loads the generated Material variables and Dayframe's semantic aliases.
+/// Loads the generated Material variables and claytxt's semantic aliases.
 #[component]
 pub fn FoundationStyles() -> Element {
     rsx! {

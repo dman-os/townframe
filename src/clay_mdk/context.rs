@@ -725,10 +725,14 @@ impl Backend {
     async fn call<M: Unary>(&self, input: M) -> Result<M::Output, ClientError<M::Error>> {
         match self {
             #[cfg(feature = "in_process")]
-            Self::InProcess(_) => unimplemented!(
-                "an in-process micro has no node transport yet: only guest micros call node \
-                 methods (over wasi:http to dispatch.local)"
-            ),
+            Self::InProcess(_) => {
+                // The request is unsent: there is no transport to hand it to.
+                drop(input);
+                unimplemented!(
+                    "an in-process micro has no node transport yet: only guest micros call node \
+                     methods (over wasi:http to dispatch.local)"
+                )
+            }
             // The `wasi:http` request is a component-model future, which can only be polled
             // inside a component-model task. A Dioxus task (a `use_resource` in a view) is
             // polled by `render_immediate` from the synchronous `mount` and `dispatch` exports,

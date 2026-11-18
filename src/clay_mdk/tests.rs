@@ -33,12 +33,12 @@ fn engine() -> wasmtime::Result<Engine> {
 }
 
 fn counter_component() -> Vec<u8> {
-    let variable = "DAYFRAME_COUNTER_COMPONENT";
+    let variable = "DAYTXT_COUNTER_COMPONENT";
     let path = std::env::var_os(variable).unwrap_or_else(|| {
-        panic!("{variable} must name a prepared counter component; run deno run --allow-all x/check-dayframe.ts --prepare-only and export the printed path")
+        panic!("{variable} must name a prepared counter component; run deno run --allow-all x/check-daytxt.ts --prepare-only and export the printed path")
     });
     std::fs::read(&path).unwrap_or_else(|error| {
-        panic!("cannot read {variable}: {error}; run deno run --allow-all x/check-dayframe.ts --prepare-only")
+        panic!("cannot read {variable}: {error}; run deno run --allow-all x/check-daytxt.ts --prepare-only")
     })
 }
 

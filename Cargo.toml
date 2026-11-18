@@ -26,7 +26,7 @@ members = [
   "./src/big_node/",
   "./src/day_cli",
   "./src/day_node",
-  "./src/dayframe_node",
+  "./src/clay_node",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
@@ -67,7 +67,6 @@ members = [
   "./src/clay_dioxus",
   "./src/clay_mdk",
   "./src/clay_rt_wasmtime",
-  "./src/clay_node_egress",
   "./src/clay_rt_wcmp",
   "./src/clay_rt_wcmp_wasmi",
   "./src/clay_guest_session",
@@ -93,12 +92,12 @@ members = [
   "./src/ui",
   "./src/clay_dioxus_kit",
   "./src/dioxus_storm",
-  "./src/dayframe_composition",
-  "./src/dayframe_native",
-  "./src/dayframe_web",
-  "./src/dayframe_desktop",
-  "./src/dayframe_mobile",
-  "./src/dayframe_showcase",
+  "./src/daytxt_core",
+  "./src/daytxt_native",
+  "./src/daytxt_web",
+  "./src/daytxt_desktop",
+  "./src/daytxt_mobile",
+  "./src/claytxt_showcase",
 ]
 exclude = [
   "src/wasm_utils_rs",
@@ -173,7 +172,7 @@ big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
 big_node = { path = "./src/big_node/" }
 day_node = { path = "./src/day_node" }
-dayframe_node = { path = "./src/dayframe_node" }
+clay_node = { path = "./src/clay_node" }
 clay_collection = { path = "./src/clay_collection" }
 clay_store = { path = "./src/clay_store" }
 clay_host = { path = "./src/clay_host" }
@@ -188,10 +187,9 @@ clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
 clay_rt_wcmp = { path = "./src/clay_rt_wcmp" }
 clay_rt_wcmp_wasmi = { path = "./src/clay_rt_wcmp_wasmi" }
 # Lives in the `src/wasm_utils_rs` workspace (it is the only root-workspace consumer), but
-# `dayframe_web` links it as a plain path dependency.
+# `daytxt_web` links it as a plain path dependency.
 clay_rt_wcmp_web = { path = "./src/clay_rt_wcmp_web" }
 clay_guest_session = { path = "./src/clay_guest_session" }
-clay_node_egress = { path = "./src/clay_node_egress" }
 clay_mdk = { path = "./src/clay_mdk", default-features = false }
 micro_settings_manifest = { path = "./src/micro_settings_manifest" }
 micro_settings = { path = "./src/micro_settings" }
@@ -207,9 +205,9 @@ micro_sample = { path = "./src/micro_sample" }
 micro_counter = { path = "./src/micro_counter" }
 micro_counter_manifest = { path = "./src/micro_counter_manifest" }
 micro_review_manifest = { path = "./src/micro_review_manifest" }
-dayframe_composition = { path = "./src/dayframe_composition" }
+daytxt_core = { path = "./src/daytxt_core" }
 ui = { path = "./src/ui" }
-dayframe_native = { path = "./src/dayframe_native" }
+daytxt_native = { path = "./src/daytxt_native" }
 
 #
 # meta
@@ -370,7 +368,7 @@ wasmtime-wasi-http = { version = "48.0.7", default-features = false }
 # async export task state in a libc `thread_local!`, which cannot be swapped per component-model
 # task. Without `std` it goes through the `wit_bindgen_0_62_0_{get,set}_task_context` hooks that
 # `clay_mdk` defines over context slot 0 (see `clay_mdk/lib.rs`). Each guest crate names the
-# features it needs; `x/check-dayframe.ts` fails if `std` comes back. The exact `=` pin is on
+# features it needs; `x/check-daytxt.ts` fails if `std` comes back. The exact `=` pin is on
 # purpose: `clay_mdk` defines `wit_bindgen_0_62_0_*` symbols, so a bump must be a visible edit there.
 wit-bindgen = { version = "=0.62.0", default-features = false }
 wstd = "0.6.8"

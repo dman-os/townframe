@@ -1,4 +1,4 @@
-//! The Dayframe skin of [`headless::nav_button::NavButton`].
+//! The claytxt skin of [`headless::nav_button::NavButton`].
 use crate::headless::nav_button::NavButtonMode;
 use crate::headless::nav_button::{self};
 use dioxus::prelude::*;

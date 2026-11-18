@@ -247,7 +247,7 @@ fn use_start(shell: &Shell, host: &HostInputs, failure: Signal<Option<String>>) 
             if let Some(spec) = start
                 && let Err(problem) = shell.start_on(&spec).await
             {
-                failure.set(Some(format!("DAYFRAME_SHELL_OPEN: {problem}")));
+                failure.set(Some(format!("DAYTXT_SHELL_OPEN: {problem}")));
             }
         }
     });
@@ -547,7 +547,7 @@ fn Sidebar(shell: Shell) -> Element {
         });
     rsx! {
         nav { class: "flex flex-col gap-2", "aria-label": "Sidebar",
-            AppBar { title: "Dayframe" }
+            AppBar { title: "daytxt" }
             if wide {
                 button {
                     class: "{BUTTON} mx-2",

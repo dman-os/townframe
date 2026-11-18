@@ -1,6 +1,6 @@
 # clay_dioxus_kit
 
-The shared Dioxus component library for Clay compositions (Dayframe, the agentic IDE). It links
+The shared Dioxus component library for Clay compositions (claytxt, the agentic IDE). It links
 into native hosts, the browser build and Wasm guest micros alike, so it depends on Dioxus (default
 features off) and the design-token vocabulary only: no backend, no renderer, no `clay_*` crate.
 Design: [ADR 032 section 7](../../docs/adrs/032-shell-micro-and-component-kit.md); vocabulary:
@@ -9,7 +9,7 @@ here, so the rules below are binding; a change to a rule is a change to this fil
 
 | Component | Headless part | Styled part | Specimen |
 |---|---|---|---|
-| `Sections` (resizable split) | `headless::sections` | `Sections` | `dayframe_showcase/kit.rs` |
+| `Sections` (resizable split) | `headless::sections` | `Sections` | `claytxt_showcase/kit.rs` |
 | `ListDetails` (list/details scaffold) | `headless::list_details` | `ListDetails` | same |
 | `Sheet` (bottom/side sheet) | `headless::sheet` | `Sheet` | same |
 | `NavButton` (back / open sidebar) | `headless::nav_button` | `NavButton` | same |
@@ -184,7 +184,7 @@ named after it.
   pin the classes; whether Blitz renders the keyframes is a screenshot matter (the ledger's K1
   notes).
 - **KIT-109** Safe areas never reach the kit. A host pads its whole frame by the system insets
-  (`dayframe_composition::Application` does) and hands the shell the size that remains, so every
+  (`daytxt_core::Application` does) and hands the shell the size that remains, so every
   surface, including an overlay and its scrim, lies inside the safe rectangle and the system bars
   show the window behind. Reason: a Wasm guest mounts `AppBar` and `ListRow` in its own tree, with
   no context to read an inset from, so a per-component inset prop would work only for the shell's
@@ -213,7 +213,7 @@ named after it.
   still deterministic and sleep-free. A seed that finds a panic stays as a regression case.
 - **KIT-072** Every component has a headless test module; a styled part with logic of its own
   (width to placement) has a skin test.
-- **KIT-080** Every component has a specimen in `dayframe_showcase/kit.rs`, at a compact and an
+- **KIT-080** Every component has a specimen in `claytxt_showcase/kit.rs`, at a compact and an
   expanded host width. A specimen is a fixed-size frame standing in for the host: its width is
   both its CSS width and the `WidthClass` / extent it hands the component. The showcase is where
   a new component is reviewed.
@@ -269,4 +269,4 @@ KIT-070 are enforced by the harness itself (`src/testing.rs`).
 | every cited `KIT-nnn` | `conventions::cited_rules_exist_in_the_readme` |
 
 The Blitz limits several rules route around are pinned, as defects, in
-`dayframe_desktop/e2e/blitz_limits.rs` (see the dayframe ledger, "K2 notes").
+`daytxt_desktop/e2e/blitz_limits.rs` (see the dayframe ledger, "K2 notes").

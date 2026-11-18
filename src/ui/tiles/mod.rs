@@ -200,10 +200,10 @@ fn visible_columns(width: f64) -> usize {
     }
 }
 
-/// Start with paths already open, from `DAYFRAME_OPEN`.
+/// Start with paths already open, from `DAYTXT_OPEN`.
 ///
 /// Semicolon-separated slots, each `slot:index,index`, where the indices are the
-/// tiles opened at each depth. `DAYFRAME_OPEN=0:0,2;1:2` opens the first tile of
+/// tiles opened at each depth. `DAYTXT_OPEN=0:0,2;1:2` opens the first tile of
 /// slot 0 then its third child (Daybook, then Plugs), and the third tile of
 /// slot 1 (Capture, in Home).
 ///
@@ -214,7 +214,7 @@ fn visible_columns(width: f64) -> usize {
 /// screenshotted. A test fixture: delete it when input can be driven.
 fn seeded_path(column_count: usize) -> Vec<Vec<usize>> {
     let mut open = vec![Vec::new(); column_count];
-    let Ok(spec) = std::env::var("DAYFRAME_OPEN") else {
+    let Ok(spec) = std::env::var("DAYTXT_OPEN") else {
         return open;
     };
     for slot in spec.split(';') {

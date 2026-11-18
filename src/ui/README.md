@@ -9,7 +9,7 @@ ui/
 │  ├─ components/ # Shared shadcn-like primitives (tabs, buttons, cards, separators)
 │  ├─ foundation.rs # Shared design-token stylesheet loader
 │  ├─ tiles/ # Tile grammar prototype (not yet shippable)
-├─ styles/ # Source Material, Dayframe, and tile CSS
+├─ styles/ # Source Material, claytxt, and tile CSS
 ├─ tailwind.css # Tailwind entrypoint importing the source styles
 ├─ assets/
 │  └─ tailwind.css # Generated Tailwind output only

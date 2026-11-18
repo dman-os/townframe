@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 /// The cached package for one prepared guest component. The host process compiles a component
 /// once and reuses the linker across incarnations, so composition code caches per guest name.
-/// `x/check-dayframe.ts` prepares the artifact and exports its path. Compilation happens
+/// `x/check-daytxt.ts` prepares the artifact and exports its path. Compilation happens
 /// outside the cache lock so concurrent activations do not serialize on it. A missing or
 /// invalid artifact is an initialization failure the supervisor records as `Faulted`, not a
 /// host panic: the shell stays up and reports it.

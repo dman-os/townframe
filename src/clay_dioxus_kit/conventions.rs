@@ -443,7 +443,7 @@ fn tests_neither_sleep_nor_wait() {
 #[test]
 fn every_component_has_a_specimen_at_both_widths() {
     const UNFRAMED: [&str; 2] = ["NavButton", "ListRow"];
-    let showcase = read(&crate_root().join("../dayframe_showcase/kit.rs"));
+    let showcase = read(&crate_root().join("../claytxt_showcase/kit.rs"));
     let mut violations = Vec::new();
     for (_, pascal) in components() {
         if !showcase.text.contains(&format!("{pascal} {{")) {

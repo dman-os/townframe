@@ -85,7 +85,7 @@ pub struct HostInputs {
     /// Comma-separated entries opened in order: `panel` opens a panel, `panel/row` opens one of
     /// its rows, `@sidebar` opens the compact sidebar. A name without a dot is shorthand for
     /// `dayframe.<name>`, so `settings,settings/counter` starts on the counter's Settings
-    /// section. The desktop launcher fills it from `DAYFRAME_SHELL_OPEN`.
+    /// section. The desktop launcher fills it from `DAYTXT_SHELL_OPEN`.
     pub start: Option<String>,
 }
 

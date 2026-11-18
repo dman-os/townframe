@@ -1,0 +1,31 @@
+[package]
+name = "daytxt_mobile"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dioxus = { workspace = true }
+
+tokio = { version = "1", features = ["time", "rt", "sync"] }
+
+[features]
+default = ["mobile"]
+# The Android system WebView (Wry), the app's renderer. `dx build --platform android --renderer
+# webview` selects this feature by its `dioxus/mobile`.
+mobile = ["dioxus/mobile", "daytxt_native/wry"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+#
+# internal
+
+# The composition (Wasmtime, SQLite) is only built for the target that runs it.
+daytxt_native = { workspace = true }
+daytxt_core = { workspace = true }
+jni = "0.21"
+
+[[bin]]
+name = "daytxt_mobile"
+path = "main.rs"
+
+[lints]
+workspace = true

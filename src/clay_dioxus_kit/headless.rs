@@ -6,7 +6,7 @@
 //! overlay's `position: fixed`). Everything a theme decides arrives through the component's
 //! `*Skin` prop, a plain struct of class strings, so a second skin (the agentic IDE's, say) is a
 //! second set of class strings over the same behaviour. The styled components at the crate root
-//! are the Dayframe skin and the only callers in this crate.
+//! are the claytxt skin and the only callers in this crate.
 
 pub mod app_bar;
 pub mod drawer;

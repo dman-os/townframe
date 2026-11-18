@@ -1,4 +1,4 @@
-//! The `wasi:*` imports a dayframe guest pulls in when rustc targets
+//! The `wasi:*` imports a claytxt guest pulls in when rustc targets
 //! `wasm32-wasip3` (ADR 018 §Phase 1), defined on the polyfill
 //! [`Linker`].
 //!

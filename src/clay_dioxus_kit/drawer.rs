@@ -1,4 +1,4 @@
-//! The Dayframe skin of [`headless::drawer::Drawer`].
+//! The claytxt skin of [`headless::drawer::Drawer`].
 use crate::WidthClass;
 use crate::headless::drawer::DrawerSkin;
 use crate::headless::drawer::{self};

@@ -2880,29 +2880,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "clay_node_egress"
+name = "clay_node"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
+ "big_blobs_core",
  "big_cabinet",
  "big_cabinet_core",
+ "big_cartridges_core",
  "big_dispatch",
  "big_dispatch_core",
+ "big_node",
  "big_nodule",
+ "big_nodule_core",
+ "blake3",
+ "bytes",
  "clay_guest_session",
  "clay_host",
  "clay_rt_wasmtime",
  "clay_surface",
+ "day_node",
  "futures",
  "http",
+ "http-body-util",
+ "intxt_core",
  "keyring-core",
+ "method_core",
  "secrets_rs",
  "serde_json",
+ "service_client_core_rs",
  "service_client_native_rs",
  "service_core_rs",
  "service_utils_rs",
  "sqlite_rs",
+ "tempfile",
  "tokio",
+ "tower",
+ "utils_rs",
 ]
 
 [[package]]
@@ -3004,6 +3019,29 @@ dependencies = [
  "proptest",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "claytxt_showcase"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "console_error_panic_hook",
+ "dioxus",
+ "dioxus-native",
+ "dioxus-ssr",
+ "gloo-timers 0.3.0",
+ "js-sys",
+ "pierre_diffs_dioxus",
+ "review_mock",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ui",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]
@@ -4341,7 +4379,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dayframe_composition"
+name = "daytxt_core"
 version = "0.1.0"
 dependencies = [
  "ciborium",
@@ -4375,7 +4413,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dayframe_desktop"
+name = "daytxt_desktop"
 version = "0.1.0"
 dependencies = [
  "accesskit_xplat 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -4400,8 +4438,8 @@ dependencies = [
  "clay_surface",
  "day_node",
  "daybook_types",
- "dayframe_composition",
- "dayframe_native",
+ "daytxt_core",
+ "daytxt_native",
  "dioxus",
  "dioxus-core",
  "dioxus-html",
@@ -4427,31 +4465,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "dayframe_mobile"
+name = "daytxt_mobile"
 version = "0.1.0"
 dependencies = [
- "dayframe_composition",
- "dayframe_native",
+ "daytxt_core",
+ "daytxt_native",
  "dioxus",
  "jni 0.21.1",
  "tokio",
 ]
 
 [[package]]
-name = "dayframe_native"
+name = "daytxt_native"
 version = "0.1.0"
 dependencies = [
  "big_cabinet",
+ "big_cabinet_core",
+ "bytes",
  "clay_docs",
  "clay_guest_session",
  "clay_host",
  "clay_mdk",
+ "clay_node",
  "clay_store",
- "dayframe_composition",
- "dayframe_node",
+ "daytxt_core",
  "dioxus",
  "dioxus-desktop",
  "dioxus-native",
+ "http",
+ "http-body-util",
+ "intxt_core",
  "micro_counter_manifest",
  "micro_review_manifest",
  "micro_sample",
@@ -4463,75 +4506,16 @@ dependencies = [
  "micro_toolbar",
  "micro_toolbar_manifest",
  "serde_json",
- "sqlite_rs",
- "tokio",
- "ui",
-]
-
-[[package]]
-name = "dayframe_node"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "big_blobs_core",
- "big_cabinet",
- "big_cabinet_core",
- "big_cartridges_core",
- "big_dispatch",
- "big_dispatch_core",
- "big_node",
- "big_nodule",
- "big_nodule_core",
- "blake3",
- "bytes",
- "clay_guest_session",
- "clay_host",
- "clay_node_egress",
- "clay_rt_wasmtime",
- "clay_surface",
- "day_node",
- "http",
- "http-body-util",
- "intxt_core",
- "method_core",
- "micro_review_manifest",
- "secrets_rs",
- "serde_json",
- "service_client_core_rs",
- "service_client_native_rs",
  "service_utils_rs",
+ "sqlite_rs",
  "tempfile",
  "tokio",
- "tower",
+ "ui",
  "utils_rs",
 ]
 
 [[package]]
-name = "dayframe_showcase"
-version = "0.1.0"
-dependencies = [
- "clay_dioxus_kit",
- "console_error_panic_hook",
- "dioxus",
- "dioxus-native",
- "dioxus-ssr",
- "gloo-timers 0.3.0",
- "js-sys",
- "pierre_diffs_dioxus",
- "review_mock",
- "serde",
- "serde_json",
- "tokio",
- "ui",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "web-time",
-]
-
-[[package]]
-name = "dayframe_web"
+name = "daytxt_web"
 version = "0.1.0"
 dependencies = [
  "clay_dioxus",
@@ -4541,7 +4525,7 @@ dependencies = [
  "clay_rt_wcmp_web",
  "clay_store",
  "console_error_panic_hook",
- "dayframe_composition",
+ "daytxt_core",
  "dioxus",
  "js-sys",
  "micro_counter_manifest",

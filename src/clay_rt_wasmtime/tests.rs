@@ -1933,8 +1933,8 @@ async fn packages_share_one_engine_and_one_linker() {
 
 #[tokio::test]
 async fn precompiled_artifacts_are_reused_by_content() {
-    let path = std::env::var("DAYFRAME_COUNTER_COMPONENT")
-        .expect("DAYFRAME_COUNTER_COMPONENT must name a prepared counter component");
+    let path = std::env::var("DAYTXT_COUNTER_COMPONENT")
+        .expect("DAYTXT_COUNTER_COMPONENT must name a prepared counter component");
     let bytes = std::fs::read(path).unwrap();
     let directory = std::env::temp_dir().join(format!(
         "clay-component-cache-{}-{}",
@@ -1977,8 +1977,8 @@ async fn precompiled_artifacts_are_reused_by_content() {
 /// payload, so its cache key is its own and a compile of it is cold even when the artifact cache
 /// is warm.
 fn uniquely_padded_counter() -> Vec<u8> {
-    let path = std::env::var("DAYFRAME_COUNTER_COMPONENT")
-        .expect("DAYFRAME_COUNTER_COMPONENT must name a prepared counter component");
+    let path = std::env::var("DAYTXT_COUNTER_COMPONENT")
+        .expect("DAYTXT_COUNTER_COMPONENT must name a prepared counter component");
     let mut bytes = std::fs::read(path).unwrap();
     // A trailing custom section (id 0, name "pad") with a unique payload gives these bytes a
     // cache key of their own, so the compile is cold even when the artifact cache is warm.

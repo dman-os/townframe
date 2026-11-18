@@ -2,7 +2,7 @@
 //! The `dispatch` fixture: a micro that calls node methods with [`Context::call`] while it
 //! activates and publishes one presentation, `view`, whose single text node reports what each
 //! attempt returned (`name=ok(<answer>)` or `name=err(<reason>)`, one per line). The cross-crate
-//! e2e of `clay_node_egress` hosts it under Wasmtime against an in-process node, and pins:
+//! e2e of `clay_node` hosts it under Wasmtime against an in-process node, and pins:
 //!
 //! - `granted`: a call to a method the host granted this micro answers;
 //! - `ungranted`: a call to a method it was not granted is refused by dispatch's own admission;

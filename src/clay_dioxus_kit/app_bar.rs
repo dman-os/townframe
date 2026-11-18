@@ -1,4 +1,4 @@
-//! The Dayframe skin of [`headless::app_bar::AppBar`].
+//! The claytxt skin of [`headless::app_bar::AppBar`].
 use crate::headless::app_bar::AppBarSkin;
 use crate::headless::app_bar::{self};
 use dioxus::prelude::*;

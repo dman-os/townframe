@@ -15,7 +15,7 @@ clay_host = { workspace = true }
 clay_surface = { workspace = true }
 # This crate only needs wash-runtime's `wasmtime` re-export, so it opts out of
 # the default features (oci, postgres, nats, webgpu) that would otherwise reach
-# `dayframe_desktop` through `clay_mdk/wasmtime`. Host crates that actually run
+# `daytxt_desktop` through `clay_mdk/wasmtime`. Host crates that actually run
 # washlets keep the defaults; feature unification gives them back in a
 # workspace-wide build.
 wash-runtime = { workspace = true, default-features = false }

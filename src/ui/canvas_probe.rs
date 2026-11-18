@@ -29,10 +29,10 @@
 //! and Blitz prints its own per-phase timings for every resolve pass, so the
 //! cost shows up on stdout without the app having to measure anything.
 //!
-//! `DAYFRAME_PROBE_COLUMNS` sets how many columns the world holds, so the same
+//! `DAYTXT_PROBE_COLUMNS` sets how many columns the world holds, so the same
 //! probe can be run at a few sizes: if the per-phase timings stay flat as the
 //! count grows, a transform change is O(1) in the tree and the camera is free.
-//! `DAYFRAME_PROBE_AUTOPAN=1` makes the camera sweep itself, for measuring a
+//! `DAYTXT_PROBE_AUTOPAN=1` makes the camera sweep itself, for measuring a
 //! moving camera without pointer input. Off by default: it is a measuring
 //! instrument, not a camera anyone would want to use.
 //!
@@ -105,7 +105,7 @@ const ZOOM_RANGE: (f64, f64) = (0.15, 2.5);
 /// How many columns to build. A knob rather than a constant because the point of
 /// the probe is the *shape* of the cost curve, which one size cannot show.
 fn world_columns() -> usize {
-    std::env::var("DAYFRAME_PROBE_COLUMNS")
+    std::env::var("DAYTXT_PROBE_COLUMNS")
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|n| *n > 0)
@@ -116,7 +116,7 @@ fn world_columns() -> usize {
 /// measured without pointer input; it makes the camera feel like a screensaver,
 /// which is the opposite of what the probe is for when someone is feeling it out.
 fn autopan() -> bool {
-    std::env::var("DAYFRAME_PROBE_AUTOPAN")
+    std::env::var("DAYTXT_PROBE_AUTOPAN")
         .map(|v| v != "0")
         .unwrap_or(false)
 }

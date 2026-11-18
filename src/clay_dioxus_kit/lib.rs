@@ -1,7 +1,7 @@
-//! The Dayframe/Clay component kit. See the README for the conventions every component follows.
+//! The claytxt/Clay component kit. See the README for the conventions every component follows.
 //!
 //! Each component is a headless part under [`headless`] (behaviour, ARIA, events) and a styled
-//! part at the crate root (the Dayframe skin over the semantic design tokens).
+//! part at the crate root (the claytxt skin over the semantic design tokens).
 pub mod headless;
 
 mod app_bar;
