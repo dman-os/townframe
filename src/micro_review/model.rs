@@ -8,6 +8,9 @@
 //! not decode as its own vocabulary is an invariant and panics.
 use crate::node::CallError;
 use crate::node::NodeCalls;
+use big_blobs_core::Blob;
+use big_blobs_core::BlobId;
+use big_blobs_core::ReadBlob;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumTag;
 use big_cabinet_core::DocId;
@@ -20,6 +23,7 @@ use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::query::DatumSelection;
+use big_cabinet_core::reference::DatumReference;
 use big_cabinet_core::query::Predicate;
 use intxt_core::generic;
 use intxt_core::work;
@@ -213,8 +217,29 @@ pub struct Entry {
     pub kind: EntryKind,
     /// What names it: the commit range, the pull request, the ref.
     pub label: String,
-    /// A commit entry's unified patch, when the datum carries one.
-    pub patch: Option<String>,
+    /// The entry's changes, read only when the view shows them ([`Review::patch`]).
+    pub changes: Changes,
+}
+
+/// What an entry says of its changes, which are read lazily because a patch is a blob the node
+/// serves separately from the entry.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Changes {
+    /// The entry's kind has no changes to show.
+    Absent,
+    /// The entry carries no patch: the diff was too large to carry (ADR 040 §4).
+    TooLarge,
+    /// The patch is the bytes of this blob datum.
+    Blob(PatchSource),
+}
+
+/// The blob datum a patch reference names, with `self` already resolved against the document the
+/// entry is in: the intxt's descriptor document today, its commits document once the blob moves
+/// there. A concrete reference names that document, so both read the same way.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatchSource {
+    pub doc: DocId,
+    pub key: DatumKey,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -482,9 +507,39 @@ impl<C: NodeCalls> Review<C> {
         Ok(Links::Named(rows))
     }
 
+    /// The text of a patch: the blob datum read from its document, then the bytes it names from
+    /// the blob store. Called when the view shows an entry's changes, never for the whole intxt.
+    pub(crate) async fn patch(&self, source: &PatchSource) -> Result<String, CallError> {
+        let PatchSource { doc, key } = source;
+        let datums = match self.read(doc, Some([key.clone()].into())).await? {
+            Read::Ready(datums) => datums,
+            Read::Unreadable(reason) => return Err(CallError::Refused(reason)),
+        };
+        let value = accepted(&datums, key)
+            .map_err(|reason| CallError::Refused(format!("{doc}: {key} is {reason}")))?;
+        let blob: Blob = serde_json::from_value(value.clone())
+            .expect("the node admitted this value as a blob");
+        let blob_id: BlobId = blob
+            .digest
+            .parse()
+            .expect("the node admitted this blob's digest");
+        let bytes = self
+            .node
+            .read_blob(ReadBlob {
+                capability: self.node.configuration()?.blob_cap,
+                blob_id,
+            })
+            .await?;
+        String::from_utf8(bytes).map_err(|error| {
+            CallError::Unshowable(format!("the {} patch is not text: {error}", blob.mime))
+        })
+    }
+
     pub(crate) async fn intxt(&self, drawer: &DocId) -> Result<Read<Intxt>, CallError> {
         Ok(match self.read(drawer, None).await? {
-            Read::Ready(datums) => assemble(&datums).map_or_else(Read::Unreadable, Read::Ready),
+            Read::Ready(datums) => {
+                assemble(drawer, &datums).map_or_else(Read::Unreadable, Read::Ready)
+            }
             Read::Unreadable(reason) => Read::Unreadable(reason),
         })
     }
@@ -549,7 +604,7 @@ fn descriptor(
 /// An intxt from its descriptor document's datums: the title, and the body's entries in order, a
 /// duplicated reference once (ADR 036 §2). The title and the body are what make it an intxt; an
 /// entry that cannot be read is a row saying so.
-fn assemble(datums: &BTreeMap<DatumKey, DatumRead>) -> Result<Intxt, String> {
+fn assemble(drawer: &DocId, datums: &BTreeMap<DatumKey, DatumRead>) -> Result<Intxt, String> {
     let (title, body) = title_and_body(datums)?;
     let mut shown = BTreeSet::new();
     let entries = body
@@ -557,7 +612,7 @@ fn assemble(datums: &BTreeMap<DatumKey, DatumRead>) -> Result<Intxt, String> {
         .iter()
         .map(|reference| reference.key())
         .filter(|listed| shown.insert((*listed).clone()))
-        .map(|listed| entry(listed, accepted(datums, listed)))
+        .map(|listed| entry(drawer, listed, accepted(datums, listed)))
         .collect();
     Ok(Intxt {
         title: title.title,
@@ -566,7 +621,7 @@ fn assemble(datums: &BTreeMap<DatumKey, DatumRead>) -> Result<Intxt, String> {
     })
 }
 
-fn entry(key: &DatumKey, value: Result<&serde_json::Value, String>) -> Entry {
+fn entry(drawer: &DocId, key: &DatumKey, value: Result<&serde_json::Value, String>) -> Entry {
     let slot = String::from_utf8_lossy(key.slot_bytes()).into_owned();
     let value = match value {
         Ok(value) => value,
@@ -574,16 +629,48 @@ fn entry(key: &DatumKey, value: Result<&serde_json::Value, String>) -> Entry {
             return Entry {
                 kind: EntryKind::Unreadable(reason),
                 label: slot,
-                patch: None,
+                changes: Changes::Absent,
             };
         }
     };
     let tag = key.tag().as_str();
-    let kind = if tag == work::GitCommitEntry::ID {
-        EntryKind::Commits
-    } else if tag == work::JjChangeEntry::ID {
-        EntryKind::JjChange
-    } else if tag == work::GitRefEntry::ID {
+    // A missing patch is "too large to carry" (the entry's own doc); a present one names a blob
+    // datum, in this document or the one the reference names.
+    let changes = |patch: &Option<DatumReference>| match patch {
+        None => Changes::TooLarge,
+        Some(reference) => Changes::Blob(PatchSource {
+            doc: reference.document().resolve(drawer),
+            key: reference.key().clone(),
+        }),
+    };
+    if tag == work::GitCommitEntry::ID {
+        let commits: work::GitCommitEntry = serde_json::from_value(value.clone())
+            .expect("the node admitted this value as a gitCommitEntry");
+        // The range as `git log` writes it. The sha is the commit key's last segment.
+        let short = |commit: &str| {
+            let sha = commit.rsplit('/').next().unwrap_or(commit);
+            sha.get(..7).unwrap_or(sha).to_owned()
+        };
+        let label = match &commits.base {
+            Some(base) => format!("{}..{}", short(base), short(&commits.tip)),
+            None => short(&commits.tip),
+        };
+        return Entry {
+            kind: EntryKind::Commits,
+            label,
+            changes: changes(&commits.patch),
+        };
+    }
+    if tag == work::JjChangeEntry::ID {
+        let change: work::JjChangeEntry = serde_json::from_value(value.clone())
+            .expect("the node admitted this value as a jjChangeEntry");
+        return Entry {
+            kind: EntryKind::JjChange,
+            label: slot,
+            changes: changes(&change.patch),
+        };
+    }
+    let kind = if tag == work::GitRefEntry::ID {
         EntryKind::TrackedRef
     } else if tag == work::SessionEntry::ID {
         EntryKind::Session
@@ -592,33 +679,10 @@ fn entry(key: &DatumKey, value: Result<&serde_json::Value, String>) -> Entry {
     } else {
         EntryKind::Other(tag.to_owned())
     };
-    if kind != EntryKind::Commits {
-        return Entry {
-            kind,
-            label: slot,
-            patch: None,
-        };
-    }
-    let commits: work::GitCommitEntry = serde_json::from_value(value.clone())
-        .expect("the node admitted this value as a gitCommitEntry");
-    // The range as `git log` writes it. The sha is the commit key's last segment.
-    let short = |commit: &str| {
-        let sha = commit.rsplit('/').next().unwrap_or(commit);
-        sha.get(..7).unwrap_or(sha).to_owned()
-    };
-    let label = match &commits.base {
-        Some(base) => format!("{}..{}", short(base), short(&commits.tip)),
-        None => short(&commits.tip),
-    };
     Entry {
         kind,
-        label,
-        // The datum's own text, carried beside the fields the vocabulary knows (see
-        // `Fixture::sample`: where a commit's patch really comes from is an open design question).
-        patch: value
-            .get("patch")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
+        label: slot,
+        changes: Changes::Absent,
     }
 }
 

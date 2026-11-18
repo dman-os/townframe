@@ -3,10 +3,12 @@
 //! semantic roles of the design language (`docs/design-language`): surfaces and text roles, the
 //! `danger` role for failures, the hairline border for dividers, 48 px targets for rows that open
 //! something.
+use crate::model::Changes;
 use crate::model::Content;
 use crate::model::Entry;
 use crate::model::EntryKind;
 use crate::model::Intxt;
+use crate::model::PatchSource;
 use crate::model::LinkOutcome;
 use crate::model::LinkRow;
 use crate::model::Links;
@@ -83,7 +85,9 @@ pub(crate) fn screens<C: NodeCalls>(node: C) -> Element {
         (Screen::Pulls, None) => rsx! { Loading { what: "pull requests" } },
         (Screen::Intxt { .. }, None) => rsx! { Loading { what: "the intxt" } },
         (Screen::Pulls, Some(Content::Pulls(pulls))) => rsx! { PullList { pulls, on_open: open } },
-        (Screen::Intxt { .. }, Some(Content::Intxt(intxt))) => rsx! { IntxtPage { intxt } },
+        (Screen::Intxt { .. }, Some(Content::Intxt(intxt))) => {
+            rsx! { IntxtPage { intxt, node: node.clone() } }
+        }
         (screen, Some(content)) => unreachable!("{screen:?} was read as {content:?}"),
     };
     let app_bar = if can_go_back {
@@ -349,7 +353,7 @@ fn link_row(row: LinkRow, on_open: EventHandler<Screen>) -> Element {
 
 /// One intxt: its title and guide, its entries grouped by kind, a commit's patch under it.
 #[component]
-fn IntxtPage(intxt: Result<Read<Intxt>, CallError>) -> Element {
+fn IntxtPage<C: NodeCalls>(intxt: Result<Read<Intxt>, CallError>, node: C) -> Element {
     let intxt = match intxt {
         Ok(Read::Ready(intxt)) => intxt,
         Ok(Read::Unreadable(reason)) => {
@@ -374,7 +378,7 @@ fn IntxtPage(intxt: Result<Read<Intxt>, CallError>) -> Element {
                 h3 { class: "{HEADING} pb-1", "{group.heading} · {group.entries.len()}" }
                 ul { class: "flex flex-col",
                     for entry in group.entries {
-                        li { class: "border-b border-border", EntryRow { entry: entry.clone() } }
+                        li { class: "border-b border-border", EntryRow { entry: entry.clone(), node: node.clone() } }
                     }
                 }
             }
@@ -382,10 +386,10 @@ fn IntxtPage(intxt: Result<Read<Intxt>, CallError>) -> Element {
     }
 }
 
-/// One entry: its short id, and for a commit range its patch in the diff view under a heading.
-/// An entry that could not be read says why instead of showing less.
+/// One entry: its short id, and for a commit range or jj change its changes under a heading. An
+/// entry that could not be read says why instead of showing less.
 #[component]
-fn EntryRow(entry: Entry) -> Element {
+fn EntryRow<C: NodeCalls>(entry: Entry, node: C) -> Element {
     rsx! {
         div { class: "flex flex-col gap-2 px-2 py-3",
             span { class: "font-semibold break-all", "{entry.label}" }
@@ -396,11 +400,51 @@ fn EntryRow(entry: Entry) -> Element {
                 EntryKind::Other(tag) => rsx! { span { class: SECONDARY, "{tag}" } },
                 _ => rsx! {},
             }
-            if let Some(patch) = entry.patch {
-                h4 { class: HEADING, "Changes" }
-                Patch { patch }
+            match entry.changes {
+                Changes::Absent => rsx! {},
+                Changes::TooLarge => rsx! {
+                    h4 { class: HEADING, "Changes" }
+                    p { class: SECONDARY, "No diff is shown: it was too large to carry with this entry." }
+                },
+                Changes::Blob(source) => rsx! {
+                    h4 { class: HEADING, "Changes" }
+                    PatchLoader { source, node }
+                },
             }
         }
+    }
+}
+
+/// An entry's patch, read from the node only once the reader asks to see it: the diff can be
+/// large, and an intxt lists many entries. A failed read is the alert, never an empty diff.
+#[component]
+fn PatchLoader<C: NodeCalls>(source: PatchSource, node: C) -> Element {
+    let mut requested = use_signal(|| false);
+    // `requested` is read where the resource is built, so asking restarts it; until then it
+    // reads nothing.
+    let patch = use_resource(use_reactive((&source, &node), move |(source, node)| {
+        let requested = requested();
+        async move {
+            if requested {
+                Some(Review::new(node).patch(&source).await)
+            } else {
+                None
+            }
+        }
+    }));
+    if !requested() {
+        return rsx! {
+            button {
+                class: "{OPENS} rounded-md border border-border px-4 py-3 text-left",
+                onclick: move |_| requested.set(true),
+                "Show changes"
+            }
+        };
+    }
+    match (*patch.read()).clone() {
+        None | Some(None) => rsx! { Loading { what: "changes" } },
+        Some(Some(Ok(patch))) => rsx! { Patch { patch } },
+        Some(Some(Err(error))) => rsx! { Failed { error } },
     }
 }
 

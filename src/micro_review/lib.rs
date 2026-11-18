@@ -49,7 +49,7 @@ async fn activate(context: Context) -> Result<(), Error> {
                     div { class: "px-4 pb-4",
                         Failed {
                             error: CallError::Unconfigured(
-                                "grant the micro the org.example.dayframe.review.config entry (githubDrawer, intxtDrawers, docCap)"
+                                "grant the micro the org.example.dayframe.review.config entry (githubDrawer, intxtDrawers, docCap, blobCap)"
                                     .to_owned(),
                             ),
                         }
