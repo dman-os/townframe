@@ -621,10 +621,6 @@ async fn install_one(minting: &Minting, install: MicroInstall) -> Res<Installed>
         None
     } else {
         let scope = DocScope {
-            // A drawer reach covers the documents IN a drawer, not the drawer's own document, which
-            // holds its descriptor (an intxt's title and body); intxt reads that one as a
-            // document. So each granted drawer's document is also granted for reading, by id.
-            read: DocScope::read_all(drawers.iter().map(|(drawer, _)| drawer.clone())),
             drawers: drawers
                 .into_iter()
                 .map(|(drawer, access)| (drawer, DrawerReach::all_kinds(access)))
