@@ -61,7 +61,7 @@ test("a pull request shows its description and the outcome of each intxt it name
   await expect(review.locator("details")).toHaveCount(0);
   await expect(
     review.getByRole("button", { name: /intxt: commits live with the intxt/ }),
-  ).toContainText("2 entries");
+  ).toContainText("3 entries");
   await expect(
     review.getByRole("button", { name: /review micro: the PR on the phone/ }),
   ).toBeVisible();
@@ -112,7 +112,8 @@ test("an intxt shows its entries and a commit's patch in the diff view, and back
   await review.getByRole("button", { name: new RegExp(intxt) }).click({
     timeout: 60_000,
   });
-  await expect(review.getByRole("heading", { name: intxt })).toBeVisible();
+  // The title is in the app bar and again over the guide.
+  await expect(review.getByRole("heading", { name: intxt }).first()).toBeVisible();
   await expect(
     review.getByText("Commits travel with the intxt that names them."),
   ).toBeVisible();
