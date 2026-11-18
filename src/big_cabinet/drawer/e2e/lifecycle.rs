@@ -697,114 +697,131 @@ async fn sensitive_root_creation_replays_every_boundary_without_replacing_groups
     }
 }
 
+// One test per crash point: each boots a node four times (both roots, with and without a
+// reboot), where a single test over every boundary booted sixteen and ran into nextest's
+// timeout under a loaded run.
 #[tokio::test]
-async fn named_metadata_creation_replays_every_boundary_on_both_roots() {
+async fn named_metadata_creation_replays_after_doc_created() {
+    named_metadata_creation_replays_on_both_roots(CrashPoint::MetadataDocCreated).await;
+}
+
+#[tokio::test]
+async fn named_metadata_creation_replays_after_doc_granted() {
+    named_metadata_creation_replays_on_both_roots(CrashPoint::MetadataDocGranted).await;
+}
+
+#[tokio::test]
+async fn named_metadata_creation_replays_after_doc_recorded() {
+    named_metadata_creation_replays_on_both_roots(CrashPoint::MetadataDocRecorded).await;
+}
+
+#[tokio::test]
+async fn named_metadata_creation_replays_after_doc_published() {
+    named_metadata_creation_replays_on_both_roots(CrashPoint::MetadataDocPublished).await;
+}
+
+/// A named metadata doc creation interrupted at `point` replays to the same doc on both roots,
+/// with or without a reboot in between.
+async fn named_metadata_creation_replays_on_both_roots(point: CrashPoint) {
     for root in MetaRoot::ALL {
-        for point in [
-            CrashPoint::MetadataDocCreated,
-            CrashPoint::MetadataDocGranted,
-            CrashPoint::MetadataDocRecorded,
-            CrashPoint::MetadataDocPublished,
-        ] {
-            for reboot in [false, true] {
-                let mut node = Node::boot().await;
-                let alice = node.creator("alice").await;
-                let drawer = node.collection(&alice, "workspace").await;
-                let view = node.view(&alice, &drawer).await.unwrap();
-                let (public, _, sensitive) = groups_of(&view);
-                let DrawerLayout::SingleGroup(layout) = &view.layout else {
-                    panic!("expected a grouped drawer")
-                };
-                let root_doc = match root {
-                    MetaRoot::Public => drawer.clone(),
-                    MetaRoot::Sensitive => layout.sensitive_root.clone(),
-                };
-                let (backing, other) = match root {
-                    MetaRoot::Public => (public, sensitive),
-                    MetaRoot::Sensitive => (sensitive, public),
-                };
-                let mut request = CreateMetaDoc {
-                    capability: node.drawer_capability(&alice, &[&drawer]).await.unwrap(),
-                    command: command("interrupted named metadata"),
-                    drawer_id: drawer.clone(),
-                    root,
-                    kind: "notes".into(),
-                    name: "archive".into(),
-                };
-                node.arm_crash(point);
-                let error = node
-                    .drawers()
-                    .call(RequestContext::root(), request.clone())
-                    .await
-                    .unwrap_err();
-                assert!(
-                    matches!(op(error), DrawersError::Storage(message) if message.contains("injected crash")),
-                    "{root:?} {point:?}"
-                );
-                let doc_id: String = node
-                    .sql
-                    .query(
-                        "SELECT doc_id FROM big_cabinet_commands WHERE command_id = ?",
-                        (request.command.as_str(),),
-                    )
-                    .await
-                    .unwrap()
-                    .one()
-                    .unwrap();
-                let doc_id: DocId = doc_id.parse().unwrap();
-                let slot = meta_doc_key("notes", "archive").unwrap();
-                let published = node.roster_datums(&root_doc).await.contains_key(&slot);
-                assert_eq!(published, point == CrashPoint::MetadataDocPublished);
-                assert_eq!(
-                    node.keyhive_level(backing, doc_id.to_bytes32().unwrap())
-                        .await,
-                    if point == CrashPoint::MetadataDocCreated {
-                        None
-                    } else {
-                        Some(KeyhiveAccess::Admin)
-                    }
-                );
-                assert_eq!(node.core().ledger.unfinished().await.unwrap().len(), 1);
-                if reboot {
-                    node.restart().await.unwrap();
-                    assert!(node.core().ledger.unfinished().await.unwrap().is_empty());
-                    request.capability = node.drawer_capability(&alice, &[&drawer]).await.unwrap();
-                }
-                let receipt = node
-                    .drawers()
-                    .call(RequestContext::root(), request.clone())
-                    .await
-                    .unwrap();
-                assert_eq!(receipt.doc_id, doc_id);
-                assert_eq!(receipt.root, root);
-                assert_eq!(
-                    node.roster_datums(&root_doc).await[&slot],
-                    json!({"docId": doc_id})
-                );
-                assert_eq!(
-                    node.keyhive_level(backing, doc_id.to_bytes32().unwrap())
-                        .await,
-                    Some(KeyhiveAccess::Admin)
-                );
-                assert_eq!(
-                    node.keyhive_level(other, doc_id.to_bytes32().unwrap())
-                        .await,
+        for reboot in [false, true] {
+            let mut node = Node::boot().await;
+            let alice = node.creator("alice").await;
+            let drawer = node.collection(&alice, "workspace").await;
+            let view = node.view(&alice, &drawer).await.unwrap();
+            let (public, _, sensitive) = groups_of(&view);
+            let DrawerLayout::SingleGroup(layout) = &view.layout else {
+                panic!("expected a grouped drawer")
+            };
+            let root_doc = match root {
+                MetaRoot::Public => drawer.clone(),
+                MetaRoot::Sensitive => layout.sensitive_root.clone(),
+            };
+            let (backing, other) = match root {
+                MetaRoot::Public => (public, sensitive),
+                MetaRoot::Sensitive => (sensitive, public),
+            };
+            let mut request = CreateMetaDoc {
+                capability: node.drawer_capability(&alice, &[&drawer]).await.unwrap(),
+                command: command("interrupted named metadata"),
+                drawer_id: drawer.clone(),
+                root,
+                kind: "notes".into(),
+                name: "archive".into(),
+            };
+            node.arm_crash(point);
+            let error = node
+                .drawers()
+                .call(RequestContext::root(), request.clone())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(op(error), DrawersError::Storage(message) if message.contains("injected crash")),
+                "{root:?} {point:?}"
+            );
+            let doc_id: String = node
+                .sql
+                .query(
+                    "SELECT doc_id FROM big_cabinet_commands WHERE command_id = ?",
+                    (request.command.as_str(),),
+                )
+                .await
+                .unwrap()
+                .one()
+                .unwrap();
+            let doc_id: DocId = doc_id.parse().unwrap();
+            let slot = meta_doc_key("notes", "archive").unwrap();
+            let published = node.roster_datums(&root_doc).await.contains_key(&slot);
+            assert_eq!(published, point == CrashPoint::MetadataDocPublished);
+            assert_eq!(
+                node.keyhive_level(backing, doc_id.to_bytes32().unwrap())
+                    .await,
+                if point == CrashPoint::MetadataDocCreated {
                     None
-                );
-                assert_eq!(
-                    node.view(&alice, &drawer).await.unwrap().meta_docs[&root]["notes/archive"],
-                    doc_id
-                );
-                assert_eq!(
-                    node.drawers()
-                        .call(RequestContext::root(), request)
-                        .await
-                        .unwrap(),
-                    receipt
-                );
+                } else {
+                    Some(KeyhiveAccess::Admin)
+                }
+            );
+            assert_eq!(node.core().ledger.unfinished().await.unwrap().len(), 1);
+            if reboot {
+                node.restart().await.unwrap();
                 assert!(node.core().ledger.unfinished().await.unwrap().is_empty());
-                node.stop().await;
+                request.capability = node.drawer_capability(&alice, &[&drawer]).await.unwrap();
             }
+            let receipt = node
+                .drawers()
+                .call(RequestContext::root(), request.clone())
+                .await
+                .unwrap();
+            assert_eq!(receipt.doc_id, doc_id);
+            assert_eq!(receipt.root, root);
+            assert_eq!(
+                node.roster_datums(&root_doc).await[&slot],
+                json!({"docId": doc_id})
+            );
+            assert_eq!(
+                node.keyhive_level(backing, doc_id.to_bytes32().unwrap())
+                    .await,
+                Some(KeyhiveAccess::Admin)
+            );
+            assert_eq!(
+                node.keyhive_level(other, doc_id.to_bytes32().unwrap())
+                    .await,
+                None
+            );
+            assert_eq!(
+                node.view(&alice, &drawer).await.unwrap().meta_docs[&root]["notes/archive"],
+                doc_id
+            );
+            assert_eq!(
+                node.drawers()
+                    .call(RequestContext::root(), request)
+                    .await
+                    .unwrap(),
+                receipt
+            );
+            assert!(node.core().ledger.unfinished().await.unwrap().is_empty());
+            node.stop().await;
         }
     }
 }
