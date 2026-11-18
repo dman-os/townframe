@@ -525,9 +525,15 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
         .to_owned();
     assert_ne!(relay_capability, granted);
     assert_eq!(relayed["body"]["idempotencyKey"], "nested-key");
-    // B has not been granted anything yet, so its routine holds no capability, and in particular
-    // was not handed A's.
-    assert!(relayed["body"]["noduleCapability"].is_null());
+    // B has not been granted anything yet. Its routine still holds a capability of its own, the one
+    // every routine with `uses` gets so it can ask for grants (`requestCartridgeGrant` and
+    // `awaitCartridgeGrantRequest`), but it was not handed A's: neither A's granted handle nor the
+    // one the relay routine called under.
+    let callee_capability = relayed["body"]["noduleCapability"]
+        .as_str()
+        .expect("a routine with uses holds its own capability for asking for grants");
+    assert_ne!(callee_capability, granted);
+    assert_ne!(callee_capability, relay_capability);
 
     // The nested call is a hop of its own: a new request id, the outer trace under a new span
     // and a budget within the outer one.
