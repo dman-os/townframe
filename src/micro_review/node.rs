@@ -3,6 +3,7 @@
 //! [`ContextNode`] is the real implementation over `clay_mdk::Context::call`, and
 //! [`crate::fixture::Fixture`] answers the same methods from memory for tests and the standalone
 //! lab.
+use big_blobs_core::ReadBlob;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::CapId;
 use clay_mdk::ClientError;
@@ -24,6 +25,9 @@ pub enum CallError {
     /// The micro has no usable configuration entry yet (see [`Configuration`]).
     #[error("the review micro is not configured: {0}")]
     Unconfigured(String),
+    /// The node answered, but with something the micro cannot show (a patch that is not text).
+    #[error("the node's answer cannot be shown: {0}")]
+    Unshowable(String),
 }
 
 impl CallError {
@@ -34,6 +38,7 @@ impl CallError {
             Self::Refused(detail) => ("The node refused the request", detail),
             Self::Transport(detail) => ("The node could not be reached", detail),
             Self::Unconfigured(detail) => ("The micro is not configured", detail),
+            Self::Unshowable(detail) => ("The answer cannot be shown", detail),
         }
     }
 }
@@ -49,8 +54,8 @@ impl<E: std::fmt::Display> From<ClientError<E>> for CallError {
 
 /// What the micro reads where, parsed from its configuration entry ([`ReviewConfig`]).
 ///
-/// INTERIM: the composition mints `doc_cap` for the micro's actor and writes this entry at
-/// install. It becomes `#drawers` permbinds plus the 6.2 domain handle.
+/// INTERIM: the composition mints `doc_cap` and `blob_cap` for the micro's actor and writes this
+/// entry at install. It becomes `#drawers` permbinds plus the 6.2 domain handle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Configuration {
     /// The drawer the imported pull requests live in.
@@ -60,6 +65,15 @@ pub struct Configuration {
     pub intxt_drawers: Vec<DocId>,
     /// The capability every `readDatums` and `pollDatums` carries. Never minted here.
     pub doc_cap: CapId,
+    /// The capability every `blobs.read` carries, to read a patch's bytes. Never minted here.
+    pub blob_cap: CapId,
+}
+
+/// A capability id from its configuration text.
+fn capability(text: &str) -> Result<CapId, CallError> {
+    serde_json::from_value(serde_json::Value::String(text.to_owned())).map_err(|error| {
+        CallError::Unconfigured(format!("capability {text:?} is not valid: {error}"))
+    })
 }
 
 impl Configuration {
@@ -78,13 +92,8 @@ impl Configuration {
                 .iter()
                 .map(drawer)
                 .collect::<Result<_, _>>()?,
-            doc_cap: serde_json::from_value(serde_json::Value::String(config.doc_cap.clone()))
-                .map_err(|error| {
-                    CallError::Unconfigured(format!(
-                        "capability {:?} is not valid: {error}",
-                        config.doc_cap
-                    ))
-                })?,
+            doc_cap: capability(&config.doc_cap)?,
+            blob_cap: capability(&config.blob_cap)?,
         })
     }
 }
@@ -99,6 +108,11 @@ pub trait NodeCalls: Clone + PartialEq + 'static {
         &self,
         input: M,
     ) -> impl Future<Output = Result<M::Output, ClientError<M::Error>>>;
+
+    /// The bytes of the blob `input` names: `blobs.read`, answered as raw octets. It is its own
+    /// seam, not a [`Self::call`], because a byte body has no wire form (`method_core::ByteBody`)
+    /// and so no `Unary` method can carry one.
+    fn read_blob(&self, input: ReadBlob) -> impl Future<Output = Result<Vec<u8>, CallError>>;
 
     /// Where to read, and the capability to read with.
     fn configuration(&self) -> Result<Configuration, CallError>;
@@ -135,6 +149,17 @@ impl NodeCalls for ContextNode {
         self.context.call(input)
     }
 
+    async fn read_blob(&self, input: ReadBlob) -> Result<Vec<u8>, CallError> {
+        // INTERIM: the micro's node transport answers JSON only: `Context::call` takes a `Unary`
+        // method, and `blobs.read` answers a byte stream. Until the guest transport hands a byte
+        // body back (the `XrpcBody::Bytes` its HTTP import already carries), a read says so
+        // instead of showing nothing.
+        Err(CallError::Transport(format!(
+            "blob {} cannot be read yet: the micro's node transport carries no byte bodies",
+            input.blob_id
+        )))
+    }
+
     fn configuration(&self) -> Result<Configuration, CallError> {
         match &self.config {
             FacetState::Loading => Err(CallError::Unconfigured(
@@ -157,6 +182,7 @@ mod tests {
             github_drawer: "z11111111111111111111111111111191".to_owned(),
             intxt_drawers: vec!["z11111111111111111111111111111192".to_owned()],
             doc_cap: "00000000-0000-0000-0000-000000000000".to_owned(),
+            blob_cap: "00000000-0000-0000-0000-000000000001".to_owned(),
         }
     }
 
@@ -165,6 +191,7 @@ mod tests {
         let parsed = Configuration::parse(&config()).unwrap();
         assert_eq!(parsed.intxt_drawers.len(), 1);
         assert_eq!(parsed.doc_cap, CapId::from_bytes([0; 16]));
+        assert_ne!(parsed.blob_cap, parsed.doc_cap);
     }
 
     #[test]
@@ -180,6 +207,10 @@ mod tests {
             },
             ReviewConfig {
                 doc_cap: "nope".to_owned(),
+                ..config()
+            },
+            ReviewConfig {
+                blob_cap: "nope".to_owned(),
                 ..config()
             },
         ] {
