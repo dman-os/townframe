@@ -1,5 +1,10 @@
 # Unified cartridge manifest: micros and nodules, WASI-first
 
+Status: Superseded (the merged `provides` was withdrawn by the operator; see cartridge-surfaces.md, then ADR 050)
+Owner: nodules lane
+Updated: 2026-11-18
+Scope: Revision 1 of the unified cartridge manifest for micros and nodules, kept for the record of what was rejected and why.
+
 Sources: S = `stack/node-59-adr-d56`, D = `origin/feat/desktop-base`, W = `/run/media/asdf/p3N/repos/wasmCloud/crates/wash-runtime` (our fork; paths relative to it unless prefixed). Nothing built or run. Part A is research, Part B is the proposal. Claims about code I did not read are marked "unverified".
 
 ---

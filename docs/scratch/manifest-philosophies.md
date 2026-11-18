@@ -1,5 +1,10 @@
 # Micro manifest vs nodule/cartridge manifest: where the philosophies meet and collide
 
+Status: Reference (comparison that led to D57)
+Owner: nodules lane
+Updated: 2026-11-18
+Scope: Where the micro manifest's philosophy collides with the plug/cartridge manifest's, with the nodules lane's position.
+
 Sources: `origin/feat/desktop-base` ("DB") and `stack/node-59-adr-d56` ("S"). All ADR paths are `docs/adrs/`. Nothing was built or run; all JSON below is copied from a snapshot test or transcribed, and says which.
 
 Short version: the micro manifest is *not* a different animal at the request level. It already uses the plug request shape (`{binding, contract, access?, necessity, resolution, minRevision?}`, ADR 028 §4, ADR 030 §12) and says "required unresolved means not startable", exactly like permbinds. The collisions are about *where* the declaration lives (a private manifest vs the cartridge's one permbind list), *who is named* (contracts vs concrete providers/collections), and *what is audited* (typed ACL vs opaque payload rows). The lifecycle (incarnations, lazy activation, idle shutdown) is genuinely micro-only.
