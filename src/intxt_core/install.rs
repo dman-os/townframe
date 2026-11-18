@@ -163,9 +163,6 @@ pub async fn put_blob<H: HttpTransport>(
         .await?
         .capability_id;
     caller
-        .call_with_bytes(
-            PutBlob { capability },
-            ByteBody::from_bytes(bytes.to_vec()),
-        )
+        .call_with_bytes(PutBlob { capability }, ByteBody::from_bytes(bytes.to_vec()))
         .await
 }
