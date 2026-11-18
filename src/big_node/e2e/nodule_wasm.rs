@@ -1262,7 +1262,11 @@ async fn a_wasm_guest_reaches_only_the_network_hosts_it_declares_and_is_granted(
     assert_eq!(allowed["body"], "hello from outside");
     let heads = outside.heads();
     assert_eq!(heads.len(), 1);
-    assert!(heads[0].starts_with("get /thing?q=1 http/1.1"), "{}", heads[0]);
+    assert!(
+        heads[0].starts_with("get /thing?q=1 http/1.1"),
+        "{}",
+        heads[0]
+    );
     assert!(
         heads[0].contains("x-from-guest: yes"),
         "the guest's own headers are sent: {}",
