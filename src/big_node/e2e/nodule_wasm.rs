@@ -20,6 +20,7 @@ use big_cartridges_core::RoutineUse;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::config::NetTarget;
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::protocol::ClearCartridgeConfig;
 use big_cartridges_core::protocol::GetCartridge;
@@ -534,15 +535,23 @@ pub(super) async fn invoke_within(
 }
 
 pub(super) async fn boot_node(secrets: &Arc<SecretStore>) -> (BigNode, StopToken) {
+    boot_node_allowing(secrets, false).await
+}
+
+/// [`boot_node`] on a node whose `net.allow_host_loopback` is `allow_host_loopback`.
+async fn boot_node_allowing(
+    secrets: &Arc<SecretStore>,
+    allow_host_loopback: bool,
+) -> (BigNode, StopToken) {
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
-    BigNode::boot(config(
+    let mut config = config(
         Arc::clone(secrets),
         sql,
         big_repo::Storage::memory(&runtime).unwrap(),
-    ))
-    .await
-    .unwrap()
+    );
+    config.allow_host_loopback = allow_host_loopback;
+    BigNode::boot(config).await.unwrap()
 }
 
 const OUTER_TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
@@ -1197,16 +1206,17 @@ impl Outside {
 async fn a_wasm_guest_reaches_only_the_network_hosts_it_declares_and_is_granted() {
     let bytes = guest_bytes();
     let secrets = secrets().await;
-    let (node, stop) = boot_node(&secrets).await;
+    let (node, stop) = boot_node_allowing(&secrets, true).await;
     let spec = caller();
     let outside = Outside::start();
     let elsewhere = Outside::start();
     put(&node, &bytes).await;
     let mut fixture = cartridge(&spec, &bytes, &[]);
+    // The test server is on the machine's loopback, which a guest reaches only as the sentinel.
     fixture.permbinds.insert(
         "net".into(),
         Permbind::Net(big_cartridges_core::PermbindNet {
-            host: "127.0.0.1".into(),
+            host: NetTarget::HOST_LOOPBACK.into(),
             port: Some(outside.port),
             methods: Some(["GET".to_owned()].into()),
             description: "the test server".into(),
@@ -1230,7 +1240,11 @@ async fn a_wasm_guest_reaches_only_the_network_hosts_it_declares_and_is_granted(
             InvocationContext::default(),
         )
     };
-    let url = format!("http://127.0.0.1:{}/thing?q=1", outside.port);
+    let url = format!(
+        "http://{}:{}/thing?q=1",
+        NetTarget::HOST_LOOPBACK,
+        outside.port
+    );
 
     // Declared but ungranted.
     let refused = fetch(url.clone(), "GET").await.unwrap();
@@ -1243,7 +1257,11 @@ async fn a_wasm_guest_reaches_only_the_network_hosts_it_declares_and_is_granted(
     assert!(outside.heads().is_empty());
 
     // Granted, the same request goes out and its body comes back, with no restart.
-    let grant = GrantKey::Net(format!("127.0.0.1:{}", outside.port).parse().unwrap());
+    let grant = GrantKey::Net(
+        format!("{}:{}", NetTarget::HOST_LOOPBACK, outside.port)
+            .parse()
+            .unwrap(),
+    );
     node.nodules
         .client
         .call_with(
@@ -1282,7 +1300,7 @@ async fn a_wasm_guest_reaches_only_the_network_hosts_it_declares_and_is_granted(
     for (url, method, why) in [
         (url.clone(), "POST", "a verb the permbind does not list"),
         (
-            format!("http://127.0.0.1:{}/", elsewhere.port),
+            format!("http://{}:{}/", NetTarget::HOST_LOOPBACK, elsewhere.port),
             "GET",
             "another port",
         ),
@@ -1298,6 +1316,81 @@ async fn a_wasm_guest_reaches_only_the_network_hosts_it_declares_and_is_granted(
     }
     assert_eq!(outside.heads().len(), 1);
     assert!(elsewhere.heads().is_empty());
+
+    // A guest's own `127.0.0.1` is not the machine: no permbind can name it (admission refuses
+    // one), so it is undeclared and `Denied`, the same as any other host.
+    let refused = fetch(format!("http://127.0.0.1:{}/", outside.port), "GET")
+        .await
+        .unwrap();
+    assert_eq!(refused["status"], 403, "{refused}");
+    assert_eq!(refused["body"]["error"], "Denied", "{refused}");
+    assert_eq!(outside.heads().len(), 1, "127.0.0.1 reached the machine");
+    shutdown(node, stop).await;
+}
+
+/// The machine's loopback is reached through the sentinel only when the node's switch is on,
+/// whatever the cartridge was granted. (Addresses in the refused ranges cannot be declared at
+/// all, and the egress's own unit tests cover what a name resolves to.)
+#[tokio::test]
+async fn a_wasm_guest_cannot_reach_the_machine_or_the_lan_without_the_node_switch() {
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let spec = caller();
+    let outside = Outside::start();
+    put(&node, &bytes).await;
+    let mut fixture = cartridge(&spec, &bytes, &[]);
+    let targets = [NetTarget::HOST_LOOPBACK];
+    for (index, host) in targets.iter().enumerate() {
+        let binding = format!("net{index}");
+        fixture.permbinds.insert(
+            binding.clone(),
+            Permbind::Net(big_cartridges_core::PermbindNet {
+                host: (*host).into(),
+                port: Some(outside.port),
+                methods: None,
+                description: "a refused destination".into(),
+                extra: Default::default(),
+            }),
+        );
+        for routine in fixture.nodule.as_mut().unwrap().routines.values_mut() {
+            routine.uses.insert(binding.clone(), RoutineUse::default());
+        }
+    }
+    admit(&node, fixture).await;
+    assert_eq!(
+        set_enabled(&node, &spec, true).await.readiness,
+        Readiness::Ready
+    );
+    for host in targets {
+        node.nodules
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(node.authority.root).metadata(),
+                SetCartridgeGrant {
+                    cartridge_id: spec.cartridge.clone(),
+                    grant: GrantKey::Net(format!("{host}:{}", outside.port).parse().unwrap()),
+                    value: Some(GrantBody::present()),
+                },
+            )
+            .await
+            .unwrap();
+        let refused = invoke(
+            &node,
+            &spec.fetch(),
+            json!({ "url": format!("http://{host}:{}/", outside.port) }),
+            InvocationContext::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused["status"], 403, "{host}: {refused}");
+        assert_eq!(refused["body"]["error"], "Denied", "{host}: {refused}");
+    }
+    assert!(
+        outside.heads().is_empty(),
+        "a refused destination was dialed"
+    );
     shutdown(node, stop).await;
 }
 
