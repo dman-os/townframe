@@ -46,48 +46,18 @@ pub use native::run_migrations;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::test_support;
 #[cfg(test)]
-#[path = "gen_tests.rs"]
 pub mod gen_tests;
 
-#[cfg(target_arch = "wasm32")]
 mod query;
-#[cfg(target_arch = "wasm32")]
 pub use query::BackendRef;
-#[cfg(target_arch = "wasm32")]
 pub use query::BindTuple;
-#[cfg(target_arch = "wasm32")]
 pub use query::Executor;
-#[cfg(target_arch = "wasm32")]
 pub use query::FromRow;
-#[cfg(target_arch = "wasm32")]
 pub use query::IntoParams;
-#[cfg(target_arch = "wasm32")]
 pub use query::Json;
-#[cfg(target_arch = "wasm32")]
 pub use query::QueryExecutor;
-#[cfg(target_arch = "wasm32")]
 pub use query::Sql;
-#[cfg(target_arch = "wasm32")]
 pub use query::SqliteBackend;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::query::BackendRef;
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::query::BindTuple;
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::query::Executor;
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::query::FromRow;
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::query::IntoParams;
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::query::Json;
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::query::QueryExecutor;
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::query::Sql;
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::query::SqliteBackend;
 
 #[cfg(test)]
 pub use crate as sqlite_rs_alias;

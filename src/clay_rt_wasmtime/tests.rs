@@ -1051,11 +1051,11 @@ fn oversized_adapter_batch_withdraws_before_resolving_component_handles() {
     let owner = host.start("ingress-budget");
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     let (mut state, _incoming) =
-        WasmStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     let placement = state
         .table
         .push(Placement::new(
-            writer.clone(),
+            std::sync::Arc::clone(&writer),
             Arc::new(AtomicBool::new(false)),
         ))
         .unwrap();
@@ -1067,12 +1067,17 @@ fn oversized_adapter_batch_withdraws_before_resolving_component_handles() {
         .collect::<Vec<_>>();
     *edits.last_mut().unwrap() =
         wit_presentation::Mutation::MountComponent(Resource::new_borrow(u32::MAX));
+    // The guest is answered `Revoked` so it unwinds instead of aborting; the budget is the
+    // micro's recorded fault.
     assert!(matches!(
         HostSurface::apply(&mut state, Resource::new_borrow(surface.rep()), edits).unwrap(),
-        Err(wit_presentation::PresentationError::Unsupported(message))
-            if message == "batch mutation limit"
+        Err(wit_presentation::PresentationError::Revoked)
     ));
     assert!(!writer.is_live());
+    assert!(
+        host.fault(&owner)
+            .is_some_and(|fault| fault.contains("batch mutation limit"))
+    );
     HostSurface::drop(&mut state, surface).unwrap();
     HostMountPoint::drop(&mut state, placement).unwrap();
     host.close();
@@ -1132,7 +1137,7 @@ async fn close_before_mount_revokes_and_releases_incarnation_owners() {
     host.close_instance(&owner).unwrap();
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     assert_eq!(
-        runtime.mount("view", writer.clone()).err(),
+        runtime.mount("view", std::sync::Arc::clone(&writer)).err(),
         Some(PresentationError::Revoked)
     );
     assert!(writer.is_live());
@@ -1218,6 +1223,62 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
     host.close();
 }
 
+/// A guest whose `dispatch` commits a batch over the surface mutation budget faults only its own
+/// micro: the surface is withdrawn, the instance closes, and the budget is the recorded cause,
+/// reached through the guest's graceful `Revoked` unwind, not a trap. Pinned by
+/// `overbudget_fixture`.
+#[tokio::test]
+async fn over_budget_batch_faults_the_micro_with_the_budget_as_cause() {
+    let host = Host::new();
+    let owner = host.start("overbudget");
+    let package = WasmPackage::from_env("overbudget")
+        .await
+        .expect("prepared overbudget component is valid");
+    let (runtime, driver) =
+        WasmRuntime::initialize(&host, owner.clone(), &package, InitialContext::default())
+            .await
+            .unwrap();
+    struct LiveSink(AtomicBool);
+
+    impl SurfaceSink<ComponentRef> for LiveSink {
+        fn is_live(&self) -> bool {
+            !self.0.load(Ordering::Acquire)
+        }
+
+        fn apply(&self, _edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
+            Ok(0)
+        }
+
+        fn withdraw(&self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let writer = Arc::new(LiveSink(AtomicBool::new(false)));
+    let session = runtime
+        .mount("view", Arc::clone(&writer) as _)
+        .expect("mount stays inside the budget");
+    assert!(writer.is_live());
+
+    let response = session.handler()(Event {
+        revision: 1,
+        element: clay_surface::NodeId::try_from(1_u32).unwrap(),
+        name: "click".into(),
+        bubbles: true,
+        data_json: "{}".into(),
+    });
+    assert_eq!(response, EventResponse::default());
+    assert!(!writer.is_live(), "the breach withdraws the surface");
+    assert_eq!(host.check(&owner), Err(clay_host::AccessError::Revoked));
+    let fault = host
+        .fault(&owner)
+        .expect("the breach is recorded as a fault");
+    assert!(fault.contains("batch mutation limit"), "{fault}");
+    drop(session);
+    drop(driver);
+    host.close();
+}
+
 #[test]
 fn first_poll_maps_pending_to_suspended_and_ready_to_output() {
     use std::task::Poll;
@@ -1293,7 +1354,9 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     .await
     .unwrap();
     let writer = Arc::new(RecordingSink::new());
-    let surface = runtime.mount("view", writer.clone()).unwrap();
+    let surface = runtime
+        .mount("view", Arc::<RecordingSink>::clone(&writer))
+        .unwrap();
     assert_eq!(
         writer.tree(SurfaceTree::text_content),
         "3Pending counter writes: 0Refresh counter"
@@ -1386,7 +1449,9 @@ async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() 
     .unwrap();
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
-        let session = runtime.mount("view", writer.clone()).unwrap();
+        let session = runtime
+            .mount("view", Arc::<RecordingSink>::clone(&writer))
+            .unwrap();
         let text = writer
             .wait_for(|text| text.contains("status=live") && text.contains("beta=two"))
             .await;
@@ -1689,7 +1754,7 @@ fn retained_surface_handles_are_bounded_and_release_capacity() {
     let placement = state
         .table
         .push(Placement::new(
-            writer.clone(),
+            std::sync::Arc::clone(&writer),
             Arc::new(AtomicBool::new(false)),
         ))
         .unwrap();
@@ -1797,11 +1862,9 @@ async fn precompiled_artifacts_are_reused_by_content() {
     ));
     let artifact = {
         let engine = engine().unwrap();
-        // The cache directory is process-global configuration; this test owns it for its duration.
-        let previous = std::env::var_os("DAYFRAME_COMPONENT_CACHE");
-        // SAFETY: tests in this binary do not read this variable concurrently except through
-        // this test, which restores it before returning.
-        unsafe { std::env::set_var("DAYFRAME_COMPONENT_CACHE", &directory) };
+        // The cache directory is process-global configuration that can be set once, and this is
+        // the only test that sets it: it then names the directory for the rest of the binary.
+        set_component_cache_directory(directory.clone());
         let first = compile_component(&engine, &bytes).unwrap();
         let artifact = cache_path(&engine, &bytes).unwrap();
         assert!(artifact.exists(), "a cold compile publishes its artifact");
@@ -1813,15 +1876,73 @@ async fn precompiled_artifacts_are_reused_by_content() {
             "a warm load must not recompile"
         );
         drop((first, second));
-        match previous {
-            Some(previous) => unsafe { std::env::set_var("DAYFRAME_COMPONENT_CACHE", previous) },
-            None => unsafe { std::env::remove_var("DAYFRAME_COMPONENT_CACHE") },
-        }
+        assert!(
+            artifact.starts_with(&directory),
+            "the explicit directory wins over the environment"
+        );
         artifact
     };
     // A warm load produces a component on the shared engine, from the published artifact.
-    let package = WasmPackage::from_bytes(&bytes).await.unwrap();
+    let package = WasmPackage::from_bytes(bytes).await.unwrap();
     assert!(Engine::same(&package.engine, &engine().unwrap()));
     assert!(artifact.exists());
     std::fs::remove_dir_all(directory).ok();
+}
+
+/// The counter component with a trailing custom section (id 0, name "pad") holding a unique
+/// payload, so its cache key is its own and a compile of it is cold even when the artifact cache
+/// is warm.
+fn uniquely_padded_counter() -> Vec<u8> {
+    let path = std::env::var("DAYFRAME_COUNTER_COMPONENT")
+        .expect("DAYFRAME_COUNTER_COMPONENT must name a prepared counter component");
+    let mut bytes = std::fs::read(path).unwrap();
+    // A trailing custom section (id 0, name "pad") with a unique payload gives these bytes a
+    // cache key of their own, so the compile is cold even when the artifact cache is warm.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_le_bytes();
+    bytes.extend([0, (1 + 3 + unique.len()) as u8, 3]);
+    bytes.extend(b"pad");
+    bytes.extend(unique);
+    bytes
+}
+
+/// Compiling a package must not occupy the thread that polls it: on Android that is the UI
+/// thread, and a frozen frame hid the section's loading state for the whole compile.
+#[tokio::test(flavor = "current_thread")]
+async fn compiling_a_package_leaves_the_polling_thread_free() {
+    let bytes = uniquely_padded_counter();
+    let mut ticks = 0u32;
+    let compile = WasmPackage::from_bytes(bytes);
+    tokio::pin!(compile);
+    loop {
+        tokio::select! {
+            package = &mut compile => {
+                package.unwrap();
+                break;
+            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(1)) => ticks += 1,
+        }
+    }
+    assert!(
+        ticks > 1,
+        "the polling thread ran {ticks} ticks during a cold compile; it was blocked"
+    );
+}
+
+/// A compile is a real wait for a paused test clock: awaiting it must not let the runtime
+/// auto-advance virtual time to the next timer (a guest feed's long poll, in the layout e2e).
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_paused_clock_does_not_advance_while_a_package_compiles() {
+    let started = tokio::time::Instant::now();
+    let package = tokio::select! {
+        package = WasmPackage::from_bytes(uniquely_padded_counter()) => package.unwrap(),
+        () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+            panic!("the paused clock jumped to a 30 s timer while the compile was in flight")
+        }
+    };
+    drop(package);
+    assert_eq!(started.elapsed(), std::time::Duration::ZERO);
 }

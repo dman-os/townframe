@@ -672,20 +672,10 @@ impl<K, V, S: Source<K, Stamped<Option<V>>>, T> RegistrationDispatch<K, V, S, T>
     }
 }
 
-#[path = "registration_durable.rs"]
 mod durable;
 pub use durable::DurableCodec;
 pub use durable::InstalledWriteError;
 pub use durable::InstalledWriter;
 
 #[cfg(test)]
-#[path = "registration_tests_notifications.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "registration_tests_semantics.rs"]
-mod semantics_tests;
-
-#[cfg(test)]
-#[path = "registration_tests_durable.rs"]
-mod durable_tests;
