@@ -1,20 +1,28 @@
-//! A deterministic simulation of one client and one server over a network that drops,
-//! duplicates, reorders and delays messages, while the wanted set churns, readability flips and
-//! the server forgets. The properties are checked after every step, and once more after a
-//! quiet phase that drains the network.
+//! A deterministic simulation of the whole stack: one client, one server, the responder and a
+//! memory part store, over a network that drops, duplicates, reorders and delays messages,
+//! while the wanted set churns, the store is written, access is granted and revoked, and the
+//! server forgets. The properties are checked after every step, and once more after a quiet
+//! phase that drains the network and pages every wanted, readable route to the store's head.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use future_form::Sendable;
+use futures::FutureExt;
+use futures::executor::block_on;
+use futures::future::BoxFuture;
 use proptest::prelude::*;
 
 use crate::interlude::*;
 
 use super::client::ReplayClient;
+use super::client::RoundOutcome;
 use super::client::TargetOutcome;
+use super::responder::Responder;
+use super::responder::Timer;
 use super::server::ReplayServer;
-use super::server::Round;
 use super::server::SESSION_TTL;
+use super::wire::PageEvent;
 use super::wire::PageSession;
 use super::wire::Route;
 use super::wire::SessionError;
@@ -23,19 +31,34 @@ use super::wire::SessionPage;
 use super::wire::SessionUpdated;
 use super::wire::TargetId;
 use super::wire::UpdateSession;
-use crate::part_store::AuthorizedPage;
-use crate::part_store::ReadVerdict;
+use super::wire::Verdict;
+use crate::part_store::LogKey;
+use crate::part_store::LogRoutes;
+use crate::part_store::ObjPayload;
+use crate::part_store::laws;
 use crate::part_store::laws::obj;
 use crate::part_store::laws::part;
 use crate::part_store::laws::principal;
+use crate::part_store::memory::MemoryPartStore;
+use crate::part_store::oracle::PartOracle;
+use crate::part_store::oracle::PartWrite;
+use crate::rev::Limits;
 use crate::rev::Rev;
 use crate::scheduler::Instant;
 
-/// Routes 0..4 are parts, 4..6 objects.
+/// Routes 0..4 are parts 0..4, 4..6 objects 4 and 5.
 const ROUTES: u8 = 6;
+const PARTS: u8 = 4;
+/// The objects writes touch: 4 and 5 have object routes, 6 and 7 only ride part routes.
+const OBJS: std::ops::Range<u8> = 4..8;
+/// Small, so a route's backlog takes several rounds.
+const PAGE_LIMIT: u32 = 3;
+/// Every round holds; the sim's timer ends a hold at once, so a hold with no rows answers
+/// after one wait on the watch.
+const HOLD_MS: u32 = 50;
 
 fn route(index: u8) -> Route {
-    if index < 4 {
+    if index < PARTS {
         Route::Part {
             part_key: part(index),
         }
@@ -46,12 +69,24 @@ fn route(index: u8) -> Route {
     }
 }
 
+/// A timer whose sleeps are over as soon as they start.
+#[derive(Clone, Copy)]
+struct Expired;
+
+impl Timer<Sendable> for Expired {
+    fn sleep(&self, _: Duration) -> BoxFuture<'static, ()> {
+        futures::future::ready(()).boxed()
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Step {
     /// Toggle whether the embedder wants a route.
     Want(u8),
-    /// Toggle whether the client may read a route; admission and verdicts both follow it.
-    Readable(u8),
+    /// Toggle the client's access to a part.
+    Access(u8),
+    /// One store write on `(object, part or value)`: set a payload, add or remove a member.
+    Write(u8, u8, u8),
     SendUpdate,
     SendRound,
     /// Deliver the message at this index (mod the number in flight): reordering and delay.
@@ -66,9 +101,8 @@ enum Step {
     /// separately by `a_late_opening_update_revives_a_forgotten_session`.
     Sweep,
     /// The server restarts: it forgets everything, and the connection's messages are lost.
+    /// The store is durable and keeps its revs.
     Restart,
-    /// The store commits a revision.
-    Tick,
 }
 
 #[derive(Debug, Clone)]
@@ -85,39 +119,46 @@ type Held = (u64, BTreeMap<TargetId, Route>, Vec<TargetId>);
 struct Sim {
     client: ReplayClient,
     server: ReplayServer,
-    round: Round,
-    read: AuthorizedPage,
+    store: MemoryPartStore,
+    /// The store's twin, written alongside it: what the client must end up with.
+    oracle: PartOracle,
+    responder: Responder<Sendable, MemoryPartStore, Expired>,
     net: Vec<Msg>,
     wanted: BTreeSet<Route>,
-    readable: BTreeSet<Route>,
     /// The cursor machine's cursors.
     cursors: BTreeMap<Route, Rev>,
-    rev: Rev,
+    /// Every row the client was handed, by route: `(route, object, rev)` to the payload of a
+    /// change, `None` for a removal.
+    received: BTreeMap<(Route, ObjKey, Rev), Option<ObjPayload>>,
     now: Instant,
     /// Every id each live session ever held, to catch a reuse. A forgotten session's history
     /// goes with it: a late opening update may open the same id again, as a new session.
     ever_held: Map<SessionId, Set<TargetId>>,
     outcomes: Vec<(TargetId, Route, TargetOutcome)>,
-    /// Whether the last round's answer was a full page with no refusal.
-    last_round_clean: bool,
+    /// Whether the last round's answer was a page with no refusal that drained every target.
+    last_round_drained: bool,
+    /// The ids the last drained round named.
+    drained_ids: BTreeSet<TargetId>,
 }
 
 impl Sim {
-    fn new(readable: BTreeSet<Route>) -> Self {
+    fn new() -> Self {
+        let store = MemoryPartStore::default();
         Self {
             client: ReplayClient::new(Uuid::from_u128(1)),
             server: ReplayServer::default(),
-            round: Round::default(),
-            read: AuthorizedPage::default(),
+            responder: Responder::new(store.clone(), Expired),
+            store,
+            oracle: default(),
             net: Vec::new(),
             wanted: BTreeSet::new(),
-            readable,
             cursors: BTreeMap::new(),
-            rev: 1,
+            received: BTreeMap::new(),
             now: Instant::now(),
             ever_held: default(),
             outcomes: Vec::new(),
-            last_round_clean: false,
+            last_round_drained: false,
+            drained_ids: BTreeSet::new(),
         }
     }
 
@@ -134,6 +175,39 @@ impl Sim {
         ))
     }
 
+    /// Whether the client may read `route` now, by the oracle: a part it holds a grant on, or
+    /// an object live in such a part.
+    fn readable(&self, route: &Route) -> bool {
+        match route {
+            Route::Part { part_key } => self
+                .oracle
+                .grants()
+                .contains_key(&(part_key.clone(), principal(0))),
+            Route::Object { obj_key } => self
+                .oracle
+                .readable_obj_state(&principal(0), obj_key)
+                .is_some(),
+        }
+    }
+
+    /// Commit one transaction to the store and the oracle alike.
+    fn commit(&mut self, write: PartWrite) {
+        let mut tx = self.store.begin();
+        block_on(laws::stage(&self.store, &mut tx, write.clone())).unwrap();
+        assert_eq!(tx.commit(), self.oracle.commit(vec![write]));
+    }
+
+    fn write(&mut self, kind: u8, obj_index: u8, other: u8) {
+        let obj_index = OBJS.start + obj_index % OBJS.len() as u8;
+        let part_index = other % PARTS;
+        let write = match kind % 3 {
+            0 => laws::set(&[(obj_index, other % 4)]),
+            1 => laws::add(&[(obj_index, part_index)]),
+            _ => laws::remove(&[(obj_index, part_index)]),
+        };
+        self.commit(write);
+    }
+
     fn step(&mut self, step: Step) {
         match step {
             Step::Want(index) => {
@@ -143,12 +217,16 @@ impl Sim {
                 }
                 self.client.set_wanted(&self.wanted);
             }
-            Step::Readable(index) => {
-                let route = route(index % ROUTES);
-                if !self.readable.remove(&route) {
-                    self.readable.insert(route);
-                }
+            Step::Access(index) => {
+                let index = index % PARTS;
+                let write = if self.readable(&route(index)) {
+                    laws::revoke(&[(index, 0)])
+                } else {
+                    laws::grant(&[(index, 0)])
+                };
+                self.commit(write);
             }
+            Step::Write(kind, obj_index, other) => self.write(kind, obj_index, other),
             Step::SendUpdate => {
                 if let Some(update) = self.client.next_update() {
                     self.net.push(Msg::Update(update.clone()));
@@ -186,7 +264,6 @@ impl Sim {
                     self.lost(&msg);
                 }
             }
-            Step::Tick => self.rev += 1,
         }
         self.check();
     }
@@ -201,8 +278,8 @@ impl Sim {
         let cursors = &self.cursors;
         let request = self.client.round(
             |route| Some(cursors.get(route).copied().unwrap_or(0)),
-            100,
-            0,
+            PAGE_LIMIT,
+            HOLD_MS,
         );
         if let Some(request) = request {
             for (id, _) in &request.targets {
@@ -217,46 +294,14 @@ impl Sim {
 
     fn deliver(&mut self, msg: Msg) {
         match msg {
-            Msg::Update(request) => {
-                let before = self.held(request.session_id);
-                let readable = &self.readable;
-                let answer = self
-                    .server
-                    .update(&principal(0), &request, self.now, |route| {
-                        readable.contains(route)
-                    });
-                let after = self.held(request.session_id);
-                if let Some(before) = &before
-                    && request.generation <= before.0
-                {
-                    assert_eq!(
-                        after.as_ref(),
-                        Some(before),
-                        "a stale update changed the server"
-                    );
-                }
-                if let Some((_, targets, _)) = &after {
-                    let ever = self.ever_held.entry(request.session_id).or_default();
-                    let fresh = targets.keys().filter(|id| {
-                        before
-                            .as_ref()
-                            .is_none_or(|(_, held, _)| !held.contains_key(*id))
-                    });
-                    for id in fresh {
-                        assert!(ever.insert(*id), "the server took id {id} a second time");
-                    }
-                    let routes: BTreeSet<_> = targets.values().collect();
-                    assert_eq!(routes.len(), targets.len(), "a session holds a route twice");
-                }
-                self.net.push(Msg::Updated(request, answer));
-            }
+            Msg::Update(request) => self.serve_update(request),
             Msg::Updated(request, answer) => {
                 self.client
                     .update_answered(&request, &answer)
                     .expect("a correct server's answer");
             }
             Msg::Round(request) => {
-                let answer = self.serve(&request);
+                let answer = self.serve_round(&request);
                 if let Err(SessionError::UnknownTarget { target }) = &answer
                     && request.session_id == self.client.session_id()
                 {
@@ -267,63 +312,145 @@ impl Sim {
                 }
                 self.net.push(Msg::Paged(request, answer));
             }
-            Msg::Paged(request, answer) => {
-                let outcome = self
-                    .client
-                    .round_answered(&request, &answer, &mut self.outcomes)
-                    .expect("a correct server's page");
-                self.last_round_clean = outcome == super::client::RoundOutcome::Answered
-                    && self.outcomes.len() == request.targets.len()
-                    && self
-                        .outcomes
-                        .iter()
-                        .all(|(_, _, outcome)| *outcome != TargetOutcome::Refused);
-                for (_, route, outcome) in &self.outcomes {
-                    if let TargetOutcome::Advance { resume, .. } = outcome {
-                        let cursor = self.cursors.entry(route.clone()).or_default();
-                        *cursor = (*cursor).max(*resume);
-                    }
-                }
+            Msg::Paged(request, answer) => self.paged(&request, &answer),
+        }
+    }
+
+    /// The server's side of an update: admission read from the store by the responder, then
+    /// the session machine.
+    fn serve_update(&mut self, request: UpdateSession) {
+        let before = self.held(request.session_id);
+        let admits = block_on(self.responder.admission(&principal(0), &request)).unwrap();
+        let answer = self
+            .server
+            .update(&principal(0), &request, self.now, admits);
+        let after = self.held(request.session_id);
+        if let Some(before) = &before
+            && request.generation <= before.0
+        {
+            assert_eq!(
+                after.as_ref(),
+                Some(before),
+                "a stale update changed the server"
+            );
+        }
+        if let Some((_, targets, _)) = &after {
+            let ever = self.ever_held.entry(request.session_id).or_default();
+            let fresh = targets.keys().filter(|id| {
+                before
+                    .as_ref()
+                    .is_none_or(|(_, held, _)| !held.contains_key(*id))
+            });
+            for id in fresh {
+                assert!(ever.insert(*id), "the server took id {id} a second time");
+            }
+            let routes: BTreeSet<_> = targets.values().collect();
+            assert_eq!(routes.len(), targets.len(), "a session holds a route twice");
+        }
+        self.net.push(Msg::Updated(request, answer));
+    }
+
+    fn serve_round(&mut self, request: &PageSession) -> Result<SessionPage, SessionError> {
+        let Self {
+            responder,
+            server,
+            now,
+            ..
+        } = self;
+        block_on(responder.page(&principal(0), |round| {
+            server.resolve_round(&principal(0), request, *now, round)
+        }))
+        .expect("the memory store does not fail")
+        .cloned()
+    }
+
+    /// The client takes a page: the client machine first, then the page's rows, each resolved
+    /// to the route its target follows, and the cursors.
+    fn paged(&mut self, request: &PageSession, answer: &Result<SessionPage, SessionError>) {
+        let outcome = self
+            .client
+            .round_answered(request, answer, &mut self.outcomes)
+            .expect("a correct server's page");
+        let head = self.oracle.latest_rev();
+        // Quiet is confirmed by a round that drained every target it named; whether it named
+        // every target the client holds is judged when quiet is decided (`drained_ids`), since
+        // an update acknowledged later in the same drain can add one.
+        self.last_round_drained = outcome == RoundOutcome::Answered
+            && self.outcomes.len() == request.targets.len()
+            && self.outcomes.iter().all(|(_, _, outcome)| {
+                // `drained` is as of the round's snapshot; a page that waited in the network
+                // past a commit is behind the head, so quiet asks for the head itself.
+                matches!(outcome, TargetOutcome::Advance { resume, .. } if *resume >= head)
+            });
+        if self.last_round_drained {
+            self.drained_ids = request.targets.iter().map(|(id, _)| *id).collect();
+        }
+        if outcome != RoundOutcome::Answered {
+            return;
+        }
+        let page = answer.as_ref().expect("an answered round has a page");
+        for event in &page.events {
+            self.receive(request, page, event);
+        }
+        for (_, route, outcome) in &self.outcomes {
+            if let TargetOutcome::Advance { resume, .. } = outcome {
+                let cursor = self.cursors.entry(route.clone()).or_default();
+                *cursor = (*cursor).max(*resume);
             }
         }
     }
 
-    /// The responder, with readability standing in for the store: verdicts from it, no rows.
-    fn serve(&mut self, request: &PageSession) -> Result<SessionPage, SessionError> {
-        self.server
-            .resolve_round(&principal(0), request, self.now, &mut self.round)?;
-        let verdict = |route: Route| {
-            if self.readable.contains(&route) {
-                ReadVerdict::Permitted
-            } else {
-                ReadVerdict::Denied
+    /// One row of a page, checked against law 8 (it lies in its target's `(cursor, resume]`)
+    /// and law 12 (removals ride part targets only), and recorded under each route it reached.
+    /// A row met again must say the same thing: one rev of one key is one row.
+    fn receive(&mut self, request: &PageSession, page: &SessionPage, event: &PageEvent) {
+        let (rev, obj_key, targets, payload) = match event {
+            PageEvent::Changed {
+                rev,
+                obj_key,
+                targets,
+                payload,
+            } => (*rev, obj_key, targets.as_slice(), Some(payload)),
+            PageEvent::Removed {
+                rev,
+                obj_key,
+                target,
+            } => (*rev, obj_key, std::slice::from_ref(target), None),
+        };
+        for target in targets {
+            let cursor = request
+                .targets
+                .iter()
+                .find(|(id, _)| id == target)
+                .map(|(_, cursor)| *cursor)
+                .expect("an event names a target of its round");
+            let resume = page
+                .verdicts
+                .iter()
+                .find_map(|(id, verdict)| match verdict {
+                    Verdict::Events { resume, .. } if id == target => Some(*resume),
+                    _ => None,
+                })
+                .expect("an event names a target answered with events");
+            assert!(
+                cursor < rev && rev <= resume,
+                "{event:?} outside ({cursor}, {resume}]"
+            );
+            // A target the client dropped since the round went out: its rows are dropped too.
+            let Some(route) = self.client.route_of(*target) else {
+                continue;
+            };
+            assert!(
+                payload.is_some() || matches!(route, Route::Part { .. }),
+                "a removal on object target {target}"
+            );
+            let row = (route.clone(), obj_key.clone(), rev);
+            let payload = payload.cloned();
+            if let Some(seen) = self.received.get(&row) {
+                assert_eq!(seen, &payload, "row {row:?} said two things");
             }
-        };
-        self.read.parts.clear();
-        self.read
-            .parts
-            .extend(self.round.routes().parts.keys().map(|part_key| {
-                verdict(Route::Part {
-                    part_key: part_key.clone(),
-                })
-            }));
-        self.read.objects.clear();
-        self.read
-            .objects
-            .extend(self.round.routes().objects.keys().map(|obj_key| {
-                verdict(Route::Object {
-                    obj_key: obj_key.clone(),
-                })
-            }));
-        self.read.rows.entries.clear();
-        self.read.rows.through = self.rev;
-        assert!(self.round.content_keys(&self.read).is_empty());
-        let mut page = SessionPage {
-            events: default(),
-            verdicts: default(),
-        };
-        self.round.answer(&self.read, self.rev, &[], &mut page);
-        Ok(page)
+            self.received.insert(row, payload);
+        }
     }
 
     fn check(&self) {
@@ -343,18 +470,16 @@ impl Sim {
         }
     }
 
-    /// Drain: no churn, no flips, no loss. The driver retries what is blocked and readable and
-    /// keeps rounds going, which is how it hears that the server forgot.
+    /// Drain: no churn, no writes, no loss. The driver retries what is blocked and readable
+    /// and keeps rounds going until one drains every target, which is also how it hears that
+    /// the server forgot.
     fn quiesce(&mut self) {
-        for _ in 0..32 {
-            let readable_blocked = self
-                .client
-                .blocked()
-                .any(|route| self.readable.contains(route));
+        for _ in 0..64 {
+            let readable_blocked = self.client.blocked().any(|route| self.readable(route));
             if self.client.is_settled() && readable_blocked {
                 self.client.retry_blocked();
             }
-            self.last_round_clean = false;
+            self.last_round_drained = false;
             if let Some(update) = self.client.next_update() {
                 self.net.push(Msg::Update(update.clone()));
             } else {
@@ -365,13 +490,12 @@ impl Sim {
                 self.deliver(msg);
             }
             self.check();
-            let readable_blocked = self
-                .client
-                .blocked()
-                .any(|route| self.readable.contains(route));
+            let readable_blocked = self.client.blocked().any(|route| self.readable(route));
             // With nothing acknowledged there is no round to send, and nothing for the server
             // to hold for this session either.
-            let confirmed = self.last_round_clean || self.client.acked().next().is_none();
+            let acked_ids: BTreeSet<_> = self.client.acked().map(|(id, _)| id).collect();
+            let confirmed =
+                (self.last_round_drained && self.drained_ids == acked_ids) || acked_ids.is_empty();
             if self.client.is_settled() && !readable_blocked && confirmed {
                 return self.check_quiet();
             }
@@ -391,11 +515,97 @@ impl Sim {
             .unwrap_or_default();
         assert_eq!(held, acked, "the server holds what the client acknowledged");
         let acked_routes: BTreeSet<_> = acked.values().collect();
-        for route in self.wanted.intersection(&self.readable) {
+        for route in self.wanted.iter().filter(|route| self.readable(route)) {
             assert!(
                 acked_routes.contains(route),
                 "wanted readable {route:?} is not acked"
             );
+            self.check_replicated(route);
+        }
+    }
+
+    /// A wanted, readable route is replicated: its cursor is at the store's head, the client
+    /// was handed every current live row of the route (the oracle's read from nothing) with
+    /// the payload it carries now, and, for a part, folding what the client was handed gives
+    /// the part's live members (so every removal it needed reached it too).
+    fn check_replicated(&self, route: &Route) {
+        let head = self.oracle.latest_rev();
+        assert_eq!(
+            self.cursors.get(route).copied().unwrap_or(0),
+            head,
+            "{route:?} is not at the head"
+        );
+        let routes = match route {
+            Route::Part { part_key } => LogRoutes {
+                parts: [(part_key.clone(), 0)].into(),
+                objects: default(),
+            },
+            Route::Object { obj_key } => LogRoutes {
+                parts: default(),
+                objects: [(obj_key.clone(), 0)].into(),
+            },
+        };
+        let unlimited = Limits {
+            max_entries: std::num::NonZeroUsize::MAX,
+            max_bytes: None,
+        };
+        let expected = self
+            .oracle
+            .read_authorized(&principal(0), &routes, 0, head, unlimited);
+        // Law 12: an object target carries content, not membership. A row of the object in a
+        // part the client could not read when it paged is withheld, and the target moves past
+        // it; what the client must end with is the object's current content.
+        if let Route::Object { obj_key } = route {
+            let last = self
+                .received
+                .range((route.clone(), obj_key.clone(), 0)..)
+                .take_while(|((received_route, obj, _), _)| {
+                    received_route == route && obj == obj_key
+                })
+                .last()
+                .map(|(_, payload)| payload);
+            let current = &expected.payloads[expected.payload_slot(obj_key)].1;
+            assert_eq!(
+                last,
+                Some(&Some(current.clone())),
+                "{route:?} lacks its current content"
+            );
+            return;
+        }
+        for entry in expected.rows.entries.iter().filter(|e| e.value.is_some()) {
+            let LogKey::Member { obj, .. } = &entry.key else {
+                unreachable!("an authorized read carries no access row")
+            };
+            let payload = &expected.payloads[expected.payload_slot(obj)].1;
+            assert_eq!(
+                self.received.get(&(route.clone(), obj.clone(), entry.rev)),
+                Some(&Some(payload.clone())),
+                "{route:?} never got {entry:?}"
+            );
+        }
+        if let Route::Part { part_key } = route {
+            let mut folded = BTreeMap::new();
+            for ((_, obj, _), payload) in self
+                .received
+                .range((route.clone(), ObjKey::new(&[]), 0)..)
+                .take_while(|((received_route, ..), _)| received_route == route)
+            {
+                // Keys sort by rev within an object, so the last one wins.
+                folded.insert(obj.clone(), payload.is_some());
+            }
+            let live: BTreeSet<_> = folded
+                .into_iter()
+                .filter(|(_, live)| *live)
+                .map(|(obj, _)| obj)
+                .collect();
+            let members: BTreeSet<_> = self
+                .oracle
+                .live_members()
+                .into_iter()
+                .filter(|(_, member_part)| member_part == part_key)
+                .map(|(obj, _)| obj)
+                .collect();
+            assert_eq!(live, members, "the client's view of {part_key}");
         }
     }
 }
@@ -403,7 +613,9 @@ impl Sim {
 fn step() -> impl Strategy<Value = Step> {
     prop_oneof![
         3 => any::<u8>().prop_map(Step::Want),
-        2 => any::<u8>().prop_map(Step::Readable),
+        2 => any::<u8>().prop_map(Step::Access),
+        3 => (any::<u8>(), any::<u8>(), any::<u8>())
+            .prop_map(|(kind, obj, other)| Step::Write(kind, obj, other)),
         3 => Just(Step::SendUpdate),
         3 => Just(Step::SendRound),
         8 => any::<u8>().prop_map(Step::Deliver),
@@ -412,7 +624,6 @@ fn step() -> impl Strategy<Value = Step> {
         1 => Just(Step::RetryBlocked),
         1 => Just(Step::Sweep),
         1 => Just(Step::Restart),
-        1 => Just(Step::Tick),
     ]
 }
 
@@ -424,15 +635,38 @@ proptest! {
 
     #[test]
     fn client_and_server_agree_over_a_faulty_network(
-        readable in proptest::collection::btree_set(0..ROUTES, 0..=ROUTES as usize),
         steps in proptest::collection::vec(step(), 0..200),
     ) {
-        let mut sim = Sim::new(readable.into_iter().map(route).collect());
+        let mut sim = Sim::new();
         for step in steps {
             sim.step(step);
         }
         sim.quiesce();
     }
+}
+
+/// Shrunk by the stack simulation: a readable part wanted while an update was in flight.
+#[test]
+fn a_part_wanted_during_an_update_catches_up() {
+    use Step::*;
+    let mut sim = Sim::new();
+    for step in [
+        Want(70),
+        Want(9),
+        Access(214),
+        Access(43),
+        Want(92),
+        Want(182),
+        SendUpdate,
+        Want(20),
+        Deliver(0),
+        Duplicate(0),
+        Deliver(0),
+        SendRound,
+    ] {
+        sim.step(step);
+    }
+    sim.quiesce();
 }
 
 /// Pins a gap in law 5: the server cannot tell a late copy of a session's opening update from a

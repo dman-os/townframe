@@ -30,6 +30,7 @@ use crate::part_store::bucket_summary::BucketSummary;
 use crate::rev::Limits;
 use crate::rev::Page;
 use crate::rev::Rev;
+use crate::rev::RevWatch;
 
 pub mod bucket_summary;
 pub mod memory;
@@ -239,9 +240,10 @@ pub enum ReadVerdict {
     UnknownPart,
 }
 
-/// One [authorized read](PartStoreServe::read_authorized): each route's verdict and the rows
-/// they let through, all taken from one snapshot of the store. The caller owns it and reuses
-/// it across reads like a [`Page`]: a read clears and refills every field.
+/// One [authorized read](PartStoreServe::read_authorized): each route's verdict, the rows
+/// they let through and the content of those rows' objects, all taken from one snapshot of the
+/// store. The caller owns it and reuses it across reads like a [`Page`]: a read clears and
+/// refills every field.
 ///
 /// `rows.through` is the progress of the permitted routes only. A route answered `Denied` or
 /// `UnknownPart` read nothing, so its reader keeps its cursor where it was: should access be
@@ -253,6 +255,23 @@ pub struct AuthorizedPage {
     /// Each object route's verdict, in the routes' key order.
     pub objects: Vec<ReadVerdict>,
     pub rows: Page<LogKey, LogEntry>,
+    /// The payload of every object with a live member row in `rows`, sorted by object and one
+    /// entry per object, so a payload is copied out once however many rows name its object.
+    ///
+    /// It is read in the same snapshot as the rows, so it is the content those rows stand for:
+    /// a payload change re-stamps every member row of its object, so a newer payload would have
+    /// moved the rows past the snapshot's `until` and out of the page with it. A live row
+    /// always has a payload (membership before payload is pending, and pending writes no row).
+    pub payloads: Vec<(ObjKey, ObjPayload)>,
+}
+
+impl AuthorizedPage {
+    /// The payload of `obj`, which has a live member row in the page.
+    pub fn payload_slot(&self, obj: &ObjKey) -> usize {
+        self.payloads
+            .binary_search_by(|(key, _)| key.cmp(obj))
+            .expect("an authorized page carries the payload of every live row's object")
+    }
 }
 
 /// One entry of a bucket leaf: a member of the part in that bucket, live with its digest or
@@ -356,10 +375,18 @@ pub trait PartStoreRead<Async: FutureForm> {
 /// [`read_authorized`](Self::read_authorized)'s verdicts tell them apart.
 ///
 /// The log as a [`RevSource`](crate::rev::RevSource) is not here: that read is unauthorized and belongs to the store's
-/// local consumers (its embedder, indexes, replays), never to a peer.
+/// local consumers (its embedder, indexes, replays), never to a peer. Its rev and its watch
+/// are, because they disclose nothing per principal: a responder picks a read's `until` from
+/// [`latest_rev`](Self::latest_rev) and waits on [`watch`](Self::watch) for a held round.
 pub trait PartStoreServe<Async: FutureForm> {
+    /// The rev of the last committed transaction: a valid `until` for
+    /// [`read_authorized`](Self::read_authorized).
+    fn latest_rev(&self) -> Async::Future<'_, Res<Rev>>;
+    /// A handle on the latest committed rev, moved from the commit path after the commit is
+    /// visible to reads (as [`RevSource::watch`](crate::rev::RevSource::watch)).
+    fn watch(&self) -> RevWatch;
     /// The log rows `principal` may read on `routes` in `(after, until]`, with each route's
-    /// verdict, into `page`.
+    /// verdict and the payloads of the rows' objects, into `page`.
     ///
     /// - A part route is `Permitted` while the principal has an access row on the part, and
     ///   carries the part's member rows only then.
@@ -370,9 +397,14 @@ pub trait PartStoreServe<Async: FutureForm> {
     ///   carries nothing, not even the removal from its last readable part; that part's own
     ///   route carries it.
     /// - Access rows are on no route.
+    /// - [`AuthorizedPage::payloads`] holds the payload of each object with a live row in the
+    ///   page, from the same snapshot.
     ///
     /// `after`, `until`, `limits` and the page's shape are
-    /// [`RevSource::read`](crate::rev::RevSource::read)'s.
+    /// [`RevSource::read`](crate::rev::RevSource::read)'s, except that the window may be empty:
+    /// `after == until` decides every verdict and reads no row (`rows.through == until`). A
+    /// responder whose targets are all caught up still owes the client their verdicts (law 7 of
+    /// [`replay`](crate::replay)).
     fn read_authorized<'a>(
         &'a self,
         principal: &'a PeerKey,

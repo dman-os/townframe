@@ -397,8 +397,18 @@ impl<Async: FutureForm> RevSource<Async> for MemoryPartStore {
 
 #[future_form(Sendable, Local)]
 impl<Async: FutureForm> PartStoreServe<Async> for MemoryPartStore {
-    /// Decides every route and copies the rows out in one critical section, so a commit
-    /// (a revocation included) lands either wholly before the read or wholly after it.
+    fn latest_rev(&self) -> Async::Future<'_, Res<Rev>> {
+        Async::ready(Ok(self.with_state(|state| state.log.rev())))
+    }
+
+    /// The log's own watch: the one [`RevSource::watch`] hands out.
+    fn watch(&self) -> RevWatch {
+        RevWatch::new(self.wakeups.subscribe())
+    }
+
+    /// Decides every route and copies the rows and their payloads out in one critical section,
+    /// so a commit (a revocation included) lands either wholly before the read or wholly after
+    /// it.
     fn read_authorized<'a>(
         &'a self,
         principal: &'a PeerKey,

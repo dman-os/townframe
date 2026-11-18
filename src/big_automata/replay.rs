@@ -102,6 +102,7 @@
 //!     [`wire::SessionError::Limit`]; `limit` and `hold_ms` are silently capped.
 
 pub mod client;
+pub mod responder;
 pub mod server;
 pub mod wire;
 

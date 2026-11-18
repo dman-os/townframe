@@ -79,6 +79,16 @@ fn revocation_hides_the_parts_buckets() -> Res<()> {
 }
 
 #[test]
+fn an_empty_window_reads_verdicts_only() -> Res<()> {
+    block_on(laws::an_empty_window_reads_verdicts_only(&Memory))
+}
+
+#[test]
+fn authorized_reads_carry_their_payloads() -> Res<()> {
+    block_on(laws::authorized_reads_carry_their_payloads(&Memory))
+}
+
+#[test]
 fn grant_returns_the_backlog() -> Res<()> {
     block_on(laws::grant_returns_the_backlog(&Memory))
 }
