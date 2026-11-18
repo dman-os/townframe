@@ -1,5 +1,5 @@
-//! The fixture node: [`NodeCalls`] over documents held in memory, answering `summarizeIntxts` and
-//! `readDatums` as the node does for the same data. It stands in until claytxt's micro -> node
+//! The fixture node: [`NodeCalls`] over documents held in memory, answering `readDatums` as the
+//! node does for the same data. It stands in until claytxt's micro -> node
 //! transport lands (see [`crate::node`]), and is what the view-model tests read.
 //!
 //! Methods are answered through their JSON wire shape: the input is serialized, dispatched by the
@@ -26,10 +26,6 @@ use big_cabinet_core::reference::DatumReference;
 use big_cabinet_core::reference::ReferenceDocId;
 use clay_mdk::ClientError;
 use intxt_core::generic;
-use intxt_core::methods::IntxtSummary;
-use intxt_core::methods::IntxtsSummarized;
-use intxt_core::methods::SummarizeIntxts;
-use intxt_core::methods::SummaryStatus;
 use intxt_core::work;
 use method_core::ContextError;
 use method_core::Unary;
@@ -274,9 +270,6 @@ impl Fixture {
     fn answer(&self, nsid: &'static str, input: Value) -> Option<Value> {
         self.calls.borrow_mut().push(nsid);
         let answer = match nsid {
-            micro_review_manifest::SUMMARIZE_INTXTS => serde_json::to_value(
-                self.summarize(serde_json::from_value(input).expect("a SummarizeIntxts")),
-            ),
             micro_review_manifest::READ_DATUMS => serde_json::to_value(
                 self.read(serde_json::from_value(input).expect("a ReadDatums"))?,
             ),
@@ -288,48 +281,6 @@ impl Fixture {
         Some(answer.expect("a method output is plain JSON"))
     }
 
-    fn summarize(&self, input: SummarizeIntxts) -> IntxtsSummarized {
-        let results = input
-            .drawers
-            .into_iter()
-            .map(|drawer| {
-                let summary = |status, reason: Option<String>| IntxtSummary {
-                    drawer: drawer.clone(),
-                    status,
-                    title: None,
-                    description: None,
-                    entries: None,
-                    updated: None,
-                    link: None,
-                    reason,
-                };
-                let Some(datums) = self.held.docs.get(&drawer) else {
-                    return summary(
-                        SummaryStatus::Unreadable,
-                        Some("the node does not hold this document".to_owned()),
-                    );
-                };
-                if !datums.contains_key(&key(generic::Intxt::ID, "main")) {
-                    return summary(SummaryStatus::NotFound, None);
-                }
-                let title: generic::Title =
-                    serde_json::from_value(datums[&key(generic::Title::ID, "main")].clone())
-                        .expect("a held intxt has a title");
-                let body: generic::Body =
-                    serde_json::from_value(datums[&key(generic::Body::ID, "main")].clone())
-                        .expect("a held intxt has a body");
-                IntxtSummary {
-                    title: Some(title.title),
-                    description: title.description,
-                    entries: Some(u32::try_from(body.order.len()).expect("few entries")),
-                    updated: Some(1),
-                    link: Some(generic::Intxt::reference(&drawer, []).to_string()),
-                    ..summary(SummaryStatus::Found, None)
-                }
-            })
-            .collect();
-        IntxtsSummarized { results }
-    }
 
     /// Every held pull request in one caught-up page, whatever the predicate says: the fixture
     /// holds one GitHub drawer.

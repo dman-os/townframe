@@ -30,9 +30,6 @@ pub const CONFIG_KEY: &str = "main";
 /// The key under which the manifest carries the node methods the micro may call. See
 /// [`manifest`].
 pub const INTERIM_METHODS_KEY: &str = "interimMethods";
-/// `org.example.intxt.summarizeIntxts`: the title and description of each intxt a PR names, in
-/// one call.
-pub const SUMMARIZE_INTXTS: &str = "org.example.intxt.summarizeIntxts";
 /// `org.example.daybook.docs.readDatums`: the datums of a document (a PR, an intxt).
 pub const READ_DATUMS: &str = "org.example.daybook.docs.readDatums";
 /// `org.example.daybook.docs.pollDatums`: which documents of the GitHub drawer hold a `githubPull`.
@@ -100,7 +97,7 @@ pub fn manifest() -> MicroManifest {
     // is whatever the composition gives the micro's `Context`.
     manifest.extra.insert(
         INTERIM_METHODS_KEY.into(),
-        serde_json::json!([SUMMARIZE_INTXTS, READ_DATUMS, POLL_DATUMS]),
+        serde_json::json!([READ_DATUMS, POLL_DATUMS]),
     );
     manifest
 }
