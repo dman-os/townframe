@@ -1766,29 +1766,29 @@ mod tests {
         }
     }
 
-    /// Two intxts hold comments that agree on their first characters. The prefix printed for one
-    /// intxt's comment is short because only that intxt's names are compared, and resolving it
-    /// against the same intxt's names gives the comment back; the names of every intxt together
-    /// would have made it ambiguous.
+    /// Short ids are hashes of the full key, so a collision cannot be written down: another
+    /// intxt's comment is searched for whose id starts with the prefix printed for ours. The
+    /// prefix is short because only our intxt's names are compared, and it resolves back to our
+    /// comment there; the names of every intxt together make it ambiguous, which is what
+    /// resolving across all live intxts used to do.
     #[test]
     fn a_printed_comment_prefix_resolves_within_its_intxt_though_another_intxt_collides() {
         let comment = |slot: &str| key(intxt_core::annotation::Comment::ID, slot).unwrap();
-        let ours = comment("0192aaaa-1");
-        let theirs = comment("0192aaaa-2");
+        let ours = comment("ours");
         let view = view_of(&["entry-one"]);
 
         let ours_names = view.names([&ours]);
         let printed = ours_names.render(&ours.to_string()).unique;
         assert_eq!(ours_names.resolve(&printed).unwrap(), &ours.to_string());
 
-        let everyone = view.names([&ours, &theirs]);
-        assert!(
-            everyone.resolve(&printed).is_err(),
-            "{printed} must collide across intxts for this test to mean anything"
-        );
-        assert!(
-            everyone.render(&ours.to_string()).unique.len() > printed.len(),
-            "{printed} is longer when both intxts' comments are compared"
+        let theirs = (0..100_000)
+            .map(|n| comment(&format!("theirs-{n}")))
+            .find(|theirs| view.names([&ours, theirs]).resolve(&printed).is_err())
+            .expect("a comment that collides at the printed prefix");
+        assert_eq!(
+            view.names([&ours]).resolve(&printed).unwrap(),
+            &ours.to_string(),
+            "{printed} still names our comment among our intxt's names, beside {theirs}"
         );
     }
 
