@@ -635,7 +635,7 @@ impl NodeDir {
 /// What the holder of the node lock is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockRole {
-    /// `day node run`: it serves until stopped, and attaches the peers service.
+    /// `day node start`: it serves until stopped, and attaches the peers service.
     Serve,
     /// A command that opened the node for itself: it serves its socket while it runs and for as
     /// long as clients remain connected after, and attaches no peers service.

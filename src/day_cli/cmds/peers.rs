@@ -43,7 +43,7 @@ async fn add(ticket: &str) -> Res<ExitCode> {
         }
     );
     if changed && dir.probe_socket().await? == SocketState::Live {
-        println!("the running daemon dials it after `day node stop` and `day node start`");
+        println!("the running daemon dials it after `day node stop` and `day node start --bg`");
     }
     Ok(ExitCode::SUCCESS)
 }

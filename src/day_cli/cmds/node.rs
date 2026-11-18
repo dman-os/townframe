@@ -13,9 +13,14 @@ pub enum NodeCommands {
         relay: bool,
     },
     /// Serve the node on its socket in the foreground until SIGTERM or Ctrl-C
-    Run,
-    /// Start a background daemon and return once it is serving
-    Start,
+    ///
+    /// With `--bg` the node is served by a background daemon instead, and the command returns
+    /// once it is serving; a daemon that is already running is left alone.
+    Start {
+        /// Serve from a background daemon and return once it is serving
+        #[arg(long)]
+        bg: bool,
+    },
     /// Stop the background daemon and return once it has exited
     Stop,
     /// Show the node's id, how it was reached, and what it runs (exit status 3 when no daemon
@@ -30,9 +35,8 @@ pub enum NodeCommands {
 pub async fn run(command: NodeCommands) -> Res<ExitCode> {
     match command {
         NodeCommands::Init { dir, relay } => super::init::run(dir, relay).await,
-        NodeCommands::Run => super::serve::run(super::serve::ServeCommands::Run).await,
-        NodeCommands::Start => super::serve::run(super::serve::ServeCommands::Start).await,
-        NodeCommands::Stop => super::serve::run(super::serve::ServeCommands::Stop).await,
+        NodeCommands::Start { bg } => super::serve::start(bg).await,
+        NodeCommands::Stop => super::serve::stop().await,
         NodeCommands::Status { json } => super::status::run(json).await,
     }
 }
