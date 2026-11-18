@@ -65,6 +65,10 @@ async fn activate(context: Context) -> Result<(), Error> {
 
 clay_mdk::export_micro!(activate, micro_lab_manifest::manifest);
 
+/// The lab's own stylesheet: the layout of its parts and the look of an experiment's row, which the
+/// kit has no component for. It names no colour that is not a kit token.
+const STYLES: &str = include_str!("styles.css");
+
 /// The lab's model and view in one root-scope render: the list of experiments, or the open one.
 fn view() -> Element {
     let mut open = use_signal(|| None::<&'static str>);
@@ -73,13 +77,15 @@ fn view() -> Element {
     match experiment {
         Some(experiment) => (experiment.open)(Callback::new(move |()| open.set(None))),
         None => rsx! {
-            div { class: "flex flex-col gap-4",
+            div { class: "ct-lab",
+                document::Style { "{STYLES}" }
                 AppBar { title: "Lab" }
-                ul { class: "mx-4 flex flex-col gap-2", "aria-label": "Experiments",
+                ul { "data-part": "experiments", "aria-label": "Experiments",
                     for experiment in EXPERIMENTS {
                         li { key: "{experiment.id}",
                             button {
-                                class: "block min-h-12 w-full rounded-md border border-border px-4 py-3 text-left focus-visible:outline",
+                                "data-part": "experiment",
+                                r#type: "button",
                                 "aria-label": "Open {experiment.title}",
                                 onclick: move |_| open.set(Some(experiment.id)),
                                 strong { "{experiment.title}" }
