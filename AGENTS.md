@@ -103,6 +103,7 @@ Diagnose the keyhive pull pipeline first; the worker-side retry storm is only th
 - Dayframe UI work has its own playbooks in `.agents/skills/`: `dayframe-design-language` (tokens, components, layout contract), `dayframe-signal-idioms` (runtime-borrow-proof state idioms, `dioxus_storm` event storms), `dayframe-native-dev-loop` (native build, screenshots, AT-SPI inspection), `blitz-dioxus-native-limits` (pinned Blitz capability bounds).
 - Cabinet datum/Lexicon work has its own playbook in `.agents/skills/`: `lexicon-authoring` (open unions, string vocabularies, empty-member convention, unknown-member carrying, admission/codec test chain).
 - Browser automation has `.agents/skills/playwright` (flake-pinned browser farm, per-package `@playwright/test` pins, the `dayframe_web` e2e).
+- Every lane runs its work as one stack of small draft PRs: `.agents/skills/pr-stacks` (naming, bases, docs layers, CI on the tip only, backups; restacking optional, the operator merges with their own tooling).
 ## VCS
 
 > [!INFO]
