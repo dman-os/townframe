@@ -224,7 +224,10 @@ fn net_permbinds_name_a_host_and_verbs_and_a_use_asks_for_nothing_more() {
     for (permbind, why) in [
         (net("", None, None), "no host"),
         (net("example.org/path", None, None), "a path is not a host"),
-        (net("https://example.org", None, None), "a URL is not a host"),
+        (
+            net("https://example.org", None, None),
+            "a URL is not a host",
+        ),
         (net("*.example.org", None, None), "no wildcards"),
         (net("example.org", Some(0), None), "port 0"),
         (net("example.org", None, Some(&["get"])), "lower-case verb"),

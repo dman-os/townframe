@@ -15,13 +15,12 @@ use crate::executor::NoduleExecutor;
 use crate::executor::ReensureQueue;
 use crate::executor::RoutineCapabilities;
 use crate::executor::RoutineSpec;
-use crate::requests::Declared;
-use crate::requests::NetUse;
-use crate::requests::RoutineUses;
 use crate::requests::GrantRequests;
 use crate::requests::GrantsFeed;
 use crate::requests::MissingAuthorityLookup;
+use crate::requests::NetUse;
 use crate::requests::Requests;
+use crate::requests::RoutineUses;
 use crate::store;
 use big_cabinet::DatumStore;
 use big_cabinet::DatumStoreHandle;
@@ -967,6 +966,20 @@ struct Granted<'a> {
     /// The operations that cover a request of the manifest.
     operations: &'a DispatchScope,
     nets: &'a BTreeSet<NetTarget>,
+}
+
+impl<'a> Granted<'a> {
+    fn new(
+        drawers: &'a BTreeMap<DrawerId, DrawerAccess>,
+        operations: &'a DispatchScope,
+        nets: &'a BTreeSet<NetTarget>,
+    ) -> Self {
+        Self {
+            drawers,
+            operations,
+            nets,
+        }
+    }
 }
 
 /// Brings each routine's handles to its desired scopes (ADR 047 §6): a handle whose scope did
@@ -2000,25 +2013,7 @@ impl State {
             .retain(|problem| unreadable.contains(problem));
         self.stores.dispatch.set_routes(routes.clone());
         let providers = ProviderIndex::new(&resolved, routes);
-        self.grant_requests.declare(
-            resolved
-                .iter()
-                .filter_map(|(cartridge_id, resolution)| match resolution {
-                    NoduleResolution::Admitted {
-                        installed,
-                        desired_nets,
-                        ..
-                    } => Some((
-                        cartridge_id.clone(),
-                        Declared {
-                            permbinds: installed.resolved.cartridge.permbinds.clone(),
-                            nets: desired_nets.clone(),
-                        },
-                    )),
-                    NoduleResolution::Refused { .. } => None,
-                })
-                .collect(),
-        );
+        self.grant_requests.declare(&resolved);
         let mut new_records = BTreeMap::new();
         for (cartridge_id, resolution) in resolved {
             match resolution {
@@ -2752,11 +2747,7 @@ impl State {
                 &cartridge_id,
                 &actor,
                 &installed,
-                Granted {
-                    drawers: &desired_grants,
-                    operations: &effective_operations,
-                    nets: &desired_nets,
-                },
+                Granted::new(&desired_grants, &effective_operations, &desired_nets),
             )
             .await?;
 
