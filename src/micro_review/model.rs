@@ -67,13 +67,100 @@ impl Pull {
         }
     }
 
+    /// The state as the chip says it.
     pub fn state_label(&self) -> &str {
         match &self.state {
-            PullState::Open => "open",
-            PullState::Closed => "closed",
-            PullState::Merged => "merged",
+            PullState::Open => "Open",
+            PullState::Closed => "Closed",
+            PullState::Merged => "Merged",
             PullState::Unknown(other) => other,
         }
+    }
+
+    /// The description as a reader sees it: the intxt block (machine data) taken out, the rest in
+    /// paragraphs, and how many intxts the block named. A block that cannot be read cannot be
+    /// taken out, so the text is shown as written and names none; the links read of the screen
+    /// reports the problem.
+    pub fn reading(&self) -> PullReading {
+        let (text, named) = match generic::PrLinks::split(&self.body) {
+            Ok((text, links)) => (text, links.intxts.len()),
+            Err(_) => (self.body.clone(), 0),
+        };
+        PullReading {
+            paragraphs: paragraphs(&text),
+            names: named,
+        }
+    }
+}
+
+/// A pull request's description for reading: see [`Pull::reading`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PullReading {
+    /// The text without the intxt block, split at blank lines; a paragraph keeps its own line
+    /// breaks.
+    pub paragraphs: Vec<String>,
+    /// How many intxts the block names.
+    pub names: usize,
+}
+
+impl PullReading {
+    /// The small line that stands for the hidden block, when it names anything.
+    pub fn names_line(&self) -> Option<String> {
+        match self.names {
+            0 => None,
+            1 => Some("names 1 intxt".to_owned()),
+            many => Some(format!("names {many} intxts")),
+        }
+    }
+}
+
+/// `text` split at blank lines (LF or CRLF), each paragraph trimmed, none empty.
+fn paragraphs(text: &str) -> Vec<String> {
+    let mut paragraphs = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            if !current.is_empty() {
+                paragraphs.push(current.join("\n"));
+                current.clear();
+            }
+        } else {
+            current.push(line.trim_end());
+        }
+    }
+    if !current.is_empty() {
+        paragraphs.push(current.join("\n"));
+    }
+    paragraphs
+}
+
+/// The longest a description is shown in a row, in characters: about three lines of a phone.
+const TEASER_CHARS: usize = 140;
+
+/// A markdown `description` for a row: its words on one line, cut at the last word boundary that
+/// fits and ended with an ellipsis when it was cut.
+pub fn teaser(description: &str) -> String {
+    let flat = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= TEASER_CHARS {
+        return flat;
+    }
+    let cut = flat
+        .char_indices()
+        .nth(TEASER_CHARS)
+        .map_or(flat.len(), |(at, _)| at);
+    // The word the cut falls in is dropped; a single word longer than the line is cut as is.
+    let end = flat[..cut].rfind(' ').filter(|at| *at > 0).unwrap_or(cut);
+    format!(
+        "{}…",
+        flat[..end].trim_end_matches([',', ';', ':', '.', '-', ' '])
+    )
+}
+
+/// "1 entry" or "N entries".
+pub fn entries_label(count: u32) -> String {
+    match count {
+        1 => "1 entry".to_owned(),
+        many => format!("{many} entries"),
     }
 }
 
@@ -142,6 +229,19 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
+    /// The heading of the group the kind is listed under.
+    fn group(&self) -> &'static str {
+        match self {
+            Self::Commits => "Commits",
+            Self::JjChange => "Jj changes",
+            Self::TrackedRef => "Refs",
+            Self::Session => "Sessions",
+            Self::PullRequest => "Pull requests",
+            Self::Other(_) => "Other",
+            Self::Unreadable(_) => "Unreadable",
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
             Self::Commits => "commits",
@@ -152,6 +252,32 @@ impl EntryKind {
             Self::Other(tag) => tag,
             Self::Unreadable(_) => "unreadable",
         }
+    }
+}
+
+/// The entries of one kind, under the heading the intxt screen gives them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryGroup<'intxt> {
+    pub heading: &'static str,
+    pub entries: Vec<&'intxt Entry>,
+}
+
+impl Intxt {
+    /// The entries grouped by kind, a group where its first entry sits and entries in the body's
+    /// order within it, so the screen reads in the order the intxt was written.
+    pub fn groups(&self) -> Vec<EntryGroup<'_>> {
+        let mut groups: Vec<EntryGroup<'_>> = Vec::new();
+        for entry in &self.entries {
+            let heading = entry.kind.group();
+            match groups.iter_mut().find(|group| group.heading == heading) {
+                Some(group) => group.entries.push(entry),
+                None => groups.push(EntryGroup {
+                    heading,
+                    entries: vec![entry],
+                }),
+            }
+        }
+        groups
     }
 }
 
@@ -509,6 +635,97 @@ mod tests {
             .collect()
     }
 
+    fn pull_with(body: &str) -> Pull {
+        Pull {
+            doc: Fixture::doc_id("2"),
+            slot: "o/r/1".to_owned(),
+            title: "t".to_owned(),
+            state: PullState::Open,
+            body: body.to_owned(),
+            url: "https://github.com/o/r/pull/1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_block_is_hidden_from_the_body_and_counted_as_the_intxts_it_names() {
+        let block = PrLinks {
+            intxts: vec![
+                PrLink::new(IntxtMarker::reference(&Fixture::doc_id("31"), [])),
+                PrLink::new(IntxtMarker::reference(&Fixture::doc_id("32"), [])),
+            ],
+            ..Default::default()
+        }
+        .block();
+        let reading = pull_with(&format!("First.\nStill first.\n\nSecond.\n\n{block}\n")).reading();
+        assert_eq!(reading.paragraphs, ["First.\nStill first.", "Second."]);
+        assert_eq!(reading.names_line().as_deref(), Some("names 2 intxts"));
+        assert!(!reading.paragraphs.concat().contains("details"));
+    }
+
+    #[test]
+    fn a_description_without_a_block_shows_in_full_and_names_nothing() {
+        let reading = pull_with("Just words.\r\n\r\nMore words.").reading();
+        assert_eq!(reading.paragraphs, ["Just words.", "More words."]);
+        assert_eq!(reading.names_line(), None);
+        assert_eq!(pull_with("").reading().paragraphs, Vec::<String>::new());
+    }
+
+    #[test]
+    fn one_intxt_is_named_in_the_singular() {
+        let body = PrLinks {
+            intxts: vec![PrLink::new(IntxtMarker::reference(
+                &Fixture::doc_id("31"),
+                [],
+            ))],
+            ..Default::default()
+        }
+        .block();
+        assert_eq!(
+            pull_with(&body).reading().names_line().as_deref(),
+            Some("names 1 intxt")
+        );
+    }
+
+    #[test]
+    fn a_malformed_block_stays_in_the_text_and_names_nothing() {
+        let body = "Words.\n\n<details>\n<summary>intxt</summary>\n\n```json\n{ \"$type\": \"org.example.intxt.prLinks\", \"intxts\": [{ \"ref\": 5 }] }\n```\n\n</details>";
+        let reading = pull_with(body).reading();
+        assert_eq!(reading.names_line(), None);
+        assert!(reading.paragraphs.concat().contains("details"));
+    }
+
+    #[test]
+    fn a_teaser_is_one_line_cut_at_a_word_boundary() {
+        assert_eq!(teaser("Short\n\ntext."), "Short text.");
+        let long = "word ".repeat(60);
+        let cut = teaser(&long);
+        assert!(cut.ends_with("word…"), "{cut}");
+        assert!(cut.chars().count() <= TEASER_CHARS + 1);
+        let unbroken = "x".repeat(300);
+        assert_eq!(teaser(&unbroken).chars().count(), TEASER_CHARS + 1);
+    }
+
+    #[tokio::test]
+    async fn entries_are_grouped_by_kind_in_the_order_the_intxt_was_written() {
+        let Read::Ready(intxt) = review(&Fixture::sample())
+            .intxt(&Fixture::doc_id("31"))
+            .await
+            .unwrap()
+        else {
+            panic!("the sample intxt is readable")
+        };
+        let groups = intxt.groups();
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| (group.heading, group.entries.len()))
+                .collect::<Vec<_>>(),
+            [("Commits", 2), ("Pull requests", 1)]
+        );
+        assert_eq!(entries_label(1), "1 entry");
+        assert_eq!(entries_label(3), "3 entries");
+    }
+
     #[tokio::test]
     async fn the_list_shows_each_held_pull_with_its_repo_ref_title_and_state() {
         let pulls = review(&Fixture::sample()).pulls().await.unwrap();
@@ -525,12 +742,12 @@ mod tests {
                 (
                     "dman-os/townframe#150".to_owned(),
                     "intxt: read a PR and its intxts on the phone".to_owned(),
-                    "open"
+                    "Open"
                 ),
                 (
                     "dman-os/townframe#151".to_owned(),
                     "chore: pin the review micro's lockfile".to_owned(),
-                    "merged"
+                    "Merged"
                 ),
             ]
         );
