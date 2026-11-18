@@ -586,7 +586,6 @@ mod virtual_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::CORE_CSS;
     use pierre_diffs::types::view::AnnotationSide;
 
     fn file(name: &str, contents: &str) -> Box<FileContents> {
@@ -653,9 +652,13 @@ mod tests {
             "the sheet starts with the core CSS, got {:?}",
             &sheet[..sheet.len().min(60)]
         );
-        assert!(
-            sheet.len() > CORE_CSS.len(),
-            "the theme CSS follows the core CSS in the sheet"
+        // The core CSS and the theme CSS each open with the layer order.
+        assert_eq!(
+            sheet
+                .matches("@layer base, theme, rendered, unsafe;")
+                .count(),
+            2,
+            "the sheet holds the core CSS and the theme CSS"
         );
         let sprite_start = rest.find("<svg aria-hidden").expect("the icon sprite");
         let sprite_end = rest[sprite_start..].find("</svg>").expect("sprite closes") + sprite_start;
