@@ -12,14 +12,14 @@ tokio = { version = "1", features = ["time", "rt", "sync"] }
 default = ["mobile"]
 # The Android system WebView (Wry), the app's renderer. `dx build --platform android --renderer
 # webview` selects this feature by its `dioxus/mobile`.
-mobile = ["dioxus/mobile", "dayframe_native/wry"]
+mobile = ["dioxus/mobile", "daytxt_native/wry"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 #
 # internal
 
 # The composition (Wasmtime, SQLite) is only built for the target that runs it.
-dayframe_native = { workspace = true }
+daytxt_native = { workspace = true }
 daytxt_core = { workspace = true }
 jni = "0.21"
 

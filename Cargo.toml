@@ -94,7 +94,7 @@ members = [
   "./src/clay_dioxus_kit",
   "./src/dioxus_storm",
   "./src/daytxt_core",
-  "./src/dayframe_native",
+  "./src/daytxt_native",
   "./src/dayframe_web",
   "./src/dayframe_desktop",
   "./src/dayframe_mobile",
@@ -209,7 +209,7 @@ micro_counter_manifest = { path = "./src/micro_counter_manifest" }
 micro_review_manifest = { path = "./src/micro_review_manifest" }
 daytxt_core = { path = "./src/daytxt_core" }
 ui = { path = "./src/ui" }
-dayframe_native = { path = "./src/dayframe_native" }
+daytxt_native = { path = "./src/daytxt_native" }
 
 #
 # meta

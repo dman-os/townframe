@@ -4,7 +4,7 @@
 pub use daytxt_core::CompositionRuntime;
 
 use clay_store::OrderedStore;
-use dayframe_native::PackageFiles;
+use daytxt_native::PackageFiles;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ pub async fn open_store() -> Result<clay_store::SqliteStore, String> {
             .ok_or("no DAYFRAME_STORE_PATH, XDG_DATA_HOME or HOME to place the store under")?
             .join("store.sqlite"),
     };
-    dayframe_native::open_store(&path).await
+    daytxt_native::open_store(&path).await
 }
 
 /// `<name>` of a `<name>.manifest.json` path.
@@ -107,7 +107,7 @@ pub async fn desktop_runtime<St: OrderedStore + Send + Sync + 'static>(
     store: Arc<St>,
 ) -> Result<CompositionRuntime, clay_store::StoreError> {
     let (packages, errors) = scan_packages();
-    assemble(store, dayframe_native::wasmtime_engine, packages, errors).await
+    assemble(store, daytxt_native::wasmtime_engine, packages, errors).await
 }
 
 /// [`desktop_runtime`] on the desktop's node: the one `day` uses (`DAY_NODE`, else the platform
@@ -131,12 +131,12 @@ pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
     let intxt_guest = std::fs::read(&guest_path)
         .map_err(|error| format!("cannot read {}: {error}", guest_path.display()))?;
     let (packages, errors) = scan_packages();
-    dayframe_native::hosted_runtime(
+    daytxt_native::hosted_runtime(
         store,
         packages,
         errors,
-        dayframe_native::wasmtime_engine,
-        dayframe_native::NodeHost {
+        daytxt_native::wasmtime_engine,
+        daytxt_native::NodeHost {
             root,
             serve: true,
             pairing_directories: vec![data_directory],
@@ -147,16 +147,16 @@ pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
 }
 
 /// The composition of `packages` run by `engine`: the engine the packages run on is the
-/// composition root's choice (see `dayframe_native::PackageEngine`). No micro has a way to call a
+/// composition root's choice (see `daytxt_native::PackageEngine`). No micro has a way to call a
 /// node.
 #[cfg(test)]
 pub(crate) async fn assemble<St: OrderedStore + Send + Sync + 'static>(
     store: Arc<St>,
-    engine: impl dayframe_native::PackageEngine,
+    engine: impl daytxt_native::PackageEngine,
     packages: Vec<PackageFiles>,
     errors: Vec<String>,
 ) -> Result<CompositionRuntime, clay_store::StoreError> {
-    dayframe_native::native_runtime(store, packages, errors, engine, &|_| None, &|_| None).await
+    daytxt_native::native_runtime(store, packages, errors, engine, &|_| None, &|_| None).await
 }
 
 #[cfg(test)]

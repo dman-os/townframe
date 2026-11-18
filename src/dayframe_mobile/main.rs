@@ -1,4 +1,4 @@
-//! Android composition root: the shared native composition (`dayframe_native`) with the store
+//! Android composition root: the shared native composition (`daytxt_native`) with the store
 //! under the app's internal data directory and the Wasm packages read from the APK's assets, and
 //! the app's own in-process node (`dayframe_node`) that its Wasm micros reach by `dispatch.local`.
 //!
@@ -19,9 +19,9 @@ fn main() {
 
 #[cfg(target_os = "android")]
 mod android {
-    use dayframe_native::PackageFiles;
-    use dayframe_native::Shell;
-    use dayframe_native::WryApplication;
+    use daytxt_native::PackageFiles;
+    use daytxt_native::Shell;
+    use daytxt_native::WryApplication;
     use dioxus::prelude::*;
     use jni::objects::JObject;
     use jni::objects::JValue;
@@ -74,7 +74,7 @@ mod android {
         // Android has no `$HOME` or XDG cache for Wasmtime to find, so without this every process
         // start recompiles every guest (6.5 s for a debug counter on a ZTE 8050). The artifacts
         // are regenerable, so they sit under the internal data dir and go with the app.
-        dayframe_native::set_component_cache_directory(data_directory.join("component-cache"));
+        daytxt_native::set_component_cache_directory(data_directory.join("component-cache"));
         dioxus::LaunchBuilder::mobile().launch(App);
     }
 
@@ -110,7 +110,7 @@ mod android {
         _env: JNIEnv,
         _activity: JObject,
     ) -> jni::sys::jboolean {
-        dayframe_native::SYSTEM_BACK.request().into()
+        daytxt_native::SYSTEM_BACK.request().into()
     }
 
     async fn read_package(name: &str) -> Result<PackageFiles, String> {
@@ -138,11 +138,11 @@ mod android {
             .collect()
     }
 
-    async fn load() -> Result<dayframe_native::CompositionRuntime, String> {
+    async fn load() -> Result<daytxt_native::CompositionRuntime, String> {
         let data_directory = DATA_DIRECTORY
             .get()
             .expect("main sets the data directory before launching");
-        let store = dayframe_native::open_store(&data_directory.join("store.sqlite")).await?;
+        let store = daytxt_native::open_store(&data_directory.join("store.sqlite")).await?;
         let mut packages = Vec::new();
         let mut errors = Vec::new();
         for name in PACKAGE_NAMES {
@@ -155,12 +155,12 @@ mod android {
         let intxt_guest = dioxus::asset_resolver::read_asset_bytes(&guest_path)
             .await
             .map_err(|error| format!("cannot read bundled asset {guest_path}: {error}"))?;
-        dayframe_native::hosted_runtime(
+        daytxt_native::hosted_runtime(
             Arc::new(store),
             packages,
             errors,
-            dayframe_native::wasmtime_engine,
-            dayframe_native::NodeHost {
+            daytxt_native::wasmtime_engine,
+            daytxt_native::NodeHost {
                 root: data_directory.join("node"),
                 // No second process on Android: nothing could reach a socket, and the data
                 // directory is too deep for a socket path.
@@ -179,7 +179,7 @@ mod android {
     /// (`DisplayMetrics.density`). The WebView fills the activity's content view, which sits below
     /// the status bar when the activity is not drawn edge to edge, so the content view is the size
     /// to lay out in; tao's window reports the whole window and a scale factor of 1.0.
-    fn webview_viewport(_: ()) -> dayframe_native::Viewport {
+    fn webview_viewport(_: ()) -> daytxt_native::Viewport {
         dioxus::prelude::manganis::android::with_activity(|env, activity| {
             let resources = env
                 .call_method(
@@ -212,7 +212,7 @@ mod android {
                         .expect("a View dimension"),
                 ) / scale
             };
-            Some(dayframe_native::Viewport {
+            Some(daytxt_native::Viewport {
                 width: dimension("getWidth"),
                 height: dimension("getHeight"),
                 scale,
@@ -345,7 +345,7 @@ mod android {
     fn App() -> Element {
         rsx! {
             Shell {
-                load: dayframe_native::runtime_loader(load),
+                load: daytxt_native::runtime_loader(load),
                 ready: Callback::new(|runtime| {
                     rsx! {
                         WryApplication {

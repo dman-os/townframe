@@ -22,8 +22,8 @@ fn main() {
 #[component]
 fn App() -> Element {
     rsx! {
-        dayframe_native::Shell {
-            load: dayframe_native::runtime_loader(|| async {
+        daytxt_native::Shell {
+            load: daytxt_native::runtime_loader(|| async {
                 let store = composition::open_store().await?;
                 composition::hosted_runtime(std::sync::Arc::new(store)).await
             }),
@@ -40,10 +40,10 @@ fn ReadyApp(runtime: Signal<Option<composition::CompositionRuntime>>) -> Element
     match use_context::<Renderer>() {
         // A desktop window has no system chrome over its surface.
         Renderer::Browser => {
-            rsx! { dayframe_native::WryApplication { runtime, insets: None, viewport: None } }
+            rsx! { daytxt_native::WryApplication { runtime, insets: None, viewport: None } }
         }
         #[cfg(feature = "blitz")]
-        Renderer::Blitz => rsx! { dayframe_native::BlitzApplication { runtime, insets: None } },
+        Renderer::Blitz => rsx! { daytxt_native::BlitzApplication { runtime, insets: None } },
         #[cfg(not(feature = "blitz"))]
         Renderer::Blitz => unreachable!("only the `blitz` feature launches Blitz"),
     }

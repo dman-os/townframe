@@ -13,7 +13,7 @@ allowed_dependencies = [
     "clay_surface",
     "daybook_types",
     "daytxt_core",
-    "dayframe_native",
+    "daytxt_native",
     "micro_counter_manifest",
     "micro_lab_manifest",
     "micro_layout_manifest",

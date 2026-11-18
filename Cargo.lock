@@ -4401,7 +4401,7 @@ dependencies = [
  "day_node",
  "daybook_types",
  "daytxt_core",
- "dayframe_native",
+ "daytxt_native",
  "dioxus",
  "dioxus-core",
  "dioxus-html",
@@ -4431,14 +4431,14 @@ name = "dayframe_mobile"
 version = "0.1.0"
 dependencies = [
  "daytxt_core",
- "dayframe_native",
+ "daytxt_native",
  "dioxus",
  "jni 0.21.1",
  "tokio",
 ]
 
 [[package]]
-name = "dayframe_native"
+name = "daytxt_native"
 version = "0.1.0"
 dependencies = [
  "big_cabinet",

@@ -11,7 +11,7 @@ path = "main.rs"
 dioxus = { workspace = true }
 ui = { workspace = true }
 daytxt_core = { workspace = true }
-dayframe_native = { workspace = true }
+daytxt_native = { workspace = true }
 day_node = { workspace = true }
 clay_docs = { workspace = true }
 clay_dioxus = { workspace = true }
@@ -44,13 +44,13 @@ accesskit_xplat = { version = "0.2.1", optional = true }
 [features]
 default = ["desktop"]
 # The shipping renderer: the shell in a system webview (Wry).
-desktop = ["dioxus/desktop", "dayframe_native/wry"]
+desktop = ["dioxus/desktop", "daytxt_native/wry"]
 # Blitz, opt-in and additive: compiled in next to Wry, launched by `DAYFRAME_RENDERER=blitz`
 # (`x/dayframe.ts desktop --native` sets both).
 blitz = [
     "dioxus/native",
     "dep:dioxus-native",
-    "dayframe_native/blitz",
+    "daytxt_native/blitz",
     "dep:anyrender",
     "dep:anyrender_vello",
     "dep:anyrender_vello_cpu",
