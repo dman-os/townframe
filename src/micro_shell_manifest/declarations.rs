@@ -48,16 +48,6 @@ impl ConfigDecl for ShellArrangement {
     type Value = ShellConfig;
 }
 
-/// The end user's theme facet (see [`THEME_CONFIG_NAME`]).
-pub struct ShellTheme;
-
-impl ConfigDecl for ShellTheme {
-    const BINDING: &'static str = THEME_CONFIG_NAME;
-    const NSID: &'static str = THEME_CONFIG_TAG;
-    const KEY: &'static str = THEME_CONFIG_KEY;
-    type Value = ThemeSheet;
-}
-
 /// The panels collection, keyed by registration id.
 pub struct ShellPanels;
 

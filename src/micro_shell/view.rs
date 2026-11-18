@@ -12,6 +12,7 @@ use clay_dioxus_kit::ListDetails;
 use clay_dioxus_kit::NavButton;
 use clay_dioxus_kit::NavButtonMode;
 use clay_dioxus_kit::PanelPage;
+use clay_dioxus_kit::Renderer;
 use clay_dioxus_kit::SectionPane;
 use clay_dioxus_kit::Sections;
 use clay_dioxus_kit::Sheet;
@@ -307,12 +308,12 @@ struct AppliedTheme {
 }
 
 /// Applies the end user's theme (see [`Shell::set_theme`]) host-wide and live: returns the
-/// sheet the frame puts in the host's own document, and provides every mount below it the same
+/// `<style>` the frame puts in the host's own document, and provides every mount below it the same
 /// CSS as [`UserStylesheet`], which a mount adopts as the last layer of its shadow root. The
 /// facet is document-backed and so can arrive from another device, so what it holds is
 /// checked again here, once per change rather than per render, and a sheet that could make the
 /// host fetch is not applied.
-fn use_theme(shell: &Shell) -> String {
+fn use_theme(shell: &Shell) -> Element {
     let snapshot = use_facet(&shell.theme);
     let raw = match &snapshot.state {
         FacetState::Present(sheet) => sheet.css.as_str(),
@@ -341,7 +342,34 @@ fn use_theme(shell: &Shell) -> String {
             String::new()
         });
     }
-    applied.document_sheet.clone()
+    if applied.document_sheet.is_empty() {
+        return VNode::empty();
+    }
+    rsx! { style { "{applied.document_sheet}" } }
+}
+
+/// The frame's two splits: the sidebar against the content, and, inside the content pane, the
+/// list against the details.
+fn splits(
+    config: &ShellConfig,
+    renderer: Renderer,
+    width_px: f64,
+    sidebar_visible: bool,
+) -> (Split, Split) {
+    let outer = Split::new(vec![config.sidebar, config.list + config.details], width_px)
+        .rule(0, SIDEBAR_RULE)
+        .renderer(renderer);
+    // The list/details split lays out inside the content pane, so its extent is that pane's.
+    let content_px = if sidebar_visible {
+        outer.sizes()[1]
+    } else {
+        width_px
+    };
+    let inner = Split::new(vec![config.list, config.details], content_px)
+        .rule(0, LIST_RULE)
+        .rule(1, DETAILS_RULE)
+        .renderer(renderer);
+    (outer, inner)
 }
 
 #[component]
@@ -396,19 +424,7 @@ fn Frame(shell: Shell) -> Element {
 
     let wide = width.fits_side_by_side();
     let sidebar_visible = wide && !state.sidebar_hidden;
-    let outer = Split::new(vec![config.sidebar, config.list + config.details], width_px)
-        .rule(0, SIDEBAR_RULE)
-        .renderer(host.renderer);
-    // The list/details split lays out inside the content pane, so its extent is that pane's.
-    let content_px = if sidebar_visible {
-        outer.sizes()[1]
-    } else {
-        width_px
-    };
-    let inner = Split::new(vec![config.list, config.details], content_px)
-        .rule(0, LIST_RULE)
-        .rule(1, DETAILS_RULE)
-        .renderer(host.renderer);
+    let (outer, inner) = splits(&config, host.renderer, width_px, sidebar_visible);
 
     let main_slot = placed_slot(
         &shell,
@@ -466,9 +482,7 @@ fn Frame(shell: Shell) -> Element {
             min_width: "0",
             min_height: "0",
             // The theme for the host's own document, ahead of everything the frame draws.
-            if !document_theme.is_empty() {
-                style { "{document_theme}" }
-            }
+            {document_theme}
             if let Some(problem) = failure() {
                 p { role: "alert", "{problem}" }
             }

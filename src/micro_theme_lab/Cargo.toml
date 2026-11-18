@@ -21,9 +21,13 @@ dioxus = { git = "https://github.com/dman-os/dioxus", rev = "1696518a2c449f44c0d
 # One authored micro, two backends (isomorphic MDK): a wasm32-wasip3 build is the guest, every
 # other target links the in-process backend.
 [target.'cfg(target_os = "wasi")'.dependencies]
+#
+# internal
 clay_mdk = { workspace = true, features = ["guest"] }
 
 [target.'cfg(not(target_os = "wasi"))'.dependencies]
+#
+# internal
 clay_mdk = { workspace = true, features = ["in_process", "view"] }
 
 [dev-dependencies]

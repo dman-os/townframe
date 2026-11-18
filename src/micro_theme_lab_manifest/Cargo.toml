@@ -17,6 +17,8 @@ micro_shell_manifest = { workspace = true }
 serde_json.workspace = true
 
 [dev-dependencies]
+#
+# internal
 # `host::declared_rows` checks the declared rows in tests; the contract itself stays backend-free.
 clay_mdk = { workspace = true, features = ["in_process"] }
 insta.workspace = true
