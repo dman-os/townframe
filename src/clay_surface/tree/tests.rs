@@ -1078,7 +1078,7 @@ fn open_data_attributes_and_overflow_anchor_pass_ingress_and_render() {
             .expect_err("malformed data-* name must be refused");
         assert_eq!(
             error,
-            PresentationError::Unsupported("attribute name or namespace".into()),
+            PresentationError::Unsupported(format!("attribute name or namespace: {bad} in None")),
             "{bad}"
         );
     }
@@ -1650,16 +1650,16 @@ fn custom_element_names_are_validated_and_capped_per_surface() {
     ] {
         assert_eq!(
             SurfaceTree::new().apply(&[element(bad, None)]),
-            Err(PresentationError::Unsupported(
-                "element tag or namespace".into()
-            )),
+            Err(PresentationError::Unsupported(format!(
+                "element tag or namespace: <{bad}> in None"
+            ))),
             "{bad:?}"
         );
     }
     assert_eq!(
         SurfaceTree::new().apply(&[element("x-card", Some("urn:other"))]),
         Err(PresentationError::Unsupported(
-            "element tag or namespace".into()
+            "element tag or namespace: <x-card> in Some(\"urn:other\")".into()
         ))
     );
     let create = |names: &mut dyn Iterator<Item = String>| {
@@ -1864,12 +1864,17 @@ fn style_elements_take_media_and_refuse_title_and_nonce() {
     // batch; what the cases below tell apart is whether the attribute itself is refused.
     let unbalanced = PresentationError::InvalidBatch("unbalanced final stack".into());
     assert_eq!(attr("media", "(min-width: 600px)"), Err(unbalanced));
-    for refused in ["title", "nonce", "blocking"] {
+    // `title` is refused by the style-specific rule, the others by the global vocabulary.
+    for (refused, reason) in [
+        ("title", "title on <style>"),
+        ("nonce", "nonce in None"),
+        ("blocking", "blocking in None"),
+    ] {
         assert_eq!(
             attr(refused, "x"),
-            Err(PresentationError::Unsupported(
-                "attribute name or namespace".into()
-            )),
+            Err(PresentationError::Unsupported(format!(
+                "attribute name or namespace: {reason}"
+            ))),
             "{refused}"
         );
     }
@@ -1877,7 +1882,7 @@ fn style_elements_take_media_and_refuse_title_and_nonce() {
     assert_eq!(
         SurfaceTree::new().apply(&[element("div", None), text_attr("media", None, "print")]),
         Err(PresentationError::Unsupported(
-            "attribute name or namespace".into()
+            "attribute name or namespace: media on <div>".into()
         ))
     );
 }

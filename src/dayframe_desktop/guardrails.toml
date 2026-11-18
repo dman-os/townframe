@@ -14,6 +14,7 @@ allowed_dependencies = [
     "dayframe_composition",
     "dayframe_native",
     "micro_counter_manifest",
+    "micro_lab_manifest",
     "micro_layout_manifest",
     "micro_sample",
     "micro_settings",

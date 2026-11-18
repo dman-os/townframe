@@ -1,0 +1,15 @@
+version = 1
+role = "plugin"
+dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
+allowed_dependencies = [
+    "clay_mdk",
+    "micro_layout_manifest",
+]
+allow_external_api_types = false
+
+# Linked by the shared composition on native and wasm32 shells (ADR 018 §7).
+[builds.native]
+
+[builds.wasm32-unknown-unknown]
+
+[builds.wasm32-wasip3]
