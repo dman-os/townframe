@@ -21,12 +21,17 @@
 //! # Partial documents
 //!
 //! A document to apply may hold only `base` and the members it changes. An omitted `title`,
-//! `description` or `entries` is unchanged (`"description": null` clears it). An `entries` list
-//! with no existing entry in it is a delta: `{ "remove": "<id>" }` removes and `{ "add": .. }`
-//! adds, and entries it does not mention stay. A list that does hold existing entries is the
-//! whole list, as printed: the ones missing from it are removed. A list that deleted every
-//! existing entry and kept an `add` therefore removes nothing: the unsafe reading of the
-//! ambiguity is never the one taken.
+//! `description`, `entries` or `entryChanges` is unchanged (`"description": null` clears it).
+//! `entries` is the whole list, as printed: the existing entries missing from it are removed, and
+//! `{ "add": .. }` entries in it are added. `entryChanges` is a delta that leaves every entry it
+//! does not name alone: `{ "remove": "<id>" }` removes and `{ "add": .. }` adds. A document
+//! with both is an error. Which one a document uses is never inferred from what is in it.
+//!
+//! # Retrying
+//!
+//! A document whose base is stale is still a no-op when what it asks for already holds in the
+//! intxt as it is now ([`EditDocument::holds_in`]): an agent that retries after a timeout is not
+//! in conflict with itself.
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -128,7 +133,7 @@ pub struct ExistingEntry {
     pub summary: Summary,
 }
 
-/// An entry of the document.
+/// An entry of the document's whole list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum EditEntry {
@@ -137,43 +142,78 @@ pub enum EditEntry {
     /// `{ "add": { "branch": "feat/x" } }`: resolved in the worktree the command runs in, as
     /// `add` does.
     Add { add: Named },
-    /// `{ "remove": "<id>" }`: takes an existing entry out, in a partial document.
+}
+
+/// One change of a delta (`entryChanges`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum EntryChange {
+    /// `{ "remove": "<id>" }`: takes an existing entry out.
     Remove { remove: String },
+    /// `{ "add": { "branch": "feat/x" } }`.
+    Add { add: Named },
+}
+
+/// The member of an entry that is alone in it (`add`, `remove`), and its value.
+fn lone<E: serde::de::Error>(
+    members: &mut Map<String, Value>,
+    names: &[&str],
+) -> Result<Option<(String, Value)>, E> {
+    for name in names {
+        let Some(value) = members.remove(*name) else {
+            continue;
+        };
+        if let Some(other) = members.keys().next() {
+            return Err(E::custom(format!(
+                "unknown member `{other}` beside `{name}`"
+            )));
+        }
+        return Ok(Some(((*name).to_owned(), value)));
+    }
+    Ok(None)
+}
+
+impl<'de> Deserialize<'de> for EntryChange {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let mut members = Map::deserialize(deserializer)?;
+        match lone(&mut members, &["add", "remove"])? {
+            Some((name, value)) if name == "add" => Ok(Self::Add {
+                add: serde_json::from_value(value)
+                    .map_err(|error| D::Error::custom(format!("`add`: {error}")))?,
+            }),
+            Some((_, value)) => Ok(Self::Remove {
+                remove: serde_json::from_value(value)
+                    .map_err(|error| D::Error::custom(format!("`remove`: {error}")))?,
+            }),
+            None => Err(D::Error::custom(match members.keys().next() {
+                Some(other) => {
+                    format!("unknown member `{other}`; a change is an `add` or a `remove`")
+                }
+                None => "a change is an `add` or a `remove`".to_owned(),
+            })),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for EditEntry {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
         let mut members = Map::deserialize(deserializer)?;
-        for lone in ["add", "remove"] {
-            let Some(value) = members.remove(lone) else {
-                continue;
-            };
-            if let Some(other) = members.keys().next() {
-                return Err(D::Error::custom(format!(
-                    "unknown member `{other}` beside `{lone}`"
-                )));
-            }
-            return Ok(if lone == "add" {
-                Self::Add {
-                    add: serde_json::from_value(value)
-                        .map_err(|error| D::Error::custom(format!("`add`: {error}")))?,
-                }
-            } else {
-                Self::Remove {
-                    remove: serde_json::from_value(value)
-                        .map_err(|error| D::Error::custom(format!("`remove`: {error}")))?,
-                }
-            });
+        if members.len() == 1 && members.contains_key("remove") {
+            return Err(D::Error::custom(
+                "`remove` belongs in `entryChanges`; in `entries`, leave the entry out",
+            ));
+        }
+        if let Some((_, value)) = lone(&mut members, &["add"])? {
+            let add = serde_json::from_value(value)
+                .map_err(|error| D::Error::custom(format!("`add`: {error}")))?;
+            return Ok(Self::Add { add });
         }
         let id = match members.remove("id") {
             Some(Value::String(id)) => id,
             Some(other) => return Err(D::Error::custom(format!("`id` is {other}, not a string"))),
-            None => {
-                return Err(D::Error::custom(
-                    "an entry has an `id`, or is an `add` or a `remove`",
-                ));
-            }
+            None => return Err(D::Error::custom("an entry has an `id`, or is an `add`")),
         };
         let mut rest = members.into_iter();
         let (Some((kind, text)), None) = (rest.next(), rest.next()) else {
@@ -224,9 +264,18 @@ pub struct EditDocument {
     )]
     #[schemars(with = "Option<String>")]
     pub description: Option<Option<String>>,
-    /// Unchanged when absent. See the module's "Partial documents" for what a list means.
+    /// The whole list of entries: the existing ones it leaves out are removed. Unchanged when
+    /// absent. Not with `entryChanges`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entries: Option<Vec<EditEntry>>,
+    /// Changes to some entries, the others left as they are. Unchanged when absent. Not with
+    /// `entries`.
+    #[serde(
+        rename = "entryChanges",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub entry_changes: Option<Vec<EntryChange>>,
     /// Why the last attempt to apply the document failed, set by the editor loop. Ignored when
     /// applying.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -260,8 +309,8 @@ impl std::fmt::Display for PlanError {
 pub struct EditPlan {
     /// The existing entries to remove.
     pub remove: Vec<String>,
-    /// What to add, with its index in the document's entries.
-    pub add: Vec<(usize, Named)>,
+    /// What to add, with the JSON pointer of the `add` in the document.
+    pub add: Vec<(String, Named)>,
     pub title: Option<String>,
     /// The new description, where none is `Some(None)`.
     pub description: Option<Option<String>>,
@@ -330,6 +379,7 @@ impl EditDocument {
             title: Some(title),
             description: Some(description),
             entries: Some(entries.into_iter().map(EditEntry::Existing).collect()),
+            entry_changes: None,
             errors: Vec::new(),
         }
     }
@@ -337,21 +387,35 @@ impl EditDocument {
     /// Reads a document from JSON, saying which entry is wrong when one is: serde's error for
     /// the whole document would name a member but not the entry it was in.
     pub fn parse(mut value: Value) -> Result<Self, Vec<PlanError>> {
-        let mut errors = Vec::new();
-        let mut entries = None;
-        if let Some(Value::Array(listed)) = value.get_mut("entries").map(Value::take) {
+        fn list<T: serde::de::DeserializeOwned>(
+            value: &mut Value,
+            name: &str,
+            errors: &mut Vec<PlanError>,
+        ) -> Option<Vec<T>> {
+            let Value::Array(listed) = value.get_mut(name)?.take() else {
+                return None;
+            };
+            value[name] = Value::Array(Vec::new());
             let mut parsed = Vec::new();
-            for (index, entry) in listed.into_iter().enumerate() {
-                match serde_json::from_value::<EditEntry>(entry) {
-                    Ok(entry) => parsed.push(entry),
+            for (index, item) in listed.into_iter().enumerate() {
+                match serde_json::from_value::<T>(item) {
+                    Ok(item) => parsed.push(item),
                     Err(error) => errors.push(PlanError::new(
-                        format!("/entries/{index}"),
+                        format!("/{name}/{index}"),
                         error.to_string(),
                     )),
                 }
             }
-            entries = Some(parsed);
-            value["entries"] = Value::Array(Vec::new());
+            Some(parsed)
+        }
+        let mut errors = Vec::new();
+        let entries = list::<EditEntry>(&mut value, "entries", &mut errors);
+        let entry_changes = list::<EntryChange>(&mut value, "entryChanges", &mut errors);
+        if entries.is_some() && entry_changes.is_some() {
+            errors.push(PlanError::new(
+                "/entryChanges",
+                "`entries` is the whole list and `entryChanges` a delta; a document has one of them",
+            ));
         }
         let mut document = match serde_json::from_value::<Self>(value) {
             Ok(document) => document,
@@ -369,9 +433,8 @@ impl EditDocument {
         if !errors.is_empty() {
             return Err(errors);
         }
-        if entries.is_some() {
-            document.entries = entries;
-        }
+        document.entries = entries;
+        document.entry_changes = entry_changes;
         Ok(document)
     }
 
@@ -408,6 +471,9 @@ impl EditDocument {
         if let Some(entries) = &self.entries {
             members.push(list("entries", entries.iter().map(json).collect()));
         }
+        if let Some(changes) = &self.entry_changes {
+            members.push(list("entryChanges", changes.iter().map(json).collect()));
+        }
         if !self.errors.is_empty() {
             members.push(list("errors", self.errors.iter().map(json).collect()));
         }
@@ -419,10 +485,32 @@ impl EditDocument {
     ///
     /// Refused when the intxt changed since `self` was printed ([`Refusal::Stale`], before any
     /// entry is read: the ids are only meaningful at the base they were printed at), and when an
-    /// entry is unknown, repeated or edited in place, or the title is empty. Reordering the
-    /// existing entries changes nothing. Applying the same document twice changes nothing: the
-    /// second time its base is stale.
+    /// entry is unknown, repeated or of another kind than the one it names, or the title is
+    /// empty. The summary of an existing entry is display only and is not compared. Reordering
+    /// the existing entries changes nothing.
     pub fn plan(&self, current: &Self) -> Result<EditPlan, Refusal> {
+        let heads = |document: &Self| {
+            let mut heads = document.base.clone();
+            heads.sort();
+            heads
+        };
+        if heads(self) != heads(current) {
+            return Err(Refusal::Stale);
+        }
+        self.plan_against(current, false)
+    }
+
+    /// Whether `self` asks for nothing `current` does not already have, whatever its base: the
+    /// entries it removes are gone, its title and description are the intxt's, and it adds
+    /// nothing. That is what a retried document looks like after the first try applied.
+    pub fn holds_in(&self, current: &Self) -> bool {
+        self.plan_against(current, true)
+            .is_ok_and(|plan| plan.is_empty())
+    }
+
+    /// [`Self::plan`] without the base check. With `retry`, an entry to remove that is not there
+    /// is not an error: it was removed already.
+    fn plan_against(&self, current: &Self, retry: bool) -> Result<EditPlan, Refusal> {
         let mut errors = Vec::new();
         if let (Some(named), Some(here)) = (&self.intxt, &current.intxt)
             && named.split('?').next() != here.split('?').next()
@@ -432,13 +520,11 @@ impl EditDocument {
                 format!("the document is for {named}, this is {here}"),
             ));
         }
-        let heads = |document: &Self| {
-            let mut heads = document.base.clone();
-            heads.sort();
-            heads
-        };
-        if heads(self) != heads(current) {
-            return Err(Refusal::Stale);
+        if self.entries.is_some() && self.entry_changes.is_some() {
+            errors.push(PlanError::new(
+                "/entryChanges",
+                "a document has `entries` or `entryChanges`, not both",
+            ));
         }
         let held: Vec<&ExistingEntry> = current
             .entries
@@ -446,7 +532,7 @@ impl EditDocument {
             .flatten()
             .filter_map(|entry| match entry {
                 EditEntry::Existing(existing) => Some(existing),
-                _ => None,
+                EditEntry::Add { .. } => None,
             })
             .collect();
         let mut listed: Vec<&str> = Vec::new();
@@ -468,41 +554,40 @@ impl EditDocument {
                     };
                     if listed.contains(&entry.id.as_str()) {
                         errors.push(PlanError::new(format!("{path}/id"), "listed twice"));
-                    } else if held.summary != entry.summary {
+                    } else if held.summary.kind() != entry.summary.kind() {
                         errors.push(PlanError::new(
                             format!("{path}/{}", entry.summary.kind()),
                             format!(
-                                "was changed to {:?} (it is {:?}); entries are added or removed, not rewritten",
-                                entry.summary.text(),
-                                held.summary.text()
+                                "the entry is a {}, not a {}; entries are added or removed, not rewritten",
+                                held.summary.kind(),
+                                entry.summary.kind()
                             ),
                         ));
                     }
                     listed.push(&entry.id);
                 }
-                EditEntry::Remove { remove } => {
-                    if !held.iter().any(|held| &held.id == remove) {
+                EditEntry::Add { add: named } => {
+                    add.push((format!("/entries/{index}/add"), named.clone()));
+                }
+            }
+        }
+        for (index, change) in self.entry_changes.iter().flatten().enumerate() {
+            match change {
+                EntryChange::Remove { remove } => {
+                    let path = format!("/entryChanges/{index}/remove");
+                    if removed.contains(&remove.as_str()) {
+                        errors.push(PlanError::new(path, "removed twice"));
+                    } else if !held.iter().any(|held| &held.id == remove) && !retry {
                         errors.push(PlanError::new(
-                            format!("/entries/{index}/remove"),
+                            path,
                             format!("the intxt holds no entry `{remove}`"),
-                        ));
-                    } else if removed.contains(&remove.as_str()) {
-                        errors.push(PlanError::new(
-                            format!("/entries/{index}/remove"),
-                            "removed twice",
                         ));
                     }
                     removed.push(remove);
                 }
-                EditEntry::Add { add: named } => add.push((index, named.clone())),
-            }
-        }
-        for id in &removed {
-            if listed.contains(id) {
-                errors.push(PlanError::new(
-                    "/entries",
-                    format!("entry `{id}` is both listed and removed"),
-                ));
+                EntryChange::Add { add: named } => {
+                    add.push((format!("/entryChanges/{index}/add"), named.clone()));
+                }
             }
         }
         if self
@@ -515,15 +600,12 @@ impl EditDocument {
         if !errors.is_empty() {
             return Err(Refusal::Invalid(errors));
         }
-        // A list holding existing entries is the whole list; one holding none is a delta.
-        let whole = !listed.is_empty();
         Ok(EditPlan {
             remove: held
                 .iter()
                 .map(|held| held.id.as_str())
-                // In a whole list the removed entries are among those it does not list.
                 .filter(|id| {
-                    if whole {
+                    if self.entries.is_some() {
                         !listed.contains(id)
                     } else {
                         removed.contains(id)
@@ -612,7 +694,7 @@ mod tests {
         let read = EditDocument::parse(serde_json::from_str(&text).unwrap()).unwrap();
         assert_eq!(read, printed);
         assert_eq!(read.to_text(), text);
-        let added = EditDocument::parse(partial(json!({ "entries": [
+        let added = EditDocument::parse(partial(json!({ "entryChanges": [
             { "add": { "branch": "feat/x" } },
             { "add": { "commits": "main..feat/y" } },
             { "add": { "change": "kxqoltvm" } },
@@ -674,14 +756,17 @@ mod tests {
         assert!(plan(partial(json!({}))).unwrap().is_empty());
         let planned = plan(partial(json!({
             "title": "Renamed",
-            "entries": [{ "remove": O }, { "add": { "branch": "feat/x" } }],
+            "entryChanges": [{ "remove": O }, { "add": { "branch": "feat/x" } }],
         })))
         .unwrap();
         assert_eq!(
             planned,
             EditPlan {
                 remove: vec![O.to_owned()],
-                add: vec![(1, Named::Branch("feat/x".to_owned()))],
+                add: vec![(
+                    "/entryChanges/1/add".to_owned(),
+                    Named::Branch("feat/x".to_owned())
+                )],
                 title: Some("Renamed".to_owned()),
                 description: None,
             }
@@ -695,16 +780,16 @@ mod tests {
         );
         // Adds alone never remove what they do not mention.
         let planned = plan(partial(
-            json!({ "entries": [{ "add": { "change": "k" } }] }),
+            json!({ "entryChanges": [{ "add": { "change": "k" } }] }),
         ))
         .unwrap();
         assert!(planned.remove.is_empty() && planned.add.len() == 1);
         let errors = invalid(partial(
-            json!({ "entries": [{ "remove": "nope" }, { "remove": S }, { "remove": S }] }),
+            json!({ "entryChanges": [{ "remove": "nope" }, { "remove": S }, { "remove": S }] }),
         ));
         assert_eq!(errors.len(), 2, "{errors:?}");
-        assert_eq!(errors[0].path, "/entries/0/remove");
-        assert_eq!(errors[1].path, "/entries/2/remove");
+        assert_eq!(errors[0].path, "/entryChanges/0/remove");
+        assert_eq!(errors[1].path, "/entryChanges/2/remove");
     }
 
     #[test]
@@ -722,7 +807,10 @@ mod tests {
             plan(edited).unwrap(),
             EditPlan {
                 remove: vec![O.to_owned()],
-                add: vec![(1, Named::Branch("feat/x".to_owned()))],
+                add: vec![(
+                    "/entries/1/add".to_owned(),
+                    Named::Branch("feat/x".to_owned())
+                )],
                 title: Some("Install, again".to_owned()),
                 description: Some(None),
             }
@@ -735,16 +823,44 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_edited_in_place_is_refused_naming_it() {
-        let errors = invalid(full(json!([
-            { "id": S, "commits": "1e26cf9..ffffff" },
-            { "id": O, "githubPull": "dman-os/townframe#179" },
-        ])));
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/entries/0/commits");
-        assert!(errors[0].message.contains("not rewritten"), "{errors:?}");
+    fn an_entry_of_another_kind_is_refused_but_its_summary_is_display_only() {
+        // The summary text drifts (a session's title changes); only the id and kind are checked.
+        assert!(
+            plan(full(json!([
+                { "id": S, "commits": "1e26cf9..ffffff" },
+                { "id": O, "githubPull": "retitled" },
+            ])))
+            .unwrap()
+            .is_empty()
+        );
         let errors = invalid(full(json!([{ "id": S, "change": "1e26cf9..c91468a" }])));
         assert_eq!(errors[0].path, "/entries/0/change");
+        assert!(errors[0].message.contains("not rewritten"), "{errors:?}");
+    }
+
+    #[test]
+    fn entries_and_entry_changes_are_one_or_the_other() {
+        let mut both = full(json!([]));
+        both["entryChanges"] = json!([{ "remove": O }]);
+        assert_eq!(
+            EditDocument::parse(both).unwrap_err()[0].path,
+            "/entryChanges"
+        );
+        // A remove in the whole list is explained, not read as a deletion.
+        let errors = EditDocument::parse(full(json!([{ "remove": O }]))).unwrap_err();
+        assert!(errors[0].message.contains("entryChanges"), "{errors:?}");
+        // Adds alone in `entries` are the whole list: everything else is removed.
+        let planned = plan(full(json!([{ "add": { "change": "k" } }]))).unwrap();
+        assert_eq!(planned.remove, [S, O]);
+        // The same adds as changes remove nothing.
+        let planned = plan(partial(
+            json!({ "entryChanges": [{ "add": { "change": "k" } }] }),
+        ))
+        .unwrap();
+        assert!(planned.remove.is_empty());
+        let errors =
+            EditDocument::parse(partial(json!({ "entryChanges": [{ "id": S }] }))).unwrap_err();
+        assert_eq!(errors[0].path, "/entryChanges/0");
     }
 
     #[test]
@@ -772,14 +888,31 @@ mod tests {
     }
 
     #[test]
-    fn applying_twice_changes_nothing_the_second_time() {
-        let edited = EditDocument::parse(partial(json!({ "entries": [{ "remove": O }] }))).unwrap();
+    fn a_retry_after_the_first_apply_holds_and_a_conflicting_one_does_not() {
+        let edited = EditDocument::parse(partial(json!({
+            "title": "Install",
+            "entryChanges": [{ "remove": O }],
+        })))
+        .unwrap();
         assert_eq!(edited.plan(&current()).unwrap().remove, [O]);
+        assert!(!edited.holds_in(&current()));
         // After the first apply the intxt is at other heads and no longer holds the entry.
         let mut after =
             EditDocument::parse(full(json!([{ "id": S, "commits": "1e26cf9..c91468a" }]))).unwrap();
         after.base = vec!["zC".to_owned()];
         assert_eq!(edited.plan(&after), Err(Refusal::Stale));
+        assert!(edited.holds_in(&after));
+        // A document that still has something to do, or an entry that is not there, is not a retry.
+        let mut renamed = edited.clone();
+        renamed.title = Some("Other".to_owned());
+        assert!(!renamed.holds_in(&after));
+        let adding = EditDocument::parse(partial(json!({
+            "entryChanges": [{ "add": { "branch": "b" } }],
+        })))
+        .unwrap();
+        assert!(!adding.holds_in(&after));
+        let whole = EditDocument::parse(full(json!([{ "id": O, "githubPull": "x" }]))).unwrap();
+        assert!(!whole.holds_in(&after));
         // The document printed again is the intxt: nothing to change.
         let mut reprinted = after.clone();
         reprinted.title = Some("Install".to_owned());
