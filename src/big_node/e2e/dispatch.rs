@@ -150,6 +150,7 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
                 true,
             ),
             (cartridge_methods::ListCartridgeGrants::XRPC.nsid, true),
+            (cartridge_methods::AwaitCartridgeGrants::XRPC.nsid, true),
             (nodule_methods::SetNoduleDevTakeover::XRPC.nsid, true),
             (nodule_methods::ListNodules::XRPC.nsid, false),
             (nodule_methods::MintNoduleCapability::XRPC.nsid, false),

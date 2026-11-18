@@ -846,8 +846,10 @@ mod grant_requests {
     use super::*;
     use big_cabinet_core::drawer::protocol::DrawerId;
     use big_cartridges_core::config::GrantKey;
+    use big_cartridges_core::protocol::AWAIT_MAX_HOLD_MS;
     use big_cartridges_core::protocol::AnswerCartridgeGrantRequest;
     use big_cartridges_core::protocol::AwaitCartridgeGrantRequest;
+    use big_cartridges_core::protocol::AwaitCartridgeGrants;
     use big_cartridges_core::protocol::CartridgesError;
     use big_cartridges_core::protocol::FiledGrantRequest;
     use big_cartridges_core::protocol::GrantAnswer;
@@ -1400,6 +1402,64 @@ mod grant_requests {
             }
             node.shutdown().await;
         }
+    }
+
+    /// The grants feed answers at once without a revision, holds on the current one until an
+    /// answer moves it, and moves again when a revoke takes the grant back.
+    #[tokio::test]
+    async fn the_grants_feed_holds_until_an_answer_or_a_revoke_moves_it() {
+        let (node, executor, _) = asking().await;
+        let feed = |since: Option<&str>, hold_ms| {
+            node.call(
+                node.operator(),
+                AwaitCartridgeGrants {
+                    cartridge_id: id(ALPHA),
+                    since: since.map(str::to_owned),
+                    hold_ms,
+                },
+            )
+        };
+        let first = feed(None, 0).await.unwrap();
+        // An expired hold answers the unchanged grants at the same revision.
+        assert_eq!(feed(Some(&first.revision), 50).await.unwrap(), first);
+
+        let ping = node.as_ping(&executor).await;
+        let request = node
+            .file(ping, REMOTE, None)
+            .await
+            .unwrap()
+            .request
+            .unwrap();
+        let (moved, answered) = tokio::join!(
+            feed(Some(&first.revision), AWAIT_MAX_HOLD_MS),
+            node.answer(request, GrantAnswer::OnlyThisBoot, None)
+        );
+        answered.unwrap();
+        let moved = moved.unwrap();
+        assert_ne!(moved.revision, first.revision);
+        let added: Vec<_> = moved
+            .grants
+            .iter()
+            .filter(|record| !first.grants.contains(record))
+            .collect();
+        let [record] = added.try_into().unwrap();
+        assert_eq!(record.grant, GrantKey::Method(REMOTE.into()));
+        assert!(record.this_boot);
+
+        node.call(
+            node.operator(),
+            SetCartridgeGrant {
+                cartridge_id: id(ALPHA),
+                grant: GrantKey::Method(REMOTE.into()),
+                value: None,
+            },
+        )
+        .await
+        .unwrap();
+        let revoked = feed(Some(&moved.revision), 0).await.unwrap();
+        assert_eq!(revoked.grants, first.grants);
+        assert_ne!(revoked.revision, moved.revision);
+        node.shutdown().await;
     }
 
     #[tokio::test]
