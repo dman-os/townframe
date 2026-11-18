@@ -7,6 +7,7 @@ This directory is the handwritten normative contract for Dayframe's platform-agn
 1. [Foundations](foundations.md) — token layers, supported values, naming, units, and generation.
 2. [Composition](composition.md) — rules for combining reusable primitives.
 3. [Interaction](interaction.md) — state, focus, motion, and accessibility requirements.
+4. [Styling contract](styling-contract.md) — the five rules, part naming, layer order and the blockers to theming.
 
 Feature grammars, including tiles, columns, widgets, and screens, are not foundation tokens. They belong in their own design documents and may consume this foundation.
 
