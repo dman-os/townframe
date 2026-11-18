@@ -385,6 +385,13 @@ impl Ledger {
         Ok(())
     }
 
+    pub(crate) async fn purge_done(&self) -> Result<(), DrawersError> {
+        sqlite::purge_done_ops(&self.sql, now_micros() - DONE_TTL_MICROS)
+            .await
+            .map_err(storage)?;
+        Ok(())
+    }
+
     /// Every row a crash left short of `done`, oldest first.
     pub(crate) async fn unfinished(&self) -> Result<Vec<Row>, DrawersError> {
         let rows = sqlite::unfinished_ops(&self.sql).await.map_err(storage)?;
@@ -515,6 +522,52 @@ mod tests {
             DrawersError::Denied
         );
         assert!(ledger.get(&command).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn purge_done_removes_only_expired_completed_rows() {
+        let runtime = SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[]).unwrap();
+        let ledger = Ledger::open(sql.clone()).await.unwrap();
+        let actor = Uuid7::new();
+        let op = Op::RemoveDoc {
+            drawer_id: DocId::new([1; 32]),
+            doc_id: DocId::new([2; 32]),
+        };
+        let expired = CommandId::try_from("expired".to_owned()).unwrap();
+        let recent = CommandId::try_from("recent".to_owned()).unwrap();
+        let unfinished = CommandId::try_from("unfinished".to_owned()).unwrap();
+
+        for command in [&expired, &recent] {
+            ledger.begin(command, [1; 32], actor, &op).await.unwrap();
+            ledger
+                .finish(command, &serde_json::json!({}))
+                .await
+                .unwrap();
+        }
+        ledger
+            .begin(&unfinished, [1; 32], actor, &op)
+            .await
+            .unwrap();
+
+        let now = now_micros();
+        for (command, done_at) in [
+            (&expired, now - DONE_TTL_MICROS - 1),
+            (&recent, now - DONE_TTL_MICROS + 60_000_000),
+        ] {
+            sql.execute(
+                "UPDATE big_cabinet_drawer_ops\n    SET done_at = :done_at\n  WHERE command_id = :command_id",
+                (done_at, command.as_str()),
+            )
+            .await
+            .unwrap();
+        }
+
+        ledger.purge_done().await.unwrap();
+
+        assert!(ledger.get(&expired).await.unwrap().is_none());
+        assert!(ledger.get(&recent).await.unwrap().is_some());
+        assert!(ledger.get(&unfinished).await.unwrap().is_some());
     }
 
     #[tokio::test]
