@@ -12,7 +12,12 @@
 //! - `refused`: a request to any authority other than `dispatch.local` is refused by the
 //!   runtime, not routed anywhere;
 //! - `resource`: the granted call made from the view's Dioxus `use_resource`, which Dioxus polls
-//!   outside any component-model task, answers like `granted` (rendered once it resolves).
+//!   outside any component-model task, answers like `granted` (rendered once it resolves);
+//! - `bytes`: [`Context::call_bytes`] from the view's `use_resource` reads a byte-body method of
+//!   [`BLOB_OCTETS`] octets (many `wasi:http` body chunks), checks each octet against
+//!   [`pattern`] as it arrives, and reports `ok(octets=<n>,chunks=<n>)`, or `err(...)` naming the
+//!   first mismatch or the stream error. The body pump is spawned in the task that sent the
+//!   request, which has ended by the time the view pulls.
 
 use big_ndk::WasiHttp;
 use big_ndk::wit::wasi::http::client;
@@ -29,6 +34,7 @@ use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::method_core::ContextError;
 use dioxus::prelude::*;
+use futures::StreamExt;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -43,6 +49,20 @@ use service_core_rs::xrpc::bearer_header_value;
 #[derive(Serialize, Deserialize)]
 struct Echo {
     text: String,
+}
+
+/// A method that answers [`BLOB_OCTETS`] octets of [`pattern`] as a byte body.
+#[derive(Serialize, Deserialize)]
+struct Blob {}
+
+/// The octets of the blob: several times the transport's body chunk (64 KiB), so the body cannot
+/// arrive as one chunk. The host's `clay_node` e2e serves the same count and pattern.
+const BLOB_OCTETS: usize = 1 << 20;
+
+/// The octet at `offset` of the blob. Not periodic in a power of two, so a dropped, repeated or
+/// reordered chunk shows at its first octet.
+fn pattern(offset: usize) -> u8 {
+    (offset % 251) as u8
 }
 
 /// A method the micro is never granted.
@@ -73,6 +93,7 @@ clay_mdk::method_core::methods! {
     error = DispatchFixtureError, nsid_prefix = "org.example.clay.test.dispatch.";
     Echo => Value, procedure, "echo";
     Reveal => Value, procedure, "reveal";
+    Blob => clay_mdk::method_core::ByteBody, procedure, "blob", bytes_output;
 }
 
 struct Report;
@@ -124,6 +145,31 @@ async fn other_origin() -> String {
     }
 }
 
+/// Reads the blob through [`Context::call_bytes`] and reports what arrived.
+async fn read_blob(cx: Context) -> String {
+    let mut body = match cx.call_bytes(Blob {}).await {
+        Ok(body) => body,
+        Err(error) => return format!("err({error})"),
+    };
+    let (mut octets, mut chunks) = (0, 0);
+    while let Some(chunk) = body.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => return format!("err(stream failed after {octets} octets: {error})"),
+        };
+        if let Some(at) = chunk
+            .iter()
+            .enumerate()
+            .position(|(at, octet)| *octet != pattern(octets + at))
+        {
+            return format!("err(octet {} is out of place)", octets + at);
+        }
+        octets += chunk.len();
+        chunks += 1;
+    }
+    format!("ok(octets={octets},chunks={chunks})")
+}
+
 async fn activate(cx: Context) -> Result<(), Error> {
     let granted = cx
         .call(Echo {
@@ -170,10 +216,15 @@ async fn activate(cx: Context) -> Result<(), Error> {
                 )
             }
         });
+        let bytes_cx = view_cx.clone();
+        let bytes = use_resource(move || read_blob(bytes_cx.clone()));
         rsx! {
             "{report}"
             if let Some(answer) = resource() {
                 "resource={answer}"
+            }
+            if let Some(answer) = bytes() {
+                "bytes={answer}"
             }
         }
     })
