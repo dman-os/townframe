@@ -1241,7 +1241,9 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
         let reply =
             async |who: &Packaging<'_>, to: &str, text: Option<&str>, resolved: Option<bool>| {
                 let mut out = Vec::new();
-                who.reply(&mut out, Some(&intxt), to, text, resolved).await.unwrap();
+                who.reply(&mut out, Some(&intxt), to, text, resolved)
+                    .await
+                    .unwrap();
                 String::from_utf8(out).unwrap()
             };
 
