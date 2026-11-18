@@ -43,4 +43,16 @@
     --color-secondary: var(--ct-color-accent);
     --color-secondary-foreground: var(--ct-color-on-accent);
   }
+  /*
+   * The success role is authored for a light surface (green 600, 4.9:1 on the Material light
+   * surface) and is only 3.05 to 3.19:1 on the dark ones, under the 4.5:1 that text needs. Material
+   * has no success colour, so the dark schemes take the lighter green (6.3 to 6.6:1 on their
+   * surface) with the dark ink on it (6.3:1).
+   */
+  :root:has(.dark),
+  :root:has(.dark-medium-contrast),
+  :root:has(.dark-high-contrast) {
+    --ct-color-success: var(--ct-color-green-400);
+    --ct-color-on-success: var(--ct-color-neutral-900);
+  }
 }
