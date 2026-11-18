@@ -112,6 +112,9 @@ impl XrpcBody {
 #[derive(Debug)]
 pub struct XrpcRequest {
     pub method: Method,
+    /// Relative to the dispatch the transport is bound to (`xrpc/<nsid>?<query>`), or an absolute
+    /// `http(s)` URL (HTTP's absolute-form) for a request to anywhere else. The host refuses the
+    /// latter unless the routine's `#net` permbind and the cartridge's grant allow it.
     pub path: String,
     pub headers: HeaderMap,
     pub body: XrpcBody,
