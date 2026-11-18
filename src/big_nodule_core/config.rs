@@ -663,7 +663,7 @@ impl CartridgeConfig {
         if !grant.accepts(&body) {
             return Err(InventoryError::InvalidGrant {
                 grant: grant.to_string(),
-                reason: "a drawer or cartridge grant states its access, and an origin, method \
+                reason: "a drawer or cartridge grant states its access, and a net, method \
                          or authority grant states none"
                     .to_owned(),
             });
@@ -736,9 +736,9 @@ pub struct ResolvedGrants {
     pub drawers: BTreeMap<DrawerId, DrawerAccess>,
     /// Data of other cartridges the cartridge may use, at an access. Nothing enforces these yet.
     pub cartridges: BTreeMap<CartridgeId, DrawerAccess>,
-    /// Origins the cartridge may talk to. Nothing enforces these yet: there is no `#origin`
-    /// permbind.
-    pub origins: BTreeSet<String>,
+    /// Hosts the cartridge may use the network to reach. Nothing enforces these yet: there is no
+    /// `#net` permbind.
+    pub nets: BTreeSet<String>,
     /// The operations and authorities the cartridge may invoke through dispatch.
     pub operations: DispatchScope,
 }
@@ -773,8 +773,8 @@ impl ResolvedGrants {
                     .or_insert(access);
                 *held = (*held).max(access);
             }
-            GrantKey::Origin(origin) => {
-                self.origins.insert(origin.clone());
+            GrantKey::Net(net) => {
+                self.nets.insert(net.clone());
             }
             GrantKey::Method(nsid) => {
                 self.operations.operations.insert(nsid.clone());

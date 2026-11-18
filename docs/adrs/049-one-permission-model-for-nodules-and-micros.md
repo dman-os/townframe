@@ -25,13 +25,13 @@ nodules lane 2026-11-17).
    node, from start to exit, not a restart of the machine.
 4. **`atRuntime` as a permbind property goes away.** Any permbind can be requested at runtime under
    items 1–2; claytxt's §5 one-shot-versus-remember question is answered by items 2–3.
-5. **Permbinds must also cover network access**: talking to an origin (fetch). Rich external
+5. **Permbinds must also cover network access**: using the network to reach a host (fetch). Rich external
    services (GitHub, Google) should not be a micro's raw fetch: platform cartridges provide them, so
    a web-modelled micro is analysed in isolation and the general-purpose service cartridges are
    the trusted part.
 6. **The user faces the cartridge, never its parts.** No routines, micros, nodules or permbind names
    on the default path. The questions are in familiar nouns: "may it read/write drawer X",
-   "may it use data from cartridge Y", "may it talk to services at origin Z". Drawer access uses
+   "may it use data from cartridge Y", "may it use the network to reach host Z". Drawer access uses
    the same read/write/admin vocabulary as the node's other grants. The single consent and audit
    view per cartridge is the value; the subsystems may stay parallel underneath.
 7. **One answer per question.** Granting a drawer to a cartridge once satisfies every permbind
@@ -73,7 +73,7 @@ Settled by ADR 047 (accepted 2026-11-13) and not reopened here:
 What this proposal adds:
 - the micro side on the same terms ("Clay on the node" §2);
 - grants per cartridge in user-facing nouns, and runtime requests with a missing-authority error (§4);
-- access narrowed by datum kind inside granted drawers, and a permbind kind for network origins (§2);
+- access narrowed by datum kind inside granted drawers, and a permbind kind for network access, `#net` (§2);
 - how a service's own handle is reached (§6.2), and the gaps that show the minting path is incomplete
   (§7);
 - the per-routine ACLs as the input to a static risk analysis (§9a).
@@ -105,9 +105,13 @@ drawer it was granted too, so its docs handle maps each reached document to thos
 permbind added when something needs it, never the default. Narrow defaults are also what makes the
 risk analysis (§9a) say something specific.
 
-**Network access is a permbind kind** (operator review item 5): `#origin { origin, methods? }`, an
-origin a routine or micro may talk to. A rich external service (GitHub, Google) is not a raw origin
-grant: a platform cartridge provides it as operations, and a cartridge that wants it declares a
+**Network access is a permbind kind** (operator review item 5; named `#net` after Deno's `--allow-net`,
+D53): `#net { host, port?, methods? }`, a host a routine or micro may use the network to reach. It
+gates a routine's outgoing `wasi:http` requests to URLs that are not the node's own `dispatch.local`,
+and is the permbind raw `wasi:sockets` will use later. Matching is exact, with no wildcards: the host
+case-insensitively, the port (the scheme's default when the request has none; a permbind or grant
+without a port means 443), and `methods` (HTTP verbs) when present. A rich external service (GitHub,
+Google) is not a raw network grant: a platform cartridge provides it as operations, and a cartridge that wants it declares a
 `#method` on those operations. The general-purpose service cartridges are the trusted part; the
 cartridges that use them are analysed without network access.
 
@@ -117,7 +121,7 @@ cartridges that use them are analysed without network access.
 permbinds and asks no more than it declares; admission applies the routine rule unchanged. A micro has no routines,
 so its `uses` sits on the micro contribution (`Contribution::Micro`, "Clay on the node" §5). Its handle is derived
 like a routine's (§4.1): `uses`, narrowed by the permbinds' rules, intersected with the **cartridge's** grants.
-There are no micro-specific grant datums: `grant/drawer/…`, `grant/cartridge/…`, `grant/origin/…` and
+There are no micro-specific grant datums: `grant/drawer/…`, `grant/cartridge/…`, `grant/net/…` and
 `grant/method/…` feed the micro and the nodule alike, and each one's `uses` keeps them apart. The default shape is
 §2's: a datum kind in a drawer, with broad access an explicit permbind.
 
@@ -134,7 +138,7 @@ Asymmetries with the nodule side, stated explicitly:
    web, the page is the host and the micro still runs in wcmp's sandbox, so the same holds.
 3. **UI sinks are reads and sends.** A micro reads not only through `fetch` but by rendering: an `<img>` whose source
    is a blob, a CSS `url()`. The host resolves a sink on the surface and checks it against the micro's handle, as for
-   a call. A sink source outside the node (an `https:` image) is network access and needs an `#origin` permbind like
+   a call. A sink source outside the node (an `https:` image) is network access and needs a `#net` permbind like
    `fetch` does; without one the host refuses it rather than loading it (micros have no ambient egress). §9a counts
    sink reads as reads and external sinks as outward sends, so "this micro can show your photos" and "this micro
    loads images from Z" are visible to the analysis. Nodules have no sinks.
@@ -161,7 +165,7 @@ and 7), so a grant records the answer to that question, once:
 - `grant/drawer/<drawerId>` → `{ access: read | write | admin }`, the node's grant vocabulary;
 - `grant/cartridge/<cartridgeId>` → `{ access }`, "may use data from cartridge Y" (its collections
   and datums included, item 8);
-- `grant/origin/<origin>` → `{}`, "may talk to services at origin Z";
+- `grant/net/<host[:port]>` → `{}`, "may use the network to reach Z";
 - `grant/method/<nsid>` → `{}`, "may use Y's operation", and `grant/authority/<prefix or *>` →
   `{}`, "may use operations under this namespace". They are two kinds because an NSID-shaped
   name is both a valid operation and a valid authority prefix, and dev takeover needs the two
@@ -240,7 +244,7 @@ so a prompt is always tied to something the person just did.
 **The prompt is the shell's.** The person sees one prompt, drawn by the shell on a trusted surface the micro can
 neither style nor read:
 - It names the cartridge and asks in the person's nouns (item 6): "may *Photos* read your *Camera roll* drawer?",
-  "may *Photos* talk to services at `example.com`?". Never a micro, routine or permbind name. The §9a risks of
+  "may *Photos* use the network to reach `example.com`?". Never a micro, routine or permbind name. The §9a risks of
   saying yes are shown beside it.
 - Answers: **Allow** (writes the grant datum through `setGrant`), **Only this time** (a grant that ends with the
   boot, item 3; an incarnation that restarts within the boot keeps it), **Don't allow**.
@@ -380,7 +384,7 @@ from the projects' public docs; versions move, so recheck before citing details.
   omitted, and an advisory warns against the `"self"` shorthand in favour of explicit hosts) and
   `key_value_stores` (no store unless listed). Its open question is whether a composed dependency
   inherits its parent's access; the proposal there is not to, with a deny adapter. *For us:*
-  `#origin` is `allowed_outbound_hosts` with explicit origins only; components composed into one
+  `#net` is `allowed_outbound_hosts` with explicit hosts only; components composed into one
   routine share that routine's handle, which ADR 047 §6's stated limit already covers.
 - **wasmCloud** grants a capability when a component imports a WIT interface and the host has a
   provider linked to it. Links can be removed at any time, which denies the capability at once. An
@@ -409,13 +413,13 @@ the analysis is static: it reads a cartridge version's manifest, needs no execut
 same answer on every node and in the registry.
 
 - **The graph.** Nodes are the cartridge's routines and micro, and the resources their `uses`
-  name: datum kinds in drawers (read or write), other cartridges' data, operations, origins, and
+  name: datum kinds in drawers (read or write), other cartridges' data, operations, network hosts, and
   the cartridge's own local state and revisioned stores. Edges are the declared accesses.
 - **Flows.** Data read by a routine can reach anything that routine can write or send. Across
   routines, data flows through anything one writes and another reads: shared local state, the
   cartridge's settings, a datum kind both reach. The analysis takes the transitive closure.
 - **Risks** are flows from a sensitive source to an outward sink. The first rule is exfiltration:
-  a path from a drawer's data to an origin, whether one routine holds both or one writes local
+  a path from a drawer's data to a network host, whether one routine holds both or one writes local
   state another sends out. It is reported with its path ("`sync` can send what `reindex` reads
   from your Photos drawer, through their shared local state `cache`").
 - **Where it is shown.** The consent screen (the FDR) lists the permissions in the person's nouns
