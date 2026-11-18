@@ -1,5 +1,7 @@
 # ADR 030: Micro lifecycle, lazy activation, and manifest contract
 
+> **Superseded in part by [ADR 050](050-cartridge-surfaces-and-the-micro-manifest.md):** §10 (the installer is now a real entrypoint with its own WIT world and an `initialization` list), §§11-14 (the manifest is the micro surface of a cartridge: `publications` become `endpoints`, `requires` and requests become permbinds plus `uses`, collection contracts become Lexicon token defs, `payload` and `attachments` become `value` and `links`) and §15's identity fields (the cartridge owns them). The lifecycle sections (§§1-9) stand.
+
 **Status:** Proposed. The lifecycle contract, the WIT and the revised manifest shape are
 implemented and run on native, Wasmtime and WCMP micros; the validation list below is
 tracked in `docs/scratch/clay-pr-ledger.md` ("Validation matrix"), with dynamic retention

@@ -41,6 +41,8 @@ In atproto, `$type` names the Lexicon definition an object follows: a record car
 
 ### 2. What belongs to the cartridge, and what to a contribution
 
+> **Amended by [ADR 050](050-cartridge-surfaces-and-the-micro-manifest.md):** a cartridge's parts beside the shared ones are a `$type` list of surfaces (nodule, micros, later others carried unread when unknown), not optional fields; at most one nodule, any number of micros. The micro's section is specified there.
+
 A cartridge has **at most one nodule**: nothing separates two nodules of one cartridge, since they would share its permbinds and settings. Contributions are optional fields of the envelope, not a list; the nodule is one, a micro is another, and a later kind is another.
 
 ```jsonc
