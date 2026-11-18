@@ -86,3 +86,80 @@ This retires the micro's config datum (`githubDrawer`, `intxtDrawers`, `docCap`)
 - **Grants** are `grant/drawer/<id>` per cartridge, so one grant covers the nodule and the review micro. Runtime requests are `requestCartridgeGrant`, answered with `day grants accept`.
 
 Open item 4 is answered (publish both contributions ourselves). Items 1–3 stay open.
+
+## Example envelope (for claytxt's cartridge-micro loader fixture)
+
+ADR 047 §2's shape, extended by ADR 049 §3 with a `micro` contribution beside `nodule`. The `micro` member's exact fields are claytxt's to fix (Clay on the node §5). What intxt relies on: the contribution names its component by key, carries its Clay manifest as a pinned datum, and declares `uses` over the cartridge's permbinds like a routine does.
+
+```jsonc
+{
+  "$type": "org.example.daybook.cartridge",
+  "id": "did:key:…/intxt",
+  "version": "0.2.0",
+  "authority": "org.example.intxt",
+  "name": "intxt",
+  "lexicons":   { "org.example.intxt": { /* #datumPin */ }, "org.example.intxt.work.gitCommit": { /* … */ }, … },
+  "sidecars":   { "org.example.intxt.work.gitCommit": { /* #datumPin */ }, … },
+  "components": { "handler": { /* #datumPin: the nodule wasm */ }, "review": { /* #datumPin: the micro wasm */ } },
+
+  "permbinds": {
+    "intxts":        { "$type": "…#drawers", "description": "The intxts it creates",
+                       "create": "required", "read": "required", "write": "required" },
+    "pullRequests":  { "$type": "…#drawers", "description": "Your imported pull requests",
+                       "read": "optional" },
+    "intxtRecords":  { "$type": "…#datum", "nsid": "org.example.intxt", "description": "Intxts: titles, entries, commits",
+                       "read": "required", "write": "required", "create": "required" },
+    "githubPulls":   { "$type": "…#datum", "nsid": "org.example.intxt.work.githubPull", "description": "Pull requests",
+                       "read": "optional" },
+    "contentBlobs":  { "$type": "…#datum", "nsid": "org.example.daybook.blob", "description": "Packs and diffs",
+                       "read": "required", "create": "required" },
+    "readDatums":    { "$type": "…#method", "nsid": "org.example.daybook.docs.readDatums",  "necessity": "required" },
+    "pollDatums":    { "$type": "…#method", "nsid": "org.example.daybook.docs.pollDatums",  "necessity": "required" },
+    "writeDatums":   { "$type": "…#method", "nsid": "org.example.daybook.docs.writeDatums", "necessity": "required" },
+    "createDrawer":  { "$type": "…#method", "nsid": "org.example.daybook.drawers.createDrawer", "necessity": "required" },
+    "addDoc":        { "$type": "…#method", "nsid": "org.example.daybook.drawers.addDoc", "necessity": "required" },
+    "summarize":     { "$type": "…#method", "nsid": "org.example.intxt.summarizeIntxts", "necessity": "required" }
+  },
+
+  "nodule": {
+    "routines": {
+      "createIntxt": {
+        "impl": { "$type": "…#componentExport", "component": "handler", "export": "handle" },
+        "implements": "org.example.intxt.createIntxt",
+        "uses": { "intxts": { "create": true, "write": true }, "intxtRecords": { "write": true, "create": true },
+                  "createDrawer": {}, "writeDatums": {} }
+      },
+      "addToIntxt": {
+        "impl": { "$type": "…#componentExport", "component": "handler", "export": "handle" },
+        "implements": "org.example.intxt.addToIntxt",
+        "uses": { "intxts": { "read": true, "write": true }, "intxtRecords": { "read": true, "write": true },
+                  "contentBlobs": { "read": true }, "addDoc": {}, "readDatums": {}, "writeDatums": {} }
+      },
+      "summarizeIntxts": {
+        "impl": { "$type": "…#componentExport", "component": "handler", "export": "handle" },
+        "implements": "org.example.intxt.summarizeIntxts",
+        "uses": { "intxts": { "read": true }, "intxtRecords": { "read": true }, "readDatums": {} }
+      }
+    }
+  },
+
+  "micro": {
+    "component": "review",
+    "manifest": { /* #datumPin: micro_review_manifest's Clay manifest (dayframe.review) */ },
+    "uses": { "pullRequests": { "read": true }, "intxts": { "read": true },
+              "githubPulls": { "read": true }, "intxtRecords": { "read": true }, "contentBlobs": { "read": true },
+              "pollDatums": {}, "readDatums": {}, "summarize": {} }
+  }
+}
+```
+
+Notes:
+- `summarize` is the micro's call to its own cartridge's routine: declared, never asked separately (ADR 049 §3, asymmetry 5).
+- `pullRequests` and `githubPulls` are optional: without the GitHub drawer granted, the micro still opens intxts it's given, and shows "not granted" for the PR list (claytxt: no request host service yet, so it shows "not granted" until there is one).
+- `#datum` with `nsid: "org.example.intxt"` stands for intxt's own record family. If a `#datum` must name one kind each, it becomes one permbind per kind (the cartridge test generates them from `UNIVERSE`).
+
+## From claytxt (2026-11-18)
+
+- No host loads a micro out of a cartridge yet (all load from package sets). Clay on the node §5 "cartridge micros" (a typed `MicroContribution`, a host loader from the node's catalog that resolves `component`) is one of tonight's lanes, and intxt's envelope is its first consumer.
+- The micro handle from `uses` ∩ the cartridge's grants is also tonight's lane. Until it lands, review.json (`INTERIM_GRANTS`, docCap) keeps working, and claytxt removes it after.
+- The micro side of `requestCartridgeGrant` (a host call the micro awaits, with the prompt drawn by the shell) is claytxt's, later, since the prompt UI needs the operator. Until then the micro shows "not granted".
