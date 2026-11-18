@@ -80,10 +80,11 @@ pub struct GitCommitEntry {
     /// range. None when the range reaches the root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    /// The pack's `org.example.daybook.blob` datum in the intxt's own descriptor document.
+    /// The pack's `org.example.daybook.blob` datum in the intxt's commits document (the one its
+    /// descriptor's `commitsDoc/main` names), not in the descriptor, which stays a small index.
     pub pack: DatumReference,
-    /// The `org.example.daybook.blob` datum (`text/x-diff`) in the intxt's own descriptor
-    /// document holding `git diff -M <base>..<tip>` (the empty tree when there is no base), so a
+    /// The `org.example.daybook.blob` datum (`text/x-diff`) in the intxt's commits document
+    /// holding `git diff -M <base>..<tip>` (the empty tree when there is no base), so a
     /// reader can show the diff without parsing a git pack. Derived from the pack's commits and
     /// absent when the diff was too large to carry (ADR 040 §4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,7 +100,8 @@ pub struct GitCommitEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JjChangeEntry {
-    /// The pack's `org.example.daybook.blob` datum in the intxt's own descriptor document.
+    /// The pack's `org.example.daybook.blob` datum in the intxt's commits document, as
+    /// [`GitCommitEntry::pack`].
     pub pack: DatumReference,
     /// As [`GitCommitEntry::patch`], the diff of the change's current commit against its parent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
