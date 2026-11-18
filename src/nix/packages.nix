@@ -158,13 +158,11 @@
       guestVendorDir = craneLib.vendorCargoDeps {
         src = srcWithWit;
         cargoLock = repoRoot + "/src/wasm_utils_rs/Cargo.lock";
-        outputHashes = {
-          inherit (outputHashes)
-            ${git "autosurgeon" "6a1df66f667667f1d14bc2272c4d426815de66b8"}
-            ${git "dioxus" "1696518a2c449f44c0d2d4ac1fedd00127058d63"}
-            ${git "wasm-component-model-polyfill" "da35a9b4e4cc71dacb57323b906093f9e18e78b6"}
-            ;
-        };
+        outputHashes = lib.getAttrs [
+          (git "autosurgeon" "6a1df66f667667f1d14bc2272c4d426815de66b8")
+          (git "dioxus" "1696518a2c449f44c0d2d4ac1fedd00127058d63")
+          (git "wasm-component-model-polyfill" "da35a9b4e4cc71dacb57323b906093f9e18e78b6")
+        ] outputHashes;
       };
 
       commonArgs = {
