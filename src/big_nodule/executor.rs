@@ -11,6 +11,7 @@
 //! back). The executor does not touch the router: it calls [`Reensure::request`] on the handle
 //! in the spec and the state actor runs the reconcile that calls `ensure` again.
 
+use crate::requests::MissingAuthorityLookup;
 use async_trait::async_trait;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::OpenedActor;
@@ -65,6 +66,10 @@ pub struct HandlerSpec {
     pub routine_capabilities: BTreeMap<String, RoutineCapabilities>,
     /// Ask the state actor to call `ensure` again for this cartridge.
     pub reensure: Reensure,
+    /// What [`egress::call`](crate::egress::call) refines a routine's refused call with: an
+    /// operation its `uses` declare that no grant covers yet is the cartridge's missing
+    /// authority, not a denial. Kept current by the state actor; hold it for the workload's life.
+    pub missing_authority: MissingAuthorityLookup,
 }
 /// What an executor reports for a revision it was asked to host.
 pub enum Hosted {
