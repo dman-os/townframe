@@ -99,11 +99,16 @@ macro_rules! export_nodule {
                 cx: &$crate::Cx,
                 body: $crate::XrpcBody,
             ) -> impl ::core::future::Future<Output = ::core::option::Option<$crate::Reply>> {
+                // Each arm boxes its own handler's future: an `async` block that awaited the
+                // matched arm in place would hold a stack slot for every arm, so its poll frame
+                // would be the sum of all the nodule's handler futures. On a wasm guest's small
+                // stack that is the overflow the route macros were fixed for (service_utils_rs
+                // `bind_service_protocol!`); one allocation per request is the price.
                 async move {
                     $(
                         if nsid.split('?').next().unwrap_or(nsid) == <$method as $crate::method_core::Method>::XRPC.nsid {
                             return ::core::option::Option::Some(
-                                $crate::invoke::<Self, $method>(self, cx, body).await,
+                                ::std::boxed::Box::pin($crate::invoke::<Self, $method>(self, cx, body)).await,
                             );
                         }
                     )*
