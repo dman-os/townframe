@@ -164,6 +164,8 @@ cartridges that use them are analysed without network access.
 
 ## 3. Declaration: the micro side [claytxt]
 
+> **Amended by [ADR 050](050-cartridge-surfaces-and-the-micro-manifest.md):** a micro's `requires` is gone; a micro reaches another provider's method or view through a permbind named in its `uses`, and the supplier and start order derive from it. A cartridge may have several micros, each with its own `uses` and handle.
+
 **A micro declares `uses` exactly as a routine does, once per micro.** Each key names one of the cartridge's
 permbinds and asks no more than it declares; admission applies the routine rule unchanged. A micro has no routines,
 so its `uses` sits on the micro contribution (`Contribution::Micro`, "Clay on the node" §5). Its handle is derived
