@@ -205,6 +205,34 @@ pub struct CartridgeGrants {
     pub grants: Vec<CartridgeGrantRecord>,
 }
 
+/// A long poll over one cartridge's grants (ADR 023), for a holder that applies them itself,
+/// such as a micro host. Answers at once with the grants (as [`ListCartridgeGrants`] lists them,
+/// "only this time" ones included) and their revision when `since` is absent or is not the
+/// current revision; otherwise holds up to `hold_ms`, which the service clamps, until they
+/// change. An expired hold answers the unchanged grants. A revision is opaque and names the boot
+/// it was taken in, so one from before a restart never matches. A cartridge granted nothing,
+/// installed or not, has no grants at a revision of its own.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwaitCartridgeGrants {
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub cartridge_id: CartridgeId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub hold_ms: u32,
+}
+
+/// The result of [`AwaitCartridgeGrants`]: the cartridge's grants and the revision they are at.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CartridgeGrantsAt {
+    pub grants: Vec<CartridgeGrantRecord>,
+    pub revision: String,
+}
+
 /// The longest an await holds, matching the registry's own watch (ADR 023 rule 3).
 pub const AWAIT_MAX_HOLD_MS: u32 = 15_000;
 
@@ -215,4 +243,5 @@ method_core::methods! {
     ListCartridgeGrantRequests => GrantRequests, query, "listCartridgeGrantRequests", privileged;
     AnswerCartridgeGrantRequest => GrantRequestAnswer, procedure, "answerCartridgeGrantRequest", privileged;
     ListCartridgeGrants => CartridgeGrants, query, "listCartridgeGrants", privileged;
+    AwaitCartridgeGrants => CartridgeGrantsAt, procedure, "awaitCartridgeGrants", long_poll, privileged;
 }
