@@ -4,13 +4,14 @@
 //! mounts other micros' presentations through capabilities it redeems itself, so what that
 //! scenario proved (interactive children, one child's withdrawal not touching the others) is
 //! proven here on the capability path.
-use super::HeadlessDom;
-use super::Launch;
 use super::composed;
 use super::press_platform_back;
-use crate::composition::CompositionRuntime;
+use super::HeadlessDom;
+use super::Launch;
 use crate::composition::assemble;
 use crate::composition::desktop_runtime;
+use crate::composition::scan_packages;
+use crate::composition::CompositionRuntime;
 use clay_docs::FacetRoute;
 use clay_host::MicroState;
 use clay_mdk::MicroId;
@@ -105,6 +106,7 @@ impl Layout {
 /// The desktop composition with its packages on `wcmp` over Wasmi, the engine the browser
 /// build runs (over the page's own `WebAssembly` instead of Wasmi).
 async fn wasmi_runtime() -> CompositionRuntime {
+    let (packages, errors) = scan_packages();
     assemble(
         std::sync::Arc::new(clay_store::MemoryStore::new()),
         |resources, id, manifest, bindings, _egress, bytes| {
@@ -117,6 +119,8 @@ async fn wasmi_runtime() -> CompositionRuntime {
                 }
             })
         },
+        packages,
+        errors,
     )
     .await
     .unwrap()
@@ -247,10 +251,9 @@ async fn an_unregistered_or_unavailable_panel_is_a_placeholder_and_the_arrangeme
         ui.text("section[aria-label=\"ghost panel\"] p[role=\"status\"]"),
         "Panel ghost is not installed."
     );
-    assert!(
-        ui.text("section[aria-label=\"Counter (Wasm) panel\"] p[role=\"alert\"]")
-            .contains("unavailable")
-    );
+    assert!(ui
+        .text("section[aria-label=\"Counter (Wasm) panel\"] p[role=\"alert\"]")
+        .contains("unavailable"));
     assert_eq!(stored_arrangement(&runtime), Some(stored.clone()));
 
     // Enabling the provider mounts its panel where the placeholder was; the unregistered id
@@ -260,10 +263,9 @@ async fn an_unregistered_or_unavailable_panel_is_a_placeholder_and_the_arrangeme
         ui.find(COUNTER_INCREMENT).is_some()
     })
     .await;
-    assert!(
-        ui.find("section[aria-label=\"ghost panel\"] p[role=\"status\"]")
-            .is_some()
-    );
+    assert!(ui
+        .find("section[aria-label=\"ghost panel\"] p[role=\"status\"]")
+        .is_some());
     assert_eq!(stored_arrangement(&runtime), Some(stored));
 }
 

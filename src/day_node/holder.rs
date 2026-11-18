@@ -84,6 +84,15 @@ pub enum SocketState {
 }
 
 impl NodeDir {
+    /// The node directory a host uses when it is not told one: the platform's per-user data
+    /// directory for `org.townframe.day`. `day` (after its `--node` flag and `DAY_NODE`) and the
+    /// desktop app both land here, so they share one node.
+    pub fn default_root() -> Res<PathBuf> {
+        let dirs = directories::ProjectDirs::from("org", "townframe", "day")
+            .ok_or_else(|| eyre::eyre!("failed to get xdg directories"))?;
+        Ok(dirs.data_dir().to_path_buf())
+    }
+
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
@@ -283,6 +292,7 @@ impl NodeDir {
                 Ok(Ok(NodeLock {
                     _file: file,
                     boot: Some(boot),
+                    socket,
                 }))
             }
             Err(std::fs::TryLockError::WouldBlock) => Ok(Err(LockHeld::read(&path)?)),
@@ -346,6 +356,8 @@ pub struct NodeLock {
     _file: std::fs::File,
     /// Held until the socket accepts connections.
     boot: Option<std::fs::File>,
+    /// The socket the holder serves; `None` for a lock taken by [`NodeDir::try_lock_unserved`].
+    socket: Option<PathBuf>,
 }
 
 impl NodeLock {
@@ -415,7 +427,9 @@ impl Booted {
     /// it attaches to the network: a daemon attaches the peers service when `node.json` has a
     /// `peers` section; a command's own node attaches none, since it lives for one command and
     /// must not dial or hold the node's endpoint. `schemas` is the datum vocabulary the node
-    /// admits. The lock announces it is serving once the socket accepts connections.
+    /// admits. A lock from [`NodeDir::try_lock`] has the node serve its socket and announces it
+    /// is serving once the socket accepts connections; one from [`NodeDir::try_lock_unserved`]
+    /// boots it with no listener.
     pub async fn boot(
         dir: &NodeDir,
         mut lock: NodeLock,
@@ -423,7 +437,7 @@ impl Booted {
         schemas: Arc<big_cabinet::SchemaRepo>,
     ) -> Res<Self> {
         let listeners = Listeners {
-            unix_socket: Some(dir.socket_path()?),
+            unix_socket: lock.socket.clone(),
             ..default()
         };
         let held = HeldNode::boot(
@@ -434,7 +448,9 @@ impl Booted {
             schemas,
         )
         .await?;
-        lock.serving()?;
+        if lock.socket.is_some() {
+            lock.serving()?;
+        }
         Ok(Self { held, _lock: lock })
     }
 

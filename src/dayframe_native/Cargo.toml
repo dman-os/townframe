@@ -15,6 +15,8 @@ clay_docs = { workspace = true }
 clay_host = { workspace = true }
 clay_mdk = { workspace = true, features = ["in_process", "view", "wasmtime", "package"] }
 clay_store = { workspace = true }
+big_cabinet = { workspace = true }
+dayframe_node = { workspace = true }
 dayframe_composition = { workspace = true }
 dioxus = { workspace = true }
 dioxus-native = { workspace = true, optional = true }

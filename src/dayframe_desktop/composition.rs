@@ -50,7 +50,7 @@ fn manifest_package_name(path: &Path) -> Option<&str> {
 ///
 /// STAND-IN until `big_cartridges` delivers manifests: a package is the sibling files
 /// `<name>.manifest.json` and `<name>.component.wasm`, discovered by the manifest.
-fn scan_packages() -> (Vec<PackageFiles>, Vec<String>) {
+pub(crate) fn scan_packages() -> (Vec<PackageFiles>, Vec<String>) {
     let Some(directory) = package_directory() else {
         return (Vec::new(), Vec::new());
     };
@@ -96,21 +96,66 @@ fn scan_packages() -> (Vec<PackageFiles>, Vec<String>) {
     (packages, errors)
 }
 
-/// Assemble the desktop composition over `store`, its packages on Wasmtime.
+/// The file in the package directory holding intxt's nodule handler component, staged beside
+/// the packages by `x/dayframe.ts` (`prepareDayframePackages`).
+const INTXT_GUEST_FILE: &str = "intxt.guest.wasm";
+
+/// Assemble the desktop composition over `store`, its packages on Wasmtime, with no node: no
+/// micro has a way to call one. Tests build this; the app uses [`hosted_runtime`].
+#[cfg(test)]
 pub async fn desktop_runtime<St: OrderedStore + Send + Sync + 'static>(
     store: Arc<St>,
 ) -> Result<CompositionRuntime, clay_store::StoreError> {
-    assemble(store, dayframe_native::wasmtime_engine).await
+    let (packages, errors) = scan_packages();
+    assemble(store, dayframe_native::wasmtime_engine, packages, errors).await
 }
 
-/// The composition with its packages run by `engine`: the engine the packages run on is the
-/// composition root's choice (see `dayframe_native::PackageEngine`).
+/// [`desktop_runtime`] on the desktop's node: the one `day` uses (`DAY_NODE`, else the platform
+/// data directory, resolved as `day` does), served on its socket so `day` reaches it.
+pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
+    store: Arc<St>,
+) -> Result<CompositionRuntime, String> {
+    let root = match std::env::var_os("DAY_NODE") {
+        Some(root) => PathBuf::from(root),
+        None => day_node::NodeDir::default_root()
+            .map_err(|error| format!("cannot place the node: {error:#}"))?,
+    };
+    // The operator's install files and pairing tickets sit in the app's data directory.
+    let data_directory =
+        data_directory().ok_or("no XDG_DATA_HOME or HOME to place the app's files under")?;
+    std::fs::create_dir_all(&data_directory)
+        .map_err(|error| format!("cannot create {}: {error}", data_directory.display()))?;
+    let guest_path = package_directory()
+        .ok_or("no package directory to read the intxt guest from")?
+        .join(INTXT_GUEST_FILE);
+    let intxt_guest = std::fs::read(&guest_path)
+        .map_err(|error| format!("cannot read {}: {error}", guest_path.display()))?;
+    let (packages, errors) = scan_packages();
+    dayframe_native::hosted_runtime(
+        store,
+        packages,
+        errors,
+        dayframe_native::wasmtime_engine,
+        dayframe_native::NodeHost {
+            root,
+            serve: true,
+            pairing_directories: vec![data_directory],
+            intxt_guest,
+        },
+    )
+    .await
+}
+
+/// The composition of `packages` run by `engine`: the engine the packages run on is the
+/// composition root's choice (see `dayframe_native::PackageEngine`). No micro has a way to call a
+/// node.
+#[cfg(test)]
 pub(crate) async fn assemble<St: OrderedStore + Send + Sync + 'static>(
     store: Arc<St>,
     engine: impl dayframe_native::PackageEngine,
+    packages: Vec<PackageFiles>,
+    errors: Vec<String>,
 ) -> Result<CompositionRuntime, clay_store::StoreError> {
-    let (packages, errors) = scan_packages();
-    // The desktop host holds no node yet, so no micro has a way to call one.
     dayframe_native::native_runtime(store, packages, errors, engine, &|_| None, &|_| None).await
 }
 

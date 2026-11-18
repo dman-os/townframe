@@ -5,7 +5,7 @@
 //!
 //! A host with no second process (Android) is always the holder of its node: [`NodeComposition`]
 //! boots a `big_node` in this process from the host's data directory, through the same
-//! [`day_node::HeldNode`] boot the `day` CLI uses, under the node lock `day` takes, opens the `micros` subsystem actor and one actor
+//! [`day_node::Booted`] boot the `day` CLI uses, under the node lock `day` takes, opens the `micros` subsystem actor and one actor
 //! per installed micro below it, and gives each micro a [`MicroEgress`] that answers its
 //! `dispatch.local` requests as that actor.
 //!
@@ -30,10 +30,9 @@ use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::drawer::protocol::RememberDrawer;
 use clay_guest_session::egress::DispatchEgress;
 use clay_node_egress::MicroEgress;
-use day_node::HeldNode;
+use day_node::Booted;
 use day_node::LockRole;
 use day_node::NodeDir;
-use day_node::NodeLock;
 use day_node::NodeSettings;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
@@ -177,6 +176,21 @@ impl MicroInstall {
     }
 }
 
+/// The bytes of the install file `name` from the first of `directories` that has it. Missing
+/// everywhere is `None`, which installs the micro unconfigured (see [`MicroInstall::interim`]);
+/// any other read failure is the operator's to see. The host decides where operators put install
+/// files (the phone's pairing directories, the desktop's data directory).
+pub fn read_install_file(directories: &[&Path], name: &str) -> std::io::Result<Option<Vec<u8>>> {
+    for directory in directories {
+        match std::fs::read(directory.join(name)) {
+            Ok(bytes) => return Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
 /// The drawers (read) and the configuration datum `bytes` states for `config`.
 fn parse_install_file(
     config: &InterimConfig,
@@ -230,6 +244,12 @@ pub struct NodeConfig {
     /// write (a node refuses a datum whose schema it does not know).
     pub schemas: Arc<big_cabinet::SchemaRepo>,
     pub installs: Vec<MicroInstall>,
+    /// Whether the holder serves the node's socket (see [`day_node::NodeDir::socket_path`]), so
+    /// `day` and other processes can reach it. A host with no second process (Android) serves
+    /// none: nothing there can reach one, and its data directory is too deep for a socket path.
+    /// A serving host finds the node held by another process as an error, since attaching to a
+    /// running node as a client is not built.
+    pub serve: bool,
 }
 
 /// A booted node and the micros installed on it.
@@ -237,9 +257,8 @@ pub struct NodeComposition {
     /// Declared first, dropped last: the node's tasks run on it. See [`Self::stop`].
     runtime: tokio::runtime::Runtime,
     installed: BTreeMap<String, Installed>,
-    held: HeldNode,
-    /// Held to the end, after the node has stopped: the node's storage is this process's alone.
-    _lock: NodeLock,
+    /// The node and the lock that makes its storage this process's alone, stopped in that order.
+    booted: Booted,
 }
 
 /// What the composition holds for one installed micro.
@@ -266,29 +285,30 @@ impl NodeComposition {
                     bootstrap,
                     schemas,
                     installs,
+                    serve,
                 } = config;
                 prepare_settings(&root, &bootstrap)?;
                 // The holder takes the node's lock as `day` does, so `day` and any other host
                 // find the directory held instead of booting the same storage a second time.
-                // This host has no second process (Android), so another holder is an invariant
-                // break, not something to attach to: desktop hosts will use
-                // `NodeDir::find_or_hold` and attach instead. It holds the lock only: no
-                // socket, because nothing can reach one and a data directory this deep would
-                // not fit a socket path. So no listeners; the holder is its own only client
-                // and reaches the node through its dispatch client.
+                // A serving host (desktop) holds the lock with its socket, which `day` reaches;
+                // one with no second process (Android) holds it unserved and is its own only
+                // client, through its dispatch client. Either way another holder is a failure
+                // here: attaching to it as a client is not built.
                 let dir = NodeDir::new(root);
-                let lock = match dir.try_lock_unserved(LockRole::Daemon)? {
-                    Ok(lock) => lock,
-                    Err(held) => utils_rs::prelude::eyre::bail!(
-                        "{held} already holds the node at {}; a host with no second process must be its only holder",
-                        dir.root().display()
-                    ),
+                let lock = match serve {
+                    true => dir.try_lock(LockRole::Daemon)?,
+                    false => dir.try_lock_unserved(LockRole::Daemon)?,
                 };
-                let settings = NodeSettings::load(dir.root())?;
-                let held = HeldNode::boot(dir.root(), &settings, default(), true, schemas).await?;
-                match install_all(&held.node, installs).await {
-                    Ok(installed) => Ok((held, lock, installed)),
-                    Err(error) => match held.stop().await {
+                let lock = lock.map_err(|held| {
+                    ferr!(
+                        "the node at {} is held by {held}; attaching to a running node is not implemented yet, so stop that process first",
+                        dir.root().display()
+                    )
+                })?;
+                let booted = Booted::boot(&dir, lock, LockRole::Daemon, schemas).await?;
+                match install_all(booted.node(), installs).await {
+                    Ok(installed) => Ok((booted, installed)),
+                    Err(error) => match booted.stop().await {
                         Ok(()) => Err(error),
                         Err(stop) => {
                             Err(error.wrap_err(format!("stopping the node also failed: {stop:#}")))
@@ -299,11 +319,10 @@ impl NodeComposition {
             .await
             .expect(ERROR_TOKIO);
         match booted {
-            Ok((held, lock, installed)) => Ok(Self {
+            Ok((booted, installed)) => Ok(Self {
                 runtime,
                 installed,
-                held,
-                _lock: lock,
+                booted,
             }),
             Err(error) => {
                 runtime.shutdown_background();
@@ -313,7 +332,7 @@ impl NodeComposition {
     }
 
     pub fn node(&self) -> &big_node::BigNode {
-        &self.held.node
+        self.booted.node()
     }
 
     /// The `dispatch.local` egress for `micro` (its id text), to hand to its Wasmtime factory.
@@ -345,7 +364,7 @@ impl NodeComposition {
     /// (its actor is reused; its capabilities are minted anew).
     pub async fn install_micro(&mut self, install: MicroInstall) -> Res<()> {
         let micro = install.micro.clone();
-        let installed = install_one(&self.held.node, install).await?;
+        let installed = install_one(self.booted.node(), install).await?;
         self.installed.insert(micro, installed);
         Ok(())
     }
@@ -355,7 +374,7 @@ impl NodeComposition {
     /// node's root authority, so it is for the host's own installs at boot and is never handed to
     /// a micro (a micro's only way out is its [`Self::egress`]).
     pub fn operator_transport(&self) -> OperatorTransport {
-        let node = &self.held.node;
+        let node = self.booted.node();
         OperatorTransport {
             router: big_dispatch::xrpc_router(
                 node.dispatch.client.clone(),
@@ -386,8 +405,8 @@ impl NodeComposition {
     /// This node's dialable endpoint ticket: what another node puts in its bootstrap list to dial
     /// it. Always present, since the composition always attaches the peers service.
     pub fn address(&self) -> String {
-        self.held
-            .node
+        self.booted
+            .node()
             .peers
             .as_ref()
             .expect("the composition attaches the peers service")
@@ -400,11 +419,10 @@ impl NodeComposition {
         let Self {
             runtime,
             installed,
-            held,
-            _lock,
+            booted,
         } = self;
         drop(installed);
-        let stopped = runtime.spawn(held.stop()).await.expect(ERROR_TOKIO);
+        let stopped = runtime.spawn(booted.stop()).await.expect(ERROR_TOKIO);
         // Dropping a runtime inside an async context panics; this does not wait for threads.
         runtime.shutdown_background();
         stopped

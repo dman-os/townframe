@@ -6,10 +6,10 @@
 use clay_docs::FacetRoute;
 use clay_guest_session::egress::DispatchEgress;
 use clay_host::Factory;
+use clay_mdk::host::factory;
 use clay_mdk::host::CapabilityPublication;
 use clay_mdk::host::CollectionBindings;
 use clay_mdk::host::Resources;
-use clay_mdk::host::factory;
 use clay_store::OrderedStore;
 #[cfg(any(feature = "blitz", feature = "wry"))]
 use dayframe_composition::Application;
@@ -22,6 +22,7 @@ use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
 use std::future::Future;
 use std::path::Path;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -355,6 +356,99 @@ pub async fn native_runtime<St: OrderedStore + Send + Sync + 'static>(
 pub type RuntimeLoader =
     Callback<(), Pin<Box<dyn Future<Output = Result<CompositionRuntime, String>>>>>;
 
+/// What a GUI host says about its node; everything else about hosting one is the same on every
+/// platform (see [`hosted_runtime`]).
+pub struct NodeHost {
+    /// The node's directory (see `day_node::NodeDir`): the one `day` uses on a desktop, the app's
+    /// own data directory on Android.
+    pub root: PathBuf,
+    /// Whether the holder serves the node's socket so `day` can reach it (see
+    /// `dayframe_node::NodeConfig::serve`): a desktop does, Android has no second process.
+    pub serve: bool,
+    /// Directories the operator's files are read from, first match winning: the install files
+    /// (`dayframe_node::MicroInstall::interim`) and `bootstrap.txt`, the endpoint tickets of the
+    /// nodes this host dials, one per line. The node's own ticket is written to
+    /// `node-address.txt` in each, for the operator to put in the other node's bootstrap list.
+    pub pairing_directories: Vec<PathBuf>,
+    /// intxt's nodule handler component, which the node installs as a cartridge at every boot
+    /// (idempotent by cartridge version).
+    pub intxt_guest: Vec<u8>,
+}
+
+/// [`native_runtime`] on the node `host` describes: finds or becomes the holder of the node in
+/// `host.root` (booted once for the process, and living as long as it does: there is no hook
+/// that could stop it in order, and the OS reclaims the process), installs one actor per package
+/// micro and intxt, and gives each micro its egress and configuration datum. A node that cannot
+/// boot is an error the launcher shows: the micros' node access is part of what the app is. The
+/// node being held by another process is one of them: attaching to a running node is not built.
+pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
+    store: Arc<St>,
+    packages: Vec<PackageFiles>,
+    package_errors: Vec<String>,
+    engine: impl PackageEngine,
+    host: NodeHost,
+) -> Result<CompositionRuntime, String> {
+    static NODE: tokio::sync::OnceCell<dayframe_node::NodeComposition> =
+        tokio::sync::OnceCell::const_new();
+    let pairing: Vec<&Path> = host
+        .pairing_directories
+        .iter()
+        .map(PathBuf::as_path)
+        .collect();
+    let node = NODE
+        .get_or_try_init(|| async {
+            let installs =
+                dayframe_node::MicroInstall::interim(package_micro_ids(&packages), |name| {
+                    dayframe_node::read_install_file(&pairing, name)
+                })
+                .map_err(|error| format!("cannot read the install files: {error:#}"))?;
+            let mut bootstrap = Vec::new();
+            for directory in &pairing {
+                bootstrap.extend(
+                    dayframe_node::read_tickets(&directory.join("bootstrap.txt"))
+                        .map_err(|error| format!("cannot read the bootstrap tickets: {error:#}"))?,
+                );
+            }
+            let node = dayframe_node::NodeComposition::boot(dayframe_node::NodeConfig {
+                root: host.root.clone(),
+                bootstrap,
+                // The node learns the datum vocabulary of intxt (the PR and intxt datums the
+                // review micro reads) from intxt's cartridge, whose Lexicons it admits when the
+                // cartridge is installed below. The review config datum is Clay's, not the
+                // node's, and needs no schema here.
+                schemas: Arc::new(
+                    big_cabinet::SchemaRepo::open(std::iter::empty())
+                        .expect("no registrations is a valid schema repo"),
+                ),
+                installs,
+                serve: host.serve,
+            })
+            .await
+            .map_err(|error| format!("cannot boot the node: {error:#}"))?;
+            node.install_intxt(&host.intxt_guest)
+                .await
+                .map_err(|error| format!("cannot install intxt on the node: {error}"))?;
+            let address = node.address();
+            for directory in &pairing {
+                let path = directory.join("node-address.txt");
+                std::fs::write(&path, &address)
+                    .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+            }
+            Ok::<_, String>(node)
+        })
+        .await?;
+    native_runtime(
+        store,
+        packages,
+        package_errors,
+        engine,
+        &|micro| node.egress(micro),
+        &|micro| node.config_datum(micro).cloned(),
+    )
+    .await
+    .map_err(|error| format!("cannot load the store: {error}"))
+}
+
 /// A [`RuntimeLoader`] from an async constructor. Must be called inside a component, as a
 /// `Callback` is owned by the current scope.
 pub fn runtime_loader<Fut>(build: impl Fn() -> Fut + 'static) -> RuntimeLoader
@@ -597,8 +691,8 @@ fn use_wry_host_inputs(
     insets_source: Option<InsetsSource>,
     viewport_source: Option<ViewportSource>,
 ) -> HostInputs {
-    use dioxus_desktop::WindowEvent;
     use dioxus_desktop::tao::event::Event;
+    use dioxus_desktop::WindowEvent;
     let window = dioxus_desktop::use_window();
     let viewport = move || {
         viewport_source.map_or_else(

@@ -14,14 +14,20 @@ import { $ } from "./utils.ts";
 // those are components tests load by environment variable, while this one is a package the
 // shell lists and so changes what every shell shows.
 //
+// `intxtGuest` also builds intxt's nodule handler component (the `wasm_utils_rs` workspace's
+// `intxt_nodule_guest`, always release) and stages it as `intxt.guest.wasm` in the package
+// directory, where the desktop host and the Android staging read it. It is not a micro, so the
+// shell's package scan skips it; the node installs it as a cartridge at boot.
+//
 // `guestProfile` is the cargo profile the guests build with. `wasm-release` (the default) is the
 // workspace's optimized guest profile, the one `dayframe_web` also builds with. `dev` is opt-in, for
 // faster rebuilds while iterating: it emits 15 to 17 MB unoptimized components that Wasmtime needs
 // seconds to compile on a phone, and they burn about 10x the fuel (see below).
 export async function prepareDayframePackages(
-  { testFixtures, trapper = false, guestProfile = "wasm-release" }: {
+  { testFixtures, trapper = false, intxtGuest = false, guestProfile = "wasm-release" }: {
     testFixtures: boolean;
     trapper?: boolean;
+    intxtGuest?: boolean;
     guestProfile?: "dev" | "wasm-release";
   },
 ): Promise<
@@ -144,6 +150,16 @@ export async function prepareDayframePackages(
     await $`cargo run --locked -q -p clay_mdk --example emit_trapper_manifest -- ${
       packagesDirectory.join("trapper.manifest.json")
     }`;
+  }
+  if (intxtGuest) {
+    await $`cargo build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest --target wasm32-wasip3 --release`;
+    const guestWorkspace = await $`cargo metadata --locked --no-deps --format-version 1 --manifest-path src/wasm_utils_rs/Cargo.toml`
+      .json<{ target_directory: string }>();
+    await $`cp ${
+      $.path(guestWorkspace.target_directory).join(
+        "wasm32-wasip3/release/intxt_nodule_guest.wasm",
+      )
+    } ${packagesDirectory.join("intxt.guest.wasm")}`;
   }
   componentEnv["DAYFRAME_PACKAGE_DIR"] = packagesDirectory.toString();
   console.log(`DAYFRAME_PACKAGE_DIR=${packagesDirectory}`);

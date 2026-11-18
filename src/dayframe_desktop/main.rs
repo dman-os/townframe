@@ -25,9 +25,7 @@ fn App() -> Element {
         dayframe_native::Shell {
             load: dayframe_native::runtime_loader(|| async {
                 let store = composition::open_store().await?;
-                composition::desktop_runtime(std::sync::Arc::new(store))
-                    .await
-                    .map_err(|error| format!("cannot load the store: {error}"))
+                composition::hosted_runtime(std::sync::Arc::new(store)).await
             }),
             ready: Callback::new(|runtime| rsx! { ReadyApp { runtime } }),
         }

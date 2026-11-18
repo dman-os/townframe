@@ -29,7 +29,6 @@ mod android {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::OnceLock;
-    use tokio::sync::OnceCell;
 
     /// The activity's `getFilesDir()`, captured in [`main`]. App-private storage that needs no
     /// permission and is removed with the app.
@@ -39,19 +38,6 @@ mod android {
     /// `adb push` and `adb pull` reach without a debuggable build: the operator's side of
     /// pairing. `None` when the device has no external storage.
     static EXTERNAL_DIRECTORY: OnceLock<Option<PathBuf>> = OnceLock::new();
-
-    /// The file in the external (or, failing that, internal) data directory that lists the
-    /// endpoint tickets of the nodes this phone dials, one per line.
-    const BOOTSTRAP_FILE: &str = "bootstrap.txt";
-
-    /// The file this phone's node writes its own endpoint ticket to at boot, for the operator to
-    /// put in the other node's bootstrap list.
-    const ADDRESS_FILE: &str = "node-address.txt";
-
-    /// The phone's node, booted once for the process. Android has no second process to hold a
-    /// node, so the app is the holder, and it lives as long as the process does: there is no
-    /// activity-destroy hook that could stop it in order, and the OS reclaims the process.
-    static NODE: OnceCell<dayframe_node::NodeComposition> = OnceCell::const_new();
 
     /// The packages `x/dayframe.ts android` stages into `packages/` before the build. `dx`
     /// copies a folder asset into the APK's `assets/` keeping the file names, which is the only
@@ -152,72 +138,6 @@ mod android {
             .collect()
     }
 
-    /// The text of the install file `name` (see `dayframe_node::MicroInstall::interim`): the
-    /// first of the pairing directories that has it. Missing everywhere is no file, which installs
-    /// the micro unconfigured; any other read failure is the operator's to see.
-    fn read_install_file(
-        data_directory: &std::path::Path,
-        name: &str,
-    ) -> std::io::Result<Option<Vec<u8>>> {
-        for directory in pairing_directories(data_directory) {
-            match std::fs::read(directory.join(name)) {
-                Ok(bytes) => return Ok(Some(bytes)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(None)
-    }
-
-    /// Boots the phone's node under `<data>/node` with one actor per package micro, dialing the
-    /// tickets in the pairing files and publishing its own ticket beside them. A node that
-    /// cannot boot is a failure the launcher shows: the micros' node access is part of what the
-    /// app is.
-    async fn boot_node(
-        data_directory: &std::path::Path,
-        installs: Vec<dayframe_node::MicroInstall>,
-    ) -> Result<dayframe_node::NodeComposition, String> {
-        let pairing_directories = pairing_directories(data_directory);
-        let mut bootstrap = Vec::new();
-        for directory in &pairing_directories {
-            bootstrap.extend(
-                dayframe_node::read_tickets(&directory.join(BOOTSTRAP_FILE))
-                    .map_err(|error| format!("cannot read the bootstrap tickets: {error:#}"))?,
-            );
-        }
-        let node = dayframe_node::NodeComposition::boot(dayframe_node::NodeConfig {
-            root: data_directory.join("node"),
-            bootstrap,
-            // The node learns the datum vocabulary of intxt (the PR and intxt datums the review
-            // micro reads) from intxt's cartridge, whose Lexicons it admits when the cartridge is
-            // installed below. The review config datum is Clay's, not the node's, and needs no
-            // schema here.
-            schemas: Arc::new(
-                big_cabinet::SchemaRepo::open(std::iter::empty())
-                    .expect("no registrations is a valid schema repo"),
-            ),
-            installs,
-        })
-        .await
-        .map_err(|error| format!("cannot boot the node: {error:#}"))?;
-        // intxt's handler component ships in the APK beside the packages. The install is
-        // idempotent by cartridge version, so every boot runs it; the first one writes.
-        let guest_path = format!("{PACKAGES}/{INTXT_GUEST_FILE}");
-        let guest = dioxus::asset_resolver::read_asset_bytes(&guest_path)
-            .await
-            .map_err(|error| format!("cannot read bundled asset {guest_path}: {error}"))?;
-        node.install_intxt(&guest)
-            .await
-            .map_err(|error| format!("cannot install intxt on the node: {error}"))?;
-        let address = node.address();
-        for directory in pairing_directories {
-            let path = directory.join(ADDRESS_FILE);
-            std::fs::write(&path, &address)
-                .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-        }
-        Ok(node)
-    }
-
     async fn load() -> Result<dayframe_native::CompositionRuntime, String> {
         let data_directory = DATA_DIRECTORY
             .get()
@@ -231,24 +151,28 @@ mod android {
                 Err(error) => errors.push(error),
             }
         }
-        let installs = dayframe_node::MicroInstall::interim(
-            dayframe_native::package_micro_ids(&packages),
-            |name| read_install_file(data_directory, name),
-        )
-        .map_err(|error| format!("cannot read the install files: {error:#}"))?;
-        let node = NODE
-            .get_or_try_init(|| boot_node(data_directory, installs))
-            .await?;
-        dayframe_native::native_runtime(
+        let guest_path = format!("{PACKAGES}/{INTXT_GUEST_FILE}");
+        let intxt_guest = dioxus::asset_resolver::read_asset_bytes(&guest_path)
+            .await
+            .map_err(|error| format!("cannot read bundled asset {guest_path}: {error}"))?;
+        dayframe_native::hosted_runtime(
             Arc::new(store),
             packages,
             errors,
             dayframe_native::wasmtime_engine,
-            &|micro| node.egress(micro),
-            &|micro| node.config_datum(micro).cloned(),
+            dayframe_native::NodeHost {
+                root: data_directory.join("node"),
+                // No second process on Android: nothing could reach a socket, and the data
+                // directory is too deep for a socket path.
+                serve: false,
+                pairing_directories: pairing_directories(data_directory)
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect(),
+                intxt_guest,
+            },
         )
         .await
-        .map_err(|error| format!("cannot load the store: {error}"))
     }
 
     /// The WebView's size in CSS px and the display's CSS px per physical px
