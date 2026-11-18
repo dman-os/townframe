@@ -200,3 +200,13 @@ Accepted as the direction: access through `uses` only (`requires` keeps supplier
 - **Re-mint before `answered` resolves** is required: `MicroEgress::remint` exists (`feat/desktop-base`); the host re-mints when `awaitCartridgeGrants` moves, and `answered` resolves only after, or the next call races the old handle.
 - **The web shell's `fetch` is enforceable:** a micro is wasm with only WIT imports, so its only network path is `wasi:http`, which the wcmp host serves (refuse-all today, then dispatch.local, then `#net` through the nodules egress). The remaining leak class is markup that makes the page fetch (`style url()`, `img src`); the host refuses batches carrying it.
 - Manager notes 2–5 agreed, including node-57's `fetch` landing with the final signature.
+
+## Operator direction (2026-11-18)
+
+- **One name: `Cx`** on both sides; the MDK's `Context` becomes `Cx`. Isomorphism means **the same types where possible**, not only the same names, so code can be written once and run in a micro or a nodule (polymorphic over `Cx`). Nodule-only things stay in `big_ndk`.
+- **Micros are the primary consumer of node services,** including other cartridges' nodules and their own cartridge's nodules and methods. Calling a node method is the same call on both sides (`cx.call(M)` over `dispatch.local`, which micros already use through the wcmp host's `wasi:http`).
+- **Standards first: the WASI ecosystem, then the Rust ecosystem, before anything of ours.** The aim is that existing libraries work unchanged, and later, other languages' WASI support (a `wasi:http` client for Python, `fetch` for JS) works with no extra glue from us. So:
+  - Network access is plain `wasi:http` outgoing requests. `Cx::fetch` is a thin convenience over it with `http` crate types, never a custom import, and nothing a stock `wasi:http` client wouldn't send may be required. **Gap found:** `#net` today identifies the calling routine by an `x-nodule-capability` header the guest must add (`big_nodule/egress.rs`), which a stock client won't send. The host must identify the caller itself, as it does for dispatch calls (the workload table), before `#net` counts as standard.
+  - Blobs follow `wasi:blobstore`'s shape (containers, `get_data`/`write_data`) as far as it fits.
+  - Grant requests have no WASI or Rust standard; the Android-shaped design stands.
+  - Shipping our own host or guest support is fine where no standard exists; it's a philosophy, not a blocker.
