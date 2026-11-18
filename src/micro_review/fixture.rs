@@ -109,10 +109,13 @@ impl Fixture {
             urls: None,
             extra: Default::default(),
         };
-        held.docs.get_mut(doc).expect("the document is held").insert(
-            key(Blob::ID, slot),
-            serde_json::to_value(blob).expect("a blob datum is plain JSON"),
-        );
+        held.docs
+            .get_mut(doc)
+            .expect("the document is held")
+            .insert(
+                key(Blob::ID, slot),
+                serde_json::to_value(blob).expect("a blob datum is plain JSON"),
+            );
         self
     }
 
@@ -231,11 +234,7 @@ impl Fixture {
             // A patch is a reference to a blob datum in the entry's own document (`self`); an
             // entry without one is a diff too large to carry. `patch_blob` holds the datum.
             if patch.is_some() {
-                entry["patch"] = json!(format!(
-                    "dtxt:datum:self/{}/patch-{}",
-                    Blob::ID,
-                    &tip[..7]
-                ));
+                entry["patch"] = json!(format!("dtxt:datum:self/{}/patch-{}", Blob::ID, &tip[..7]));
             }
             (key(work::GitCommitEntry::ID, &tip[..7]), entry)
         };
@@ -396,7 +395,9 @@ impl NodeCalls for Fixture {
     }
 
     fn read_blob(&self, input: ReadBlob) -> impl Future<Output = Result<Vec<u8>, CallError>> {
-        self.calls.borrow_mut().push(micro_review_manifest::READ_BLOB);
+        self.calls
+            .borrow_mut()
+            .push(micro_review_manifest::READ_BLOB);
         ready(
             self.held
                 .blobs

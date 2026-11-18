@@ -335,17 +335,29 @@ async fn a_patch_is_read_only_when_asked_for_and_resolves_self_and_concrete_refe
     };
     // `self` is the document the entry is in.
     assert_eq!(source.doc, Fixture::doc_id("31"));
-    assert!(review.patch(source).await.unwrap().starts_with("diff --git a/src/review.rs"));
+    assert!(
+        review
+            .patch(source)
+            .await
+            .unwrap()
+            .starts_with("diff --git a/src/review.rs")
+    );
     assert_eq!(
-        fixture.calls().iter().filter(|nsid| **nsid == micro_review_manifest::READ_BLOB).count(),
+        fixture
+            .calls()
+            .iter()
+            .filter(|nsid| **nsid == micro_review_manifest::READ_BLOB)
+            .count(),
         1
     );
 
     // A concrete reference names its own document, where the blob datum may have moved to.
     let commits = Fixture::doc_id("5");
-    let held = Fixture::empty()
-        .doc(commits.clone(), [])
-        .patch_blob(&commits, "moved", "diff --git a/x b/x\n");
+    let held = Fixture::empty().doc(commits.clone(), []).patch_blob(
+        &commits,
+        "moved",
+        "diff --git a/x b/x\n",
+    );
     let entry = (
         key(work::GitCommitEntry::ID, "abcdef0"),
         serde_json::json!({
