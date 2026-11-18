@@ -24,8 +24,9 @@
       # name/type/hasExt, so the deps directories are removed with difference.
       srcDir = repoRoot + "/src";
       srcExtensions =
-        file:
-        file.hasExt "rs"
+        extra: file:
+        lib.any file.hasExt extra
+        || file.hasExt "rs"
         || file.hasExt "wit"
         || file.hasExt "toml"
         || file.hasExt "lock"
@@ -38,25 +39,36 @@
           )
         )
       );
-      srcWithoutWitDeps =
+      # `extra` names further extensions the build reads with include_str!/asset!
+      # (the wasm guests and the web shell embed .json fixtures and the .css bundle).
+      mkSrcWithWit =
+        extra:
         let
-          base = lib.fileset.fileFilter srcExtensions srcDir;
+          srcWithoutWitDeps =
+            let
+              base = lib.fileset.fileFilter (srcExtensions extra) srcDir;
+            in
+            if witDepsDirs == [ ] then base else lib.fileset.difference base (lib.fileset.unions witDepsDirs);
+          src = lib.fileset.toSource {
+            root = repoRoot;
+            fileset = lib.fileset.unions [
+              (repoRoot + "/Cargo.toml")
+              (repoRoot + "/Cargo.lock")
+              (repoRoot + "/.cargo")
+              srcWithoutWitDeps
+            ];
+          };
         in
-        if witDepsDirs == [ ] then base else lib.fileset.difference base (lib.fileset.unions witDepsDirs);
-      src = lib.fileset.toSource {
-        root = repoRoot;
-        fileset = lib.fileset.unions [
-          (repoRoot + "/Cargo.toml")
-          (repoRoot + "/Cargo.lock")
-          (repoRoot + "/.cargo")
-          srcWithoutWitDeps
-        ];
-      };
-      srcWithWit = pkgs.runCommand "townframe-src-with-wit-deps" { } ''
-        cp -r ${src} $out
-        chmod -R u+w $out
-        cp -r ${witDeps}/. $out/
-      '';
+        pkgs.runCommand "townframe-src-with-wit-deps" { } ''
+          cp -r ${src} $out
+          chmod -R u+w $out
+          cp -r ${witDeps}/. $out/
+        '';
+      srcWithWit = mkSrcWithWit [ ];
+      guestSrc = mkSrcWithWit [
+        "json"
+        "css"
+      ];
 
       # Cargo.lock pins git dependencies by raw revision. Some of those
       # revisions are orphaned commits (reachable by SHA, contained in no ref),
@@ -164,6 +176,110 @@
           (git "wasm-component-model-polyfill" "da35a9b4e4cc71dacb57323b906093f9e18e78b6")
         ] outputHashes;
       };
+
+      # Wasm guests. Guests resolve their features in isolation (CONTRIBUTING.md on
+      # `resolver.feature-unification`), as x/dayframe-packages.ts builds them.
+      isolated = "--config 'resolver.feature-unification=\"selected\"'";
+      microNames = [
+        "counter"
+        "layout"
+        "lab"
+        "review"
+      ];
+      # Build scripts and proc macros still run on the host, so the guests keep
+      # the host-side native tools the root workspace's build scripts expect.
+      guestNativeBuildInputs = [
+        pkgs.pkg-config
+        pkgs.cmake
+        pkgs.protobuf
+        pkgs.llvmPackages.libclang
+      ];
+      wasmArgs = {
+        version = version;
+        src = guestSrc;
+        inherit cargoVendorDir;
+        doCheck = false;
+        nativeBuildInputs = guestNativeBuildInputs;
+        LIBCLANG_PATH = "${lib.getLib pkgs.llvmPackages.libclang}/lib";
+      };
+
+      # The micro components, `wasm-release`, for wasm32-wasip3. rustc's target
+      # emits a component directly: no adapter step.
+      microsArgs = wasmArgs // {
+        pname = "daytxt-micros";
+        CARGO_BUILD_TARGET = "wasm32-wasip3";
+        CARGO_PROFILE = "wasm-release";
+        cargoExtraArgs = "--locked ${isolated} ${
+          lib.concatMapStringsSep " " (name: "-p micro_${name}") microNames
+        }";
+      };
+      daytxt-micros = craneLib.buildPackage (
+        microsArgs
+        // {
+          cargoArtifacts = craneLib.buildDepsOnly microsArgs;
+          doInstallCargoArtifacts = false;
+          installPhaseCommand = ''
+            mkdir -p $out
+            ${lib.concatMapStringsSep "\n" (
+              name:
+              "cp target/wasm32-wasip3/wasm-release/micro_${name}.wasm $out/${name}.component.wasm"
+            ) microNames}
+          '';
+        }
+      );
+
+      # The manifest sidecars the desktop shell pairs with each component: each
+      # micro's manifest crate emits its own through a native example (host build).
+      manifestsArgs = wasmArgs // {
+        pname = "daytxt-manifests";
+        cargoExtraArgs = "--locked ${
+          lib.concatMapStringsSep " " (name: "-p micro_${name}_manifest") microNames
+        }";
+      };
+      daytxt-manifests = craneLib.buildPackage (
+        manifestsArgs
+        // {
+          cargoArtifacts = craneLib.buildDepsOnly manifestsArgs;
+          doInstallCargoArtifacts = false;
+          buildPhaseCargoCommand = lib.concatMapStringsSep "\n" (name: ''
+            cargo run --release --locked -q -p micro_${name}_manifest --example emit_manifest -- $PWD/${name}.manifest.json
+          '') microNames;
+          installPhaseCommand = ''
+            mkdir -p $out
+            cp *.manifest.json $out/
+          '';
+        }
+      );
+
+      # intxt's nodule handler lives in the second guest workspace
+      # (src/wasm_utils_rs, own lock and vendor set), always `--release`; that
+      # workspace's profile strips this one guest's final link.
+      intxtGuestArgs = wasmArgs // {
+        pname = "intxt-guest";
+        cargoVendorDir = guestVendorDir;
+        CARGO_BUILD_TARGET = "wasm32-wasip3";
+        cargoExtraArgs = "--locked --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest";
+      };
+      intxt-guest = craneLib.buildPackage (
+        intxtGuestArgs
+        // {
+          cargoArtifacts = null;
+          doInstallCargoArtifacts = false;
+          installPhaseCommand = ''
+            mkdir -p $out
+            cp src/wasm_utils_rs/target/wasm32-wasip3/release/intxt_nodule_guest.wasm $out/intxt.guest.wasm
+          '';
+        }
+      );
+
+      # The directory DAYFRAME_PACKAGE_DIR points at: <name>.manifest.json,
+      # <name>.component.wasm and intxt.guest.wasm.
+      daytxt-packages = pkgs.runCommand "daytxt-packages" { } ''
+        mkdir -p $out
+        cp ${daytxt-micros}/*.component.wasm $out/
+        cp ${daytxt-manifests}/*.manifest.json $out/
+        cp ${intxt-guest}/intxt.guest.wasm $out/
+      '';
 
       commonArgs = {
         pname = "daybook-cli";
@@ -291,6 +407,12 @@
       packages = {
         inherit daybook-cli;
         guest-cargo-vendor-dir = guestVendorDir;
+        inherit
+          daytxt-micros
+          daytxt-manifests
+          intxt-guest
+          daytxt-packages
+          ;
         wit-deps = witDeps;
         cargo-vendor-dir = cargoVendorDir;
       };
