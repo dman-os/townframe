@@ -4,7 +4,7 @@
 //! attached, holding the node lock for as long as it lives. The lock is its identity: `stop` finds
 //! the pid in it and waits for its release to learn the process has exited, and a socket file
 //! nobody listens on while the lock is free is a leftover of a server that died without cleaning
-//! up. Nothing here sleeps or polls: `start` waits for the server's readiness line, `stop` blocks
+//! up. Nothing here sleeps or polls: `start --bg` waits for the server's readiness line, `stop` blocks
 //! on the lock.
 
 use crate::context::Booted;
@@ -17,28 +17,8 @@ use std::future::Future;
 use std::io::Write;
 use tokio::io::AsyncBufReadExt;
 
-#[derive(Debug, clap::Subcommand)]
-pub enum ServeCommands {
-    /// Serve the node on its socket in the foreground until SIGTERM or Ctrl-C
-    Run,
-    /// Start a background daemon and return once it is serving
-    Start,
-    /// Stop the background daemon and return once it has exited
-    Stop,
-}
-
-/// What the foreground server prints, once, when it is serving. `start` waits for this line.
+/// What the foreground server prints, once, when it is serving. `start --bg` waits for this line.
 const READY_PREFIX: &str = "listening on ";
-
-pub async fn run(command: ServeCommands) -> Res<ExitCode> {
-    let conf = lazy::config().await?;
-    let dir = &conf.node_dir;
-    match command {
-        ServeCommands::Run => run_foreground(dir).await,
-        ServeCommands::Start => start(dir).await,
-        ServeCommands::Stop => stop(dir).await,
-    }
-}
 
 /// Boots the node with its socket attached (and its peers service, when `node.json` configures
 /// one) and serves until `shutdown` resolves, then stops it. `ready` is called once, when the
@@ -76,6 +56,17 @@ pub async fn serve(
     served
 }
 
+/// `day node start`: serves the node on its socket in the foreground until SIGTERM or Ctrl-C, or
+/// with `bg` spawns that as a background process and returns once it is serving.
+pub async fn start(bg: bool) -> Res<ExitCode> {
+    let conf = lazy::config().await?;
+    if bg {
+        start_background(&conf.node_dir).await
+    } else {
+        run_foreground(&conf.node_dir).await
+    }
+}
+
 async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
     use tokio::signal::unix::SignalKind;
     use tokio::signal::unix::signal;
@@ -108,9 +99,9 @@ async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn start(dir: &NodeDir) -> Res<ExitCode> {
+async fn start_background(dir: &NodeDir) -> Res<ExitCode> {
     // A command that has the node open is not the server: wait for it to finish, then start serving.
-    // A server that is still booting is awaited, so `start` never reports one that is not
+    // A server that is still booting is awaited, so `start --bg` never reports one that is not
     // serving.
     if let Err(held) = dir.try_lock(LockRole::Command)? {
         if held.role == Some(LockRole::Serve) {
@@ -137,7 +128,7 @@ async fn start(dir: &NodeDir) -> Res<ExitCode> {
     let mut child = tokio::process::Command::new(std::env::current_exe()?)
         .arg("--node")
         .arg(dir.root())
-        .args(["node", "run"])
+        .args(["node", "start"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(log)
@@ -165,7 +156,10 @@ async fn start(dir: &NodeDir) -> Res<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn stop(dir: &NodeDir) -> Res<ExitCode> {
+/// `day node stop`: signals the background server and returns once it has exited.
+pub async fn stop() -> Res<ExitCode> {
+    let conf = lazy::config().await?;
+    let dir = &conf.node_dir;
     let held = match dir.try_lock(LockRole::Command)? {
         Ok(_free) => {
             // Nobody has the node. A socket file left behind is a server that died uncleanly.

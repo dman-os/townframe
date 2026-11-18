@@ -1,6 +1,6 @@
 # The daemon lifecycle: start, status, exec over the socket, stop
 
-`node start` returns once the daemon prints its readiness line. While it runs, `node status`
+`node start --bg` returns once the daemon prints its readiness line. While it runs, `node status`
 and `exec` reach the node over its socket instead of booting their own. `node stop`
 returns once the process has exited, and the socket is gone.
 
@@ -18,10 +18,10 @@ nodules   0 enabled of 0
 services  not exposed by the node
 peers     none attached (only a daemon attaches peers)
 
-$ day node start
+$ day node start --bg
 daemon started (pid [..]) listening on [..]/run/day/[..].sock
 
-$ day node start
+$ day node start --bg
 daemon already running on [..]/run/day/[..].sock
 
 $ day node status

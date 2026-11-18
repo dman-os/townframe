@@ -8,7 +8,7 @@ are not ids are refused before the node is asked.
 $ day node init
 initialized node [..] at [..]/node
 
-$ day node start
+$ day node start --bg
 daemon started (pid [..]) listening on [..]/run/day/[..].sock
 
 $ sh -c '"$DAY" drawers add-member z11111111111111111111111111111111 5866666666666666666666666666666666666666666666666666666666666666 --access read 2>&1 | grep -o "the node refused the member: UnknownDrawer" | head -1'

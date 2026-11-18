@@ -10,7 +10,7 @@ being handed a capability first. `remember` and `forget` go through the same han
 $ day node init
 initialized node [..] at [..]/node
 
-$ day node start
+$ day node start --bg
 daemon started (pid [..]) listening on [..]/run/day/[..].sock
 
 $ day drawers ls
