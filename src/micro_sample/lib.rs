@@ -4,16 +4,16 @@
 mod tests;
 mod view;
 
-use clay_mdk::Attachment;
 use clay_mdk::ComponentDecl;
 use clay_mdk::ConfigDecl;
 use clay_mdk::Context;
 use clay_mdk::Error;
+use clay_mdk::Link;
 use clay_mdk::ManifestBuilder;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
 use clay_mdk::PackageDecl;
-use clay_mdk::RowAttachment;
+use clay_mdk::RowLink;
 use clay_mdk::Sidecar;
 use clay_mdk::host::DocumentService;
 use dioxus::prelude::*;
@@ -75,7 +75,7 @@ impl ComponentDecl for SampleDetailView {
 /// at runtime, so it exists only while the micro runs.
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
-        .component::<SampleDetailView>()
+        .view::<SampleDetailView>()
         .config::<SampleFacet>()
         .writes::<SettingsSections>(SECTIONS_BINDING, Necessity::Required)
         .writes::<LayoutPanels>(PANELS_BINDING, Necessity::Optional)
@@ -111,9 +111,9 @@ pub async fn activate(context: Context) -> Result<(), Error> {
             &ID.to_owned(),
             &Section {
                 title: "Sample micro".into(),
-                detail: Attachment::at(0),
+                detail: Link::at(0),
             },
-            vec![RowAttachment::own::<SampleDetailView>()],
+            vec![RowLink::own::<SampleDetailView>()],
         )
         .await?;
     Ok(())

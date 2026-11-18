@@ -1,10 +1,9 @@
 use super::*;
 use crate::ConfigurationRequest;
+use crate::Endpoint;
 use crate::Entrypoints;
 use crate::FacetAccess;
 use crate::MicroId;
-use crate::PublicationDeclaration;
-use crate::PublicationKind;
 use clay_collection::Nsid;
 use clay_collection::ReplicaId;
 use clay_dioxus::ComponentMount;
@@ -36,29 +35,23 @@ async fn counter_package() -> WasmPackage {
 fn manifest(view: &str, config: Option<(bool, bool)>) -> MicroManifest {
     MicroManifest {
         entrypoints: Entrypoints::micro_client(),
-        // The counter also publishes a badge presentation and the `count` and `increment` calls.
-        publications: vec![
-            PublicationDeclaration {
-                name: view.into(),
-                kind: PublicationKind::Presentation,
-                contract: None,
-            },
-            PublicationDeclaration {
-                name: "badge".into(),
-                kind: PublicationKind::Presentation,
-                contract: None,
-            },
-            PublicationDeclaration {
-                name: "count".into(),
-                kind: PublicationKind::Call,
-                contract: Some(Nsid::literal("org.example.dayframe.counter.count")),
-            },
-            PublicationDeclaration {
-                name: "increment".into(),
-                kind: PublicationKind::Call,
-                contract: Some(Nsid::literal("org.example.dayframe.toolbar.action")),
-            },
-        ],
+        // The counter also serves a badge view, the `count` method and the `increment` callback.
+        endpoints: BTreeMap::from([
+            (view.into(), Endpoint::View { implements: None }),
+            ("badge".into(), Endpoint::View { implements: None }),
+            (
+                "count".into(),
+                Endpoint::Method {
+                    nsid: Nsid::literal("org.example.dayframe.counter.count"),
+                },
+            ),
+            (
+                "increment".into(),
+                Endpoint::Callback {
+                    implements: Nsid::literal("org.example.dayframe.toolbar.action"),
+                },
+            ),
+        ]),
         requires: vec![],
         configuration_requests: config
             .map(|(read, write)| ConfigurationRequest {
@@ -408,7 +401,7 @@ async fn a_guest_slot_mounts_another_guests_presentation_and_follows_it_through_
             let supervisor = Rc::clone(&supervisor);
             async move { supervisor.drive().await }
         });
-        // The row the consumer's `slot` shows: its attachment is the counter's `view`.
+        // The row the consumer's `slot` shows: its link is the counter's `view`.
         let cbor = |text: &str| {
             let mut bytes = Vec::new();
             ciborium::into_writer(text, &mut bytes).unwrap();

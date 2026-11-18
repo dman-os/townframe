@@ -97,7 +97,7 @@ mod tests {
             1,
             MicroManifest {
                 entrypoints: Entrypoints::micro_client(),
-                publications: vec![],
+                endpoints: Default::default(),
                 requires: vec![],
                 configuration_requests: vec![],
                 collection_contracts: vec![],
@@ -167,8 +167,8 @@ mod tests {
                 id: "row".into(),
                 binding: "nowhere".into(),
                 key: "k".into(),
-                payload: serde_json::Value::Null,
-                attachments: vec![],
+                value: serde_json::Value::Null,
+                links: vec![],
             });
         assert_eq!(
             Package::new(LOCAL_NAMESPACE, invalid, vec![]).unwrap_err(),
@@ -191,15 +191,15 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_fixture_sidecar_declares_its_publications() {
+    fn lifecycle_fixture_sidecar_declares_its_endpoints() {
         let sidecar = lifecycle_fixture_sidecar();
         assert_eq!(sidecar.id, "dayframe.lifecycle-fixture");
         assert_eq!(
             sidecar
                 .manifest
-                .publications
-                .iter()
-                .map(|publication| publication.name.as_str())
+                .endpoints
+                .keys()
+                .map(String::as_str)
                 .collect::<Vec<_>>(),
             ["detail", "echo", "relay"]
         );

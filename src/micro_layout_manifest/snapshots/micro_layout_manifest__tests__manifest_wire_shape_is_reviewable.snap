@@ -9,10 +9,9 @@ entrypoints:
   initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
   presentation: "townframe:dayframe/presentation-events@0.4.0"
   installer: ~
-publications:
-  - name: view
-    kind: presentation
-    contract: ~
+endpoints:
+  view:
+    $type: "org.example.clay.micro.manifest#viewEndpoint"
 requires:
   - binding: nav-button
     contract: org.example.dayframe.shell.navButton
@@ -45,12 +44,12 @@ contributions:
   - id: panel
     binding: shell-panels
     key: dayframe.layout
-    payload:
+    value:
       content:
-        $attachment: 0
+        $link: 0
       sockets:
         - list
       title: Layout
-    attachments:
+    links:
       - index: 0
-        publication: view
+        endpoint: view

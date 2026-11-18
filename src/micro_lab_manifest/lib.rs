@@ -1,6 +1,6 @@
 //! Engine-neutral declarations of the Lab micro: the claytxt lane's experiments, one panel.
 //! The lab publishes one presentation and declares one row into the `layout.panels`
-//! collection, whose attachment is a lazy endpoint to that presentation, so the layout lists
+//! collection, whose link is a lazy endpoint to that presentation, so the layout lists
 //! the panel without starting the lab. It holds no configuration and no calls: an experiment
 //! that needs either grows the manifest when it does. The wasm guest reads only the constants;
 //! the composition root reads `manifest()`.
@@ -41,7 +41,7 @@ impl ComponentDecl for LabView {
 
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
-        .component::<LabView>()
+        .view::<LabView>()
         .writes::<LayoutPanels>(PANELS_BINDING, Necessity::Optional)
         .contributes::<LayoutPanels>("layout-panel", ID, |at| Panel {
             title: "Lab".into(),

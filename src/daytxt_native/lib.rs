@@ -89,8 +89,6 @@ fn native_micros() -> Vec<InstalledMicro> {
                     )
                 },
             )
-            .satisfied_by(&shell, &micro_shell_manifest::sidecar())
-            .expect("the shell publishes what Settings requires")
         },
         InstalledMicro {
             enabled_on_admission: true,
@@ -286,39 +284,26 @@ fn package_micros(
                     ));
                 }
                 let engine = engine.clone();
-                let micro = InstalledMicro::new(
-                    package.id().clone(),
-                    sidecar.clone(),
-                    move |id, resources, bindings| {
-                        engine(
-                            resources,
-                            id,
-                            sidecar.manifest,
-                            bindings,
-                            egress.clone(),
-                            bytes,
-                        )
-                    },
-                )
-                // A package may require the shell's publications (the layout's app bar
-                // button); the shell is the only provider a package can name today.
-                .satisfied_by(
-                    &clay_mdk::MicroId::local(micro_shell_manifest::ID),
-                    &micro_shell_manifest::sidecar(),
-                )
-                .map(|micro| InstalledMicro {
-                    enabled_on_admission: ENABLED_ON_ADMISSION
-                        .iter()
-                        .any(|id| micro.id == clay_mdk::MicroId::local(id)),
-                    ..micro
+                installed.push(InstalledMicro {
+                    enabled_on_admission: enable_all
+                        || ENABLED_ON_ADMISSION
+                            .iter()
+                            .any(|id| *package.id() == clay_mdk::MicroId::local(id)),
+                    ..InstalledMicro::new(
+                        package.id().clone(),
+                        sidecar.clone(),
+                        move |id, resources, bindings| {
+                            engine(
+                                resources,
+                                id,
+                                sidecar.manifest,
+                                bindings,
+                                egress.clone(),
+                                bytes,
+                            )
+                        },
+                    )
                 });
-                match micro {
-                    Ok(mut micro) => {
-                        micro.enabled_on_admission = enable_all;
-                        installed.push(micro);
-                    }
-                    Err(error) => errors.push(format!("{}: {error}", files.origin)),
-                }
             }
             Err(error) => errors.push(format!("{}: {error}", files.origin)),
         }
