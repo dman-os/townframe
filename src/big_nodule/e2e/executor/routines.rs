@@ -1742,11 +1742,7 @@ mod grant_requests {
                 "https://api.example.org:9443/",
                 "another port",
             ),
-            (
-                http::Method::POST,
-                API,
-                "a verb the permbind does not list",
-            ),
+            (http::Method::POST, API, "a verb the permbind does not list"),
             (
                 http::Method::GET,
                 "http://www.example.org/",

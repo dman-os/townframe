@@ -9,11 +9,11 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use super::AUTHORITY;
-use crate::config::InvalidNetTarget;
-use crate::config::NetTarget;
 use super::Digest;
 use super::Necessity;
 use super::Resolution;
+use crate::config::InvalidNetTarget;
+use crate::config::NetTarget;
 
 const PERMBIND_AUTHORITY: &str = "org.example.daybook.cartridge";
 const COMPONENT_AUTHORITY: &str = "org.example.daybook.cartridge";

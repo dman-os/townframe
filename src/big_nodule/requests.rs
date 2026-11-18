@@ -23,6 +23,7 @@ use big_cartridges_core::protocol::RequestedAccess;
 use big_dispatch_core::DispatchError;
 use big_nodule_core::config::CartridgeConfig;
 use big_nodule_core::config::DatumSlot;
+use big_nodule_core::config::NoduleResolution;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesError;
 use method_core::ContextError;
@@ -230,10 +231,26 @@ impl GrantRequests {
         self.grants.send_if_modified(|feed| feed.update(grants));
     }
 
-    /// Records the permbinds the admitted cartridges declare, replacing what the last reconcile
-    /// saw.
-    pub(crate) fn declare(&mut self, declared: BTreeMap<CartridgeId, Declared>) {
-        self.declared = declared;
+    /// Records the permbinds the admitted cartridges declare, and the network hosts their grants
+    /// cover, replacing what the last reconcile saw.
+    pub(crate) fn declare(&mut self, resolved: &BTreeMap<CartridgeId, NoduleResolution>) {
+        self.declared = resolved
+            .iter()
+            .filter_map(|(cartridge_id, resolution)| match resolution {
+                NoduleResolution::Admitted {
+                    installed,
+                    desired_nets,
+                    ..
+                } => Some((
+                    cartridge_id.clone(),
+                    Declared {
+                        permbinds: installed.resolved.cartridge.permbinds.clone(),
+                        nets: desired_nets.clone(),
+                    },
+                )),
+                NoduleResolution::Refused { .. } => None,
+            })
+            .collect();
     }
 
     /// The grants of `cartridge_id` that last the boot, for its config snapshot.
