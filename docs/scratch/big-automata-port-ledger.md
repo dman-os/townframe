@@ -877,6 +877,29 @@ is clean apart from dead code.
 - sans-IO client and server machines, with a simulation proptest;
 - service stack audit: cancellation, iroh in the browser, encoding negotiation, sans-IO fit.
 
+**Service stack audit (2026-11-18):**
+- **Browser.** iroh 1.4.1 supports the browser, relay-only. `service_core_rs` and
+  `service_client_core_rs` build for wasm. `service_client_native_rs` doesn't: it enables tokio
+  `net`, and its iroh client calls `tokio::spawn` (`xrpc/iroh.rs:238,366`) and
+  `tokio::time::timeout`. `service_core_rs/context.rs` uses `tokio::time::Instant` and
+  `SystemTime`. `IrohXrpcClient` isn't wired into `Client<Proto>`; unary only.
+- **Cancellation over XRPC is drop-only.** HTTP builds a root context
+  (`service_core_rs/xrpc.rs:85`); iroh cancel works via STOP_SENDING (tested).
+  - Admitted IRPC unary handlers ignore a dropped caller (`host.rs:160`).
+  - `Host::invoke`'s biased select throws away a result that is ready in the same poll as a
+    cancel (`host.rs:91`).
+  - The WebSocket subscription pump is a detached, untracked `tokio::spawn`
+    (`router.rs:731`).
+- **Identity.** The iroh peer comes from the authenticated connection, as an extension that
+  headers can't spoof (tested). It's a `String`, not a typed id. Direct and IRPC calls carry no
+  peer.
+- **Encoding.** JSON is hard-wired, with a `Value` intermediate and a double serialization
+  (`router.rs:911,914`). atproto fixes the encoding per method in the lexicon (no
+  negotiation). `[u8; 32]` needs byte adapters.
+- **Supersede with transport cancel.** The next round can be admitted before the previous one
+  is dropped. That's safe because the server keeps no cursor (law 9), but it costs a
+  long-poll permit briefly.
+
 **Then:** `quint-connect` conformance; the responder on `read_authorized`; the service
 binding; the bucket and summary RPCs on the same binding; the tasks (batched, coalesced
 cursor persistence).
