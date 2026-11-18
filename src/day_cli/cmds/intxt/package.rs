@@ -199,6 +199,9 @@ pub(crate) struct Packaging<'a> {
     pub(super) caller: Caller<&'a NodeClient>,
     pub(super) cwd: &'a Path,
     pub(super) node_dir: &'a Path,
+    /// Who the review verbs write as and read the inbox of: the operator unless the CLI detected
+    /// an agent ([`Packaging::participating_as`]).
+    pub(super) participant: super::participant::Detected,
 }
 
 /// An intxt as `show` and `add` read it: its title and its entries in body order.
@@ -336,14 +339,14 @@ impl<'a> Packaging<'a> {
             ),
             cwd,
             node_dir,
+            participant: super::participant::Detected::operator(),
         }
     }
 
-    /// The same verbs run as `actor`, a descendant of the operator: what they write is attributed
-    /// to it, which is how a second side of a review exists on one node.
-    #[cfg(test)]
-    pub(crate) fn acting_as(mut self, actor: big_cabinet_core::dmeta::Uuid7) -> Self {
-        self.caller = self.caller.acting_as(actor);
+    /// The same verbs as the participant `detected` names rather than the operator: what a
+    /// comment claims as its `creator` and `generator`, and whose side of a thread `inbox` reads.
+    pub(crate) fn participating_as(mut self, detected: super::participant::Detected) -> Self {
+        self.participant = detected;
         self
     }
 
