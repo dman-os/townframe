@@ -23,7 +23,6 @@ use clay_guest_session::capabilities::GuestCall;
 use clay_guest_session::capabilities::InFlightCall;
 use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::capabilities::PublishedCapability;
-use clay_guest_session::ingress_budget;
 use clay_guest_session::presentation::map_mutations;
 use clay_host::ComponentRef;
 use clay_host::Host;
@@ -459,19 +458,16 @@ impl wit_presentation::HostSurface for WasmStoreState {
         edits: Vec<wit_presentation::Mutation>,
     ) -> wasmtime::Result<Result<u64, wit_presentation::PresentationError>> {
         let edits: Vec<_> = edits.into_iter().map(convert_mutation).collect();
-        if let Err(reason) = ingress_budget(&edits) {
-            self.table.get(&surface)?.writer().withdraw();
-            return Ok(Err(wit_presentation::PresentationError::Unsupported(
-                reason.into(),
-            )));
+        let surface = self.table.get(&surface)?.clone();
+        if let Err(error) = self.presentation.admit(&surface, &edits) {
+            return Ok(Err(convert_error(error)));
         }
         let converted = map_mutations(edits, |reference| {
             self.table.get(&reference).map(|component| component.0)
         })?;
-        let surface = self.table.get(&surface)?;
         Ok(self
             .presentation
-            .apply(surface, &converted)
+            .apply(&surface, &converted)
             .map_err(convert_error))
     }
 
@@ -603,20 +599,36 @@ fn compile_component(engine: &Engine, bytes: &[u8]) -> Result<Component, String>
     unsafe { Component::deserialize(engine, &compiled) }.map_err(|error| error.to_string())
 }
 
-/// `$DAYFRAME_COMPONENT_CACHE`, else the XDG/home cache, keyed by content and engine
-/// compatibility. `None` means the process has no cache location at all (no `HOME`, no
-/// `XDG_CACHE_HOME`); compilation then happens in memory only.
+/// Where compiled artifacts live, set once by a composition root that has app storage of its own.
+static CACHE_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+
+/// Keep compiled components under `directory` (created on first write). A composition root whose
+/// process has no `$HOME` or XDG cache, an Android app, sets this once before it loads a
+/// package; without it every start recompiles every guest. Setting it twice is a programming
+/// error, since artifacts would then be split between two directories.
+pub fn set_component_cache_directory(directory: PathBuf) {
+    CACHE_DIRECTORY
+        .set(directory)
+        .expect("the component cache directory is set once per process");
+}
+
+/// The directory set by [`set_component_cache_directory`], else `$DAYFRAME_COMPONENT_CACHE`,
+/// else the XDG/home cache, keyed by content and engine compatibility. `None` means the process
+/// has no cache location at all; compilation then happens in memory only.
 fn cache_path(engine: &Engine, bytes: &[u8]) -> Option<PathBuf> {
-    let directory = match std::env::var_os("DAYFRAME_COMPONENT_CACHE") {
-        Some(directory) => PathBuf::from(directory),
-        None => {
-            let base = std::env::var_os("XDG_CACHE_HOME")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
-                })?;
-            base.join("dayframe").join("components")
-        }
+    let directory = match CACHE_DIRECTORY.get() {
+        Some(directory) => directory.clone(),
+        None => match std::env::var_os("DAYFRAME_COMPONENT_CACHE") {
+            Some(directory) => PathBuf::from(directory),
+            None => {
+                let base = std::env::var_os("XDG_CACHE_HOME")
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
+                    })?;
+                base.join("dayframe").join("components")
+            }
+        },
     };
     let mut key = blake3::Hasher::new();
     key.update(bytes);
@@ -653,9 +665,43 @@ impl WasmPackage {
         Self::from_bytes(bytes).await
     }
 
-    pub async fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, String> {
+    /// Compile `bytes` off the polling thread and wait for it. Cranelift runs for seconds on a
+    /// phone, and the caller is a local future the shell polls on its UI thread; compiling in the
+    /// poll froze the frame (and with it the section's loading state) for the whole compile.
+    ///
+    /// Inside a tokio runtime the compile goes to its blocking pool, not a bare thread: a runtime
+    /// with a paused test clock auto-advances virtual time whenever every task is parked, and a
+    /// future parked on a bare thread's oneshot looks parked on nothing, so the clock jumped to the
+    /// next timer (a guest feed's 30 s long poll) while the compile was still running. Tokio
+    /// inhibits that auto-advance while a blocking task is in flight, which makes the compile a
+    /// real wait that a deterministic test clock respects. Without a runtime (the Android shell
+    /// polls on its own executor) a `wasm-compile` thread does the same job.
+    pub async fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
         let engine = engine()?;
-        let component = compile_component(&engine, bytes.as_ref())?;
+        let compile = {
+            let engine = engine.clone();
+            move || compile_component(&engine, &bytes)
+        };
+        let component = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => runtime
+                .spawn_blocking(compile)
+                .await
+                .expect("the compile task does not panic")?,
+            Err(_) => {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                std::thread::Builder::new()
+                    .name("wasm-compile".into())
+                    .spawn(move || {
+                        // A closed receiver is the activation being cancelled mid-compile (the
+                        // micro was disabled); the finished artifact is already in the cache.
+                        sender.send(compile()).ok();
+                    })
+                    .expect("the OS can spawn a compile thread");
+                receiver
+                    .await
+                    .expect("the compile thread reports before it exits")?
+            }
+        };
         let linker = linker(&engine)?;
         Ok(Self {
             engine,
@@ -833,10 +879,10 @@ impl WasmRuntime {
             .collect();
         active.publications = leases;
         let pending_limit = active.store.data().documents.limits().pending_deliveries;
-        let fuel = active.fuel_per_call.clone();
+        let fuel = Arc::clone(&active.fuel_per_call);
         let incarnation = Arc::new(Mutex::new(Some(active)));
-        let driver_incarnation = incarnation.clone();
-        let pump_incarnation = incarnation.clone();
+        let driver_incarnation = Arc::clone(&incarnation);
+        let pump_incarnation = Arc::clone(&incarnation);
         let pump_host = host.clone();
         let pump_instance = instance.clone();
         let documents = clay_guest_session::drive(
@@ -860,7 +906,7 @@ impl WasmRuntime {
                     let Some(active) = guard.as_ref() else {
                         return;
                     };
-                    active.wake.clone()
+                    Arc::clone(&active.wake)
                 };
                 tokio::select! {
                     () = &mut documents => return,
@@ -905,7 +951,7 @@ impl WasmRuntime {
             }
         };
         let revoked = Arc::new(AtomicBool::new(false));
-        let cleanup_revoked = revoked.clone();
+        let cleanup_revoked = Arc::clone(&revoked);
         host.own(
             &instance,
             Box::new(move || {
@@ -952,7 +998,7 @@ impl WasmRuntime {
         writer: Arc<dyn SurfaceSink<ComponentRef>>,
     ) -> Result<SurfaceSession, PresentationError> {
         let instance_for_surface = self.instance.clone();
-        let incarnation_for_surface = self.incarnation.clone();
+        let incarnation_for_surface = Arc::clone(&self.incarnation);
         let surface_rep = self.mount_guest_surface(
             publication,
             &writer,
@@ -960,11 +1006,11 @@ impl WasmRuntime {
             &incarnation_for_surface,
         )?;
         let dispatch_host = self.host.clone();
-        let dispatch_incarnation = incarnation_for_surface.clone();
+        let dispatch_incarnation = Arc::clone(&incarnation_for_surface);
         let dispatch_instance = instance_for_surface.clone();
-        let dispatch_writer = writer.clone();
+        let dispatch_writer = Arc::clone(&writer);
         let drop_host = self.host.clone();
-        let drop_incarnation = incarnation_for_surface.clone();
+        let drop_incarnation = Arc::clone(&incarnation_for_surface);
         let drop_instance = instance_for_surface.clone();
         let drop_writer = writer;
 
@@ -1073,7 +1119,7 @@ impl WasmRuntime {
         instance: &Instance,
         incarnation: &Arc<Mutex<Option<WasmIncarnation>>>,
     ) -> Result<u32, PresentationError> {
-        let revoked = self.revoked.clone();
+        let revoked = Arc::clone(&self.revoked);
         let mut guard = incarnation.lock().unwrap();
         if self.host.check(instance).is_err() {
             return Err(PresentationError::Revoked);
@@ -1085,7 +1131,7 @@ impl WasmRuntime {
             .store
             .data_mut()
             .table
-            .push(Placement::new(writer.clone(), revoked))
+            .push(Placement::new(Arc::clone(writer), revoked))
             .map_err(|_| PresentationError::Revoked)?;
         let placement_rep = placement.rep();
         active.refuel();
@@ -1163,7 +1209,7 @@ impl WasmRuntime {
     /// control knob (`store(0)` makes the next guest entry trap with `OutOfFuel`) without
     /// handing out the runtime or its store.
     pub fn fuel_budget(&self) -> Arc<AtomicU64> {
-        self.fuel.clone()
+        Arc::clone(&self.fuel)
     }
 }
 
