@@ -438,6 +438,102 @@ async fn capture_records_a_session_and_stores_a_binary_file_as_a_blob() {
     .await;
 }
 
+/// Claude Code can fire a tool's post hook before the transcript shows the call: the op is
+/// recorded without a cause, and the next hook, once the transcript has the call, gives the op
+/// the cause in the log.
+#[tokio::test(flavor = "multi_thread")]
+async fn capture_backfills_the_cause_of_an_op_recorded_before_the_transcript_showed_its_call() {
+    use crate::cmds::intxt::capture;
+    use big_cabinet_core::DocId;
+    use big_cabinet_core::datum::DatumMember;
+    use intxt_core::work;
+    use std::io::Write;
+
+    with_intxt_node(async |tmp, client| {
+        let node_root = tmp.path().join("node");
+        let base = tmp.path().canonicalize().unwrap();
+        let repo = init_repo(&base, &[("a.txt", "one\n")]);
+        let transcript = base.join("claude/s1.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        let mut file = std::fs::File::create(&transcript).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type": "user", "uuid": "u1", "parentUuid": null, "timestamp": "2026-11-10T10:00:00Z",
+                   "cwd": repo, "sessionId": "s1", "message": {"role": "user", "content": "edit"}})
+        )
+        .unwrap();
+        let hook = |event: &str, tool: bool| {
+            let mut input = json!({
+                "session_id": "s1",
+                "transcript_path": transcript,
+                "cwd": repo,
+                "hook_event_name": event,
+            });
+            if tool {
+                input["tool_name"] = json!("Bash");
+                input["tool_use_id"] = json!("t1");
+                input["tool_input"] = json!({"command": "edit"});
+            }
+            input.to_string().into_bytes()
+        };
+        capture::run(client, &node_root, &hook("SessionStart", false))
+            .await
+            .unwrap();
+        capture::run(client, &node_root, &hook("PreToolUse", true))
+            .await
+            .unwrap();
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        // The transcript has no `t1` yet.
+        let post = capture::run(client, &node_root, &hook("PostToolUse", true))
+            .await
+            .unwrap();
+        assert_eq!(post.uncaused_tool_calls, 0);
+        let recorded = post.recorded.unwrap();
+        let docs = &recorded.worktrees[&repo.display().to_string()].docs;
+        let worktree: work::Worktree = serde_json::from_value(
+            read_at(
+                client,
+                &docs.worktree.as_ref().unwrap().parse::<DocId>().unwrap(),
+                &format!("{}/main", work::Worktree::ID).parse().unwrap(),
+            )
+            .await
+            .unwrap()
+            .1,
+        )
+        .unwrap();
+        let log: DocId = worktree.op_logs[0].doc.parse().unwrap();
+        let op_key = format!("{}/0", work::WorktreeOp::ID).parse().unwrap();
+        let op = read_at(client, &log, &op_key).await.unwrap().1;
+        assert_eq!(op["kind"], "edit");
+        assert!(op.get("cause").is_none(), "{op}");
+
+        writeln!(
+            file,
+            "{}",
+            json!({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "timestamp": "2026-11-10T10:00:01Z",
+                   "cwd": repo, "sessionId": "s1",
+                   "message": {"id": "m-t1", "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                               "input": {"command": "edit"}}]}})
+        )
+        .unwrap();
+        let stopped = capture::run(client, &node_root, &hook("Stop", false))
+            .await
+            .unwrap();
+        assert_eq!(stopped.uncaused_tool_calls, 0);
+        let backfilled = read_at(client, &log, &op_key).await.unwrap().1;
+        assert!(
+            backfilled["cause"]
+                .as_str()
+                .unwrap()
+                .contains("promptTurn/u1"),
+            "{backfilled}"
+        );
+        assert_eq!(backfilled["files"], op["files"]);
+    })
+    .await;
+}
+
 /// Records, through the capture hooks, a Claude Code session `s1` in `repo` whose two tool calls
 /// each write a file and commit it, so the content of both commits was produced by a recorded call.
 async fn record_session_with_two_commits(
