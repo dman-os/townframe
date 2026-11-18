@@ -329,15 +329,16 @@ impl Cx {
     /// `Denied` (nothing declared it) or the cartridge's `MissingAuthority` (declared, not yet
     /// granted: a routine may then ask with `requestCartridgeGrant`). The routine's capability
     /// goes with the request so the host can tell which routine asked, and is removed before
-    /// the request leaves the node. The response body is read whole.
+    /// the request leaves the node. Bodies are not buffered here: a byte `body` is sent chunk
+    /// by chunk and a non-JSON answer arrives as a byte stream the caller reads at its own
+    /// pace (a JSON answer is small by definition and arrives whole).
     pub async fn fetch(
         &self,
         method: http::Method,
         url: &str,
         mut headers: http::HeaderMap,
-        body: Vec<u8>,
-    ) -> Result<(http::StatusCode, http::HeaderMap, Vec<u8>), HttpTransportError> {
-        use futures::StreamExt;
+        body: XrpcBody,
+    ) -> Result<XrpcResponse, HttpTransportError> {
         if let Some(capability) = &self.nodule {
             headers.insert(
                 NODULE_CAPABILITY_HEADER,
@@ -345,29 +346,16 @@ impl Cx {
                     .expect("a capability id is valid header text"),
             );
         }
-        let response = HttpTransport::send(
+        HttpTransport::send(
             &self.transport,
             XrpcRequest {
                 method,
                 path: url.to_owned(),
                 headers,
-                body: XrpcBody::Json(body),
+                body,
             },
         )
-        .await?;
-        let body = match response.body {
-            XrpcBody::Json(body) => body,
-            XrpcBody::Bytes(mut stream) => {
-                let mut body = Vec::new();
-                while let Some(chunk) = stream.next().await {
-                    body.extend_from_slice(&chunk.map_err(|error| HttpTransportError {
-                        message: format!("response body: {error}"),
-                    })?);
-                }
-                body
-            }
-        };
-        Ok((response.status, response.headers, body))
+        .await
     }
 
     /// Calls `M` through dispatch with the nodule's own capability, as the next hop of this
