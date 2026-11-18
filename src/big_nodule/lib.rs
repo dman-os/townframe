@@ -24,6 +24,8 @@ pub use service_client_core_rs::xrpc::XrpcBody;
 pub mod executor;
 mod requests;
 mod state;
+pub use state::RoutineScopes;
+pub use state::lower_uses;
 mod store;
 pub mod wire;
 

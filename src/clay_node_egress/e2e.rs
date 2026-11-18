@@ -21,6 +21,7 @@ use big_dispatch::ProviderError;
 use big_dispatch::ProviderKind;
 use big_dispatch::ProviderState;
 use big_dispatch_core::Body;
+use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
 use clay_guest_session::InitialContext;
 use clay_guest_session::capabilities::DeclaredPublication;
@@ -40,7 +41,6 @@ use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -232,8 +232,11 @@ async fn run_fixture(
     attempts
 }
 
-fn methods(nsids: &[&str]) -> BTreeSet<String> {
-    nsids.iter().map(|nsid| (*nsid).to_owned()).collect()
+fn methods(nsids: &[&str]) -> DispatchScope {
+    DispatchScope {
+        operations: nsids.iter().map(|nsid| (*nsid).to_owned()).collect(),
+        ..DispatchScope::default()
+    }
 }
 
 /// The micro's calls reach dispatch as its own actor under the capability the host minted for

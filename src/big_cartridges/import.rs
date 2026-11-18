@@ -35,11 +35,7 @@ use service_utils_rs::RequestContext;
 /// The artifact key a micro's component is published under.
 pub const MICRO_COMPONENT_ARTIFACT: &str = "component";
 
-/// The description schema of a micro contribution built from Clay's manifest. Following ADR 028
-/// (compatibility lives in the NSID), this NSID is the manifest format's identity: a breaking
-/// manifest change mints a new NSID rather than bumping a revision. Clay's older manifests also
-/// carry an integer `schema` member; it is not read, and stays in the description if present.
-pub const CLAY_MICRO_MANIFEST_SCHEMA: &str = "org.example.clay.micro.manifest";
+pub use big_cartridges_core::CLAY_MICRO_MANIFEST_SCHEMA;
 
 const WASM_MEDIA_TYPE: &str = "application/wasm";
 
@@ -172,6 +168,7 @@ pub async fn micro_pair(
                 component: MICRO_COMPONENT_ARTIFACT.into(),
                 schema: CLAY_MICRO_MANIFEST_SCHEMA.into(),
                 description: manifest.into_iter().collect(),
+                uses: Default::default(),
                 extra: Default::default(),
             });
         },

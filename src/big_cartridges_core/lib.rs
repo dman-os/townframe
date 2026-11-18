@@ -181,6 +181,17 @@ impl Cartridge {
                     format!("`{}` is not a component of this cartridge", micro.component),
                 ));
             }
+            // A micro's `uses` are admitted by the routine rule (ADR 049 §3): each key names one
+            // of the cartridge's permbinds, and asks no more than that permbind declares.
+            for (use_key, usage) in &micro.uses {
+                let permbind = self.permbinds.get(use_key).ok_or_else(|| {
+                    CartridgeError::invalid(
+                        format!("micro.uses.{use_key}"),
+                        "use must name a permbind",
+                    )
+                })?;
+                Self::validate_routine_use("micro", use_key, usage, permbind)?;
+            }
         }
         self.validate_routine_uses()
     }
@@ -216,7 +227,7 @@ impl Cartridge {
                     }
                     if let Some(permbind) = self.permbinds.get(use_key) {
                         Self::validate_routine_use(
-                            routine_key,
+                            &format!("nodule.routines.{routine_key}"),
                             use_key,
                             &routine.uses[use_key],
                             permbind,
@@ -228,8 +239,10 @@ impl Cartridge {
         Ok(())
     }
 
+    /// Checks one `uses` entry of `owner` (`micro`, or `nodule.routines.<key>`) asks no more than
+    /// its permbind declares.
     fn validate_routine_use(
-        routine_key: &str,
+        owner: &str,
         use_key: &str,
         usage: &RoutineUse,
         permbind: &Permbind,
@@ -259,8 +272,8 @@ impl Cartridge {
             .any(|(requested, declared)| *requested && declared.is_none())
         {
             return Err(CartridgeError::invalid(
-                format!("nodule.routines.{routine_key}.uses.{use_key}"),
-                "routine use asks for access the permbind does not declare",
+                format!("{owner}.uses.{use_key}"),
+                "use asks for access the permbind does not declare",
             ));
         }
         Ok(())
@@ -308,6 +321,13 @@ impl ResolvedCartridge {
     }
 }
 
+/// The description schema of a micro contribution built from Clay's manifest. Following ADR 028
+/// (compatibility lives in the NSID), this NSID is the manifest format's identity: a breaking
+/// manifest change mints a new NSID rather than bumping a revision. Clay's older manifests also
+/// carry an integer `schema` member; it is not read, and stays in the description if present.
+/// A micro host loads a contribution only when its `schema` is this one.
+pub const CLAY_MICRO_MANIFEST_SCHEMA: &str = "org.example.clay.micro.manifest";
+
 /// `org.example.daybook.cartridge.micro`: the package's one GUI contribution. It has no key of its own:
 /// the micro's identity is the cartridge id it is installed as.
 ///
@@ -325,6 +345,12 @@ pub struct MicroContribution {
     pub component: String,
     pub schema: String,
     pub description: IndexMap<String, serde_json::Value>,
+    /// What the micro reaches of the cartridge's permbinds, declared once for the micro as a
+    /// routine declares its own (ADR 049 §3). The host mints the micro's handles from these
+    /// narrowed by the permbinds' rules and intersected with the cartridge's grants; a micro with
+    /// no `uses` can call nothing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub uses: BTreeMap<String, RoutineUse>,
     #[serde(flatten)]
     pub extra: Extra,
 }

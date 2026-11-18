@@ -4,5 +4,7 @@
 # exposed_external_crates: []
 
 impl DispatchEgress for clay_node_egress::MicroEgress
-pub impl clay_node_egress::MicroEgress::async fn install (dispatch : Client < DispatchProtocol > , minter : Authorization , actor : & OpenedActor , methods : BTreeSet < String > ,) -> Result < Self , ClientError < DispatchError > >
+pub impl clay_node_egress::MicroEgress::async fn install (dispatch : Client < DispatchProtocol > , minter : Authorization , actor : & OpenedActor , scope : DispatchScope ,) -> Result < Self , ClientError < DispatchError > >
+pub impl clay_node_egress::MicroEgress::async fn remint (& self , minter : Authorization , actor : & OpenedActor , scope : DispatchScope ,) -> Result < Option < CapId > , ClientError < DispatchError > >
+pub impl clay_node_egress::MicroEgress::fn capability (& self) -> Option < CapId >
 pub struct clay_node_egress::MicroEgress  {  }

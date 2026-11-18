@@ -13,18 +13,31 @@
 //! undoes it in reverse: the egress handles go first because they hold dispatch clients that must
 //! not outlive the node they call, then the node stops its own services in reverse of their boot.
 //!
+//! Micros come from two places. A micro a cartridge contributes is loaded from the node's catalog
+//! and its handles are minted from its `uses` and the cartridge's grants ([`cartridge`]). A micro
+//! that is in no cartridge keeps the interim path below ([`MicroInstall`]) until it is published
+//! as one.
+//!
 //! The node runs on a runtime of its own. Its tasks (the peers endpoint, dispatch, indexing) must
 //! not share a host's UI loop, and the host's runtime flavor is not the node's business.
 
+use big_blobs_core::MintBlobsCapability;
+use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::OpenedActor;
+use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::DrawerReach;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_dispatch_core::DispatchScope;
+use big_nodule::RoutineScopes;
+use big_nodule::executor::RoutineCapabilities;
 use clay_guest_session::egress::DispatchEgress;
 use clay_node_egress::MicroEgress;
 use day_node::HeldNode;
@@ -34,6 +47,7 @@ use service_client_core_rs::xrpc::HttpTransportError;
 use service_client_core_rs::xrpc::XrpcBody;
 use service_client_core_rs::xrpc::XrpcRequest;
 use service_client_core_rs::xrpc::XrpcResponse;
+use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -47,15 +61,19 @@ use utils_rs::prelude::WrapErr;
 use utils_rs::prelude::default;
 use utils_rs::prelude::ferr;
 
+mod cartridge;
 #[cfg(test)]
 mod e2e;
 
+pub use cartridge::CartridgeMicro;
+
 /// One micro the composition installs, and what node access it is granted.
 ///
-/// INTERIM: the permission model (per-micro `uses` intersected with the cartridge's grants, Clay
-/// on the node section 2, and its 6.2 lowering of a domain handle) replaces both fields. Until it
-/// lands, the composition names the granted NSIDs and drawers of each micro here, and this table
-/// is the only place that does; empty grants nothing, which is every micro's grant today.
+/// INTERIM, for micros that are in no cartridge only. A micro a cartridge contributes is minted
+/// from its `uses` and the cartridge's grants ([`NodeComposition::sync_cartridge_micros`]), and
+/// this table never applies to it. Until `dayframe.review` is published as a cartridge, the
+/// composition names the granted NSIDs and drawers of each such micro here, and this table is the
+/// only place that does; empty grants nothing.
 #[derive(Debug, Clone)]
 pub struct MicroInstall {
     /// The micro's id text, `<did>/<name>`.
@@ -237,10 +255,22 @@ pub struct NodeComposition {
 /// What the composition holds for one installed micro.
 struct Installed {
     egress: Arc<MicroEgress>,
-    /// The micro's document capability over its configured drawers; `None` for a micro with none.
+    /// The micro's document capability: over its configured drawers for an interim install, and
+    /// the docs handle of its [`Minted`] scopes for a cartridge's micro. `None` for a micro with
+    /// none.
     doc_capability: Option<CapId>,
     /// The install's configuration datum with `docCap` added: `(tag, key, value)`.
     config: Option<(String, String, serde_json::Value)>,
+    /// What a cartridge's micro was minted for; `None` for an interim install.
+    minted: Option<Minted>,
+}
+
+/// The scopes a cartridge's micro holds handles for, and the handles beyond dispatch's (which its
+/// egress holds). A later sync compares the scopes with what its grants now lower to, and retracts
+/// and mints again when they differ.
+struct Minted {
+    scopes: RoutineScopes,
+    handles: RoutineCapabilities,
 }
 
 impl NodeComposition {
@@ -469,54 +499,30 @@ async fn install_one(node: &big_node::BigNode, install: MicroInstall) -> Res<Ins
         drawers,
         config,
     } = install;
-    let authority = &node.authority;
-    let minter = Authorization::identity(authority.root);
-    let open = |parent, path: String, rights| {
-        authority.client.call(
-            RequestContext::root(),
-            OpenActor {
-                parent,
-                path,
-                rights,
-            },
-        )
-    };
-    // A subsystem actor holds every right, as `big_node` opens `nodules`; a micro's own actor
-    // can only be used. Opening an open actor is idempotent.
-    let micros = open(authority.root, "micros".into(), Rights::all())
-        .await
-        .wrap_err("opening the micros subsystem actor")?;
-    let actor: OpenedActor = open(
-        micros.capability,
-        format!("micros/{}", actor_segment(&micro)),
-        Rights::USE,
+    let actor = open_micro_actor(node, &micro).await?;
+    let minter = Authorization::identity(node.authority.root);
+    let egress = MicroEgress::install(
+        node.dispatch.client.clone(),
+        minter,
+        &actor,
+        DispatchScope {
+            operations: methods,
+            ..DispatchScope::default()
+        },
     )
     .await
-    .wrap_err_with(|| format!("opening the actor of micro {micro}"))?;
-    let egress = MicroEgress::install(node.dispatch.client.clone(), minter, &actor, methods)
-        .await
-        .wrap_err_with(|| format!("minting the capability of micro {micro}"))?;
+    .wrap_err_with(|| format!("minting the capability of micro {micro}"))?;
     let doc_capability = if drawers.is_empty() {
         None
     } else {
-        let minted = node
-            .docs
-            .client
-            .call_with(
-                RequestContext::root(),
-                minter.metadata(),
-                MintDocCapability {
-                    scope: DocScope {
-                        drawers: drawers.into_iter().collect(),
-                        ..DocScope::default()
-                    },
-                    rights: Rights::USE,
-                    subject: Some(actor.actor.actor_id),
-                },
-            )
-            .await
-            .wrap_err_with(|| format!("minting the document capability of micro {micro}"))?;
-        Some(minted.capability_id)
+        let scope = DocScope {
+            drawers: drawers
+                .into_iter()
+                .map(|(drawer, access)| (drawer, DrawerReach::all_kinds(access)))
+                .collect(),
+            ..DocScope::default()
+        };
+        Some(mint_docs(node, &actor, scope).await?)
     };
     let config = config.map(
         |InstallConfig {
@@ -537,7 +543,159 @@ async fn install_one(node: &big_node::BigNode, install: MicroInstall) -> Res<Ins
         egress: Arc::new(egress),
         doc_capability,
         config,
+        minted: None,
     })
+}
+
+/// Installs a cartridge's micro: its actor, and a handle for each service `scopes` reaches,
+/// minted as the node's operator and bound to the micro's actor, so each is refused under any
+/// other. The guest never holds them: the host presents dispatch's on every `dispatch.local` call
+/// and names the others in the calls it makes for the micro (ADR 049 section 3, asymmetry 2).
+///
+/// With `previous`, the micro's earlier install, the egress the micro's incarnation holds stays
+/// and presents the new dispatch capability from its next call, and every handle of the earlier
+/// scopes is retracted (ADR 049 section 6.4).
+async fn install_with(
+    node: &big_node::BigNode,
+    micro: &str,
+    scopes: RoutineScopes,
+    previous: Option<Installed>,
+) -> Res<Installed> {
+    let actor = open_micro_actor(node, micro).await?;
+    let minter = Authorization::identity(node.authority.root);
+    let dispatch = scopes.dispatch.clone().unwrap_or_default();
+    let egress = match previous {
+        Some(previous) => {
+            let replaced = previous
+                .egress
+                .remint(minter, &actor, dispatch)
+                .await
+                .wrap_err_with(|| format!("minting the capability of micro {micro}"))?;
+            for handle in replaced.into_iter().chain(previous.handle_ids()) {
+                retract(node, handle).await?;
+            }
+            previous.egress
+        }
+        None => Arc::new(
+            MicroEgress::install(node.dispatch.client.clone(), minter, &actor, dispatch)
+                .await
+                .wrap_err_with(|| format!("minting the capability of micro {micro}"))?,
+        ),
+    };
+    let mut handles = RoutineCapabilities {
+        dispatch: egress.capability(),
+        ..RoutineCapabilities::default()
+    };
+    if let Some(scope) = scopes.docs.clone() {
+        handles.docs = Some(mint_docs(node, &actor, scope).await?);
+    }
+    if let Some(scope) = scopes.drawers.clone() {
+        handles.drawers = Some(
+            node.drawers
+                .client
+                .call_with(
+                    RequestContext::root(),
+                    minter.metadata(),
+                    MintDrawerCapability {
+                        scope,
+                        rights: Rights::USE,
+                        subject: Some(actor.actor.actor_id),
+                    },
+                )
+                .await
+                .wrap_err_with(|| format!("minting the drawers capability of micro {micro}"))?
+                .capability_id,
+        );
+    }
+    if let Some(scope) = scopes.blobs.clone() {
+        handles.blobs = Some(
+            node.blobs
+                .client
+                .call_with(
+                    RequestContext::root(),
+                    minter.metadata(),
+                    MintBlobsCapability {
+                        scope,
+                        rights: Rights::USE,
+                        subject: Some(actor.actor.actor_id),
+                    },
+                )
+                .await
+                .wrap_err_with(|| format!("minting the blobs capability of micro {micro}"))?
+                .capability_id,
+        );
+    }
+    Ok(Installed {
+        egress,
+        doc_capability: handles.docs,
+        config: None,
+        minted: Some(Minted { scopes, handles }),
+    })
+}
+
+/// Opens the micro's actor below the `micros` subsystem actor, which is opened first. A subsystem
+/// actor holds every right, as `big_node` opens `nodules`; a micro's own actor can only be used.
+/// Opening an open actor is idempotent.
+async fn open_micro_actor(node: &big_node::BigNode, micro: &str) -> Res<OpenedActor> {
+    let authority = &node.authority;
+    let open = |parent, path: String, rights| {
+        authority.client.call(
+            RequestContext::root(),
+            OpenActor {
+                parent,
+                path,
+                rights,
+            },
+        )
+    };
+    let micros = open(authority.root, "micros".into(), Rights::all())
+        .await
+        .wrap_err("opening the micros subsystem actor")?;
+    open(
+        micros.capability,
+        format!("micros/{}", actor_segment(micro)),
+        Rights::USE,
+    )
+    .await
+    .wrap_err_with(|| format!("opening the actor of micro {micro}"))
+}
+
+/// Mints a document capability for `scope`, as the node's operator, bound to `actor`.
+async fn mint_docs(node: &big_node::BigNode, actor: &OpenedActor, scope: DocScope) -> Res<CapId> {
+    Ok(node
+        .docs
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
+            MintDocCapability {
+                scope,
+                rights: Rights::USE,
+                subject: Some(actor.actor.actor_id),
+            },
+        )
+        .await
+        .wrap_err("minting a document capability")?
+        .capability_id)
+}
+
+/// Retracts `capability`. One that is already dead is retracted.
+async fn retract(node: &big_node::BigNode, capability: CapId) -> Res<()> {
+    match node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            RetractCapability {
+                via: capability,
+                capability,
+            },
+        )
+        .await
+    {
+        Ok(()) | Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => Ok(()),
+        Err(error) => Err(error).wrap_err("retracting a micro's capability"),
+    }
 }
 
 /// The one path segment a micro's actor lives at below `micros`, by the nodules' rule (`big_nodule`
