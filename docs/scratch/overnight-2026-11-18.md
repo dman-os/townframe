@@ -35,10 +35,12 @@ Fixes on the way, all on the phone branch:
   reads the WebView's size and the density itself (`Viewport` source).
 
 Known, not fixed:
-- The intxt card under a PR says "Intxt cannot be read … the presented capability does not permit
-  this operation": the review micro's doc capability, minted over the intxt drawer, is refused on
-  the drawer's own document (where the intxt's description lives). Raised with intxt (and nodules'
-  scope semantics); the fix may be on either side.
+- The intxt card under a PR said "Intxt cannot be read": the review micro's doc capability covered
+  the intxt drawer's member documents but not the drawer's own document (its descriptor). Fixed on
+  the phone branch (`760cef9c`: the interim capability also reads each granted drawer's document);
+  that build is installed but I couldn't check it on screen (the phone left our app). Nodules then
+  made a drawer reach cover its own document (node-55, `f6795553`), so drop the workaround once the
+  phone base is on node-55.
 - A grant made while the phone is connected reaches it only after an app restart. Nodules is
   building one merged grant feed (`awaitCartridgeGrants`) tonight.
 - The source node picks a random UDP port and relays are off, so a source restart strands the phone
