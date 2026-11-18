@@ -72,7 +72,7 @@ pub enum GrantsCommands {
         /// The cartridge, as `<did>/<name>`
         cartridge: String,
         /// The answer to take back, as `day grants list` prints it: `drawer:<id>`,
-        /// `cartridge:<id>`, `origin:<origin>`, `method:<nsid>` or `authority:<prefix>`
+        /// `cartridge:<id>`, `net:<host[:port]>`, `method:<nsid>` or `authority:<prefix>`
         grant: String,
     },
 }
@@ -269,7 +269,7 @@ fn grant_sentence(grant: &GrantKey, body: &GrantBody) -> String {
         GrantKey::Cartridge(cartridge) => {
             format!("may {} your data from {cartridge}", access(body))
         }
-        GrantKey::Origin(origin) => format!("may talk to services at {origin}"),
+        GrantKey::Net(net) => format!("may use the network to reach {net}"),
         GrantKey::Method(nsid) => format!("may use the operation `{nsid}`"),
         GrantKey::Authority(prefix) if prefix == "*" => "may use any operation".to_owned(),
         GrantKey::Authority(prefix) => format!("may use the operations under `{prefix}`"),

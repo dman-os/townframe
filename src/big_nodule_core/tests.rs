@@ -1359,7 +1359,7 @@ mod admission_tests {
         let other: CartridgeId = example_cartridge!("other").parse().unwrap();
         let drawer_grant = GrantKey::Drawer(drawer.clone());
         let cartridge_grant = GrantKey::Cartridge(other.clone());
-        let origin = GrantKey::Origin("https://api.example.org".into());
+        let net = GrantKey::Net("api.example.org".into());
         let method = GrantKey::Method("org.example.search.query".into());
         let authority = GrantKey::Authority("org.example.callee".into());
 
@@ -1374,7 +1374,7 @@ mod admission_tests {
             Some(GrantBody::access(EntryAccess::Write)),
         )
         .unwrap();
-        for key in [&origin, &method, &authority] {
+        for key in [&net, &method, &authority] {
             docs.set_grant(key.clone(), Some(GrantBody::present()))
                 .unwrap();
         }
@@ -1388,8 +1388,8 @@ mod admission_tests {
             BTreeMap::from([(other, DrawerAccess::Write)])
         );
         assert_eq!(
-            resolved.origins,
-            BTreeSet::from(["https://api.example.org".to_owned()])
+            resolved.nets,
+            BTreeSet::from(["api.example.org".to_owned()])
         );
         assert_eq!(
             resolved.operations,
@@ -1793,7 +1793,7 @@ mod declaration {
         use big_cartridges_core::config::CartridgeInstall;
         use big_cartridges_core::config::DrawerGrant;
         use big_cartridges_core::config::MethodGrant;
-        use big_cartridges_core::config::OriginGrant;
+        use big_cartridges_core::config::NetGrant;
 
         let universe = config_universe();
         let ids: Vec<&str> = universe
@@ -1808,7 +1808,7 @@ mod declaration {
                 CartridgeConfigIdentity::ID,
                 DrawerGrant::ID,
                 CartridgeGrant::ID,
-                OriginGrant::ID,
+                NetGrant::ID,
                 MethodGrant::ID,
                 AuthorityGrant::ID,
                 NoduleDevTakeover::ID,
@@ -1946,7 +1946,7 @@ mod config_tests {
         for text in [
             format!("drawer:{drawer}"),
             format!("cartridge:{}", example_cartridge!("other")),
-            "origin:https://api.example.org".to_owned(),
+            "net:api.example.org".to_owned(),
             "method:org.example.tags.apply".to_owned(),
             "authority:org.example.tags".to_owned(),
             "authority:*".to_owned(),
@@ -1965,7 +1965,7 @@ mod config_tests {
             "drawer",
             "drawer:not-a-doc",
             "cartridge:not-a-cartridge",
-            "origin:",
+            "net:",
             "method:org.example",
             "method:*",
             "authority:tags",
