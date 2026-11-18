@@ -23,8 +23,8 @@ use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::query::DatumSelection;
-use big_cabinet_core::reference::DatumReference;
 use big_cabinet_core::query::Predicate;
+use big_cabinet_core::reference::DatumReference;
 use intxt_core::generic;
 use intxt_core::work;
 use intxt_core::work::PullState;
@@ -471,7 +471,6 @@ impl<C: NodeCalls> Review<C> {
         }))
     }
 
-
     /// The intxts `description` names, with the descriptor each node lets this micro read.
     /// One descriptor read is made per drawer, in the block's order.
     pub(crate) async fn links(&self, description: &str) -> Result<Links, CallError> {
@@ -518,8 +517,8 @@ impl<C: NodeCalls> Review<C> {
         };
         let value = accepted(&datums, key)
             .map_err(|reason| CallError::Refused(format!("{doc}: {key} is {reason}")))?;
-        let blob: Blob = serde_json::from_value(value.clone())
-            .expect("the node admitted this value as a blob");
+        let blob: Blob =
+            serde_json::from_value(value.clone()).expect("the node admitted this value as a blob");
         let blob_id: BlobId = blob
             .digest
             .parse()
