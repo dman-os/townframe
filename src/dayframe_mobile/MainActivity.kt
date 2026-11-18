@@ -1,12 +1,18 @@
 package dev.dioxus.main
 
-import android.os.Build
 import android.os.Bundle
-import android.window.OnBackInvokedDispatcher
+import androidx.activity.OnBackPressedCallback
 
 typealias BuildConfig = com.example.mobile.BuildConfig
 
 class MainActivity : WryActivity() {
+    /**
+     * Wry's own back handling navigates the WebView's history and, with none, finishes the
+     * activity. The Dayframe shell keeps no WebView history, so that would close the app on every
+     * back gesture; the shell's callback below replaces it.
+     */
+    override val handleBackNavigation: Boolean = false
+
     /**
      * Bound by name to `Java_dev_dioxus_main_MainActivity_requestSystemBack` in libmain.so:
      * whether the Dayframe shell took the back gesture (it has somewhere to go back to).
@@ -15,19 +21,19 @@ class MainActivity : WryActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // From targetSdk 36 predictive back is on, and the platform no longer delivers
-        // KEYCODE_BACK to the app: it invokes the activity's back callback or, with none
-        // registered, closes the app. Claim the gesture for the shell, and let the system have it
-        // when the shell is on its home. Before API 33 the WebView navigates its own history on
-        // back, which the shell does not use, so the app closes as before.
-        if (Build.VERSION.SDK_INT >= 33) {
-            onBackInvokedDispatcher.registerOnBackInvokedCallback(
-                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-            ) {
-                if (!requestSystemBack()) {
-                    moveTaskToBack(true)
+        // androidx's dispatcher receives back on every API level: the predictive back gesture
+        // (targetSdk 36 no longer delivers KEYCODE_BACK on API 33+) and the back key before it.
+        // The shell takes the gesture when it has somewhere to go back to; otherwise the task moves
+        // to the background, which is what the system does for an app with no callback.
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    if (!requestSystemBack()) {
+                        moveTaskToBack(true)
+                    }
                 }
-            }
-        }
+            },
+        )
     }
 }
