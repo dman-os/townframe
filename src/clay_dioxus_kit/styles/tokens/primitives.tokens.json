@@ -145,7 +145,17 @@
   "font": {
     "family": {
       "$type": "fontFamily",
-      "sans": { "$value": ["system-ui", "sans-serif"] }
+      "sans": { "$value": ["system-ui", "sans-serif"] },
+      "mono": {
+        "$value": [
+          "ui-monospace",
+          "SFMono-Regular",
+          "Menlo",
+          "Consolas",
+          "Liberation Mono",
+          "monospace"
+        ]
+      }
     },
     "weight": {
       "$type": "fontWeight",

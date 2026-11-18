@@ -365,7 +365,11 @@ impl LabTab {
                 ("tabs-horizontal", "Horizontal"),
                 ("tabs-vertical", "Vertical"),
             ],
-            LabTab::Card => &[("card-variants", "Variants"), ("card-parts", "Parts")],
+            LabTab::Card => &[
+                ("card-variants", "Variants"),
+                ("card-statuses", "Statuses"),
+                ("card-parts", "Parts"),
+            ],
             LabTab::Separator => &[
                 ("separator-orientations", "Orientations"),
                 ("separator-roles", "Roles"),

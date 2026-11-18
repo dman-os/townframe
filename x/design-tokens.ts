@@ -429,6 +429,7 @@ const runtimeAliases: Record<string, string> = {
   "color.danger": "color-danger",
   "color.on-danger": "color-on-danger",
   "font.family.sans": "font-family-sans",
+  "font.family.mono": "font-family-mono",
   "elevation.none": "shadow-none",
   "elevation.sm": "shadow-sm",
   "elevation.md": "shadow-md",
@@ -528,6 +529,7 @@ const generated = [
   ...tailwindAliases,
   ...compatibilityAliases,
   "  --font-sans: var(--ct-font-family-sans);",
+  "  --font-mono: var(--ct-font-family-mono);",
   "}",
   "",
 ].join("\n");
@@ -677,6 +679,9 @@ function selfTest(): void {
   );
   if (!generated.includes("--ct-font-family: var(--ct-font-family-sans);")) {
     fail("self-test generated legacy font alias is missing");
+  }
+  if (!generated.includes("--ct-font-family-mono:")) {
+    fail("self-test generated monospace font family is missing");
   }
   console.log("design token self-tests passed");
 }

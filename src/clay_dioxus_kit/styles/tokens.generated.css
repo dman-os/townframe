@@ -37,6 +37,9 @@
     --ct-color-green-600: #1f7a3d;
     --ct-color-amber-500: #f5a624;
     --ct-font-family-sans: system-ui, sans-serif;
+    --ct-font-family-mono:
+      ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+      monospace;
     --ct-font-weight-regular: 400;
     --ct-font-weight-medium: 500;
     --ct-font-weight-semibold: 600;
@@ -154,4 +157,5 @@
   --color-destructive-foreground: var(--ct-color-on-danger);
   --color-ring: var(--ct-color-focus);
   --font-sans: var(--ct-font-family-sans);
+  --font-mono: var(--ct-font-family-mono);
 }

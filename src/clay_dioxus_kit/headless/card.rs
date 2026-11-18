@@ -1,8 +1,10 @@
 //! A bounded group of related content (`ct-card`).
 //!
 //! Parts: `header`, `content`, `footer`, each optional and in that order. Axis: `data-variant`
-//! (`outline`, `raised`, `plain`). A card has no role of its own: it is a visual grouping, and a
+//! (`outline`, `raised`, `plain`) and `data-status` (`info`, `success`, `warning`, `danger`, the
+//! same axis and colour roles as `Alert`; absent is neutral). A card has no role of its own: it is a visual grouping, and a
 //! caller who wants it announced names it with a heading inside the header.
+use super::Status;
 use dioxus::prelude::*;
 
 /// How a card sets itself off from its surroundings.
@@ -28,9 +30,20 @@ impl CardVariant {
 }
 
 #[component]
-pub fn Card(#[props(default)] variant: CardVariant, children: Element) -> Element {
+pub fn Card(
+    #[props(default)] variant: CardVariant,
+    /// What the card says about its content; a neutral card has none.
+    #[props(default)]
+    status: Option<Status>,
+    children: Element,
+) -> Element {
     rsx! {
-        div { class: "ct-card", "data-variant": variant.as_str(), {children} }
+        div {
+            class: "ct-card",
+            "data-variant": variant.as_str(),
+            "data-status": status.map(Status::as_str),
+            {children}
+        }
     }
 }
 
@@ -62,7 +75,7 @@ mod tests {
 
     fn app(variant: CardVariant) -> Element {
         rsx! {
-            Card { variant,
+            Card { variant, status: None,
                 CardHeader { h3 { "Title" } }
                 CardContent { "Body" }
                 CardFooter { button { "Act" } }
@@ -84,6 +97,28 @@ mod tests {
             .map(|part| page.attr(part, "data-part").expect("every child is a part"))
             .collect();
         assert_eq!(parts, ["header", "content", "footer"]);
+    }
+
+    #[test]
+    fn a_status_names_itself_and_a_neutral_card_has_none() {
+        fn with_status(status: Option<Status>) -> Element {
+            rsx! { Card { status, CardContent { "Body" } } }
+        }
+        let page = Page::with_props(with_status, None);
+        assert_eq!(page.attr(page.by_class("ct-card"), "data-status"), None);
+        for status in [
+            Status::Info,
+            Status::Success,
+            Status::Warning,
+            Status::Danger,
+        ] {
+            let page = Page::with_props(with_status, Some(status));
+            let card = page.by_class("ct-card");
+            assert_eq!(
+                page.attr(card, "data-status").as_deref(),
+                Some(status.as_str())
+            );
+        }
     }
 
     #[test]
