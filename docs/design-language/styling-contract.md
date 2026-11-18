@@ -143,7 +143,7 @@ The contract is the attribute vocabulary and the stylesheet, so a Solid or React
 
 What a port must do:
 
-- Emit the same root class, `data-part`, `data-state`, `data-*` axes and ARIA as the Rust part. The README's component table lists them per component, and each headless module's tests are the executable statement of the vocabulary.
+- Emit the same root class, `data-part`, `data-state`, `data-*` axes and ARIA as the Rust part. Each headless module's docs (`src/clay_dioxus_kit/headless/<name>.rs`) list the parts, states and axes of its component, and its tests are the executable statement of them.
 - Set `data-*` booleans as present-or-absent (`data-disabled=""`), never `="false"`.
 - Compute dynamic geometry in JS and write it as an inline custom property of the documented name. The stylesheet decides what to do with it.
 - Own behaviour the same way: keyboard map, roving focus, `aria-*`. The kit's tests list the keys.
@@ -163,8 +163,11 @@ Things that stop a theme from restyling the app today, seeded 2026-11-18. Counts
 | Tailwind utility strings in `micro_theme_lab` | about 19 | Open. |
 | Tailwind utility strings in `micro_shell` | about 7 | Open. |
 | Tailwind utility strings in the other micros (`micro_settings`, `micro_sample`, `micro_counter`, `micro_lab`, `micro_layout`, `micro_toolbar`) | smaller | Open; not on the operator's seed list. |
+| The foundation had no type scale and no `success`, `warning` or `info` colour roles; the kit now carries `--ct-dimension-font-size-{sm,md,lg}` and the three roles (with `on-` pairs). The roles are provisional (FOUND-012: Material has no equivalent, so `info` follows its secondary colour and the other two keep their authored values in every Material scheme). | 2 token files | Open: review the roles' contrast in dark schemes. |
 | `url()` is refused in a theme and in a micro's sheet, and `@font-face` and `@import` with it. Custom fonts and images cannot be themed. | n/a | Open. Needs a design: `data:` or `blob:` font and image sources, admitted by `clay_surface::refuse_fetching_stylesheet` (which exists to stop the host fetching on a guest's behalf, so a payload carried inline is a different case). |
 | The Material adapter sets colour roles on `.ct-theme`, below `:root`, so a theme that sets `--ct-color-*` on `:root` loses silently. | 1 file | Open; a theme must target `.ct-theme` for now. |
+| The `reset` layer sits above Tailwind's `utilities` (the contract's layers are declared after Tailwind's so that `user` outranks a utility), so a reset rule beats a utility on the same property. The reset only sets `box-sizing` and zeroes `html`/`body` margin and padding. | 1 file | Open; harmless today, revisit if a utility must override it. |
+| Focus pseudo-classes (`:focus-visible`, `:focus-within`) did not show in the headless sway/WebKitGTK check, where the webview never becomes the active page, though the keys reached the focused element. The skins' focus rings and `ScrubStrip`'s keyboard reveal are therefore verified by unit tests only. | n/a | Open, verification gap. |
 | A micro's own unlayered rules outrank `user`, so a micro that hard-codes colours in its own sheet is not themeable. | by design | Decision recorded in `docs/scratch/theme-lab-micro.md`; revisit if micros start styling themselves. |
 | Blitz has no shadow roots, no `prefers-reduced-motion`, and its CSS transitions and `color-mix()` coverage is unverified. A theme's animation may not play there. | n/a | Open, renderer limit (never shapes the contract). |
 | The web shell's CSP (`style-src-elem 'self'`) refuses the host document's inline `<style>`, so the shell's own document is not themed there, only the mounts. | web shell | Open; the web shell is superseded. |
