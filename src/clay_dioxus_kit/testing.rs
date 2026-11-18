@@ -602,8 +602,18 @@ impl WriteMutations for Dom {
         let Kind::Element { attrs, .. } = &mut self.nodes[top].kind else {
             panic!("set_attribute on a non-element");
         };
+        // The wire admits any well-formed `data-*` name and a raw `style` whose declarations
+        // pass its checks; the contract (`KIT-200`) narrows the raw `style` to custom properties.
         let known = match ns {
-            None => WIRE_ATTRIBUTES.contains(&name),
+            None => {
+                WIRE_ATTRIBUTES.contains(&name)
+                    || name == "style"
+                    || (name.starts_with("data-")
+                        && name.len() > 5
+                        && name[5..]
+                            .bytes()
+                            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_')))
+            }
             Some("style") => WIRE_STYLE_PROPERTIES.contains(&name),
             Some(_) => false,
         };
@@ -611,6 +621,18 @@ impl WriteMutations for Dom {
             known,
             "attribute {name:?} ({ns:?}) is outside the guest wire vocabulary"
         );
+        if let (None, "style", BorrowedAttributeValue::Text(text)) = (ns, name, &value) {
+            for declaration in text
+                .split(';')
+                .filter(|declaration| !declaration.trim().is_empty())
+            {
+                let property = declaration.split(':').next().unwrap_or_default().trim();
+                assert!(
+                    property.starts_with("--ct-"),
+                    "inline style {declaration:?}: only `--ct-*` custom properties may be inline (KIT-200)"
+                );
+            }
+        }
         let key = ns.map_or_else(|| name.to_owned(), |ns| format!("{ns}:{name}"));
         match value {
             BorrowedAttributeValue::None | BorrowedAttributeValue::Bool(false) => {
@@ -853,9 +875,22 @@ impl Page {
     }
 
     fn pointer_holding(&mut self, node: Node, name: &str, page_x: f64, buttons: u16) {
+        self.pointer_at_holding(node, name, (page_x, 0.0), buttons);
+    }
+
+    /// A pointer event at client `(x, y)`, for a component that reads both axes (`ScrubStrip`).
+    /// Held buttons follow [`Self::pointer`].
+    pub(crate) fn pointer_at(&mut self, node: Node, name: &str, at: (f64, f64)) {
+        let held = matches!(name, "pointerdown" | "pointermove");
+        self.pointer_at_holding(node, name, at, u16::from(held));
+    }
+
+    fn pointer_at_holding(&mut self, node: Node, name: &str, at: (f64, f64), buttons: u16) {
         let point = SerializedPointInteraction {
-            page_x,
-            client_x: page_x,
+            page_x: at.0,
+            client_x: at.0,
+            page_y: at.1,
+            client_y: at.1,
             buttons,
             ..Default::default()
         };
@@ -915,6 +950,20 @@ impl Page {
         focused
     }
 
+    /// A `wheel` of `delta_y` pixels (positive is down).
+    pub(crate) fn wheel(&mut self, node: Node, delta_y: f64) {
+        let data: dioxus_html::SerializedWheelData = serde_json::from_value(serde_json::json!({
+            "delta_mode": 0, "delta_x": 0.0, "delta_y": delta_y, "delta_z": 0.0,
+            "alt_key": false, "button": 0, "buttons": 0,
+            "client_x": 0.0, "client_y": 0.0, "ctrl_key": false,
+            "meta_key": false, "offset_x": 0.0, "offset_y": 0.0,
+            "page_x": 0.0, "page_y": 0.0, "screen_x": 0.0,
+            "screen_y": 0.0, "shift_key": false,
+        }))
+        .expect("wheel data");
+        self.dispatch(node, "wheel", EventData::Wheel(data));
+    }
+
     /// A `keydown` of `key`.
     pub(crate) fn key(&mut self, node: Node, key: Key) {
         let data = SerializedKeyboardData::new(
@@ -930,6 +979,52 @@ impl Page {
 }
 
 impl Page {
+    /// The one element whose `class` names `class`: a contract component's root (`ct-button`),
+    /// which has no role to find it by. Several or none is a failure.
+    pub(crate) fn by_class(&self, class: &str) -> Node {
+        let mut all = vec![];
+        self.walk(0, false, &mut all);
+        let found: Vec<_> = all
+            .into_iter()
+            .filter(|node| {
+                self.attr(*node, "class")
+                    .is_some_and(|classes| classes.split_whitespace().any(|c| c == class))
+            })
+            .collect();
+        match found[..] {
+            [only] => only,
+            _ => panic!(
+                "expected exactly one .{class}, found {} in:\n{}",
+                found.len(),
+                self.outline()
+            ),
+        }
+    }
+
+    /// The `data-part` of each child element of `node`, in order; every child of a contract
+    /// component's root or part must be a part, so a child without one fails.
+    pub(crate) fn parts(&self, node: Node) -> Vec<String> {
+        self.children(node)
+            .into_iter()
+            .filter(|child| matches!(self.dom.nodes[child.0].kind, Kind::Element { .. }))
+            .map(|child| {
+                self.attr(child, "data-part").unwrap_or_else(|| {
+                    panic!("{} is a child without a data-part", self.describe(child))
+                })
+            })
+            .collect()
+    }
+
+    /// An inline custom property (`--ct-*`), the only inline style a contract component may set
+    /// (`KIT-200`).
+    pub(crate) fn custom_property(&self, node: Node, name: &str) -> Option<String> {
+        let style = self.attr(node, "style")?;
+        style.split(';').find_map(|declaration| {
+            let (property, value) = declaration.split_once(':')?;
+            (property.trim() == name).then(|| value.trim().to_owned())
+        })
+    }
+
     /// The child elements of `node`, in order (including ones hidden from assistive technology).
     pub(crate) fn children(&self, node: Node) -> Vec<Node> {
         self.dom.nodes[node.0]

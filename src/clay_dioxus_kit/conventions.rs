@@ -110,10 +110,26 @@ fn components() -> Vec<(String, String)> {
         .collect()
 }
 
-/// The styled part of every component (`<name>.rs` at the crate root).
+/// Whether the component follows the styling contract (`KIT-200`): its skin is a stylesheet,
+/// `styles/kit/<name>.css`, and it has no styled Rust part. The others are legacy until the
+/// contract reaches them.
+fn is_contract(snake: &str) -> bool {
+    crate_root()
+        .join("styles/kit")
+        .join(format!("{snake}.css"))
+        .exists()
+}
+
+/// The root class of a contract component: `ct-` and its name in kebab case.
+fn root_class(snake: &str) -> String {
+    format!("ct-{}", snake.replace('_', "-"))
+}
+
+/// The styled part of every legacy component (`<name>.rs` at the crate root).
 fn styled_parts() -> Vec<Source> {
     components()
         .iter()
+        .filter(|(snake, _)| !is_contract(snake))
         .map(|(snake, _)| read(&crate_root().join(format!("{snake}.rs"))))
         .collect()
 }
@@ -151,10 +167,11 @@ fn the_only_runtime_dependency_is_dioxus_without_default_features() {
     );
 }
 
-/// `KIT-002`, `KIT-072`: a component is `headless/<name>.rs` (public) plus `<name>.rs` (private),
-/// both declared, the headless part with tests, and the README lists it.
+/// `KIT-002`, `KIT-072`, `KIT-200`: a component is `headless/<name>.rs` (public) plus either a
+/// private styled part (`<name>.rs`, legacy) or a stylesheet (`styles/kit/<name>.css`, contract),
+/// declared and re-exported, the headless part with tests, and the README lists it.
 #[test]
-fn a_component_is_a_public_headless_module_and_a_private_styled_one() {
+fn a_component_is_a_public_headless_module_and_a_skin() {
     let lib = read(&crate_root().join("lib.rs"));
     let headless = read(&crate_root().join("headless.rs"));
     let readme = read(&crate_root().join("README.md"));
@@ -165,20 +182,36 @@ fn a_component_is_a_public_headless_module_and_a_private_styled_one() {
                 "KIT-002: headless.rs does not declare `pub mod {snake};`"
             ));
         }
-        if !lib.text.contains(&format!("\nmod {snake};")) {
-            violations.push(format!(
-                "KIT-002: lib.rs does not declare a private `mod {snake};`"
-            ));
-        }
-        if lib.text.contains(&format!("pub mod {snake};")) {
-            violations.push(format!(
-                "KIT-002: lib.rs makes the styled `{snake}` module public"
-            ));
-        }
-        if !lib.text.contains(&format!("pub use {snake}::{pascal};")) {
-            violations.push(format!(
-                "KIT-002: lib.rs does not re-export `{snake}::{pascal}`"
-            ));
+        if is_contract(&snake) {
+            if crate_root().join(format!("{snake}.rs")).exists() {
+                violations.push(format!(
+                    "KIT-200: `{snake}` has a stylesheet and a styled Rust part; a contract component has only the stylesheet"
+                ));
+            }
+            if !lib
+                .text
+                .contains(&format!("pub use headless::{snake}::{pascal};"))
+            {
+                violations.push(format!(
+                    "KIT-002: lib.rs does not re-export `headless::{snake}::{pascal}`"
+                ));
+            }
+        } else {
+            if !lib.text.contains(&format!("\nmod {snake};")) {
+                violations.push(format!(
+                    "KIT-002: lib.rs does not declare a private `mod {snake};`"
+                ));
+            }
+            if lib.text.contains(&format!("pub mod {snake};")) {
+                violations.push(format!(
+                    "KIT-002: lib.rs makes the styled `{snake}` module public"
+                ));
+            }
+            if !lib.text.contains(&format!("pub use {snake}::{pascal};")) {
+                violations.push(format!(
+                    "KIT-002: lib.rs does not re-export `{snake}::{pascal}`"
+                ));
+            }
         }
         if !readme.text.contains(&format!("`headless::{snake}`")) {
             violations.push(format!(
@@ -190,15 +223,19 @@ fn a_component_is_a_public_headless_module_and_a_private_styled_one() {
             .text
             .split_once("#[cfg(test)]")
             .unwrap_or(("", ""));
-        if !tests.contains("#[test]") {
+        // The tests may sit in `headless/<name>/tests.rs` instead of inline.
+        let external = crate_root().join("headless").join(&snake).join("tests.rs");
+        let external = tests.contains("mod tests;") && read(&external).text.contains("#[test]");
+        if !tests.contains("#[test]") && !external {
             violations.push(format!("KIT-072: headless/{snake}.rs has no test"));
         }
     }
     assert_no_violations(violations);
 }
 
-/// `KIT-010`, `KIT-011`: a headless part names no class and imports no styled part; it receives
-/// class strings through its `*Skin` props.
+/// `KIT-010`, `KIT-011`, `KIT-200`: a headless part names no class and imports no styled part; it
+/// receives class strings through its `*Skin` props. A contract component's one class is its root,
+/// `ct-<name>`.
 #[test]
 fn headless_parts_hold_no_styling() {
     let styled: Vec<_> = components()
@@ -208,8 +245,16 @@ fn headless_parts_hold_no_styling() {
     let violations = headless_parts()
         .iter()
         .flat_map(|source| {
+            let own_root = Path::new(&source.path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|snake| is_contract(snake))
+                .map(root_class);
             let mut found = source.violations("KIT-011", |line| {
-                let class_literal = line.contains("class: \"") || line.contains("class:\"");
+                let class_literal = (line.contains("class: \"") || line.contains("class:\""))
+                    && !own_root.as_ref().is_some_and(|root| {
+                        line.contains(&format!("class: \"{root}\""))
+                    });
                 let styled_import = line.split("crate::").skip(1).any(|rest| {
                     let head: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
                     styled.contains(&head)
@@ -362,6 +407,9 @@ fn breakpoints_live_in_width_rs_and_nothing_measures_the_dom() {
         violations.extend(source.violations("KIT-040", |line| {
             MEASURING
                 .iter()
+                // `headless.rs` holds the roving-focus helper, which keeps element handles to
+                // focus them and never measures through them.
+                .filter(|api| !(source.path == "headless.rs" && **api == "MountedData"))
                 .find(|api| line.contains(**api))
                 .map(|api| format!("`{api}` measures the DOM or asks the window"))
         }));
@@ -370,8 +418,10 @@ fn breakpoints_live_in_width_rs_and_nothing_measures_the_dom() {
 }
 
 /// `KIT-052`: `tabindex` (which panics Blitz) is set only by the `Split::renderer` path
-/// (`Renderer::takes_focus`) and by the modal panels (`Sheet`, `Drawer`), which take `-1` and are
-/// focused on mount by `headless::focus_on_mount`, the one place focus moves programmatically.
+/// (`Renderer::takes_focus`), by the roving widgets (`Tabs`, `ScrubStrip`) on a line that names
+/// `takes_focus`, and by the modal panels (`Sheet`, `Drawer`), which take `-1` and are focused on
+/// mount by `headless::focus_on_mount`. Focus moves programmatically only in `headless.rs`
+/// (`focus_on_mount` and the roving-focus ring).
 #[test]
 fn tabindex_is_only_the_renderer_focus_gate() {
     let mut violations = Vec::new();
@@ -383,7 +433,16 @@ fn tabindex_is_only_the_renderer_focus_gate() {
         violations.extend(source.violations("KIT-052", |line| {
             let modal_panel =
                 ["headless/sheet.rs", "headless/drawer.rs"].contains(&source.path.as_str());
-            if line.contains("tabindex") && source.path != "headless/sections.rs" && !modal_panel {
+            let roving =
+                ["headless/tabs.rs", "headless/scrub_strip.rs"].contains(&source.path.as_str());
+            if roving && line.contains("tabindex") && !line.contains("takes_focus") {
+                return Some("`tabindex` not gated on `Renderer::takes_focus`".into());
+            }
+            if line.contains("tabindex")
+                && source.path != "headless/sections.rs"
+                && !modal_panel
+                && !roving
+            {
                 return Some("`tabindex` outside the Sections renderer gate".into());
             }
             if source.path == "headless.rs" {
@@ -437,15 +496,31 @@ fn tests_neither_sleep_nor_wait() {
     assert_no_violations(violations);
 }
 
-/// `KIT-080`: every component has a specimen in the showcase, and a framed specimen has both a
-/// compact and an expanded frame. `NavButton` is a leaf button shown inline and `ListRow` is shown
-/// inside the `ListDetails` frames, so neither has a frame of its own.
+/// `KIT-080`, `KIT-204`: every legacy component has a specimen in the showcase, and a framed
+/// specimen has both a compact and an expanded frame. `NavButton` is a leaf button shown inline and
+/// `ListRow` is shown inside the `ListDetails` frames, so neither has a frame of its own. A
+/// contract component has a specimen page, `claytxt_showcase/specimens/<name>.rs`, that mounts it.
 #[test]
-fn every_component_has_a_specimen_at_both_widths() {
+fn every_component_has_a_specimen() {
     const UNFRAMED: [&str; 2] = ["NavButton", "ListRow"];
     let showcase = read(&crate_root().join("../claytxt_showcase/kit.rs"));
     let mut violations = Vec::new();
-    for (_, pascal) in components() {
+    for (snake, pascal) in components() {
+        if is_contract(&snake) {
+            let page = crate_root()
+                .join("../claytxt_showcase/specimens")
+                .join(format!("{snake}.rs"));
+            match std::fs::read_to_string(&page) {
+                Ok(text) if text.contains(&format!("{pascal} {{")) => {}
+                Ok(_) => violations.push(format!(
+                    "KIT-204: the specimen page of `{pascal}` never mounts it"
+                )),
+                Err(_) => violations.push(format!(
+                    "KIT-204: the showcase has no specimen page `specimens/{snake}.rs`"
+                )),
+            }
+            continue;
+        }
         if !showcase.text.contains(&format!("{pascal} {{")) {
             violations.push(format!(
                 "KIT-080: the showcase has no specimen of `{pascal}`"
@@ -464,6 +539,80 @@ fn every_component_has_a_specimen_at_both_widths() {
             if !frames.iter().any(|frame| frame.contains(width)) {
                 violations.push(format!("KIT-080: no `{pascal}` frame at {width}"));
             }
+        }
+    }
+    assert_no_violations(violations);
+}
+
+/// `KIT-200`: a contract component's headless part sets no inline style but custom properties
+/// (`--ct-*`), which its stylesheet reads. (The harness refuses the same at run time.)
+#[test]
+fn contract_parts_set_only_custom_properties_inline() {
+    let mut violations = Vec::new();
+    for source in headless_parts() {
+        let stem = Path::new(&source.path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("file stem");
+        if !is_contract(stem) {
+            continue;
+        }
+        violations.extend(source.violations("KIT-200", |line| {
+            let inline = line.contains("style:") || line.contains("\"style\":");
+            (inline && !line.contains("\"--ct-")).then(|| {
+                format!(
+                    "inline style that is not a `--ct-*` custom property: {}",
+                    line.trim()
+                )
+            })
+        }));
+    }
+    assert_no_violations(violations);
+}
+
+/// `KIT-201`, `KIT-202`, `KIT-203`: a contract component's skin is a stylesheet keyed on its root
+/// class, imported into the `kit` layer, with no `!important` (layers order the cascade, not
+/// weight), no `@apply`, no fetching `url()`, and a `prefers-reduced-motion` guard wherever it
+/// transitions or animates. The generated bundle carries it, so a skin edited without
+/// regenerating the bundle fails here.
+#[test]
+fn contract_skins_are_stylesheets_in_the_kit_layer() {
+    let entry = read(&crate_root().join("tailwind.css"));
+    let bundle = read(&crate_root().join("assets/tailwind.css"));
+    let mut violations = Vec::new();
+    for (snake, _) in components()
+        .into_iter()
+        .filter(|(snake, _)| is_contract(snake))
+    {
+        let root = root_class(&snake);
+        let path = format!("styles/kit/{snake}.css");
+        let css = read(&crate_root().join(&path));
+        if !entry
+            .text
+            .contains(&format!("@import \"./{path}\" layer(kit);"))
+        {
+            violations.push(format!(
+                "KIT-202: tailwind.css does not import {path} into `layer(kit)`"
+            ));
+        }
+        if !css.text.contains(&format!(".{root}")) {
+            violations.push(format!("KIT-201: {path} never styles `.{root}`"));
+        }
+        if !bundle.text.contains(&format!(".{root}")) {
+            violations.push(format!(
+                "KIT-202: assets/tailwind.css has no `.{root}`: regenerate the bundle"
+            ));
+        }
+        for banned in ["!important", "@apply", "url("] {
+            if css.text.contains(banned) {
+                violations.push(format!("KIT-202: {path} uses `{banned}`"));
+            }
+        }
+        let animates = css.text.contains("transition") || css.text.contains("animation");
+        if animates && !css.text.contains("prefers-reduced-motion") {
+            violations.push(format!(
+                "KIT-203: {path} animates without a `prefers-reduced-motion` guard"
+            ));
         }
     }
     assert_no_violations(violations);

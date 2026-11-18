@@ -10,13 +10,14 @@
 @import "./styles/tokens.generated.css";
 @import "./styles/tokens.css";
 @import "./styles/motion.css";
-@import "./styles/tiles.css";
-@import "./styles/components.css";
-@import "./styles/tile-grammar.css";
+@import "./styles/kit/button.css" layer(kit);
+@import "./styles/kit/tabs.css" layer(kit);
+@import "./styles/kit/card.css" layer(kit);
+@import "./styles/kit/separator.css" layer(kit);
+@import "./styles/kit/alert.css" layer(kit);
+@import "./styles/kit/chip.css" layer(kit);
+@import "./styles/kit/scrub_strip.css" layer(kit);
 
-/* Button props form class names at runtime; keep every declared variant in the bundle. */
 /* Tailwind scans the whole repository; a WIT interface name in the nodule crates reads as an
    arbitrary property and would emit an invalid rule. */
 @source not inline("[wasi:http/handler@0.3.0]");
-
-@source inline("ct-button-default ct-button-secondary ct-button-outline ct-button-ghost ct-button-destructive ct-button-sm ct-button-md ct-button-lg");

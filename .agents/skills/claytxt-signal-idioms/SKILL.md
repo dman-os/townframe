@@ -5,7 +5,7 @@ description: Crash-proof Dioxus state idioms for claytxt UI code. Use whenever w
 
 # State and signals: crash-proof idioms
 
-Dioxus signals are borrow-checked at run time (`RefCell` semantics) and nothing in the type system sees it. The crashes it produces compile, pass the happy-path test and appear the first time a real pointer produces an unlucky event order. `ArcIndex` had three in two days: a `peek` guard alive across a `commit` that wrote the same signal (`AlreadyBorrowed`), a pointerup releasing a gesture it never started, and props frozen by `use_signal(|| items)`. The rules below make each structurally impossible. `clippy.toml` already denies a `read`/`write` guard held across `.await`; the rest is on you.
+Dioxus signals are borrow-checked at run time (`RefCell` semantics) and nothing in the type system sees it. The crashes it produces compile, pass the happy-path test and appear the first time a real pointer produces an unlucky event order. `ScrubStrip` (then `ArcIndex`) had three in two days: a `peek` guard alive across a `commit` that wrote the same signal (`AlreadyBorrowed`), a pointerup releasing a gesture it never started, and props frozen by `use_signal(|| items)`. The rules below make each structurally impossible. `clippy.toml` already denies a `read`/`write` guard held across `.await`; the rest is on you.
 
 This skill is the state counterpart to `claytxt-design-language` (tokens, layout) and `daytxt-native-dev-loop` (running it).
 
@@ -75,7 +75,7 @@ let send = use_callback(move |event| for effect in apply(event) { /* run effects
 
 - Effects run *after* the write, with nothing borrowed. Timers and animations are events: an effect spawns a task that sends `Tick { generation, step }`, and a transition drops a tick whose generation is stale. `apply` is `Copy` (it captures `Copy` values), so the task gets its own.
 - Layout derived from props is computed inside `next` from the state it is transitioning, not captured by the handler from an earlier render.
-- Reference: `src/ui/arc_index.rs` (`ArcState`, `ArcEvent`, `Effect`, `ArcState::next`) and its `transitions` tests.
+- Reference: `src/clay_dioxus_kit/headless/scrub_strip.rs` (`StripState`, `StripEvent`, `StripState::next`, which returns the successor and the breakpoint to report) and its `transitions` tests.
 
 ## 4. Helpers take and return values, not `Signal`s
 

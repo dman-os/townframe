@@ -5,6 +5,8 @@
 //! assets on Android).
 mod interim;
 
+use clay_dioxus_kit::ThemeMode;
+use clay_dioxus_kit::ThemeRoot;
 use clay_docs::FacetRoute;
 use clay_guest_session::egress::DispatchEgress;
 use clay_host::Factory;
@@ -28,8 +30,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use clay_dioxus_kit::ThemeMode;
-use clay_dioxus_kit::ThemeRoot;
 
 /// The discovered packages the first boot that admits them records as enabled, so they run
 /// without a click in Settings: any other package stays disabled until a user enables it (see
