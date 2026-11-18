@@ -66,12 +66,12 @@ impl GuestDom {
             u64,
             dioxus_core::RenderTargetId,
         )>::new()));
-        let root_targets = targets.clone();
+        let root_targets = std::rc::Rc::clone(&targets);
         let slots = std::rc::Rc::new(Slots::default());
-        let root_slots = slots.clone();
+        let root_slots = std::rc::Rc::clone(&slots);
         let mut dom = dioxus_core::VirtualDom::new_with_props(
             move |()| {
-                use_context_provider(|| root_slots.clone());
+                use_context_provider(|| std::rc::Rc::clone(&root_slots));
                 let children = app();
                 let targets = root_targets.borrow();
                 rsx! {

@@ -3,13 +3,13 @@
 //! side builds their factories here, grants them [`Resources`], resolves their collection
 //! requests into [`CollectionBindings`], and reads the declared rows and shell roots they
 //! register.
+pub use crate::decl::RootRow;
 pub use crate::native::BoundCollection;
 pub use crate::native::CollectionBindings;
 pub use crate::native::CollectionRegistry;
 pub use crate::native::DeclaredRows;
 pub use crate::native::DocumentService;
 pub use crate::native::Resources;
-pub use crate::native::RootRow;
 pub use crate::native::declared_rows;
 pub use crate::native::factory;
 pub use crate::native::manifest_scope;
@@ -18,6 +18,8 @@ pub use crate::native::runtime_scope;
 pub use crate::wasm::WasmPackage;
 #[cfg(feature = "wasmtime")]
 pub use crate::wasm::component_package;
+#[cfg(feature = "wasmtime")]
+pub use crate::wasm::set_component_cache_directory;
 #[cfg(feature = "wasmtime")]
 pub use crate::wasm::factory as wasm_factory;
 #[cfg(feature = "wcmp")]
