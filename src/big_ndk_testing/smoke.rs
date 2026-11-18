@@ -525,9 +525,15 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
         .to_owned();
     assert_ne!(relay_capability, granted);
     assert_eq!(relayed["body"]["idempotencyKey"], "nested-key");
-    // B has not been granted anything yet, so its routine holds no capability, and in particular
-    // was not handed A's.
-    assert!(relayed["body"]["noduleCapability"].is_null());
+    // B has not been granted anything yet. Its routine still holds a capability of its own, the one
+    // every routine with `uses` gets so it can ask for grants (`requestCartridgeGrant` and
+    // `awaitCartridgeGrantRequest`), but it was not handed A's: neither A's granted handle nor the
+    // one the relay routine called under.
+    let callee_capability = relayed["body"]["noduleCapability"]
+        .as_str()
+        .expect("a routine with uses holds its own capability for asking for grants");
+    assert_ne!(callee_capability, granted);
+    assert_ne!(callee_capability, relay_capability);
 
     // The nested call is a hop of its own: a new request id, the outer trace under a new span
     // and a budget within the outer one.
@@ -573,7 +579,8 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
     let own = relay(&node, &b, &a.echo(), None, context.clone()).await;
     assert_eq!(own["status"], 200, "{own}");
 
-    // Revoking takes effect: the handler is told no capability and the one it remembered is dead.
+    // Revoking takes effect: the handler is told a new capability, which still reaches only the
+    // grant-request methods every routine with `uses` keeps, and the one it remembered is dead.
     node.revoke(
         &a.cartridge,
         DispatchScope {
@@ -583,7 +590,10 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
         },
     )
     .await;
-    assert!(own_capability(&node, &a).await.is_none());
+    let after_revoke = own_capability(&node, &a)
+        .await
+        .expect("a routine with uses keeps its own capability for asking for grants");
+    assert_ne!(after_revoke, granted, "a revoked grant is a new capability");
     let stale = relay(&node, &a, &target, Some(&relay_capability), context).await;
     assert_eq!(stale["status"], 403, "{stale}");
     node.stop().await;
