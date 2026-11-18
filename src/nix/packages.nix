@@ -82,14 +82,20 @@
       outputHashes = {
         ${git "autosurgeon" "6a1df66f667667f1d14bc2272c4d426815de66b8"} =
           "sha256-dIhUdjaf/dlWufOu6X7694DqP7MHRpvOBdzXx6HFOi4=";
-        ${git "dioxus" "1696518a2c449f44c0d2d4ac1fedd00127058d63"} = lib.fakeHash;
+        ${git "dioxus" "1696518a2c449f44c0d2d4ac1fedd00127058d63"} =
+          "sha256-PiiB2Ab21huCGtOg6EQOuFKIbk3Wp95JuOX69iFV+RA=";
         ${git "iroh-blobs" "b3d641036c807b30d9fc62fd22a83801a38386d3"} =
           "sha256-9S3fDD2eMHVECWvnX32I+RnPUNd2lRp3S6+TPZRBYGw=";
-        ${git "wasmtime" "a24366c874177c2beecd96c7dfae6754c847d361"} = lib.fakeHash;
-        ${git "blitz" "ffaf2bd0518a2cf7571c43f08327bd580b1871ca"} = lib.fakeHash;
-        ${git "subduction" "5f418129c5188750a34847d2624ace583c192c59"} = lib.fakeHash;
-        ${git "wasm-component-model-polyfill" "da35a9b4e4cc71dacb57323b906093f9e18e78b6"} = lib.fakeHash;
-        ${git "keyhive" "a84137d1f2bdd81cc6c883253a534cc3f0380b5e"} = lib.fakeHash;
+        ${git "wasmtime" "a24366c874177c2beecd96c7dfae6754c847d361"} =
+          "sha256-T8q2cJyQXhaci4vadjjpC+IaoVkoPFO7W7WV3o8/h3k=";
+        ${git "blitz" "ffaf2bd0518a2cf7571c43f08327bd580b1871ca"} =
+          "sha256-RK6XcHOCVl4qmlMnWl7q1bB27ynukmPxwx0j+5+MZhc=";
+        ${git "subduction" "5f418129c5188750a34847d2624ace583c192c59"} =
+          "sha256-4cvvJQol5wkeVJmW8wzUy7S8Qsdl8PYyH1y/K/eIjRU=";
+        ${git "wasm-component-model-polyfill" "da35a9b4e4cc71dacb57323b906093f9e18e78b6"} =
+          "sha256-S+xSm+6zSdsYo6ReFJoT29rT2DT/VXYxCUVvnExajaw=";
+        ${git "keyhive" "a84137d1f2bdd81cc6c883253a534cc3f0380b5e"} =
+          "sha256-8Iok2MexAWnGFov2D+6jC+GsMhDLfOPlufYDRMLz9Ls=";
       };
       # wash-runtime comes from our fork (dman-os/wasmCloud, branch
       # townframe-changes); its pinned commit is on a branch, so it needs no
