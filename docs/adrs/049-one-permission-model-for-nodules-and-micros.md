@@ -105,12 +105,59 @@ drawer it was granted too, so its docs handle maps each reached document to thos
 permbind added when something needs it, never the default. Narrow defaults are also what makes the
 risk analysis (§9a) say something specific.
 
+How kinds combine (operator, 2026-11-17/18, D52 and D55):
+- **A document named directly in a scope keeps its own kinds.** A drawer reach's kinds do not widen
+  it, even when the document is also a member of a reached drawer. Naming a document is the narrower,
+  deliberate statement, so it wins.
+- **A drawer reach has separate read and write kinds** (#178), so "read every kind, write only notes"
+  is expressible.
+- **A drawer reach with Read or more reads the drawer's own document**, its public root (ADR 019), at
+  the reach's readable kinds. That document is not a member of its own drawer, so a reach used to see
+  nothing of a drawer's descriptor, although ADR 019 gives that document to the drawer's Read
+  participants. **Writing it through a reach stays refused.** A cartridge keeps its records in the
+  drawer's content documents. The public root holds the descriptor, the roster and broad identity
+  datums (a marker, a title), and churny state there grows the history every Read participant
+  replicates (operator, 2026-11-18, withdrawing a proposal to let Write reaches write it).
+- **`branch` requires read of the whole source document.** A branch is a new document, not bound by
+  the source's grants, so it would carry out every kind it copies.
+- **`merge` checks what it changes.** Each datum a merge changes is checked against the actor's write
+  kinds on the target, and only those datums need read on the source. Requiring every kind on both
+  sides would refuse merges that only touch what the actor may write. This is what keeps the original
+  design's guarantee for branches the runtime makes for a routine: the routine writes only what it may
+  on its branch, so merging the branch back carries only authorized writes, and a branch someone else
+  wrote to cannot smuggle writes the merging actor lacks.
+- **Datum-reference edges show targets the caller cannot read.** Every field an edge carries is
+  already in the readable origin's reference, so hiding the edge would hide nothing.
+
 **Network access is a permbind kind** (operator review item 5; named `#net` after Deno's `--allow-net`,
 D53): `#net { host, port?, methods? }`, a host a routine or micro may use the network to reach. It
 gates a routine's outgoing `wasi:http` requests to URLs that are not the node's own `dispatch.local`,
-and is the permbind raw `wasi:sockets` will use later. Matching is exact, with no wildcards: the host
-case-insensitively, the port (the scheme's default when the request has none; a permbind or grant
-without a port means 443), and `methods` (HTTP verbs) when present. A rich external service (GitHub,
+and is the permbind raw `wasi:sockets` will use later.
+
+- **Syntax is Deno's `--allow-net`** (operator, 2026-11-18, D56), so it reads as people and agents
+  already know it. `host` allows any port, and `host:port` allows only that port. There is no scheme:
+  `http://h:8443` and `https://h:8443` are the same destination. IPv6 literals go in brackets:
+  `[::1]:8000`. The host matches exactly and case-insensitively, with no wildcards; `methods` (HTTP
+  verbs), when present, limits the verbs. This replaces the first cut's rule that a missing port meant
+  443, which matched no convention.
+- **The resolved address is checked again at connect time** (D56, after wasmCloud's
+  `EgressAddressPolicy` in our wash fork, `host/egress_policy.rs`). The permbind and grant name a
+  host, but DNS decides where the connection goes, so a granted name that resolves to `127.0.0.1` would
+  otherwise reach the person's own machine (DNS rebinding included). Every address actually dialed is
+  refused if it is loopback, link-local (the cloud metadata address included), unspecified, multicast
+  or documentation space, in every spelling, IPv4-mapped IPv6 included. **Private ranges (RFC 1918,
+  ULA, carrier-grade NAT) are refused too**, where wasmCloud allows them by default: wasmCloud targets
+  clusters, where a private address is a sibling service, but a node runs on a person's device, where
+  the LAN (router, NAS, printers) is as sensitive as localhost.
+- **A guest's loopback is its own.** Naming `127.0.0.1` or `localhost` never reaches the machine. The
+  machine's loopback is reachable only through one reserved host name, as wasmCloud's
+  `host.wasmcloud.internal` is: only when the cartridge holds a `#net` grant for that name and port
+  *and* the node's own settings allow host loopback. Neither the cartridge's author nor the person
+  granting can open it alone.
+- **Redirects are not followed by the host.** A guest that follows one makes a new request, which is
+  checked like any other.
+
+A rich external service (GitHub,
 Google) is not a raw network grant: a platform cartridge provides it as operations, and a cartridge that wants it declares a
 `#method` on those operations. The general-purpose service cartridges are the trusted part; the
 cartridges that use them are analysed without network access.
@@ -204,6 +251,12 @@ Access can be requested while the cartridge runs, not only at install (operator 
 - **Who waits.** A micro awaits the answer (a future from its host service). A workflow waits as
   workflows do. A plain routine files the request and fails its call at once with the
   missing-authority error below; the caller retries once the person has answered.
+- **As built for nodules (5a; the operator's review is pending, D53).** Every routine always holds a
+  handle for filing requests, whatever its `uses`, because asking is how it reaches what it lacks.
+  **Allow never narrows**: it grants exactly what was asked or nothing, because a cartridge holding
+  something other than what it asked for would act on a wrong picture of its access. **Answered
+  requests are kept until the boot ends**, which is what makes "declined stays declined" and "only
+  this time" hold.
 
 ### 4.3 The missing-authority error
 
@@ -214,6 +267,11 @@ if one was filed. So when cartridge X's micro calls cartridge Y's routine and Y 
 receives Y's `MissingAuthority` and can tell the person "Y needs permission for this", with the
 request to answer. It is distinct from `Denied`, which means the access will not be granted (the
 rules forbid it), not that nobody has said yes yet.
+
+**Interim (operator, 2026-11-18, D53):** dispatch and `#net` answer `MissingAuthority`; the drawers
+and docs services still answer `Denied` until a micro needs the difference. Doing it properly means
+the handle's scope carries the permbind each reach came from, so the service can name it; until then
+those services can't tell "not granted yet" from "never".
 
 ### 4.4 Unchanged
 
@@ -274,6 +332,26 @@ may be granted, as a *delegator*, and uses none of it on its own behalf beyond i
 work. Least privilege applies to the routines' handles (which are `uses` ∩ grants), not to the
 delegator. Precedent: snapd's `snapd` holds every interface it connects; a Fuchsia component
 manager routes capabilities it does not use itself.
+
+**A runtime grants itself first, then its children** (operator, 2026-11-18, D56). Every grant a
+cartridge actor holds sits on an explicit grant to the runtime's service actor, made while someone
+with the authority to give it is present:
+- **A drawer the cartridge creates** is created as the service actor, because the runtime makes the
+  create call on the cartridge's behalf anyway. The service actor owns the new drawer and grants the
+  cartridge actor access to it. So the cartridge reaches what it made, without a rule that the create
+  permission counts as consent to a grant nobody answered.
+- **An existing drawer granted to a cartridge** (`setGrant`, or Allow on a request) is granted to the
+  service actor in that same call, using the granter's authority over the drawer. The runtime then
+  grants it down to the cartridge actor (`apply_grant`). Before this, the runtime tried that second
+  step on its own authority, which holds none of the person's drawers, and failed with `Denied`.
+- **Why the parent needs its own grant.** A channel may act as its actor's descendants (ADR 037,
+  question 2), so the service actor can already act as any of its cartridge actors: it opens them and
+  mints their handles. That rule is about who may *act as* an actor. Keyhive and the authority still
+  let an actor hand down only what it holds itself, so the parent's own grant is what makes the
+  hand-down possible. Nothing depends on "a child's grant lets the parent act".
+- **It is cheap.** A drawer grant to a local actor is one row in the node-local authority ledger
+  (`GrantDrawer`, `big_cabinet/drawer/grant.rs`), not a keyhive delegation, and nothing about it syncs.
+- The same holds for the `micros` service actor.
 
 ### 6.2 Every service domain, not only dispatch
 
@@ -448,6 +526,13 @@ Answered 2026-11-17 (operator, second pass):
 
 Still open:
 1. Where a UI sink checks its handle (micro question 1 below): undecided.
+2. **Grants on sister nodes** (D56). A grant datum lives in the cartridge config document in the
+   shared config drawer (ADR 044), so it will sync to a sister node. The node-local grant to that
+   node's service actor (§6.1) does not sync, and the person whose authority it needs is not present
+   when the datum arrives. Who makes it there is for the sister work (ADR 038).
+3. **A nodule's own drawers by default** (operator, 2026-11-18): a nodule may create drawers for its
+   own work without declaring a permbind, like an XDG data directory, owned per §6.1. Settle the
+   shape with the drawer rework under way (automata lane) before building it.
 
 Micro side [claytxt]:
 
