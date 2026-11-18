@@ -9622,6 +9622,7 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "clay_dioxus",
+ "clay_dioxus_kit",
  "clay_guest_session",
  "clay_host",
  "clay_mdk",
@@ -9723,6 +9724,7 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "clay_dioxus",
+ "clay_dioxus_kit",
  "clay_guest_session",
  "clay_host",
  "clay_mdk",
