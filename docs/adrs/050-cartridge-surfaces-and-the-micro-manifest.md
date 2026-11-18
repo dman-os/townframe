@@ -209,7 +209,7 @@ input   = { key, trigger: install | upgrade | start | target-changed, previous, 
 `everyUpgrade` runs at install and at each version change; `previous` and `current` are the versions, which closes the
 nodule to-do that initializers received `{}`. A nodule initializer targets one of its own routines (ADR 047 §3); a micro
 initializer calls the micro's `installer` export with the record. The installer runs as a short-lived instance, not an
-incarnation: no UI, nothing served, and its only reach is the entry's `uses` (normally a `#contribute` handle). Its rows
+incarnation: no UI, nothing served, and its reach is the micro's own `uses` (§3), so an installer that contributes rows needs the `#contribute` permbind named there, like any other write. Its rows
 go to the installation scope as a set, replaced atomically on each run so an upgrade cannot leave stale rows, and
 retracted on uninstall.
 

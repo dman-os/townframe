@@ -1,5 +1,10 @@
 # Cartridge = shared infrastructure + N surfaces (revision of unified-manifest)
 
+Status: Decided in direction (operator, D57); normative text is ADR 050
+Owner: nodules lane
+Updated: 2026-11-18
+Scope: Revision 2: the cartridge as shared infrastructure plus a list of surfaces, with the manager's and operator's reviews.
+
 Supersedes `unified-manifest.md`. `provides` is withdrawn. Read-only research; nothing built. S = `stack/node-59-adr-d56`, D = `origin/feat/desktop-base`.
 
 ## 1. The shape in one paragraph
