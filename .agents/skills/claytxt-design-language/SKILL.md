@@ -17,15 +17,15 @@ Read the repository `AGENTS.md`, then the relevant design-language documents:
 - `docs/design-language/foundations.md` — normative foundation rules and `FOUND-*` IDs.
 - `docs/design-language/composition.md` — layout and composition rules.
 - `docs/design-language/interaction.md` — state and interaction rules.
-- `src/ui/styles/README.md` — stylesheet integration.
+- `src/clay_dioxus_kit/styles/README.md` — stylesheet integration.
 - `docs/adrs/014-dayframe-dx-application-architecture.md` — application crate, feature-module, data-lifecycle, and feature-gate boundaries when UI work crosses presentation into app architecture.
 
 For token or Tailwind work, also inspect:
 
-- `src/ui/styles/tokens/primitives.tokens.json`
-- `src/ui/styles/tokens/semantic.tokens.json`
+- `src/clay_dioxus_kit/styles/tokens/primitives.tokens.json`
+- `src/clay_dioxus_kit/styles/tokens/semantic.tokens.json`
 - `x/design-tokens.ts`
-- `src/ui/tailwind.css`
+- `src/clay_dioxus_kit/tailwind.css`
 
 For native build or visual verification, also read `.agents/skills/daytxt-native-dev-loop/SKILL.md`.
 
@@ -34,7 +34,7 @@ For any component that holds state, handles gestures, or writes signals from a t
 ## Source-of-truth rules
 
 - Authored token JSON is canonical. Generated CSS and bundled Tailwind output are derived artifacts and MUST NOT be hand-edited.
-- Run `x/design-tokens.ts --check` after token changes. Regenerate with `--write`, then regenerate `src/ui/assets/tailwind.css` through the documented Tailwind command.
+- Run `x/design-tokens.ts --check` after token changes. Regenerate with `--write`, then regenerate `src/clay_dioxus_kit/assets/tailwind.css` through the documented Tailwind command.
 - Foundation tokens are application-agnostic. They MUST NOT contain tiles, columns, widgets, screens, routes, workflows, or other product-specific grammar.
 - Keep the dependency direction `primitive -> semantic -> optional reusable component`. A primitive MUST NOT depend on a semantic or feature token.
 - The showcase is curated executable evidence, not the normative source and not an exhaustive token catalog.
@@ -117,7 +117,7 @@ deno check x/design-tokens.ts
 deno run --allow-read --allow-write x/design-tokens.ts --self-test
 deno run --allow-read --allow-write x/design-tokens.ts --write
 deno run --allow-read --allow-write x/design-tokens.ts --check
-tailwindcss -i src/ui/tailwind.css -o src/ui/assets/tailwind.css
+tailwindcss -i src/clay_dioxus_kit/tailwind.css -o src/clay_dioxus_kit/assets/tailwind.css
 cargo fmt --all -- --check
 ```
 

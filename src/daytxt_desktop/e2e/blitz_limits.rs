@@ -10,8 +10,8 @@ use blitz_traits::shell::ColorScheme;
 use blitz_traits::shell::Viewport;
 use std::sync::Arc;
 
-/// The stylesheet the apps ship (`ui::FoundationStyles` links the same file).
-const TAILWIND: &str = include_str!("../../ui/assets/tailwind.css");
+/// The stylesheet the apps ship (`clay_dioxus_kit::FoundationStyles` links the same file).
+const TAILWIND: &str = include_str!("../../clay_dioxus_kit/assets/tailwind.css");
 
 /// Side of the square viewport and canvas the paint pins draw into.
 const SIZE: u32 = 100;

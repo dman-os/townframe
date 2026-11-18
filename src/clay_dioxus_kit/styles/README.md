@@ -7,8 +7,8 @@
 ```sh
 cd ../ecma/gursha
 pnpm exec tsx \
-  ../townframe/src/ui/styles/gen-material-css.ts \
-  ../townframe/src/ui/styles
+  ../townframe/src/clay_dioxus_kit/styles/gen-material-css.ts \
+  ../townframe/src/clay_dioxus_kit/styles
 ```
 
 The Material files provide the external theme-provider values used by `.df-theme`; they are not the authored claytxt semantic token source.

@@ -25,7 +25,6 @@ allowed_dependencies = [
     "micro_toolbar",
     "micro_toolbar_manifest",
     "sqlite_rs",
-    "ui",
 ]
 allow_external_api_types = false
 

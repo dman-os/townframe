@@ -4459,7 +4459,6 @@ dependencies = [
  "serde_json",
  "sqlite_rs",
  "tokio",
- "ui",
  "wcmp",
  "wcmp-wasm-core-wasmi",
 ]
@@ -4482,6 +4481,7 @@ dependencies = [
  "big_cabinet",
  "big_cabinet_core",
  "bytes",
+ "clay_dioxus_kit",
  "clay_docs",
  "clay_guest_session",
  "clay_host",
@@ -4510,7 +4510,6 @@ dependencies = [
  "sqlite_rs",
  "tempfile",
  "tokio",
- "ui",
  "utils_rs",
 ]
 
@@ -4519,6 +4518,7 @@ name = "daytxt_web"
 version = "0.1.0"
 dependencies = [
  "clay_dioxus",
+ "clay_dioxus_kit",
  "clay_docs",
  "clay_mdk",
  "clay_rt_wcmp",
@@ -4538,7 +4538,6 @@ dependencies = [
  "micro_toolbar_manifest",
  "serde",
  "serde_json",
- "ui",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

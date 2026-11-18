@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn the_enum_is_the_token_scale() {
         let tokens: serde_json::Value =
-            serde_json::from_str(include_str!("../ui/styles/tokens/semantic.tokens.json")).unwrap();
+            serde_json::from_str(include_str!("styles/tokens/semantic.tokens.json")).unwrap();
         let tokens = tokens["layer"].as_object().unwrap();
         let mut previous = None;
         for (layer, name) in LAYERS {

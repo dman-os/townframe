@@ -1,11 +1,5 @@
 //! This crate contains all shared UI for the workspace.
 
-mod foundation;
-pub use foundation::FoundationStyles;
-pub use foundation::ThemeMode;
-pub use foundation::ThemeRoot;
-pub use foundation::ThemeStyles;
-
 pub mod components;
 pub use components::sample_column_specs;
 pub use components::Button;

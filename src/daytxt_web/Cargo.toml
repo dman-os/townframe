@@ -5,9 +5,9 @@ edition = "2021"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 dioxus = { workspace = true }
-ui = { workspace = true }
 daytxt_core = { workspace = true }
 clay_dioxus = { workspace = true }
+clay_dioxus_kit = { workspace = true, features = ["host"] }
 clay_mdk = { workspace = true, features = ["in_process", "view", "wcmp", "package"] }
 clay_rt_wcmp = { workspace = true }
 clay_store = { workspace = true }
