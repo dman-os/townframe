@@ -171,6 +171,7 @@ _: {
         curl
         mold
         deno
+        b3sum
 
         pnpm
         nodejs_24
