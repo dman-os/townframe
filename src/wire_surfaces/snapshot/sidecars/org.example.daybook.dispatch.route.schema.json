@@ -1,0 +1,22 @@
+{
+  "$defs": {
+    "MethodRoute": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.dispatch.route/<pattern>`: the node-local route of an exact NSID or an\nauthority prefix to the provider `provider` (ADR 045). Dispatch's router applies it; the\nnodule service holds the datum only until the node has a per-node store of its own, so this\ndatum is not keyed by a cartridge and has no slot in a [`NoduleEntry`].",
+      "properties": {
+        "provider": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "title": "MethodRoute",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.dispatch.route"
+    }
+  },
+  "$ref": "#/$defs/MethodRoute",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

@@ -1,5 +1,6 @@
 use big_cabinet_core::datum::Extra;
 use big_cabinet_core::datum::Nsid;
+use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::reference::DatumPin;
 use indexmap::IndexMap;
 use serde::Deserialize;
@@ -10,6 +11,8 @@ use super::AUTHORITY;
 use super::Digest;
 use super::Necessity;
 use super::Resolution;
+use crate::config::InvalidNetTarget;
+use crate::config::NetTarget;
 
 const PERMBIND_AUTHORITY: &str = "org.example.daybook.cartridge";
 const COMPONENT_AUTHORITY: &str = "org.example.daybook.cartridge";
@@ -19,6 +22,7 @@ pub enum Permbind {
     Datum(PermbindDatum),
     Method(PermbindMethod),
     Drawers(PermbindDrawers),
+    Net(PermbindNet),
     #[datum(other)]
     Unknown(big_cabinet_core::datum::UnknownMember),
 }
@@ -57,6 +61,43 @@ pub struct PermbindMethod {
     pub extra: Extra,
 }
 
+/// `#net { host, port?, methods? }`: a host a routine may use the network to reach (ADR 049 §2).
+/// It gates the routine's outgoing `wasi:http` requests to URLs that are not the node's own
+/// `dispatch.local`, and is the permbind raw `wasi:sockets` will use. A routine that takes it
+/// reaches the host only once the cartridge also holds the matching `grant/net` datum.
+///
+/// Matching is exact (no wildcards): the host case-insensitively, the port as stated (none means
+/// the HTTPS port, 443, see [`NetTarget`]), and `methods` (HTTP verbs, upper case) when present.
+#[macros::datum(authority = PERMBIND_AUTHORITY, name = "net")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermbindNet {
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// The HTTP verbs the routine may use; every verb when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub methods: Option<Vec<String>>,
+    pub description: String,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+impl PermbindNet {
+    /// The host and port this permbind names, as [`Cartridge::validate`] checked them.
+    pub fn target(&self) -> Result<NetTarget, InvalidNetTarget> {
+        NetTarget::new(&self.host, self.port)
+    }
+
+    /// Whether `method` is among the verbs this permbind allows.
+    pub fn allows_method(&self, method: &str) -> bool {
+        self.methods
+            .as_ref()
+            .is_none_or(|methods| methods.iter().any(|allowed| allowed == method))
+    }
+}
+
 #[macros::datum(authority = PERMBIND_AUTHORITY, name = "drawers")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -75,6 +116,23 @@ pub struct PermbindDrawers {
     pub delete: Option<Necessity>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+impl PermbindDrawers {
+    /// The most access to an existing drawer this permbind declares: reading is `Read`, and
+    /// writing or deleting (which has no access level of its own) is `Write`. `None` when it
+    /// declares neither, as for a permbind that only creates drawers, which no drawer grant
+    /// satisfies (a create-only routine reaches no existing drawer).
+    pub fn declared_access(&self) -> Option<DrawerAccess> {
+        [
+            (self.read.is_some(), DrawerAccess::Read),
+            (self.write.is_some(), DrawerAccess::Write),
+            (self.delete.is_some(), DrawerAccess::Write),
+        ]
+        .into_iter()
+        .filter_map(|(declared, access)| declared.then_some(access))
+        .max()
+    }
 }
 
 #[expect(

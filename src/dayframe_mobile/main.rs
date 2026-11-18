@@ -23,9 +23,9 @@ mod android {
     use dayframe_native::Shell;
     use dayframe_native::WryApplication;
     use dioxus::prelude::*;
-    use jni::JNIEnv;
     use jni::objects::JObject;
     use jni::objects::JValue;
+    use jni::JNIEnv;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::OnceLock;

@@ -17,7 +17,15 @@
 //! continue into the nested call, so it stays inside the outer call's budget; its request id is
 //! new. An executor adapts its transport to [`call`] and supplies the signer from its own table,
 //! so every executor authorizes a handler's calls the same way.
+//!
+//! A request to any other URL is network access, which only a `#net` permbind opens (ADR 049
+//! §2). [`authorize_net`] is the one check of it, as [`call`] is of dispatch: the routine, named
+//! by the capability it presents in `x-nodule-capability` (never forwarded; it is the node's, not
+//! the destination's), must take a `#net` permbind that matches the scheme's port, host and
+//! method, and the cartridge must hold the matching `grant/net`. The executor then performs the
+//! request itself with its own HTTP client.
 
+use crate::requests::MissingAuthorityLookup;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_dispatch_core::Body;
@@ -32,6 +40,7 @@ use futures::StreamExt;
 use http::HeaderMap;
 use http::Method;
 use http::StatusCode;
+use http::Uri;
 use http_body::Frame;
 use http_body_util::BodyExt;
 use http_body_util::Full;
@@ -44,7 +53,9 @@ use serde_json::Value;
 use serde_json::json;
 use service_client_core_rs::xrpc::XrpcBody;
 use service_client_native_rs::Client;
+use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
 use service_core_rs::xrpc::bearer_token;
+use service_core_rs::xrpc::domain_error_envelope;
 use service_core_rs::xrpc::request_context;
 use service_utils_rs::ClientError;
 use service_utils_rs::HttpMetadata;
@@ -71,7 +82,7 @@ fn json_response(status: StatusCode, body: Value) -> (StatusCode, XrpcBody) {
 /// one way, so the body rules are not restated per transport.
 pub async fn call_http<B>(
     dispatch: &Client<DispatchProtocol>,
-    signer: Option<CapId>,
+    caller: Option<&WorkloadCaller>,
     request: http::Request<B>,
 ) -> (StatusCode, XrpcBody)
 where
@@ -116,7 +127,7 @@ where
     };
     call(
         dispatch,
-        signer,
+        caller,
         &parts.method,
         parts
             .uri
@@ -161,17 +172,33 @@ pub fn http_response(status: StatusCode, body: XrpcBody) -> http::Response<HttpB
     builder.body(body).expect("a well-formed response")
 }
 
+/// Who a handler's outgoing calls are made as, from the executor's table: never anything the
+/// handler said.
+#[derive(Clone)]
+pub struct WorkloadCaller {
+    /// The calling workload's own actor capability.
+    pub signer: CapId,
+    /// What refines a refused call of one of its routines (see [`call`]). `None` for a workload
+    /// that is not a cartridge's routine (a Clay micro): it has no `uses` to refine against, so
+    /// its refusals go out as dispatch gave them, and it has no `#net` permbinds, so every
+    /// non-dispatch request is refused as undeclared.
+    pub missing_authority: Option<MissingAuthorityLookup>,
+}
+
 /// Runs a handler's outgoing request through dispatch. A malformed request is answered like an
 /// XRPC server would, not refused as a transport failure.
 ///
-/// `signer` is the calling workload's own actor capability, from the executor's table: never
-/// anything the handler said. `None` means the workload has been stopped (its nodule disabled,
+/// `caller` is the calling workload's identity, from the executor's table. `None` means the workload has been stopped (its nodule disabled,
 /// upgraded or retired) while one of its requests was still running, so it has no identity left
 /// to call with. That is a lifecycle race, not a broken invariant, and is answered the way a
 /// proxy answers a call from a drained upstream rather than crashing the node.
+///
+/// A call dispatch refuses as [`DispatchError::Denied`] is refined by `missing_authority`: when
+/// the routine's `uses` declare the operation and no grant covers it yet, the answer is the
+/// cartridge's `MissingAuthority`, which the guest's typed client decodes (ADR 049 §4.3).
 pub async fn call(
     dispatch: &Client<DispatchProtocol>,
-    signer: Option<CapId>,
+    caller: Option<&WorkloadCaller>,
     method: &Method,
     path: &str,
     headers: &HeaderMap,
@@ -251,7 +278,7 @@ pub async fn call(
         },
         XrpcBody::Bytes(_) => Value::Null,
     };
-    let Some(signer) = signer else {
+    let Some(caller) = caller else {
         return bad(
             StatusCode::SERVICE_UNAVAILABLE,
             "WorkloadStopped",
@@ -264,6 +291,8 @@ pub async fn call(
         range: None,
         origin: Origin::Remote,
     };
+    // `Invoke` takes the operation, which a refusal is attributed by.
+    let called = operation.clone();
     let invoke = match body {
         XrpcBody::Json(_) => Invoke::json(operation, input, invocation),
         XrpcBody::Bytes(body) => Invoke {
@@ -278,7 +307,11 @@ pub async fn call(
             request_context,
             HttpMetadata {
                 idempotency_key: idempotency_key.clone(),
-                ..Authorization { authority, signer }.metadata()
+                ..Authorization {
+                    authority,
+                    signer: caller.signer,
+                }
+                .metadata()
             },
             invoke,
         )
@@ -294,11 +327,74 @@ pub async fn call(
                 "descriptor bodies are native-only",
             ),
         },
-        Err(ClientError::Method(error)) => dispatch_error_response(error),
+        Err(ClientError::Method(error)) => {
+            let error = match &caller.missing_authority {
+                Some(lookup) => lookup.refine(authority, &called, error),
+                None => error,
+            };
+            dispatch_error_response(error)
+        }
         Err(ClientError::Transport { message, .. }) => {
             panic!("in-process dispatch transport failed: {message}")
         }
     }
+}
+
+/// Whether the workload's handler may send `method` to `uri`, a URL that is not `dispatch.local`
+/// (see the module docs). `Err` is the answer to give the handler instead of sending: a
+/// declared but ungranted request is the cartridge's `MissingAuthority` (403, decoded by the
+/// guest's typed client), an undeclared one `Denied` (403), and a URL that is not `http` or
+/// `https` with a host is a 400. `caller` is `None` when the workload has been stopped (see
+/// [`call`]).
+pub fn authorize_net(
+    caller: Option<&WorkloadCaller>,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, XrpcBody)> {
+    let Some(caller) = caller else {
+        return Err(json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({ "error": "WorkloadStopped", "message": "the calling handler has been stopped" }),
+        ));
+    };
+    let invalid = |message: &str| {
+        json_response(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "InvalidRequest", "message": message }),
+        )
+    };
+    let default_port = match uri.scheme_str() {
+        Some("http") => 80,
+        Some("https") => 443,
+        _ => return Err(invalid("a network request must be to an http or https URL")),
+    };
+    let Some(host) = uri.host() else {
+        return Err(invalid("a network request must name a host"));
+    };
+    let port = uri.port_u16().unwrap_or(default_port);
+    // Without a routine's capability there is no `uses` to check: refused as undeclared.
+    let Some(capability) = headers
+        .get(NODULE_CAPABILITY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|id| serde_json::from_value::<CapId>(Value::String(id.to_owned())).ok())
+    else {
+        return Err(dispatch_error_response(DispatchError::Denied));
+    };
+    let Some(lookup) = &caller.missing_authority else {
+        return Err(dispatch_error_response(DispatchError::Denied));
+    };
+    lookup
+        .authorize_net(capability, method.as_str(), host, port)
+        .map_err(dispatch_error_response)
+}
+
+/// Removes from the headers of a request [`authorize_net`] allowed what is the node's and never
+/// the destination's: the routine's capability. Nothing else of the node's reaches a guest, so
+/// nothing else of it can be sent; the guest's own headers (an `authorization` for the
+/// destination included) go as they are.
+pub fn strip_node_headers(headers: &mut HeaderMap) {
+    headers.remove(NODULE_CAPABILITY_HEADER);
 }
 
 /// The HTTP form of a dispatch failure, which is the inverse of
@@ -315,6 +411,13 @@ fn dispatch_error_response(error: DispatchError) -> (StatusCode, XrpcBody) {
     };
     match &error {
         DispatchError::Denied => named(StatusCode::FORBIDDEN, "Denied"),
+        // Whole under `operationError`, so a guest's typed client decodes it as the method's
+        // error (every method error wraps `ContextError`) and a routine can match it.
+        DispatchError::Context(ContextError::MissingAuthority { .. }) => json_response(
+            StatusCode::FORBIDDEN,
+            serde_json::to_value(domain_error_envelope(&error))
+                .expect("an XRPC error envelope serializes"),
+        ),
         DispatchError::LocalOnly => named(StatusCode::FORBIDDEN, "LocalOnly"),
         DispatchError::BodyMismatch { .. } => json_response(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,

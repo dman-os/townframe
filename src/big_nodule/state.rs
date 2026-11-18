@@ -15,6 +15,12 @@ use crate::executor::NoduleExecutor;
 use crate::executor::ReensureQueue;
 use crate::executor::RoutineCapabilities;
 use crate::executor::RoutineSpec;
+use crate::requests::GrantRequests;
+use crate::requests::GrantsFeed;
+use crate::requests::MissingAuthorityLookup;
+use crate::requests::NetUse;
+use crate::requests::Requests;
+use crate::requests::RoutineUses;
 use crate::store;
 use big_cabinet::DatumStore;
 use big_cabinet::DatumStoreHandle;
@@ -39,6 +45,7 @@ use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::DatumKinds;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsProtocol;
+use big_cabinet_core::doc::DrawerReach;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::doc::StoreSnapshot;
@@ -52,13 +59,22 @@ use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::reference::DatumTag;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Permbind;
+use big_cartridges_core::ResolvedCartridge;
 use big_cartridges_core::Revision;
+use big_cartridges_core::RoutineUse;
 use big_cartridges_core::RunMode;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::config::NetTarget;
+use big_cartridges_core::protocol::AwaitCartridgeGrantRequest;
+use big_cartridges_core::protocol::CartridgeGrantRecord;
 use big_cartridges_core::protocol::CartridgeInstallRecord;
 use big_cartridges_core::protocol::CartridgesProtocol;
+use big_cartridges_core::protocol::FiledGrantRequest;
+use big_cartridges_core::protocol::GrantAnswer;
+use big_cartridges_core::protocol::GrantRequestState;
+use big_cartridges_core::protocol::RequestCartridgeGrant;
 use big_dispatch::Caller;
 use big_dispatch::LexiconSource;
 use big_dispatch::Operation;
@@ -76,6 +92,7 @@ use big_dispatch_core::Readiness;
 use big_nodule_core::NoduleAdmission;
 use big_nodule_core::config::AdmissionCache;
 use big_nodule_core::config::CartridgeConfig;
+use big_nodule_core::config::DatumSlot;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::NoduleResolution;
 use big_nodule_core::inventory::ArtifactState;
@@ -93,6 +110,7 @@ use big_nodule_core::providers::ProviderIndex;
 use big_nodule_core::providers::RequestStatus;
 use big_nodule_core::providers::Unresolved;
 use indexmap::IndexMap;
+use method_core::Method as _;
 use serde_json::Value;
 use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
@@ -127,6 +145,9 @@ pub(crate) struct Stores {
     /// service presents to it.
     pub(crate) cartridges: Client<CartridgesProtocol>,
     pub(crate) cartridges_authorization: Authorization,
+    /// The blobs service and the delegator handle routine blobs handles are minted from.
+    pub(crate) blobs: Client<big_blobs_core::BlobsProtocol>,
+    pub(crate) blobs_capability: CapId,
     pub(crate) shared_config_drawer: DrawerId,
     pub(crate) parent: OpenedActor,
     pub(crate) parent_path: String,
@@ -177,7 +198,6 @@ pub(crate) enum Command {
     SetGrant {
         context: RequestContext,
         cartridge_id: CartridgeId,
-        component: Component,
         grant: GrantKey,
         value: Option<GrantBody>,
         reply: Reply<()>,
@@ -223,6 +243,29 @@ pub(crate) enum Command {
     ListInstalls {
         context: RequestContext,
         reply: Reply<Vec<CartridgeInstallRecord>>,
+    },
+    /// The cartridge whose nodule runs as `actor_id`, which is how a request is attributed to a
+    /// cartridge: from the caller's actor, never from a body.
+    CartridgeOfActor {
+        actor_id: Uuid7,
+        reply: Reply<CartridgeId>,
+    },
+    FileGrantRequest {
+        cartridge_id: CartridgeId,
+        permbind: String,
+        drawer: Option<DrawerId>,
+        reply: Reply<FiledGrantRequest>,
+    },
+    AnswerGrantRequest {
+        context: RequestContext,
+        request: Uuid7,
+        answer: GrantAnswer,
+        drawer: Option<DrawerId>,
+        reply: Reply<GrantRequestState>,
+    },
+    ListGrants {
+        cartridge_id: Option<CartridgeId>,
+        reply: Reply<Vec<CartridgeGrantRecord>>,
     },
 }
 
@@ -275,6 +318,11 @@ pub(crate) struct Handle {
     /// The install rows as the last reconcile left them, for [`crate::NoduleService`]'s
     /// subscription to follow.
     pub(crate) installs: watch::Receiver<Vec<CartridgeInstallRecord>>,
+    /// The grant requests of this boot, for the service's list and its long polls to follow.
+    pub(crate) requests: watch::Receiver<Requests>,
+    /// Each cartridge's grants as the last reconcile left them, for the service's
+    /// `awaitCartridgeGrants` to follow.
+    pub(crate) grants: watch::Receiver<GrantsFeed>,
 }
 
 impl Handle {
@@ -330,6 +378,11 @@ pub(crate) struct State {
     docs_changed: Arc<Notify>,
     /// The install rows of the last reconcile.
     installs: watch::Sender<Vec<CartridgeInstallRecord>>,
+    /// The runtime grant requests of this boot and the grants that last as long (ADR 049 §4.2).
+    grant_requests: GrantRequests,
+    /// Each cartridge's refusal attribution, shared with its executor (see
+    /// [`MissingAuthorityLookup`]).
+    missing_authority: BTreeMap<CartridgeId, MissingAuthorityLookup>,
 }
 
 fn nodule_actor(actor: &OpenedActor) -> NoduleActor {
@@ -457,13 +510,20 @@ async fn load_applied_operations(
         .collect())
 }
 
-/// The scope of each service handle a routine should hold; a service the routine has no access
-/// to is `None`, and no handle is minted for it.
-#[derive(Clone, Default, PartialEq)]
-struct RoutineScopes {
-    dispatch: Option<DispatchScope>,
-    config: Option<DocScope>,
-    drawers: Option<DrawerScope>,
+/// The blobs service's mint operation: the one capability domain beyond dispatch, docs and
+/// drawers whose handle a routine's operations can need (ADR 049 §6.2).
+const BLOBS_MINT: &str = "org.example.daybook.blobs.mintCapability";
+
+/// The scope of each service handle a routine, or a micro, should hold; a service it has no
+/// access to is `None`, and no handle is minted for it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RoutineScopes {
+    pub dispatch: Option<DispatchScope>,
+    /// The docs handle: the cartridge config document and, narrowed to the `#datum` kinds the
+    /// `uses` take, each drawer it was granted (ADR 049 §2).
+    pub docs: Option<DocScope>,
+    pub drawers: Option<DrawerScope>,
+    pub blobs: Option<big_blobs_core::protocol::BlobsScope>,
 }
 
 /// What a routine holds: the handles, and the scopes they were minted for, which is what a
@@ -478,141 +538,327 @@ impl AppliedRoutine {
     fn handles(&self) -> impl Iterator<Item = CapId> {
         [
             self.handles.dispatch,
-            self.handles.config,
+            self.handles.docs,
             self.handles.drawers,
+            self.handles.blobs,
         ]
         .into_iter()
         .flatten()
     }
 }
 
-/// Each routine's desired scopes: what its `uses` list, intersected with what was granted
-/// (`effective_operations` for methods, `desired_grants` for drawers) and with what the
-/// permbind declares.
+/// Each routine's desired scopes: [`RoutineScopes::lower`] over its `uses`.
 fn desired_routine_scopes(
     installed: &InstalledNodule,
     desired_grants: &BTreeMap<DrawerId, DrawerAccess>,
     effective_operations: &DispatchScope,
 ) -> BTreeMap<String, RoutineScopes> {
-    let settings_kinds = installed.resolved.settings_kinds();
     installed
         .nodule
         .routines
         .iter()
         .map(|(routine_key, routine)| {
-            let mut operations = BTreeSet::new();
-            let mut read = BTreeSet::new();
-            let mut write = BTreeSet::new();
-            let mut drawers = BTreeMap::new();
-            let mut create_drawer = false;
-            for (binding, usage) in &routine.uses {
-                let permbind = installed
+            (
+                routine_key.clone(),
+                RoutineScopes::lower(
+                    &installed.resolved,
+                    &installed.config_doc,
+                    &routine.uses,
+                    desired_grants,
+                    effective_operations,
+                ),
+            )
+        })
+        .collect()
+}
+
+impl RoutineScopes {
+    /// The scopes of the service handles a holder of `uses` should have: what `uses` lists,
+    /// intersected with what the cartridge was granted (`effective_operations` for methods,
+    /// `desired_grants` for drawers; ADR 049 §4.1) and with what the permbind declares. A grant is
+    /// the cartridge's, so one grant of a drawer satisfies every holder whose `uses` take a
+    /// `#drawers` permbind that needs it, and a holder whose `uses` do not take one reaches no
+    /// drawer however many are granted. A routine and a micro are lowered by this one function
+    /// (ADR 049 §3), so the two runtimes cannot disagree about what a `uses` entry confers.
+    ///
+    /// `effective_operations` is the cartridge's granted operations bound to its method permbinds
+    /// (`NoduleAdmission::bind_operations`), and `config_doc` the cartridge's configuration
+    /// document, where its settings datums live.
+    pub fn lower(
+        resolved: &ResolvedCartridge,
+        config_doc: &DocId,
+        uses: &BTreeMap<String, RoutineUse>,
+        desired_grants: &BTreeMap<DrawerId, DrawerAccess>,
+        effective_operations: &DispatchScope,
+    ) -> Self {
+        let settings_kinds = resolved.settings_kinds();
+
+        let mut operations = BTreeSet::new();
+        let mut read = BTreeSet::new();
+        let mut write = BTreeSet::new();
+        // Every `#datum` kind the routine's `uses` take, settings or not: the kinds its docs
+        // handle reaches inside the drawers it was granted.
+        let mut datum_read = BTreeSet::new();
+        let mut datum_write = BTreeSet::new();
+        let mut drawers = BTreeMap::new();
+        let mut create_drawer = false;
+        // The operation-level flags of the blobs handle the routine's operations need, stated
+        // beside each operation's definition (ADR 049 §6.2).
+        let mut blobs_flags = serde_json::Map::new();
+        for (binding, usage) in uses {
+            let permbind = resolved
+                .cartridge
+                .permbinds
+                .get(binding)
+                .expect("admission refuses a use without its permbind");
+            match permbind {
+                // Listing a method permbind is the use: method access has no
+                // read/write/create/delete to inspect.
+                Permbind::Method(method) => {
+                    if effective_operations
+                        .operations
+                        .contains(method.nsid.as_str())
+                    {
+                        operations.insert(method.nsid.to_string());
+                        if let Some(need) = method_lexicon::builtin_method(method.nsid.as_str())
+                            .and_then(|built_in| built_in.handle)
+                        {
+                            assert_eq!(
+                                need.mint, BLOBS_MINT,
+                                "a built-in operation's handle need names a domain the nodule runtime mints"
+                            );
+                            blobs_flags.extend(
+                                need.flags.iter().map(|flag| {
+                                    ((*flag).to_owned(), serde_json::Value::Bool(true))
+                                }),
+                            );
+                        }
+                    }
+                }
+                Permbind::Datum(datum) => {
+                    let tag = DatumTag::new(datum.nsid.to_string())
+                        .expect("an admitted datum binding has a valid tag");
+                    if usage.read {
+                        datum_read.insert(tag.clone());
+                    }
+                    if usage.write || usage.create || usage.delete {
+                        datum_write.insert(tag.clone());
+                    }
+                    // What the cartridge-wide capabilities this replaces reached, and so
+                    // all a datum permbind reaches: the cartridge config document, whole
+                    // for reads and the declared settings kinds for writes. No code ever
+                    // turned a non-settings `#datum` permbind into a document scope, and
+                    // no document set is named for one yet, so such a permbind confers
+                    // nothing here rather than a document this change invented.
+                    if !settings_kinds
+                        .covers(&DatumKinds::Only(std::iter::once(tag.clone()).collect()))
+                    {
+                        continue;
+                    }
+                    if usage.read {
+                        read.insert(tag.clone());
+                    }
+                    if usage.write || usage.create || usage.delete {
+                        write.insert(tag);
+                    }
+                }
+                Permbind::Drawers(drawer) => {
+                    // What the routine uses on existing drawers, as far as the permbind
+                    // declares it and a drawer was granted that far. `create` is not
+                    // among them: it sets only the scope's create flag below, so a
+                    // create-only routine can make drawers without any access to the
+                    // ones that exist (grants never widen silently, ADR 028). Deleting
+                    // has no access level of its own, so it needs Write.
+                    let access = [
+                        (usage.read && drawer.read.is_some(), DrawerAccess::Read),
+                        (usage.write && drawer.write.is_some(), DrawerAccess::Write),
+                        (usage.delete && drawer.delete.is_some(), DrawerAccess::Write),
+                    ]
+                    .into_iter()
+                    .filter_map(|(used, access)| used.then_some(access))
+                    .max();
+                    if let Some(access) = access {
+                        drawers.extend(
+                            desired_grants
+                                .iter()
+                                .filter(|(_, granted)| **granted >= access)
+                                .map(|(id, _)| (id.clone(), access)),
+                        );
+                    }
+                    create_drawer |= usage.create && drawer.create.is_some();
+                }
+                // Network access is checked where the request leaves (`egress::authorize_net`),
+                // not by a handle: there is no scope to mint.
+                Permbind::Net(_) | Permbind::Unknown(_) => {}
+            }
+        }
+        // A routine with something in its `uses` may always ask for it and wait for the
+        // answer: filing confers nothing, and the grant that would admit the call is the very
+        // thing the request is for, so it cannot be a precondition of it (ADR 049 §4.2).
+        if !uses.is_empty() {
+            operations.extend(
+                [
+                    RequestCartridgeGrant::XRPC.nsid,
+                    AwaitCartridgeGrantRequest::XRPC.nsid,
+                ]
+                .map(str::to_owned),
+            );
+        }
+        let docs = routine_docs_scope(
+            config_doc,
+            &drawers,
+            [read, write],
+            [datum_read, datum_write],
+            &mut operations,
+        );
+        let blobs = (!blobs_flags.is_empty()).then(|| {
+            serde_json::from_value(serde_json::Value::Object(blobs_flags))
+                .expect("a handle need's flags are fields of the blobs scope")
+        });
+        let drawers = (!drawers.is_empty() || create_drawer).then_some(DrawerScope {
+            drawers,
+            create: create_drawer,
+        });
+        let dispatch = (!operations.is_empty()).then(|| DispatchScope {
+            operations,
+            authorities: effective_operations.authorities.clone(),
+            privileged: effective_operations.privileged,
+        });
+        Self {
+            dispatch,
+            docs,
+            drawers,
+            blobs,
+        }
+    }
+}
+
+/// Per routine, what its `uses` leave refused for want of a grant someone may still give (ADR 049
+/// §4.3): the operations its method permbinds declare that `effective_operations` (the
+/// cartridge's grants) do not cover, with the permbind of each, and every `#net` permbind it
+/// takes with whether `desired_nets` covers it. Drawer and docs calls are not here: they pass the
+/// handle and are refused by their own service, which cannot be traced to one permbind from the
+/// call alone.
+fn routine_uses(
+    installed: &InstalledNodule,
+    effective_operations: &DispatchScope,
+    desired_nets: &BTreeSet<NetTarget>,
+) -> BTreeMap<String, RoutineUses> {
+    installed
+        .nodule
+        .routines
+        .iter()
+        .map(|(routine_key, routine)| {
+            let mut uses = RoutineUses::default();
+            for binding in routine.uses.keys() {
+                match installed
                     .resolved
                     .cartridge
                     .permbinds
                     .get(binding)
-                    .expect("admission refuses a routine use without its permbind");
-                match permbind {
-                    // Listing a method permbind is the use: method access has no
-                    // read/write/create/delete to inspect.
-                    Permbind::Method(method) => {
-                        if effective_operations
+                    .expect("admission refuses a use without its permbind")
+                {
+                    Permbind::Method(method)
+                        if !effective_operations
                             .operations
-                            .contains(method.nsid.as_str())
-                        {
-                            operations.insert(method.nsid.to_string());
-                        }
+                            .contains(method.nsid.as_str()) =>
+                    {
+                        uses.ungranted
+                            .insert(method.nsid.to_string(), binding.to_string());
                     }
-                    Permbind::Datum(datum) => {
-                        let tag = DatumTag::new(datum.nsid.to_string())
-                            .expect("an admitted datum binding has a valid tag");
-                        // What the cartridge-wide capabilities this replaces reached, and so
-                        // all a datum permbind reaches: the cartridge config document, whole
-                        // for reads and the declared settings kinds for writes. No code ever
-                        // turned a non-settings `#datum` permbind into a document scope, and
-                        // no document set is named for one yet, so such a permbind confers
-                        // nothing here rather than a document this change invented.
-                        if !settings_kinds
-                            .covers(&DatumKinds::Only(std::iter::once(tag.clone()).collect()))
-                        {
-                            continue;
-                        }
-                        if usage.read {
-                            read.insert(tag.clone());
-                        }
-                        if usage.write || usage.create || usage.delete {
-                            write.insert(tag);
-                        }
+                    Permbind::Net(net) => {
+                        let target = net
+                            .target()
+                            .expect("admission refuses a net permbind that names no host");
+                        let port = target.port().unwrap_or(NetTarget::DEFAULT_PORT);
+                        uses.nets.push(NetUse {
+                            binding: binding.to_string(),
+                            permbind: net.clone(),
+                            granted: desired_nets
+                                .iter()
+                                .any(|grant| grant.reaches(target.host(), port)),
+                            target,
+                        });
                     }
-                    Permbind::Drawers(drawer) => {
-                        // What the routine uses on existing drawers, as far as the permbind
-                        // declares it and a drawer was granted that far. `create` is not
-                        // among them: it sets only the scope's create flag below, so a
-                        // create-only routine can make drawers without any access to the
-                        // ones that exist (grants never widen silently, ADR 028). Deleting
-                        // has no access level of its own, so it needs Write.
-                        let access = [
-                            (usage.read && drawer.read.is_some(), DrawerAccess::Read),
-                            (usage.write && drawer.write.is_some(), DrawerAccess::Write),
-                            (usage.delete && drawer.delete.is_some(), DrawerAccess::Write),
-                        ]
-                        .into_iter()
-                        .filter_map(|(used, access)| used.then_some(access))
-                        .max();
-                        if let Some(access) = access {
-                            drawers.extend(
-                                desired_grants
-                                    .iter()
-                                    .filter(|(_, granted)| **granted >= access)
-                                    .map(|(id, _)| (id.clone(), access)),
-                            );
-                        }
-                        create_drawer |= usage.create && drawer.create.is_some();
-                    }
-                    Permbind::Unknown(_) => {}
+                    _ => {}
                 }
             }
-            let config = (!read.is_empty() || !write.is_empty()).then(|| {
-                let by_doc = |kinds: BTreeSet<DatumTag>| {
-                    if kinds.is_empty() {
-                        BTreeMap::new()
-                    } else {
-                        BTreeMap::from([(installed.config_doc.clone(), DatumKinds::Only(kinds))])
-                    }
-                };
-                // The nodule reaches the docs service through dispatch, so the handle that
-                // names the document kinds is useless without the operations that carry it.
-                if !read.is_empty() {
-                    operations.insert("org.example.daybook.docs.readDatums".to_owned());
-                }
-                if !write.is_empty() {
-                    operations.insert("org.example.daybook.docs.writeDatums".to_owned());
-                }
-                DocScope {
-                    read: by_doc(read),
-                    write: by_doc(write),
-                    ..Default::default()
-                }
-            });
-            let drawers = (!drawers.is_empty() || create_drawer).then_some(DrawerScope {
-                drawers,
-                create: create_drawer,
-            });
-            let dispatch = (!operations.is_empty()).then(|| DispatchScope {
-                operations,
-                authorities: effective_operations.authorities.clone(),
-                privileged: effective_operations.privileged,
-            });
-            (
-                routine_key.clone(),
-                RoutineScopes {
-                    dispatch,
-                    config,
-                    drawers,
-                },
-            )
+            (routine_key.clone(), uses)
         })
         .collect()
+}
+
+/// The docs handle's scope for one routine: the cartridge config document's settings kinds
+/// (`config`, as `[read, write]`) and each drawer the routine's `#drawers` use reaches
+/// (`drawers`), at the routine's `#datum` kinds (`datum`, as `[read, write]`). Adds the docs
+/// operations the handle is useless without to `operations`.
+fn routine_docs_scope(
+    config_doc: &DocId,
+    drawers: &BTreeMap<DrawerId, DrawerAccess>,
+    [read, write]: [BTreeSet<DatumTag>; 2],
+    [datum_read, datum_write]: [BTreeSet<DatumTag>; 2],
+    operations: &mut BTreeSet<String>,
+) -> Option<DocScope> {
+    // Reading or writing datum kinds in a granted drawer is the default shape of drawer
+    // access (ADR 049 §2): each drawer the routine's `#drawers` use reaches is reached for
+    // the routine's `#datum` kinds only, the kinds it reads for reading and the kinds it
+    // writes (`write`, `create`, `delete`) for writing, so a routine that reads one kind and
+    // writes another cannot write the first. A write kind needs the drawers use to reach
+    // the drawer for `Write`; without it the kind contributes nothing. A routine with no
+    // `#datum` kinds reaches no document in any drawer; broad access is a separate,
+    // explicit permbind.
+    let drawer_reach: BTreeMap<_, _> = drawers
+        .iter()
+        .filter_map(|(drawer, access)| {
+            let write = if *access >= DrawerAccess::Write {
+                datum_write.clone()
+            } else {
+                BTreeSet::new()
+            };
+            if datum_read.is_empty() && write.is_empty() {
+                return None;
+            }
+            Some((
+                drawer.clone(),
+                DrawerReach {
+                    access: if write.is_empty() {
+                        DrawerAccess::Read
+                    } else {
+                        DrawerAccess::Write
+                    },
+                    read: DatumKinds::Only(datum_read.clone()),
+                    write: DatumKinds::Only(write),
+                },
+            ))
+        })
+        .collect();
+    (!read.is_empty() || !write.is_empty() || !drawer_reach.is_empty()).then(|| {
+        let by_doc = |kinds: BTreeSet<DatumTag>| {
+            if kinds.is_empty() {
+                BTreeMap::new()
+            } else {
+                BTreeMap::from([(config_doc.clone(), DatumKinds::Only(kinds))])
+            }
+        };
+        // The nodule reaches the docs service through dispatch, so the handle that
+        // names the document kinds is useless without the operations that carry it.
+        if !read.is_empty() || !drawer_reach.is_empty() {
+            operations.insert("org.example.daybook.docs.readDatums".to_owned());
+        }
+        if !write.is_empty()
+            || drawer_reach
+                .values()
+                .any(|reach| reach.access >= DrawerAccess::Write)
+        {
+            operations.insert("org.example.daybook.docs.writeDatums".to_owned());
+        }
+        DocScope {
+            read: by_doc(read),
+            write: by_doc(write),
+            drawers: drawer_reach,
+            ..Default::default()
+        }
+    })
 }
 
 /// Mints the handles each routine wants and does not hold, recording the scope each was minted
@@ -645,19 +891,26 @@ async fn mint_missing_handles(
                 };
             applied.scopes.dispatch = scopes.dispatch.clone();
         }
-        if applied.handles.config.is_none()
-            && let Some(scope) = &scopes.config
+        if applied.handles.docs.is_none()
+            && let Some(scope) = &scopes.docs
         {
-            applied.handles.config = match state
+            // The service's own docs handle reaches only the config documents, so a scope that
+            // reaches granted drawers is proved by the drawers' policy as the service actor,
+            // which holds each drawer it granted (`apply_grant`), as a drawers handle is.
+            let authorization = if scope.drawers.is_empty() {
+                Authorization {
+                    authority: state.stores.docs_capability,
+                    signer: state.stores.parent.capability,
+                }
+            } else {
+                Authorization::identity(state.stores.parent.capability)
+            };
+            applied.handles.docs = match state
                 .stores
                 .docs
                 .call_with(
                     context.child(),
-                    Authorization {
-                        authority: state.stores.docs_capability,
-                        signer: state.stores.parent.capability,
-                    }
-                    .metadata(),
+                    authorization.metadata(),
                     MintDocCapability {
                         scope: scope.clone(),
                         rights: Rights::USE,
@@ -672,7 +925,7 @@ async fn mint_missing_handles(
                     None
                 }
             };
-            applied.scopes.config = scopes.config.clone();
+            applied.scopes.docs = scopes.docs.clone();
         }
         if applied.handles.drawers.is_none()
             && let Some(scope) = &scopes.drawers
@@ -699,8 +952,61 @@ async fn mint_missing_handles(
             };
             applied.scopes.drawers = scopes.drawers.clone();
         }
+        if applied.handles.blobs.is_none()
+            && let Some(scope) = &scopes.blobs
+        {
+            // Minted from the service's delegator handle, narrowed to this routine's flags and
+            // bound to its nodule actor (ADR 049 §6.1).
+            applied.handles.blobs = match state
+                .stores
+                .blobs
+                .call_with(
+                    context.child(),
+                    Authorization {
+                        authority: state.stores.blobs_capability,
+                        signer: state.stores.parent.capability,
+                    }
+                    .metadata(),
+                    big_blobs_core::MintBlobsCapability {
+                        scope: scope.clone(),
+                        rights: Rights::USE,
+                        subject: Some(actor.actor.actor_id),
+                    },
+                )
+                .await
+            {
+                Ok(capability) => Some(capability.capability_id),
+                Err(mint_error) => {
+                    error = Some(mint_error.to_string());
+                    None
+                }
+            };
+            applied.scopes.blobs = scopes.blobs.clone();
+        }
     }
     error
+}
+
+/// What a cartridge's grants give, as one reconcile resolved them (ADR 049 §4.1).
+struct Granted<'a> {
+    drawers: &'a BTreeMap<DrawerId, DrawerAccess>,
+    /// The operations that cover a request of the manifest.
+    operations: &'a DispatchScope,
+    nets: &'a BTreeSet<NetTarget>,
+}
+
+impl<'a> Granted<'a> {
+    fn new(
+        drawers: &'a BTreeMap<DrawerId, DrawerAccess>,
+        operations: &'a DispatchScope,
+        nets: &'a BTreeSet<NetTarget>,
+    ) -> Self {
+        Self {
+            drawers,
+            operations,
+            nets,
+        }
+    }
 }
 
 /// Brings each routine's handles to its desired scopes (ADR 047 §6): a handle whose scope did
@@ -714,8 +1020,11 @@ async fn apply_nodule_capabilities(
     cartridge_id: &CartridgeId,
     actor: &OpenedActor,
     installed: &InstalledNodule,
-    desired_grants: &BTreeMap<DrawerId, DrawerAccess>,
-    effective_operations: &DispatchScope,
+    Granted {
+        drawers: desired_grants,
+        operations: effective_operations,
+        nets: desired_nets,
+    }: Granted<'_>,
 ) -> Res<(
     BTreeMap<String, RoutineCapabilities>,
     Option<String>,
@@ -754,15 +1063,19 @@ async fn apply_nodule_capabilities(
                 wanted.is_some_and(|wanted| wanted.dispatch == applied.scopes.dispatch),
             ),
             (
-                applied.handles.config,
-                wanted.is_some_and(|wanted| wanted.config == applied.scopes.config),
+                applied.handles.docs,
+                wanted.is_some_and(|wanted| wanted.docs == applied.scopes.docs),
             ),
             (
                 applied.handles.drawers,
                 wanted.is_some_and(|wanted| wanted.drawers == applied.scopes.drawers),
             ),
+            (
+                applied.handles.blobs,
+                wanted.is_some_and(|wanted| wanted.blobs == applied.scopes.blobs),
+            ),
         ];
-        let mut live = [false; 3];
+        let mut live = [false; 4];
         for (index, (handle, matches)) in held.into_iter().enumerate() {
             let Some(capability) = handle else { continue };
             if matches && state.stores.is_cap_live(context, capability).await? {
@@ -776,12 +1089,16 @@ async fn apply_nodule_capabilities(
             kept.scopes.dispatch = applied.scopes.dispatch;
         }
         if live[1] {
-            kept.handles.config = applied.handles.config;
-            kept.scopes.config = applied.scopes.config;
+            kept.handles.docs = applied.handles.docs;
+            kept.scopes.docs = applied.scopes.docs;
         }
         if live[2] {
             kept.handles.drawers = applied.handles.drawers;
             kept.scopes.drawers = applied.scopes.drawers;
+        }
+        if live[3] {
+            kept.handles.blobs = applied.handles.blobs;
+            kept.scopes.blobs = applied.scopes.blobs;
         }
         routines.insert(routine_key, kept);
     }
@@ -798,16 +1115,9 @@ async fn apply_nodule_capabilities(
         }
     }
 
-    let mut error = mint_missing_handles(state, context, actor, &desired, &mut routines).await;
+    let error = mint_missing_handles(state, context, actor, &desired, &mut routines).await;
     // A routine the manifest no longer has holds nothing.
     routines.retain(|routine_key, _| desired.contains_key(routine_key));
-    if effective_operations.privileged
-        && !routines
-            .values()
-            .any(|applied| applied.handles.dispatch.is_some())
-    {
-        error = Some("requested privileged operation exceeds the dispatch authority".to_owned());
-    }
     if error.is_some() {
         // A routine that got only some of its handles would run with less than it declared:
         // none keep any, and the next reconcile mints them again.
@@ -830,6 +1140,21 @@ async fn apply_nodule_capabilities(
             )
         })
         .collect();
+    // What a routine's refused call is attributed from: only while its handle is the one now
+    // minted for it, and none at all when the mint failed and no routine holds a handle.
+    let uses = if installed.enabled {
+        routine_uses(installed, effective_operations, desired_nets)
+    } else {
+        BTreeMap::new()
+    };
+    state.missing_authority(cartridge_id).set(
+        routines
+            .iter()
+            .filter_map(|(routine_key, applied)| {
+                Some((applied.handles.dispatch?, uses.get(routine_key)?.clone()))
+            })
+            .collect(),
+    );
     state
         .routine_capabilities
         .insert(cartridge_id.clone(), routines);
@@ -897,6 +1222,7 @@ impl State {
         )
         .await?;
         let (installs, installs_rx) = watch::channel(Vec::new());
+        let (grant_requests, requests_rx, grants_rx) = GrantRequests::new();
 
         let mut state = Self {
             stores,
@@ -923,6 +1249,8 @@ impl State {
             docs,
             docs_changed,
             installs,
+            grant_requests,
+            missing_authority: BTreeMap::new(),
         };
         let context = RequestContext::root();
         // The boot reconcile may already have started initializers, and the config documents it
@@ -1011,6 +1339,8 @@ impl State {
             Handle {
                 commands,
                 installs: installs_rx,
+                requests: requests_rx,
+                grants: grants_rx,
             },
             stop,
         ))
@@ -1034,8 +1364,13 @@ impl State {
             snapshot.value.refuse_dev_takeover();
         }
         self.docs.sync(&snapshot.value.config_docs()).await?;
-        let (heads, docs) = self.docs.snapshots().await?;
+        let (heads, mut docs) = self.docs.snapshots().await?;
         snapshot.heads.extend(heads);
+        for (cartridge_id, doc) in &mut docs {
+            if let Some(grants) = self.grant_requests.boot_grants(cartridge_id) {
+                doc.attach_boot_grants(grants.clone());
+            }
+        }
         snapshot.value.attach_cartridge_docs(docs);
         self.docs
             .read_pins(&snapshot.value, &self.admission_cache)
@@ -1084,17 +1419,10 @@ impl State {
             Command::SetGrant {
                 context,
                 cartridge_id,
-                component,
                 grant,
                 value,
                 reply,
-            } => {
-                answer(
-                    reply,
-                    self.set_grant(&context, &cartridge_id, component, grant, value),
-                )
-                .await
-            }
+            } => answer(reply, self.set_grant(&context, &cartridge_id, grant, value)).await,
             Command::ClearConfig {
                 context,
                 cartridge_id,
@@ -1139,6 +1467,54 @@ impl State {
                 scope,
                 reply,
             } => answer(reply, self.list(&context, scope)).await,
+            Command::CartridgeOfActor { actor_id, reply } => {
+                answer(reply, async {
+                    self.actors
+                        .iter()
+                        .find(|(_, actor)| actor.actor.actor_id == actor_id)
+                        .map(|(cartridge_id, _)| cartridge_id.clone())
+                        .ok_or(NodulesError::Denied)
+                })
+                .await
+            }
+            Command::FileGrantRequest {
+                cartridge_id,
+                permbind,
+                drawer,
+                reply,
+            } => {
+                answer(reply, async {
+                    let held = self.records.get(&cartridge_id);
+                    self.grant_requests
+                        .file(cartridge_id.clone(), permbind, drawer, held)
+                })
+                .await
+            }
+            Command::AnswerGrantRequest {
+                context,
+                request,
+                answer: given,
+                drawer,
+                reply,
+            } => {
+                answer(
+                    reply,
+                    self.answer_grant_request(&context, request, given, drawer),
+                )
+                .await
+            }
+            Command::ListGrants {
+                cartridge_id,
+                reply,
+            } => {
+                answer(reply, async {
+                    let snapshot = self.config().await?;
+                    Ok(self
+                        .grant_requests
+                        .list(snapshot.value.cartridge_docs(), cartridge_id.as_ref()))
+                })
+                .await
+            }
             Command::ListInstalls { context, reply } => {
                 answer(reply, async {
                     self.refresh_if_needed(&context).await?;
@@ -1248,32 +1624,24 @@ impl State {
         self.install_record(cartridge_id)
     }
 
-    /// Sets or revokes one grant datum in the cartridge's config document.
+    /// Sets or revokes one grant datum in the cartridge's config document. A grant is the
+    /// cartridge's, not a component's (ADR 049 §4.1), so any install may be granted.
     async fn set_grant(
         &mut self,
         context: &RequestContext,
         cartridge_id: &CartridgeId,
-        component: Component,
         grant: GrantKey,
         value: Option<GrantBody>,
     ) -> Res<()> {
-        // A grant is of a component the cartridge contributes: one it does not would be a datum
-        // nothing reads.
-        if self
-            .install_record(cartridge_id)?
-            .install
-            .component(component)
-            .is_none()
-        {
-            return Err(InventoryError::NoComponent {
-                id: cartridge_id.clone(),
-                component,
-                action: "grant",
-            }
-            .into());
+        self.install_record(cartridge_id)?;
+        if value.is_none() {
+            // A revoke takes back an "only this time" answer too; the reconcile the edit runs
+            // below re-mints without it.
+            self.grant_requests
+                .revoke_boot_grants(cartridge_id, Some(&grant));
         }
         self.edit_cartridge_config(context, cartridge_id, move |config| {
-            config.set_grant(component, grant, value)
+            config.set_grant(grant, value)
         })
         .await
     }
@@ -1285,6 +1653,7 @@ impl State {
         context: &RequestContext,
         cartridge_id: &CartridgeId,
     ) -> Res<()> {
+        self.grant_requests.revoke_boot_grants(cartridge_id, None);
         self.edit_cartridge_config(context, cartridge_id, |config| {
             config.clear();
             Ok(())
@@ -1314,6 +1683,53 @@ impl State {
         let snapshot = self.config().await?;
         drop(self.reconcile(context, snapshot, Trigger::Change).await?);
         Ok(())
+    }
+
+    /// Answers a pending request. An allow or an only-this-boot answer re-mints the cartridge's
+    /// handles (the reconcile every grant change runs) before the request reads as answered, so
+    /// whoever awaits it finds the access in place.
+    async fn answer_grant_request(
+        &mut self,
+        context: &RequestContext,
+        request: Uuid7,
+        answer: GrantAnswer,
+        drawer: Option<DrawerId>,
+    ) -> Res<GrantRequestState> {
+        let record = self.grant_requests.pending(request)?;
+        let cartridge_id = record.cartridge_id.clone();
+        let state = match answer {
+            GrantAnswer::Decline => {
+                self.grant_requests.decline(&record);
+                return Ok(GrantRequestState::Declined);
+            }
+            GrantAnswer::Allow => {
+                let (grant, body) = GrantRequests::grant_for(&record, drawer)?;
+                self.edit_cartridge_config(context, &cartridge_id, move |config| {
+                    // An answer never narrows: a wider grant of the same thing stays.
+                    let access = |body: &GrantBody| body.access.as_ref().and_then(|a| a.known());
+                    let wider = config.grants().any(|(key, slot)| {
+                        *key == grant
+                            && matches!(slot, DatumSlot::Accepted { value, .. } if access(value) >= access(&body))
+                    });
+                    if wider {
+                        return Ok(());
+                    }
+                    config.set_grant(grant, Some(body))
+                })
+                .await?;
+                GrantRequestState::Allowed
+            }
+            GrantAnswer::OnlyThisBoot => {
+                let (grant, body) = GrantRequests::grant_for(&record, drawer)?;
+                self.grant_requests
+                    .grant_this_boot(cartridge_id, grant, body);
+                let snapshot = self.config().await?;
+                drop(self.reconcile(context, snapshot, Trigger::Change).await?);
+                GrantRequestState::OnlyThisBoot
+            }
+        };
+        self.grant_requests.settle(request, state);
+        Ok(state)
     }
 
     async fn set_dev_takeover(
@@ -1450,6 +1866,7 @@ impl State {
             }
             return Err(crate::store_error(err));
         }
+        self.grant_requests.forget(cartridge_id);
         let snapshot = self.config().await?;
         let revoke_errors = self.reconcile(context, snapshot, Trigger::Change).await?;
         if let Some(err) = revoke_errors.get(cartridge_id) {
@@ -1476,6 +1893,15 @@ impl State {
             drop(self.reconcile(context, snapshot, Trigger::Change).await?);
         }
         Ok(())
+    }
+
+    /// The cartridge's refusal attribution, which its executor keeps and the next reconcile
+    /// updates in place.
+    fn missing_authority(&mut self, cartridge_id: &CartridgeId) -> MissingAuthorityLookup {
+        self.missing_authority
+            .entry(cartridge_id.clone())
+            .or_insert_with(|| self.grant_requests.lookup(cartridge_id.clone()))
+            .clone()
     }
 
     async fn any_applied_grant_dead(&self, context: &RequestContext) -> Res<bool> {
@@ -1614,6 +2040,7 @@ impl State {
             .retain(|problem| unreadable.contains(problem));
         self.stores.dispatch.set_routes(routes.clone());
         let providers = ProviderIndex::new(&resolved, routes);
+        self.grant_requests.declare(&resolved);
         let mut new_records = BTreeMap::new();
         for (cartridge_id, resolution) in resolved {
             match resolution {
@@ -1654,6 +2081,7 @@ impl State {
                     installed,
                     desired_grants,
                     desired_operations,
+                    desired_nets,
                 } => {
                     let record = self
                         .reconcile_admitted(
@@ -1664,6 +2092,7 @@ impl State {
                             installed,
                             desired_grants,
                             desired_operations,
+                            desired_nets,
                         )
                         .await?;
                     new_records.insert(cartridge_id, record);
@@ -1678,6 +2107,8 @@ impl State {
                 true
             }
         });
+        self.grant_requests
+            .publish_grants(snapshot.value.cartridge_docs());
         self.observed_heads = snapshot.heads;
         self.records = new_records;
         Ok(revoke_errors)
@@ -1723,6 +2154,7 @@ impl State {
                 installed,
                 desired_grants,
                 desired_operations,
+                desired_nets,
             }) = resolved.remove(&cartridge_id)
             else {
                 unreachable!("selected as admitted above");
@@ -1756,6 +2188,7 @@ impl State {
                         installed,
                         desired_grants,
                         desired_operations,
+                        desired_nets,
                     }
                 }
                 Err(error) => {
@@ -1974,6 +2407,7 @@ impl State {
             config_doc: installed.config_doc.clone(),
 
             reensure: self.reensure.handle(cartridge_id.clone()),
+            missing_authority: self.missing_authority(&cartridge_id),
         };
         self.hosted.insert(cartridge_id.clone(), installed.revision);
         let state = match executor.ensure(&spec).await {
@@ -2315,6 +2749,7 @@ impl State {
         mut installed: InstalledNodule,
         desired_grants: BTreeMap<DrawerId, DrawerAccess>,
         desired_operations: DispatchScope,
+        desired_nets: BTreeSet<NetTarget>,
     ) -> Res<NoduleRecord> {
         let cartridge_id = installed.cartridge_id.clone();
         let actor = self.ensure_nodule_actor(context, &cartridge_id).await?;
@@ -2339,8 +2774,7 @@ impl State {
                 &cartridge_id,
                 &actor,
                 &installed,
-                &desired_grants,
-                &effective_operations,
+                Granted::new(&desired_grants, &effective_operations, &desired_nets),
             )
             .await?;
 
@@ -2509,6 +2943,9 @@ impl State {
             self.stores.retract_grant_cap(context, capability).await?;
         }
         self.routine_capabilities.remove(cartridge_id);
+        if let Some(lookup) = self.missing_authority.remove(cartridge_id) {
+            lookup.set(Default::default());
+        }
         Ok(())
     }
 

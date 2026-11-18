@@ -21,11 +21,33 @@ use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::EntryAccess;
 use big_cabinet_core::drawer::protocol::CreateDrawer;
 use big_cabinet_core::drawer::protocol::CreateLayout;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cartridges_core::CLAY_MICRO_MANIFEST_SCHEMA;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::MicroContribution;
+use big_cartridges_core::Necessity;
+use big_cartridges_core::Permbind;
+use big_cartridges_core::PermbindDatum;
+use big_cartridges_core::PermbindDrawers;
+use big_cartridges_core::PermbindMethod;
+use big_cartridges_core::RoutineUse;
+use big_cartridges_core::config::Component;
+use big_cartridges_core::config::GrantBody;
+use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::protocol::GetCartridge;
+use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::PublishCartridgeVersion;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
+use big_cartridges_core::protocol::SetCartridgeGrant;
+use big_cartridges_core::registry::version_key;
+use big_cartridges_core::registry::version_pin;
+use big_cartridges_core::test_support::FixtureCartridge;
 use big_dispatch::Caller;
 use big_dispatch::Operation;
 use big_dispatch::Provider;
@@ -796,6 +818,382 @@ async fn installing_intxt_at_boot_makes_summarize_intxts_reachable_for_the_revie
             .unwrap()
             .already_installed,
         "a second boot's install is a no-op"
+    );
+    composition.stop().await.unwrap();
+}
+
+/// Drives a node's cartridges service as its operator, as the CLI and the phone's install do.
+struct Operator(intxt_core::client::Caller<crate::OperatorTransport>);
+
+impl Operator {
+    fn of(composition: &NodeComposition) -> Self {
+        Self(intxt_core::client::Caller::new(
+            composition.operator_transport(),
+            RequestContext::root(),
+            None,
+            "cartridge-micro-test".to_owned(),
+        ))
+    }
+
+    /// Publishes `fixture` and installs it by the pin of the version just published, with its
+    /// micro enabled.
+    async fn install_micro(&self, fixture: FixtureCartridge) -> CartridgeId {
+        let (id, version) = (
+            fixture.resolved.cartridge.id.clone(),
+            fixture.resolved.cartridge.version.clone(),
+        );
+        let component = fixture
+            .blobs
+            .values()
+            .next()
+            .expect("the fixture carries its micro's component");
+        intxt_core::install::put_blob(&self.0, component)
+            .await
+            .unwrap();
+        let staged = self.0.call(fixture.stage_request()).await.unwrap();
+        self.0
+            .call(PublishCartridgeVersion {
+                envelope: fixture.publishable(staged),
+            })
+            .await
+            .unwrap();
+        let doc_id = self
+            .0
+            .call(GetCartridge { id: id.clone() })
+            .await
+            .unwrap()
+            .doc_id;
+        let (heads, _) = self.0.read(&doc_id, &version_key(&version)).await.unwrap();
+        self.0
+            .call(InstallCartridge {
+                cartridge: version_pin(doc_id, &version, heads),
+            })
+            .await
+            .unwrap();
+        self.set_micro_enabled(&id, true).await;
+        id
+    }
+
+    async fn set_micro_enabled(&self, id: &CartridgeId, enabled: bool) {
+        self.0
+            .call(SetCartridgeEnabled {
+                cartridge_id: id.clone(),
+                component: Component::Micro,
+                enabled,
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn grant(&self, id: &CartridgeId, grant: GrantKey, value: Option<GrantBody>) {
+        self.0
+            .call(SetCartridgeGrant {
+                cartridge_id: id.clone(),
+                grant,
+                value,
+            })
+            .await
+            .unwrap();
+    }
+}
+
+/// A micro-only cartridge: the contribution names `component`, whose bytes are `wasm`, and
+/// `permbinds` are the manifest's, of which the micro `uses` some.
+fn micro_cartridge(
+    name: &str,
+    permbinds: impl IntoIterator<Item = (&'static str, Permbind)>,
+    uses: impl IntoIterator<Item = (&'static str, RoutineUse)>,
+) -> FixtureCartridge {
+    let mut fixture = FixtureCartridge::new(Cartridge::new(
+        CartridgeId::new(big_cartridges_core::example_namespace!(), name).unwrap(),
+        "3.0.0".parse().unwrap(),
+    ));
+    fixture.resolved.cartridge.authority = Some("org.example.clay.test".to_owned());
+    fixture.with_wasm("component", MICRO_WASM);
+    fixture.resolved.cartridge.permbinds = permbinds
+        .into_iter()
+        .map(|(key, permbind)| (key.to_owned(), permbind))
+        .collect();
+    fixture.resolved.cartridge.micro = Some(MicroContribution {
+        component: "component".to_owned(),
+        schema: CLAY_MICRO_MANIFEST_SCHEMA.to_owned(),
+        description: [("entrypoints".to_owned(), json!({"view": "presentation"}))]
+            .into_iter()
+            .collect(),
+        uses: uses
+            .into_iter()
+            .map(|(key, usage)| (key.to_owned(), usage))
+            .collect(),
+        extra: Default::default(),
+    });
+    fixture
+}
+
+/// The bytes of the fixture micro's component: the loader reads them, nothing runs them here.
+const MICRO_WASM: &[u8] = b"\0asm\x01\0\0\0cartridge-micro-fixture";
+
+fn method_permbind(nsid: &str) -> Permbind {
+    Permbind::Method(PermbindMethod {
+        nsid: nsid.parse().unwrap(),
+        description: format!("calls {nsid}"),
+        necessity: Necessity::Optional,
+        min_revision: None,
+        extra: Default::default(),
+    })
+}
+
+fn uses_read() -> RoutineUse {
+    RoutineUse {
+        read: true,
+        ..Default::default()
+    }
+}
+
+/// The wire form of a guest's call to `nsid` with `input`, answered by the micro's egress.
+async fn call_method(egress: &Arc<dyn DispatchEgress>, nsid: &str, input: &Value) -> (u16, Value) {
+    let request = http::Request::post(format!("http://dispatch.local/xrpc/{nsid}"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(
+            Full::new(Bytes::from(serde_json::to_vec(input).unwrap()))
+                .map_err(|never| match never {})
+                .boxed_unsync(),
+        )
+        .unwrap();
+    let response = egress.send(request).await;
+    let status = response.status().as_u16();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+/// A micro a cartridge contributes is loaded from the catalog by the `component` its contribution
+/// names, and its egress is minted from its `uses` intersected with the cartridge's grants: a
+/// method it uses but was not granted is denied, one it was granted but does not use is denied
+/// (the grant is the cartridge's, and each component's `uses` narrows it), a grant that is
+/// given or revoked reaches the running micro's egress through its grants follower, and a
+/// disabled micro is dropped on the next sync.
+#[tokio::test]
+async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut composition = NodeComposition::boot(NodeConfig {
+        root: dir.path().to_owned(),
+        bootstrap: vec![],
+        schemas: no_schemas(),
+        installs: vec![],
+        serve: false,
+    })
+    .await
+    .unwrap();
+    composition
+        .node()
+        .dispatch
+        .router
+        .register(
+            "clay-test",
+            [ECHO, REVEAL].map(|nsid| {
+                (
+                    nsid.to_owned(),
+                    Operation::unchecked(Some(
+                        big_cabinet_core::datum::operation::OperationKind::Procedure,
+                    )),
+                )
+            }),
+            ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(TestMethods))),
+        )
+        .expect("the test methods are unclaimed");
+    let operator = Operator::of(&composition);
+    assert!(
+        composition
+            .sync_cartridge_micros()
+            .await
+            .unwrap()
+            .is_empty(),
+        "no cartridge is installed"
+    );
+
+    let id = operator
+        .install_micro(micro_cartridge(
+            "cart-micro",
+            [
+                ("echo", method_permbind(ECHO)),
+                ("reveal", method_permbind(REVEAL)),
+            ],
+            [("echo", RoutineUse::default())],
+        ))
+        .await;
+    let micro = id.to_string();
+    let loaded = composition.sync_cartridge_micros().await.unwrap();
+    let [loaded] = loaded.as_slice() else {
+        panic!("one cartridge micro is installed: {loaded:?}");
+    };
+    let loaded = loaded.as_ref().unwrap();
+    assert_eq!(loaded.micro, micro, "the micro's id is the cartridge's");
+    assert_eq!(
+        loaded.component, MICRO_WASM,
+        "the component is the one the contribution's `component` key pins"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&loaded.manifest_json).unwrap(),
+        json!({
+            "entrypoints": {"view": "presentation"},
+            "id": "cart-micro",
+            "package_version": 3,
+            "authority": "org.example.clay.test",
+        }),
+        "the manifest is the contribution's description with the identity the envelope owns"
+    );
+
+    let egress = composition.egress(&micro).unwrap();
+    let (status, denied) = call_method(&egress, ECHO, &json!({"text": "ping"})).await;
+    assert_eq!(
+        (status, denied["error"].as_str()),
+        (403, Some("Denied")),
+        "nothing is granted yet: {denied}"
+    );
+
+    let mut changes = composition.handles_changed(&micro).unwrap();
+    for method in [ECHO, REVEAL] {
+        operator
+            .grant(
+                &id,
+                GrantKey::Method(method.to_owned()),
+                Some(GrantBody::present()),
+            )
+            .await;
+    }
+    // The micro's grants follower mints its handles again, and the egress the micro holds
+    // presents the new capability from its next call.
+    changes.changed().await.unwrap();
+    let (status, answer) = call_method(&egress, ECHO, &json!({"text": "ping"})).await;
+    assert_eq!(
+        (status, &answer),
+        (200, &json!({"operation": ECHO, "echo": "ping"}))
+    );
+    let (status, denied) = call_method(&egress, REVEAL, &json!({"text": "ping"})).await;
+    assert_eq!(
+        (status, denied["error"].as_str()),
+        (403, Some("Denied")),
+        "REVEAL is granted to the cartridge but not in the micro's `uses`: {denied}"
+    );
+
+    operator
+        .grant(&id, GrantKey::Method(ECHO.to_owned()), None)
+        .await;
+    changes.changed().await.unwrap();
+    let (status, _) = call_method(&egress, ECHO, &json!({"text": "ping"})).await;
+    assert_eq!(
+        status, 403,
+        "a revoked grant is gone once the follower mints again"
+    );
+
+    operator.set_micro_enabled(&id, false).await;
+    assert!(
+        composition
+            .sync_cartridge_micros()
+            .await
+            .unwrap()
+            .is_empty(),
+        "a disabled micro is not loaded"
+    );
+    assert!(composition.egress(&micro).is_none(), "and it holds nothing");
+    composition.stop().await.unwrap();
+}
+
+/// A micro's document capability is lowered from its `#drawers` and `#datum` uses and the drawers
+/// the cartridge was granted: it reads the notes of a granted drawer, and only those.
+#[tokio::test]
+async fn a_cartridge_micros_document_capability_follows_the_granted_drawers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut composition = NodeComposition::boot(NodeConfig {
+        root: dir.path().to_owned(),
+        bootstrap: vec![],
+        schemas: note_schemas(),
+        installs: vec![],
+        serve: false,
+    })
+    .await
+    .unwrap();
+    let granted_drawer = create_drawer(composition.node(), "granted").await;
+    let other_drawer = create_drawer(composition.node(), "other").await;
+    let granted_doc = create_note(composition.node(), &granted_drawer, "visible").await;
+    let other_doc = create_note(composition.node(), &other_drawer, "hidden").await;
+    let operator = Operator::of(&composition);
+    let id = operator
+        .install_micro(micro_cartridge(
+            "cart-reader",
+            [
+                (
+                    "drawers",
+                    Permbind::Drawers(PermbindDrawers {
+                        description: "Notebooks".to_owned(),
+                        resolution: Default::default(),
+                        read: Some(Necessity::Required),
+                        write: None,
+                        create: None,
+                        delete: None,
+                        extra: Default::default(),
+                    }),
+                ),
+                (
+                    "notes",
+                    Permbind::Datum(PermbindDatum {
+                        nsid: NOTE.parse().unwrap(),
+                        description: "Notes".to_owned(),
+                        read: Some(Necessity::Required),
+                        write: None,
+                        create: None,
+                        delete: None,
+                        extra: Default::default(),
+                    }),
+                ),
+                ("readDatums", method_permbind(ReadDatums::XRPC.nsid)),
+            ],
+            [
+                ("drawers", uses_read()),
+                ("notes", uses_read()),
+                ("readDatums", RoutineUse::default()),
+            ],
+        ))
+        .await;
+    let micro = id.to_string();
+    for loaded in composition.sync_cartridge_micros().await.unwrap() {
+        loaded.unwrap();
+    }
+    assert!(
+        composition.doc_capability(&micro).is_none(),
+        "no drawer is granted, so the micro reaches no document"
+    );
+
+    let mut changes = composition.handles_changed(&micro).unwrap();
+    operator
+        .grant(
+            &id,
+            GrantKey::Drawer(granted_drawer.clone()),
+            Some(GrantBody::access(EntryAccess::Read)),
+        )
+        .await;
+    operator
+        .grant(
+            &id,
+            GrantKey::Method(ReadDatums::XRPC.nsid.to_owned()),
+            Some(GrantBody::present()),
+        )
+        .await;
+    changes.changed().await.unwrap();
+    let capability = composition
+        .doc_capability(&micro)
+        .expect("a granted drawer the micro uses mints it a document capability");
+    let egress = composition.egress(&micro).unwrap();
+    let (status, read) = read_datums(&egress, capability, &granted_doc).await;
+    assert_eq!(status, 200, "{read}");
+    assert!(
+        serde_json::to_string(&read).unwrap().contains("visible"),
+        "the granted drawer's note is read: {read}"
+    );
+    let (status, denied) = read_datums(&egress, capability, &other_doc).await;
+    assert_eq!(
+        (status, denied["error"].as_str()),
+        (400, Some("Denied")),
+        "a drawer the cartridge was not granted is denied: {denied}"
     );
     composition.stop().await.unwrap();
 }

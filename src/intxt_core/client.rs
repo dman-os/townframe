@@ -33,6 +33,7 @@ use big_cabinet_core::doc::DatumEvent;
 use big_cabinet_core::doc::DatumKinds;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::DrawerReach;
 use big_cabinet_core::doc::ListDatums;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ObservedDatum;
@@ -330,7 +331,7 @@ impl<H: HttpTransport> Caller<H> {
         };
         let capability = self
             .doc_capability(DocScope {
-                drawers: [(drawer.clone(), DrawerAccess::Read)].into(),
+                drawers: [(drawer.clone(), DrawerReach::all_kinds(DrawerAccess::Read))].into(),
                 ..DocScope::default()
             })
             .await?;
@@ -496,6 +497,30 @@ impl<H: HttpTransport> Caller<H> {
         })
         .await?;
         Ok(included)
+    }
+
+    /// Writes the intxt's title and description (`title/main` in its descriptor), based on the
+    /// heads the descriptor was read at. The heads are in the command's content, so setting a
+    /// title back to an earlier value is a new command and not a retry of the first.
+    pub async fn write_title(
+        &self,
+        intxt: &DrawerId,
+        title: &generic::Title,
+    ) -> Result<(), IntxtError> {
+        let title_key = key(generic::Title::ID, "main")?;
+        let (heads, _) = self.read(intxt, &title_key).await?;
+        let set: BTreeMap<DatumKey, Value> = [(title_key, to_value(title))].into();
+        let descriptor = self.write_capability(intxt, set.keys()).await?;
+        self.call(WriteDatums {
+            capability: descriptor,
+            command: Some(self.command("write-title", &(&set, &heads))?),
+            doc_id: intxt.clone(),
+            mode: WriteMode::AtHeads { heads },
+            set,
+            remove: Default::default(),
+        })
+        .await?;
+        Ok(())
     }
 
     /// Removes `entries` from the intxt's body and deletes their datums, with `also` (datums only

@@ -1,0 +1,22 @@
+{
+  "$defs": {
+    "DrawerSuccessor": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.drawer.successor/main`: this drawer has been replaced by another.\nFixed singleton on the descriptor-bearing doc — the public metadata root of a grouped\ndrawer, the content doc of a self-doc drawer. Resolution returns only the new id: no\ngrant, no roster or child copy, no blob move, no silent mirror-policy retarget.",
+      "properties": {
+        "drawerId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "drawerId"
+      ],
+      "title": "DrawerSuccessor",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.drawer.successor"
+    }
+  },
+  "$ref": "#/$defs/DrawerSuccessor",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

@@ -25,11 +25,17 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Revision;
 use big_cartridges_core::Version;
+use big_cartridges_core::protocol::AnswerCartridgeGrantRequest;
+use big_cartridges_core::protocol::AwaitCartridgeGrantRequest;
+use big_cartridges_core::protocol::AwaitCartridgeGrants;
 use big_cartridges_core::protocol::CartridgesError;
 use big_cartridges_core::protocol::ClearCartridgeConfig;
 use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::ListCartridgeGrantRequests;
+use big_cartridges_core::protocol::ListCartridgeGrants;
 use big_cartridges_core::protocol::ListCartridgeInstalls;
 use big_cartridges_core::protocol::ObserveCartridgeInstalls;
+use big_cartridges_core::protocol::RequestCartridgeGrant;
 use big_cartridges_core::protocol::SetCartridgeEnabled;
 use big_cartridges_core::protocol::SetCartridgeGrant;
 use big_cartridges_core::protocol::UninstallCartridge;
@@ -297,6 +303,12 @@ declare_service_protocol! {
             SetCartridgeGrant(SetCartridgeGrant),
             ClearCartridgeConfig(ClearCartridgeConfig),
             ListCartridgeInstalls(ListCartridgeInstalls),
+            RequestCartridgeGrant(RequestCartridgeGrant),
+            AwaitCartridgeGrantRequest(AwaitCartridgeGrantRequest),
+            ListCartridgeGrantRequests(ListCartridgeGrantRequests),
+            AnswerCartridgeGrantRequest(AnswerCartridgeGrantRequest),
+            ListCartridgeGrants(ListCartridgeGrants),
+            AwaitCartridgeGrants(AwaitCartridgeGrants),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
             SetNoduleDevTakeover(SetNoduleDevTakeover),
             SetMethodRoute(SetMethodRoute),

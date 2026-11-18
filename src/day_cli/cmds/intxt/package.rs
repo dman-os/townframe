@@ -21,6 +21,7 @@ use big_cabinet_core::DocReference;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumRead;
@@ -49,6 +50,8 @@ use intxt_core::client::Caller;
 use intxt_core::client::MAX_REWRITE_HOPS;
 use intxt_core::client::key;
 use intxt_core::client::to_value;
+use intxt_core::edit::Named;
+use intxt_core::edit::Summary;
 use intxt_core::generic;
 use intxt_core::methods::CreateIntxt;
 use intxt_core::methods::IntxtCreated;
@@ -64,38 +67,13 @@ use std::io::Write;
 /// Files over this size are recorded by blob id and left out of the pack (ADR 040 §4, D45).
 const MAX_PACKED_BLOB_BYTES: u64 = 8 * 1024 * 1024;
 
-/// What an `add` names: exactly one per call.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Named {
-    /// A range (`main..feat/x`) or a single commit.
-    Commits(String),
-    /// A local branch: its commits since the merge base with its upstream (or `main`), and the
-    /// branch itself, tracked as this clone sees it.
-    Branch(String),
-    /// A jj change, followed through its rewrites.
-    Change(String),
-}
-
-impl Named {
-    /// The one thing `add`'s `--commits`, `--branch` and `--change` flags name; clap requires
-    /// exactly one of them, so any other combination is a bug in the command's definition.
-    pub(crate) fn from_flags(
-        commits: Option<String>,
-        branch: Option<String>,
-        change: Option<String>,
-    ) -> Self {
-        match (commits, branch, change) {
-            (Some(range), None, None) => Self::Commits(range),
-            (None, Some(branch), None) => Self::Branch(branch),
-            (None, None, Some(change)) => Self::Change(change),
-            _ => unreachable!("clap requires exactly one of --commits, --branch and --change"),
-        }
-    }
-}
+/// An entry's patch is left out when the diff is over this size, as a file is left out of the
+/// pack (ADR 040 §4); readers then parse the pack.
+const MAX_PATCH_BYTES: u64 = 8 * 1024 * 1024;
 
 /// What `add` named, resolved now: the entry that names the commits, the commits, and what the
 /// pack is made of.
-struct Resolved {
+pub(super) struct Resolved {
     entry: DatumKey,
     /// Where git can read the commits: the worktree, or jj's git directory.
     git_dir: PathBuf,
@@ -105,16 +83,21 @@ struct Resolved {
     /// The jj change the commits are the evolution of, which their datums name.
     change_id: Option<String>,
     label: String,
-    /// The entry's value, given the pack's reference, the tips and the bases.
-    value: fn(DatumReference, &[String], &[String]) -> Value,
+    /// The commit the entry's patch shows the diff to, against `bases`. None when the commits
+    /// have no single diff (a jj change whose commit is a merge).
+    patch_tip: Option<String>,
+    /// The entry's value, given the pack's reference, the patch's, the tips and the bases.
+    value: fn(DatumReference, Option<DatumReference>, &[String], &[String]) -> Value,
     /// A branch to track on this clone: its full ref name and its base.
     tracked: Option<(String, Option<String>)>,
 }
 
 impl Resolved {
-    fn new(named: &Named, identity: &Identity) -> Res<Self> {
+    pub(super) fn new(named: &Named, identity: &Identity) -> Res<Self> {
         if let Named::Change(change) = named {
             let jj = revisions::resolve_jj_change(&identity.root, change)?;
+            // The evolog lists the change's current commit first.
+            let patch_tip = (jj.bases.len() <= 1).then(|| jj.commits[0].clone());
             return Ok(Self {
                 entry: key(work::JjChangeEntry::ID, &jj.change_id)?,
                 git_dir: jj.git_dir,
@@ -127,9 +110,11 @@ impl Resolved {
                 bases: jj.bases,
                 commits: jj.commits,
                 change_id: Some(jj.change_id),
-                value: |pack, _, _| {
+                patch_tip,
+                value: |pack, patch, _, _| {
                     serde_json::to_value(work::JjChangeEntry {
                         pack,
+                        patch,
                         extra: Default::default(),
                     })
                     .expect("an entry serializes")
@@ -161,15 +146,17 @@ impl Resolved {
                 short_sha(&revisions.tip),
                 commits.len()
             ),
+            patch_tip: Some(revisions.tip.clone()),
             tips: vec![revisions.tip],
             bases: revisions.base.into_iter().collect(),
             commits,
             change_id: None,
-            value: |pack, tips, bases| {
+            value: |pack, patch, tips, bases| {
                 serde_json::to_value(work::GitCommitEntry {
                     tip: commit_key(&tips[0]),
                     base: bases.first().map(|base| commit_key(base)),
                     pack,
+                    patch,
                     extra: Default::default(),
                 })
                 .expect("an entry serializes")
@@ -189,6 +176,17 @@ struct Plan {
     lines: Vec<String>,
 }
 
+/// What an `add` did, for the verb that reports it.
+pub(super) struct Added {
+    /// The intxt's title.
+    pub(super) title: String,
+    /// Whether anything was written.
+    pub(super) changed: bool,
+    pub(super) lines: Vec<String>,
+    /// The command that takes the new entries out again.
+    pub(super) undo: Option<String>,
+}
+
 /// A node, and the worktree and node directory a verb works against.
 pub(crate) struct Packaging<'a> {
     pub(super) client: &'a NodeClient,
@@ -201,6 +199,8 @@ pub(crate) struct Packaging<'a> {
 pub(super) struct View {
     pub(super) title: generic::Title,
     pub(super) entries: Vec<(DatumKey, Value)>,
+    /// The heads of the descriptor document the title and the entries were read at.
+    pub(super) heads: Vec<ChangeHash>,
 }
 
 impl View {
@@ -664,12 +664,12 @@ impl<'a> Packaging<'a> {
     }
 
     /// Remembers `drawer` so the node lists it, which is what makes an intxt live.
-    async fn remember(&self, drawer: &DrawerId) -> Res<()> {
+    pub(super) async fn remember(&self, drawer: &DrawerId, mirror: bool) -> Res<()> {
         self.caller
             .call(RememberDrawer {
                 capability: self.known_drawers().await?,
                 drawer_id: drawer.clone(),
-                mirror: false,
+                mirror,
             })
             .await?;
         Ok(())
@@ -701,7 +701,7 @@ impl<'a> Packaging<'a> {
                 "{drawer} is not an intxt: its descriptor has no intxt marker"
             );
             if !live.contains(&drawer) {
-                self.remember(&drawer).await?;
+                self.remember(&drawer, false).await?;
                 ids.push(drawer.to_string());
             }
             return Ok((drawer, ShortIds::new(ids)));
@@ -806,7 +806,7 @@ impl<'a> Packaging<'a> {
             },
         )
         .await?;
-        self.remember(&drawer_id).await?;
+        self.remember(&drawer_id, false).await?;
         if let Some(doc) = &shared {
             self.caller
                 .share(&drawer_id, doc, DrawerAccess::Write)
@@ -876,28 +876,7 @@ impl<'a> Packaging<'a> {
                 removed.insert(found);
             }
         }
-        let pack_of = |value: &Value| -> Option<DatumKey> {
-            let pack: DatumReference = value.get("pack")?.as_str()?.parse().ok()?;
-            Some(pack.key().clone())
-        };
-        let kept: BTreeSet<DatumKey> = view
-            .entries
-            .iter()
-            .filter(|(key, _)| !removed.contains(key))
-            .filter_map(|(_, value)| pack_of(value))
-            .collect();
-        let packs: BTreeSet<DatumKey> = view
-            .entries
-            .iter()
-            .filter(|(key, _)| removed.contains(key))
-            .filter_map(|(_, value)| pack_of(value))
-            .filter(|pack| !kept.contains(pack))
-            .collect();
-        if !removed.is_empty() {
-            self.caller
-                .remove_entries(&drawer, &removed, &packs)
-                .await?;
-        }
+        self.remove_held(&drawer, &view, &removed).await?;
         let removed_comments = self.remove_comments(&drawer, removed_comments).await?;
         writeln!(
             out,
@@ -911,8 +890,46 @@ impl<'a> Packaging<'a> {
         Ok(())
     }
 
+    /// Removes the entries `removed` from the intxt, and the packs only they referenced. The
+    /// documents lent to the intxt stay lent: whether another entry still needs one is not
+    /// derivable from the entries alone. `view` is the intxt as it was read for `removed`.
+    pub(super) async fn remove_held(
+        &self,
+        drawer: &DrawerId,
+        view: &View,
+        removed: &BTreeSet<DatumKey>,
+    ) -> Res<()> {
+        // An entry's blobs: its pack and, when it has one, its patch.
+        let pack_of = |value: &Value| -> Vec<DatumKey> {
+            ["pack", "patch"]
+                .into_iter()
+                .filter_map(|field| {
+                    let blob: DatumReference = value.get(field)?.as_str()?.parse().ok()?;
+                    Some(blob.key().clone())
+                })
+                .collect()
+        };
+        let kept: BTreeSet<DatumKey> = view
+            .entries
+            .iter()
+            .filter(|(key, _)| !removed.contains(key))
+            .flat_map(|(_, value)| pack_of(value))
+            .collect();
+        let packs: BTreeSet<DatumKey> = view
+            .entries
+            .iter()
+            .filter(|(key, _)| removed.contains(key))
+            .flat_map(|(_, value)| pack_of(value))
+            .filter(|pack| !kept.contains(pack))
+            .collect();
+        if !removed.is_empty() {
+            self.caller.remove_entries(drawer, removed, &packs).await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn load(&self, drawer: &DrawerId) -> Res<View> {
-        let (_, mut datums) = self.caller.read_datums(drawer, None).await?;
+        let (heads, mut datums) = self.caller.read_datums(drawer, None).await?;
         let mut accepted = |key: &DatumKey| match datums.remove(key) {
             Some(DatumRead::Accepted { value, .. }) => Ok(value),
             other => Err(eyre::eyre!("{key} in {drawer} is not readable: {other:?}")),
@@ -924,7 +941,11 @@ impl<'a> Packaging<'a> {
         for reference in &body.order {
             entries.push((reference.key().clone(), accepted(reference.key())?));
         }
-        Ok(View { title, entries })
+        Ok(View {
+            title,
+            entries,
+            heads,
+        })
     }
 
     /// What capture holds for the worktree `identity` names, after recording what `resolved`
@@ -1028,14 +1049,14 @@ impl<'a> Packaging<'a> {
         Ok(ops)
     }
 
-    /// Puts `pack` in the blob store and answers the blob datum that names it: its key and value.
-    async fn put_pack(&self, pack: Vec<u8>) -> Res<(DatumKey, Value)> {
-        let info = intxt_core::install::put_blob(&self.caller, &pack).await?;
+    /// Puts `bytes` in the blob store and answers the blob datum that names them: its key and value.
+    async fn put_content(&self, bytes: Vec<u8>, mime: &str) -> Res<(DatumKey, Value)> {
+        let info = intxt_core::install::put_blob(&self.caller, &bytes).await?;
         let digest = info.blob_id.digest_str();
         Ok((
             key(big_blobs_core::Blob::ID, &digest)?,
             json!({
-                "mime": "application/x-git-pack",
+                "mime": mime,
                 "digest": digest,
                 "lengthOctets": info.length_octets,
             }),
@@ -1073,12 +1094,15 @@ impl<'a> Packaging<'a> {
         let kind = if pack.thin { "thin" } else { "full" };
         let size = pack.bytes.len();
         self.ensure_inventory(drawer).await?;
-        let (blob_key, blob) = self.put_pack(pack.bytes).await?;
+        let (blob_key, blob) = self
+            .put_content(pack.bytes, "application/x-git-pack")
+            .await?;
         let pack_ref = DatumReference::new(ReferenceDocId::SelfDoc, blob_key.clone());
         plan.set.insert(blob_key, blob);
+        let patch_ref = self.plan_patch(plan, resolved, MAX_PATCH_BYTES).await?;
         plan.set.insert(
             resolved.entry.clone(),
-            (resolved.value)(pack_ref, &resolved.tips, &resolved.bases),
+            (resolved.value)(pack_ref, patch_ref, &resolved.tips, &resolved.bases),
         );
         plan.written.push(resolved.entry.clone());
         plan.lines.push(format!(
@@ -1086,6 +1110,43 @@ impl<'a> Packaging<'a> {
             resolved.label
         ));
         Ok(true)
+    }
+
+    /// The reader-friendly diff of the commits `resolved` names (`text/x-diff`, derived from the
+    /// pack's commits; the pack stays the truth): puts it in the blob store, adds its blob datum
+    /// to `plan` and answers its reference. None, with a line saying why, when the diff is over
+    /// `max_bytes` or the commits have no single diff.
+    async fn plan_patch(
+        &self,
+        plan: &mut Plan,
+        resolved: &Resolved,
+        max_bytes: u64,
+    ) -> Res<Option<DatumReference>> {
+        let Some(tip) = resolved.patch_tip.clone() else {
+            plan.lines.push(
+                "  patch      skipped (the change's commit is a merge, so it has no single diff)"
+                    .to_owned(),
+            );
+            return Ok(None);
+        };
+        let base = resolved.bases.first().cloned();
+        let git_dir = resolved.git_dir.clone();
+        let diff = tokio::task::spawn_blocking(move || {
+            pack::unified_diff(&Git::new(&git_dir), base.as_deref(), &tip, max_bytes)
+        })
+        .await??;
+        let Some(diff) = diff else {
+            plan.lines.push(format!(
+                "  patch      skipped (the diff is over {max_bytes} bytes; the pack carries the commits)"
+            ));
+            return Ok(None);
+        };
+        let size = diff.len();
+        let (blob_key, blob) = self.put_content(diff, "text/x-diff").await?;
+        let patch_ref = DatumReference::new(ReferenceDocId::SelfDoc, blob_key.clone());
+        plan.set.insert(blob_key, blob);
+        plan.lines.push(format!("  patch      {size} bytes"));
+        Ok(Some(patch_ref))
     }
 
     /// What `add` writes to track the branch `resolved` names on this clone, which is nothing
@@ -1197,20 +1258,51 @@ impl<'a> Packaging<'a> {
         full: bool,
     ) -> Res<()> {
         let (drawer, intxts) = self.resolve(intxt).await?;
-        let view = self.load(&drawer).await?;
+        let resolved = Resolved::new(&named, &self.identity()?)?;
+        let added = self.add_resolved(&drawer, &intxts, &resolved, full).await?;
+        writeln!(
+            out,
+            "{} {} \"{}\"",
+            if added.changed {
+                "added to"
+            } else {
+                "nothing to add to"
+            },
+            shown(&intxts, &drawer.to_string()),
+            added.title
+        )?;
+        for line in &added.lines {
+            writeln!(out, "{line}")?;
+        }
+        if let Some(undo) = &added.undo {
+            writeln!(out, "  undo: {undo}")?;
+        }
+        Ok(())
+    }
+
+    /// What `resolved` adds to `drawer`, with the sessions that produced it: writes it, and says
+    /// what was written and how to undo it. Something already in the intxt is left alone and said
+    /// so. The intxt is read afresh, so a call may follow another on the same intxt.
+    pub(super) async fn add_resolved(
+        &self,
+        drawer: &DrawerId,
+        intxts: &ShortIds<String>,
+        resolved: &Resolved,
+        full: bool,
+    ) -> Res<Added> {
+        let view = self.load(drawer).await?;
         let identity = self.identity()?;
-        let resolved = Resolved::new(&named, &identity)?;
-        let recorded = self.recorded_after_import(&identity, &resolved).await?;
+        let recorded = self.recorded_after_import(&identity, resolved).await?;
 
         let mut plan = Plan::default();
         let new_commits = self
-            .plan_commits(&mut plan, &drawer, &view, &resolved, full)
+            .plan_commits(&mut plan, drawer, &view, resolved, full)
             .await?;
-        self.plan_ref(&mut plan, &view, &resolved, &identity, &recorded)
+        self.plan_ref(&mut plan, &view, resolved, &identity, &recorded)
             .await?;
         // The sessions of commits already in the intxt were derived when they were added.
         let (sessions, present) = if new_commits {
-            self.following_sessions(&view, &resolved, &recorded).await?
+            self.following_sessions(&view, resolved, &recorded).await?
         } else {
             Default::default()
         };
@@ -1219,8 +1311,8 @@ impl<'a> Packaging<'a> {
         // its commits document existed gets its commits by adding the range again.
         let (wrote_commits, commit_lines) = self
             .write_commits(
-                &drawer,
-                &resolved,
+                drawer,
+                resolved,
                 recorded
                     .docs
                     .repo
@@ -1238,15 +1330,13 @@ impl<'a> Packaging<'a> {
         plan.lines.extend(commit_lines);
         let mut written = plan.written.clone();
         if !written.is_empty() {
-            self.caller
-                .include(&drawer, plan.set, &plan.written)
-                .await?;
+            self.caller.include(drawer, plan.set, &plan.written).await?;
             for doc in &plan.shared {
-                self.caller.share(&drawer, doc, DrawerAccess::Read).await?;
+                self.caller.share(drawer, doc, DrawerAccess::Read).await?;
             }
         }
         for (part, described) in &sessions {
-            let included = self.caller.add_part(&drawer, part).await?;
+            let included = self.caller.add_part(drawer, part).await?;
             written.push(included.entry.key().clone());
             plan.lines
                 .push(format!("  session    {described} (follows the commits)"));
@@ -1260,24 +1350,7 @@ impl<'a> Packaging<'a> {
                 .push("  sessions   none recorded for these commits".to_owned());
         }
 
-        let heading = format!(
-            "{} \"{}\"",
-            shown(&intxts, &drawer.to_string()),
-            view.title.title
-        );
-        writeln!(
-            out,
-            "{} {heading}",
-            if written.is_empty() && wrote_commits == 0 {
-                "nothing to add to"
-            } else {
-                "added to"
-            }
-        )?;
-        for line in &plan.lines {
-            writeln!(out, "{line}")?;
-        }
-        if !written.is_empty() {
+        let undo = (!written.is_empty()).then(|| {
             // Short ids among the intxt's items as they are now.
             let ids = ShortIds::new(
                 view.entries
@@ -1286,18 +1359,22 @@ impl<'a> Packaging<'a> {
                     .chain(written.iter().map(ToString::to_string))
                     .collect::<Vec<_>>(),
             );
-            writeln!(
-                out,
-                "  undo: day x intxt rm {} {}",
-                shown(&intxts, &drawer.to_string()),
+            format!(
+                "day x intxt rm {} {}",
+                shown(intxts, &drawer.to_string()),
                 written
                     .iter()
                     .map(|entry| shown(&ids, &entry.to_string()))
                     .collect::<Vec<_>>()
                     .join(" ")
-            )?;
-        }
-        Ok(())
+            )
+        });
+        Ok(Added {
+            title: view.title.title,
+            changed: !written.is_empty() || wrote_commits > 0,
+            lines: plan.lines,
+            undo,
+        })
     }
 
     /// `day x intxt which`: the intxts on this node that hold the commit `name` names in this
@@ -1331,6 +1408,78 @@ impl<'a> Packaging<'a> {
         Ok(())
     }
 
+    /// What `show` and `edit` say of an entry after its id: its kind and the summary of what
+    /// it holds. A session or a pull request is read from its own document, which may not have
+    /// synced yet.
+    pub(super) async fn describe(&self, entry: &DatumKey, value: &Value) -> Res<Summary> {
+        let tag = entry.tag().as_str();
+        let slot = String::from_utf8_lossy(entry.slot_bytes()).into_owned();
+        Ok(if tag == work::GitCommitEntry::ID {
+            let commit: work::GitCommitEntry = serde_json::from_value(value.clone())?;
+            Summary::Commits(format!(
+                "{}{}",
+                commit
+                    .base
+                    .as_deref()
+                    .map(|base| format!("{}..", short_sha(sha_of(base))))
+                    .unwrap_or_default(),
+                short_sha(sha_of(&commit.tip))
+            ))
+        } else if tag == work::JjChangeEntry::ID {
+            Summary::Change(slot[..slot.len().min(12)].to_owned())
+        } else if tag == work::GitRefEntry::ID {
+            let tracked: work::GitRefEntry = serde_json::from_value(value.clone())?;
+            let (clone, reference) = slot.split_once('/').unwrap_or(("", &slot));
+            Summary::Ref(format!(
+                "{reference}  (clone {}){}",
+                &clone[..clone.len().min(8)],
+                tracked
+                    .base
+                    .as_deref()
+                    .map(|base| format!("  base {}", short_sha(sha_of(base))))
+                    .unwrap_or_default()
+            ))
+        } else if tag == work::SessionEntry::ID {
+            let included: work::SessionEntry = serde_json::from_value(value.clone())?;
+            let session = match included.session.document() {
+                ReferenceDocId::Concrete(doc) => {
+                    self.caller.try_read(doc, included.session.key()).await?.1
+                }
+                ReferenceDocId::SelfDoc => None,
+            };
+            let described = match session {
+                Some(session) => {
+                    let session: work::AgentSession = serde_json::from_value(session)?;
+                    format!(
+                        "{}  {}",
+                        session.harness,
+                        session.title.unwrap_or_else(|| session.cwd.clone())
+                    )
+                }
+                None => "(document not synced)".to_owned(),
+            };
+            Summary::Session(format!("{slot}  {described}"))
+        } else if tag == work::GithubPullEntry::ID {
+            let included: work::GithubPullEntry = serde_json::from_value(value.clone())?;
+            let pull = match included.pull.document() {
+                ReferenceDocId::Concrete(doc) => {
+                    self.caller.try_read(doc, included.pull.key()).await?.1
+                }
+                ReferenceDocId::SelfDoc => None,
+            };
+            let described = match pull {
+                Some(pull) => {
+                    let pull: work::GithubPull = serde_json::from_value(pull)?;
+                    format!("{:?}  {}", pull.state, pull.title)
+                }
+                None => "(document not synced)".to_owned(),
+            };
+            Summary::GithubPull(format!("{slot}  {described}"))
+        } else {
+            Summary::Other(entry.to_string())
+        })
+    }
+
     /// `day x intxt show`: the title, the description, and the entries by kind, each with its
     /// short id among the intxt's entries.
     pub(crate) async fn show(&self, out: &mut impl Write, intxt: Option<&str>) -> Res<()> {
@@ -1360,72 +1509,14 @@ impl<'a> Packaging<'a> {
         let mut pulls = Vec::new();
         let mut others = Vec::new();
         for (entry, value) in &view.entries {
-            let id = shown(&ids, &entry.to_string());
-            let tag = entry.tag().as_str();
-            let slot = String::from_utf8_lossy(entry.slot_bytes()).into_owned();
-            if tag == work::GitCommitEntry::ID {
-                let commit: work::GitCommitEntry = serde_json::from_value(value.clone())?;
-                commits.push(format!(
-                    "  {id}  {}{}",
-                    commit
-                        .base
-                        .as_deref()
-                        .map(|base| format!("{}..", short_sha(sha_of(base))))
-                        .unwrap_or_default(),
-                    short_sha(sha_of(&commit.tip))
-                ));
-            } else if tag == work::JjChangeEntry::ID {
-                changes.push(format!("  {id}  {}", &slot[..slot.len().min(12)]));
-            } else if tag == work::GitRefEntry::ID {
-                let tracked: work::GitRefEntry = serde_json::from_value(value.clone())?;
-                let (clone, reference) = slot.split_once('/').unwrap_or(("", &slot));
-                refs.push(format!(
-                    "  {id}  {reference}  (clone {}){}",
-                    &clone[..clone.len().min(8)],
-                    tracked
-                        .base
-                        .as_deref()
-                        .map(|base| format!("  base {}", short_sha(sha_of(base))))
-                        .unwrap_or_default()
-                ));
-            } else if tag == work::SessionEntry::ID {
-                let included: work::SessionEntry = serde_json::from_value(value.clone())?;
-                let session = match included.session.document() {
-                    ReferenceDocId::Concrete(doc) => {
-                        self.caller.try_read(doc, included.session.key()).await?.1
-                    }
-                    ReferenceDocId::SelfDoc => None,
-                };
-                let described = match session {
-                    Some(session) => {
-                        let session: work::AgentSession = serde_json::from_value(session)?;
-                        format!(
-                            "{}  {}",
-                            session.harness,
-                            session.title.unwrap_or_else(|| session.cwd.clone())
-                        )
-                    }
-                    None => "(document not synced)".to_owned(),
-                };
-                sessions.push(format!("  {id}  {slot}  {described}"));
-            } else if tag == work::GithubPullEntry::ID {
-                let included: work::GithubPullEntry = serde_json::from_value(value.clone())?;
-                let pull = match included.pull.document() {
-                    ReferenceDocId::Concrete(doc) => {
-                        self.caller.try_read(doc, included.pull.key()).await?.1
-                    }
-                    ReferenceDocId::SelfDoc => None,
-                };
-                let described = match pull {
-                    Some(pull) => {
-                        let pull: work::GithubPull = serde_json::from_value(pull)?;
-                        format!("{:?}  {}", pull.state, pull.title)
-                    }
-                    None => "(document not synced)".to_owned(),
-                };
-                pulls.push(format!("  {id}  {slot}  {described}"));
-            } else {
-                others.push(format!("  {id}  {entry}"));
+            let line = format!("  {}  ", shown(&ids, &entry.to_string()));
+            match self.describe(entry, value).await? {
+                Summary::Commits(text) => commits.push(line + &text),
+                Summary::Change(text) => changes.push(line + &text),
+                Summary::Ref(text) => refs.push(line + &text),
+                Summary::Session(text) => sessions.push(line + &text),
+                Summary::GithubPull(text) => pulls.push(line + &text),
+                Summary::Other(text) => others.push(line + &text),
             }
         }
         // Commits imported from git history (FDR 008 W6) come with no sessions, none having been

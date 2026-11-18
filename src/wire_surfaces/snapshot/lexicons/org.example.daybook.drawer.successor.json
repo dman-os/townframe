@@ -1,0 +1,17 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "drawerId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "drawerId"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.drawer.successor",
+  "lexicon": 1
+}

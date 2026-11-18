@@ -32,6 +32,7 @@ use ui::ThemeRoot;
 /// One package as the shell found it: the `<name>.manifest.json` sidecar text and the guest
 /// component bytes it describes.
 // STAND-IN until `big_plugs` delivers manifests.
+#[derive(Clone)]
 pub struct PackageFiles {
     /// Where the shell found it, for installation error messages.
     pub origin: String,
@@ -187,23 +188,18 @@ pub fn wasmtime_engine(
     })
 }
 
-/// The ids (`<did>/<name>`) of the micros `packages` install, for a composition that opens one
-/// node actor per micro. A package that does not parse is skipped here, and reported by
-/// [`native_runtime`].
-pub fn package_micro_ids(packages: &[PackageFiles]) -> Vec<String> {
-    packages
-        .iter()
-        .filter_map(|files| {
-            // Only the identity is wanted, so the component bytes are not copied in.
-            clay_mdk::package::Package::from_json(
-                clay_mdk::LOCAL_NAMESPACE,
-                &files.manifest_json,
-                Vec::new(),
-            )
-            .ok()
-            .map(|package| package.id().as_str().to_owned())
-        })
-        .collect()
+/// The id (`<did>/<name>`) the micro of `files` installs as, for a composition that opens one node
+/// actor per micro and for one that replaces a package with the micro a cartridge contributes. A
+/// package that does not parse has none here, and is reported by [`native_runtime`].
+pub fn package_micro_id(files: &PackageFiles) -> Option<String> {
+    // Only the identity is wanted, so the component bytes are not copied in.
+    clay_mdk::package::Package::from_json(
+        clay_mdk::LOCAL_NAMESPACE,
+        &files.manifest_json,
+        Vec::new(),
+    )
+    .ok()
+    .map(|package| package.id().as_str().to_owned())
 }
 
 /// The `dispatch.local` egress a composition holds for a micro, by its id text (`<did>/<name>`):
@@ -388,20 +384,23 @@ pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
     engine: impl PackageEngine,
     host: NodeHost,
 ) -> Result<CompositionRuntime, String> {
-    static NODE: tokio::sync::OnceCell<dayframe_node::NodeComposition> =
-        tokio::sync::OnceCell::const_new();
+    /// The booted node and the micros its cartridges contribute, as the shell loads them: each is
+    /// a package whose component came out of the node's catalog, with the handles the node minted
+    /// for it from its `uses` and the cartridge's grants.
+    struct Hosted {
+        node: dayframe_node::NodeComposition,
+        cartridge_packages: Vec<PackageFiles>,
+        /// Cartridge micros that could not be loaded, for the shell's installation errors.
+        cartridge_errors: Vec<String>,
+    }
+    static NODE: tokio::sync::OnceCell<Hosted> = tokio::sync::OnceCell::const_new();
     let pairing: Vec<&Path> = host
         .pairing_directories
         .iter()
         .map(PathBuf::as_path)
         .collect();
-    let node = NODE
+    let hosted = NODE
         .get_or_try_init(|| async {
-            let installs =
-                dayframe_node::MicroInstall::interim(package_micro_ids(&packages), |name| {
-                    dayframe_node::read_install_file(&pairing, name)
-                })
-                .map_err(|error| format!("cannot read the install files: {error:#}"))?;
             let mut bootstrap = Vec::new();
             for directory in &pairing {
                 bootstrap.extend(
@@ -409,7 +408,7 @@ pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
                         .map_err(|error| format!("cannot read the bootstrap tickets: {error:#}"))?,
                 );
             }
-            let node = dayframe_node::NodeComposition::boot(dayframe_node::NodeConfig {
+            let mut node = dayframe_node::NodeComposition::boot(dayframe_node::NodeConfig {
                 root: host.root.clone(),
                 bootstrap,
                 // The node learns the datum vocabulary of intxt (the PR and intxt datums the
@@ -420,7 +419,7 @@ pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
                     big_cabinet::SchemaRepo::open(std::iter::empty())
                         .expect("no registrations is a valid schema repo"),
                 ),
-                installs,
+                installs: Vec::new(),
                 serve: host.serve,
             })
             .await
@@ -428,15 +427,74 @@ pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
             node.install_intxt(&host.intxt_guest)
                 .await
                 .map_err(|error| format!("cannot install intxt on the node: {error}"))?;
+            let mut cartridge_packages = Vec::new();
+            let mut cartridge_errors = Vec::new();
+            for loaded in node
+                .sync_cartridge_micros()
+                .await
+                .map_err(|error| format!("cannot load the cartridges' micros: {error:#}"))?
+            {
+                match loaded {
+                    Ok(micro) => cartridge_packages.push(PackageFiles {
+                        origin: format!("cartridge {}", micro.micro),
+                        manifest_json: micro.manifest_json,
+                        component: micro.component,
+                    }),
+                    Err(error) => cartridge_errors.push(format!("{error:#}")),
+                }
+            }
+            // INTERIM: a bundled micro that no cartridge replaces is installed from the table in
+            // `dayframe_node`, until it is published as a cartridge.
+            let uncovered = packages
+                .iter()
+                .filter_map(package_micro_id)
+                .filter(|id| {
+                    !cartridge_packages
+                        .iter()
+                        .filter_map(package_micro_id)
+                        .any(|loaded| plug_name(&loaded) == plug_name(id))
+                })
+                .collect::<Vec<_>>();
+            let installs = dayframe_node::MicroInstall::interim(uncovered, |name| {
+                dayframe_node::read_install_file(&pairing, name)
+            })
+            .map_err(|error| format!("cannot read the install files: {error:#}"))?;
+            for install in installs {
+                node.install_micro(install)
+                    .await
+                    .map_err(|error| format!("cannot install a micro on the node: {error:#}"))?;
+            }
             let address = node.address();
             for directory in &pairing {
                 let path = directory.join("node-address.txt");
                 std::fs::write(&path, &address)
                     .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
             }
-            Ok::<_, String>(node)
+            Ok::<_, String>(Hosted {
+                node,
+                cartridge_packages,
+                cartridge_errors,
+            })
         })
         .await?;
+    // A cartridge's micro replaces the bundled package of the same name.
+    let replaced = |files: &PackageFiles| {
+        package_micro_id(files).is_some_and(|id| {
+            hosted
+                .cartridge_packages
+                .iter()
+                .filter_map(package_micro_id)
+                .any(|loaded| plug_name(&loaded) == plug_name(&id))
+        })
+    };
+    let mut packages: Vec<PackageFiles> = packages
+        .into_iter()
+        .filter(|files| !replaced(files))
+        .collect();
+    packages.extend(hosted.cartridge_packages.iter().cloned());
+    let mut package_errors = package_errors;
+    package_errors.extend(hosted.cartridge_errors.iter().cloned());
+    let node = &hosted.node;
     native_runtime(
         store,
         packages,
@@ -447,6 +505,14 @@ pub async fn hosted_runtime<St: OrderedStore + Send + Sync + 'static>(
     )
     .await
     .map_err(|error| format!("cannot load the store: {error}"))
+}
+
+/// The `<name>` of a micro id `<did>/<name>`: a cartridge's micro is installed under its
+/// publisher's DID, a bundled package under the local namespace, and the name is what they share.
+fn plug_name(id: &str) -> &str {
+    id.split_once('/')
+        .unwrap_or_else(|| panic!("micro id {id:?} is not `<did>/<name>`"))
+        .1
 }
 
 /// A [`RuntimeLoader`] from an async constructor. Must be called inside a component, as a
@@ -784,7 +850,7 @@ mod tests {
             manifest_json: serde_json::to_vec(&micro_review_manifest::sidecar()).unwrap(),
             component: Vec::new(),
         };
-        let id = package_micro_ids(&[review("review")]).remove(0);
+        let id = package_micro_id(&review("review")).unwrap();
         let datum = serde_json::json!({ "githubDrawer": "g", "intxtDrawers": [], "docCap": "c" });
         let runtime = native_runtime(
             Arc::new(clay_store::MemoryStore::default()),

@@ -4,13 +4,18 @@ use super::blobs::put_cap;
 use super::*;
 use big_blobs_core::BlobInfo;
 use big_cabinet_core::DatumPin;
+use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
+use big_cabinet_core::reference::DatumReference;
+use big_cabinet_core::reference::Location;
+use big_cabinet_core::reference::ReferenceDocId;
 
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Component as ManifestComponent;
 use big_cartridges_core::Digest;
+use big_cartridges_core::Version;
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::protocol::CartridgeChanges;
 use big_cartridges_core::protocol::CartridgesCursor;
@@ -26,10 +31,12 @@ use big_cartridges_core::protocol::PublishCartridgeVersion;
 use big_cartridges_core::protocol::PublishedCartridgeVersion;
 use big_cartridges_core::protocol::RemoveCartridge;
 use big_cartridges_core::protocol::RemoveCartridgeVersion;
+use big_cartridges_core::protocol::ResolveCartridgePin;
 use big_cartridges_core::protocol::ResolveCartridgeVersion;
 use big_cartridges_core::protocol::WatchCartridges;
 use big_cartridges_core::registry::identity_key;
 use big_cartridges_core::registry::version_key;
+use big_cartridges_core::registry::version_pin;
 use big_cartridges_core::signature::SignatureError;
 use big_cartridges_core::test_support::FixtureCartridge;
 use big_cartridges_core::test_support::cartridge_id;
@@ -533,6 +540,97 @@ async fn staging_refuses_components_whose_bytes_are_not_local() {
         .unwrap()
         .cartridges;
     assert!(listed.is_empty());
+    shutdown(node, stop).await;
+}
+
+/// The registry resolves an install pin from the pin alone, as exactly the revision it selects:
+/// a version's pin resolves as its label does, at any heads from its publish on. A pin taken
+/// before the version was published, one naming its own document or another datum is refused,
+/// and one at heads this node has not seen is refused as recoverable.
+#[tokio::test]
+async fn an_install_pin_resolves_as_the_revision_it_selects() {
+    let secrets = secrets().await;
+    let (node, stop, _sql) = boot_memory(&secrets).await;
+    let (v1, v2): (Version, Version) = ("1.0.0".parse().unwrap(), "1.1.0".parse().unwrap());
+    let version = |version: &Version| {
+        FixtureCartridge::new(Cartridge::new(PHOTOS.parse().unwrap(), version.clone()))
+    };
+    let first = node.publish_fixture(&version(&v1)).await;
+    let second = node.publish_fixture(&version(&v2)).await;
+    let resolve = |pin: DatumPin| {
+        node.cartridges.client.call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            ResolveCartridgePin { pin },
+        )
+    };
+    let by_label = node
+        .cartridges
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            ResolveCartridgeVersion {
+                id: cartridge_id("photos"),
+                version: v2.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolve(second.clone()).await.unwrap(), by_label);
+
+    let reference = second.location().reference();
+    let ReferenceDocId::Concrete(doc) = reference.document().clone() else {
+        panic!("a published version's pin names its registry document");
+    };
+    let later = reference.heads().to_vec();
+    let earlier = first.location().reference().heads().to_vec();
+    assert_eq!(
+        resolve(version_pin(doc.clone(), &v1, later.clone()))
+            .await
+            .unwrap()
+            .cartridge
+            .version,
+        v1,
+        "a version's envelope never changes, so later heads select it as well"
+    );
+    let at = |document: ReferenceDocId, key| {
+        DatumPin::new(
+            Location::new(
+                DatumReference::new(document, key).pinned(later.iter().copied()),
+                None,
+            )
+            .unwrap(),
+        )
+    };
+    for (pin, why) in [
+        (
+            version_pin(doc.clone(), &v2, earlier),
+            "before the version was published",
+        ),
+        (
+            at(ReferenceDocId::SelfDoc, version_key(&v2)),
+            "naming its own document",
+        ),
+        (
+            at(ReferenceDocId::Concrete(doc.clone()), identity_key()),
+            "naming another datum",
+        ),
+    ] {
+        assert!(
+            matches!(
+                resolve(pin).await,
+                Err(ClientError::Method(CartridgesError::Rejected(_)))
+            ),
+            "{why}"
+        );
+    }
+    assert!(matches!(
+        resolve(version_pin(doc, &v2, [ChangeHash([7; 32])])).await,
+        Err(ClientError::Method(
+            CartridgesError::PinnedEnvelopeUnreadable { .. }
+        ))
+    ));
     shutdown(node, stop).await;
 }
 
