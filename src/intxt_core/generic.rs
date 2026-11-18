@@ -188,6 +188,24 @@ impl PrLinks {
             .unwrap_or_default())
     }
 
+    /// A PR `description` as a reader sees it: the text with the intxt block (its whole
+    /// `<details>` element) removed and the blank lines that framed it trimmed away, and the
+    /// intxts the block named. A description with no block comes back as written, naming none; a
+    /// malformed block is an error, as in [`PrLinks::read`].
+    pub fn split(description: &str) -> Result<(String, Self), PrBlockError> {
+        let Some(found) = Self::find(description)? else {
+            return Ok((description.to_owned(), Self::default()));
+        };
+        let before = description[..found.span.start].trim_end();
+        let after = description[found.span.end..].trim_start();
+        let text = match (before.is_empty(), after.is_empty()) {
+            (_, true) => before.to_owned(),
+            (true, false) => after.to_owned(),
+            (false, false) => format!("{before}\n\n{after}"),
+        };
+        Ok((text, found.links))
+    }
+
     /// The block to paste at the end of a PR description.
     pub fn block(&self) -> String {
         let mut object = serde_json::Map::new();
