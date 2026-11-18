@@ -1493,6 +1493,7 @@
     }
   }
 }
+@layer reset, tokens, kit, user;
 :root, .light {
   --scheme-color-primary: oklch(48.629% 0.09 276.331);
   --scheme-color-surface-tint: oklch(48.629% 0.09 276.331);
@@ -1799,7 +1800,18 @@
   --scheme-color-surface-container-high: oklch(35.46% 0.01 285.863);
   --scheme-color-surface-container-highest: oklch(39.638% 0.01 285.935);
 }
-@layer theme {
+@layer reset {
+  html, body {
+    margin: 0;
+    padding: 0;
+    min-width: 100%;
+    min-height: 100%;
+  }
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
+}
+@layer tokens {
   :root {
     --ct-dimension-spacing-0: 0rem;
     --ct-dimension-spacing-1: 0.25rem;
@@ -1829,6 +1841,8 @@
     --ct-color-blue-900: #0f1f61;
     --ct-color-red-100: #ffe0e0;
     --ct-color-red-600: #bd1f1f;
+    --ct-color-green-600: #1f7a3d;
+    --ct-color-amber-500: #f5a624;
     --ct-font-family-sans: system-ui, sans-serif;
     --ct-font-weight-regular: 400;
     --ct-font-weight-medium: 500;
@@ -1861,6 +1875,12 @@
     --ct-color-scrim: rgba(0, 0, 0, 0.32);
     --ct-color-danger: #bd1f1f;
     --ct-color-on-danger: #ffffff;
+    --ct-color-success: #1f7a3d;
+    --ct-color-on-success: #ffffff;
+    --ct-color-warning: #f5a624;
+    --ct-color-on-warning: #1f1f29;
+    --ct-color-info: #2952c7;
+    --ct-color-on-info: #ffffff;
     --ct-dimension-spacing: 0.25rem;
     --ct-spacing: 0.25rem;
     --ct-radius-sm: 0.25rem;
@@ -1890,19 +1910,6 @@
     --ct-motion-easing-enter: cubic-bezier(0.05, 0.7, 0.1, 1);
     --ct-font-family: var(--ct-font-family-sans);
   }
-}
-@layer base {
-  html, body {
-    margin: 0;
-    padding: 0;
-    min-width: 100%;
-    min-height: 100%;
-  }
-  *, *::before, *::after {
-    box-sizing: border-box;
-  }
-}
-@layer theme {
   .ct-theme {
     --ct-color-canvas: var(--scheme-color-background);
     --ct-color-surface: var(--scheme-color-surface-container-low);
@@ -1921,10 +1928,10 @@
     --ct-color-on-accent-container: var(--scheme-color-on-secondary-container);
     --ct-color-selected: var(--scheme-color-secondary-container);
     --ct-color-on-selected: var(--scheme-color-on-secondary-container);
+    --ct-color-info: var(--scheme-color-secondary);
+    --ct-color-on-info: var(--scheme-color-on-secondary);
     --ct-color-danger: var(--scheme-color-error);
     --ct-color-on-danger: var(--scheme-color-on-error);
-    --ct-color-success: var(--scheme-color-tertiary);
-    --ct-color-warning: var(--scheme-color-secondary);
     --color-foreground-muted: var(--ct-color-text-muted);
     --color-foreground-subtle: var(--ct-color-text-subtle);
     --color-surface-raised: var(--ct-color-surface-raised);

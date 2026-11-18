@@ -1,6 +1,12 @@
 @import "tailwindcss";
 
+/* The contract's layers (docs/design-language/styling-contract.md), lowest first. They are declared
+   after Tailwind's own so a `user` rule outranks a utility. `reset` and `tokens` are filled by
+   the imports below, `kit` by the component skins, `user` by the end user's theme at run time. */
+@layer reset, tokens, kit, user;
+
 @import "./styles/material.css";
+@import "./styles/reset.css";
 @import "./styles/tokens.generated.css";
 @import "./styles/tokens.css";
 @import "./styles/motion.css";

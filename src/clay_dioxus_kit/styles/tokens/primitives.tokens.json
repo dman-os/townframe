@@ -110,6 +110,24 @@
           "alpha": 1
         }
       }
+    },
+    "green": {
+      "600": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.12, 0.48, 0.24],
+          "alpha": 1
+        }
+      }
+    },
+    "amber": {
+      "500": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.96, 0.65, 0.14],
+          "alpha": 1
+        }
+      }
     }
   },
   "font": {
