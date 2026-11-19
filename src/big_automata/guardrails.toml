@@ -1,7 +1,7 @@
 version = 1
 role = "domain"
-dependency_reason = "The sans-io sync machines and their store contracts build on the shared ids, prelude and hashing in utils_rs."
-allowed_dependencies = ["utils_rs"]
+dependency_reason = "The sans-io sync machines and their store contracts build on the shared ids, prelude and hashing in utils_rs; the replay protocol declares its methods and protocol with service_core_rs and method_core."
+allowed_dependencies = ["method_core", "service_core_rs", "utils_rs"]
 allow_external_api_types = false
 
 [builds.native]

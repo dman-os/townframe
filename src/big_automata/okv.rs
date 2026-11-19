@@ -82,9 +82,7 @@ impl<K: Ord> Selector<K> {
 /// memory backend's optimistic commit) consumes none either when it does. A backend that holds
 /// its write lock for the whole transaction (SQLite) never fails this way, but callers must not
 /// rely on that.
-pub trait OkvStore<Async: FutureForm>:
-    RevSource<Async, Selector = Selector<<Self as RevSource<Async>>::Key>>
-{
+pub trait OkvStore: RevSource<Selector = Selector<<Self as RevSource>::Key>> {
     /// The caller-owned transaction `apply` and `get` work in.
     type Tx;
 
@@ -92,21 +90,21 @@ pub trait OkvStore<Async: FutureForm>:
     /// batch's (committed, or staged earlier in the same transaction). Within a batch the last
     /// mutation of a key wins. An empty batch is a caller bug and panics: it has no rows to
     /// stamp.
-    fn apply<'a>(
-        &'a self,
-        tx: &'a mut Self::Tx,
+    fn apply(
+        &self,
+        tx: &mut Self::Tx,
         mutations: Vec<Mutation<Self::Key, Self::Value>>,
-    ) -> Async::Future<'a, Res<Rev>>;
+    ) -> impl Future<Output = Res<Rev>> + Send;
 
     /// The key's value as `tx` sees it: its own staged write if it has one (a staged delete
     /// reads as `None`), otherwise the committed row. A tombstone and a key never written both
     /// read as `None`. The read is part of the transaction: a backend that validates at commit
     /// fails the commit if the key's table moved after the transaction first touched it.
-    fn get<'a>(
-        &'a self,
-        tx: &'a mut Self::Tx,
-        key: &'a Self::Key,
-    ) -> Async::Future<'a, Res<Option<Self::Value>>>;
+    fn get(
+        &self,
+        tx: &mut Self::Tx,
+        key: &Self::Key,
+    ) -> impl Future<Output = Res<Option<Self::Value>>> + Send;
 }
 
 /// What a row costs against a byte budget; see the module docs.

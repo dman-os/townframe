@@ -2,6 +2,9 @@
 
 **Status:** Proposed.
 
+**Updated:** 2026-11-19 (see [Revision 2026-11-19](#revision-2026-11-19-the-replay-session-protocol)): decision 9's
+delivery is now the replay session protocol.
+
 **Supersedes (by topic):** the abandoned Willow collection-sync exploration
 (`docs/adrs/010-willow-collection-sync.md`, orphaned on the side branch at commits
 `skuzkrotxkux` / `vnlrzzmswlsq`, not reachable from the current working copy). The
@@ -1539,3 +1542,41 @@ keys leaking to unauthorized peers.
   reads.
 - The `unscoped`/all mode question: what "mirror everything" means once `/seds` is
   an ordinary part, and whether that mode becomes "all parts" or a real group.
+
+## Revision 2026-11-19: the replay session protocol
+
+Decision 9's client-driven page delivery is kept, but the session layer around it is rebuilt
+as one module that owns its semantics: `src/big_automata/replay.rs`. The laws there are the
+contract; this section records what changed and why.
+
+- **One target set per session.** The old session namespaced several subscriptions, but a
+  client only ever used one per peer. A session is now one target set, named by a
+  client-chosen id; generation 0 opens it, so `subscription_id` is gone.
+- **No session-less page.** The stateless `replay_page` is dropped. Sessions exist because a
+  request naming n long keys every poll is too costly.
+- **`Refused` replaces `UnknownPart` / `Unauthorized`,** so a refusal never confirms a part
+  exists (decision 2's rule, now in the verdict type).
+- **Cancellation is the transport's.** The `supersede` field is gone: a client cancels its
+  previous round through request cancellation. That is safe because the server keeps no
+  cursor, so a discarded round changes nothing (law 9).
+- **Verdicts and rows come from one snapshot** of current access (law 7). Rows older than a
+  revocation are never served after it.
+- **Law 5, amended:** a delayed duplicate of a session's opening update can revive a session
+  the server forgot. Missing targets surface as `UnknownTarget`, and the client opens a new
+  session; removed targets come back as orphans that carry nothing and expire with the
+  session. Found by both the Rust simulation and TLC.
+- **Law 11, amended:** a removal omitted because the membership began after the round's
+  cursor is judged against that cursor, so a client applies a round's answer for a target
+  only while its cursor is still the round's. Answers to overtaken rounds are dropped. Found
+  by the stack simulation.
+- **Transport:** the protocol is three methods on the service stack
+  (`org.townframe.bigsync.replay.{updateSession,pageSession,closeSession}`), hosted by
+  `big_automata_iroh`. Which principal a caller acts as is decided by the embedder, not by
+  the iroh endpoint.
+
+**Verification:**
+- a Quint model of client, server and a faulty network, checked with TLC
+  (`src/big_automata/replay/spec/`);
+- full-graph conformance between a server-only model and `ReplayServer`;
+- a full-stack simulation proptest over the memory part store.
+

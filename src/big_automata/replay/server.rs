@@ -15,7 +15,7 @@ use crate::part_store::AuthorizedPage;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
-use crate::part_store::ObjState;
+use crate::part_store::ObjPayload;
 use crate::part_store::ReadVerdict;
 use crate::replay::wire::CloseSession;
 use crate::replay::wire::Generation;
@@ -139,10 +139,13 @@ impl ReplayServer {
             .iter()
             .filter(|id| session.targets.contains_key(id))
             .count();
+        // `id_buf` holds exactly the removals here: the duplicate check above inserted every one
+        // of them and found none twice. Probing it keeps this linear in the update's size.
+        let removals = &self.id_buf;
         let reused = update
             .additions
             .iter()
-            .any(|(id, _)| session.targets.contains_key(id) && !update.removals.contains(id));
+            .any(|(id, _)| session.targets.contains_key(id) && !removals.contains(id));
         if reused {
             return Err(SessionError::Invalid(
                 "an update adds an id the session holds".into(),
@@ -291,15 +294,16 @@ strike! {
     /// One resolved round: what the responder reads and how the read maps back to the wire.
     /// The responder owns it and reuses it across rounds; resolving refills every field.
     ///
-    /// The responder's sequence, all for the round's `principal`:
+    /// The responder's sequence ([`crate::replay::responder`]), all for the round's
+    /// `principal`:
     ///
-    /// 1. pick `until`, a committed rev of the store, with [`Round::after`] `< until`;
+    /// 1. pick `until`, a committed rev of the store, and read from [`Round::after`] capped at
+    ///    `until` (a window that may be empty);
     /// 2. [`read_authorized`](crate::part_store::PartStoreServe::read_authorized) of
-    ///    [`Round::routes`] in `(after, until]` under [`Round::limits`];
-    /// 3. [`readable_obj_states`](crate::part_store::PartStoreServe::readable_obj_states) of
-    ///    [`Round::content_keys`];
-    /// 4. [`Round::answer`]. When the page carries no event and [`Round::hold`] is not zero,
-    ///    the responder may wait for a new rev and go again from step 1 (law 13).
+    ///    [`Round::routes`] in `(after, until]` under [`Round::limits`], which carries the
+    ///    rows' payloads from the same snapshot;
+    /// 3. [`Round::answer`]. When the read carries no row and [`Round::hold`] is not zero, the
+    ///    responder may wait for a new rev and go again from step 1 (law 13).
     pub struct Round {
         /// In the order the request named them.
         targets: Vec<struct RoundTarget {
@@ -317,8 +321,9 @@ strike! {
         after: Rev,
         limit: u32,
         hold: Duration,
-        /// The objects whose content the page needs, sorted.
-        content_keys: Vec<ObjKey>,
+        /// Scratch for [`Round::answer`]: per payload of the read, the event its payload
+        /// moved into, so the events before it clone from there.
+        moved_into: Vec<Option<usize>>,
     }
 }
 
@@ -334,7 +339,7 @@ impl Default for Round {
             after: 0,
             limit: 1,
             hold: Duration::ZERO,
-            content_keys: default(),
+            moved_into: default(),
         }
     }
 }
@@ -426,28 +431,6 @@ impl Round {
         Ok(())
     }
 
-    /// The objects the read's live rows are about, sorted and distinct: what the responder asks
-    /// [`readable_obj_states`](crate::part_store::PartStoreServe::readable_obj_states) for,
-    /// in this order, before [`Round::answer`].
-    pub fn content_keys(&mut self, read: &AuthorizedPage) -> &[ObjKey] {
-        self.content_keys.clear();
-        self.content_keys.extend(
-            read.rows
-                .entries
-                .iter()
-                .filter(|entry| entry.value.is_some())
-                .map(|entry| match &entry.key {
-                    LogKey::Member { obj, .. } => obj.clone(),
-                    LogKey::Access { .. } => {
-                        unreachable!("an authorized read carries no access row")
-                    }
-                }),
-        );
-        self.content_keys.sort_unstable();
-        self.content_keys.dedup();
-        &self.content_keys
-    }
-
     fn targets_on(&self, probe: RouteProbe<'_>) -> impl Iterator<Item = &RoundTarget> {
         let start = self
             .by_route
@@ -467,9 +450,8 @@ impl Round {
 
     /// Map the authorized read of this round to its page, into `out` (cleared first).
     ///
-    /// `until` is the read's upper end, and `contents` are the answers of
-    /// [`readable_obj_states`](crate::part_store::PartStoreServe::readable_obj_states) for
-    /// [`Round::content_keys`], in that order.
+    /// `until` is the read's upper end. The read is taken apart: its payloads move into the
+    /// page's events.
     ///
     /// - Verdicts (law 7) are the read's: a permitted route is `Events`, any other `Refused`.
     /// - A live row goes to the permitted part target of its part and the permitted object
@@ -478,35 +460,18 @@ impl Round {
     /// - `resume` is the read's progress, never below the target's cursor (law 8), and
     ///   `drained` says it reached `until` (law 10).
     ///
-    /// The content comes from a second snapshot. When a row's object has no readable content in
-    /// it (access or membership changed between the two reads), the page ends before that
-    /// row's revision: every target resumes below it, so the next round reads it again and
-    /// decides it from the access of that round. Nothing is skipped and no content leaks.
-    pub fn answer(
-        &self,
-        read: &AuthorizedPage,
-        until: Rev,
-        contents: &[Option<ObjState>],
-        out: &mut SessionPage,
-    ) {
-        assert_eq!(
-            contents.len(),
-            self.content_keys.len(),
-            "the contents answer Round::content_keys"
-        );
+    /// The content is the read's own ([`AuthorizedPage::payloads`]), from the snapshot that
+    /// decided the rows and verdicts, so every live row has it and none can leak past access.
+    pub fn answer(&mut self, read: &mut AuthorizedPage, until: Rev, out: &mut SessionPage) {
         assert_eq!(read.parts.len(), self.routes.parts.len());
         assert_eq!(read.objects.len(), self.routes.objects.len());
         out.events.clear();
         out.verdicts.clear();
-        let mut through = read.rows.through;
         for revision in read.rows.revisions() {
-            let first = out.events.len();
-            if !self.map_revision(read, revision, contents, out) {
-                out.events.truncate(first);
-                through = revision[0].rev - 1;
-                break;
-            }
+            self.map_revision(read, revision, out);
         }
+        self.fill_payloads(read, out);
+        let through = read.rows.through;
         out.verdicts.extend(self.targets.iter().map(|target| {
             let verdict = match self.verdict(read, target) {
                 ReadVerdict::Permitted => {
@@ -522,14 +487,14 @@ impl Round {
         }));
     }
 
-    /// Push one revision's events; `false` when an object of it has no readable content.
+    /// Push one revision's events, each [`PageEvent::Changed`] with a placeholder payload that
+    /// [`Round::fill_payloads`] replaces.
     fn map_revision(
         &self,
         read: &AuthorizedPage,
         revision: &[crate::rev::Entry<LogKey, LogEntry>],
-        contents: &[Option<ObjState>],
         out: &mut SessionPage,
-    ) -> bool {
+    ) {
         let rev = revision[0].rev;
         let carries = |target: &&RoundTarget| {
             target.cursor < rev && self.verdict(read, target) == ReadVerdict::Permitted
@@ -560,27 +525,44 @@ impl Round {
                         .map(|target| target.id),
                 );
             }
-            if changed.is_empty() {
-                continue;
+            if !changed.is_empty() {
+                out.events.push(PageEvent::Changed {
+                    rev,
+                    obj_key: obj.clone(),
+                    targets: changed,
+                    payload: ObjPayload::Null,
+                });
             }
-            let ix = self
-                .content_keys
-                .binary_search(obj)
-                .expect("Round::content_keys holds every live row's object");
-            let Some((payload, _)) = contents[ix]
-                .as_ref()
-                .and_then(|state| state.content.as_ref())
-            else {
-                return false;
-            };
-            out.events.push(PageEvent::Changed {
-                rev,
-                obj_key: obj.clone(),
-                targets: changed,
-                payload: payload.clone(),
-            });
         }
-        true
+    }
+
+    /// Give every [`PageEvent::Changed`] its object's payload. The walk goes from the last event
+    /// back: an object's last event takes the payload out of the read, and its earlier events
+    /// (the object's rows at other revs of the page) clone from that event. So a payload is
+    /// moved, not copied, unless its object has events at more than one rev.
+    fn fill_payloads(&mut self, read: &mut AuthorizedPage, out: &mut SessionPage) {
+        self.moved_into.clear();
+        self.moved_into.resize(read.payloads.len(), None);
+        for ix in (0..out.events.len()).rev() {
+            let PageEvent::Changed { obj_key, .. } = &out.events[ix] else {
+                continue;
+            };
+            let slot = read.payload_slot(obj_key);
+            let filled = match self.moved_into[slot] {
+                None => {
+                    self.moved_into[slot] = Some(ix);
+                    std::mem::take(&mut read.payloads[slot].1)
+                }
+                Some(later) => match &out.events[later] {
+                    PageEvent::Changed { payload, .. } => payload.clone(),
+                    PageEvent::Removed { .. } => unreachable!("a payload moved into a removal"),
+                },
+            };
+            let PageEvent::Changed { payload, .. } = &mut out.events[ix] else {
+                unreachable!("matched as a change above")
+            };
+            *payload = filled;
+        }
     }
 }
 

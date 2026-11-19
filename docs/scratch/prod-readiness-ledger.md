@@ -715,7 +715,14 @@ replay. For small machines, **TLC with full-graph conformance is cheaper and str
 - proptest for APIs;
 - the bespoke DST simulator for liveness.
 
-**TLC is not a quint backend:** `quint verify` drives Apalache only. TLC runs on the TLA+ from
+**Correction (2026-11-19):** quint 0.33's `quint verify --backend=tlc` runs TLC directly
+(Apalache's jar bundles it), as the replay spec's runs show. What is still missing for
+full-graph conformance is TLC's state-graph dump plus a converter to something Rust reads.
+Conformance needs small per-machine models (e.g. `ReplayServer` alone, with inputs as free
+events), not the joint client/server/network model in `replay/spec/session.qnt` (4.4M
+states, log abstracted). Status: not wired for any machine yet.
+
+**Original note (superseded):** `quint verify` drives Apalache only. TLC runs on the TLA+ from
 `quint compile --target=tlaplus` (<https://quint-lang.org/docs/model-checkers>), which is the
 route flotilla's spike took, plus a converter from TLC's dumped state graph. So `formal-tools`
 must also provision `tla2tools.jar` (TLC). The JSON-limit fix to Apalache 0.62.4 also unblocked
@@ -934,4 +941,56 @@ an accidental quadratic or worse code path, not a tuned performance suite. Candi
 
 Start with scaling checks: time at n and 10n, asserting a bound on the ratio, run in CI.
 Existing harness to look at first: `.agents/skills/perf-investigation` (costs.rs).
+
+## Wire inspection under normal use (operator, 2026-11-19)
+
+Capture and inspect the raw wire of nodes running normal workloads (relay plus several peers;
+documents, blobs, drawers, sync churn) to learn:
+- what makes up most of the wire bytes, by protocol (ALPN: subduction, big_sync/replay, repo
+  sync, iroh-blobs, XRPC, keyhive) and by message kind;
+- what travels in clear vs ciphertext: QUIC/TLS hides payloads from the network, but inside
+  the connection, what does the *peer* see in clear (keys, part and object ids, cursors,
+  payload JSON) vs encrypted content (keyhive/CGKA ciphertext);
+- overhead: framing, JSON vs binary, repeated keys, chatty round trips, idle keepalives.
+
+Feeds the metadata privacy audit (what each party can link), the codec decision (CBOR per
+method, by measurement), and the benchmarks.
+
+**How:** instrument at the protocol layer (per ALPN or method byte counters and sampled message
+dumps, behind a debug flag) rather than capturing packets, since QUIC is encrypted. Optionally
+add a key-log for decrypting captures in a test harness.
+
+**Uuid audit (2026-11-19):** findings are in `docs/scratch/uuid-audit.md`.
+- **Fixed:** the WebSocket client frame mask and handshake key came from `Uuid::now_v7()`,
+  whose prefix is a predictable timestamp; they now use random bytes, per RFC 6455.
+- **Open:** v7 `Uuid7` actor, `docUuid`, operator and grant-subject ids travel to peers in
+  dmeta and certificates, leaking creation time and order (big_cabinet; ties into the
+  metadata audit). `command_id` primary keys take unvalidated caller text.
+
+## Browser story (operator decisions, 2026-11-19)
+
+Research: `docs/scratch/browser-async-research.md` (subduction, keyhive, iroh, n0-future,
+sqlite_rs).
+- **Send everywhere.** Shared async code and traits are `Send`, using native `async fn` in
+  traits (or `-> impl Future + Send`) with static dispatch, boxing only where `dyn` is needed.
+  JS handles (the browser SQLite client, WebCrypto, MessagePort) are wrapped once, at the
+  adapter edge, with `SendWrapper`; this is sound because the browser runs single-threaded
+  (wasm threads are opt-in and not planned).
+- **FutureForm only at the subduction/keyhive boundary,** where their traits require it. It
+  is stripped from big_automata now, and from big_repo when we get there.
+- **Runtime surface:** `n0_future` directly (spawn = `spawn_local` in the browser, JoinSet,
+  abort-on-drop, time via web-time, timeouts), `tokio::sync` for channels and watch, std or
+  surelock locks that are never held across an await. No `tokio::spawn`, `tokio::time` or
+  `tokio::net` in shared code.
+- **Drivers** are runtime-agnostic and live in their domain crate (big_automata's driver goes
+  into big_automata). A separate crate only where compilation units force it.
+- **Hosting:** the node runs in a leader-elected dedicated worker. Tabs' workers contend for a
+  Web Lock; the leader runs the node and holds the database, and the others talk to it over
+  BroadcastChannel or MessagePort. The service worker is optional (offline assets, push), and
+  service vs UI stays the embedder's choice; lower layers don't care.
+- **Storage:** SQLite on OPFS (opfs-sahpool-style synchronous access handles, dedicated
+  workers only; shipped in Chromium, Firefox 111+, Safari 16.4+). IndexedDB (async VFS via
+  Asyncify/JSPI) is a slower fallback. `sqlite_rs` gets renamed `sqlite_utils_rs` and gains a
+  wasm32-unknown-unknown backend when we reach it.
+- **Testing:** a wasm-bindgen-test lane in the Playwright browser farm for drivers.
 

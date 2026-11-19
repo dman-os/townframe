@@ -10,8 +10,6 @@ use crate::part_store::PartStoreServe;
 use crate::part_store::bucket_summary::BucketFingerprint;
 use crate::part_store::memory::MemoryPartStore;
 use crate::rev::Rev;
-use future_form::Local;
-use future_form::Sendable;
 use std::collections::HashMap;
 
 fn part() -> PartKey {
@@ -57,20 +55,13 @@ struct SummaryStore {
     summaries: HashMap<BuckId, BucketSummary>,
 }
 
-impl PartStoreRead<Local> for SummaryStore {
-    fn obj_states<'a>(
-        &'a self,
-        _objs: &'a [ObjKey],
-    ) -> <Local as FutureForm>::Future<'a, Res<Vec<Option<ObjState>>>> {
+impl PartStoreRead for SummaryStore {
+    async fn obj_states(&self, _objs: &[ObjKey]) -> Res<Vec<Option<ObjState>>> {
         unreachable!("filter_buckets does not read objects")
     }
 
-    fn bucket_summaries<'a>(
-        &'a self,
-        _part: &'a PartKey,
-        ids: &'a [BuckId],
-    ) -> <Local as FutureForm>::Future<'a, Res<Vec<BucketSummary>>> {
-        Local::ready(Ok(ids
+    async fn bucket_summaries(&self, _part: &PartKey, ids: &[BuckId]) -> Res<Vec<BucketSummary>> {
+        Ok(ids
             .iter()
             .map(|id| {
                 self.summaries
@@ -78,28 +69,22 @@ impl PartStoreRead<Local> for SummaryStore {
                     .cloned()
                     .unwrap_or_else(|| panic!("no local summary for {id:?}"))
             })
-            .collect()))
+            .collect())
     }
 
-    fn member_count<'a>(
-        &'a self,
-        _part: &'a PartKey,
-    ) -> <Local as FutureForm>::Future<'a, Res<u64>> {
+    async fn member_count(&self, _part: &PartKey) -> Res<u64> {
         unreachable!("filter_buckets does not count members")
     }
 
-    fn peer_part_cursors<'a>(
-        &'a self,
-        _peer: &'a PeerKey,
-        _parts: &'a [PartKey],
-    ) -> <Local as FutureForm>::Future<'a, Res<Vec<Option<Rev>>>> {
+    async fn peer_part_cursors(
+        &self,
+        _peer: &PeerKey,
+        _parts: &[PartKey],
+    ) -> Res<Vec<Option<Rev>>> {
         unreachable!("filter_buckets does not read peer cursors")
     }
 
-    fn set_peer_part_cursors<'a>(
-        &'a self,
-        _cursors: &'a [(PeerKey, PartKey, Rev)],
-    ) -> <Local as FutureForm>::Future<'a, Res<()>> {
+    async fn set_peer_part_cursors(&self, _cursors: &[(PeerKey, PartKey, Rev)]) -> Res<()> {
         unreachable!("filter_buckets does not write peer cursors")
     }
 }
@@ -132,7 +117,7 @@ fn filter_buckets_equal_fp_different_counts_is_dirty() {
     };
     let remote = vec![summary(clean, 5, 3, 7), summary(dirty, 5, 3, 7)];
 
-    match futures::executor::block_on(filter_buckets::<Local, _>(part(), 1, remote, &store))
+    match futures::executor::block_on(filter_buckets(part(), 1, remote, &store))
         .expect("the summary store reads infallibly")
     {
         FilteredBuckets::Handoff(out) => {
@@ -156,7 +141,7 @@ fn filter_buckets_equal_counts_different_watermark_is_clean() {
     };
     let remote = vec![summary(buck, 5, 3, 7)];
 
-    match futures::executor::block_on(filter_buckets::<Local, _>(part(), 0, remote, &store))
+    match futures::executor::block_on(filter_buckets(part(), 0, remote, &store))
         .expect("the summary store reads infallibly")
     {
         FilteredBuckets::Done => {}
@@ -171,7 +156,7 @@ fn filter_buckets_equal_counts_different_watermark_is_clean() {
 
 /// Leaf entries compare by the stored payload digest: a local object whose payload matches a
 /// remote entry's content is not fetched again, and a different digest is a change. Runs the
-/// memory part store through the `Local` form.
+/// memory part store.
 #[test]
 fn filter_objects_compares_payloads_by_stored_digest() {
     use crate::part_store::PartStoreWrite;
@@ -184,13 +169,13 @@ fn filter_objects_compares_payloads_by_stored_digest() {
     let payload = serde_json::json!({"held": "here"});
     let digest = PayloadDigest::of(&payload).expect(ERROR_IMPOSSIBLE);
     let mut tx = store.begin();
-    futures::executor::block_on(PartStoreWrite::<Local>::set_payloads(
+    futures::executor::block_on(PartStoreWrite::set_payloads(
         &store,
         &mut tx,
         vec![(obj.clone(), payload)],
     ))
     .expect("staging is infallible");
-    futures::executor::block_on(PartStoreWrite::<Local>::add_members(
+    futures::executor::block_on(PartStoreWrite::add_members(
         &store,
         &mut tx,
         &[(obj.clone(), part())],
@@ -212,7 +197,7 @@ fn filter_objects_compares_payloads_by_stored_digest() {
         )])
     };
     let deltas = |bucks| {
-        futures::executor::block_on(filter_objects::<Local, _>(part(), bucks, seed, &store))
+        futures::executor::block_on(filter_objects(part(), bucks, seed, &store))
             .expect("the memory store reads infallibly")
             .remove(&BuckId::ROOT)
             .expect("the bucket was asked for")
@@ -267,7 +252,7 @@ fn walk_converges(scenario: harness::Scenario) -> Res<harness::Driver<MemoryPart
             .map(|at| obj(u16::try_from(at).expect(ERROR_IMPOSSIBLE)))
             .collect::<Vec<_>>();
         let hidden = {
-            let states = PartStoreRead::<Sendable>::obj_states(&responder, &objs).await?;
+            let states = PartStoreRead::obj_states(&responder, &objs).await?;
             objs.iter()
                 .zip(states)
                 .filter(|(_, state)| {
@@ -291,8 +276,7 @@ fn walk_converges(scenario: harness::Scenario) -> Res<harness::Driver<MemoryPart
                 })
                 .collect::<Vec<_>>()
         };
-        let hidden_before =
-            payloads(PartStoreRead::<Sendable>::obj_states(&requester, &hidden).await?);
+        let hidden_before = payloads(PartStoreRead::obj_states(&requester, &hidden).await?);
 
         let mut driver = Driver::new(requester, Responder::new(responder, scenario.leaf_cap));
         driver.run(&parts).await?;
@@ -359,8 +343,7 @@ fn walk_converges(scenario: harness::Scenario) -> Res<harness::Driver<MemoryPart
                     })
                     .map(|(at, _)| obj(u16::try_from(at).expect(ERROR_IMPOSSIBLE)))
                     .collect::<Vec<_>>();
-                let promoted =
-                    PartStoreRead::<Sendable>::obj_states(&driver.requester, &pending).await?;
+                let promoted = PartStoreRead::obj_states(&driver.requester, &pending).await?;
                 let mut expected = members_before.clone();
                 expected.extend(
                     pending
@@ -375,7 +358,7 @@ fn walk_converges(scenario: harness::Scenario) -> Res<harness::Driver<MemoryPart
             }
         }
         assert_eq!(
-            payloads(PartStoreRead::<Sendable>::obj_states(&driver.requester, &hidden).await?),
+            payloads(PartStoreRead::obj_states(&driver.requester, &hidden).await?),
             hidden_before,
             "an object only in unreadable parts reached the requester"
         );
@@ -552,7 +535,7 @@ fn a_large_part_walks_only_its_dirty_buckets() -> Res<()> {
         build(&requester_store, &requester, &[]).await?;
 
         // The buckets at the working level whose summaries differ, and their members.
-        let at_level = PartStoreServe::<Sendable>::bucket_list(
+        let at_level = PartStoreServe::bucket_list(
             &responder_store,
             &requester_principal(),
             &part,
@@ -564,8 +547,7 @@ fn a_large_part_walks_only_its_dirty_buckets() -> Res<()> {
         .await?
         .expect("the part is readable");
         let ids = at_level.iter().map(|bucket| bucket.id).collect::<Vec<_>>();
-        let ours =
-            PartStoreRead::<Sendable>::bucket_summaries(&requester_store, &part, &ids).await?;
+        let ours = PartStoreRead::bucket_summaries(&requester_store, &part, &ids).await?;
         let dirty = at_level
             .iter()
             .zip(&ours)

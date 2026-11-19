@@ -1,18 +1,14 @@
 //! The server machine's laws, one test per law, and the round's mapping over the memory store.
 
-use future_form::Sendable;
 use futures::executor::block_on;
 
 use super::*;
-use crate::part_store::AccessLevel;
 use crate::part_store::PartStoreServe;
-use crate::part_store::PartStoreWrite;
 use crate::part_store::laws::obj;
 use crate::part_store::laws::part;
 use crate::part_store::laws::payload;
 use crate::part_store::laws::principal;
 use crate::part_store::memory::MemoryPartStore;
-use crate::rev::RevSource;
 
 fn at(secs: u64) -> Instant {
     static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -462,4 +458,5 @@ fn law_14_limit_and_hold_are_capped_silently() {
     assert_eq!(round_buf.hold(), Duration::from_millis(250));
 }
 
+mod conformance;
 mod rounds;

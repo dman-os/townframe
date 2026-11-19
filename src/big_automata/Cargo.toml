@@ -17,6 +17,8 @@ test-support = ["dep:proptest"]
 
 [dependencies]
 utils_rs = { workspace = true, features = ["hash"] }
+method_core.workspace = true
+service_core_rs.workspace = true
 
 structstruck.workspace = true
 
@@ -37,8 +39,7 @@ tokio = { workspace = true, features = ["sync"] }
 surelock.workspace = true
 async-channel.workspace = true
 async-trait.workspace = true
-future_form.workspace = true
-# `#[future_form]` expands to `::futures::future::{BoxFuture, LocalBoxFuture}`
+# `futures::future::select` races the replay responder's hold against its timer
 futures.workspace = true
 
 #
@@ -61,8 +62,19 @@ proptest = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
+serde_json.workspace = true
 
 # `rand` pulls in getrandom 0.3. On the web, `.cargo/config.toml` selects its `wasm_js`
 # backend, which only compiles with the feature of the same name turned on.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom03 = { workspace = true, features = ["wasm_js"] }
+
+# `declare_service_protocol!` expands to `irpc::` paths in the caller. Natively the protocol enum
+# carries irpc's remote half (`rpc`); in the browser irpc has no QUIC transport and the macro
+# emits the in-process half only. Not `irpc.workspace`: its default features (noq, rustls,
+# aws-lc) do not build for wasm.
+[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
+irpc = { version = "0.17.0", default-features = false, features = ["derive", "spans", "rpc"] }
+
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+irpc = { version = "0.17.0", default-features = false, features = ["derive", "spans"] }

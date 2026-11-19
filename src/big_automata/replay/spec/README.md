@@ -68,6 +68,15 @@ see what each buys. Neither is a law.
   answered, answers that change the client are eventually read, and the
   client's own steps (send, retry, unblock, round) are weakly fair. Stale
   requests carry no fairness, since the server may answer them forever.
+* The TTL sweep (`sweepRevived`) is weakly fair and spends no budget. It takes a
+  revived session (one whose id was forgotten) that holds ids no live session of
+  the client carries: any such session the client has left, or removed ids in the
+  client's own. `forget` (the environment's choice, budgeted) is unchanged.
+* A late duplicate that revives a forgotten session is spent: the network is a
+  set that never consumes, so without this the same copy could revive the session
+  after every sweep for ever, and no fairness rules that out. A real network
+  holds finitely many copies. The cost: one copy revives at most once, so
+  `amended` no longer explores a second revival by the same copy.
 
 ## Properties
 
@@ -157,10 +166,19 @@ restated) and its `liveCatchesUp` run are still to do.
   exhaustive, 8m29s.
 - `liveCatchesUp` holds: exhaustive, 35m29s. Every wanted, readable route's cursor reaches its
   head.
-- `liveConverges` fails, found in 1m07s; the counterexample hasn't been read yet. The expected
-  cause is the revived session's orphans, which the amended law accepts until the TTL while the
-  model has no fair TTL sweep. Confirm against the trace, then either give forgetting fairness or
-  restate the property per live session.
+- `liveConverges` as first run failed (1m07s). The trace: the client wants `a`, restarts
+  (session 1), sends the opening, unwants `a` and sends the removal; the server forgets session
+  1, and a late duplicate of the opening revives it with the orphan (`0 -> "b"`); the client,
+  now at generation 2 with nothing wanted and nothing in flight, has no update due and never
+  touches the session. Nothing removes the orphan, because the model had no TTL sweep. Class:
+  a missing fairness assumption, not a protocol hole (the amended law says orphans expire with
+  the revived session at its TTL). Adding the weakly fair `sweepRevived` exposed a second
+  lasso: sweep, then the server re-takes the same stale opening from the set network, for ever.
+  That is the network model's fault (see the spent-duplicate rule above).
+- After both changes (`sweepRevived`, fair; revival spends the duplicate):
+  - `safetyCore,law9InOrder,law6NoUnknownTarget,boundsHeld` hold: 5,033,138 distinct states,
+    exhaustive, 8m59s.
+  - `liveConverges`: rerun pending (the run was cut by a mothership reboot).
 
 ## Not checked
 

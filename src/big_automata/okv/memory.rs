@@ -17,9 +17,6 @@ use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::ops::Bound;
 
-use future_form::Local;
-use future_form::Sendable;
-use future_form::future_form;
 use tokio::sync::watch;
 
 use crate::interlude::*;
@@ -407,8 +404,7 @@ where
 
 // Every operation is one synchronous critical section, so the memory backend does its work when
 // called and hands back a ready future.
-#[future_form(Sendable, Local)]
-impl<Async: FutureForm, K, V> RevSource<Async> for MemoryOkv<K, V>
+impl<K, V> RevSource for MemoryOkv<K, V>
 where
     K: Ord + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V: Clone + AsRef<[u8]> + Send + Sync + 'static,
@@ -417,19 +413,19 @@ where
     type Value = V;
     type Selector = Selector<K>;
 
-    fn latest_rev(&self) -> Async::Future<'_, Res<Rev>> {
-        Async::ready(Ok(self.with_table(OkvTable::rev)))
+    fn latest_rev(&self) -> impl Future<Output = Res<Rev>> + Send {
+        std::future::ready(Ok(self.with_table(OkvTable::rev)))
     }
 
     /// Copies one bounded page out under the lock.
-    fn read<'a>(
-        &'a self,
-        selector: &'a Selector<K>,
+    fn read(
+        &self,
+        selector: &Selector<K>,
         after: Rev,
         until: Rev,
         limits: Limits,
-        page: &'a mut Page<K, V>,
-    ) -> Async::Future<'a, Res<()>> {
+        page: &mut Page<K, V>,
+    ) -> impl Future<Output = Res<()>> + Send {
         self.with_table(|table| {
             table.read_into(
                 |key, _rev, _value| selector.matches(key),
@@ -440,7 +436,7 @@ where
                 page,
             );
         });
-        Async::ready(Ok(()))
+        std::future::ready(Ok(()))
     }
 
     fn watch(&self) -> RevWatch {
@@ -448,19 +444,18 @@ where
     }
 }
 
-#[future_form(Sendable, Local)]
-impl<Async: FutureForm, K, V> OkvStore<Async> for MemoryOkv<K, V>
+impl<K, V> OkvStore for MemoryOkv<K, V>
 where
     K: Ord + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V: Clone + AsRef<[u8]> + Send + Sync + 'static,
 {
     type Tx = MemoryTx;
 
-    fn apply<'a>(
-        &'a self,
-        tx: &'a mut MemoryTx,
+    fn apply(
+        &self,
+        tx: &mut MemoryTx,
         mutations: Vec<Mutation<K, V>>,
-    ) -> Async::Future<'a, Res<Rev>> {
+    ) -> impl Future<Output = Res<Rev>> + Send {
         let stage = self.stage(tx);
         let rev = stage.rev.checked_add(1).expect("okv rev overflow");
         assert!(
@@ -472,15 +467,15 @@ where
             stage.rows.insert(key, (rev, value));
         }
         stage.rev = rev;
-        Async::ready(Ok(rev))
+        std::future::ready(Ok(rev))
     }
 
-    fn get<'a>(&'a self, tx: &'a mut MemoryTx, key: &'a K) -> Async::Future<'a, Res<Option<V>>> {
+    fn get(&self, tx: &mut MemoryTx, key: &K) -> impl Future<Output = Res<Option<V>>> + Send {
         let stage = self.stage(tx);
         let value = match stage.rows.get(key) {
             Some((_, value)) => value.clone(),
             None => self.with_table(|table| table.get(key).and_then(|(_rev, value)| value.clone())),
         };
-        Async::ready(Ok(value))
+        std::future::ready(Ok(value))
     }
 }
