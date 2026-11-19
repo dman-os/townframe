@@ -35,10 +35,12 @@ utils_rs.workspace = true
 #
 # misc
 async-trait.workspace = true
+axum = { workspace = true }
 http.workspace = true
 keyring-core = { version = "1.0", default-features = false }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
+tower = { workspace = true, features = ["util"] }
 
 [dev-dependencies]
 #

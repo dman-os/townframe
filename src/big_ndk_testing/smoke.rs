@@ -2,6 +2,7 @@
 //! e2e (`src/big_node/e2e/nodule_wasm.rs`): the same contract, observed through the same real
 //! node, with the native executor in place of the wasm one.
 
+use big_cabinet_core::authority::Authorization;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::ComponentExport;
@@ -323,13 +324,16 @@ async fn invoke(
         .await
 }
 
-/// The capability id a nodule is told in `x-nodule-capability`, as the fixture echoes it.
-async fn own_capability(node: &TestNode, spec: &Spec) -> Option<String> {
-    invoke(node, &spec.echo(), json!({}), Default::default())
-        .await
-        .unwrap()["noduleCapability"]
-        .as_str()
-        .map(str::to_owned)
+/// The dispatch capability the node minted for `spec`'s echo routine, which is the one the nodule
+/// is told in `x-nodule-capability`; `None` when no grant gave it one.
+fn own_capability(node: &TestNode, spec: &Spec) -> Option<String> {
+    node.handles(&spec.cartridge)
+        .expect("the nodule is enabled")
+        .routines
+        .get(&spec.echo())
+        .expect("the echo routine is admitted")
+        .dispatch
+        .map(Authorization::id_text)
 }
 
 /// What the caller's `relay` reports having received from calling `operation` through
@@ -495,9 +499,7 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
         },
     )
     .await;
-    let unrelated = own_capability(&node, &a)
-        .await
-        .expect("a granted nodule is told its capability");
+    let unrelated = own_capability(&node, &a).expect("a granted nodule is told its capability");
     let denied = relay(&node, &a, &target, None, context.clone()).await;
     assert_eq!(denied["status"], 403, "{denied}");
 
@@ -511,7 +513,7 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
         },
     )
     .await;
-    let granted = own_capability(&node, &a).await.unwrap();
+    let granted = own_capability(&node, &a).unwrap();
     assert_ne!(granted, unrelated, "a changed grant is a new capability");
     let relayed = relay(&node, &a, &target, None, context.clone()).await;
     assert_eq!(relayed["status"], 200, "{relayed}");
@@ -572,7 +574,7 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
         },
     )
     .await;
-    let theirs = own_capability(&node, &b).await.unwrap();
+    let theirs = own_capability(&node, &b).unwrap();
     let forged = relay(&node, &a, &a.echo(), Some(&theirs), context.clone()).await;
     assert_eq!(forged["status"], 403, "{forged}");
     // The same capability from its own nodule is honored, which is what the forgery lacked.
@@ -591,7 +593,6 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
     )
     .await;
     let after_revoke = own_capability(&node, &a)
-        .await
         .expect("a routine with uses keeps its own capability for asking for grants");
     assert_ne!(after_revoke, granted, "a revoked grant is a new capability");
     let stale = relay(&node, &a, &target, Some(&relay_capability), context).await;
@@ -621,6 +622,47 @@ async fn a_handlers_domain_error_reaches_the_caller_typed() {
         Err(crate::CallError::Method(RelayError::InvalidRequest(
             "no operation to relay".into()
         )))
+    );
+    node.stop().await;
+}
+
+/// The in-process caller speaks the node's XRPC router: the operator is admitted with no
+/// credential, and a cartridge's own handles (the actor signing for a routine's dispatch
+/// capability) call as it, so a grant it lacks is refused.
+#[tokio::test]
+async fn the_node_caller_acts_as_the_operator_or_as_a_cartridge_by_its_handles() {
+    let spec = caller();
+    let node = super::node()
+        .with_nodule(cartridge(&spec, &[]), Fixture)
+        .boot()
+        .await;
+    node.enable(&spec.cartridge).await;
+    let call = || CallRelay {
+        operation: String::new(),
+        authority: None,
+        input: None,
+    };
+    let invalid = Err(service_utils_rs::ClientError::Method(
+        RelayError::InvalidRequest("no operation to relay".into()),
+    ));
+    assert_eq!(node.caller().call(call()).await, invalid);
+
+    // Nothing is granted, so the routine holds no dispatch capability to call with: the cartridge
+    // acts under its actor alone, which permits nothing.
+    let handles = node
+        .handles(&spec.cartridge)
+        .expect("the nodule is enabled");
+    assert!(handles.routines[&spec.relay()].dispatch.is_none());
+    let refused = node
+        .caller()
+        .call_as(Authorization::identity(handles.actor), call())
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(service_utils_rs::ClientError::Transport { .. })
+        ) || refused != invalid,
+        "{refused:?}"
     );
     node.stop().await;
 }
