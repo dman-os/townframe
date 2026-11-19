@@ -8,7 +8,12 @@ rust-version.workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 pierre_diffs = { workspace = true }
+
+#
+# misc
 # Spelled out (not `dioxus.workspace = true`) so default features stay off, as in
 # `clay_dioxus_kit`: the diff view needs the macro, signals, hooks and element vocabulary only,
 # never a renderer or launcher, so it links into native, browser and wasm guest builds alike.

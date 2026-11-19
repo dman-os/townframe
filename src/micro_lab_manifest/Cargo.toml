@@ -8,8 +8,13 @@ rust-version.workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 clay_mdk = { workspace = true, features = ["contract"] }
 micro_layout_manifest = { workspace = true }
+
+#
+# misc
 serde_json.workspace = true
 
 [dev-dependencies]
