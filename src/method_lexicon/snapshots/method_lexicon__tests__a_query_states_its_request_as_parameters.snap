@@ -59,6 +59,10 @@ expression: "lexicon_of::<big_cabinet_core::doc::GetDocAvailability>()"
           "name": "UnknownHeads"
         },
         {
+          "description": "A document id arrived in a request that is not the 32 bytes every document id is. Ids are\nvariable-width keys on the wire (ADR 012), but a document's id is its ed25519 key, so\nonly a 32-byte one can name a document; refusing here keeps the width from ever reaching\nthe repository, where it is an invariant.",
+          "name": "InvalidDocId"
+        },
+        {
           "name": "CommandInFlight"
         },
         {
@@ -75,6 +79,15 @@ expression: "lexicon_of::<big_cabinet_core::doc::GetDocAvailability>()"
         },
         {
           "name": "InvalidValue"
+        },
+        {
+          "name": "NotContentAddressed"
+        },
+        {
+          "name": "ContentHashMismatch"
+        },
+        {
+          "name": "KeyRefUnresolved"
         },
         {
           "name": "ValueTooLarge"

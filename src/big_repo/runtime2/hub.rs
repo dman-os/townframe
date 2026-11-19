@@ -762,7 +762,7 @@ where
                 initial_keys,
                 resp,
             } => {
-                self.route_to_doc_worker(doc_id, |_lease| DocWorkerMsg::PutDoc {
+                self.route_to_doc_worker("PutDoc", doc_id, |_lease| DocWorkerMsg::PutDoc {
                     initial_content,
                     initial_keys,
                     resp,
@@ -790,9 +790,8 @@ where
                 )?;
             }
             Runtime2Cmd::AcquireDocInterest { doc_id, resp } => {
-                self.route_to_doc_worker(doc_id, |_lease| DocWorkerMsg::AcquireInterest {
-                    resp,
-                    _lease,
+                self.route_to_doc_worker("AcquireDocInterest", doc_id, |_lease| {
+                    DocWorkerMsg::AcquireInterest { resp, _lease }
                 })?;
             }
             Runtime2Cmd::GetDocHandle {
@@ -800,10 +799,12 @@ where
                 lease,
                 resp,
             } => {
-                self.route_to_doc_worker(doc_id, |_lease| DocWorkerMsg::AcquireHandle {
-                    lease,
-                    resp,
-                    _lease,
+                self.route_to_doc_worker("GetDocHandle", doc_id, |_lease| {
+                    DocWorkerMsg::AcquireHandle {
+                        lease,
+                        resp,
+                        _lease,
+                    }
                 })?;
             }
             Runtime2Cmd::CommitDelta {
@@ -815,26 +816,26 @@ where
                 origin,
                 resp,
             } => {
-                self.route_to_doc_worker(doc_id, |_lease| DocWorkerMsg::CommitDelta {
-                    bundle_id,
-                    commits,
-                    heads,
-                    patches,
-                    origin,
-                    resp,
-                    _lease,
+                self.route_to_doc_worker("CommitDelta", doc_id, |_lease| {
+                    DocWorkerMsg::CommitDelta {
+                        bundle_id,
+                        commits,
+                        heads,
+                        patches,
+                        origin,
+                        resp,
+                        _lease,
+                    }
                 })?;
             }
             Runtime2Cmd::DocHeadState { doc_id, resp } => {
-                self.route_to_doc_worker(doc_id, |_lease| DocWorkerMsg::QueryHeadState {
-                    resp,
-                    _lease,
+                self.route_to_doc_worker("DocHeadState", doc_id, |_lease| {
+                    DocWorkerMsg::QueryHeadState { resp, _lease }
                 })?;
             }
             Runtime2Cmd::EnsureCausalCoverage { doc_id, resp } => {
-                self.route_to_doc_worker(doc_id, |_lease| DocWorkerMsg::ReconcileCausalCoverage {
-                    resp,
-                    _lease,
+                self.route_to_doc_worker("EnsureCausalCoverage", doc_id, |_lease| {
+                    DocWorkerMsg::ReconcileCausalCoverage { resp, _lease }
                 })?;
             }
             Runtime2Cmd::InspectDocHeadState { doc_id, resp } => {
@@ -851,23 +852,21 @@ where
                 }
             }
             Runtime2Cmd::OpenConn { peer, addr, resp } => {
-                let child_tasks = self.child_tasks.clone();
                 self.spawn_background(F::open_connection_and_watch(
                     Arc::clone(&self.connect),
                     peer,
                     addr,
                     self.evt_tx.clone(),
-                    child_tasks,
+                    self.child_tasks.clone(),
                     resp,
                 ))?;
             }
             Runtime2Cmd::AcceptConn { incoming, resp } => {
-                let child_tasks = self.child_tasks.clone();
                 self.spawn_background(F::accept_connection_and_watch(
                     Arc::clone(&self.connect),
                     incoming,
                     self.evt_tx.clone(),
-                    child_tasks,
+                    self.child_tasks.clone(),
                     resp,
                 ))?;
             }
@@ -3194,12 +3193,20 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
     /// The internal lease from [`Self::doc_worker_handle`] is bundled into the
     /// message, so the worker stays alive (un-evictable) until it has finished
     /// the operation and dropped the message.
+    ///
+    /// `command` names the command being routed, for the error a doc id that is not 32 bytes
+    /// wide raises: every entry point validates that width where a request admits the id, so
+    /// reaching a worker with one is an invariant break that crashes the hub, and the message
+    /// has to say which command carried which id.
     fn route_to_doc_worker(
         &mut self,
+        command: &'static str,
         doc_id: DocumentId,
         msg: impl FnOnce(DocWorkerInternalLease) -> DocWorkerMsg,
     ) -> eyre::Result<()> {
-        let (worker, lease) = self.doc_worker_handle(doc_id)?;
+        let (worker, lease) = self
+            .doc_worker_handle(doc_id.clone())
+            .wrap_err_with(|| format!("routing {command} to the worker of doc {doc_id}"))?;
         worker.send(msg(lease)).wrap_err(ERROR_CHANNEL)
     }
 
@@ -3259,7 +3266,8 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             generation,
             Arc::clone(&self.interests),
             self.span.clone(),
-        )?;
+        )
+        .wrap_err_with(|| format!("spawning the worker of doc {doc_id}"))?;
         let handle = worker.handle;
         let stop = worker.stop;
         self.child_tasks.spawn(worker.run)?;

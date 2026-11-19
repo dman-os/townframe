@@ -927,6 +927,10 @@ impl Core {
         context: &RequestContext,
         drawer_id: &DrawerId,
     ) -> Result<Option<DrawerRecord>, DrawersError> {
+        // A request names the drawer by an id that is not looked up in the projection first
+        // (`GetDrawer`, `RememberDrawer`, successors): refuse a non-document-width id here rather
+        // than letting discovery read a document it can never have.
+        DocsError::ensure_doc_id(drawer_id).map_err(DrawersError::Docs)?;
         if let Some(record) = self.state.drawer(drawer_id).await? {
             return Ok(Some(record));
         }

@@ -12,6 +12,9 @@ pub const DATUM_REF: &str = "org.example.daybook.defs#datumRef";
 pub const DATUM_LOCATION: &str = "org.example.daybook.defs#datumLocation";
 /// `#datumPin`: a [`DatumPin`](super::DatumPin), a location and the heads it is read at.
 pub const DATUM_PIN: &str = "org.example.daybook.defs#datumPin";
+/// `#keyRef`: a [`KeyReference`](super::KeyReference), a content-addressed datum named by its key
+/// alone, with no document (ADR 035 §2.9).
+pub const KEY_REF: &str = "org.example.daybook.defs#keyRef";
 /// The authoring annotation a Rust type's schema carries to say its position *is* the named
 /// Lexicon def: projection emits a `ref` to it, and the sidecar overlay leaves it to the def.
 pub const LEXICON_REF: &str = "x-lexicon-ref";
@@ -55,6 +58,16 @@ pub fn defs_lexicon() -> serde_json::Value {
                         "minLength": 1,
                         "items": { "type": "string" },
                         "description": "The document heads the location is read at, as multibase base58btc. Absent: the document's current frontier.",
+                    },
+                },
+            },
+            "keyRef": {
+                "type": "object",
+                "required": ["key"],
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "A datum key, `<tag>/<slot>`, of a kind whose slot is a content hash of its value. Any document holding that key with a value that hashes to it satisfies the reference.",
                     },
                 },
             },
