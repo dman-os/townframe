@@ -154,20 +154,24 @@ pub type DHashMapMutRef<'a, K, V> = dashmap::mapref::one::RefMut<'a, K, V>;
 pub use cheapstr::CHeapStr;
 
 // FIXME: why this take 7ms on debug builds?
-/// Build the color-eyre hook with color disabled when stderr is not a terminal
-/// or `NO_COLOR` is set.
-///
+/// Whether stderr gets ANSI colour: only on a terminal, and never when `NO_COLOR` is set
+/// (https://no-color.org: set and not empty). tracing's formatter colours unconditionally
+/// unless told otherwise, and so does color-eyre 0.6, so both are driven from here.
+fn stderr_colour() -> bool {
+    std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr())
+}
+
 /// color-eyre 0.6 applies its owo-colors styles unconditionally, ignoring
 /// both `NO_COLOR` and TTY detection, so ANSI leaks into piped output (e.g.
-/// the CLI e2e snapshots). A blank theme renders plain text instead.
+/// the CLI e2e snapshots. A blank theme renders plain text instead, when stderr is not a
+/// terminal or `NO_COLOR` is set.
 pub(crate) fn eyre_hook_builder() -> color_eyre::config::HookBuilder {
     let builder = color_eyre::config::HookBuilder::default();
-    if std::env::var_os("NO_COLOR").is_some()
-        || !std::io::IsTerminal::is_terminal(&std::io::stderr())
-    {
-        builder.theme(color_eyre::config::Theme::new())
-    } else {
+    if stderr_colour() {
         builder
+    } else {
+        builder.theme(color_eyre::config::Theme::new())
     }
 }
 
@@ -197,6 +201,7 @@ pub fn setup_tracing_at(default_level: &str) -> Res<()> {
             tracing_subscriber::fmt::layer()
                 .compact()
                 .with_writer(std::io::stderr)
+                .with_ansi(stderr_colour())
                 //.with_timer(tracing_subscriber::fmt::time::time()),
                 .with_timer(tracing_subscriber::fmt::time::uptime()),
         )
