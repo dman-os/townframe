@@ -209,9 +209,16 @@ impl Capability {
                     drop(answer.send(reference.call(request).await));
                     views.notify_views();
                 }));
-                answered
-                    .await
-                    .expect("a call's task lives until the incarnation closes, with its callers")?
+                // The task is dropped with the incarnation's other work when it closes, which can
+                // be while a caller still awaits. Every call in flight at a close is answered
+                // `Revoked` by the host, which owns that answer; a panic here would instead trap
+                // the guest in the middle of its own close, and an error of the guest's own
+                // would race the host's answer with a differently shaped one. So the caller
+                // stays suspended until the runtime drops it with the incarnation.
+                match answered.await {
+                    Ok(response) => response?,
+                    Err(futures::channel::oneshot::Canceled) => std::future::pending().await,
+                }
             }
         };
         decode(&response)
