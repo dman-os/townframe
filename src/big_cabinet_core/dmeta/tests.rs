@@ -171,12 +171,22 @@ fn nested_metadata_and_branch_origins_preserve_unknown_members() {
     assert_eq!(serde_json::to_value(decoded).unwrap(), branch);
     #[cfg(feature = "schemars")]
     {
-        let schema = serde_json::to_value(schemars::schema_for!(BranchPath)).unwrap();
-        assert!(
-            jsonschema::validator_for(&schema)
-                .unwrap()
-                .is_valid(&branch)
-        );
+        let declaration =
+            crate::datum::Declaration::of::<BranchPath>().expect("branch is lexicon-aligned");
+        let universe = crate::datum::Universe::collect(vec![declaration]);
+        let file = crate::datum::Bundle::new(&universe, Vec::new())
+            .lexicons()
+            .expect("an aligned branch publishes")
+            .pop()
+            .expect("the branch lexicon exists")
+            .file;
+        let validator =
+            crate::datum::compile_position(&file, &[], &file["defs"]["main"], "$.defs.main")
+                .expect("the published branch position compiles");
+        assert!(validator.is_valid(&branch));
+        let mut malformed = branch.clone();
+        malformed["from"] = json!(123);
+        assert!(!validator.is_valid(&malformed));
     }
 }
 

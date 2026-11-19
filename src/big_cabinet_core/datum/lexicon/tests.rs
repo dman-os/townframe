@@ -467,6 +467,17 @@ fn a_pattern_map_that_is_not_keyed_is_refused() {
 #[cfg(feature = "schemars")]
 #[test]
 fn reference_types_project_to_refs_to_the_reference_defs() {
+    fn nullable_datum_reference_schema(
+        _generator: &mut schemars::SchemaGenerator,
+    ) -> schemars::Schema {
+        schemars::json_schema!({
+            "anyOf": [
+                {"x-lexicon-ref": "org.example.daybook.defs#datumRef"},
+                {"type": "null"}
+            ]
+        })
+    }
+
     #[derive(schemars::JsonSchema)]
     #[expect(
         dead_code,
@@ -476,6 +487,7 @@ fn reference_types_project_to_refs_to_the_reference_defs() {
         link: crate::DatumReference,
         at: crate::Location,
         pinned: crate::DatumPin,
+        #[schemars(schema_with = "nullable_datum_reference_schema")]
         maybe: Option<crate::DatumReference>,
     }
     let file = project_datum(
