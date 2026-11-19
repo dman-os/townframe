@@ -6,6 +6,7 @@ use clay_mdk::Facet;
 use clay_mdk::FacetState;
 use clay_mdk::Operation;
 use clay_mdk::OperationReceipt;
+use clay_mdk::hooks::Stylesheet;
 use clay_mdk::hooks::use_facet;
 use dioxus::prelude::*;
 
@@ -38,7 +39,7 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
     let sample_for_refresh = facet.clone();
     rsx! {
         div { class: "ct-sample",
-            document::Style { "{STYLES}" }
+            Stylesheet { css: STYLES }
             p { "This detail component belongs to the sample micro, not Settings." }
             match config_state {
                 FacetState::Present(config) => {

@@ -9,6 +9,7 @@
 use clay_dioxus_kit::AppBar;
 use clay_mdk::Context;
 use clay_mdk::Error;
+use clay_mdk::hooks::Stylesheet;
 use dioxus::prelude::*;
 use micro_lab_manifest::LabView;
 use pierre_diffs_dioxus::PtrEq;
@@ -78,7 +79,7 @@ fn view() -> Element {
         Some(experiment) => (experiment.open)(Callback::new(move |()| open.set(None))),
         None => rsx! {
             div { class: "ct-lab",
-                document::Style { "{STYLES}" }
+                Stylesheet { css: STYLES }
                 AppBar { title: "Lab" }
                 ul { "data-part": "experiments", "aria-label": "Experiments",
                     for experiment in EXPERIMENTS {

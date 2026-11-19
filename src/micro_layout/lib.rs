@@ -23,6 +23,7 @@ use clay_mdk::Error;
 use clay_mdk::Facet;
 use clay_mdk::FacetState;
 use clay_mdk::hooks::PresentationSlot;
+use clay_mdk::hooks::Stylesheet;
 use clay_mdk::hooks::use_facet;
 use clay_mdk::hooks::use_rows;
 use dioxus::prelude::*;
@@ -158,7 +159,7 @@ fn framed(leading: Element, body: Element) -> Element {
     rsx! {
         PanelPage { app_bar: rsx! { AppBar { title: "Layout", leading } },
             div { class: "ct-layout",
-                document::Style { "{STYLES}" }
+                Stylesheet { css: STYLES }
                 {body}
             }
         }

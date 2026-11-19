@@ -12,6 +12,7 @@ use clay_mdk::Facet;
 use clay_mdk::FacetState;
 use clay_mdk::Operation;
 use clay_mdk::OperationStatus;
+use clay_mdk::hooks::Stylesheet;
 use clay_mdk::hooks::use_facet;
 use dioxus::prelude::*;
 use micro_counter_manifest::COUNT;
@@ -132,7 +133,7 @@ fn view(counter: Counter) -> Element {
     let document = counter.facet.clone().zip(snapshot);
     rsx! {
         div { class: "ct-counter",
-            document::Style { "{STYLES}" }
+            Stylesheet { css: STYLES }
             Button {
                 variant: ButtonVariant::Outline,
                 label: "Increment Wasm counter".to_owned(),

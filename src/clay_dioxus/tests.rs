@@ -1000,16 +1000,97 @@ fn a_guest_stylesheet_reaches_the_mount_as_its_shadow_sheet_or_a_light_dom_style
     VirtualDom::new_with_props(app, props.clone()).rebuild(&mut browser);
     assert_eq!(
         browser.outline(),
-        "(div[data-dioxus-shadow,data-dioxus-shadow-sheet,style](div[data-clay-presentation,style](button[class](#))))"
+        "(div[data-dioxus-shadow,data-dioxus-shadow-sheet](div[data-clay-presentation,style](button[class](#))))"
     );
     assert_eq!(browser.text_content(), "0");
     let mut blitz = SurfaceTree::new();
     VirtualDom::new_with_props(blitz_app, props).rebuild(&mut blitz);
     assert_eq!(
         blitz.outline(),
-        "(div[data-dioxus-shadow,style](style(#),div[data-clay-presentation,style](button[class](#))))"
+        "(div[data-dioxus-shadow](style(#),div[data-clay-presentation,style](button[class](#))))"
     );
     assert_eq!(blitz.text_content(), ".btn {\ncolor: red;\n}0");
+}
+
+/// A natively linked micro mounts through the same shadow root as a guest: its stylesheet,
+/// set with [`use_mount_stylesheet`], is the root's adopted sheet (or Blitz's light-DOM `<style>`)
+/// and never a `<style>` element in the host document, the user theme follows it in
+/// `@layer user`, and a sheet that changes between renders replaces the old one in place.
+#[test]
+fn a_native_micro_renders_in_the_shared_shadow_mount_with_its_own_sheet_then_the_theme() {
+    let host = Host::new();
+    let components = NativeComponents::new(&host);
+    let owner = host.start("publisher");
+    let sheet = Rc::new(RefCell::new(".a { color: red; }".to_owned()));
+    let (reference, _guard) = components
+        .publish(&owner, {
+            let sheet = Rc::clone(&sheet);
+            move || {
+                assert!(use_mount_stylesheet(&sheet.borrow()));
+                rsx! { p { class: "a", "hi" } }
+            }
+        })
+        .unwrap();
+    #[derive(Clone)]
+    struct Props {
+        components: NativeComponents,
+        owner: Instance,
+        reference: ComponentRef,
+        blitz: bool,
+        theme: Rc<Cell<Option<Signal<String>>>>,
+    }
+    impl PartialEq for Props {
+        fn eq(&self, _: &Self) -> bool {
+            true
+        }
+    }
+    fn app(props: Props) -> Element {
+        if props.blitz {
+            use_context_provider(|| LightDomStylesheets);
+        }
+        let theme = use_signal(String::new);
+        props.theme.set(Some(theme));
+        use_context_provider(|| UserStylesheet(theme.into()));
+        rsx! {
+            ComponentMount {
+                components: props.components,
+                owner: props.owner,
+                reference: props.reference,
+            }
+        }
+    }
+    let props = |blitz| Props {
+        components: components.clone(),
+        owner: owner.clone(),
+        reference,
+        blitz,
+        theme: Rc::default(),
+    };
+    let mut browser = SurfaceTree::new();
+    VirtualDom::new_with_props(app, props(false)).rebuild(&mut browser);
+    assert_eq!(
+        browser.outline(),
+        "(div[data-dioxus-shadow,data-dioxus-shadow-sheet](p[class](#)))"
+    );
+
+    let blitz_props = props(true);
+    let theme = Rc::clone(&blitz_props.theme);
+    let mut dom = VirtualDom::new_with_props(app, blitz_props);
+    let mut blitz = SurfaceTree::new();
+    dom.rebuild(&mut blitz);
+    // The micro's sheet reaches its mount on the render after the one that set it, so the
+    // first frame is not unstyled: the write marks the mount dirty and the same flush redraws.
+    dom.render_immediate(&mut blitz);
+    assert_eq!(blitz.text_content(), ".a {\ncolor: red;\n}hi");
+    let mut applied = theme.get().expect("the app made the theme signal");
+    dom.in_runtime(|| applied.set(".a { color: blue; }".to_owned()));
+    dom.render_immediate(&mut blitz);
+    assert_eq!(
+        blitz.text_content(),
+        ".a {\ncolor: red;\n}\n@layer user {\n.a {\ncolor: blue;\n}\n}hi"
+    );
+    drop(dom);
+    host.close();
 }
 
 /// The end user's theme follows the micro's own sheet in `@layer user`, in the same adopted

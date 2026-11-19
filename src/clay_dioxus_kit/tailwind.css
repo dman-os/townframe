@@ -18,6 +18,7 @@
 @import "./styles/kit/scrub_strip.css" layer(kit);
 @import "./styles/kit/list_details.css" layer(kit);
 @import "./styles/kit/sections.css" layer(kit);
+@import "./styles/kit/overlay.css" layer(kit);
 @import "./styles/kit/drawer.css" layer(kit);
 @import "./styles/kit/sheet.css" layer(kit);
 @import "./styles/kit/panel_page.css" layer(kit);

@@ -35,6 +35,7 @@ use clay_dioxus_kit::ChipVariant;
 use clay_dioxus_kit::PanelPage;
 use clay_dioxus_kit::Separator;
 use clay_dioxus_kit::Status;
+use clay_mdk::hooks::Stylesheet;
 use dioxus::prelude::*;
 use intxt_core::work::PullState;
 use pierre_diffs_dioxus::DiffInput;
@@ -52,7 +53,7 @@ const STYLE: &str = include_str!("review.css");
 pub(crate) fn Frame(app_bar: Element, children: Element) -> Element {
     rsx! {
         section { class: "micro-review", "aria-label": "Review",
-            document::Style { "{STYLE}" }
+            Stylesheet { css: STYLE }
             PanelPage { app_bar,
                 div { "data-part": "page", {children} }
             }
