@@ -1,0 +1,21 @@
+{
+  "$defs": {
+    "Jwk": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "kty": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kty"
+      ],
+      "title": "Jwk",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.jwk"
+    }
+  },
+  "$ref": "#/$defs/Jwk",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

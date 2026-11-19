@@ -1,0 +1,131 @@
+{
+  "defs": {
+    "GrantBody": {
+      "nullable": [
+        "access"
+      ],
+      "properties": {
+        "access": {
+          "knownValues": [
+            "Relay",
+            "Read",
+            "Write",
+            "Admin"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SetCartridgeGrant": {
+      "nullable": [
+        "value"
+      ],
+      "properties": {
+        "cartridgeId": {
+          "type": "string"
+        },
+        "grant": {
+          "type": "string"
+        },
+        "value": {
+          "ref": "#GrantBody",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "cartridgeId",
+        "grant"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "description": "Sets, or with `value` absent revokes, one grant of the cartridge: the datum `grant` names in\nits config document. Grants are per cartridge, in the person's nouns, and feed the nodule and\nthe micro alike (ADR 049 §4.1). A drawer or cartridge grant's value states its access; an\norigin, method or authority grant states none (see [`GrantKey::accepts`]). Only this method\nwrites grant datums, never the cartridge.",
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "Rejected"
+        },
+        {
+          "description": "Staging refuses a version once its envelope has been published.",
+          "name": "AlreadyPublished"
+        },
+        {
+          "description": "A pinned datum is unavailable at its recorded frontier; this is recoverable when sync catches up.",
+          "name": "PinnedDatumUnreadable"
+        },
+        {
+          "description": "A pin must resolve inside the registry document that carries its envelope.",
+          "name": "PinnedDocumentMismatch"
+        },
+        {
+          "description": "A pinned datum was readable but did not decode as its declared manifest type.",
+          "name": "PinnedDatumInvalid"
+        },
+        {
+          "description": "The envelope a [`ResolveCartridgePin`] pin selects is not available at its heads yet;\nthis is recoverable when sync catches up.",
+          "name": "PinnedEnvelopeUnreadable"
+        },
+        {
+          "description": "The envelope a [`ResolveCartridgePin`] pin selects is not the revision the registry\nserves under its label.",
+          "name": "PinnedRevisionMismatch"
+        },
+        {
+          "description": "A published version never changes content: the label is taken by another envelope.",
+          "name": "VersionExists"
+        },
+        {
+          "description": "The envelope's signature is missing or does not verify against its namespace DID, or the\nDID's method cannot be verified without resolution (fail closed).",
+          "name": "Signature"
+        },
+        {
+          "description": "An unsigned envelope can be signed by the node only for the node's own DID.",
+          "name": "UnsignedForeignNamespace"
+        },
+        {
+          "description": "A new label must order after every label the cartridge has or had, so a validly signed older\nversion cannot be published as new (a downgrade attack). Taking an older version is an\nexplicit runtime action, not a registry one.",
+          "name": "Downgrade"
+        },
+        {
+          "description": "The handle's namespace scope does not include the cartridge's namespace.",
+          "name": "NamespaceNotPermitted"
+        },
+        {
+          "description": "The version exists in the drawer but its signature did not verify, so it is not served.",
+          "name": "Unverified"
+        },
+        {
+          "description": "An artifact's bytes are not in the local blob store, so the registry would pin bytes it\ncannot serve.",
+          "name": "ArtifactUnavailable"
+        },
+        {
+          "name": "UnknownCartridge"
+        },
+        {
+          "name": "UnknownVersion"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#SetCartridgeGrant",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.cartridges.setCartridgeGrant",
+  "lexicon": 1
+}

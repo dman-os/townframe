@@ -24,7 +24,7 @@ impl Core {
                 context,
                 self.issuer,
                 DocScope {
-                    read: [known_drawers.clone()].into(),
+                    read: DocScope::read_all([known_drawers.clone()]),
                     ..Default::default()
                 },
                 |Authorization {

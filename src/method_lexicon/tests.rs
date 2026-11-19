@@ -6,7 +6,7 @@ use serde_json::json;
 /// Every built-in method: its NSID with the result of assembling its Lexicon.
 fn every_builtin() -> Vec<(&'static str, Result<Value, super::MethodLexiconError>)> {
     let mut all: Vec<_> = super::builtin_methods()
-        .map(|(nsid, assemble)| (nsid, assemble()))
+        .map(|(nsid, _, assemble)| (nsid, assemble()))
         .collect();
     all.sort_by_key(|(nsid, _)| *nsid);
     all
@@ -35,6 +35,36 @@ fn lexicon_of<M: MethodSchema>() -> Value {
     lexicon::<M>().expect("the method publishes a Lexicon")
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+struct DatumReferenceRequest {
+    reference: big_cabinet_core::DatumReference,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+struct DatumReferenceOutput {
+    accepted: bool,
+}
+
+method_core::methods! {
+    error = big_cabinet_core::doc::DocsError, nsid_prefix = "org.example.test.";
+    DatumReferenceRequest => DatumReferenceOutput, procedure, "reference";
+}
+
+impl method_core::schema::MethodSchema for DatumReferenceRequest {
+    fn schemas() -> method_core::schema::MethodSchemas {
+        method_core::schema::collect::<Self, DatumReferenceOutput, big_cabinet_core::doc::DocsError>(
+        )
+    }
+}
+
+#[test]
+fn a_method_input_with_a_datum_reference_rejects_a_number() {
+    let file = lexicon_of::<DatumReferenceRequest>();
+    let contract = super::MethodContract::compile(&file, &[]).unwrap();
+
+    assert!(contract.check_request(&json!({"reference": 123})).is_err());
+}
+
 #[test]
 fn a_procedure_states_its_request_as_the_input_body() {
     insta::assert_json_snapshot!(lexicon_of::<big_cabinet_core::drawer::protocol::AddChild>());
@@ -43,6 +73,32 @@ fn a_procedure_states_its_request_as_the_input_body() {
 #[test]
 fn a_query_states_its_request_as_parameters() {
     insta::assert_json_snapshot!(lexicon_of::<big_cabinet_core::doc::GetDocAvailability>());
+}
+
+/// A byte body (ADR 042 §1) is stated by its encoding alone, `*/*` for any media type, and the
+/// method keeps JSON parameters: a procedure with a byte input states them as `parameters`, so
+/// dispatch checks those, as it does for a query.
+#[test]
+fn a_byte_body_is_stated_by_its_encoding_and_its_parameters_stay_json() {
+    let put = lexicon_of::<big_blobs_core::PutBlob>();
+    let main = &put["defs"]["main"];
+    assert_eq!(main["type"], "procedure");
+    assert_eq!(main["input"], json!({ "encoding": "*/*" }));
+    assert_eq!(main["output"]["encoding"], "application/json");
+    assert!(main["parameters"]["properties"]["capability"].is_object());
+    let contract = super::MethodContract::compile(&put, &[]).unwrap();
+    assert!(
+        contract.check_request(&json!({})).is_err(),
+        "the parameters are what is checked, and `capability` is required"
+    );
+
+    let read = lexicon_of::<big_blobs_core::ReadBlob>();
+    let main = &read["defs"]["main"];
+    assert_eq!(main["type"], "query");
+    assert_eq!(main["output"], json!({ "encoding": "*/*" }));
+    for name in ["capability", "blobId"] {
+        assert!(main["parameters"]["properties"][name].is_object(), "{name}");
+    }
 }
 
 #[test]
@@ -131,7 +187,8 @@ fn a_common_error_is_named_as_dispatch_names_its_refusals() {
 #[test]
 fn every_builtin_error_enum_names_its_context_variant_context() {
     let mut failures = Vec::new();
-    for (nsid, _, schemas) in super::builtin_list() {
+    for (method, _, _, schemas) in super::builtin_list() {
+        let nsid = method.nsid;
         let schemas = schemas();
         let error = serde_json::to_value(&schemas.error).unwrap();
         let branches = super::resolve(&error, &schemas.definitions)["oneOf"]
@@ -175,9 +232,10 @@ fn every_builtin_methods_positions_compile_to_validators() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// The body a method takes: a procedure's input, else a query's parameters.
+/// The body a method takes: a procedure's JSON input, else its parameters (a query's, or a
+/// procedure whose body is bytes, which states only the body's encoding).
 fn request_position(file: &Value) -> super::Position {
-    if file["defs"]["main"].get("input").is_some() {
+    if file["defs"]["main"]["input"].get("schema").is_some() {
         super::Position::Input
     } else {
         super::Position::Parameters
@@ -527,6 +585,41 @@ fn unknown_admits_objects_only_and_an_open_union_admits_other_variants() {
         !validator
             .violations(&json!({"any": {}, "pick": {"$type": "org.example.test.put#a", "n": "x"}}))
             .is_empty()
+    );
+}
+
+/// Tagged variants that type a field as `T` and `Option<T>` agree on `T`: `ObservedDatum`'s
+/// `present` and `removed` both carry `docHeads` as a string array, so a page with either passes
+/// the `pollDatums` output check rather than meeting an `unknown` that refuses arrays.
+#[test]
+fn a_poll_page_with_present_and_removed_datums_passes_its_output_check() {
+    let file = lexicon_of::<big_cabinet_core::doc::PollDatums>();
+    let validator = super::position_validator(&file, &[], super::Position::Output)
+        .unwrap()
+        .unwrap();
+    let heads = json!(["aa", "bb"]);
+    let version = json!({"heads": heads, "clock": 1});
+    let page = |datum: Value| {
+        json!({"events": [{
+            "kind": "datum", "revision": 1, "docId": "z11111111111111111111111111111111",
+            "datumKey": "org.example.note", "datum": datum,
+        }], "through": 1, "caughtUp": true})
+    };
+    for datum in [
+        json!({"state": "present", "docHeads": heads, "version": version}),
+        json!({"state": "removed", "docHeads": heads, "version": version}),
+        json!({"state": "removed", "docHeads": null, "version": version}),
+    ] {
+        let page = page(datum);
+        assert_eq!(validator.violations(&page), Vec::<String>::new(), "{page}");
+    }
+    assert!(
+        !validator
+            .violations(&page(
+                json!({"state": "present", "docHeads": [1], "version": version})
+            ))
+            .is_empty(),
+        "docHeads stays a string array, not any value"
     );
 }
 /// A struct that flattens a tagged enum states its own fields and the enum's, both required where

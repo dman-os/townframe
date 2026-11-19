@@ -20,22 +20,24 @@
 
 #![cfg(test)]
 
+mod intxt;
+
 mod library {
     use crate::client::Mode;
     use crate::client::NodeClient;
     use crate::client::Reply;
-    use crate::context::Booted;
-    use crate::context::LockRole;
-    use crate::context::NodeDir;
-    use crate::context::SocketState;
     use crate::interlude::*;
     use big_node::peers::Peers;
     use big_nodule_core::protocol::ListNodules;
+    use day_node::Booted;
+    use day_node::LockRole;
+    use day_node::NodeDir;
+    use day_node::SocketState;
     use method_core::Method;
     use tokio::sync::oneshot;
 
-    fn connect(dir: &NodeDir) -> impl Future<Output = Res<NodeClient>> {
-        NodeClient::connect(dir, crate::client::CONNECT_DEADLINE)
+    pub(super) fn connect(dir: &NodeDir) -> impl Future<Output = Res<NodeClient>> {
+        NodeClient::connect(dir, day_node::CONNECT_DEADLINE)
     }
 
     /// A directory under `/tmp` rather than `$TMPDIR`: a socket named by a 64 character node id
@@ -49,7 +51,7 @@ mod library {
 
     /// An initialized node whose socket directory is `<sandbox>/run`, so no test touches the
     /// real runtime directory.
-    fn new_node() -> (tempfile::TempDir, NodeDir) {
+    pub(super) fn new_node() -> (tempfile::TempDir, NodeDir) {
         let tmp = short_tempdir();
         let dir = NodeDir::with_socket_dir(tmp.path().join("node"), tmp.path().join("run"));
         dir.init().unwrap();
@@ -98,7 +100,7 @@ mod library {
                     &dir,
                     |booted| {
                         ready_tx
-                            .send(booted.node.peers.clone())
+                            .send(booted.node().peers.clone())
                             .map_err(|_| eyre::eyre!("test is gone"))
                     },
                     async {
@@ -174,8 +176,15 @@ mod library {
     async fn the_node_id_is_the_repos_peer_id() {
         let (_tmp, dir) = new_node();
         let lock = dir.try_lock(LockRole::Command).unwrap().unwrap();
-        let booted = Booted::boot(&dir, lock, LockRole::Command).await.unwrap();
-        let peer = booted.node.repo.local_peer_id().to_bytes32().unwrap();
+        let booted = Booted::boot(
+            &dir,
+            lock,
+            LockRole::Command,
+            crate::client::empty_schemas().unwrap(),
+        )
+        .await
+        .unwrap();
+        let peer = booted.node().repo.local_peer_id().to_bytes32().unwrap();
         assert_eq!(
             dir.settings().unwrap().node_id(),
             data_encoding::HEXLOWER.encode(&peer)
@@ -210,6 +219,102 @@ mod library {
         assert_eq!(local[1].status, 404, "{:?}", local[1]);
         assert!(!local[2].is_success(), "{:?}", local[2]);
         assert_eq!(dir.probe_socket().await.unwrap(), SocketState::Absent);
+    }
+
+    /// A file put and read back, whole and by `Range`, is the same bytes whichever way the node
+    /// is reached: streamed from and to files (ADR 042), never as JSON, so the in-process router
+    /// and the daemon's socket carry the raw bodies alike.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_round_trips_as_raw_bytes_in_process_and_over_the_daemon() {
+        use crate::client::Raw;
+        use method_core::HttpMethod::Get;
+        use method_core::HttpMethod::Post;
+        const MINT: &str = "org.example.daybook.blobs.mintCapability";
+        const PUT: &str = "org.example.daybook.blobs.put";
+        const READ: &str = "org.example.daybook.blobs.read";
+        let (tmp, dir) = new_node();
+        let upload = tmp.path().join("upload.bin");
+        // Over the 64 KiB chunks a read yields, so it is several chunks long.
+        let content: Vec<u8> = (0..300_000u32).map(|at| (at % 251) as u8).collect();
+        std::fs::write(&upload, &content).unwrap();
+        let rights = serde_json::to_value(big_cabinet_core::authority::Rights::USE).unwrap();
+        let round_trip = async |client: &NodeClient, name: &str| {
+            let mint = async |scope: serde_json::Value| {
+                let reply = client
+                    .call(MINT, Post, &json!({ "scope": scope, "rights": rights }))
+                    .await
+                    .unwrap();
+                assert_eq!(reply.status, 200, "{reply:?}");
+                reply.body["capabilityId"].as_str().unwrap().to_owned()
+            };
+            let put = mint(json!({ "put": true })).await;
+            let stored = client
+                .call_raw(
+                    PUT,
+                    Post,
+                    &json!({ "capability": put }),
+                    Raw {
+                        upload: Some(&upload),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(stored.status, 200, "{stored:?}");
+            assert_eq!(stored.body["lengthOctets"], content.len());
+            let blob_id = stored.body["blobId"].as_str().unwrap().to_owned();
+            let read = mint(json!({ "read": [blob_id] })).await;
+            let params = json!({ "capability": read, "blobId": blob_id });
+            let whole = tmp.path().join(format!("{name}-whole.bin"));
+            let reply = client
+                .call_raw(
+                    READ,
+                    Get,
+                    &params,
+                    Raw {
+                        download: Some(&whole),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(reply.status, 200, "{reply:?}");
+            assert_eq!(reply.body["octets"], content.len());
+            assert!(std::fs::read(&whole).unwrap() == content);
+            let part = tmp.path().join(format!("{name}-part.bin"));
+            let reply = client
+                .call_raw(
+                    READ,
+                    Get,
+                    &params,
+                    Raw {
+                        range: Some("bytes=70000-70099"),
+                        download: Some(&part),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(reply.status, 206, "{reply:?}");
+            assert_eq!(
+                reply.body["contentRange"],
+                format!("bytes 70000-70099/{}", content.len())
+            );
+            assert_eq!(std::fs::read(&part).unwrap(), &content[70_000..70_100]);
+            stored.body
+        };
+        let in_process = connect(&dir).await.unwrap();
+        let local = round_trip(&in_process, "in-process").await;
+        in_process.stop().await.unwrap();
+
+        let daemon = TestDaemon::start(&dir).await;
+        let over_socket = connect(&dir).await.unwrap();
+        assert_eq!(over_socket.mode(), Mode::Daemon);
+        let remote = round_trip(&over_socket, "socket").await;
+        over_socket.stop().await.unwrap();
+        daemon.stop().await;
+        // The node's answer is the content's own id, however the bytes arrived.
+        assert_eq!(local, remote);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -367,9 +472,14 @@ mod library {
             async move { connect(&dir).await }
         });
         // The arrival blocks on the boot lock while the holder boots.
-        let holder = Booted::boot(&dir, booting, LockRole::Command)
-            .await
-            .unwrap();
+        let holder = Booted::boot(
+            &dir,
+            booting,
+            LockRole::Command,
+            crate::client::empty_schemas().unwrap(),
+        )
+        .await
+        .unwrap();
         let client = arriving.await.unwrap().unwrap();
         assert_eq!(client.socket_state(), SocketState::Live);
         let reply = call(
@@ -417,19 +527,6 @@ mod library {
             NodeDir::with_socket_dir(tmp.path().join("x".repeat(200)), tmp.path().join("run"));
         far.init().unwrap();
         far.socket_path().unwrap();
-    }
-
-    #[test]
-    fn the_default_socket_directory_is_the_runtime_directory_or_a_private_one_in_tmp() {
-        use crate::context::socket_dir_in;
-        assert_eq!(
-            socket_dir_in(Some(std::path::Path::new("/run/user/1000")), 1000),
-            std::path::Path::new("/run/user/1000/day")
-        );
-        assert_eq!(
-            socket_dir_in(None, 1000),
-            std::path::Path::new("/tmp/day-1000")
-        );
     }
 
     /// A directory that is not the user's own is refused as a socket directory, whoever made
@@ -493,7 +590,7 @@ mod library {
     async fn a_daemon_dials_its_bootstrap_peer_and_both_report_the_connection() {
         let loopback = |dir: &NodeDir| {
             dir.update_settings(|settings| {
-                settings.peers = Some(crate::context::PeerSettings {
+                settings.peers = Some(day_node::PeerSettings {
                     loopback_only: true,
                     ..default()
                 });
@@ -662,7 +759,7 @@ mod blackbox {
 
         /// The node's socket, from its id: `<runtime dir>/day/<node id>.sock`.
         fn socket(&self) -> PathBuf {
-            let id = crate::context::NodeDir::new(self.node())
+            let id = day_node::NodeDir::new(self.node())
                 .settings()
                 .unwrap()
                 .node_id();
@@ -709,7 +806,7 @@ mod blackbox {
         fn drop(&mut self) {
             // A node whose settings do not parse (a case that corrupts them on purpose) never
             // booted, so it owns no keyring entries.
-            let Ok(settings) = crate::context::NodeDir::new(self.node()).settings() else {
+            let Ok(settings) = day_node::NodeDir::new(self.node()).settings() else {
                 return;
             };
             // The test process's `SecretStore::boot` is the in-memory mock (the dev-dependency
@@ -767,6 +864,60 @@ mod blackbox {
     #[test]
     fn daemon_cases() {
         run_cases("daemon");
+    }
+
+    /// An installed intxt handler remains callable from fresh CLI processes and after daemon restarts.
+    #[test]
+    fn installed_intxt_serves_calls_from_later_processes() {
+        let sandbox = Sandbox::new();
+        let text = |output: &std::process::Output| {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+                + &String::from_utf8_lossy(&output.stderr)
+        };
+        let handler = super::intxt::guest_path();
+        let handler = handler.to_str().expect("the handler path is valid UTF-8");
+
+        let initialized = sandbox.day(&["node", "init"]);
+        assert!(initialized.status.success(), "{}", text(&initialized));
+
+        let installed = sandbox.day(&["x", "intxt", "install", "--handler", handler]);
+        assert!(installed.status.success(), "{}", text(&installed));
+
+        let create = |title: &str| {
+            let input = serde_json::to_string(&json!({"title": title})).unwrap();
+            let output = sandbox.day(&["x", "org.example.intxt.createIntxt", &input]);
+            assert!(output.status.success(), "{}", text(&output));
+            let answer: serde_json::Value =
+                serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                    panic!("invalid createIntxt output: {error}; {}", text(&output))
+                });
+            let drawer_id = answer
+                .get("drawerId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| {
+                    panic!("createIntxt did not print a drawer id: {}", text(&output))
+                });
+            assert!(
+                !drawer_id.is_empty(),
+                "createIntxt printed an empty drawer id"
+            );
+        };
+
+        create("fresh process");
+
+        let started = sandbox.day(&["node", "start"]);
+        assert!(started.status.success(), "{}", text(&started));
+        create("daemon process");
+
+        let stopped = sandbox.day(&["node", "stop"]);
+        assert!(stopped.status.success(), "{}", text(&stopped));
+
+        let restarted = sandbox.day(&["node", "start"]);
+        assert!(restarted.status.success(), "{}", text(&restarted));
+        create("restarted daemon process");
+
+        let stopped = sandbox.day(&["node", "stop"]);
+        assert!(stopped.status.success(), "{}", text(&stopped));
     }
 
     /// Parallel commands against one node (as a capture hook firing several times at once does)

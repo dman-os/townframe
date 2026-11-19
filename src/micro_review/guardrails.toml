@@ -1,0 +1,32 @@
+version = 1
+role = "plugin"
+dependency_reason = "claytxt microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top; the review micro reads intxt's and the cabinet's wire vocabularies and shows a patch through the diff view"
+allowed_dependencies = [
+    "big_blobs_core",
+    "big_cabinet_core",
+    "clay_dioxus_kit",
+    "clay_mdk",
+    "intxt_core",
+    "method_core",
+    "micro_review_manifest",
+    "pierre_diffs_dioxus",
+]
+allow_external_api_types = false
+
+# One authored micro, two targets (isomorphic MDK): linked natively through its `ACTIVATE`
+# entry, or built as the wasm32-wasip3 component guest (ADR 018 Phase 1).
+# `fixture` is the in-memory node for tests and labs; the shipped guest builds without it.
+[builds.native]
+features = ["fixture"]
+powerset = true
+
+[builds.wasm32-wasip3]
+
+[[exemptions]]
+code = "ERROR_DEPENDENCY_GROUP"
+path = "src/micro_review/Cargo.toml"
+symbol = "dependency-groups"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
+reference = "docs/scratch/nodule-runtime-ledger.md"

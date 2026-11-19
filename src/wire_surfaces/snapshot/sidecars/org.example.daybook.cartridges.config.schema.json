@@ -1,0 +1,22 @@
+{
+  "$defs": {
+    "CartridgeConfigIdentity": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.cartridges.config/main`: names the cartridge a config document is for.\nWritten once when the document is created, so a node (or a sister) installing the same\ncartridge finds the document by scanning the shared config drawer for it instead of creating a\nsecond one.",
+      "properties": {
+        "cartridge": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cartridge"
+      ],
+      "title": "CartridgeConfigIdentity",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridges.config"
+    }
+  },
+  "$ref": "#/$defs/CartridgeConfigIdentity",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

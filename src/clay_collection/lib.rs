@@ -18,7 +18,6 @@
 
 mod ledger;
 mod mirror;
-mod nsid;
 mod projection;
 mod registration;
 mod replica;
@@ -28,13 +27,13 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use datum_core::InvalidNsid;
+pub use datum_core::Nsid;
 pub use ledger::Ledger;
 pub use ledger::Overlay;
 pub use ledger::OverlayWait;
 pub use mirror::Mirror;
 pub use mirror::ReadTicket;
-pub use nsid::InvalidNsid;
-pub use nsid::Nsid;
 pub use projection::PendingNotifications;
 pub use projection::Projection;
 pub use projection::ProjectionLease;

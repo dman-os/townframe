@@ -15,15 +15,21 @@ path = "main.rs"
 # internal
 method_core.workspace = true
 utils_rs.workspace = true
-sqlite_rs.workspace = true
-secrets_rs.workspace = true
+service_client_core_rs.workspace = true
 service_utils_rs.workspace = true
 big_node.workspace = true
-big_dispatch.workspace = true
-big_nodule_core.workspace = true
-big_repo.workspace = true
+day_node.workspace = true
 big_cabinet.workspace = true
+big_dispatch.workspace = true
+big_dispatch_core.workspace = true
+big_nodule_core.workspace = true
+# `test-support` for the fixture namespace intxt's cartridge sits under, which signs it.
+big_cartridges_core = { workspace = true, features = ["test-support"] }
+big_blobs_core.workspace = true
 big_cabinet_core = { workspace = true, features = ["manifest"] }
+intxt_capture.workspace = true
+intxt_core = { workspace = true, features = ["install"] }
+short_ids.workspace = true
 
 #
 # cli
@@ -39,6 +45,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync",
 axum = { workspace = true }
 http.workspace = true
 reqwest.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
+futures.workspace = true
 serde_urlencoded = "0.7"
 tower = { workspace = true, features = ["util"] }
 
@@ -59,6 +67,7 @@ rand.workspace = true
 #
 # fs and os
 directories.workspace = true
+tempfile.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
@@ -69,5 +78,4 @@ secrets_rs = { workspace = true, features = ["test-support"] }
 #
 # misc
 trycmd = "1.2.1"
-tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

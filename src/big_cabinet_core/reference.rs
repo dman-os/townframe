@@ -26,6 +26,7 @@ const HEADS_KEY: &str = "heads";
 pub const SELF_DOC: &str = "self";
 
 mod defs;
+mod doc;
 
 pub use defs::DATUM_LOCATION;
 pub use defs::DATUM_PIN;
@@ -34,6 +35,7 @@ pub use defs::DEFS_NSID;
 pub use defs::LEXICON_REF;
 pub use defs::defs_lexicon;
 pub use defs::node_type_libraries;
+pub use doc::DocReference;
 
 /// Unicode data used when serializing canonical Go-style datum references.
 ///
@@ -212,7 +214,7 @@ impl schemars::JsonSchema for DatumReference {
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({ "type": "string", "format": "uri", LEXICON_REF: DATUM_REF })
+        schemars::json_schema!({ LEXICON_REF: DATUM_REF })
     }
 }
 
@@ -567,7 +569,7 @@ impl schemars::JsonSchema for Location {
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({ "type": "string", "format": "uri", LEXICON_REF: DATUM_LOCATION })
+        schemars::json_schema!({ LEXICON_REF: DATUM_LOCATION })
     }
 }
 
@@ -681,15 +683,7 @@ impl schemars::JsonSchema for DatumPin {
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "object",
-            "properties": {
-                "ref": { "type": "string", "format": "uri", LEXICON_REF: DATUM_LOCATION },
-                "heads": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
-            },
-            "required": ["ref"],
-            LEXICON_REF: DATUM_PIN,
-        })
+        schemars::json_schema!({ LEXICON_REF: DATUM_PIN })
     }
 }
 
@@ -920,8 +914,16 @@ pub enum ReferenceError {
     FragmentNotAllowed,
     #[error("this reference kind cannot have a query or fragment")]
     QueryOrFragmentNotAllowed,
-    #[error("unsupported query {0:?}: only `heads=` is defined")]
+    #[error(
+        "unsupported query {0:?}: only `heads=` is defined (and `via=` on a document reference)"
+    )]
     UnsupportedQuery(String),
+    #[error("`via=` is empty; a reference with no hint has no such key")]
+    EmptyVia,
+    #[error("{0:?} is not a node key in a `via=` hint: expected 32 bytes as multibase base58btc")]
+    InvalidViaKey(String),
+    #[error("the query key {0:?} appears twice")]
+    DuplicateQueryKey(String),
     #[error("`heads=` is empty; an unpinned reference has no query")]
     EmptyHeads,
     #[error("{0:?} is not a document head: expected 32 bytes as multibase base58btc")]

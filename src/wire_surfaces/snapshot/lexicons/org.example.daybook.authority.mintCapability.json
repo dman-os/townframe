@@ -1,0 +1,125 @@
+{
+  "defs": {
+    "Capability": {
+      "nullable": [
+        "subject"
+      ],
+      "properties": {
+        "capabilityId": {
+          "type": "string"
+        },
+        "issuerId": {
+          "type": "string"
+        },
+        "object": {
+          "type": "string"
+        },
+        "rights": {
+          "ref": "#Rights",
+          "type": "ref"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capabilityId",
+        "object",
+        "rights",
+        "issuerId"
+      ],
+      "type": "object"
+    },
+    "MintCapability": {
+      "nullable": [
+        "parent",
+        "subject"
+      ],
+      "properties": {
+        "dependencies": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "object": {
+          "type": "string"
+        },
+        "parent": {
+          "type": "string"
+        },
+        "rights": {
+          "ref": "#Rights",
+          "type": "ref"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "issuer",
+        "dependencies",
+        "object",
+        "rights"
+      ],
+      "type": "object"
+    },
+    "Rights": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "InvalidCapability"
+        },
+        {
+          "name": "Unauthorized"
+        },
+        {
+          "name": "Escalation"
+        },
+        {
+          "name": "UnrecognizedActor"
+        },
+        {
+          "name": "InvalidActorPath"
+        },
+        {
+          "name": "ActorNotFound"
+        },
+        {
+          "name": "StateCorrupt"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "Claim"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#MintCapability",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#Capability",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.authority.mintCapability",
+  "lexicon": 1
+}

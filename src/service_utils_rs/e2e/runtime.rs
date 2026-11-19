@@ -14,6 +14,8 @@ use crate::TransportContext;
 use crate::XrpcRouter;
 use crate::sample::GetValue;
 use crate::sample::SampleProtocol;
+use crate::sample::SampleService;
+use crate::sample::TEST_TASK_MARKER;
 use futures::StreamExt;
 use futures::stream;
 use method_core::ContextError;
@@ -107,8 +109,12 @@ impl Handler<Probe> for ProbeService {
         request: Envelope<Probe>,
     ) -> Result<ResponseEnvelope<Observation>, ContextError> {
         if request.params.nested {
-            self.dependency
-                .call(request.context.child(), GetValue {})
+            // The marker shows whether the dependency's handler ran on this handler's task.
+            TEST_TASK_MARKER
+                .scope(
+                    NESTED_MARKER,
+                    self.dependency.call(request.context.child(), GetValue {}),
+                )
                 .await
                 .unwrap();
         }
@@ -163,8 +169,11 @@ impl Handler<Feed> for ProbeService {
     }
 }
 
+const NESTED_MARKER: u64 = 7;
+
 struct Runtime {
     service: Arc<ProbeService>,
+    sample: Arc<SampleService>,
     host: Arc<Host<Arc<ProbeService>>>,
     direct: Client<Protocol>,
     irpc: Client<Protocol>,
@@ -174,6 +183,7 @@ struct Runtime {
 impl Runtime {
     fn boot() -> Self {
         let (sample, dependency_stop) = crate::sample::boot("initial");
+        let sample_service = Arc::clone(&sample.service);
         let service = Arc::new(ProbeService {
             dependency: Client::new(Transport::direct(sample.host)),
             polls: Arc::new(Mutex::new(Vec::new())),
@@ -186,6 +196,7 @@ impl Runtime {
             IrpcAdapter::local::<_, Protocol>(Arc::clone(&host), Admission::new(2, 2), 2);
         Self {
             service,
+            sample: sample_service,
             host,
             direct,
             irpc: Client::new(Transport::irpc(irpc)).with_event_buffer(1),
@@ -551,5 +562,38 @@ async fn iroh_identity_comes_from_the_connection_and_response_metadata_survives(
     server_router.shutdown().await.unwrap();
     client_endpoint.close().await;
     server.close().await;
+    runtime.stop.stop().await;
+}
+
+/// One incoming request is one spawn: a fresh call runs on a task of its host's own, and the
+/// hops its handler makes run inline on that task, so their handlers see its task-locals.
+#[tokio::test]
+async fn a_fresh_call_gets_its_own_task_and_its_nested_hops_run_inline_on_it() {
+    let runtime = Runtime::boot();
+    TEST_TASK_MARKER
+        .scope(
+            41,
+            runtime
+                .service
+                .dependency
+                .call(RequestContext::root(), GetValue {}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.sample.last_handler_task(),
+        None,
+        "a fresh call is spawned"
+    );
+    runtime
+        .direct
+        .call(RequestContext::root(), Probe { nested: true })
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.sample.last_handler_task(),
+        Some(NESTED_MARKER),
+        "a nested hop runs inline on its caller's task"
+    );
     runtime.stop.stop().await;
 }

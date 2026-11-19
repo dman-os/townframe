@@ -1,11 +1,18 @@
 //! Contributor-owned native presentation; Settings mounts it without reading its document.
 use super::SampleConfig;
+use clay_dioxus_kit::Button;
+use clay_dioxus_kit::ButtonVariant;
 use clay_mdk::Facet;
 use clay_mdk::FacetState;
 use clay_mdk::Operation;
 use clay_mdk::OperationReceipt;
+use clay_mdk::hooks::Stylesheet;
 use clay_mdk::hooks::use_facet;
 use dioxus::prelude::*;
+
+/// The sample's own stylesheet: the layout of its parts and the look of its text field, which
+/// the kit has no component for. It names no colour that is not a kit token.
+const STYLES: &str = include_str!("styles.css");
 
 #[component]
 pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
@@ -31,18 +38,25 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
     let sample_for_toggle = facet.clone();
     let sample_for_refresh = facet.clone();
     rsx! {
-        div { class: "flex flex-col gap-4",
+        div { class: "ct-sample",
+            Stylesheet { css: STYLES }
             p { "This detail component belongs to the sample micro, not Settings." }
             match config_state {
                 FacetState::Present(config) => {
                     let config_for_toggle = config.clone();
+                    let toggle_label = if config.enabled {
+                        "Disable sample configuration flag"
+                    } else {
+                        "Enable sample configuration flag"
+                    }
+                    .to_owned();
                     rsx! {
                         p { "Greeting preview: {config.greeting}" }
-                        button {
-                            class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                            "aria-label": if config.enabled { "Disable sample configuration flag" } else { "Enable sample configuration flag" },
-                            "aria-pressed": config.enabled,
-                            onclick: move |_| {
+                        Button {
+                            variant: ButtonVariant::Outline,
+                            label: toggle_label,
+                            pressed: Some(config.enabled),
+                            onclick: move |()| {
                                 let mut next = config_for_toggle.clone();
                                 next.enabled = !next.enabled;
                                 match sample_for_toggle.write(next) {
@@ -55,9 +69,9 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                             },
                             if config.enabled { "Configuration flag: enabled — click to disable" } else { "Configuration flag: disabled — click to enable" }
                         }
-                        label { class: "flex flex-col gap-2", "Greeting",
+                        label { "data-part": "field", "Greeting",
                             input {
-                                class: "rounded-md border border-border bg-surface px-4 py-2 text-foreground focus-visible:outline",
+                                "data-part": "input",
                                 "aria-label": "Greeting",
                                 value: "{config.greeting}",
                                 oninput: move |event| {
@@ -81,11 +95,11 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
             if snapshot.refreshing {
                 p { role: "status", "Refreshing sample configuration." }
             }
-            div { class: "flex flex-wrap gap-2",
-                button {
-                    class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                    "aria-label": "Refresh configuration",
-                    onclick: move |_| {
+            div { "data-part": "actions",
+                Button {
+                    variant: ButtonVariant::Outline,
+                    label: "Refresh configuration".to_owned(),
+                    onclick: move |()| {
                         if sample_for_refresh.refresh().unwrap().refreshing {
                             status.set("Refreshing sample configuration; pending edits were retained.".into());
                         } else {
@@ -96,7 +110,7 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                 }
             }
             p { role: "status", "{status}" }
-            p { class: "text-sm text-muted-foreground", "Mirror revision {snapshot.revision} · pending writes: {snapshot.pending}" }
+            p { "data-part": "detail", "Mirror revision {snapshot.revision} · pending writes: {snapshot.pending}" }
             if let Some(receipt) = receipt() {
                 p { role: "status", "Operation {receipt.id}: {receipt.status:?}" }
             }

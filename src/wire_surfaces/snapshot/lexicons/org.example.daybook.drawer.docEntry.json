@@ -1,0 +1,23 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "access": {
+          "knownValues": [
+            "Relay",
+            "Read",
+            "Write",
+            "Admin"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "access"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.drawer.docEntry",
+  "lexicon": 1
+}

@@ -1,0 +1,17 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "schema": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.lexicon.sidecar",
+  "lexicon": 1
+}

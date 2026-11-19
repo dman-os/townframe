@@ -21,7 +21,7 @@ async fn doc_poll_replays_then_reports_versions_and_removal() {
         .capability(
             &alice,
             DocScope {
-                read: BTreeSet::from([document.clone()]),
+                read: DocScope::read_all([document.clone()]),
                 ..DocScope::default()
             },
         )
@@ -84,7 +84,7 @@ async fn a_scoped_caller_needs_an_anchor_that_reaches_the_document() {
         .capability(
             &mallory,
             DocScope {
-                read: BTreeSet::from([own.doc_id.clone()]),
+                read: DocScope::read_all([own.doc_id.clone()]),
                 ..DocScope::default()
             },
         )
@@ -143,7 +143,7 @@ async fn a_sole_doc_poll_is_not_woken_by_writes_to_other_documents() {
         .capability(
             &alice,
             DocScope {
-                read: BTreeSet::from([watched.clone(), other.clone()]),
+                read: DocScope::read_all([watched.clone(), other.clone()]),
                 ..DocScope::default()
             },
         )
@@ -234,7 +234,7 @@ async fn a_poll_resumes_across_a_gap_between_calls() {
         .capability(
             &alice,
             DocScope {
-                read: BTreeSet::from([document.clone()]),
+                read: DocScope::read_all([document.clone()]),
                 ..DocScope::default()
             },
         )

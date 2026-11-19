@@ -1,0 +1,92 @@
+/*
+ * ct-tabs (headless/tabs.rs). Parts: list, tab, panel. States: data-state (active|inactive) on a
+ * tab and a panel, data-disabled on a tab. Axis: data-orientation on the root.
+ */
+.ct-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-dimension-spacing-3);
+  width: 100%;
+}
+
+.ct-tabs[data-orientation="vertical"] {
+  flex-direction: row;
+  align-items: flex-start;
+}
+
+.ct-tabs [data-part="list"] {
+  display: flex;
+  gap: var(--ct-dimension-spacing-1);
+  width: fit-content;
+  max-width: 100%;
+  padding: var(--ct-dimension-spacing-1);
+  overflow-x: auto;
+  border-radius: var(--ct-dimension-radius-md);
+  background: var(--ct-color-surface-sunken);
+}
+
+.ct-tabs[data-orientation="vertical"] [data-part="list"] {
+  flex-direction: column;
+  overflow-x: visible;
+}
+
+.ct-tabs [data-part="tab"] {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.5rem;
+  padding-inline: var(--ct-dimension-spacing-3);
+  border: 0;
+  border-radius: var(--ct-dimension-radius-sm);
+  background: transparent;
+  color: var(--ct-color-text-muted);
+  font-family: var(--ct-font-family);
+  font-size: var(--ct-dimension-font-size-md);
+  font-weight: var(--ct-font-weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--ct-motion-duration-fade),
+    color var(--ct-motion-duration-fade);
+}
+
+@media (pointer: coarse) {
+  .ct-tabs [data-part="tab"] {
+    min-height: var(--ct-dimension-target-coarse);
+  }
+}
+
+.ct-tabs [data-part="tab"]:hover:not(:disabled) {
+  background: var(--ct-color-canvas);
+  color: var(--ct-color-text);
+}
+
+.ct-tabs [data-part="tab"][data-state="active"] {
+  background: var(--ct-color-selected);
+  color: var(--ct-color-on-selected);
+}
+
+.ct-tabs [data-part="tab"]:focus-visible {
+  outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
+  outline-offset: 1px;
+}
+
+.ct-tabs [data-part="tab"][data-disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.ct-tabs [data-part="panel"] {
+  min-width: 0;
+  flex: 1;
+}
+
+.ct-tabs [data-part="panel"][hidden] {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ct-tabs [data-part="tab"] {
+    transition: none;
+  }
+}

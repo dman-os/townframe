@@ -171,7 +171,10 @@ async fn replace_slot(node: &BigNode, drawer: &DocId, document: &DocId) {
                 capability: capability(
                     node,
                     DocScope {
-                        write: BTreeSet::from([drawer.clone()]),
+                        write: std::collections::BTreeMap::from([(
+                            drawer.clone(),
+                            big_cabinet_core::doc::DatumKinds::All,
+                        )]),
                         ..Default::default()
                     },
                 )
@@ -299,7 +302,7 @@ async fn self_doc(node: &BigNode, parent: &DocId, inventory: &DocId) -> BlobId {
         .await
         .unwrap();
     node.docs.client.call(RequestContext::root(), WriteDatums {
-        capability: capability(node, DocScope { write: BTreeSet::from([document.clone()]), ..Default::default() }).await,
+        capability: capability(node, DocScope { write: std::collections::BTreeMap::from([(document.clone(), big_cabinet_core::doc::DatumKinds::All)]), ..Default::default() }).await,
         command: None, doc_id: document.clone(), mode: WriteMode::AtCurrent,
         set: BTreeMap::from([(DatumKey::from_text(Blob::ID, "self").unwrap(), json!({
             "mime":"application/octet-stream", "digest":imported.info.blob_id.digest_str(), "lengthOctets":imported.info.length_octets,

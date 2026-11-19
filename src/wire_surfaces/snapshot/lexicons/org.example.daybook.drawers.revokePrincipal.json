@@ -1,0 +1,133 @@
+{
+  "defs": {
+    "Principal": {
+      "properties": {
+        "groupId": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "peer",
+            "group"
+          ],
+          "type": "string"
+        },
+        "peerId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "RevokePrincipal": {
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "drawerId": {
+          "type": "string"
+        },
+        "principal": {
+          "ref": "#Principal",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "capability",
+        "drawerId",
+        "principal"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "SelfChild"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Docs"
+        },
+        {
+          "name": "DocsUnavailable"
+        },
+        {
+          "description": "Keyhive storage or the engine failed; nothing the caller named is at fault.",
+          "name": "Keyhive"
+        },
+        {
+          "description": "A named group or doc id that is not a 32-byte Ed25519 point.",
+          "name": "InvalidKey"
+        },
+        {
+          "description": "A Keyhive group this node does not hold, perhaps not yet synced.",
+          "name": "UnknownGroup"
+        },
+        {
+          "description": "A principal group the caller named that this node does not hold.",
+          "name": "UnknownPrincipal"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "UnknownDrawer"
+        },
+        {
+          "description": "A peer this node has not met: its keyhive identity arrives with a live connection.",
+          "name": "UnknownPeer"
+        },
+        {
+          "name": "SelfDoc"
+        },
+        {
+          "name": "AlreadyDrawer"
+        },
+        {
+          "name": "NotAnEntry"
+        },
+        {
+          "name": "ForeignLayout"
+        },
+        {
+          "name": "CommandInFlight"
+        },
+        {
+          "name": "CommandReused"
+        },
+        {
+          "name": "RosterUnreadable"
+        },
+        {
+          "name": "InvalidMetaDocSlot"
+        },
+        {
+          "name": "SuccessorCycle"
+        },
+        {
+          "name": "SuccessorSelf"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#RevokePrincipal",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.drawers.revokePrincipal",
+  "lexicon": 1
+}

@@ -83,7 +83,7 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 code = "ERROR_FN_LENGTH"
 path = "src/big_repo/runtime2/hub.rs"
 symbol = "module::Runtime2Hub < F , R >::handle_cmd"
-ceiling = 425
+ceiling = 424
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
 reference = "docs/scratch/agent-guardrails-open-items.md"
@@ -174,15 +174,6 @@ code = "ERROR_INLINE_TEST_MOD"
 path = "src/big_repo/changes.rs"
 symbol = "module::tests"
 ceiling = 458
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_INLINE_TEST_MOD"
-path = "src/big_repo/keyhive_storage.rs"
-symbol = "module::tests"
-ceiling = 447
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
 reference = "docs/scratch/agent-guardrails-open-items.md"

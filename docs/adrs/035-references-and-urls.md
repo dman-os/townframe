@@ -2,6 +2,10 @@
 
 **Status:** Proposed.
 
+**Changed 2026-11-17 (operator):** §3 adds the `doc` kind, `dtxt:doc:<doc id>`, which names a whole document rather than a datum. An intxt is named by its descriptor document (ADR 036), so `Intxt::reference` is now a `doc` URL and no longer a `datum` URL to the intxt marker.
+
+**Changed 2026-11-17 (operator, second change):** the `doc` kind takes a `via=` query key, a locator hint (§2.2, §3 `doc`). It is a hint only and never part of identity.
+
 **Supersedes:** the `db+datum:` grammar of ADR 007 ("Datum addresses have no URI authority") and ADR 021 §2, the hex encoding of the sibling `refHeads` pin (ADR 007 plug manifests, ADR 021), the `db+actor://` form of ADR 020/022, and the `db+blob:` form of ADR 001 ("Blob Identity and URIs"). **Keeps:** the semantics those records already gave references (§2 gathers them in one place). **Related:** ADR 020 (datum identity, signed claims), ADR 022 (authorization), ADR 025 (reference predicates), ADR 026 (blobs), ADRs 036, 040 and 041 (the first heavy users). Discussion and evidence: `docs/scratch/intxt-ledger.md` N3–N6, A1, D24, D25.
 
 ## 1. Context
@@ -38,13 +42,15 @@ Facts this decision relies on:
 These rules hold for every kind in §3. Most were already decided for `db+datum:`; they are restated here once so new kinds inherit them.
 
 1. **A reference is an address, not a capability.** It grants no access, implies no retention, and does not assert that the target exists or is reachable (ADR 007). Being allowed to read a datum that holds a reference does not authorize dereferencing it (ADR 022). An unresolved reference is a normal state that readers show, not an error: the target may be private, not yet synced, or gone.
-2. **Identity carries no locator.** No reference has an authority component. Documents live in one global space: a document id names the same document on every node, and any node holding it can serve it. Drawers are access and collection contexts, nodes and relays are providers, a git remote is a fetch hint; none of them identifies the target, and none of them goes into the identifying part of a URL. Putting the node in the authority was rejected for that reason (ADR 007): it would make one document's references differ by where they were found. If locator hints are ever needed they are query keys, which leave the path (the identity) unchanged; none are designed until a feature needs one.
+2. **Identity carries no locator.** No reference has an authority component. Documents live in one global space: a document id names the same document on every node, and any node holding it can serve it. Drawers are access and collection contexts, nodes and relays are providers, a git remote is a fetch hint; none of them identifies the target, and none of them goes into the identifying part of a URL. Putting the node in the authority was rejected for that reason (ADR 007): it would make one document's references differ by where they were found. Locator hints are query keys, which leave the path (the identity) unchanged; `via=` on the `doc` kind (§3) is the first.
 3. **The parts of a URL have fixed roles.** The path names the primary resource. The query selects a version of it. The fragment selects a position inside it, is interpreted by the target's type, and is not part of the target's identity (RFC 3986 §3.5; JSON Pointer fragments, RFC 6901 §6; W3C Media Fragments). An API that takes a whole resource rejects a fragment rather than ignoring it.
 4. **No version means "current at read".** A reference without a version follows its target; a reference with one is reproducible. A reader that cannot reach the pinned version reports it as pending; it does not fall back to current, because that silently shows different content under the same reference.
 5. **`self` is relative to the containing document.** It lets a datum copied into a branch keep its internal references (ADR 007). `self` is never a concrete id and is resolved by the reader against the document the datum was read from.
 6. **References are declared, never sniffed.** Inside a datum, a reference is a position the schema marks `x-automerge: "reference"` (ADR 021). Writes refuse a value there that does not parse, and indexes find every reference from the schema alone (the `datum_ref` index; ADR 025 reference predicates), which is what makes backlinks ("what points at this?") a query instead of a scan. A string that spells a URL where nothing declares a reference is data.
 7. **One canonical spelling.** Each reference has exactly one canonical string: the encoding rules below, heads sorted, percent-escapes uppercase, nothing escaped that does not need to be. Writers emit the canonical form, so equal references compare equal as strings and indexes can key on them. Parsers accept non-canonical input and canonicalize.
 8. **Stored references split off the version.** The URL with `?heads=` is the text form: what a CLI prints, a link carries and a person pastes. Inside a datum the version is a sibling field: a reference position holds the URL without its query, and an optional sibling array holds the heads. Re-pinning a reference to newer heads is the common write, and keeping it in its own field means it rewrites only that field, not the string naming the target. The fragment stays in the URL field: it changes when the position changes, not when the pin moves (an Automerge cursor survives revisions, so re-pinning an annotation leaves its fragment alone).
+
+9. Removed 2026-11-17 (operator): no user needed key references; intxt keys commits per intxt and finds them with `Predicate::HasKey`.
 
 ## 3. Decision: one scheme, kinds as namespaces
 
@@ -74,6 +80,20 @@ dtxt:datum:zDoc/org.example.dpath//photos/beach.jpg?heads=zAb…|zCd…#meta/@0
 We diverge from automerge-repo in one place: heads go in the query, not the fragment, because a datum is a resource with its own versions and the fragment is needed for positions inside it.
 
 Code has two types. A **datum reference** has no fragment and is what every API taking a datum accepts (branch origins, write targets, reference positions in datum values). A **location** may carry a fragment and is what annotation targets and other selectors accept. Both carry the optional heads. A location without a fragment is the whole datum.
+
+### `doc`
+
+```
+dtxt:doc:<doc id>[?heads=<head>|<head>…]
+dtxt:doc:zDoc?heads=zAb…|zCd…
+```
+
+- **Path** names a whole document: `<doc id>` is a document id in its text form (multibase base58btc). It is always a concrete id: `self` is relative to the datum a reference sits in (§2.5), and a whole-document reference has no containing datum to be relative to. Nothing follows the id in the path.
+- **Query** pins a version, exactly as for `datum`: `heads=` lists the document heads, each in multibase base58btc, sorted, `|`-joined, never empty. No other query key is defined except `via=`.
+- **`via=`** is a locator hint: `via=<node key>|<node key>…`, each a node's multibase base58btc key as in `dtxt:actor:`, sorted, `|`-joined like `heads=`, never empty. It names nodes that are known to hold the document, so a reader of a PR description knows where to look first. It grants nothing, a reader may try other nodes, and it is not part of the reference's identity: equality and hashing in `DocReference` compare the document and heads only. Keys are separated by `&` (`?heads=…&via=…`, canonical order heads then via), a key may appear once, and an unknown key is refused. Whether `datum` references take `via=` is open: `datum` accepts only `heads=` for now.
+- **Fragment** is not defined. There is no position inside a whole document, so an API that takes a document rejects a fragment (§2.3).
+
+A document reference does not say what the document holds, and (§2.1) does not assert it exists. Whoever resolves it checks the document is what they expect: a reader that expects an intxt treats a document with no intxt descriptor as not found, like a datum reference whose target has an unexpected tag (§5). The code type is `DocReference`, a text form only. A position that declares `dtxt:datum:` references (a datum reference or a location) rejects a `doc` URL as an unexpected kind, and a `doc` position rejects a `datum` URL; there is no stored form yet, because no reference position in a datum value holds a whole document. When one does, it takes a sibling `heads` field as in §2.8.
 
 ### `actor`
 
@@ -105,6 +125,6 @@ Content identity only, with no query hints. In ADR 026 a blob is reached through
 
 ## 5. Target constraints
 
-A reference position can only say "a `dtxt:datum:`". A schema does not constrain the target's tag, and Cabinet does not enforce one. Cabinet could only check at write time, and a reference is weak (§2.1): its target may not exist yet, may be unreadable to the writer, or may change tag meaning later, so a write-time check would reject legitimate references and still not keep them valid. Readers check instead: a reference whose target has an unexpected tag is rendered as unresolved, like any other reference that doesn't resolve (operator, 2026-11-10). A schema may document the expected tags for tools and renderers; that note is not enforced.
+A datum reference position can only say "a `dtxt:datum:`". A schema does not constrain the target's tag, and Cabinet does not enforce one. Cabinet could only check at write time, and a reference is weak (§2.1): its target may not exist yet, may be unreadable to the writer, or may change tag meaning later, so a write-time check would reject legitimate references and still not keep them valid. Readers check instead: a reference whose target has an unexpected tag is rendered as unresolved, like any other reference that doesn't resolve (operator, 2026-11-10). A schema may document the expected tags for tools and renderers; that note is not enforced.
 
 Settled by the operator on 2026-11-10: cursors keep Automerge's hex spelling; slots keep raw `/`; UUID aliases and locators are query keys if ever needed, not path parts; query keys are not formalized beyond `heads=`; stored references keep the pin in a sibling field; target tags are reader-checked, not enforced.

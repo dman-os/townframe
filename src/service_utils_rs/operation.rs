@@ -1,3 +1,4 @@
+pub use service_core_rs::operation::Body;
 pub use service_core_rs::operation::ClientError;
 pub use service_core_rs::operation::Envelope;
 pub use service_core_rs::operation::EventFrame;

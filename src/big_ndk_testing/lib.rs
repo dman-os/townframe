@@ -3,13 +3,13 @@
 //!
 //! [`node`] starts a builder; each registered nodule is a cartridge manifest and the Rust value that
 //! serves it. [`TestNodeBuilder::boot`] boots a real in-memory `BigNode`, hosting the nodules
-//! with an executor that serves them in-process in place of the wasm component, and admits their
+//! with an executor that serves them in-process in place of the wasm component, and installs their
 //! cartridges. Everything else is the production path: enabling, grants, dispatch authorization and
 //! the nodule's own outgoing calls (see [`executor`]). It is for tests only (cartridge authoring
 //! principle 6): no node outside a test is built with it.
 //!
 //! ```ignore
-//! let cartridge = my_cartridge_manifest(); // declares a nodule with a `handler` artifact
+//! let cartridge = my_cartridge_fixture(); // routines served by a `handler` component
 //! let node = big_ndk_testing::node()
 //!     .with_nodule(cartridge.clone(), MyNodule::default())
 //!     .boot()
@@ -19,8 +19,12 @@
 //! node.stop().await;
 //! ```
 //!
-//! The cartridge needs a `handler` artifact entry for the node to host the nodule, but the harness
-//! never reads its bytes, so a placeholder digest is fine.
+//! The cartridge is a [`FixtureCartridge`]: its routines name a component the node must be able to
+//! host, but the harness never reads the component's bytes, so placeholder bytes are fine. They are
+//! put in the node's blob store because the registry service stages a version's components from
+//! there; the harness then publishes the fixture through the registry (signing it as the example
+//! namespace when it is unsigned, `example_cartridge!` ids) and installs the pin of that version,
+//! which the nodule service resolves through the registry as in production.
 
 #![recursion_limit = "256"]
 
@@ -31,8 +35,14 @@ mod smoke;
 
 use big_cabinet::SchemaRepo;
 use big_cabinet_core::authority::Authorization;
-use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::config::Component;
+use big_cartridges_core::config::GrantBody;
+use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
+use big_cartridges_core::protocol::SetCartridgeGrant;
+use big_cartridges_core::test_support::FixtureCartridge;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
@@ -41,11 +51,9 @@ use big_node::BigNode;
 use big_node::Config;
 use big_node::StopToken;
 use big_nodule::executor::NoduleExecutor;
-use big_nodule_core::protocol::AdmitNodule;
+use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesProtocol;
-use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleMethodGrants;
 use executor::Hosting;
 use executor::NativeExecutor;
 use executor::Registered;
@@ -70,7 +78,7 @@ pub fn node() -> TestNodeBuilder {
 }
 
 pub struct TestNodeBuilder {
-    nodules: Vec<(Cartridge, Box<dyn Registered>)>,
+    nodules: Vec<(FixtureCartridge, Box<dyn Registered>)>,
 }
 
 impl TestNodeBuilder {
@@ -78,7 +86,7 @@ impl TestNodeBuilder {
     /// a handler, and `nodule` is what serves it. Every request is served by a clone of
     /// `nodule`, as the wasm component serves each from a fresh value, so state does not
     /// carry from one call to the next.
-    pub fn with_nodule<N>(mut self, cartridge: Cartridge, nodule: N) -> Self
+    pub fn with_nodule<N>(mut self, cartridge: FixtureCartridge, nodule: N) -> Self
     where
         N: big_ndk::Nodule + Clone + Send + 'static,
     {
@@ -87,8 +95,8 @@ impl TestNodeBuilder {
         self
     }
 
-    /// Boots the node and admits every registered cartridge. The nodules are not enabled: grants are
-    /// set and [`TestNode::enable`] called by the test, in whatever order it is exercising.
+    /// Boots the node and installs every registered cartridge. The nodules are not enabled: grants
+    /// are set and [`TestNode::enable`] called by the test, in whatever order it is exercising.
     pub async fn boot(self) -> TestNode {
         let Self { nodules } = self;
         let mut cartridges = Vec::new();
@@ -130,11 +138,8 @@ impl TestNodeBuilder {
             _runtime: runtime,
         };
         for cartridge in cartridges {
-            node.nodules(AdmitNodule {
-                cartridge,
-                drawers: None,
-            })
-            .await;
+            let pin = node.node.publish_fixture(&cartridge).await;
+            node.nodules(InstallCartridge { cartridge: pin }).await;
         }
         node
     }
@@ -207,14 +212,10 @@ impl TestNode {
             .call_with(
                 request,
                 Authorization::identity(self.node.authority.root).metadata(),
-                Invoke {
-                    operation: operation.to_owned(),
-                    input,
-                    context,
-                },
+                Invoke::json(operation, input, context),
             )
             .await
-            .map(|output| output.output)
+            .map(|output| output.body.into_json())
             .map_err(|error| match error {
                 ClientError::Method(error) => error,
                 ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
@@ -227,20 +228,59 @@ impl TestNode {
     }
 
     pub async fn set_enabled(&self, cartridge_id: &CartridgeId, enabled: bool) -> NoduleRecord {
-        self.nodules(SetNoduleEnabled {
+        self.nodules(SetCartridgeEnabled {
             cartridge_id: cartridge_id.clone(),
+            component: Component::Nodule,
             enabled,
         })
-        .await
+        .await;
+        self.record(cartridge_id).await
     }
 
-    /// Sets the methods the nodule of `cartridge_id` may invoke, which it holds as a dispatch
-    /// capability minted from them. The grant is bounded by what the nodule's cartridge requested and
-    /// by the nodule service's own dispatch authority, and the record says whether it was applied.
+    /// Grants the cartridge `cartridge_id` the methods in `methods`, each as a grant datum of its
+    /// own in the cartridge's config document, so its nodule holds them as a dispatch capability
+    /// minted from them. A grant states no privilege, so `methods.privileged` is not carried. Grants already made stay. The grant is bounded by what the nodule's cartridge
+    /// requested and by the nodule service's own dispatch authority, and the record says whether
+    /// it was applied.
     pub async fn grant(&self, cartridge_id: &CartridgeId, methods: DispatchScope) -> NoduleRecord {
-        self.nodules(SetNoduleMethodGrants {
+        let grants = methods
+            .operations
+            .into_iter()
+            .map(GrantKey::Method)
+            .chain(methods.authorities.into_iter().map(GrantKey::Authority));
+        for grant in grants {
+            self.nodules(SetCartridgeGrant {
+                cartridge_id: cartridge_id.clone(),
+                grant,
+                value: Some(GrantBody::present()),
+            })
+            .await;
+        }
+        self.record(cartridge_id).await
+    }
+
+    /// Clears the grant datums for `methods` from the config document of `cartridge_id`, which
+    /// revokes them: the nodule is re-minted a capability without them.
+    pub async fn revoke(&self, cartridge_id: &CartridgeId, methods: DispatchScope) -> NoduleRecord {
+        let grants = methods
+            .operations
+            .into_iter()
+            .map(GrantKey::Method)
+            .chain(methods.authorities.into_iter().map(GrantKey::Authority));
+        for grant in grants {
+            self.nodules(SetCartridgeGrant {
+                cartridge_id: cartridge_id.clone(),
+                grant,
+                value: None,
+            })
+            .await;
+        }
+        self.record(cartridge_id).await
+    }
+
+    async fn record(&self, cartridge_id: &CartridgeId) -> NoduleRecord {
+        self.nodules(GetNodule {
             cartridge_id: cartridge_id.clone(),
-            methods,
         })
         .await
     }

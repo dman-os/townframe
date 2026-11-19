@@ -7,6 +7,7 @@
 
 mod collections;
 mod documents;
+mod egress;
 
 use clay_guest_session::DocumentSession;
 pub use clay_guest_session::InitialContext;
@@ -28,10 +29,17 @@ use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_host::Instance;
 use clay_surface::AttributeValue;
+use clay_surface::ElementAction;
+use clay_surface::ElementCommand;
+use clay_surface::ElementRead;
 use clay_surface::Event;
 use clay_surface::EventResponse;
 use clay_surface::Mutation;
 use clay_surface::PresentationError;
+use clay_surface::ScrollAlign;
+use clay_surface::ScrollBehavior;
+use clay_surface::ScrollIntoView;
+use clay_surface::ScrollOffsets;
 use clay_surface::SurfaceSession;
 use clay_surface::SurfaceSink;
 use tokio::sync::oneshot;
@@ -61,6 +69,9 @@ use tokio::sync::mpsc;
 use wasmtime_wasi::WasiCtx;
 use wasmtime_wasi::WasiCtxView;
 use wasmtime_wasi::WasiView;
+use wasmtime_wasi_http::WasiHttpCtx;
+use wasmtime_wasi_http::WasiHttpCtxView;
+use wasmtime_wasi_http::WasiHttpView;
 
 /// Marks a presentation call that suspended on its first poll: a guest contract violation
 /// (the sync exports promise a decision before the listener closure returns), handled at
@@ -68,6 +79,18 @@ use wasmtime_wasi::WasiView;
 #[derive(Debug, thiserror::Error)]
 #[error("guest presentation call suspended on its first poll")]
 pub(crate) struct Suspended;
+
+/// Why a guest entry failed, for the fault the supervisor reports. Wasmtime's error is a chain:
+/// the outermost link is only the context `error while executing at wasm backtrace:` (whose
+/// text holds the guest frames) and the root cause is the trap itself (`all fuel consumed by
+/// WebAssembly`, `wasm trap: unreachable`, or a host error the guest called into). `{:#}` of
+/// the error prints just the outermost link, which is how a trap used to read as no reason at
+/// all, so the chain is walked here, root cause first.
+pub(crate) fn trap_reason(error: &wasmtime::Error) -> String {
+    let mut links = error.chain().map(ToString::to_string).collect::<Vec<_>>();
+    links.reverse();
+    links.join("; ")
+}
 
 /// Test probe: how many presentation calls hit [`Suspended`] (i.e. returned `Pending`)
 /// rather than completing or failing on the first poll. The W2 spike asserts a guest that
@@ -271,7 +294,8 @@ impl wasmtime::component::AccessorTask<WasmStoreState> for GuestCallTask {
             }
             Err(trap) => {
                 drop(reply.send(Err(CallError::Provider(format!(
-                    "guest trapped during call: {trap:#}"
+                    "guest trapped during call: {}",
+                    trap_reason(&trap)
                 )))));
                 Err(trap)
             }
@@ -281,6 +305,9 @@ impl wasmtime::component::AccessorTask<WasmStoreState> for GuestCallTask {
 
 struct WasmStoreState {
     wasi: WasiCtx,
+    /// `wasi:http/client`, which reaches only `dispatch.local` (see [`egress`]).
+    http: WasiHttpCtx,
+    http_hooks: egress::Hooks,
     table: ResourceTable,
     documents: DocumentSession,
     collections: clay_guest_session::collections::CollectionSession,
@@ -323,6 +350,16 @@ impl WasmStoreState {
     }
 }
 
+impl WasiHttpView for WasmStoreState {
+    fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: &mut self.http_hooks,
+        }
+    }
+}
+
 impl WasiView for WasmStoreState {
     fn ctx(&mut self) -> WasiCtxView<'_> {
         WasiCtxView {
@@ -356,6 +393,8 @@ impl WasmStoreState {
         Ok((
             Self {
                 wasi: wasi.build(),
+                http: WasiHttpCtx::new(),
+                http_hooks: egress::Hooks::default(),
                 table: ResourceTable::new(),
                 documents,
                 collections,
@@ -403,11 +442,47 @@ fn convert_mutation(mutation: wit_presentation::Mutation) -> Mutation<Resource<W
             Mutation::SetAttribute((name, ns, convert_attribute_value(value)))
         }
         wit_presentation::Mutation::SetText(value) => Mutation::SetText(value),
+        wit_presentation::Mutation::SetStyleSheet(sheet) => Mutation::SetStyleSheet(sheet),
         wit_presentation::Mutation::AddEventListener(name) => Mutation::AddEventListener(name),
         wit_presentation::Mutation::RemoveEventListener(name) => {
             Mutation::RemoveEventListener(name)
         }
         wit_presentation::Mutation::Remove => Mutation::Remove,
+    }
+}
+
+fn convert_element_command(command: wit_presentation::ElementCommand) -> ElementCommand {
+    use wit_presentation::ElementAction as Wire;
+    let behavior = |behavior| match behavior {
+        wit_presentation::ScrollBehavior::Instant => ScrollBehavior::Instant,
+        wit_presentation::ScrollBehavior::Smooth => ScrollBehavior::Smooth,
+    };
+    let align = |align| match align {
+        wit_presentation::ScrollAlign::Start => ScrollAlign::Start,
+        wit_presentation::ScrollAlign::Center => ScrollAlign::Center,
+        wit_presentation::ScrollAlign::End => ScrollAlign::End,
+        wit_presentation::ScrollAlign::Nearest => ScrollAlign::Nearest,
+    };
+    ElementCommand {
+        request: command.request,
+        action: match command.action {
+            Wire::Scroll(to) => ElementAction::Scroll(ScrollOffsets {
+                left: to.left,
+                top: to.top,
+                behavior: behavior(to.behavior),
+            }),
+            Wire::ScrollIntoView(view) => ElementAction::ScrollIntoView(ScrollIntoView {
+                behavior: behavior(view.behavior),
+                vertical: align(view.vertical),
+                horizontal: align(view.horizontal),
+            }),
+            Wire::SetFocus(focus) => ElementAction::SetFocus(focus),
+            Wire::Read(what) => ElementAction::Read(match what {
+                wit_presentation::ElementRead::ClientRect => ElementRead::ClientRect,
+                wit_presentation::ElementRead::ScrollOffset => ElementRead::ScrollOffset,
+                wit_presentation::ElementRead::ScrollSize => ElementRead::ScrollSize,
+            }),
+        },
     }
 }
 
@@ -468,6 +543,19 @@ impl wit_presentation::HostSurface for WasmStoreState {
         Ok(self
             .presentation
             .apply(&surface, &converted)
+            .map_err(convert_error))
+    }
+
+    fn element_command(
+        &mut self,
+        surface: Resource<Surface>,
+        element: u32,
+        command: wit_presentation::ElementCommand,
+    ) -> wasmtime::Result<Result<(), wit_presentation::PresentationError>> {
+        let surface = self.table.get(&surface)?;
+        Ok(self
+            .presentation
+            .element_command(surface, element, convert_element_command(command))
             .map_err(convert_error))
     }
 
@@ -533,7 +621,7 @@ const RESERVED_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
 /// overflow a guest would otherwise write into its neighbour.
 const MEMORY_GUARD_BYTES: u64 = 64 * 1024;
 
-/// The linker is identical for every package on the shared engine (WASI p3 plus the micro
+/// The linker is identical for every package on the shared engine (WASI p3, `wasi:http` p3 plus the micro
 /// client), so it is built once rather than rebuilt per micro.
 fn linker(engine: &Engine) -> Result<Arc<Linker<WasmStoreState>>, String> {
     static LINKER: OnceLock<Result<Arc<Linker<WasmStoreState>>, String>> = OnceLock::new();
@@ -541,6 +629,8 @@ fn linker(engine: &Engine) -> Result<Arc<Linker<WasmStoreState>>, String> {
         .get_or_init(|| {
             let mut linker = Linker::new(engine);
             wasmtime_wasi::p3::add_to_linker(&mut linker).map_err(|error| error.to_string())?;
+            wasmtime_wasi_http::p3::add_to_linker(&mut linker)
+                .map_err(|error| error.to_string())?;
             MicroClient::add_to_linker::<_, HasSelf<WasmStoreState>>(&mut linker, |state| state)
                 .map_err(|error| error.to_string())?;
             Ok(Arc::new(linker))
@@ -612,13 +702,13 @@ pub fn set_component_cache_directory(directory: PathBuf) {
         .expect("the component cache directory is set once per process");
 }
 
-/// The directory set by [`set_component_cache_directory`], else `$DAYFRAME_COMPONENT_CACHE`,
+/// The directory set by [`set_component_cache_directory`], else `$DAYTXT_COMPONENT_CACHE`,
 /// else the XDG/home cache, keyed by content and engine compatibility. `None` means the process
 /// has no cache location at all; compilation then happens in memory only.
 fn cache_path(engine: &Engine, bytes: &[u8]) -> Option<PathBuf> {
     let directory = match CACHE_DIRECTORY.get() {
         Some(directory) => directory.clone(),
-        None => match std::env::var_os("DAYFRAME_COMPONENT_CACHE") {
+        None => match std::env::var_os("DAYTXT_COMPONENT_CACHE") {
             Some(directory) => PathBuf::from(directory),
             None => {
                 let base = std::env::var_os("XDG_CACHE_HOME")
@@ -626,7 +716,7 @@ fn cache_path(engine: &Engine, bytes: &[u8]) -> Option<PathBuf> {
                     .or_else(|| {
                         std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
                     })?;
-                base.join("dayframe").join("components")
+                base.join("claytxt").join("components")
             }
         },
     };
@@ -639,18 +729,15 @@ fn cache_path(engine: &Engine, bytes: &[u8]) -> Option<PathBuf> {
 }
 
 impl WasmPackage {
-    /// Load a component artifact prepared by `x/check-dayframe.ts`, named by the environment
-    /// variable `DAYFRAME_<name>_COMPONENT` (uppercased, `-` → `_`; e.g. `sleeper` →
-    /// `DAYFRAME_SLEEPER_COMPONENT`). Test and fixture code only: compositions that ship a package
+    /// Load a component artifact prepared by `x/check-daytxt.ts`, named by the environment
+    /// variable `DAYTXT_<name>_COMPONENT` (uppercased, `-` → `_`; e.g. `sleeper` →
+    /// `DAYTXT_SLEEPER_COMPONENT`). Test and fixture code only: compositions that ship a package
     /// embed or fetch it themselves.
     pub async fn from_env(name: &str) -> Result<Self, String> {
-        let variable = format!(
-            "DAYFRAME_{}_COMPONENT",
-            name.to_uppercase().replace('-', "_")
-        );
+        let variable = format!("DAYTXT_{}_COMPONENT", name.to_uppercase().replace('-', "_"));
         let path = std::env::var(&variable).map_err(|_| {
             format!(
-                "{variable} must name a prepared {name} component; run deno run --allow-all x/check-dayframe.ts --prepare-only and export the printed path"
+                "{variable} must name a prepared {name} component; run deno run --allow-all x/check-daytxt.ts --prepare-only and export the printed path"
             )
         })?;
         let path = std::path::PathBuf::from(path);
@@ -836,12 +923,17 @@ impl WasmIncarnation {
             })
             .await
             .and_then(|trapped| trapped)
-            .map_err(|trap| format!("guest trapped while closing: {trap:#}"));
+            .map_err(|trap| format!("guest trapped while closing: {}", trap_reason(&trap)));
         self.refuel();
         let dropped = root
             .resource_drop_async(&mut self.store)
             .await
-            .map_err(|trap| format!("guest trapped dropping its instance root: {trap:#}"));
+            .map_err(|trap| {
+                format!(
+                    "guest trapped dropping its instance root: {}",
+                    trap_reason(&trap)
+                )
+            });
         self.publications.clear();
         closed??;
         dropped
@@ -934,13 +1026,17 @@ impl WasmRuntime {
                             let Some(active) = guard.as_mut() else {
                                 return;
                             };
-                            let trapped = active.tick().await.is_err();
-                            if trapped {
+                            let trapped = active.tick().await.err();
+                            if trapped.is_some() {
                                 guard.take();
                             }
                             trapped
                         };
-                        if trapped {
+                        if let Some(trap) = trapped {
+                            pump_host.record_fault(
+                                &pump_instance,
+                                format!("guest trapped in its event loop: {}", trap_reason(&trap)),
+                            );
                             if pump_host.check(&pump_instance).is_ok() {
                                 pump_host.close_instance(&pump_instance).unwrap();
                             }
@@ -1062,8 +1158,12 @@ impl WasmRuntime {
                         prevent_default: response.prevent_default,
                         stop_propagation: response.stop_propagation,
                     },
-                    Err(_trap) => {
+                    Err(trap) => {
                         dispatch_writer.withdraw();
+                        dispatch_host.record_fault(
+                            &dispatch_instance,
+                            format!("guest trapped during dispatch: {}", trap_reason(&trap)),
+                        );
                         dispatch_host.close_instance(&dispatch_instance).unwrap();
                         EventResponse::default()
                     }
@@ -1089,23 +1189,27 @@ impl WasmRuntime {
                     } else {
                         Ok(())
                     };
-                    if outcome.is_err() {
+                    if let Err(trap) = outcome {
                         guard.take();
-                        true
+                        Some(format!(
+                            "guest trapped during unmount: {}",
+                            trap_reason(&trap)
+                        ))
                     } else {
                         wit_presentation::HostSurface::drop(
                             active.store.data_mut(),
                             Resource::new_own(surface_rep),
                         )
                         .expect("mounted surface must remain in the host resource table");
-                        false
+                        None
                     }
                 } else {
-                    false
+                    None
                 };
                 drop(guard);
                 drop_writer.withdraw();
-                if trapped {
+                if let Some(cause) = trapped {
+                    drop_host.record_fault(&drop_instance, cause);
                     drop_host.close_instance(&drop_instance).unwrap();
                 }
             },
@@ -1187,10 +1291,14 @@ impl WasmRuntime {
                     }
                 })
             }
-            Err(_trap) => {
+            Err(trap) => {
                 guard.take();
                 drop(guard);
                 writer.withdraw();
+                self.host.record_fault(
+                    instance,
+                    format!("guest trapped during mount: {}", trap_reason(&trap)),
+                );
                 self.host.close_instance(instance).unwrap();
                 Err(PresentationError::Revoked)
             }

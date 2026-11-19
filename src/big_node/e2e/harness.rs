@@ -21,8 +21,6 @@ use crate::peers::PolicyChoice;
 use big_blobs::InventorySelection;
 use big_blobs_core::Blob;
 use big_blobs_core::BlobId;
-use big_blobs_core::PutBlob;
-use big_blobs_core::ReadBlob;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::BranchDoc;
 use big_cabinet_core::doc::MergeDoc;
@@ -34,6 +32,7 @@ use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::drawer::protocol::RememberDrawer;
 use big_sync_core::PeerKey;
+use method_core::ByteBody;
 use service_utils_rs::ClientError;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -125,6 +124,20 @@ impl Note {
             DatumRead::Absent { .. } => None,
             other => panic!("datum {field} is not settled: {other:?}"),
         }
+    }
+
+    /// The accepted values of the datums tagged `tag`, by key.
+    pub(super) fn accepted(&self, tag: &str) -> BTreeMap<DatumKey, serde_json::Value> {
+        self.0
+            .datums
+            .iter()
+            .filter(|(key, _)| key.tag().as_str() == tag)
+            .filter_map(|(key, read)| match read {
+                DatumRead::Accepted { value, .. } => Some((key.clone(), value.clone())),
+                DatumRead::Absent { .. } => None,
+                other => panic!("datum {key} is not settled: {other:?}"),
+            })
+            .collect()
     }
 }
 
@@ -473,7 +486,7 @@ impl Cluster {
         let capability = capability(
             node,
             DocScope {
-                read: BTreeSet::from([doc.clone()]),
+                read: DocScope::read_all([doc.clone()]),
                 ..DocScope::default()
             },
         )
@@ -532,7 +545,10 @@ impl Cluster {
         let capability = capability(
             node,
             DocScope {
-                write: BTreeSet::from([doc.clone()]),
+                write: std::collections::BTreeMap::from([(
+                    doc.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..DocScope::default()
             },
         )
@@ -570,9 +586,12 @@ impl Cluster {
         let capability = capability(
             node,
             DocScope {
-                read: BTreeSet::from([doc.clone()]),
+                read: DocScope::read_all([doc.clone()]),
                 // A branch is announced on its origin, so it takes write access there too.
-                write: BTreeSet::from([doc.clone()]),
+                write: std::collections::BTreeMap::from([(
+                    doc.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 create: BTreeSet::from([placement.clone()]),
                 ..DocScope::default()
             },
@@ -603,8 +622,11 @@ impl Cluster {
         let capability = capability(
             node,
             DocScope {
-                read: BTreeSet::from([source.clone()]),
-                write: BTreeSet::from([target.clone()]),
+                read: DocScope::read_all([source.clone()]),
+                write: std::collections::BTreeMap::from([(
+                    target.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..DocScope::default()
             },
         )
@@ -632,23 +654,21 @@ impl Cluster {
         index: usize,
         drawer: &SharedDrawer,
         bytes: &[u8],
-    ) -> BlobId {
+    ) -> (DocId, BlobId) {
         let node = self.node(index);
         let put = put_cap(node).await;
         let info = node
             .blobs
-            .client
-            .call(
+            .put(
                 RequestContext::root(),
-                PutBlob {
-                    capability: put,
-                    bytes: bytes.to_vec().into(),
-                },
+                put,
+                ByteBody::from_bytes(bytes.to_vec()),
             )
             .await
             .unwrap();
         let placement = format!("drawer {}", drawer.id);
-        node.docs
+        let receipt = node
+            .docs
             .client
             .call(
                 RequestContext::root(),
@@ -676,7 +696,7 @@ impl Cluster {
             .await
             .unwrap();
         self.wait_blob_published(index, drawer, info.blob_id).await;
-        info.blob_id
+        (receipt.doc_id, info.blob_id)
     }
 
     /// Waits until node `index` holds `blob`'s inventory part, which is when the bytes are
@@ -757,21 +777,12 @@ impl Cluster {
             Err(ClientError::Method(big_blobs_core::BlobsError::NotFound)) => return None,
             Err(error) => panic!("stat {blob} on {}: {error:?}", self.members[index].nickname),
         };
-        let range = node
+        let body = node
             .blobs
-            .client
-            .call(
-                RequestContext::root(),
-                ReadBlob {
-                    capability: read,
-                    blob_id: blob,
-                    offset: 0,
-                    length: u32::try_from(length).unwrap(),
-                },
-            )
+            .read(RequestContext::root(), read, blob, None)
             .await
             .unwrap();
-        Some(range.bytes.as_slice().to_vec())
+        Some(body.collect(length).await.unwrap().to_vec())
     }
 
     /// Waits until `condition` holds, re-checking it whenever a node reports a peers event or

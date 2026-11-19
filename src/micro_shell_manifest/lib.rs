@@ -6,8 +6,8 @@
 //! `org.example.dayframe.shell`.
 //!
 //! A panel row is keyed by its contributor's chosen *registration id* (CBOR text) and holds a
-//! [`Panel`]: a title, the sockets it may fill, and lazy presentation attachments. Reading rows
-//! never starts a contributor; the shell mounts a panel through a slot over its attachment,
+//! [`Panel`]: a title, the sockets it may fill, and lazy presentation links. Reading rows
+//! never starts a contributor; the shell mounts a panel through a slot over its link,
 //! which activates or joins the contributor for as long as the panel is shown.
 //!
 //! # Navigation
@@ -18,11 +18,11 @@
 //! never keeps a stack of its own, so back behaves the same everywhere. The calls' request and
 //! response types are [`NavigateRequest`], [`OpenSheetRequest`] and plain CBOR `bool`/`String`.
 //!
-//! A list panel that opens rows names a [`Panel::details`] attachment: the presentation the
+//! A list panel that opens rows names a [`Panel::details`] link: the presentation the
 //! shell mounts in the details position while one of its rows is open. That presentation
 //! learns *which* row by asking the shell ([`OPENED`]), because a presentation takes no
 //! parameters and the shell, not the list, owns the stack.
-use clay_mdk::Attachment;
+use clay_mdk::Link;
 use clay_mdk::ManifestBuilder;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
@@ -39,6 +39,16 @@ pub use declarations::ShellFrame;
 pub use declarations::ShellHome;
 pub use declarations::ShellNavButton;
 pub use declarations::ShellPanels;
+mod theme;
+pub use theme::GET_THEME;
+pub use theme::GET_THEME_CONTRACT;
+pub use theme::SET_THEME;
+pub use theme::SET_THEME_CONTRACT;
+pub use theme::ShellTheme;
+pub use theme::THEME_CONFIG_KEY;
+pub use theme::THEME_CONFIG_NAME;
+pub use theme::THEME_CONFIG_TAG;
+pub use theme::ThemeSheet;
 
 pub const ID: &str = "dayframe.shell";
 pub const PACKAGE_VERSION: u32 = 1;
@@ -121,11 +131,11 @@ pub struct Panel {
     /// destination; [`NavigateRequest`] to it opens it in the socket it does fill.
     pub sockets: Vec<Socket>,
     /// The panel's own presentation.
-    pub content: Attachment,
+    pub content: Link,
     /// For a list panel whose rows open details: the presentation of one opened row (see the
     /// module docs). Absent for a panel whose rows open nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<Attachment>,
+    pub details: Option<Link>,
     /// Whether this is the home panel, the list the shell shows when nothing is open. Exactly
     /// one installed panel is.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -184,20 +194,23 @@ impl Default for ShellConfig {
 }
 
 /// The shell's package declaration: it declares the panels collection, publishes its frame, its
-/// home panel, its sidebar/back button and its navigation calls, contributes the home panel to
+/// home panel, its sidebar/back button, its navigation and theme calls, contributes the home panel to
 /// its own collection, and registers the frame as a shell root.
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
-        .component::<ShellFrame>()
-        .component::<ShellHome>()
-        .component::<ShellNavButton>()
-        .call(NAVIGATE, NAVIGATE_CONTRACT)
-        .call(BACK, BACK_CONTRACT)
-        .call(FORWARD, FORWARD_CONTRACT)
-        .call(OPEN_SHEET, OPEN_SHEET_CONTRACT)
-        .call(CLOSE_SHEET, CLOSE_SHEET_CONTRACT)
-        .call(OPENED, OPENED_CONTRACT)
+        .view::<ShellFrame>()
+        .view::<ShellHome>()
+        .view::<ShellNavButton>()
+        .method(NAVIGATE, NAVIGATE_CONTRACT)
+        .method(BACK, BACK_CONTRACT)
+        .method(FORWARD, FORWARD_CONTRACT)
+        .method(OPEN_SHEET, OPEN_SHEET_CONTRACT)
+        .method(CLOSE_SHEET, CLOSE_SHEET_CONTRACT)
+        .method(OPENED, OPENED_CONTRACT)
+        .method(GET_THEME, GET_THEME_CONTRACT)
+        .method(SET_THEME, SET_THEME_CONTRACT)
         .config::<ShellArrangement>()
+        .config::<ShellTheme>()
         .declares::<ShellPanels>()
         // The shell reads panels through a binding configuration resolves; a second write
         // binding to the same contract carries its own home panel. It also registers its frame
@@ -227,7 +240,7 @@ pub fn sidecar() -> Sidecar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clay_mdk::CAPABILITY_ATTACHMENT_TAG;
+    use clay_mdk::LINK_TAG;
     use clay_mdk::host::declared_rows;
 
     // The manifest is wire data (ADR 030 §11); the snapshot follows the current shape so drift
@@ -244,8 +257,8 @@ mod tests {
             &Panel {
                 title: "Settings".into(),
                 sockets: vec![Socket::List],
-                content: Attachment::at(0),
-                details: Some(Attachment::at(1)),
+                content: Link::at(0),
+                details: Some(Link::at(1)),
                 home: false,
             },
             &mut bytes,
@@ -279,17 +292,14 @@ mod tests {
             ),
             (
                 text("content"),
-                Value::Tag(
-                    CAPABILITY_ATTACHMENT_TAG,
-                    Box::new(Value::Integer(0.into())),
-                ),
+                Value::Tag(LINK_TAG, Box::new(Value::Integer(0.into()))),
             ),
         ]);
         let mut bytes = Vec::new();
         ciborium::into_writer(&row, &mut bytes).unwrap();
         let panel: Panel = ciborium::from_reader(bytes.as_slice()).unwrap();
         assert_eq!(panel.sockets, [Socket::Sidebar, Socket::List]);
-        assert_eq!(panel.content, Attachment::at(0));
+        assert_eq!(panel.content, Link::at(0));
         assert_eq!(panel.details, None);
         assert!(!panel.home);
     }

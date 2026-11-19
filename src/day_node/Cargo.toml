@@ -1,0 +1,51 @@
+[package]
+name = "day_node"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+#
+# internal
+big_cabinet.workspace = true
+big_cabinet_core.workspace = true
+big_node.workspace = true
+big_repo.workspace = true
+secrets_rs.workspace = true
+sqlite_rs.workspace = true
+utils_rs.workspace = true
+
+#
+# encoding
+data-encoding.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+
+#
+# crypto
+rand.workspace = true
+
+#
+# async and http, to wait on the node's locks and reach its holder over its socket
+tokio = { workspace = true, features = ["rt", "time", "net"] }
+reqwest.workspace = true
+
+#
+# fs and os
+directories.workspace = true
+libc = "0.2"
+
+[dev-dependencies]
+#
+# internal
+secrets_rs = { workspace = true, features = ["test-support"] }
+
+#
+# misc
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

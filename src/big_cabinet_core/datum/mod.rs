@@ -37,10 +37,12 @@ mod e2e;
 pub use datum_core::DatumMember;
 pub use datum_core::DatumShape;
 pub use datum_core::Extra;
+pub use datum_core::InvalidNsid;
 pub use datum_core::KnownString;
 pub use datum_core::Member;
 #[cfg(feature = "schemars")]
 pub use datum_core::MemberSchema;
+pub use datum_core::Nsid;
 pub use datum_core::Openness;
 pub use datum_core::Shape;
 #[cfg(feature = "schemars")]

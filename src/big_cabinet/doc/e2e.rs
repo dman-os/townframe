@@ -386,7 +386,10 @@ impl Node {
                         .capability(
                             actor,
                             DocScope {
-                                write: BTreeSet::from([document.clone()]),
+                                write: std::collections::BTreeMap::from([(
+                                    document.clone(),
+                                    big_cabinet_core::doc::DatumKinds::All,
+                                )]),
                                 ..DocScope::default()
                             },
                         )
@@ -417,7 +420,7 @@ impl Node {
                         .capability(
                             actor,
                             DocScope {
-                                read: BTreeSet::from([document.clone()]),
+                                read: DocScope::read_all([document.clone()]),
                                 ..DocScope::default()
                             },
                         )
@@ -445,7 +448,7 @@ impl Node {
                     .capability(
                         actor,
                         DocScope {
-                            read: BTreeSet::from([document.clone()]),
+                            read: DocScope::read_all([document.clone()]),
                             ..DocScope::default()
                         },
                     )

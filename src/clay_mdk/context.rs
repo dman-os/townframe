@@ -22,8 +22,10 @@ use crate::manifest::Access;
 use crate::manifest::Request;
 use crate::rows::Minter;
 use crate::rows::Writer;
+use method_core::Unary;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use service_core_rs::ClientError;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -113,8 +115,8 @@ pub struct OperationReceipt {
     pub status: OperationStatus,
 }
 
-/// A reference another micro's publication minted for this one: a resolved requirement or a
-/// row attachment. Holding it does not keep the provider running unless it is redeemed (a slot
+/// A reference another micro's endpoint minted for this one: a resolved requirement or a
+/// row link. Holding it does not keep the provider running unless it is redeemed (a slot
 /// mounting a presentation) or retained; [`Self::status`] never activates anything.
 pub struct Capability(CapabilityInner);
 
@@ -189,8 +191,35 @@ impl Capability {
         let response = match &self.0 {
             #[cfg(feature = "in_process")]
             CapabilityInner::InProcess(reference) => reference.call(request).await?,
+            // A call is a component-model future, which can only be polled inside a
+            // component-model task. A view awaits through Dioxus, which `render_immediate`
+            // polls from the synchronous `mount` and `dispatch` exports, where there is none,
+            // and wit-bindgen asserts. So the call runs as incarnation-owned work and the
+            // caller awaits its answer over a channel; nothing polls Dioxus tasks in a guest on
+            // their own wake, so the views are marked dirty once the answer is sent and the
+            // render pass that follows polls the woken caller (see `Context::call`).
             #[cfg(feature = "guest")]
-            CapabilityInner::Guest(reference) => reference.call(request).await?,
+            CapabilityInner::Guest(reference) => {
+                let (answer, answered) = futures::channel::oneshot::channel();
+                let runtime = crate::guest::Runtime::current();
+                let reference = Rc::clone(reference);
+                let views = Rc::clone(&runtime);
+                runtime.spawn(Box::pin(async move {
+                    // A caller that stopped waiting has no use for the answer.
+                    drop(answer.send(reference.call(request).await));
+                    views.notify_views();
+                }));
+                // The task is dropped with the incarnation's other work when it closes, which can
+                // be while a caller still awaits. Every call in flight at a close is answered
+                // `Revoked` by the host, which owns that answer; a panic here would instead trap
+                // the guest in the middle of its own close, and an error of the guest's own
+                // would race the host's answer with a differently shaped one. So the caller
+                // stays suspended until the runtime drops it with the incarnation.
+                match answered.await {
+                    Ok(response) => response?,
+                    Err(futures::channel::oneshot::Canceled) => std::future::pending().await,
+                }
+            }
         };
         decode(&response)
     }
@@ -338,7 +367,7 @@ impl Clone for Capability {
     }
 }
 
-/// Two references are equal when they store back as the same attachment (in-process) or are the
+/// Two references are equal when they store back as the same link (in-process) or are the
 /// same held reference (guest), so a re-rendered row that still names the same target does not
 /// remount its slot.
 impl PartialEq for Capability {
@@ -368,28 +397,28 @@ pub(crate) fn encode<T: Serialize>(value: &T) -> Vec<u8> {
     bytes
 }
 
-/// What one row of a registration attaches to its value (indexed by [`crate::Attachment`]):
-/// one of this micro's own publications, named as the manifest declares it.
+/// What one row of a registration links its value to (indexed by [`crate::Link`]): one of this
+/// micro's own endpoints, named as the manifest declares it.
 ///
 /// A durable row persists endpoints, never references (ADR 031 §7), so the host turns the name
-/// into the endpoint `(micro, publication, contract)` when the row is written. That needs no
-/// live publication, so a row may be written at any time: from `activate`, from a spawned task
+/// into the endpoint `(micro, endpoint, contract)` when the row is written. That needs no
+/// live endpoint, so a row may be written at any time: from `activate`, from a spawned task
 /// or from a call handler, and a reader that redeems it activates the micro as for any lazy
 /// endpoint. A name the manifest does not declare fails the write.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RowAttachment(String);
+pub struct RowLink(String);
 
-impl RowAttachment {
-    /// The presentation `P` this micro publishes.
+impl RowLink {
+    /// The view `P` this micro serves.
     pub fn own<P: ComponentDecl>() -> Self {
         Self(P::NAME.into())
     }
 
-    /// One of this micro's publications named by data instead of by declaration: a call
-    /// publication (calls stay named by string until they are declared by their `Method`
-    /// request type), or a name the caller does not control.
-    pub fn by_name(publication: impl Into<String>) -> Self {
-        Self(publication.into())
+    /// One of this micro's endpoints named by data instead of by declaration: a method or
+    /// callback (those stay named by string until they are declared by their `Method` request
+    /// type), or a name the caller does not control.
+    pub fn by_name(endpoint: impl Into<String>) -> Self {
+        Self(endpoint.into())
     }
 
     #[cfg(feature = "guest")]
@@ -397,7 +426,7 @@ impl RowAttachment {
         self.0
     }
 
-    /// The endpoint the host stores for this attachment.
+    /// The endpoint the host stores for this link.
     #[cfg(feature = "in_process")]
     pub(crate) fn into_in_process(
         self,
@@ -700,6 +729,42 @@ impl Backend {
         }
     }
 
+    async fn call<M: Unary>(&self, input: M) -> Result<M::Output, ClientError<M::Error>> {
+        match self {
+            #[cfg(feature = "in_process")]
+            Self::InProcess(_) => {
+                // The request is unsent: there is no transport to hand it to.
+                drop(input);
+                unimplemented!(
+                    "an in-process micro has no node transport yet: only guest micros call node \
+                     methods (over wasi:http to dispatch.local)"
+                )
+            }
+            // The `wasi:http` request is a component-model future, which can only be polled
+            // inside a component-model task. A Dioxus task (a `use_resource` in a view) is
+            // polled by `render_immediate` from the synchronous `mount` and `dispatch` exports,
+            // where there is none, and wit-bindgen asserts on it. So the request runs as
+            // incarnation-owned work on the guest's own executor, and the caller awaits its
+            // answer over a channel, which any executor can poll. Nothing polls Dioxus tasks in
+            // a guest on their own wake, so once the answer is sent the views are marked dirty:
+            // the render pass that follows polls the woken caller.
+            #[cfg(feature = "guest")]
+            Self::Guest(runtime) => {
+                let (answer, answered) = futures::channel::oneshot::channel();
+                let views = Rc::clone(runtime);
+                runtime.spawn(Box::pin(async move {
+                    // A caller that stopped waiting (its view unmounted and dropped the
+                    // resource) has no use for the answer, so a closed channel is not an error.
+                    drop(answer.send(crate::guest::call(input).await));
+                    views.notify_views();
+                }));
+                answered
+                    .await
+                    .expect("a call's task lives until the incarnation closes, with its callers")
+            }
+        }
+    }
+
     fn spawn(&self, future: LocalFuture<()>) {
         match self {
             #[cfg(feature = "in_process")]
@@ -812,6 +877,10 @@ impl Context {
     /// be one the manifest declares as a presentation; admission checks that once `activate`
     /// returns, and nothing is reachable by other micros before then. Any number of
     /// presentations may be published, one per declared name.
+    ///
+    /// `render` runs once per mount, in a component scope of its own (like one instance of a
+    /// custom element): the hooks it calls are that mount's, and what it captures (collections,
+    /// facets, the micro's store) is shared by every mount.
     pub fn publish<P: ComponentDecl>(
         &self,
         render: impl Fn() -> dioxus_core::Element + 'static,
@@ -850,6 +919,20 @@ impl Context {
                 })
             }),
         )
+    }
+
+    /// Calls node method `M` and awaits its answer: the call API nodules have (`big_ndk::Cx::call`),
+    /// over the same transport (Clay on the node §3). A guest's call is a `wasi:http` request to
+    /// `dispatch.local`, which its host answers as this micro's actor, presenting the micro's own
+    /// capability. The micro holds no credential and names no identity; what it may call is what
+    /// the host granted it, and anything else is [`ClientError::Method`] carrying dispatch's
+    /// denial.
+    ///
+    /// The returned future may be polled by any executor, a view's Dioxus resource included: in
+    /// a guest the request itself runs on the incarnation's own task, and this future only
+    /// awaits its answer.
+    pub async fn call<M: Unary>(&self, input: M) -> Result<M::Output, ClientError<M::Error>> {
+        self.0.backend.call(input).await
     }
 
     /// Run `future` as incarnation-owned local work: it is dropped when this instance closes,
