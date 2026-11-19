@@ -43,3 +43,5 @@ pub use service::SampleService;
 #[cfg(test)]
 pub(crate) use service::TEST_TASK_MARKER;
 pub use service::boot;
+#[cfg(test)]
+pub(crate) use service::TEST_TASK_MARKER;
