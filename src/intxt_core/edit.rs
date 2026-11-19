@@ -13,7 +13,7 @@
 //! short id `show` prints is a prefix. The full form does not grow when entries come and go, so it
 //! is the same when the document is printed and when it is applied; the caller resolves any
 //! prefix that is unambiguous among the intxt's entries at apply time to the full form before
-//! [`EditDocument::plan`]. The heads in [`EditDocument::base`] (of the intxt's descriptor
+//! [`EditDocument::plan`]. The heads in [`EditDocument::base`] (of the intxt's index
 //! document, where the entries are written) pin the rest: a changed base is refused before any
 //! entry is read. The entry's summary is carried for the reader and checked on apply: an entry
 //! is added or removed, never rewritten.
@@ -249,7 +249,7 @@ pub struct EditDocument {
     /// The intxt: its `dtxt:doc:` reference. Applied to the intxt it names when none is named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intxt: Option<String>,
-    /// The heads of the intxt's descriptor document, where its title, description and entries
+    /// The heads of the intxt's index document, where its title, description and entries
     /// are written, at the time the document was printed. An intxt whose heads differ now has
     /// changed since, and the document is refused. Each is a base58 multibase hash. Required.
     pub base: Vec<String>,
