@@ -38,7 +38,9 @@ pub struct big_node::peers::Peers  {  }
 pub struct big_node::peers::PeersConfig  { loopback_only: bool, listen_port: Option < u16 >, policy: PolicyChoice, initial_backoff: Duration, max_backoff: Duration, sweep_interval: Duration }
 pub type big_node::HostedExecutor = (Arc < dyn NoduleExecutor > , service_utils_rs :: StopToken)
 pub use big_node::info :: GET_NODE_INFO
+pub use big_node::info :: GetNodeInfo
 pub use big_node::info :: NodeInfo
+pub use big_node::info :: NodeInfoError
 pub use big_node::listeners :: FdClients
 pub use big_node::listeners :: Listeners
 pub use big_node::listeners :: UnixClients
