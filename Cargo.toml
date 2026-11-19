@@ -361,6 +361,9 @@ web-sys = "0.3.104"
 # cli
 clap = "4.5"
 clap_complete = "4.5"
+clap_mangen = "0.3"
+clap-markdown = "0.1"
+shadow-rs = { version = "2", default-features = false }
 
 # 
 # networks

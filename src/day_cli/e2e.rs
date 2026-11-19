@@ -1009,6 +1009,21 @@ mod blackbox {
         );
     }
 
+    /// `--version` reports the build: the package version, then the commit it was built from
+    /// (shadow-rs), while `-V` stays the one-line version.
+    #[test]
+    fn the_long_version_names_the_commit_and_the_build() {
+        let sandbox = Sandbox::new();
+        let long = sandbox.day(&["--version"]);
+        let long = String::from_utf8_lossy(&long.stdout);
+        assert!(long.starts_with("day "), "{long}");
+        for field in ["branch:", "commit_hash:", "build_time:", "build_env:"] {
+            assert!(long.contains(field), "no {field} in {long}");
+        }
+        let short = sandbox.day(&["-V"]);
+        assert_eq!(String::from_utf8_lossy(&short.stdout).lines().count(), 1);
+    }
+
     /// A server killed without cleaning up leaves a socket and no lock: every command still
     /// works, and `node stop` and `node start` clean up after it.
     #[test]
