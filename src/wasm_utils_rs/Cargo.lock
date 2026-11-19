@@ -495,6 +495,7 @@ name = "clay_collection"
 version = "0.1.0"
 dependencies = [
  "clay_store",
+ "datum_core",
  "serde",
 ]
 
@@ -951,6 +952,16 @@ checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "datum_core"
+version = "0.1.0"
+dependencies = [
+ "const_format",
+ "indexmap 2.14.0",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

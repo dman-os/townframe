@@ -9,6 +9,7 @@
 //! through the path it is given with `runtime = …`.
 
 mod member;
+mod nsid;
 mod shape;
 mod value;
 mod wire;
@@ -20,6 +21,8 @@ pub use member::DatumMember;
 pub use member::is_nsid;
 pub use member::is_nsid_authority;
 pub use member::str_eq;
+pub use nsid::InvalidNsid;
+pub use nsid::Nsid;
 pub use shape::DatumShape;
 pub use shape::Openness;
 pub use shape::Shape;

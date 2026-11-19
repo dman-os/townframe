@@ -2813,6 +2813,7 @@ name = "clay_collection"
 version = "0.1.0"
 dependencies = [
  "clay_store",
+ "datum_core",
  "proptest",
  "serde",
  "serde_json",
