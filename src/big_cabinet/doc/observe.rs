@@ -127,10 +127,14 @@ impl DocsService {
                 .filter(|held| held.access >= at_least)
                 .map(|_| ())
                 .ok_or(DocsError::Denied),
-            DomainAuthority::Identity(actor) => {
+            DomainAuthority::Operator | DomainAuthority::Identity(_) => {
                 let readable = self
                     .access
-                    .readable_in_drawer(context, *actor, drawer_id)
+                    .readable_in_drawer(
+                        context,
+                        authority.holder().expect("not a scoped authority"),
+                        drawer_id,
+                    )
                     .await
                     .map_err(access_error)?;
                 if readable.is_none() {
@@ -324,7 +328,7 @@ impl DocsService {
         // The kinds the caller reaches each matching document at; an unreached one delivers
         // nothing.
         let kinds = match authority {
-            DomainAuthority::Identity(_) => None,
+            DomainAuthority::Operator | DomainAuthority::Identity(_) => None,
             DomainAuthority::Scoped(_) => Some(
                 Self::reach(
                     self.access.as_ref(),

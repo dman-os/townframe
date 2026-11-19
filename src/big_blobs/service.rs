@@ -12,7 +12,6 @@ use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::Rights;
-use big_cabinet_core::dmeta::Uuid7;
 use big_sync::keyed_frontier::SqliteFrontierCodec;
 use big_sync::keyed_frontier::SqliteFrontierSelector;
 use big_sync::keyed_frontier::SqliteKeyedFrontier;
@@ -147,8 +146,6 @@ pub struct Config {
     pub sql: Database,
     pub authority: Client<AuthorityProtocol>,
     pub namespace: Namespace,
-    /// The node operator: the one identity that may mint a blobs handle of any scope.
-    pub operator: Uuid7,
 }
 
 /// The prefix of every capability object this domain mints; the scope follows it as JSON.
@@ -187,7 +184,6 @@ pub struct BlobService {
     pub roots: PairRoots,
     pub(crate) ownership: ByteOwnership,
     capabilities: DomainCapabilities,
-    operator: Uuid7,
     availability: SqliteKeyedFrontier<AvailabilityCodec>,
     _owner: Option<std::fs::File>,
 }
@@ -306,7 +302,6 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
         roots,
         ownership,
         capabilities: DomainCapabilities::new(config.authority, config.namespace, SCOPE_PREFIX),
-        operator: config.operator,
         availability,
         _owner: owner,
     });
@@ -613,11 +608,11 @@ impl Handler<MintBlobsCapability> for BlobService {
         if !caller.rights.contains(Rights::USE) {
             return Err(BlobsError::Denied);
         }
-        // The operator's identity mints any scope; a scoped handle only a subset of its own. Any
-        // other identity is nobody this service knows. The rights subset and `NARROW` checks
+        // The operator's root capability mints any scope; a scoped handle only a subset of its
+        // own. Any other identity is nobody this service knows. The rights subset and `NARROW` checks
         // are `DomainCapabilities::mint`'s.
         match &caller.authority {
-            DomainAuthority::Identity(actor) if *actor == self.operator => {}
+            DomainAuthority::Operator => {}
             DomainAuthority::Identity(_) => return Err(BlobsError::Denied),
             DomainAuthority::Scoped(scope) if !scope.covers(&params.scope) => {
                 return Err(BlobsError::Denied);

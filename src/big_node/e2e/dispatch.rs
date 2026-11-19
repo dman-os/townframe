@@ -20,7 +20,7 @@ use big_nodule_core::protocol::NoduleRecord;
 use method_core::Method;
 use service_utils_rs::ClientError;
 
-/// The operator's identity narrowed to a dispatch handle that covers `scope` only.
+/// The operator's root capability narrowed to a dispatch handle that covers `scope` only.
 pub(super) async fn narrowed(node: &BigNode, scope: DispatchScope) -> Authorization {
     let operator = Authorization::identity(node.authority.root);
     let capability = node

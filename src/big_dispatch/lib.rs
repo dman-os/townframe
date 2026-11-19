@@ -38,7 +38,6 @@ use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::operation::OperationKind;
-use big_cabinet_core::dmeta::Uuid7;
 use big_dispatch_core::Body;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchMessage;
@@ -76,17 +75,14 @@ const SCOPE_PREFIX: &str = "DispatchService/scope/v1/";
 pub const MAX_JSON_BODY_OCTETS: u64 = 16 * 1024 * 1024;
 
 /// What the embedder hands the service: the authority it verifies and mints capabilities
-/// through, the operations namespace it mints in, and the operator whose identity may invoke
-/// anything.
+/// through, the operations namespace it mints in.
 pub struct DispatchConfig {
     pub authority: Client<AuthorityProtocol>,
     pub namespace: Namespace,
-    pub operator: Uuid7,
 }
 
 pub struct DispatchService {
     capabilities: DomainCapabilities,
-    operator: Uuid7,
     router: Arc<Router>,
 }
 
@@ -127,14 +123,14 @@ impl DispatchService {
         Ok(caller)
     }
 
-    /// What the caller may invoke: everything for the operator's identity, the scope of a handle
+    /// What the caller may invoke: everything for the operator's root capability, the scope of a handle
     /// this domain minted, nothing for any other identity (this domain keeps no grant table).
     fn scope_of<'a>(
         &self,
         caller: &'a Invocation<DispatchScope>,
     ) -> Res<Option<&'a DispatchScope>> {
         match &caller.authority {
-            DomainAuthority::Identity(actor) if *actor == self.operator => Ok(None),
+            DomainAuthority::Operator => Ok(None),
             DomainAuthority::Identity(_) => Err(DispatchError::Denied),
             DomainAuthority::Scoped(scope) => Ok(Some(scope)),
         }
@@ -498,7 +494,6 @@ pub fn boot(config: DispatchConfig) -> (Dispatch, StopToken) {
     let router = Arc::new(Router::default());
     let service = Arc::new(DispatchService {
         capabilities,
-        operator: config.operator,
         router: Arc::clone(&router),
     });
     let (host, host_stop) = Host::new(service);

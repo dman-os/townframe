@@ -76,6 +76,7 @@ use self::ledger::Ledger;
 use self::state::MetaDocRows;
 use self::state::State;
 use crate::authority::DomainAuthority;
+use crate::authority::Holder;
 use crate::capability::DomainCapabilities;
 use crate::capability::Invocation;
 use crate::grants::GrantError;
@@ -183,9 +184,6 @@ pub(crate) struct Projection {
     pub(crate) capabilities: DomainCapabilities,
     pub(crate) grants: Arc<Grants>,
     pub(crate) actor: Actor,
-    /// The authority's root identity, the node operator (ADR 033 section 5). It holds no
-    /// standing grants and needs none: see [`Projection::granted`].
-    pub(crate) operator: Uuid7,
     pub(crate) state: State,
     pub(crate) datum_set: Arc<crate::index::DatumSetStore>,
     pub(crate) ledger: Ledger,
@@ -299,11 +297,11 @@ impl Handler<MintDrawerCapability> for DrawerService {
         }
         let mut dependencies = Vec::new();
         for (drawer, access) in &params.scope.drawers {
-            match &caller.authority {
-                DomainAuthority::Identity(actor) => {
+            match caller.authority.holder() {
+                Some(holder) => {
                     let (held, proof) = self
                         .core
-                        .effective(&request.context, *actor, drawer)
+                        .effective(&request.context, holder, drawer)
                         .await?
                         .ok_or(DrawersError::Denied)?;
                     if held < *access {
@@ -311,7 +309,7 @@ impl Handler<MintDrawerCapability> for DrawerService {
                     }
                     dependencies.extend(proof);
                 }
-                DomainAuthority::Scoped(_) => {
+                None => {
                     self.core
                         .authorize(&request.context, &caller.authority, drawer, *access)
                         .await?;
@@ -508,23 +506,26 @@ impl Projection {
     pub(crate) async fn granted(
         &self,
         context: &RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         bounds: BTreeMap<DrawerId, state::Reach>,
     ) -> Result<Option<(Access, Vec<CapId>)>, DrawersError> {
-        // The operator is the cabinet's superuser: it holds Admin on every drawer this node
-        // projects without a standing grant, so what it reaches is what Admin on each bounding
-        // drawer reaches (a doc at the level it is entered, a drawer through its links). That is
-        // what lets the operator turn its own standing into a handle on a drawer that synced in
-        // from a peer, where no local grant exists for anyone. Its proof is the identity
-        // capability it presents, which every minted handle already depends on, so there is no
-        // grant to cite here.
-        if actor == self.operator {
-            return Ok(bounds
-                .values()
-                .filter_map(|bound| bound.apply(Access::Admin))
-                .max()
-                .map(|access| (access, Vec::new())));
-        }
+        // The operator, the holder of the authority's root capability, is the cabinet's
+        // superuser: it holds Admin on every drawer this node projects without a standing grant,
+        // so what it reaches is what Admin on each bounding drawer reaches (a doc at the level it
+        // is entered, a drawer through its links). That is what lets the operator turn its own
+        // standing into a handle on a drawer that synced in from a peer, where no local grant
+        // exists for anyone. Its proof is the root capability it presents, which every minted
+        // handle already depends on, so there is no grant to cite here.
+        let actor = match holder {
+            Holder::Operator => {
+                return Ok(bounds
+                    .values()
+                    .filter_map(|bound| bound.apply(Access::Admin))
+                    .max()
+                    .map(|access| (access, Vec::new())));
+            }
+            Holder::Actor(actor) => actor,
+        };
         let candidates: Vec<_> = bounds
             .iter()
             .flat_map(|(drawer, bound)| {
@@ -568,7 +569,7 @@ impl Core {
     pub(crate) async fn effective(
         &self,
         context: &RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         drawer: &DrawerId,
     ) -> Result<Option<(Access, Vec<CapId>)>, DrawersError> {
         let mut bounds = self
@@ -585,13 +586,13 @@ impl Core {
                 .await?;
         }
         bounds.insert(drawer.clone(), state::Reach::ordinary(Access::Admin));
-        self.granted(context, actor, bounds).await
+        self.granted(context, holder, bounds).await
     }
 
     pub(crate) async fn reach(
         &self,
         context: &RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         doc: &DocId,
     ) -> Result<Option<(Access, Vec<CapId>)>, DrawersError> {
         let mut bounds = self.state.ancestors(state::ScopeTarget::Doc(doc)).await?;
@@ -603,7 +604,7 @@ impl Core {
             }
             bounds = self.state.ancestors(state::ScopeTarget::Doc(doc)).await?;
         }
-        self.granted(context, actor, bounds).await
+        self.granted(context, holder, bounds).await
     }
 
     pub(crate) async fn level(
@@ -613,8 +614,12 @@ impl Core {
         drawer: &DrawerId,
     ) -> Result<Option<Access>, DrawersError> {
         match authority {
-            DomainAuthority::Identity(actor) => Ok(self
-                .effective(context, *actor, drawer)
+            DomainAuthority::Operator | DomainAuthority::Identity(_) => Ok(self
+                .effective(
+                    context,
+                    authority.holder().expect("not a scoped authority"),
+                    drawer,
+                )
                 .await?
                 .map(|(access, _)| access)),
             DomainAuthority::Scoped(scope) => {
@@ -647,8 +652,12 @@ impl Core {
         doc: &DocId,
     ) -> Result<Option<Access>, DrawersError> {
         match authority {
-            DomainAuthority::Identity(actor) => Ok(self
-                .reach(context, *actor, doc)
+            DomainAuthority::Operator | DomainAuthority::Identity(_) => Ok(self
+                .reach(
+                    context,
+                    authority.holder().expect("not a scoped authority"),
+                    doc,
+                )
                 .await?
                 .map(|(access, _)| access)),
             DomainAuthority::Scoped(scope) => {
@@ -685,7 +694,7 @@ impl Core {
         match authority {
             // The operator creates drawers without a grant, as it reaches every drawer without
             // one (see `Projection::granted`).
-            DomainAuthority::Identity(actor) if *actor == self.operator => Ok(Vec::new()),
+            DomainAuthority::Operator => Ok(Vec::new()),
             DomainAuthority::Identity(actor) => {
                 let proof = self
                     .grants

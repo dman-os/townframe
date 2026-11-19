@@ -233,7 +233,6 @@ impl Node {
             self.authority.client.clone(),
             self.drawers_actor.capability,
             self.drawers_namespace,
-            self.authority.service.operator_uuid(),
             self.sql.clone(),
             Arc::clone(&self.datum_set),
         )
@@ -388,7 +387,11 @@ impl Node {
         for drawer in drawers {
             let (access, _) = self
                 .core()
-                .effective(&RequestContext::root(), actor.actor.actor_id, drawer)
+                .effective(
+                    &RequestContext::root(),
+                    Holder::Actor(actor.actor.actor_id),
+                    drawer,
+                )
                 .await?
                 .ok_or(DrawersError::Denied)?;
             scope.drawers.insert((*drawer).clone(), access);
@@ -661,7 +664,11 @@ impl Node {
         for root in roots.keys() {
             if let Some((access, _)) = self
                 .core()
-                .effective(&RequestContext::root(), actor.actor.actor_id, root)
+                .effective(
+                    &RequestContext::root(),
+                    Holder::Actor(actor.actor.actor_id),
+                    root,
+                )
                 .await?
             {
                 scope.drawers.insert(root.clone(), access);
