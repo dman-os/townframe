@@ -10,6 +10,14 @@ pub fn setup_tracing_once() {
     });
 }
 
+/// Whether stderr gets ANSI colour: only on a terminal, and never when `NO_COLOR` is set
+/// (https://no-color.org: set and not empty). tracing's formatter colours unconditionally
+/// unless told otherwise, and so does color-eyre 0.6, so both are driven from here.
+pub(crate) fn stderr_colour() -> bool {
+    std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr())
+}
+
 /// Filter string for a subscriber: `env` (the `RUST_LOG`/`RUST_LOG_TEST` value) or else
 /// `default`, with `instr=off,` prepended. `INSTR` investigation probes log under the `instr`
 /// target and stay silent even when the env filter is a plain `info` or `debug`; `EnvFilter`
