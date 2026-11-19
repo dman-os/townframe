@@ -73,7 +73,9 @@ pub impl big_cartridges_core::config::GrantKey::const fn tag (& self) -> & 'stat
 pub impl big_cartridges_core::config::GrantKey::fn accepts (& self , body : & GrantBody) -> bool
 pub impl big_cartridges_core::config::GrantKey::fn datum_key (& self) -> DatumKey
 pub impl big_cartridges_core::config::GrantKey::fn from_datum_key (key : & DatumKey) -> Option < Self >
+pub impl big_cartridges_core::config::NetTarget::fn covers (& self , other : & Self) -> bool
 pub impl big_cartridges_core::config::NetTarget::fn host (& self) -> & str
+pub impl big_cartridges_core::config::NetTarget::fn names_this_machine_or_lan (& self) -> bool
 pub impl big_cartridges_core::config::NetTarget::fn new (host : & str , port : Option < u16 >) -> Result < Self , InvalidNetTarget >
 pub impl big_cartridges_core::config::NetTarget::fn port (& self) -> Option < u16 >
 pub impl big_cartridges_core::config::NetTarget::fn reaches (& self , host : & str , port : u16) -> bool
