@@ -8,6 +8,7 @@ mod interlude {
     pub use utils_rs::prelude::*;
 }
 
+mod cli;
 mod guardrails;
 mod plug;
 mod sql;
@@ -29,6 +30,7 @@ async fn main_main() -> Res<()> {
     use clap::Parser;
     match Args::parse().command {
         Commands::Sql { command } => sql::dispatch(&workspace_root().await?, command).await,
+        Commands::Cli { command } => cli::dispatch(&workspace_root().await?, command),
         Commands::Plug { command } => plug::dispatch(command).await,
         Commands::Guardrails { command } => guardrails::dispatch(&workspace_root().await?, command),
     }
@@ -76,6 +78,11 @@ enum Commands {
     Sql {
         #[command(subcommand)]
         command: sql::SqlCmd,
+    },
+    /// The `day` CLI's reference documentation: the Markdown reference and the man pages.
+    Cli {
+        #[command(subcommand)]
+        command: cli::CliCmd,
     },
     /// Plug packaging.
     Plug {
