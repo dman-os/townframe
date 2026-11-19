@@ -444,6 +444,9 @@ blitz-traits = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2c
 # gets its own slot, so in-process service hops (dispatch → drawers → docs → authority) piled
 # up frames of hundreds of KB: creating a drawer at boot peaked at 1.18 MB of a 2 MiB thread,
 # and 0.33 MB at opt-level 1.
+# Not day_cli: the binary crate is where edits land most, and at opt-level 1 a one-line edit
+# rebuilds it in about 55 s (LLVM passes and local ThinLTO) against about 20 s at opt-level 0.
+# The deep service hops whose frames needed slot reuse live in the crates below.
 [profile.dev.package.service_utils_rs]
 opt-level = 1
 [profile.dev.package.service_client_core_rs]
@@ -465,8 +468,6 @@ opt-level = 1
 [profile.dev.package.big_repo]
 opt-level = 1
 [profile.dev.package.big_sync]
-opt-level = 1
-[profile.dev.package.day_cli]
 opt-level = 1
 
 # Keep the application debuggable while optimizing the native UI hot path in dev.
