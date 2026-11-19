@@ -741,7 +741,13 @@ impl<F: FutureForm> DocWorker2<F> {
     #[tracing::instrument(skip_all)]
     async fn load_doc_snapshot(&self) -> eyre::Result<LoadedDocSnapshot> {
         let instr_start = std::time::Instant::now(); // INSTR
-        let (mut instr_cached, mut instr_causal, mut instr_causal_complete, mut instr_bytes, mut instr_covered) = (0usize, 0usize, 0usize, 0usize, 0usize); // INSTR
+        let (
+            mut instr_cached,
+            mut instr_causal,
+            mut instr_causal_complete,
+            mut instr_bytes,
+            mut instr_covered,
+        ) = (0usize, 0usize, 0usize, 0usize, 0usize); // INSTR
         let Some(mut tree) = self.io.hydrate_tree(self.sed_id).await? else {
             return Ok(LoadedDocSnapshot::Missing);
         };
@@ -817,13 +823,20 @@ impl<F: FutureForm> DocWorker2<F> {
             if !is_checkpoint
                 && let Some(plaintext) = self.decrypt_with_recovered_key(head, locator).await?
             {
-                instr_cached += 1; instr_bytes += plaintext.len(); // INSTR
+                instr_cached += 1;
+                instr_bytes += plaintext.len(); // INSTR
                 plaintexts.insert(head.as_bytes().to_vec(), plaintext);
                 continue;
             }
 
             let result = self.io.try_causal_decrypt(self.sed_id, locator).await?;
-            instr_causal += 1; instr_causal_complete += result.complete.len(); instr_bytes += result.complete.iter().map(|(_, plain)| plain.len()).sum::<usize>(); // INSTR
+            instr_causal += 1;
+            instr_causal_complete += result.complete.len();
+            instr_bytes += result
+                .complete
+                .iter()
+                .map(|(_, plain)| plain.len())
+                .sum::<usize>(); // INSTR
             {
                 let mut cache = self
                     .recovered_keys

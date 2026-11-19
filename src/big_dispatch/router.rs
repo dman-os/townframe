@@ -149,6 +149,9 @@ pub struct LexiconSource {
 pub struct Operation {
     pub kind: Option<OperationKind>,
     pub lexicon: Option<LexiconSource>,
+    /// The method's declaration says it is privileged (`XrpcMethod::privileged`): a scope
+    /// without `DispatchScope::privileged` cannot invoke it. Only a built-in declares one.
+    pub privileged: bool,
 }
 
 impl Operation {
@@ -157,6 +160,7 @@ impl Operation {
         Self {
             kind,
             lexicon: None,
+            privileged: false,
         }
     }
 }
@@ -202,6 +206,7 @@ impl fmt::Debug for Contract {
 pub struct ProviderEntry {
     pub provider_id: String,
     pub operation_kind: Option<OperationKind>,
+    pub privileged: bool,
     pub state: ProviderState,
     pub contract: Option<Arc<Contract>>,
 }
@@ -284,7 +289,17 @@ impl Router {
                 let Some(source) = &operation.lexicon else {
                     continue;
                 };
-                let carried: Vec<&Value> = source.carried.iter().collect();
+                // The node's own type libraries resolve for every operation, a nodule's or a
+                // built-in's, whatever the provider carried: a provider's copy of one is
+                // replaced by the node's (admission refused a differing one), so the library is
+                // carried exactly once.
+                let libraries = big_cabinet_core::reference::node_type_libraries();
+                let carried: Vec<&Value> = source
+                    .carried
+                    .iter()
+                    .filter(|file| !libraries.iter().any(|library| library["id"] == file["id"]))
+                    .chain(libraries)
+                    .collect();
                 let compiled =
                     MethodContract::compile(&source.file, &carried).map_err(|source| {
                         ContractError {
@@ -326,6 +341,7 @@ impl Router {
                     Arc::new(ProviderEntry {
                         provider_id: provider_id.to_owned(),
                         operation_kind: operation.kind,
+                        privileged: operation.privileged,
                         state: state.clone(),
                         contract: contracts.remove(nsid),
                     }),
@@ -356,6 +372,7 @@ impl Router {
                             .expect("reverse index names a claimed route");
                         operations.get(nsid).is_some_and(|operation| {
                             operation.kind == held.operation_kind
+                                && operation.privileged == held.privileged
                                 && *state == held.state
                                 // Lexicons only matter to a provider that is called.
                                 && (!matches!(state, ProviderState::Ready(_))

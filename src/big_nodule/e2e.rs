@@ -156,10 +156,6 @@ fn settings_of(thumbnails: bool) -> IndexMap<String, Value> {
         .collect()
 }
 
-/// The authority prefix the nodule service is granted dispatch over in these tests: no nodule can
-/// be granted anything outside it.
-const OPERATIONS_CEILING: &str = "org.example";
-
 /// The schemas the nodule config document and its test notes need.
 fn test_schemas() -> Arc<SchemaRepo> {
     Arc::new(
@@ -187,7 +183,8 @@ fn test_schemas() -> Arc<SchemaRepo> {
     )
 }
 
-/// The operator introduces the nodule service to dispatch over [`OPERATIONS_CEILING`]: a handle
+/// The operator introduces the nodule service to dispatch over every authority, privileged
+/// methods excepted, as `big_node` boots it: a handle
 /// bound to `nodules_actor`, with `DELEGATE` so the service can bind each nodule's own handle
 /// to that nodule.
 async fn grant_nodule_dispatch(
@@ -202,7 +199,7 @@ async fn grant_nodule_dispatch(
             Authorization::identity(authority.root).metadata(),
             MintDispatchCapability {
                 scope: DispatchScope {
-                    authorities: [OPERATIONS_CEILING.to_owned()].into(),
+                    authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
                     ..Default::default()
                 },
                 rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
@@ -237,7 +234,7 @@ struct Node {
     dispatch: Dispatch,
     dispatch_stop: StopToken,
     /// What the nodule service mints every nodule's dispatch handle from: the operator's grant of
-    /// everything under [`OPERATIONS_CEILING`].
+    /// every method that is not privileged.
     dispatch_authority: CapId,
     nodules: Nodules,
     executor: Option<Arc<dyn NoduleExecutor>>,

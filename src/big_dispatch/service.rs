@@ -51,6 +51,7 @@ type RouteFn = dyn Fn(RequestContext, HttpMetadata, Value) -> BoxFuture<'static,
 
 struct Route {
     kind: OperationKind,
+    privileged: bool,
     call: Box<RouteFn>,
 }
 
@@ -113,7 +114,14 @@ where
             }
             .boxed()
         });
-        let previous = self.routes.insert(operation.nsid, Route { kind, call });
+        let previous = self.routes.insert(
+            operation.nsid,
+            Route {
+                kind,
+                privileged: operation.privileged,
+                call,
+            },
+        );
         assert!(
             previous.is_none(),
             "operation {} is declared twice in one provider",
@@ -154,6 +162,7 @@ impl ServiceProvider {
                     (*nsid).to_owned(),
                     Operation {
                         kind: Some(route.kind),
+                        privileged: route.privileged,
                         lexicon: Some(LexiconSource {
                             file,
                             carried: Vec::new(),

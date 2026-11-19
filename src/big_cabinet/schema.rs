@@ -31,17 +31,13 @@ use big_cabinet_core::drawer::DrawerSuccessor;
 use big_cabinet_core::drawer::KnownDrawerEntry;
 use big_cabinet_core::drawer::SelfDocLayout;
 use big_cabinet_core::drawer::SingleGroupLayout;
-use big_cabinet_core::reference::DEFS_NSID;
+use big_cabinet_core::reference::node_type_libraries;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::RwLock;
 use thiserror::Error;
-
-/// The reference defs Lexicon ([`big_cabinet_core::reference::defs_lexicon`]), carried for every
-/// registration.
-static DEFS: LazyLock<Value> = LazyLock::new(big_cabinet_core::reference::defs_lexicon);
 
 static CORE: LazyLock<Universe> = LazyLock::new(|| {
     Universe::collect([
@@ -84,7 +80,7 @@ fn core_schemas() -> impl Iterator<Item = SchemaHandle> {
             .enumerate()
             .filter(|(other, _)| *other != index)
             .map(|(_, other)| &other.file)
-            .chain(std::iter::once(&*DEFS))
+            .chain(node_type_libraries())
             .collect();
         let compiled = bundle
             .validate_lexicon(&datum.id, &lexicon.file, &carried)
@@ -250,13 +246,17 @@ impl KnownSchemas {
     ) -> Result<(), SchemaRepoError> {
         let known = &mut self.known;
         for group in groups {
-            if let Some(copy) = group
-                .carried_lexicons
-                .iter()
-                .find(|file| file.get("id").and_then(Value::as_str) == Some(DEFS_NSID))
-                && copy != &*DEFS
-            {
-                return Err(SchemaRepoError::ConflictingDefs(DEFS_NSID.to_owned()));
+            for library in node_type_libraries() {
+                if let Some(copy) = group
+                    .carried_lexicons
+                    .iter()
+                    .find(|file| file.get("id") == library.get("id"))
+                    && copy != library
+                {
+                    return Err(SchemaRepoError::ConflictingDefs(
+                        library["id"].as_str().unwrap_or_default().to_owned(),
+                    ));
+                }
             }
             let mut tags = std::collections::BTreeSet::new();
             for registration in &group.registrations {
@@ -282,13 +282,18 @@ impl KnownSchemas {
                 if known.contains_key(tag) {
                     return Err(SchemaRepoError::DuplicateDatumTag(tag.clone()));
                 }
-                // The reference defs are carried for every registration, so any Lexicon can refer to
-                // them. A group's own copy is a vendored one and must be the node's.
+                // The node's type libraries (the reference defs) are carried for every
+                // registration, so any Lexicon can refer to them. A group's own copy is a
+                // vendored one and must be the node's.
                 let carried: Vec<_> = group
                     .carried_lexicons
                     .iter()
-                    .filter(|file| file.get("id").and_then(Value::as_str) != Some(DEFS_NSID))
-                    .chain(std::iter::once(&*DEFS))
+                    .filter(|file| {
+                        !node_type_libraries()
+                            .iter()
+                            .any(|library| library.get("id") == file.get("id"))
+                    })
+                    .chain(node_type_libraries())
                     .chain(
                         group
                             .registrations

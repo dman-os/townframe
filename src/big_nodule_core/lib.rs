@@ -121,8 +121,10 @@ pub struct Handler {
 /// A nodule's datum Lexicons split for the schema registry: see [`Nodule::registrable_datums`].
 #[derive(Debug, Default)]
 pub struct RegistrableDatums<'a> {
-    /// `(nsid, file, sidecar)` of each record the nodule holds; see [`Nodule::sidecar`].
+    /// `(nsid, file, sidecar)` of each datum the nodule holds: a `main` that is a record or an
+    /// object, under its authority; see [`Nodule::sidecar`].
     pub held: Vec<(&'a str, &'a IndexMap<String, Value>, Option<&'a Value>)>,
+    /// Every other datum file: a type library (no `main`), or a datum outside the authority.
     pub carried: Vec<&'a IndexMap<String, Value>>,
 }
 
@@ -290,6 +292,10 @@ impl Nodule {
                 .map(|nsid| (*nsid).to_owned())
                 .collect(),
             authorities: BTreeSet::new(),
+            // Privilege is not narrowed by the manifest (a request names a method, not its
+            // declaration), so a grant that asks for it carries it through; the mint then
+            // refuses it unless the nodule service itself holds it.
+            privileged: grants.privileged,
         };
         let unrequested = DispatchScope {
             operations: grants
@@ -308,6 +314,7 @@ impl Nodule {
                 })
                 .cloned()
                 .collect(),
+            privileged: false,
         };
         (applied, unrequested)
     }
@@ -363,11 +370,12 @@ impl Nodule {
     }
 
     /// The datum Lexicons this nodule brings to the node's schema registry, split for
-    /// registration under the envelope's `authority`: the records it holds (under the authority,
-    /// a `main` record) are its to register; every other datum file is carried so the held ones
-    /// can resolve references to vendored copies and shared type libraries, but is never
-    /// registered by this nodule. A vendored copy of a record is the holder's to register, so
-    /// registering it here would shadow the holder's.
+    /// registration under the envelope's `authority`: the datums it holds (under the authority,
+    /// a datum Lexicon, whose `main` is a record or an object) are its to register; every other
+    /// file is carried so the held ones can resolve references to vendored copies and shared type
+    /// libraries, but is never registered by this nodule. A Lexicon without a `main` datum is a
+    /// type library and is always carried. A vendored copy of a datum is the holder's to register,
+    /// so registering it here would shadow the holder's.
     pub fn registrable_datums(&self, authority: Option<&str>) -> RegistrableDatums<'_> {
         let mut split = RegistrableDatums::default();
         for file in self.datum_lexicons() {
@@ -375,13 +383,17 @@ impl Nodule {
                 .get("id")
                 .and_then(Value::as_str)
                 .expect("admission checked every Lexicon states its NSID");
-            let is_record = file
-                .get("defs")
-                .and_then(|defs| defs.get("main"))
-                .and_then(|main| main.get("type"))
-                .and_then(Value::as_str)
-                == Some("record");
-            if is_record
+            // Rust-declared datums publish an `object` main (their stored values carry no
+            // `$type`, which a Lexicon `record` would require); hand-written ones may state a
+            // `record`. Either is a datum; a file with no `main` is a type library.
+            let is_datum = matches!(
+                file.get("defs")
+                    .and_then(|defs| defs.get("main"))
+                    .and_then(|main| main.get("type"))
+                    .and_then(Value::as_str),
+                Some("record" | "object")
+            );
+            if is_datum
                 && authority.is_some_and(|authority| DispatchScope::authority_owns(authority, id))
             {
                 split.held.push((id, file, self.sidecar.get(id)));
@@ -558,6 +570,19 @@ impl<'a> Admission<'a> {
                 .get("id")
                 .and_then(Value::as_str)
                 .expect("lexicons() verified every file states its NSID");
+            if let Some(library) = provided_library(id) {
+                let copy =
+                    Value::Object(file.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+                if copy != *library {
+                    return Err(NoduleError::invalid(
+                        format!("lexicons[{index}]"),
+                        format!(
+                            "`{id}` is a type library the node provides; a vendored copy must equal the node's"
+                        ),
+                    ));
+                }
+                continue;
+            }
             if !self.owns(id) && !self.is_requested(id) && !self.implemented.contains(id) {
                 return Err(NoduleError::invalid(
                     format!("lexicons[{index}].id"),
@@ -802,6 +827,18 @@ impl<'a> Admission<'a> {
                 ));
             }
         };
+        // A type library the node provides is always resolved, requested or not.
+        if let Some(library) = provided_library(file) {
+            let def = def.unwrap_or("main");
+            return if library["defs"].get(def).is_some() {
+                Ok(())
+            } else {
+                Err(NoduleError::invalid(
+                    path,
+                    format!("`{file}` declares no definition `{def}`"),
+                ))
+            };
+        }
         if !self.owns(file) {
             return if self.is_requested(file) || self.implemented.contains(file) {
                 Ok(())
@@ -884,6 +921,14 @@ impl<'a> Admission<'a> {
             },
         }
     }
+}
+
+/// The type library the node provides under `nsid`, if it is one (see
+/// [`node_type_libraries`](big_cabinet_core::reference::node_type_libraries)).
+fn provided_library(nsid: &str) -> Option<&'static Value> {
+    big_cabinet_core::reference::node_type_libraries()
+        .iter()
+        .find(|library| library["id"] == nsid)
 }
 
 struct LexiconFile<'a> {

@@ -461,6 +461,84 @@ async fn a_request_without_a_credential_is_unauthenticated() {
     h.shutdown().await;
 }
 
+/// A scope that names every authority still reaches no privileged method, a scope reaches one only
+/// when it says `privileged`, and the bit attenuates like the names do: a handle without it cannot
+/// mint one with it, while minting a narrower handle still works.
+#[tokio::test]
+async fn privilege_is_a_scope_bit_that_names_cannot_confer() {
+    const SENSITIVE: &str = "org.example.admin.setGrants";
+    let h = harness().await;
+    let echo = h.register_echo();
+    h.dispatch
+        .router
+        .register(
+            "admin",
+            [(
+                SENSITIVE.to_owned(),
+                Operation {
+                    privileged: true,
+                    ..Operation::unchecked(Some(OperationKind::Query))
+                },
+            )],
+            ProviderState::Ready(ProviderKind::BuiltIn(echo as Arc<dyn Provider>)),
+        )
+        .unwrap();
+    let operator = h.operator();
+
+    let everything = h
+        .mint_dispatch(operator, authorities(&[DispatchScope::ALL_AUTHORITIES]))
+        .await
+        .unwrap();
+    assert!(h.invoke(everything, ECHO, json!({})).await.is_ok());
+    assert_eq!(
+        h.invoke(everything, SENSITIVE, json!({})).await,
+        Err(DispatchError::Denied)
+    );
+    // Naming the method exactly is no more than naming its authority.
+    let named = h
+        .mint_dispatch(
+            operator,
+            DispatchScope {
+                operations: [SENSITIVE.to_owned()].into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        h.invoke(named, SENSITIVE, json!({})).await,
+        Err(DispatchError::Denied)
+    );
+
+    // Only a handle that holds the bit can mint one with it.
+    let privileged = DispatchScope {
+        privileged: true,
+        ..authorities(&[DispatchScope::ALL_AUTHORITIES])
+    };
+    assert_eq!(
+        h.mint_dispatch(everything, privileged.clone()).await,
+        Err(DispatchError::Denied)
+    );
+    let holder = h.mint_dispatch(operator, privileged).await.unwrap();
+    assert!(h.invoke(holder, SENSITIVE, json!({})).await.is_ok());
+    // Narrowing still works from either, and a narrowed handle of the holder keeps the bit only
+    // if it asks for it.
+    let narrowed = h
+        .mint_dispatch(everything, authorities(&["org.example.echo"]))
+        .await
+        .unwrap();
+    assert!(h.invoke(narrowed, ECHO, json!({})).await.is_ok());
+    let dropped = h
+        .mint_dispatch(holder, authorities(&["org.example.admin"]))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.invoke(dropped, SENSITIVE, json!({})).await,
+        Err(DispatchError::Denied)
+    );
+    h.shutdown().await;
+}
+
 /// The adapter, exercised on dispatch's own protocol: serving `Client<DispatchProtocol>` as a
 /// provider makes `mintCapability` reachable by NSID through an `Invoke`. The caller holds one
 /// credential: dispatch admits it for the NSID, then hands it on as the request's `Authorization`
@@ -572,6 +650,7 @@ impl Harness {
         }}});
         let operation = |kind, file| Operation {
             kind: Some(kind),
+            privileged: false,
             lexicon: Some(LexiconSource {
                 file,
                 carried: Vec::new(),
@@ -724,6 +803,79 @@ async fn the_wrong_http_verb_for_a_methods_kind_is_invalid() {
             panic!("{operation}: the wrong verb is refused");
         };
         assert!(message.contains(expected), "{message}");
+    }
+    h.shutdown().await;
+}
+
+/// A cartridge's operation that refers to the node's reference defs is checked with them
+/// resolved, whether the provider carried no copy or carried the node's own: the input's
+/// reference is validated as a reference (a malformed one is refused at its path), not left as
+/// an unresolved `ref` that no object satisfies.
+#[tokio::test]
+async fn an_operation_referring_to_the_nodes_reference_defs_is_validated_with_them() {
+    let h = harness().await;
+    for (nsid, carried) in [
+        ("org.example.contract.tagBare", Vec::new()),
+        (
+            "org.example.contract.tagVendored",
+            vec![big_cabinet_core::reference::defs_lexicon()],
+        ),
+    ] {
+        let tag = json!({"lexicon": 1, "id": nsid, "defs": {"main": {
+            "type": "procedure",
+            "input": {"encoding": "application/json", "schema": {
+                "type": "object", "required": ["part"],
+                "properties": {"part": {"type": "ref", "ref": "org.example.daybook.defs#datumRef"}}
+            }},
+            "output": {"encoding": "application/json", "schema": {"type": "object", "properties": {}}},
+        }}});
+        let canned = Arc::new(Canned {
+            output: json!({}),
+            seen: Default::default(),
+        });
+        h.dispatch
+            .router
+            .register(
+                nsid,
+                [(
+                    nsid.to_owned(),
+                    Operation {
+                        kind: Some(OperationKind::Procedure),
+                        privileged: false,
+                        lexicon: Some(LexiconSource { file: tag, carried }),
+                    },
+                )],
+                ProviderState::Ready(ProviderKind::BuiltIn(
+                    Arc::clone(&canned) as Arc<dyn Provider>
+                )),
+            )
+            .unwrap();
+        let valid = json!({"part": "dtxt:datum:self/org.example.note/one"});
+        h.invoke(h.operator(), nsid, valid.clone()).await.unwrap();
+        assert_eq!(*canned.seen.lock().unwrap(), [valid], "{nsid}");
+        let Err(DispatchError::InvalidInput(message)) =
+            h.invoke(h.operator(), nsid, json!({"part": 7})).await
+        else {
+            panic!("{nsid}: a value that is not a reference is refused");
+        };
+        // Refused against the def's own `string` shape at the field's path: unresolved, the
+        // `ref` would have been judged as an `object` (the error a cartridge that neither
+        // requested nor vendored the defs used to see).
+        assert!(message.contains("/part"), "{nsid}: {message}");
+        assert!(message.contains(r#"of type "string""#), "{nsid}: {message}");
+        // A string that is not a URI is refused at the same path by the def's `format: "uri"`,
+        // which an operation's compilation keeps: dispatch has no reference walk to refuse it.
+        let Err(DispatchError::InvalidInput(message)) = h
+            .invoke(h.operator(), nsid, json!({"part": "not a reference"}))
+            .await
+        else {
+            panic!("{nsid}: a string that is not a URI is refused");
+        };
+        assert!(message.contains("/part"), "{nsid}: {message}");
+        assert!(
+            !message.contains("of type"),
+            "{nsid}: refused by the format, not as a type error: {message}"
+        );
     }
     h.shutdown().await;
 }

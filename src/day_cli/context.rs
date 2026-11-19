@@ -17,7 +17,6 @@
 
 use crate::interlude::*;
 
-use big_dispatch_core::DispatchScope;
 use big_node::BigNode;
 use big_node::Listeners;
 use secrets_rs::SecretStore;
@@ -86,10 +85,6 @@ pub struct NodeSettings {
     version: u32,
     /// 32 bytes, lowercase hex.
     identity_seed: String,
-    /// The operator's grant of dispatch to the nodule service: the ceiling of what any nodule
-    /// can be granted to invoke. Empty (the default) lets nodules invoke nothing.
-    #[serde(default)]
-    pub nodule_operations: DispatchScope,
     /// The node's network attachment. Absent: the daemon attaches none, so the node neither
     /// dials nor can be dialed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -255,7 +250,6 @@ impl NodeDir {
         let settings = NodeSettings {
             version: NodeSettings::VERSION,
             identity_seed: data_encoding::HEXLOWER.encode(&seed),
-            nodule_operations: DispatchScope::default(),
             peers: None,
             relay: false,
         };
@@ -491,7 +485,6 @@ impl Booted {
             secrets: Arc::clone(&secrets),
             index_concurrency: std::num::NonZeroUsize::new(2).expect("two is not zero"),
             blob_storage: bindings.blobs,
-            nodule_operations: settings.nodule_operations,
             listeners,
             peers,
         };

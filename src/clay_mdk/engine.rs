@@ -6,11 +6,11 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use clay_dioxus::RenderGuard;
 use clay_guest_session::InitialContext;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::DeclaredPublication;
 use clay_guest_session::capabilities::PublicationKind;
-use clay_dioxus::RenderGuard;
 use clay_host::Activator;
 use clay_host::ComponentRef;
 use clay_host::Factory;

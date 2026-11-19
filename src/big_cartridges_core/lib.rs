@@ -173,6 +173,18 @@ impl Cartridge {
                         ));
                     }
                     check_schema(&path, &micro.schema)?;
+                    if micro.component.is_empty() {
+                        return Err(CartridgeError::invalid(
+                            format!("{path}.component"),
+                            "a micro names the artifact key of its component",
+                        ));
+                    }
+                    if self.artifact(&micro.component).is_none() {
+                        return Err(CartridgeError::invalid(
+                            format!("{path}.component"),
+                            format!("`{}` is not an artifact of this cartridge", micro.component),
+                        ));
+                    }
                 }
                 Contribution::Unknown(_) => {}
             }
@@ -272,14 +284,20 @@ pub struct NoduleContribution {
 }
 
 /// `org.example.daybook.cartridge.micro`: the package's one GUI contribution. It has no key of its own:
-/// the micro's identity is the cartridge id it is installed as. `schema` is the id of the description
-/// the payload conforms to, and `description` is Clay's manifest minus the members the envelope
-/// already states (`id`, `package_version`).
+/// the micro's identity is the cartridge id it is installed as.
+///
+/// `component` is the key of the [`Artifact`] holding the micro's wasm component; it is the one
+/// member the catalog and the host loader read, so it is typed and [`Cartridge::validate`] checks
+/// the artifact exists. `schema` is the id of the manifest format `description` conforms to, and
+/// `description` is Clay's manifest minus the members the envelope already states (`id`,
+/// `package_version`). Clay's runtime owns that manifest's interpretation, so the catalog carries
+/// it as an open object and does not depend on Clay's crates.
 #[macros::datum(authority = Cartridge::ID, name = "micro")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MicroContribution {
+    pub component: String,
     pub schema: String,
     pub description: IndexMap<String, serde_json::Value>,
     #[serde(flatten)]
