@@ -8,12 +8,9 @@
 //! they move to a shared vocabulary, informed by the atproto community's generic lexicons
 //! (`docs/scratch/atproto-generic-lexicons.md`), and every stored datum's tag is migrated.
 
-use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::DocId;
-use big_cabinet_core::Location;
-use big_cabinet_core::ReferenceDocId;
-use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::DocReference;
 use big_cabinet_core::datum::Extra;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -42,28 +39,29 @@ impl Default for Intxt {
 
 impl Intxt {
     /// The text that names an intxt outside the node, such as a line in a GitHub PR description:
-    /// a reference to this marker in the intxt's descriptor document,
-    /// `dtxt:datum:<drawer id>/org.example.intxt/main`. A drawer is named by its descriptor
-    /// document's id, which is the same on every node, so the text resolves on any node the drawer
-    /// is shared with.
-    pub fn reference(drawer: &DocId) -> DatumReference {
-        DatumReference::new(
-            ReferenceDocId::Concrete(drawer.clone()),
-            DatumKey::new(Self::ID, "main").expect("the marker's key is a valid datum key"),
-        )
+    /// a reference to its descriptor document, `dtxt:doc:<drawer id>` (ADR 035 §3). An intxt is
+    /// named by its descriptor document, whose id is the drawer id and is the same on every node,
+    /// so the text resolves on any node the drawer is shared with.
+    pub fn reference(drawer: &DocId) -> DocReference {
+        DocReference::new(drawer.clone())
     }
 
-    /// The intxts `text` names with [`Self::reference`], in order of first mention and each once.
+    /// The documents `text` names with [`Self::reference`], in order of first mention and each
+    /// once.
     ///
     /// A PR and its intxts are many to many: an intxt holds any number of PRs' commits, and a PR
     /// description names every intxt it belongs to, one reference each. A reference ends at
     /// whitespace or at the markdown punctuation that can close it (`)`, `]`, `>`, a backtick, a
-    /// quote), and sentence punctuation right after it is not part of it. A pin or a fragment on
-    /// the reference still names the intxt. Text that is not a reference, or a reference to any
-    /// other datum, is ignored.
+    /// quote), and sentence punctuation right after it is not part of it. A pin on the reference
+    /// still names the document. Text that is not a `dtxt:doc:` reference, such as a datum
+    /// reference, is ignored.
+    ///
+    /// A doc reference names any document, and telling an intxt's descriptor from another document
+    /// takes a read this pure function cannot make. A caller that needs intxts checks each id
+    /// against its drawers and treats a document that is not an intxt as not found.
     pub fn named_in(text: &str) -> Vec<DocId> {
         let mut named = Vec::new();
-        for (start, _) in text.match_indices("dtxt:datum:") {
+        for (start, _) in text.match_indices("dtxt:doc:") {
             let rest = &text[start..];
             let end = rest
                 .find(|c: char| {
@@ -71,18 +69,11 @@ impl Intxt {
                 })
                 .unwrap_or(rest.len());
             let candidate = rest[..end].trim_end_matches(['.', ',', ';', ':']);
-            let Ok(location) = Location::parse(candidate) else {
+            let Ok(reference) = DocReference::parse(candidate) else {
                 continue;
             };
-            let reference = location.into_reference();
-            let ReferenceDocId::Concrete(drawer) = reference.document() else {
-                continue;
-            };
-            if reference.key().tag().as_str() == Self::ID
-                && reference.key().slot_bytes() == b"main"
-                && !named.contains(drawer)
-            {
-                named.push(drawer.clone());
+            if !named.contains(reference.document()) {
+                named.push(reference.document().clone());
             }
         }
         named
