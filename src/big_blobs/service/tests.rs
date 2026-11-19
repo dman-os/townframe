@@ -603,3 +603,136 @@ async fn filesystem_boot_discards_provenance_after_committed_last_release_before
     stop.stop().await;
     Ok(())
 }
+
+/// A drawer reach reads exactly the blobs pinned in a `blobInventory` meta doc of that drawer:
+/// any of its inventories, on either root, whatever they are named, and nothing else.
+#[tokio::test]
+async fn a_drawer_reach_reads_exactly_the_blobs_its_inventories_pin() -> Res<()> {
+    use big_cabinet_core::drawer::DrawerAccess;
+    let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+    let sql = runtime.ephemeral(&[])?;
+    sql.apply_migrations(
+        "test_drawers",
+        &[
+            sqlite_rs::Migration {
+                version: 1,
+                name: "drawers",
+                sql: include_str!("../../big_cabinet/drawer/sqlite/migrations/001_drawers.sql"),
+            },
+            sqlite_rs::Migration {
+                version: 2,
+                name: "metadata",
+                sql: include_str!(
+                    "../../big_cabinet/drawer/sqlite/migrations/003_meta_doc_roots.sql"
+                ),
+            },
+        ],
+    )
+    .await?;
+    let (admission, admission_stop) = crate::admission::Admission::boot(sql.clone()).await?;
+    let (blobs, stop) = boot(Config {
+        storage: Storage::memory().unwrap(),
+        sql: sql.clone(),
+        authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+        operator: Uuid7::new(),
+        namespace: Namespace {
+            namespace_id: Uuid7::new(),
+            capability: CapId::from_bytes([7; 16]),
+        },
+    })
+    .await?;
+    let drawer = big_cabinet_core::DocId::new([1; 32]);
+    let other_drawer = big_cabinet_core::DocId::new([2; 32]);
+    let blob = |byte: u8| BlobId::new([byte; 32]);
+    // Three inventories on `drawer` (a default one and a second, differently named one on the
+    // sensitive root, plus a public one) and one on `other_drawer`.
+    for (owner, root, name, inventory, pinned) in [
+        (&drawer, "public", "ciphertext", [11; 32], blob(21)),
+        (&drawer, "sensitive", "plaintext", [12; 32], blob(22)),
+        (&drawer, "sensitive", "intxt-bob", [13; 32], blob(23)),
+        (&other_drawer, "public", "ciphertext", [14; 32], blob(24)),
+    ] {
+        let inventory = big_cabinet_core::DocId::new(inventory);
+        sql.execute(
+            "INSERT INTO big_cabinet_drawer_meta_docs (drawer_id, root, kind, name, doc_id) VALUES (?, ?, 'blobInventory', ?, ?)",
+            (owner.to_string(), root, name, inventory.to_string()),
+        )
+        .await?;
+        admission
+            .pins(
+                &inventory,
+                1,
+                &std::collections::BTreeMap::from([(pinned, 5)]),
+                true,
+            )
+            .await?;
+    }
+    // A meta doc of another kind on the drawer pins nothing a handle may read.
+    sql.execute(
+        "INSERT INTO big_cabinet_drawer_meta_docs (drawer_id, root, kind, name, doc_id) VALUES (?, 'public', 'other', 'x', ?)",
+        (drawer.to_string(), big_cabinet_core::DocId::new([15; 32]).to_string()),
+    )
+    .await?;
+    admission
+        .pins(
+            &big_cabinet_core::DocId::new([15; 32]),
+            1,
+            &std::collections::BTreeMap::from([(blob(25), 5)]),
+            true,
+        )
+        .await?;
+
+    let scope = |drawer_access: &[(&big_cabinet_core::DocId, DrawerAccess)]| BlobsScope {
+        drawers: drawer_access
+            .iter()
+            .map(|(drawer, access)| ((*drawer).clone(), *access))
+            .collect(),
+        ..Default::default()
+    };
+    let reading = scope(&[(&drawer, DrawerAccess::Read)]);
+    for held in [21, 22, 23] {
+        blobs
+            .service
+            .authorize_read(&reading, &blob(held))
+            .await
+            .unwrap();
+    }
+    // Another drawer's blob, a blob of a non-inventory meta doc, and an uninventoried blob.
+    for refused in [24, 25, 99] {
+        assert_eq!(
+            blobs.service.authorize_read(&reading, &blob(refused)).await,
+            Err(BlobsError::Denied),
+            "blob {refused}"
+        );
+    }
+    // A reach below `Read` reads nothing, and a named blob is read whatever the drawers.
+    let relay = scope(&[(&drawer, DrawerAccess::Relay)]);
+    assert_eq!(
+        blobs.service.authorize_read(&relay, &blob(21)).await,
+        Err(BlobsError::Denied)
+    );
+    let named = BlobsScope {
+        read: std::collections::BTreeSet::from([blob(24)]),
+        ..relay
+    };
+    blobs
+        .service
+        .authorize_read(&named, &blob(24))
+        .await
+        .unwrap();
+    // Reaching both drawers reads both.
+    let both = scope(&[
+        (&drawer, DrawerAccess::Write),
+        (&other_drawer, DrawerAccess::Read),
+    ]);
+    blobs
+        .service
+        .authorize_read(&both, &blob(24))
+        .await
+        .unwrap();
+
+    drop(blobs);
+    stop.stop().await;
+    admission_stop.stop().await;
+    Ok(())
+}

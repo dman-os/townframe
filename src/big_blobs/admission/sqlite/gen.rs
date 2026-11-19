@@ -68,6 +68,12 @@ pub async fn dirty(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult
     set.all()
 }
 
+pub const DRAWER_HOLDS_BLOB_SQL: &str = include_str!("queries/drawer_holds_blob.sql");
+pub async fn drawer_holds_blob(db: &impl crate::sqlite_rs_alias::QueryExecutor, drawer_id: String, inventory_kind: String, digest: String) -> SqlResult<Vec<i64>> {
+    let set = db.query(DRAWER_HOLDS_BLOB_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id), crate::sqlite_rs_alias::IntoValue::into_value(inventory_kind), crate::sqlite_rs_alias::IntoValue::into_value(digest)]).await?;
+    set.all()
+}
+
 pub const DRAWERS_FOR_ROOTS_SQL: &str = include_str!("queries/drawers_for_roots.sql");
 pub async fn drawers_for_roots(db: &impl crate::sqlite_rs_alias::QueryExecutor, roots: String) -> SqlResult<Vec<String>> {
     let set = db.query(DRAWERS_FOR_ROOTS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(roots)]).await?;
