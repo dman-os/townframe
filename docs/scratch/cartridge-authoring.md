@@ -7,7 +7,7 @@ Scope: How an author writes a cartridge with micros, nodules, or both. Drafted b
 
 ## Where things stand
 
-- **Cartridge manifests.** `big_cartridges_core::Cartridge` holds `Contribution::Nodule` and `Contribution::Micro`, so one cartridge can ship either or both. `MicroContribution` is an opaque description today, not clay_mdk's typed `MicroManifest`.
+- **Cartridge manifests.** `big_cartridges_core::Cartridge` holds `Contribution::Nodule` and `Contribution::Micro`, so one cartridge can ship either or both. `MicroContribution` types the one member the catalog and host loader read, `component` (the key of the wasm artifact, checked by `Cartridge::validate`); Clay's manifest stays an open `description` object, not clay_mdk's typed `MicroManifest`, so the catalog does not depend on Clay.
 - **Micros** are authored against `clay_mdk`: a context object, `export_micro!`, native and guest backends. They reach documents only through Clay's own WIT (`townframe:dayframe/documents`, facet-based), with no network egress. Lane T1 is replacing the stringly constants and loose-const manifest crates with typed declarations: each declared type carries its NSID, `ctx.call::<Op>()`, and schemas come from the datum macro.
 - **Nodules** have no authoring kit. The one nodule is `src/test_nodule_guest`, a raw `wasi:http/handler@0.3.0` component. It parses the capability, idempotency and deadline headers by hand and calls other operations through `http://dispatch.local/xrpc/<nsid>`. Its manifest is built in test code (`big_node/e2e/nodule_wasm.rs::cartridge`).
 - **Typed service calls already exist** on the native side:

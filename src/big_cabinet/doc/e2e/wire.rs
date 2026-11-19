@@ -16,6 +16,7 @@ use big_cabinet_core::dmeta::ClaimOperation;
 use big_cabinet_core::dmeta::DatumClaim;
 use big_cabinet_core::dmeta::DatumSignature;
 use big_cabinet_core::dmeta::MultibaseKey;
+use big_cabinet_core::dmeta::ResourceLimit;
 use big_cabinet_core::dmeta::SignatureBytes;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::dmeta::cid_of;
@@ -411,6 +412,15 @@ fn docs_error_wire() {
             "error_set_and_removed",
             DocsError::SetAndRemoved {
                 datum_key: key("main"),
+            },
+        ),
+        (
+            "error_value_too_large",
+            DocsError::ValueTooLarge {
+                datum_key: key("main"),
+                limit: ResourceLimit::Bytes,
+                observed: 16_777_217,
+                maximum: 16_777_216,
             },
         ),
         (

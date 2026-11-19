@@ -16,11 +16,7 @@ expression: claims_inspection()
         "status": "verifiedSignature",
         "evidence": {
           "signature": {
-            "actorUuid": "02020202-0202-7202-8202-020202020202",
-            "signature": {
-              "$bytes": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw=="
-            },
-            "docUuid": "03030303-0303-7303-8303-030303030303"
+            "$bytes": "AQICAgICAnICggICAgICAgIDAwMDAwNzA4MDAwMDAwMDBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw=="
           },
           "actorPublicKey": "zYMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
           "claim": {

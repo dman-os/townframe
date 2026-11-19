@@ -123,6 +123,7 @@ use big_cabinet_core::dmeta::DmetaWrite;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
 use big_cabinet_core::dmeta::NativeReadBudget;
+use big_cabinet_core::dmeta::NativeReadError;
 use big_cabinet_core::dmeta::NativeValue;
 use big_cabinet_core::dmeta::SignatureBytes;
 use big_cabinet_core::dmeta::SignatureId;
@@ -293,11 +294,13 @@ fn sorted(mut heads: Vec<ChangeHash>) -> Vec<ChangeHash> {
     heads
 }
 
+/// Existence is read from change metadata: `get_change_by_hash` re-encodes the change by scanning
+/// every operation in the document.
 fn check_heads(doc: &Automerge, heads: &[ChangeHash]) -> Result<(), DocsError> {
     let unknown: Vec<_> = heads
         .iter()
         .copied()
-        .filter(|head| doc.get_change_by_hash(head).is_none())
+        .filter(|head| doc.get_change_meta_by_hash(head).is_none())
         .collect();
     if !unknown.is_empty() {
         return Err(DocsError::UnknownHeads { heads: unknown });

@@ -252,6 +252,7 @@ pub fn builtin_methods() -> impl Iterator<Item = (&'static str, Assemble)> {
                 drawers::SetDrawerSuccessor,
                 drawers::ResolveDrawerSuccessor,
                 drawers::ListDrawers,
+                drawers::ListDocDrawers,
                 drawers::GrantDrawer,
                 drawers::RevokeDrawer,
                 drawers::InvitePrincipal,

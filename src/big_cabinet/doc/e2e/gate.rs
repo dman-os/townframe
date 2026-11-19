@@ -11,11 +11,14 @@ use automerge::ObjType;
 use automerge::PatchLog;
 use automerge::ROOT;
 use automerge::ReadDoc;
+use automerge::ScalarValue;
 use automerge::transaction::Transactable;
 use big_cabinet_core::authority::SignDatumClaim;
 use big_cabinet_core::dmeta::ClaimOperation;
 use big_cabinet_core::dmeta::DatumClaim;
+use big_cabinet_core::dmeta::DatumSignature;
 use big_cabinet_core::dmeta::NativeValue;
+use big_cabinet_core::dmeta::SignatureBytes;
 use big_cabinet_core::dmeta::cid_of;
 use big_cabinet_core::dmeta::encode_native;
 
@@ -320,20 +323,19 @@ async fn a_bogus_signature_entry_rejects_only_its_own_datum() {
         doc.set_actor(ActorId::from([1_u8; 32]));
         let mut tx = doc.transaction();
         let list = signatures(&tx, &key("main"));
-        let honest = tx.get(&list, 0).unwrap().unwrap().1;
-        let doc_uuid = tx
-            .get(&honest, "docUuid")
-            .unwrap()
-            .unwrap()
-            .0
-            .to_str()
-            .unwrap()
-            .to_owned();
-        let entry = tx.insert_object(&list, 0, ObjType::Map).unwrap();
-        tx.put(&entry, "actorUuid", alice.actor.actor_id.to_string())
+        // The honest entry is one packed bytes value; the bogus one names the same document and
+        // actor under a signature that is not theirs.
+        let honest = tx.get(&list, 0).unwrap().unwrap().0;
+        let mut bogus = DatumSignature::from_packed(
+            honest
+                .to_bytes()
+                .expect("a signature entry is a bytes value"),
+        )
+        .unwrap();
+        bogus.actor_uuid = alice.actor.actor_id;
+        bogus.signature = SignatureBytes::try_from([9_u8; 64].as_slice()).unwrap();
+        tx.insert(&list, 0, ScalarValue::Bytes(bogus.packed().to_vec()))
             .unwrap();
-        tx.put(&entry, "docUuid", doc_uuid).unwrap();
-        tx.put(&entry, "signature", vec![9_u8; 64]).unwrap();
         tx.commit();
     })
     .await;
@@ -510,7 +512,7 @@ enum Damage {
     MissingUrl,
     MissingActor,
     MissingAlias,
-    MissingActorUuid,
+    UnknownFormat,
     UnboundDocUuid,
     MissingSignature,
     ShortSignature,
@@ -555,18 +557,10 @@ async fn signed_outside(
             signer.actor.certificate.as_slice().to_vec(),
         )
         .unwrap();
-        let aliases = object(&tx, &dmeta, "datumUuids");
-        let target = datum.to_string();
+        let metadata = object(&tx, &dmeta, "datums");
+        let aliases = object(&tx, &object(&tx, &metadata, &datum.to_string()), "uuids");
         let chosen = tx
             .keys(&aliases)
-            .filter(|alias| {
-                tx.get(&aliases, alias.as_str())
-                    .unwrap()
-                    .unwrap()
-                    .0
-                    .to_str()
-                    == Some(target.as_str())
-            })
             .map(|alias| alias.parse::<uuid::Uuid>().unwrap())
             .min()
             .unwrap();
@@ -575,9 +569,6 @@ async fn signed_outside(
             .unwrap();
         let list = signatures(&tx, &datum);
         tx.delete(&list, 0).unwrap();
-        let entry = tx.insert_object(&list, 0, ObjType::Map).unwrap();
-        tx.put(&entry, "actorUuid", signer.actor.actor_id.to_string())
-            .unwrap();
         let documents = object(&tx, &dmeta, "docUuids");
         let doc_uuid = tx
             .keys(&documents)
@@ -589,14 +580,36 @@ async fn signed_outside(
                     .to_str()
                     == Some(document.to_string().as_str())
             })
+            .unwrap()
+            .parse::<uuid::Uuid>()
             .unwrap();
-        tx.put(&entry, "docUuid", doc_uuid).unwrap();
-        tx.put(
-            &entry,
-            "signature",
-            signature.clone().unwrap_or(vec![0; 64]),
-        )
-        .unwrap();
+        // The entry is one packed bytes value: format byte, actor, document, signature. A peer
+        // can write any bytes there, so the damages below malform it in each way it can be.
+        let mut packed = vec![0x01];
+        packed.extend(signer.actor.actor_id.as_uuid().as_bytes());
+        packed.extend(
+            match damage {
+                Damage::UnboundDocUuid => *big_cabinet_core::dmeta::Uuid7::new().as_uuid(),
+                _ => doc_uuid,
+            }
+            .as_bytes(),
+        );
+        packed.extend(signature.clone().unwrap_or(vec![0; 64]));
+        match damage {
+            Damage::MissingSignature => packed.truncate(33),
+            Damage::ShortSignature => packed.truncate(96),
+            Damage::UnknownFormat => packed[0] = 0x02,
+            _ => {}
+        }
+        // Only an entry that carries a message or a witness is a map, around the packed value.
+        let carried = matches!(damage, Damage::BadMessage | Damage::InheritedValue).then(|| {
+            let entry = tx.insert_object(&list, 0, ObjType::Map).unwrap();
+            tx.put(&entry, "signature", packed.clone()).unwrap();
+            entry
+        });
+        if carried.is_none() {
+            tx.insert(&list, 0, ScalarValue::Bytes(packed)).unwrap();
+        }
         let claim = DatumClaim {
             origin_document: document.clone(),
             datum_key: datum.clone(),
@@ -614,17 +627,13 @@ async fn signed_outside(
                 .delete(&actors, signer.actor.actor_id.to_string())
                 .unwrap(),
             Damage::MissingAlias => tx.delete(&aliases, chosen.to_string()).unwrap(),
-            Damage::UnboundDocUuid => tx
-                .put(
-                    &entry,
-                    "docUuid",
-                    big_cabinet_core::dmeta::Uuid7::new().to_string(),
-                )
+            Damage::UnboundDocUuid
+            | Damage::UnknownFormat
+            | Damage::MissingSignature
+            | Damage::ShortSignature => {}
+            Damage::BadMessage => tx
+                .put(carried.as_ref().unwrap(), "message", vec![0_u8])
                 .unwrap(),
-            Damage::MissingActorUuid => tx.delete(&entry, "actorUuid").unwrap(),
-            Damage::MissingSignature => tx.delete(&entry, "signature").unwrap(),
-            Damage::ShortSignature => tx.put(&entry, "signature", vec![0_u8; 63]).unwrap(),
-            Damage::BadMessage => tx.put(&entry, "message", vec![0_u8]).unwrap(),
             Damage::BadCertificate => tx.put(&binding, "delegation", vec![0xff_u8]).unwrap(),
             Damage::UnsupportedCertificate => {
                 tx.put(&binding, "delegation", vec![0xf6_u8]).unwrap()
@@ -633,7 +642,9 @@ async fn signed_outside(
                 .put(&binding, "actorUrl", "dtxt:actor:wrong/bob")
                 .unwrap(),
             Damage::InheritedValue => {
-                let inherited = tx.put_object(&entry, "inherited", ObjType::Map).unwrap();
+                let inherited = tx
+                    .put_object(carried.as_ref().unwrap(), "inherited", ObjType::Map)
+                    .unwrap();
                 tx.put(&inherited, "originDoc", document.to_string())
                     .unwrap();
                 tx.put(&inherited, "message", claim.signing_bytes().unwrap())
@@ -765,10 +776,10 @@ malformed_evidence! {
     absent_actor_url: (Damage::MissingUrl, "attribution certificate or URL"),
     absent_actor_binding: (Damage::MissingActor, "unbound actor"),
     absent_datum_alias: (Damage::MissingAlias, "datum UUID alias"),
-    absent_actor_uuid: (Damage::MissingActorUuid, "metadata text"),
+    unknown_entry_format: (Damage::UnknownFormat, "signature entry"),
     unbound_doc_uuid: (Damage::UnboundDocUuid, "unbound document UUID"),
-    absent_signature: (Damage::MissingSignature, "signature bytes"),
-    short_signature: (Damage::ShortSignature, "signature length"),
+    truncated_entry: (Damage::MissingSignature, "signature entry"),
+    short_signature: (Damage::ShortSignature, "signature entry"),
     disagreeing_message: (Damage::BadMessage, "messages disagree"),
     malformed_certificate: (Damage::BadCertificate, "attribution"),
     rebound_actor_url: (Damage::WrongUrl, "attribution"),

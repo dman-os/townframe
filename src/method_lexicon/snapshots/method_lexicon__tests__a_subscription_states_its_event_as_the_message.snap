@@ -77,6 +77,9 @@ expression: "lexicon_of::<big_cabinet_core::doc::ObserveDocAvailability>()"
           "name": "InvalidValue"
         },
         {
+          "name": "ValueTooLarge"
+        },
+        {
           "name": "Conflict"
         },
         {
