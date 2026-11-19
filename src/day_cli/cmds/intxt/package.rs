@@ -64,6 +64,10 @@ use std::io::Write;
 /// Files over this size are recorded by blob id and left out of the pack (ADR 040 §4, D45).
 const MAX_PACKED_BLOB_BYTES: u64 = 8 * 1024 * 1024;
 
+/// An entry's patch is left out when the diff is over this size, as a file is left out of the
+/// pack (ADR 040 §4); readers then parse the pack.
+const MAX_PATCH_BYTES: u64 = 8 * 1024 * 1024;
+
 /// What an `add` names: exactly one per call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Named {
@@ -105,8 +109,11 @@ struct Resolved {
     /// The jj change the commits are the evolution of, which their datums name.
     change_id: Option<String>,
     label: String,
-    /// The entry's value, given the pack's reference, the tips and the bases.
-    value: fn(DatumReference, &[String], &[String]) -> Value,
+    /// The commit the entry's patch shows the diff to, against `bases`. None when the commits
+    /// have no single diff (a jj change whose commit is a merge).
+    patch_tip: Option<String>,
+    /// The entry's value, given the pack's reference, the patch's, the tips and the bases.
+    value: fn(DatumReference, Option<DatumReference>, &[String], &[String]) -> Value,
     /// A branch to track on this clone: its full ref name and its base.
     tracked: Option<(String, Option<String>)>,
 }
@@ -115,6 +122,8 @@ impl Resolved {
     fn new(named: &Named, identity: &Identity) -> Res<Self> {
         if let Named::Change(change) = named {
             let jj = revisions::resolve_jj_change(&identity.root, change)?;
+            // The evolog lists the change's current commit first.
+            let patch_tip = (jj.bases.len() <= 1).then(|| jj.commits[0].clone());
             return Ok(Self {
                 entry: key(work::JjChangeEntry::ID, &jj.change_id)?,
                 git_dir: jj.git_dir,
@@ -127,9 +136,11 @@ impl Resolved {
                 bases: jj.bases,
                 commits: jj.commits,
                 change_id: Some(jj.change_id),
-                value: |pack, _, _| {
+                patch_tip,
+                value: |pack, patch, _, _| {
                     serde_json::to_value(work::JjChangeEntry {
                         pack,
+                        patch,
                         extra: Default::default(),
                     })
                     .expect("an entry serializes")
@@ -161,15 +172,17 @@ impl Resolved {
                 short_sha(&revisions.tip),
                 commits.len()
             ),
+            patch_tip: Some(revisions.tip.clone()),
             tips: vec![revisions.tip],
             bases: revisions.base.into_iter().collect(),
             commits,
             change_id: None,
-            value: |pack, tips, bases| {
+            value: |pack, patch, tips, bases| {
                 serde_json::to_value(work::GitCommitEntry {
                     tip: commit_key(&tips[0]),
                     base: bases.first().map(|base| commit_key(base)),
                     pack,
+                    patch,
                     extra: Default::default(),
                 })
                 .expect("an entry serializes")
@@ -876,21 +889,27 @@ impl<'a> Packaging<'a> {
                 removed.insert(found);
             }
         }
-        let pack_of = |value: &Value| -> Option<DatumKey> {
-            let pack: DatumReference = value.get("pack")?.as_str()?.parse().ok()?;
-            Some(pack.key().clone())
+        // An entry's blobs: its pack and, when it has one, its patch.
+        let pack_of = |value: &Value| -> Vec<DatumKey> {
+            ["pack", "patch"]
+                .into_iter()
+                .filter_map(|field| {
+                    let blob: DatumReference = value.get(field)?.as_str()?.parse().ok()?;
+                    Some(blob.key().clone())
+                })
+                .collect()
         };
         let kept: BTreeSet<DatumKey> = view
             .entries
             .iter()
             .filter(|(key, _)| !removed.contains(key))
-            .filter_map(|(_, value)| pack_of(value))
+            .flat_map(|(_, value)| pack_of(value))
             .collect();
         let packs: BTreeSet<DatumKey> = view
             .entries
             .iter()
             .filter(|(key, _)| removed.contains(key))
-            .filter_map(|(_, value)| pack_of(value))
+            .flat_map(|(_, value)| pack_of(value))
             .filter(|pack| !kept.contains(pack))
             .collect();
         if !removed.is_empty() {
@@ -1028,14 +1047,14 @@ impl<'a> Packaging<'a> {
         Ok(ops)
     }
 
-    /// Puts `pack` in the blob store and answers the blob datum that names it: its key and value.
-    async fn put_pack(&self, pack: Vec<u8>) -> Res<(DatumKey, Value)> {
-        let info = super::put_blob(self.client, &pack).await?;
+    /// Puts `bytes` in the blob store and answers the blob datum that names them: its key and value.
+    async fn put_content(&self, bytes: Vec<u8>, mime: &str) -> Res<(DatumKey, Value)> {
+        let info = super::put_blob(self.client, &bytes).await?;
         let digest = info.blob_id.digest_str();
         Ok((
             key(big_blobs_core::Blob::ID, &digest)?,
             json!({
-                "mime": "application/x-git-pack",
+                "mime": mime,
                 "digest": digest,
                 "lengthOctets": info.length_octets,
             }),
@@ -1073,12 +1092,15 @@ impl<'a> Packaging<'a> {
         let kind = if pack.thin { "thin" } else { "full" };
         let size = pack.bytes.len();
         self.ensure_inventory(drawer).await?;
-        let (blob_key, blob) = self.put_pack(pack.bytes).await?;
+        let (blob_key, blob) = self
+            .put_content(pack.bytes, "application/x-git-pack")
+            .await?;
         let pack_ref = DatumReference::new(ReferenceDocId::SelfDoc, blob_key.clone());
         plan.set.insert(blob_key, blob);
+        let patch_ref = self.plan_patch(plan, resolved, MAX_PATCH_BYTES).await?;
         plan.set.insert(
             resolved.entry.clone(),
-            (resolved.value)(pack_ref, &resolved.tips, &resolved.bases),
+            (resolved.value)(pack_ref, patch_ref, &resolved.tips, &resolved.bases),
         );
         plan.written.push(resolved.entry.clone());
         plan.lines.push(format!(
@@ -1086,6 +1108,43 @@ impl<'a> Packaging<'a> {
             resolved.label
         ));
         Ok(true)
+    }
+
+    /// The reader-friendly diff of the commits `resolved` names (`text/x-diff`, derived from the
+    /// pack's commits; the pack stays the truth): puts it in the blob store, adds its blob datum
+    /// to `plan` and answers its reference. None, with a line saying why, when the diff is over
+    /// `max_bytes` or the commits have no single diff.
+    async fn plan_patch(
+        &self,
+        plan: &mut Plan,
+        resolved: &Resolved,
+        max_bytes: u64,
+    ) -> Res<Option<DatumReference>> {
+        let Some(tip) = resolved.patch_tip.clone() else {
+            plan.lines.push(
+                "  patch      skipped (the change's commit is a merge, so it has no single diff)"
+                    .to_owned(),
+            );
+            return Ok(None);
+        };
+        let base = resolved.bases.first().cloned();
+        let git_dir = resolved.git_dir.clone();
+        let diff = tokio::task::spawn_blocking(move || {
+            pack::unified_diff(&Git::new(&git_dir), base.as_deref(), &tip, max_bytes)
+        })
+        .await??;
+        let Some(diff) = diff else {
+            plan.lines.push(format!(
+                "  patch      skipped (the diff is over {max_bytes} bytes; the pack carries the commits)"
+            ));
+            return Ok(None);
+        };
+        let size = diff.len();
+        let (blob_key, blob) = self.put_content(diff, "text/x-diff").await?;
+        let patch_ref = DatumReference::new(ReferenceDocId::SelfDoc, blob_key.clone());
+        plan.set.insert(blob_key, blob);
+        plan.lines.push(format!("  patch      {size} bytes"));
+        Ok(Some(patch_ref))
     }
 
     /// What `add` writes to track the branch `resolved` names on this clone, which is nothing

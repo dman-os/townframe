@@ -2,6 +2,8 @@
 
 use crate::Error;
 use crate::git::Git;
+use std::io::Read;
+use std::process::Stdio;
 
 /// The commits and loose objects to include in a git pack.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +61,66 @@ pub fn build(git: &Git, request: &PackRequest) -> Result<Pack, Error> {
         bytes: git.run_with_input(&args, &[], revisions.as_bytes())?,
         thin: !request.bases.is_empty(),
     })
+}
+
+/// The unified diff a reader shows for a commit range (`git diff -M <base>..<tip>`), against the
+/// empty tree when there is no `base`. None when it is over `max_bytes`: the output is read only
+/// that far, and git is stopped there.
+pub fn unified_diff(
+    git: &Git,
+    base: Option<&str>,
+    tip: &str,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>, Error> {
+    let empty_tree;
+    let base = match base {
+        Some(base) => base,
+        None => {
+            empty_tree = String::from_utf8_lossy(&git.run_with_input(
+                &["hash-object", "-t", "tree", "--stdin"],
+                &[],
+                &[],
+            )?)
+            .trim()
+            .to_owned();
+            &empty_tree
+        }
+    };
+    let args = ["diff", "--no-color", "--no-ext-diff", "-M", base, tip];
+    let mut child = git
+        .command(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // stderr is drained on its own thread while stdout is read: git blocks once a pipe it
+    // writes to is full, so reading only stdout could wait forever on a chatty stderr.
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+    let drain = std::thread::spawn(move || {
+        let mut text = Vec::new();
+        stderr.read_to_end(&mut text).map(|_| text)
+    });
+    let mut bytes = Vec::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout was piped")
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        child.kill()?;
+        child.wait()?;
+        drain.join().expect("the stderr drain does not panic")?;
+        return Ok(None);
+    }
+    let status = child.wait()?;
+    let stderr = drain.join().expect("the stderr drain does not panic")?;
+    if !status.success() {
+        return Err(Error::Git {
+            args: args.join(" "),
+            stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
+        });
+    }
+    Ok(Some(bytes))
 }
 
 #[cfg(test)]
@@ -216,5 +278,45 @@ mod tests {
 
         assert!(has_object(target.path(), &small));
         assert!(!has_object(target.path(), &large));
+    }
+
+    #[test]
+    fn a_diff_is_unified_text_against_the_base_or_the_empty_tree() {
+        let repo = Repo::new();
+        repo.write("a.txt", "one\n");
+        let base = repo.commit_all("base");
+        repo.write("a.txt", "two\n");
+        let tip = repo.commit_all("tip");
+        let git = Git::new(&repo.root);
+
+        let diff = unified_diff(&git, Some(&base), &tip, 1 << 20)
+            .unwrap()
+            .unwrap();
+        let diff = String::from_utf8(diff).unwrap();
+        assert!(diff.starts_with("diff --git a/a.txt b/a.txt\n"), "{diff}");
+        assert!(diff.contains("@@ -1 +1 @@\n-one\n+two\n"), "{diff}");
+
+        // A range reaching the root shows every file as added.
+        let diff = unified_diff(&git, None, &tip, 1 << 20).unwrap().unwrap();
+        let diff = String::from_utf8(diff).unwrap();
+        assert!(diff.contains("new file mode 100644"), "{diff}");
+        assert!(diff.contains("@@ -0,0 +1 @@\n+two\n"), "{diff}");
+    }
+
+    #[test]
+    fn a_diff_over_the_limit_is_left_out() {
+        let repo = Repo::new();
+        repo.write("a.txt", "one\n");
+        let base = repo.commit_all("base");
+        repo.write("a.txt", "two\n".repeat(1000));
+        let tip = repo.commit_all("tip");
+        let git = Git::new(&repo.root);
+
+        assert_eq!(unified_diff(&git, Some(&base), &tip, 100).unwrap(), None);
+        assert!(
+            unified_diff(&git, Some(&base), &tip, 1 << 20)
+                .unwrap()
+                .is_some()
+        );
     }
 }
