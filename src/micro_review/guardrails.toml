@@ -15,7 +15,10 @@ allow_external_api_types = false
 
 # One authored micro, two targets (isomorphic MDK): linked natively through its `ACTIVATE`
 # entry, or built as the wasm32-wasip3 component guest (ADR 018 Phase 1).
+# `fixture` is the in-memory node for tests and labs; the shipped guest builds without it.
 [builds.native]
+features = ["fixture"]
+powerset = true
 
 [builds.wasm32-wasip3]
 
