@@ -32,8 +32,9 @@ use big_cabinet_core::reference::ReferenceDocId;
 use intxt_core::client::key;
 use intxt_core::client::to_value;
 use intxt_core::generic;
+use intxt_core::methods::SummarizeIntxts;
+use intxt_core::methods::SummaryStatus;
 use intxt_core::work;
-use intxt_core::methods::{SummarizeIntxts, SummaryStatus};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -289,11 +290,7 @@ impl Packaging<'_> {
     }
 
     /// `day x intxt github show`: prints an imported pull request and summarizes its named intxts.
-    pub(crate) async fn github_show(
-        &self,
-        out: &mut impl Write,
-        target: &str,
-    ) -> Res<()> {
+    pub(crate) async fn github_show(&self, out: &mut impl Write, target: &str) -> Res<()> {
         let pull = PullRef::parse(target)?;
         let node = self.load_github()?.ok_or_else(|| {
             eyre::eyre!(
@@ -308,7 +305,13 @@ impl Packaging<'_> {
             )
         })?;
         let datum = self.read_github_pull(&doc, &pull).await?;
-        writeln!(out, "{}  {:?}  \"{}\"", pull.name(), datum.state, datum.title)?;
+        writeln!(
+            out,
+            "{}  {:?}  \"{}\"",
+            pull.name(),
+            datum.state,
+            datum.title
+        )?;
         writeln!(out, "url: {}", datum.url)?;
         writeln!(out, "{}", datum.body)?;
 
@@ -332,7 +335,9 @@ impl Packaging<'_> {
                     "{}  \"{}\"  {} entries",
                     summary.link.expect("found intxt summaries have a link"),
                     summary.title.expect("found intxt summaries have a title"),
-                    summary.entries.expect("found intxt summaries have an entry count")
+                    summary
+                        .entries
+                        .expect("found intxt summaries have an entry count")
                 )?,
                 SummaryStatus::NotFound => {
                     writeln!(out, "{}  not an intxt", link.reference)?;
@@ -341,7 +346,9 @@ impl Packaging<'_> {
                     out,
                     "{}  unreadable: {}",
                     link.reference,
-                    summary.reason.expect("unreadable intxt summaries have a reason")
+                    summary
+                        .reason
+                        .expect("unreadable intxt summaries have a reason")
                 )?,
             }
         }
@@ -410,9 +417,19 @@ impl Packaging<'_> {
                 drawer.to_string()
             };
             let title_key = key(generic::Title::ID, "main")?;
-            let title = match self.caller.try_read(&drawer, &title_key).await {
-                Ok((_, Some(title))) => serde_json::from_value::<generic::Title>(title)?.title,
-                Ok((_, None)) => {
+            let titled = async {
+                match self.caller.try_index(&drawer).await? {
+                    Some(index) => self
+                        .caller
+                        .try_read(&index, &title_key)
+                        .await
+                        .map(|read| read.1),
+                    None => Ok(None),
+                }
+            };
+            let title = match titled.await {
+                Ok(Some(title)) => serde_json::from_value::<generic::Title>(title)?.title,
+                Ok(None) => {
                     writeln!(out, "  intxt {name}: not an intxt on this node, skipped")?;
                     continue;
                 }

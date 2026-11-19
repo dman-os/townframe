@@ -5,10 +5,12 @@
 //! Packaging is client code (ledger D41, D50): git and jj run here, and the entries are written
 //! with the operator's own authority through [`Caller`], the way the recorder writes, so there
 //! is no nodule method for it. The pack of git objects an entry carries (ADR 040 §4) goes into
-//! the node's blob store and is named by a blob datum in the intxt's commits document
-//! (`org.example.daybook.blob/<digest>`, ledger D45), which the entry references. The descriptor
-//! holds only the small index (marker, title, entries, body order, the `commitsDoc/main`
-//! pointer); content, and so every re-add's blobs, goes in the commits document.
+//! the node's blob store and is named by a blob datum in the adding writer's commits document
+//! (`org.example.daybook.blob/<digest>`, ledger D45), which the entry references. The intxt's
+//! index document holds only the small index (title, entries, body order) and its drawer document
+//! only the descriptor, the marker and the pointer to the index (ledger D70); content, and so
+//! every re-add's blobs, goes in the writer's commits document, which is found by its marker among
+//! the drawer's documents.
 //!
 //! The verbs write to a `Write` and take the node client and the directories they work in, so
 //! tests drive them without a process around them.
@@ -25,9 +27,7 @@ use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::CommandId;
-use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumRead;
-use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::MetaRoot;
 use big_cabinet_core::drawer::listing::KnownDrawers;
@@ -38,7 +38,6 @@ use big_cabinet_core::drawer::protocol::ForgetDrawer;
 use big_cabinet_core::drawer::protocol::ListKnownDrawers;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::drawer::protocol::RememberDrawer;
-use big_cabinet_core::drawer::protocol::drawer_placement;
 use big_cabinet_core::reference::DatumReference;
 use big_cabinet_core::reference::ReferenceDocId;
 use intxt_capture::git::Git;
@@ -168,14 +167,14 @@ impl Resolved {
     }
 }
 
-/// What an `add` is about to write: the datums for the descriptor, which of them are entries (in
-/// body order), the blob datums for the commits document, the documents to share with the intxt,
-/// and what to tell the operator.
+/// What an `add` is about to write: the datums for the index document, which of them are entries
+/// (in body order), the blob datums for the writer's commits document, the documents to share with
+/// the intxt, and what to tell the operator.
 #[derive(Default)]
 struct Plan {
     set: BTreeMap<DatumKey, Value>,
-    /// The commits document the entries' blobs are in, and the blob datums to write to it. Empty
-    /// unless an entry with a pack is new.
+    /// The writer's commits document the entries' blobs are in, and the blob datums to write to
+    /// it. Empty unless an entry with a pack is new.
     blobs: Option<(DocId, BTreeMap<DatumKey, Value>)>,
     written: Vec<DatumKey>,
     shared: BTreeSet<DocId>,
@@ -208,7 +207,7 @@ pub(crate) struct Packaging<'a> {
 pub(super) struct View {
     pub(super) title: generic::Title,
     pub(super) entries: Vec<(DatumKey, Value)>,
-    /// The heads of the descriptor document the title and the entries were read at.
+    /// The heads of the index document the title and the entries were read at.
     pub(super) heads: Vec<ChangeHash>,
 }
 
@@ -427,81 +426,16 @@ impl<'a> Packaging<'a> {
         Ok(live)
     }
 
-    /// The intxt's commits document, if it has one: the one its descriptor's `commitsDoc/main`
-    /// names.
-    pub(super) async fn commits_doc(&self, drawer: &DrawerId) -> Res<Option<DocId>> {
-        let (_, held) = self
-            .caller
-            .try_read(drawer, &key(work::CommitsDoc::ID, "main")?)
-            .await?;
-        held.map(|value| {
-            let held: work::CommitsDoc = serde_json::from_value(value)?;
-            Ok(held.doc.parse()?)
-        })
-        .transpose()
-    }
-
-    /// The intxt's commits document, made if the intxt has none yet: a content document placed
-    /// in the intxt's drawer, so it is a document of the drawer like any other, and recorded in
-    /// the descriptor (`commitsDoc/main`) so the intxt finds it again; `which` finds it by its
-    /// datums, not by name. The command id is fixed per drawer, so creating it again answers the
-    /// first creation (a run that died before recording it finds the same document), and two
-    /// writers converge on one document.
-    pub(super) async fn ensure_commits_doc(&self, drawer: &DrawerId) -> Res<DocId> {
-        if let Some(doc) = self.commits_doc(drawer).await? {
-            return Ok(doc);
-        }
-        let placement = drawer_placement(drawer);
-        let capability = self
-            .caller
-            .doc_capability(DocScope {
-                create: [placement.clone()].into(),
-                ..DocScope::default()
-            })
-            .await?;
-        let doc = self
-            .caller
-            .call(CreateDoc {
-                capability,
-                command: CommandId::try_from(format!("intxt-commits-doc-{drawer}"))?,
-                placement,
-                datums: BTreeMap::new(),
-            })
-            .await?
-            .doc_id;
-        self.record_commits_doc(drawer, &doc).await?;
-        Ok(doc)
-    }
-
-    /// Records `doc` as the intxt's commits document (`commitsDoc/main` in its descriptor).
-    pub(super) async fn record_commits_doc(&self, drawer: &DrawerId, doc: &DocId) -> Res<()> {
-        self.caller
-            .write_datums(
-                drawer,
-                [(
-                    key(work::CommitsDoc::ID, "main")?,
-                    to_value(&work::CommitsDoc {
-                        doc: doc.to_string(),
-                        extra: Default::default(),
-                    }),
-                )]
-                .into(),
-                BTreeSet::new(),
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Writes a `gitCommit/<sha>` for every commit `resolved` names into the intxt's commits
-    /// document, so the document holding the key is what says the intxt holds the commit (the
-    /// membership query of `which`). A commit is the same value wherever it is read, so one the
-    /// document holds already is left alone, which makes adding again, or adding a range that
-    /// overlaps, write only what is new.
+    /// Writes a `gitCommit/<sha>` for every commit `resolved` names into the caller's own commits
+    /// document, so a document holding the key is what says the intxt holds the commit (the
+    /// membership query of `which`). A commit is the same value wherever it is read, so one that
+    /// any of the intxt's commits documents holds already (another writer's, say) is left alone,
+    /// which makes adding again, or adding a range that overlaps, write only what is new.
     ///
-    /// A new commit that git's `post-rewrite` hook reported as replacing a commit the document
+    /// A new commit that git's `post-rewrite` hook reported as replacing a commit the intxt
     /// holds (`hooked_rewrites`) is a rewrite of it, exactly: the pair is copied from the capture
     /// drawer's repository document, `repo`. Every other new commit whose patch id matches exactly
-    /// one commit the document already holds from outside the range is a rewrite of it too (an
+    /// one commit the intxt already holds from outside the range is a rewrite of it too (an
     /// amend, a rebase, a force-push seen from another machine): `rewrite/<old>` and
     /// `rewrittenFrom/<new>` are written beside them. Several matches name no single
     /// predecessor, so nothing is written and the line says so. A commit with a hook pair in the
@@ -518,25 +452,33 @@ impl<'a> Packaging<'a> {
         if resolved.commits.is_empty() {
             return Ok((0, Vec::new()));
         }
-        let doc = self.ensure_commits_doc(drawer).await?;
-        // One read of the document gives the held commits and their patch ids.
-        let (_, datums) = self.caller.read_datums(&doc, None).await?;
+        let own = self.caller.own_doc(drawer, work::Commits::ID).await?;
+        // One read of each of the intxt's commits documents (the caller's own is one of them)
+        // gives the held commits and their patch ids.
         let mut held: BTreeMap<String, Option<String>> = BTreeMap::new();
         let mut rewritten = BTreeSet::new();
-        for (datum_key, read) in datums {
-            let slot = String::from_utf8_lossy(datum_key.slot_bytes()).into_owned();
-            let DatumRead::Accepted { value, .. } = read else {
-                eyre::bail!("{datum_key} in {doc} is not readable: {read:?}");
-            };
-            match datum_key.tag().as_str() {
-                work::GitCommit::ID => {
-                    let commit: work::GitCommit = serde_json::from_value(value)?;
-                    held.insert(slot, commit.patch_id);
+        for doc in self
+            .caller
+            .tagged_docs(drawer, work::Commits::ID)
+            .await?
+            .into_keys()
+        {
+            let (_, datums) = self.caller.read_datums(&doc, None).await?;
+            for (datum_key, read) in datums {
+                let slot = String::from_utf8_lossy(datum_key.slot_bytes()).into_owned();
+                let DatumRead::Accepted { value, .. } = read else {
+                    eyre::bail!("{datum_key} in {doc} is not readable: {read:?}");
+                };
+                match datum_key.tag().as_str() {
+                    work::GitCommit::ID => {
+                        let commit: work::GitCommit = serde_json::from_value(value)?;
+                        held.insert(slot, commit.patch_id);
+                    }
+                    work::Rewrite::ID => {
+                        rewritten.insert(slot);
+                    }
+                    _ => {}
                 }
-                work::Rewrite::ID => {
-                    rewritten.insert(slot);
-                }
-                _ => {}
             }
         }
         let missing: Vec<String> = resolved
@@ -634,7 +576,7 @@ impl<'a> Packaging<'a> {
             write.insert(key(work::GitCommit::ID, sha)?, to_value(commit));
         }
         self.caller
-            .write_datums(&doc, write, BTreeSet::new())
+            .write_datums(&own, write, BTreeSet::new())
             .await?;
         Ok((written, lines))
     }
@@ -806,10 +748,10 @@ impl<'a> Packaging<'a> {
     /// `day x intxt new`: creates an intxt, remembers it, and says its short id. Answers its
     /// drawer.
     ///
-    /// With `with`, the intxt shares that intxt's commits document: the document is added to the
-    /// new drawer and the new descriptor names it as its commits document, so the two intxts
-    /// hold one set of `gitCommit` datums. The intxt named is resolved first, so a name that
-    /// resolves to none leaves nothing created.
+    /// With `with`, the new drawer is lent that intxt's commits documents (each writer's, found by
+    /// their markers) at Write, so the two intxts hold those `gitCommit` datums in common and a
+    /// writer who already had a commits document there keeps adding to it. The intxt named is
+    /// resolved first, so a name that resolves to none leaves nothing created.
     pub(crate) async fn create(
         &self,
         out: &mut impl Write,
@@ -817,12 +759,16 @@ impl<'a> Packaging<'a> {
         description: Option<&str>,
         with: Option<&str>,
     ) -> Res<DrawerId> {
-        let shared = match with {
+        let lent: Vec<DocId> = match with {
             Some(name) => {
                 let (related, _) = self.resolve(Some(name)).await?;
-                Some(self.ensure_commits_doc(&related).await?)
+                self.caller
+                    .tagged_docs(&related, work::Commits::ID)
+                    .await?
+                    .into_keys()
+                    .collect()
             }
-            None => None,
+            None => Vec::new(),
         };
         let IntxtCreated { drawer_id } = call(
             self.client,
@@ -833,21 +779,20 @@ impl<'a> Packaging<'a> {
         )
         .await?;
         self.remember(&drawer_id, false).await?;
-        if let Some(doc) = &shared {
+        for doc in &lent {
             self.caller
                 .share(&drawer_id, doc, DrawerAccess::Write)
                 .await?;
-            self.record_commits_doc(&drawer_id, doc).await?;
         }
         let live = self.live_intxts().await?;
         let ids = ShortIds::new(live.iter().map(ToString::to_string).collect::<Vec<_>>());
         let short = shown(&ids, &drawer_id.to_string());
         writeln!(out, "intxt {short} \"{title}\"")?;
-        if shared.is_some() {
+        if let Some(with) = with {
             writeln!(
                 out,
-                "  shares the commits document of {}",
-                with.unwrap_or_default()
+                "  lends the {} commits document(s) of {with}",
+                lent.len()
             )?;
         }
         if let Some(identity) = identity::resolve(self.cwd)? {
@@ -858,18 +803,23 @@ impl<'a> Packaging<'a> {
         Ok(drawer_id)
     }
 
-    /// Makes sure the intxt's drawer has a blob inventory, so the blob workers pin and sync the
-    /// packs it holds (ledger D45). The root is `sensitive`: a pack is the operator's work. The
-    /// command id is fixed per drawer, so creating it again answers the first creation.
+    /// Makes sure the intxt's drawer has the caller's blob inventory, so the blob workers pin and
+    /// sync the packs it holds (ledger D45). The root is `sensitive`: a pack is the operator's
+    /// work. The inventory is a meta document, whose `(root, kind, name)` slot holds one value
+    /// and is last-writer-wins when two nodes create it, so its name carries the writer
+    /// (`intxt-<actor>`): two writers' first `add`s make two inventories and neither is orphaned.
+    /// The command id is fixed per drawer and writer, so creating it again answers the first
+    /// creation.
     async fn ensure_inventory(&self, drawer: &DrawerId) -> Res<()> {
         let capability = self.drawer_capability(drawer).await?;
+        let writer = self.caller.actor().await?;
         self.caller
             .call(CreateMetaDoc {
                 capability,
-                command: CommandId::try_from(format!("intxt-inventory-{drawer}"))?,
+                command: CommandId::try_from(format!("intxt-inventory-{drawer}-{writer}"))?,
                 drawer_id: drawer.clone(),
                 kind: "blobInventory".into(),
-                name: "intxt".into(),
+                name: format!("intxt-{writer}"),
                 root: MetaRoot::Sensitive,
             })
             .await?;
@@ -915,8 +865,8 @@ impl<'a> Packaging<'a> {
         drawer: &DrawerId,
         removed: &BTreeSet<DatumKey>,
     ) -> Res<()> {
-        // An entry's pack and patch blob datums are in the commits document, which can be shared
-        // with other intxts whose entries may name the same digest, so removing an entry leaves
+        // An entry's pack and patch blob datums are in a writer's commits document, which can be
+        // lent to other intxts whose entries may name the same digest, so removing an entry leaves
         // them there.
         if !removed.is_empty() {
             self.caller.remove_entries(drawer, removed).await?;
@@ -924,11 +874,13 @@ impl<'a> Packaging<'a> {
         Ok(())
     }
 
+    /// The intxt's index document read: its title and its entries in body order.
     pub(super) async fn load(&self, drawer: &DrawerId) -> Res<View> {
-        let (heads, mut datums) = self.caller.read_datums(drawer, None).await?;
+        let index = self.caller.index(drawer).await?;
+        let (heads, mut datums) = self.caller.read_datums(&index, None).await?;
         let mut accepted = |key: &DatumKey| match datums.remove(key) {
             Some(DatumRead::Accepted { value, .. }) => Ok(value),
-            other => Err(eyre::eyre!("{key} in {drawer} is not readable: {other:?}")),
+            other => Err(eyre::eyre!("{key} in {index} is not readable: {other:?}")),
         };
         let title = serde_json::from_value(accepted(&key(generic::Title::ID, "main")?)?)?;
         let body: generic::Body =
@@ -1090,10 +1042,10 @@ impl<'a> Packaging<'a> {
         let kind = if pack.thin { "thin" } else { "full" };
         let size = pack.bytes.len();
         self.ensure_inventory(drawer).await?;
-        // The blob datums live in the commits document and the entry, in the descriptor,
-        // references them there: the descriptor stays a small index however often a rewritten
+        // The blob datums live in the writer's commits document and the entry, in the index
+        // document, references them there: the index stays small however often a rewritten
         // change is added again.
-        let commits_doc = self.ensure_commits_doc(drawer).await?;
+        let commits_doc = self.caller.own_doc(drawer, work::Commits::ID).await?;
         let (blob_key, blob) = self
             .put_content(pack.bytes, "application/x-git-pack")
             .await?;
@@ -1320,8 +1272,8 @@ impl<'a> Packaging<'a> {
             Default::default()
         };
 
-        // Written even when the entry is already in, so an intxt that holds a range from before
-        // its commits document existed gets its commits by adding the range again.
+        // Written even when the entry is already in, so an intxt that holds a range whose commits
+        // were never written gets them by adding the range again.
         let (wrote_commits, commit_lines) = self
             .write_commits(
                 drawer,
@@ -1337,14 +1289,14 @@ impl<'a> Packaging<'a> {
             .await?;
         if wrote_commits > 0 {
             plan.lines.push(format!(
-                "  commit data {wrote_commits} commit(s) in the intxt's commits document"
+                "  commit data {wrote_commits} commit(s) in your commits document"
             ));
         }
         plan.lines.extend(commit_lines);
         let mut written = plan.written.clone();
         if !written.is_empty() {
-            // The blob datums land in the commits document before the descriptor write that adds
-            // the entry naming them, so a reader never sees an entry whose blobs are missing. A
+            // The blob datums land in the commits document before the index write that adds the
+            // entry naming them, so a reader never sees an entry whose blobs are missing. A
             // failure between the two writes leaves unreferenced blob datums in the commits
             // document; adding again is idempotent, since the datums are keyed by digest, and
             // writes the same ones.
@@ -1415,9 +1367,10 @@ impl<'a> Packaging<'a> {
             if self.caller.commit_holders(drawer, &sha).await?.is_empty() {
                 continue;
             }
+            let index = self.caller.index(drawer).await?;
             let (_, title) = self
                 .caller
-                .read(drawer, &key(generic::Title::ID, "main")?)
+                .read(&index, &key(generic::Title::ID, "main")?)
                 .await?;
             let title: generic::Title = serde_json::from_value(title)?;
             writeln!(

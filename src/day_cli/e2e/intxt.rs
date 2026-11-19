@@ -6,6 +6,7 @@ use super::library::new_node;
 use crate::client::NodeClient;
 use crate::interlude::*;
 use big_cabinet_core::datum::DatumMember as _;
+use intxt_core::work;
 
 mod patch;
 
@@ -69,6 +70,14 @@ fn operator(client: &NodeClient) -> intxt_core::client::Caller<&NodeClient> {
         None,
         "intxt-install".to_owned(),
     )
+}
+
+/// The index document of `drawer`: where its title, entries and body order are.
+pub(super) async fn index_of(
+    client: &NodeClient,
+    drawer: &big_cabinet_core::drawer::protocol::DrawerId,
+) -> big_cabinet_core::DocId {
+    operator(client).index(drawer).await.unwrap()
 }
 
 /// A document capability the operator mints for `scope`.
@@ -149,8 +158,8 @@ pub(super) async fn day_x(
 }
 
 /// `org.example.intxt.createIntxt`, through the real installed handler, creates a drawer whose
-/// descriptor document carries the intxt marker, the title and an empty body, readable as
-/// written.
+/// own document carries the intxt marker and the pointer to its index document, which holds the
+/// title and an empty body, readable as written.
 #[tokio::test(flavor = "multi_thread")]
 async fn create_intxt_creates_a_drawer_marked_as_an_intxt() {
     use big_cabinet_core::drawer::protocol::DrawerId;
@@ -163,26 +172,58 @@ async fn create_intxt_creates_a_drawer_marked_as_an_intxt() {
         )
         .await;
         let drawer: DrawerId = created["drawerId"].as_str().unwrap().parse().unwrap();
-        let accepted = |key: &str| {
-            let client = &client;
-            let drawer = &drawer;
+        let index = index_of(client, &drawer).await;
+        let accepted = |doc: &big_cabinet_core::DocId, key: &str| {
+            let (client, doc) = (&client, doc.clone());
             let key = key.parse().unwrap();
-            async move { read_at(client, drawer, &key).await.unwrap().1 }
+            async move { read_at(client, &doc, &key).await.unwrap().1 }
         };
         assert_eq!(
-            accepted("org.example.intxt/main").await,
+            accepted(&drawer, "org.example.intxt/main").await,
             json!({"empty": true})
         );
         assert_eq!(
-            accepted("org.example.intxt.title/main").await,
+            accepted(&drawer, "org.example.intxt.index/main").await,
+            json!({"doc": index.to_string()})
+        );
+        assert_eq!(
+            accepted(&index, "org.example.intxt.title/main").await,
             json!({"title": "Datum references move to dtxt:"})
         );
         assert_eq!(
-            accepted("org.example.intxt.body/main").await,
+            accepted(&index, "org.example.intxt.body/main").await,
             json!({"order": []})
         );
+        assert_drawer_document_holds_only_the_pointers(client, &drawer).await;
     })
     .await;
+}
+
+/// The drawer's own document is a public metadata root a relay can read (ADR 019, "Meta docs"),
+/// so it holds the cabinet's descriptor and roster (`org.example.daybook.drawer…`) and, of intxt's,
+/// only the marker and the pointer to the index document: no title, no entry, no comment, no
+/// commit.
+async fn assert_drawer_document_holds_only_the_pointers(
+    client: &NodeClient,
+    drawer: &big_cabinet_core::drawer::protocol::DrawerId,
+) {
+    let keys: std::collections::BTreeSet<String> = operator(client)
+        .datum_keys(drawer)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|key| key.to_string())
+        .filter(|key| !key.starts_with("org.example.daybook.drawer"))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "org.example.intxt/main".to_owned(),
+            "org.example.intxt.index/main".to_owned()
+        ]
+        .into(),
+        "the drawer's own document holds more than the descriptor, the marker and the pointer"
+    );
 }
 
 /// Installing again, with the node's handler already installed and enabled, is a no-op: it answers
@@ -600,7 +641,7 @@ async fn record_session_with_two_commits(
 
 /// The intxt's commits document holds a `gitCommit/<sha>` for each commit of the range
 /// `merge_base..tip`, found by the membership query anchored on the intxt's drawer, and holds
-/// nothing else.
+/// nothing else but its marker and the entry's blobs.
 async fn assert_commit_membership(
     client: &NodeClient,
     drawer: &big_cabinet_core::drawer::protocol::DrawerId,
@@ -636,9 +677,9 @@ async fn assert_commit_membership(
             .unwrap()
             .is_empty()
     );
-    // Besides the commits, the document holds the entry's two blob datums (its pack and its
-    // patch), each with the cipherBlob and JWK that a blob in a content document is stored as,
-    // at the blob's own slot (ADR 026 §3).
+    // Besides the commits, the document holds its marker, naming the writer, and the entry's two
+    // blob datums (its pack and its patch), each with the cipherBlob and JWK that a blob in a
+    // content document is stored as, at the blob's own slot (ADR 026 §3).
     let (blobs, held): (Vec<_>, Vec<_>) = caller
         .datum_keys(&commits_doc)
         .await
@@ -646,8 +687,24 @@ async fn assert_commit_membership(
         .into_iter()
         .partition(|key| key.tag().as_str() == big_blobs_core::Blob::ID);
     assert_eq!(blobs.len(), 2, "{blobs:?}");
+    let marker = format!("{}/main", work::Commits::ID);
     let mut held: Vec<_> = held.into_iter().map(|key| key.to_string()).collect();
+    assert_eq!(held.iter().filter(|key| **key == marker).count(), 1);
+    held.retain(|key| *key != marker);
     held.sort();
+    let writer = caller.actor().await.unwrap().to_string();
+    assert_eq!(
+        caller
+            .read(&commits_doc, &marker.parse().unwrap())
+            .await
+            .unwrap()
+            .1,
+        json!({"writer": writer})
+    );
+    assert_eq!(
+        caller.tagged_docs(drawer, work::Commits::ID).await.unwrap(),
+        [(commits_doc.clone(), writer)].into()
+    );
     assert_eq!(
         held,
         {
@@ -684,8 +741,8 @@ async fn assert_commit_membership(
     assert!(datum.get("raw").is_none(), "{datum}");
 }
 
-/// `new --with` shares the commits document: the new intxt's descriptor names the same
-/// document, so the membership query anchored on either drawer finds the commits once; a name
+/// `new --with` lends the related intxt's commits documents: the new drawer holds the same
+/// documents, so the membership query anchored on either drawer finds the commits once; a name
 /// that is no intxt creates nothing.
 async fn assert_new_with_shares_commits_document(
     client: &NodeClient,
@@ -694,32 +751,25 @@ async fn assert_new_with_shares_commits_document(
     short: &str,
     tip: &str,
 ) {
-    let commits_doc_of = async |drawer: &big_cabinet_core::drawer::protocol::DrawerId| {
-        let (_, datum) = read_at(
-            client,
-            drawer,
-            &"org.example.intxt.work.commitsDoc/main".parse().unwrap(),
-        )
-        .await
-        .unwrap();
-        datum["doc"].as_str().unwrap().to_owned()
-    };
     let mut out = Vec::new();
     let follow_up = packaging
         .create(&mut out, "Follow-up", None, Some(short))
         .await
         .unwrap();
     let out = String::from_utf8(out).unwrap();
-    assert!(out.contains("shares the commits document of"), "{out}");
-    assert_eq!(
-        commits_doc_of(&follow_up).await,
-        commits_doc_of(drawer).await
-    );
+    assert!(out.contains("lends the 1 commits document(s) of"), "{out}");
     let lookup = intxt_core::client::Caller::new(
         client,
         service_utils_rs::RequestContext::root(),
         None,
         "test-with".to_owned(),
+    );
+    assert_eq!(
+        lookup
+            .tagged_docs(&follow_up, work::Commits::ID)
+            .await
+            .unwrap(),
+        lookup.tagged_docs(drawer, work::Commits::ID).await.unwrap()
     );
     assert_eq!(
         lookup.commit_holders(&follow_up, tip).await.unwrap(),
@@ -868,11 +918,10 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
         assert!(shown.contains("sessions (1):"), "{shown}");
         assert!(shown.contains("s1  claude-code"), "{shown}");
 
-        // The entry's pack is a blob datum in the intxt's commits document, not in its
-        // descriptor, which holds no blob datums at all.
+        // The entry's pack is a blob datum in the writer's commits document, not the index.
         let (_, entry) = read_at(
             client,
-            &drawer,
+            &index_of(client, &drawer).await,
             &format!("org.example.intxt.work.gitCommitEntry/{tip}")
                 .parse()
                 .unwrap(),
@@ -887,7 +936,8 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
             entry["base"],
             format!("org.example.intxt.work.gitCommit/{merge_base}")
         );
-        let pack = big_cabinet_core::DatumReference::parse(entry["pack"].as_str().unwrap()).unwrap();
+        let pack =
+            big_cabinet_core::DatumReference::parse(entry["pack"].as_str().unwrap()).unwrap();
         let big_cabinet_core::ReferenceDocId::Concrete(pack_doc) = pack.document() else {
             panic!("{pack} names a document, not the entry's own");
         };
@@ -902,17 +952,19 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
             [pack_doc.clone()].into(),
             "the pack is in the commits document"
         );
-        let in_descriptor: Vec<_> = caller
-            .datum_keys(&drawer)
+        let in_index: Vec<_> = caller
+            .datum_keys(&index_of(client, &drawer).await)
             .await
             .unwrap()
             .into_iter()
             .filter(|key| key.tag().as_str() == big_blobs_core::Blob::ID)
             .collect();
         assert!(
-            in_descriptor.is_empty(),
-            "the descriptor holds no blob datums: {in_descriptor:?}"
+            in_index.is_empty(),
+            "the index document holds no blob datums: {in_index:?}"
         );
+        // After `new` and `add`, the drawer's own document is still only the pointers.
+        assert_drawer_document_holds_only_the_pointers(client, &drawer).await;
         let (_, blob) = read_at(client, pack_doc, pack.key()).await.unwrap();
         assert_eq!(blob["mime"], "application/x-git-pack");
         assert!(blob["lengthOctets"].as_u64().unwrap() > 0, "{blob}");
@@ -1201,16 +1253,15 @@ async fn intxt_add_copies_the_rewrites_the_hook_reported() {
         );
 
         let caller = Caller::new(client, RequestContext::root(), None, "test-hook".to_owned());
-        // The descriptor names the commits document.
-        let (_, descriptor) = read_at(
-            client,
-            &drawer,
-            &"org.example.intxt.work.commitsDoc/main".parse().unwrap(),
-        )
-        .await
-        .unwrap();
-        let commits_doc: big_cabinet_core::DocId =
-            descriptor["doc"].as_str().unwrap().parse().unwrap();
+        // The intxt's commits document is the one the writer's marker names.
+        let [commits_doc] = caller
+            .tagged_docs(&drawer, work::Commits::ID)
+            .await
+            .unwrap()
+            .into_keys()
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
         let slot = |tag: &str, sha: &str| format!("{tag}/{sha}").parse().unwrap();
         let (_, rewrite) = caller
             .read(&commits_doc, &slot(work::Rewrite::ID, &held))
@@ -1279,8 +1330,8 @@ async fn intxt_add_copies_the_rewrites_the_hook_reported() {
 #[tokio::test(flavor = "multi_thread")]
 async fn intxt_review_comments_follow_a_rebase_and_resolve() {
     use crate::cmds::intxt::package::Packaging;
-    use crate::cmds::intxt::review::Side;
     use crate::cmds::intxt::participant::Detected;
+    use crate::cmds::intxt::review::Side;
     use intxt_core::annotation::Motivation;
     use intxt_core::edit::Named;
 
@@ -1578,6 +1629,7 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
         };
         let captures = create("captures").await;
         let review = create("review").await;
+        let review_index = index_of(client, &review).await;
         let capture = |tag: &str, value: serde_json::Value| {
             let client = &client;
             let captures = &captures;
@@ -1649,14 +1701,14 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
         assert_eq!(
             added,
             [
-                format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
-                format!("dtxt:datum:{review}/org.example.intxt.work.sessionEntry/eb26ecaa"),
-                format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
+                format!("dtxt:datum:{review_index}/org.example.intxt.work.worktreeEntry/0193a"),
+                format!("dtxt:datum:{review_index}/org.example.intxt.work.sessionEntry/eb26ecaa"),
+                format!("dtxt:datum:{review_index}/org.example.intxt.work.worktreeEntry/0193a"),
             ]
         );
         let (_, entry) = read_at(
             client,
-            &review,
+            &review_index,
             &"org.example.intxt.work.worktreeEntry/0193a"
                 .parse()
                 .unwrap(),
@@ -1666,7 +1718,7 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
         assert_eq!(entry, json!({"worktree": worktree.to_string()}));
         let (_, body) = read_at(
             client,
-            &review,
+            &review_index,
             &"org.example.intxt.body/main".parse().unwrap(),
         )
         .await
@@ -1725,17 +1777,17 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
 async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
     use crate::cmds::intxt::package::Packaging;
     use big_cabinet_core::DocId;
-    use big_cabinet_core::datum::DatumMember;
     use big_cabinet_core::authority::Rights;
+    use big_cabinet_core::datum::DatumMember;
     use big_cabinet_core::drawer::DrawerAccess;
     use big_cabinet_core::drawer::listing::KnownDrawers;
-    use big_cabinet_core::drawer::protocol::{
-        DrawerScope, ListKnownDrawers, MintDrawerCapability,
-    };
-    use method_core::Method;
+    use big_cabinet_core::drawer::protocol::DrawerScope;
+    use big_cabinet_core::drawer::protocol::ListKnownDrawers;
+    use big_cabinet_core::drawer::protocol::MintDrawerCapability;
     use intxt_core::client::Caller;
     use intxt_core::generic;
     use intxt_core::work;
+    use method_core::Method;
     use serde_json::Value;
     use service_utils_rs::RequestContext;
 
@@ -1903,7 +1955,8 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
         let entry_key: big_cabinet_core::DatumKey = format!("{}/o/r/12", work::GithubPullEntry::ID)
             .parse()
             .unwrap();
-        let entry = caller.read(&drawer, &entry_key).await.unwrap().1;
+        let index = caller.index(&drawer).await.unwrap();
+        let entry = caller.read(&index, &entry_key).await.unwrap().1;
         assert_eq!(
             entry["pull"],
             format!("dtxt:datum:{doc}/{}/o/r/12", work::GithubPull::ID)

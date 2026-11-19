@@ -304,10 +304,11 @@ async fn concurrent_line_edits_to_a_note_both_land() {
     node.stop().await;
 }
 
-/// `createIntxt`, called as the operator, creates the drawer and writes the three descriptor
-/// datums of ADR 036 §2 on its descriptor document.
+/// `createIntxt`, called as the operator, creates the drawer and an index document in it. The
+/// drawer's own document holds only the marker and the pointer to the index (ADR 036 §2, as
+/// amended by ledger D70); the index holds the title, the description and the empty body.
 #[tokio::test]
-async fn create_intxt_writes_the_descriptor_datums() {
+async fn create_intxt_writes_the_index_document_and_points_at_it() {
     let node = boot().await;
     let created = node
         .call(intxt_core::methods::CreateIntxt {
@@ -316,15 +317,30 @@ async fn create_intxt_writes_the_descriptor_datums() {
         })
         .await
         .unwrap();
-    let keys = [
-        key::<generic::Intxt>("main"),
-        key::<generic::Title>("main"),
-        key::<generic::Body>("main"),
-    ];
+    let index = operator(&node, "index")
+        .index(&created.drawer_id)
+        .await
+        .unwrap();
     assert_eq!(
-        read(&node, &created.drawer_id, &keys).await,
+        read(
+            &node,
+            &created.drawer_id,
+            &[key::<generic::Intxt>("main"), key::<generic::Index>("main")]
+        )
+        .await,
         BTreeMap::from([
             datum::<generic::Intxt>("main", json!({"empty": true})),
+            datum::<generic::Index>("main", json!({"doc": index.to_string()})),
+        ])
+    );
+    assert_eq!(
+        read(
+            &node,
+            &index,
+            &[key::<generic::Title>("main"), key::<generic::Body>("main")]
+        )
+        .await,
+        BTreeMap::from([
             datum::<generic::Title>(
                 "main",
                 json!({"title": "Port the sync", "description": "Notes *in markdown*"}),
@@ -335,8 +351,230 @@ async fn create_intxt_writes_the_descriptor_datums() {
     node.stop().await;
 }
 
-/// `addToIntxt` includes parts once: each part is an entry in the intxt and a place in its body's
-/// order, adding one again changes neither, and the parts' documents are in the intxt's drawer.
+/// Two actors make their first comment and their first commit on one intxt without seeing each
+/// other's documents first (each resolves its own documents before either has written, so
+/// neither finds the other's). The first writes of the old fixed slots each created a document
+/// and the last writer won the slot, orphaning the other's; now each actor's documents carry its
+/// marker, and every document is found by tag, so both comments and both commits are read back
+/// and nothing is orphaned. The actors are descendants of the node's operator, as the cabinet
+/// attests them separately; two nodes' operators are the same case across a sync.
+#[tokio::test]
+async fn two_writers_first_documents_are_both_found_and_nothing_is_orphaned() {
+    use big_cabinet_core::authority::OpenActor;
+    use big_cabinet_core::drawer::protocol::GrantDrawer;
+    use intxt_core::annotation;
+
+    let node = boot().await;
+    let drawer = node
+        .call(intxt_core::methods::CreateIntxt {
+            title: "Two writers".to_owned(),
+            description: None,
+        })
+        .await
+        .unwrap()
+        .drawer_id;
+    let big_node = node.big_node();
+    let root = Authorization::identity(big_node.authority.root);
+    let admin = big_node
+        .drawers
+        .client
+        .call_with(
+            RequestContext::root(),
+            root.metadata(),
+            MintDrawerCapability {
+                scope: DrawerScope {
+                    drawers: [(drawer.clone(), DrawerAccess::Admin)].into(),
+                    create: false,
+                },
+                rights: Rights::USE | Rights::DELEGATE,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    let mut writers = Vec::new();
+    for name in ["ada", "grace"] {
+        let actor = big_node
+            .authority
+            .client
+            .call(
+                RequestContext::root(),
+                OpenActor {
+                    parent: big_node.authority.root,
+                    path: name.into(),
+                    rights: Rights::USE,
+                },
+            )
+            .await
+            .unwrap()
+            .actor
+            .actor_id;
+        big_node
+            .drawers
+            .client
+            .call(
+                RequestContext::root(),
+                GrantDrawer {
+                    capability: admin,
+                    drawer_id: drawer.clone(),
+                    subject_id: actor,
+                    access: DrawerAccess::Write,
+                },
+            )
+            .await
+            .unwrap();
+        writers.push((actor, operator(&node, name).acting_as(actor)));
+    }
+    let [(ada, as_ada), (grace, as_grace)] = &writers[..] else {
+        unreachable!("two writers were opened")
+    };
+
+    // Each actor's first comment and first commit, with both actors resolving their documents
+    // before either writes.
+    let (notes, commits) = tokio::join!(
+        async {
+            tokio::join!(
+                as_ada.own_doc(&drawer, annotation::Notes::ID),
+                as_grace.own_doc(&drawer, annotation::Notes::ID),
+            )
+        },
+        async {
+            tokio::join!(
+                as_ada.own_doc(&drawer, work::Commits::ID),
+                as_grace.own_doc(&drawer, work::Commits::ID),
+            )
+        },
+    );
+    let ((ada_notes, grace_notes), (ada_commits, grace_commits)) = (
+        (notes.0.unwrap(), notes.1.unwrap()),
+        (commits.0.unwrap(), commits.1.unwrap()),
+    );
+    assert_ne!(ada_notes, grace_notes);
+    assert_ne!(ada_commits, grace_commits);
+
+    let comment = |content: &str| {
+        json!({
+            "targets": [],
+            "body": {"mime": "text/markdown", "content": content},
+            "motivation": "commenting",
+            "creator": {"type": "Person"},
+        })
+    };
+    let commit = |message: &str| {
+        json!({
+            "parents": [],
+            "author": {"name": "Ada", "email": "ada@example.com", "at": "2026-11-10T21:04:11Z"},
+            "committer": {"name": "Ada", "email": "ada@example.com", "at": "2026-11-10T21:04:11Z"},
+            "message": message,
+            "files": [],
+        })
+    };
+    let ada_comment = key::<annotation::Comment>("019a0000-0000-7000-8000-00000000000a");
+    let grace_comment = key::<annotation::Comment>("019a0000-0000-7000-8000-00000000000b");
+    let (ada_commit, grace_commit) = ("a".repeat(40), "b".repeat(40));
+    for (writer, notes, comment_key, content, commits, sha) in [
+        (
+            as_ada,
+            &ada_notes,
+            &ada_comment,
+            "from ada",
+            &ada_commits,
+            &ada_commit,
+        ),
+        (
+            as_grace,
+            &grace_notes,
+            &grace_comment,
+            "from grace",
+            &grace_commits,
+            &grace_commit,
+        ),
+    ] {
+        writer
+            .write_datums(
+                notes,
+                [(comment_key.clone(), comment(content))].into(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        writer
+            .write_datums(
+                commits,
+                [(key::<work::GitCommit>(sha), commit(content))].into(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Any reader, the operator or either writer, finds both writers' documents by tag, each
+    // named for its writer.
+    for reader in [&operator(&node, "reader"), as_ada, as_grace] {
+        assert_eq!(
+            reader
+                .tagged_docs(&drawer, annotation::Notes::ID)
+                .await
+                .unwrap(),
+            BTreeMap::from([
+                (ada_notes.clone(), ada.to_string()),
+                (grace_notes.clone(), grace.to_string()),
+            ])
+        );
+        assert_eq!(
+            reader
+                .tagged_docs(&drawer, work::Commits::ID)
+                .await
+                .unwrap(),
+            BTreeMap::from([
+                (ada_commits.clone(), ada.to_string()),
+                (grace_commits.clone(), grace.to_string()),
+            ])
+        );
+        // Both comments are read back, from the two documents.
+        let mut comments = BTreeSet::new();
+        for doc in [&ada_notes, &grace_notes] {
+            comments.extend(
+                reader
+                    .datum_keys(doc)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|key| key.tag().as_str() == annotation::Comment::ID),
+            );
+        }
+        assert_eq!(
+            comments,
+            BTreeSet::from([ada_comment.clone(), grace_comment.clone()])
+        );
+        // And the membership query finds each writer's commit in that writer's document.
+        assert_eq!(
+            reader.commit_holders(&drawer, &ada_commit).await.unwrap(),
+            [ada_commits.clone()].into()
+        );
+        assert_eq!(
+            reader.commit_holders(&drawer, &grace_commit).await.unwrap(),
+            [grace_commits.clone()].into()
+        );
+    }
+    // Asking again answers the document an actor already has, not a third.
+    assert_eq!(
+        as_ada
+            .own_doc(&drawer, annotation::Notes::ID)
+            .await
+            .unwrap(),
+        ada_notes
+    );
+    assert_eq!(
+        as_grace.own_doc(&drawer, work::Commits::ID).await.unwrap(),
+        grace_commits
+    );
+    node.stop().await;
+}
+
+/// `addToIntxt` includes parts once: each part is an entry in the intxt's index document and a place
+/// in its body's order, adding one again changes neither, and the parts' documents are in the intxt's drawer.
 #[tokio::test]
 async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
     let node = boot().await;
@@ -351,6 +589,7 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
     };
     let captures = intxt("captures").await;
     let review = intxt("review").await;
+    let review_index = operator(&node, "index").index(&review).await.unwrap();
     let capture = async |datums: BTreeMap<DatumKey, Value>| {
         let first = datums.keys().next().unwrap().clone();
         let tag = first.tag().to_string();
@@ -401,10 +640,10 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
     assert_eq!(
         added,
         [
-            format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
-            format!("dtxt:datum:{review}/org.example.intxt.work.sessionEntry/eb26ecaa"),
-            format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
-            format!("dtxt:datum:{review}/org.example.intxt.work.repoEntry/{repo_doc}"),
+            format!("dtxt:datum:{review_index}/org.example.intxt.work.worktreeEntry/0193a"),
+            format!("dtxt:datum:{review_index}/org.example.intxt.work.sessionEntry/eb26ecaa"),
+            format!("dtxt:datum:{review_index}/org.example.intxt.work.worktreeEntry/0193a"),
+            format!("dtxt:datum:{review_index}/org.example.intxt.work.repoEntry/{repo_doc}"),
         ]
     );
     let entries = [
@@ -414,7 +653,7 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
         key::<generic::Body>("main"),
     ];
     assert_eq!(
-        read(&node, &review, &entries).await,
+        read(&node, &review_index, &entries).await,
         BTreeMap::from([
             datum::<work::WorktreeEntry>("0193a", json!({"worktree": worktree.to_string()})),
             datum::<work::SessionEntry>("eb26ecaa", json!({"session": session.to_string()})),
