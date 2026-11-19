@@ -1,11 +1,15 @@
+use futures::StreamExt;
 use http::HeaderValue;
 use http::header;
 use http_body_util::BodyExt;
+
+use method_core::ByteBody;
 use method_core::MethodKind;
 use method_core::XrpcMethod;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use service_client_core_rs::xrpc::XrpcBody;
 use service_client_core_rs::xrpc::XrpcClientError;
 use service_client_core_rs::xrpc::decode_response;
 use service_client_core_rs::xrpc::encode_request;
@@ -364,12 +368,19 @@ impl IrohXrpcClient {
                 outcome_unknown: operation.kind == MethodKind::Procedure,
             })?;
         let connection_task = IrohConnectionTaskGuard(Some(tokio::spawn(connection_task)));
+        let request_body = match encoded.body {
+            XrpcBody::Json(body) => http_body_util::Full::new(hyper::body::Bytes::from(body))
+                .map_err(|never| match never {})
+                .boxed_unsync(),
+            XrpcBody::Bytes(body) => {
+                http_body_util::StreamBody::new(body.map(|chunk| chunk.map(http_body::Frame::data)))
+                    .boxed_unsync()
+            }
+        };
         let mut request = hyper::Request::builder()
             .method(encoded.method)
             .uri(format!("/{}", encoded.path))
-            .body(http_body_util::Full::new(hyper::body::Bytes::from(
-                encoded.body,
-            )))
+            .body(request_body)
             .map_err(|error| XrpcClientError::Encode(error.to_string()))?;
         *request.headers_mut() = encoded.headers;
         request
@@ -385,22 +396,50 @@ impl IrohXrpcClient {
                 })?;
         let status = response.status();
         let headers = response.headers().clone();
-        let body = collect_iroh_response_body(response.into_body(), self.max_response_bytes)
-            .await
-            .map_err(|message| XrpcClientError::Protocol {
-                message,
-                outcome_unknown: operation.kind == MethodKind::Procedure,
-            })?;
-        connection_task
-            .join()
-            .await
-            .map_err(|message| XrpcClientError::Transport {
-                message: format!("connection task: {message}"),
-                outcome_unknown: operation.kind == MethodKind::Procedure,
-            })?;
-        if connection.close_reason().is_some() {
-            self.send(IrohConnectionCommand::Discard(generation));
-        }
+        let body = if headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_none_or(method_core::is_json_content_type)
+        {
+            let body = collect_iroh_response_body(response.into_body(), self.max_response_bytes)
+                .await
+                .map_err(|message| XrpcClientError::Protocol {
+                    message,
+                    outcome_unknown: operation.kind == MethodKind::Procedure,
+                })?;
+            connection_task
+                .join()
+                .await
+                .map_err(|message| XrpcClientError::Transport {
+                    message: format!("connection task: {message}"),
+                    outcome_unknown: operation.kind == MethodKind::Procedure,
+                })?;
+            if connection.close_reason().is_some() {
+                self.send(IrohConnectionCommand::Discard(generation));
+            }
+            XrpcBody::Json(body)
+        } else {
+            let mime = headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let stream = futures::stream::unfold(
+                (response.into_body().into_data_stream(), connection_task),
+                |(mut body, connection_task)| async move {
+                    body.next().await.map(|chunk| {
+                        (
+                            chunk.map_err(|error| std::io::Error::other(error.to_string())),
+                            (body, connection_task),
+                        )
+                    })
+                },
+            );
+            let mut body = ByteBody::new(stream);
+            if let Some(mime) = mime {
+                body = body.with_mime(mime);
+            }
+            XrpcBody::Bytes(body)
+        };
         decode_response(operation, context.request_id, status, &headers, &body)
     }
 }

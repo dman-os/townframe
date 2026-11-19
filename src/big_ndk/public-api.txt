@@ -13,5 +13,6 @@ pub use big_ndk::serve :: Nodule
 pub use big_ndk::serve :: Reply
 pub use big_ndk::serve :: invoke
 pub use big_ndk::serve :: serve
+pub use big_ndk::service_client_core_rs :: xrpc :: XrpcBody
 pub use big_ndk::wasi :: WasiHttp
 pub use big_ndk::wasi :: serve_wasi

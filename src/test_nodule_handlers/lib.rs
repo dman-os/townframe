@@ -27,6 +27,11 @@
 //!   not JSON), or the `UpstreamFailed` domain error when the outgoing request fails. With a
 //!   `query` it sends `GET /xrpc/<operation>?<query>` with no body instead, which is how a
 //!   query is called.
+//! - `/xrpc/<nsid>.ingest` takes a byte body and answers 200 with `{ chunks, octets, mime, sum }`:
+//!   how many chunks the stream yielded to the guest, their total length, the request's
+//!   `content-type` and the wrapping sum of every octet. It reads the stream one chunk at a time.
+//! - `/xrpc/<nsid>.emit` answers a byte body of [`EMIT_CHUNKS`] chunks of [`EMIT_CHUNK_OCTETS`]
+//!   octets (chunk `i` is all `i as u8`) as `application/x-emit`, produced lazily.
 //! - Any other `/xrpc/` operation answers 404 `{ "error": "UnknownOperation" }` and any other
 //!   path answers 404 `{ "error": "NotFound" }`.
 
@@ -34,18 +39,23 @@ use big_ndk::Cx;
 use big_ndk::Handler;
 use big_ndk::Nodule;
 use big_ndk::Reply;
+use big_ndk::XrpcBody;
 use big_ndk::invoke;
+use futures::StreamExt;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::Method;
 use http::header::CONTENT_TYPE;
+use method_core::ByteBody;
 use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use service_client_core_rs::xrpc::HttpTransport;
+
 use service_client_core_rs::xrpc::XrpcRequest;
+use service_client_core_rs::xrpc::XrpcResponse;
 use service_client_core_rs::xrpc::write_context_headers;
 
 use service_core_rs::HttpMetadata;
@@ -106,15 +116,136 @@ method_core::methods! {
     Config => Value, procedure, "config";
 }
 
+/// How many chunks `emit` answers, and how long each is.
+pub const EMIT_CHUNKS: usize = 4;
+pub const EMIT_CHUNK_OCTETS: usize = 64 * 1024;
+
 /// The fixture nodule: `echo` and `relay` under any authority.
 #[derive(Default, Clone)]
 pub struct Fixture;
 
+/// Consumes a byte body chunk by chunk, keeping only the running totals.
+async fn ingest(body: XrpcBody) -> Reply {
+    let XrpcBody::Bytes(mut body) = body else {
+        return Reply {
+            status: http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            body: XrpcBody::json(
+                br#"{"error":"InvalidRequest","message":"ingest takes a byte body"}"#.to_vec(),
+            ),
+        };
+    };
+    let mime = body.mime.clone();
+    let (mut chunks, mut octets, mut sum) = (0u64, 0u64, 0u64);
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.expect("the host's request body stream does not fail");
+        chunks += 1;
+        octets += chunk.len() as u64;
+        sum = chunk
+            .iter()
+            .fold(sum, |sum, octet| sum.wrapping_add(u64::from(*octet)));
+    }
+    Reply {
+        status: http::StatusCode::OK,
+        body: XrpcBody::json(
+            serde_json::to_vec(&json!({
+                "chunks": chunks,
+                "octets": octets,
+                "mime": mime,
+                "sum": sum,
+            }))
+            .expect("a JSON value serializes"),
+        ),
+    }
+}
+
+/// A lazily produced byte answer of [`EMIT_CHUNKS`] chunks.
+fn emit() -> Reply {
+    let chunks = (0..EMIT_CHUNKS).map(|index| {
+        Ok::<_, std::io::Error>(bytes::Bytes::from(vec![index as u8; EMIT_CHUNK_OCTETS]))
+    });
+    Reply {
+        status: http::StatusCode::OK,
+        body: XrpcBody::Bytes(
+            ByteBody::new(futures::stream::iter(chunks))
+                .with_mime("application/x-emit")
+                .with_length((EMIT_CHUNKS * EMIT_CHUNK_OCTETS) as u64),
+        ),
+    }
+}
+
+/// `put` and `read`: forwards the call to the node's blobs service through dispatch, streaming the
+/// body each way. The query string names the blobs handle (`capability`, and `blobId` for a
+/// read), which is a parameter of the blobs method; the guest authenticates to dispatch with its
+/// own nodule capability, as any hop does.
+async fn forward_blob(cx: &Cx, nsid: &str, body: XrpcBody) -> Reply {
+    let invalid = |message: &str| Reply {
+        status: http::StatusCode::BAD_REQUEST,
+        body: XrpcBody::json(
+            serde_json::to_vec(&json!({"error": "InvalidRequest", "message": message}))
+                .expect("a JSON value serializes"),
+        ),
+    };
+    let Some((operation, query)) = nsid.split_once('?') else {
+        return invalid("blob calls need query parameters");
+    };
+    let Some(authority) = cx.nodule_capability() else {
+        return invalid("no nodule capability");
+    };
+    let mut headers = HeaderMap::new();
+    write_context_headers(
+        &mut headers,
+        &cx.next_hop(),
+        &HttpMetadata {
+            authorization: Some(bearer_header_value(authority)),
+            idempotency_key: cx.idempotency_key().map(str::to_owned),
+            range: None,
+        },
+    )
+    .expect("context headers are valid HTTP");
+    let is_put = operation.ends_with(".put");
+    let request = XrpcRequest {
+        method: if is_put { Method::POST } else { Method::GET },
+        path: format!(
+            "xrpc/org.example.daybook.blobs.{}?{query}",
+            if is_put { "put" } else { "read" }
+        ),
+        headers,
+        body: if is_put {
+            body
+        } else {
+            XrpcBody::json(Vec::new())
+        },
+    };
+    match cx.transport().send(request).await {
+        Ok(XrpcResponse { status, body, .. }) => Reply { status, body },
+        Err(error) => Reply {
+            status: http::StatusCode::BAD_GATEWAY,
+            body: XrpcBody::json(
+                serde_json::to_vec(&json!({
+                    "error": "UpstreamFailed",
+                    "message": error.message,
+                }))
+                .expect("a JSON error serializes"),
+            ),
+        },
+    }
+}
+
 impl Nodule for Fixture {
-    async fn route(&self, nsid: &str, cx: &Cx, body: &[u8]) -> Option<Reply> {
-        match nsid.rsplit('.').next().unwrap_or_default() {
+    async fn route(&self, nsid: &str, cx: &Cx, body: XrpcBody) -> Option<Reply> {
+        match nsid
+            .split('?')
+            .next()
+            .unwrap_or_default()
+            .rsplit('.')
+            .next()
+            .unwrap_or_default()
+        {
             "echo" => Some(invoke::<Self, Echo>(self, cx, body).await),
             "relay" => Some(invoke::<Self, Relay>(self, cx, body).await),
+            "put" | "read" => Some(forward_blob(cx, nsid, body).await),
+            "ingest" => Some(ingest(body).await),
+            "emit" => Some(emit()),
             "config" => Some(invoke::<Self, Config>(self, cx, body).await),
             _ => None,
         }
@@ -213,14 +344,16 @@ impl Handler<Relay> for Fixture {
                 method: Method::GET,
                 path: format!("xrpc/{}?{query}", input.operation),
                 headers,
-                body: Vec::new(),
+                body: XrpcBody::json(Vec::new()),
             },
             None => XrpcRequest {
                 method: Method::POST,
                 path: format!("xrpc/{}", input.operation),
                 headers,
-                body: serde_json::to_vec(input.input.as_ref().unwrap_or(&Value::Null))
-                    .expect("serializing a Value cannot fail"),
+                body: XrpcBody::json(
+                    serde_json::to_vec(input.input.as_ref().unwrap_or(&Value::Null))
+                        .expect("serializing a Value cannot fail"),
+                ),
             },
         };
         let response = cx
@@ -228,9 +361,15 @@ impl Handler<Relay> for Fixture {
             .send(request)
             .await
             .map_err(|error| FixtureError::UpstreamFailed(error.message))?;
-        let body = serde_json::from_slice::<Value>(&response.body).unwrap_or_else(|_| {
-            Value::String(String::from_utf8_lossy(&response.body).into_owned())
-        });
+        let body = match response.body {
+            XrpcBody::Json(body) => serde_json::from_slice::<Value>(&body)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned())),
+            XrpcBody::Bytes(_) => {
+                return Err(FixtureError::UpstreamFailed(
+                    "the fixture cannot relay a byte body yet".to_owned(),
+                ));
+            }
+        };
         Ok(json!({ "status": response.status.as_u16(), "body": body }))
     }
 }

@@ -7,9 +7,9 @@
 //! [`HttpForm::Get`] the node's XRPC listener (`big_dispatch::xrpc_router`) hands it, so the
 //! query string is decoded by the method's Lexicon `parameters` in one place, and a verb that
 //! is not the method's kind is refused by dispatch as it is for the listener. A guest's bodies
-//! are JSON in both directions until byte bodies reach guests with wasi:http streams (ADR 042
-//! §2): a method that takes bytes is refused by dispatch's encoding check, and one that answers
-//! bytes is answered `NotImplemented`. The call's origin is [`Origin::Remote`], never inherited
+//! carry either application/json bytes or pull-based wasi:http byte streams (ADR 042 §2). Byte
+//! methods receive their parameters from the query string beside the stream, and byte answers
+//! preserve their MIME and known length. The call's origin is [`Origin::Remote`], never inherited
 //! from whoever the nodule is serving, so a local-only method is refused (ADR 042 §3). Dispatch then admits the call as it
 //! admits any other: the capability must be live, permit the NSID and be bound to that actor, so
 //! a handler that presents another nodule's capability id is denied there. Nothing else the
@@ -33,11 +33,19 @@ use http::StatusCode;
 use method_core::ContextError;
 use serde_json::Value;
 use serde_json::json;
+use service_client_core_rs::xrpc::XrpcBody;
 use service_client_native_rs::Client;
 use service_core_rs::xrpc::bearer_token;
 use service_core_rs::xrpc::request_context;
 use service_utils_rs::ClientError;
 use service_utils_rs::HttpMetadata;
+
+fn json_response(status: StatusCode, body: Value) -> (StatusCode, XrpcBody) {
+    (
+        status,
+        XrpcBody::json(serde_json::to_vec(&body).expect("a JSON value serializes")),
+    )
+}
 
 /// Runs a handler's outgoing request through dispatch. A malformed request is answered like an
 /// XRPC server would, not refused as a transport failure.
@@ -53,10 +61,10 @@ pub async fn call(
     method: &Method,
     path: &str,
     headers: &HeaderMap,
-    body: &[u8],
-) -> (StatusCode, Value) {
+    body: XrpcBody,
+) -> (StatusCode, XrpcBody) {
     let bad = |status: StatusCode, error: &str, message: &str| {
-        (status, json!({ "error": error, "message": message }))
+        json_response(status, json!({ "error": error, "message": message }))
     };
     let Some(target) = path.strip_prefix("/xrpc/") else {
         return bad(
@@ -69,7 +77,7 @@ pub async fn call(
     let (operation, query) = target.split_once('?').unwrap_or((target, ""));
     let http = match *method {
         Method::GET => {
-            if !body.is_empty() {
+            if !matches!(&body, XrpcBody::Json(body) if body.is_empty()) {
                 return bad(
                     StatusCode::BAD_REQUEST,
                     "InvalidRequest",
@@ -115,16 +123,19 @@ pub async fn call(
         );
     };
     let idempotency_key = metadata.idempotency_key;
-    let input = if body.is_empty() {
-        Value::Null
-    } else if let Ok(input) = serde_json::from_slice(body) {
-        input
-    } else {
-        return bad(
-            StatusCode::BAD_REQUEST,
-            "InvalidRequest",
-            "the request body is not JSON",
-        );
+    let input = match &body {
+        XrpcBody::Json(body) if body.is_empty() => Value::Null,
+        XrpcBody::Json(body) => match serde_json::from_slice(body) {
+            Ok(input) => input,
+            Err(_) => {
+                return bad(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidRequest",
+                    "the request body is not JSON",
+                );
+            }
+        },
+        XrpcBody::Bytes(_) => Value::Null,
     };
     let Some(signer) = signer else {
         return bad(
@@ -133,6 +144,21 @@ pub async fn call(
             "the calling handler has been stopped",
         );
     };
+    let invocation = InvocationContext {
+        idempotency_key: idempotency_key.clone(),
+        http: Some(http),
+        range: None,
+        origin: Origin::Remote,
+    };
+    let invoke = match body {
+        XrpcBody::Json(_) => Invoke::json(operation, input, invocation),
+        XrpcBody::Bytes(body) => Invoke {
+            operation,
+            parameters: Value::Null,
+            body: Body::Bytes(body),
+            context: invocation,
+        },
+    };
     let result = dispatch
         .call_with(
             request_context,
@@ -140,26 +166,13 @@ pub async fn call(
                 idempotency_key: idempotency_key.clone(),
                 ..Authorization { authority, signer }.metadata()
             },
-            Invoke::json(
-                operation,
-                input,
-                InvocationContext {
-                    idempotency_key,
-                    http: Some(http),
-                    range: None,
-                    origin: Origin::Remote,
-                },
-            ),
+            invoke,
         )
         .await;
     match result {
         Ok(output) => match output.body {
-            Body::Json(output) => (StatusCode::OK, output),
-            Body::Bytes(_) => bad(
-                StatusCode::NOT_IMPLEMENTED,
-                "NotImplemented",
-                "the method answers bytes, which reach guests with wasi:http streams",
-            ),
+            Body::Json(output) => json_response(StatusCode::OK, output),
+            Body::Bytes(body) => (StatusCode::OK, XrpcBody::Bytes(body)),
             #[cfg(unix)]
             Body::Descriptors(_) => bad(
                 StatusCode::NOT_IMPLEMENTED,
@@ -179,9 +192,9 @@ pub async fn call(
 /// denied 403, unknown operation 404, not ready 503, invalid input 400 and an output off its Lexicon 500 as an XRPC
 /// `{ error, message }`, a provider's own error as it came, a deadline 504. The failures of the
 /// services behind dispatch are gateway errors.
-fn dispatch_error_response(error: DispatchError) -> (StatusCode, Value) {
+fn dispatch_error_response(error: DispatchError) -> (StatusCode, XrpcBody) {
     let named = |status: StatusCode, name: &str| {
-        (
+        json_response(
             status,
             json!({ "error": name, "message": error.to_string() }),
         )
@@ -189,17 +202,17 @@ fn dispatch_error_response(error: DispatchError) -> (StatusCode, Value) {
     match &error {
         DispatchError::Denied => named(StatusCode::FORBIDDEN, "Denied"),
         DispatchError::LocalOnly => named(StatusCode::FORBIDDEN, "LocalOnly"),
-        DispatchError::BodyMismatch { .. } => (
+        DispatchError::BodyMismatch { .. } => json_response(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             json!({ "error": "InvalidRequest", "message": error.to_string() }),
         ),
-        DispatchError::TooLarge { .. } => (
+        DispatchError::TooLarge { .. } => json_response(
             StatusCode::PAYLOAD_TOO_LARGE,
             json!({ "error": "InvalidRequest", "message": error.to_string() }),
         ),
         DispatchError::UnknownOperation => named(StatusCode::NOT_FOUND, "UnknownOperation"),
         DispatchError::NotReady { .. } => named(StatusCode::SERVICE_UNAVAILABLE, "NotReady"),
-        DispatchError::InvalidInput(message) => (
+        DispatchError::InvalidInput(message) => json_response(
             StatusCode::BAD_REQUEST,
             json!({ "error": "InvalidRequest", "message": message }),
         ),
@@ -209,7 +222,7 @@ fn dispatch_error_response(error: DispatchError) -> (StatusCode, Value) {
         DispatchError::Context(ContextError::DeadlineExceeded) => {
             named(StatusCode::GATEWAY_TIMEOUT, "DeadlineExceeded")
         }
-        DispatchError::Provider { status, body } => (
+        DispatchError::Provider { status, body } => json_response(
             StatusCode::from_u16(*status).expect("a provider answered a valid status"),
             body.clone(),
         ),

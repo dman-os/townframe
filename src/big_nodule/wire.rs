@@ -33,14 +33,9 @@ pub fn gateway_error(message: impl std::fmt::Display) -> ProviderError {
     }
 }
 
-/// The refusal of a byte body bound for a nodule handler. Byte bodies reach a guest as wasi:http
-/// body streams, which no executor bridges yet (ADR 042 §2), so a guest's methods are JSON until
-/// then.
-pub fn byte_body_refused() -> ProviderError {
-    ProviderError::InvalidInput(
-        "a nodule handler takes JSON bodies only; byte bodies reach guests with wasi:http streams"
-            .to_owned(),
-    )
+/// The refusal of descriptor bodies, which are only supported by the native descriptor transport.
+pub fn descriptor_body_refused() -> ProviderError {
+    ProviderError::InvalidInput("descriptor bodies are native-only".to_owned())
 }
 
 /// The headers of a delivery to a handler: the request id and trace of the next hop, the

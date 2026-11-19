@@ -325,6 +325,43 @@ fn check(validator: Option<&PositionValidator>, value: &Value) -> Result<(), Vec
     }
 }
 
+/// One side of a method Lexicon's body, as the Lexicon declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredBody {
+    pub encoding: method_core::Encoding,
+    /// The media type the Lexicon names when it is neither `*/*` nor JSON. A compiled-in method
+    /// states its media type as a `&'static str` in its `Encoding`; a Lexicon's is data a
+    /// cartridge supplied, so it is owned here and `encoding` is `Bytes { mime: None }`.
+    pub mime: Option<String>,
+}
+
+/// The body encodings a method Lexicon `file` declares, as `(input, output)`: `application/json`
+/// or no body is JSON, `*/*` is bytes of any media type, `application/x-descriptors` is file
+/// descriptors, and any other media type is bytes of that type. This is how a method with no
+/// compiled-in [`method_core::XrpcMethod`], such as a nodule's, tells dispatch its encodings.
+pub fn body_encodings(file: &Value) -> (DeclaredBody, DeclaredBody) {
+    let side = |body: &Value| match body["encoding"].as_str() {
+        None | Some("application/json") => DeclaredBody {
+            encoding: method_core::Encoding::Json,
+            mime: None,
+        },
+        Some("application/x-descriptors") => DeclaredBody {
+            encoding: method_core::Encoding::Descriptors,
+            mime: None,
+        },
+        Some("*/*") => DeclaredBody {
+            encoding: method_core::Encoding::Bytes { mime: None },
+            mime: None,
+        },
+        Some(mime) => DeclaredBody {
+            encoding: method_core::Encoding::Bytes { mime: None },
+            mime: Some(mime.to_owned()),
+        },
+    };
+    let main = &file["defs"]["main"];
+    (side(&main["input"]), side(&main["output"]))
+}
+
 impl MethodContract {
     /// Compiles method `file` (a query, procedure or subscription Lexicon) with the files it may
     /// reference in `carried`.
