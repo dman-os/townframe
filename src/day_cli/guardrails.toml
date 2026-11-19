@@ -20,3 +20,4 @@ allowed_dependencies = [
 allow_external_api_types = false
 
 [builds.native]
+features = ["docs"]
