@@ -42,18 +42,22 @@ impl DocsStub {
             Arc::new(move |scope: DocScope| {
                 let document = scope
                     .read
-                    .first()
+                    .keys()
+                    .next()
                     .expect("metadata scope reads one document")
                     .clone();
-                let write = scope.write.contains(&document);
+                let write = scope.write.contains_key(&document);
                 assert_eq!(
                     scope,
                     DocScope {
-                        read: BTreeSet::from([document.clone()]),
+                        read: DocScope::read_all([document.clone()]),
                         write: if write {
-                            BTreeSet::from([document.clone()])
+                            std::collections::BTreeMap::from([(
+                                document.clone(),
+                                big_cabinet_core::doc::DatumKinds::All,
+                            )])
                         } else {
-                            BTreeSet::new()
+                            std::collections::BTreeMap::new()
                         },
                         ..Default::default()
                     }

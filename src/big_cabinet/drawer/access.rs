@@ -385,11 +385,13 @@ impl DocAccess for DrawerAccess {
                 return Ok(vec![self.core.namespace.capability]);
             }
             let mut dependencies = Vec::new();
+            let write_docs: BTreeSet<_> = scope.write.keys().cloned().collect();
             for (doc, needed) in scope
                 .read
-                .difference(&scope.write)
+                .keys()
+                .filter(|doc| !write_docs.contains(*doc))
                 .map(|doc| (doc, Access::Read))
-                .chain(scope.write.iter().map(|doc| (doc, Access::Write)))
+                .chain(scope.write.keys().map(|doc| (doc, Access::Write)))
             {
                 let (held, proof) = self
                     .core
@@ -416,6 +418,7 @@ impl DocAccess for DrawerAccess {
                 }
                 dependencies.extend(proof);
             }
+            // The kinds a drawer reach names are not the drawer policy's: it proves the access.
             for (drawer, needed) in &scope.drawers {
                 let (held, proof) = self
                     .core
@@ -423,7 +426,7 @@ impl DocAccess for DrawerAccess {
                     .await
                     .map_err(access_error)?
                     .ok_or_else(|| AccessError::Refused("drawer is not reachable".into()))?;
-                if held < *needed {
+                if held < needed.access {
                     return Err(AccessError::Refused("insufficient drawer access".into()));
                 }
                 dependencies.extend(proof);

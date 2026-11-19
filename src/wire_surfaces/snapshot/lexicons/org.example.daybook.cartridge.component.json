@@ -1,0 +1,10 @@
+{
+  "defs": {
+    "main": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.cartridge.component",
+  "lexicon": 1
+}

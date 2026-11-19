@@ -1,6 +1,7 @@
 use super::ws::WsIo;
 use super::ws::WsMessage;
 use futures::StreamExt;
+use method_core::ByteBody;
 use method_core::MethodKind;
 use method_core::Subscription;
 use method_core::XrpcMethod;
@@ -8,6 +9,7 @@ use reqwest::Url;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use service_client_core_rs::xrpc::XrpcBody;
 use service_client_core_rs::xrpc::XrpcClientError;
 use service_client_core_rs::xrpc::decode_response;
 use service_client_core_rs::xrpc::encode_request;
@@ -148,7 +150,10 @@ impl XrpcClient {
             .client
             .request(encoded.method, url)
             .headers(encoded.headers)
-            .body(encoded.body)
+            .body(match encoded.body {
+                XrpcBody::Json(body) => reqwest::Body::from(body),
+                XrpcBody::Bytes(body) => reqwest::Body::wrap_stream(body),
+            })
             .send()
             .await
             .map_err(|error| XrpcClientError::Transport {
@@ -326,27 +331,47 @@ impl XrpcClient {
 async fn read_response_body(
     response: reqwest::Response,
     max_bytes: usize,
-) -> Result<Vec<u8>, (String, bool)> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
+) -> Result<XrpcBody, (String, bool)> {
+    let mime = response
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let length = response.content_length();
+    if mime
+        .as_deref()
+        .is_none_or(method_core::is_json_content_type)
     {
-        return Err((
-            "XRPC response body exceeds configured limit".to_owned(),
-            false,
-        ));
-    }
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| (error.to_string(), true))?;
-        if body.len().saturating_add(chunk.len()) > max_bytes {
+        if length.is_some_and(|length| length > max_bytes as u64) {
             return Err((
                 "XRPC response body exceeds configured limit".to_owned(),
-                true,
+                false,
             ));
         }
-        body.extend_from_slice(&chunk);
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| (error.to_string(), true))?;
+            if body.len().saturating_add(chunk.len()) > max_bytes {
+                return Err((
+                    "XRPC response body exceeds configured limit".to_owned(),
+                    true,
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(XrpcBody::Json(body))
+    } else {
+        let stream = response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(std::io::Error::other));
+        let mut body = ByteBody::new(stream);
+        if let Some(mime) = mime {
+            body = body.with_mime(mime);
+        }
+        if let Some(length) = length {
+            body = body.with_length(length);
+        }
+        Ok(XrpcBody::Bytes(body))
     }
-    Ok(body)
 }

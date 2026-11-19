@@ -1,0 +1,17 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "kty": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kty"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.jwk",
+  "lexicon": 1
+}

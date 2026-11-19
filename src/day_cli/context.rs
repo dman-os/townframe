@@ -133,6 +133,11 @@ pub struct PeerSettings {
     /// `big_node::peers::PeersConfig::loopback_only`).
     #[serde(default)]
     pub loopback_only: bool,
+    /// The UDP port the node listens on (see `big_node::peers::PeersConfig::listen_port`). Unset,
+    /// a free port is taken at each start and the node's ticket changes with every restart; a
+    /// node that others dial by its ticket sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_port: Option<u16>,
 }
 
 impl PeerSettings {
@@ -167,6 +172,7 @@ impl PeerSettings {
             .collect::<Res<Vec<_>>>()?;
         Ok(big_node::peers::PeersConfig {
             loopback_only: self.loopback_only,
+            listen_port: self.listen_port,
             policy: if relay {
                 big_node::peers::PolicyChoice::Custom(Arc::new(big_node::peers::RelayPolicy::new(
                     dial,
@@ -250,6 +256,23 @@ impl NodeDir {
             socket.display()
         );
         Ok(socket)
+    }
+
+    /// The native descriptor socket paired with [`Self::socket_path`].
+    #[cfg(unix)]
+    pub fn fd_socket_path(&self) -> Res<PathBuf> {
+        let socket = self.socket_path()?;
+        let stem = socket
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| eyre::eyre!("the node socket has no UTF-8 stem"))?;
+        let fd_socket = socket.with_file_name(format!("{stem}.fd.sock"));
+        eyre::ensure!(
+            fd_socket.as_os_str().len() <= MAX_SOCKET_PATH_BYTES,
+            "the descriptor socket path {} is longer than a Unix socket path can be ({MAX_SOCKET_PATH_BYTES} bytes); use a shorter XDG_RUNTIME_DIR",
+            fd_socket.display()
+        );
+        Ok(fd_socket)
     }
 
     pub fn log_path(&self) -> PathBuf {

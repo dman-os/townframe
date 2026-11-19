@@ -2,8 +2,8 @@
 //! served (the contract every XRPC hop speaks) and how its response maps back onto dispatch's
 //! provider errors. [`crate::egress`] is the other direction.
 
+use crate::executor::RoutineCapabilities;
 use big_cabinet_core::authority::Authorization;
-use big_cabinet_core::authority::CapId;
 use big_dispatch::Caller;
 use big_dispatch::ProviderError;
 use big_dispatch_core::InvocationContext;
@@ -14,7 +14,11 @@ use serde_json::json;
 use service_client_core_rs::xrpc::write_context_headers;
 use service_core_rs::xrpc::DOMAIN_ERROR_FIELD;
 use service_core_rs::xrpc::DOMAIN_ERROR_STATUS;
+use service_core_rs::xrpc::NODULE_BLOBS_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
+use service_core_rs::xrpc::NODULE_CONFIG_CAPABILITY_HEADER;
+use service_core_rs::xrpc::NODULE_CONFIG_DOC_HEADER;
+use service_core_rs::xrpc::NODULE_DRAWER_CAPABILITY_HEADER;
 use service_core_rs::xrpc::bearer_header_value;
 use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
@@ -31,6 +35,11 @@ pub fn gateway_error(message: impl std::fmt::Display) -> ProviderError {
     }
 }
 
+/// The refusal of descriptor bodies, which are only supported by the native descriptor transport.
+pub fn descriptor_body_refused() -> ProviderError {
+    ProviderError::InvalidInput("descriptor bodies are native-only".to_owned())
+}
+
 /// The headers of a delivery to a handler: the request id and trace of the next hop, the
 /// remaining budget as a relative `x-timeout-ms`, the idempotency key, and the caller's
 /// capability as a bare `Bearer` token (the caller's signer never enters a handler), plus
@@ -39,7 +48,8 @@ pub fn delivery_headers(
     caller: &Caller,
     request: &RequestContext,
     context: &InvocationContext,
-    nodule_capability: Option<CapId>,
+    config_doc: &big_cabinet_core::dmeta::DocId,
+    capabilities: &RoutineCapabilities,
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
     write_context_headers(
@@ -50,15 +60,48 @@ pub fn delivery_headers(
                 caller.authorization.authority,
             ))),
             idempotency_key: context.idempotency_key.clone(),
+            // A guest's methods are JSON: there is no byte output to range over.
+            range: None,
         },
     )
     .expect("request context headers are valid HTTP");
-    if let Some(capability) = nodule_capability {
+    if let Some(capability) = capabilities.dispatch {
         headers.insert(
             NODULE_CAPABILITY_HEADER,
             Authorization::id_text(capability)
                 .parse()
                 .expect("a capability id is a valid header value"),
+        );
+    }
+    if let Some(capability) = capabilities.drawers {
+        headers.insert(
+            NODULE_DRAWER_CAPABILITY_HEADER,
+            Authorization::id_text(capability)
+                .parse()
+                .expect("a capability id is a valid header value"),
+        );
+    }
+    if let Some(capability) = capabilities.blobs {
+        headers.insert(
+            NODULE_BLOBS_CAPABILITY_HEADER,
+            Authorization::id_text(capability)
+                .parse()
+                .expect("a capability id is a valid header value"),
+        );
+    }
+    if let Some(capability) = capabilities.docs {
+        headers.insert(
+            NODULE_CONFIG_CAPABILITY_HEADER,
+            Authorization::id_text(capability)
+                .parse()
+                .expect("a capability id is a valid header value"),
+        );
+        headers.insert(
+            NODULE_CONFIG_DOC_HEADER,
+            config_doc
+                .to_string()
+                .parse()
+                .expect("a document id is a valid header value"),
         );
     }
     headers

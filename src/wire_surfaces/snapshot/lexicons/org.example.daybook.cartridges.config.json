@@ -1,0 +1,17 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "cartridge": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cartridge"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.cartridges.config",
+  "lexicon": 1
+}

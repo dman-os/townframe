@@ -1,0 +1,92 @@
+{
+  "defs": {
+    "BlobInfo": {
+      "properties": {
+        "blobId": {
+          "type": "string"
+        },
+        "lengthOctets": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "blobId",
+        "lengthOctets"
+      ],
+      "type": "object"
+    },
+    "BlobStat": {
+      "nullable": [
+        "info"
+      ],
+      "properties": {
+        "info": {
+          "ref": "#BlobInfo",
+          "type": "ref"
+        }
+      },
+      "type": "object"
+    },
+    "StatBlob": {
+      "properties": {
+        "blobId": {
+          "type": "string"
+        },
+        "capability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "blobId"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "NotFound"
+        },
+        {
+          "description": "The item is over the node's size limit for one put (ADR 042 §6). For a batch import this is\nthe refusal of that item alone.",
+          "name": "TooLarge"
+        },
+        {
+          "description": "The body of a put failed while the node read it: the upload was cut off.",
+          "name": "Unreadable"
+        },
+        {
+          "description": "A read asked for a range that selects no octet of the blob.",
+          "name": "RangeNotSatisfiable"
+        },
+        {
+          "name": "InvalidInput"
+        },
+        {
+          "name": "Storage"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#StatBlob",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#BlobStat",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.blobs.stat",
+  "lexicon": 1
+}

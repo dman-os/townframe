@@ -1,0 +1,25 @@
+{
+  "$defs": {
+    "BranchPath": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "The branch side of a branch: `org.example.daybook.branch/<docid>` on the branch document,\nnaming that document's branch path.\n\nThe datum id carries the document id, not the value, because a branch merged back brings this\ndatum along: the origin then holds the branch's entry under the branch's id, and still finds\nits own path (if it is itself a branch) under its own id. Only Branch writes it.",
+      "properties": {
+        "from": {
+          "x-lexicon-ref": "org.example.daybook.defs#datumPin"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "BranchPath",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.branch"
+    }
+  },
+  "$ref": "#/$defs/BranchPath",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

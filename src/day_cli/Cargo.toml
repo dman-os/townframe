@@ -20,9 +20,11 @@ secrets_rs.workspace = true
 service_utils_rs.workspace = true
 big_node.workspace = true
 big_dispatch.workspace = true
+big_dispatch_core.workspace = true
 big_nodule_core.workspace = true
 big_repo.workspace = true
 big_cabinet.workspace = true
+big_cartridges_core.workspace = true
 big_cabinet_core = { workspace = true, features = ["manifest"] }
 
 #
@@ -39,6 +41,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync",
 axum = { workspace = true }
 http.workspace = true
 reqwest.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
+futures.workspace = true
 serde_urlencoded = "0.7"
 tower = { workspace = true, features = ["util"] }
 

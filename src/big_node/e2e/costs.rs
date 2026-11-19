@@ -561,7 +561,8 @@ async fn long_test_cost_table() {
                     "put 64 KiB blob and publish it in the drawer",
                     cluster.add_blob(0, &drawer, &bytes),
                 )
-                .await,
+                .await
+                .1,
         );
     }
     for blob in &blobs {
@@ -706,7 +707,7 @@ async fn dispatch_costs(table: &mut Table) {
         capability: capability(
             &node,
             DocScope {
-                read: BTreeSet::from([note.doc_id.clone()]),
+                read: DocScope::read_all([note.doc_id.clone()]),
                 ..DocScope::default()
             },
         )
@@ -721,7 +722,10 @@ async fn dispatch_costs(table: &mut Table) {
     let write_capability = capability(
         &node,
         DocScope {
-            write: BTreeSet::from([note.doc_id.clone()]),
+            write: std::collections::BTreeMap::from([(
+                note.doc_id.clone(),
+                big_cabinet_core::doc::DatumKinds::All,
+            )]),
             ..DocScope::default()
         },
     )
@@ -753,11 +757,11 @@ async fn dispatch_costs(table: &mut Table) {
                     .call_with(
                         RequestContext::root(),
                         operator.metadata(),
-                        big_dispatch_core::Invoke {
-                            operation: WriteDatums::XRPC.nsid.to_owned(),
-                            input: write.clone(),
-                            context: Default::default(),
-                        },
+                        big_dispatch_core::Invoke::json(
+                            WriteDatums::XRPC.nsid,
+                            write.clone(),
+                            Default::default(),
+                        ),
                     )
                     .await
                     .unwrap()
@@ -770,15 +774,16 @@ async fn dispatch_costs(table: &mut Table) {
                     .call_with(
                         RequestContext::root(),
                         operator.metadata(),
-                        big_dispatch_core::Invoke {
-                            operation: ReadDatums::XRPC.nsid.to_owned(),
-                            input: input.clone(),
-                            context: Default::default(),
-                        },
+                        big_dispatch_core::Invoke::json(
+                            ReadDatums::XRPC.nsid,
+                            input.clone(),
+                            Default::default(),
+                        ),
                     )
                     .await
                     .unwrap()
-                    .output
+                    .body
+                    .into_json()
             })
             .await;
         // The check dispatch adds to every call, alone: compiled once, run per call.

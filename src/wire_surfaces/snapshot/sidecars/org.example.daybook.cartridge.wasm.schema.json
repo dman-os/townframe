@@ -1,0 +1,37 @@
+{
+  "$defs": {
+    "Digest": {
+      "type": "string"
+    },
+    "WasmComponent": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "bytes": {
+          "x-lexicon-ref": "org.example.daybook.defs#datumPin"
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "mediaType": {
+          "type": "string"
+        },
+        "size": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "bytes",
+        "digest",
+        "size",
+        "mediaType"
+      ],
+      "title": "WasmComponent",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridge.wasm"
+    }
+  },
+  "$ref": "#/$defs/WasmComponent",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

@@ -175,7 +175,15 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         StaticCommands::Carts { command } => cmds::carts::run(command).await,
         StaticCommands::Peers { command } => cmds::peers::run(command).await,
         StaticCommands::Drawers { command } => cmds::drawers::run(command).await,
-        StaticCommands::Exec { nsid, input, get } => cmds::exec::run(nsid, input, get).await,
+        StaticCommands::Grants { command } => cmds::grants::run(command).await,
+        StaticCommands::Exec {
+            nsid,
+            input,
+            get,
+            body,
+            range,
+            output,
+        } => cmds::exec::run(nsid, input, get, body, range, output).await,
     }
 }
 
@@ -234,6 +242,12 @@ enum StaticCommands {
         #[clap(subcommand)]
         command: cmds::drawers::DrawersCommands,
     },
+    /// What cartridges may reach, and the requests they make for more
+    #[clap(visible_alias = "grant")]
+    Grants {
+        #[clap(subcommand)]
+        command: cmds::grants::GrantsCommands,
+    },
     /// Execute an operation through the node's dispatch router and print the JSON answer
     #[clap(visible_alias = "x")]
     Exec {
@@ -245,6 +259,16 @@ enum StaticCommands {
         /// instead of the JSON body of a POST
         #[arg(long)]
         get: bool,
+        /// Stream this file as the raw request body of an operation whose input is bytes, such
+        /// as org.example.daybook.blobs.put; the input is then its parameters, as a query string
+        #[arg(long, value_name = "FILE")]
+        body: Option<std::path::PathBuf>,
+        /// An HTTP Range, such as bytes=0-99, for an operation that answers part of its bytes
+        #[arg(long, value_name = "RANGE")]
+        range: Option<String>,
+        /// Write an answer that is bytes, such as org.example.daybook.blobs.read, to this file
+        #[arg(long, value_name = "FILE")]
+        output: Option<std::path::PathBuf>,
     },
     /// Generate shell completions
     Completions {

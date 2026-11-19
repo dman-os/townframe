@@ -1,0 +1,31 @@
+[package]
+name = "wire_surfaces"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[[bin]]
+name = "wire-surfaces"
+path = "main.rs"
+
+[dependencies]
+#
+# internal
+big_cabinet.workspace = true
+big_cabinet_core = { workspace = true, features = ["manifest"] }
+big_node.workspace = true
+method_lexicon.workspace = true
+utils_rs = { workspace = true, default-features = false }
+
+#
+# misc
+clap = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

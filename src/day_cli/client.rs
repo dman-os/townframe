@@ -24,6 +24,13 @@ use crate::interlude::*;
 
 use big_cabinet_core::authority::Authorization;
 use big_dispatch::Anonymous;
+use big_dispatch_core::InvocationContext;
+use big_dispatch_core::Invoke;
+#[cfg(unix)]
+use service_utils_rs::__client_native::DescriptorClient;
+use service_utils_rs::Body;
+
+use big_dispatch::Edge;
 use method_core::HttpMethod;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -62,6 +69,19 @@ impl Mode {
     }
 }
 
+/// The byte body of a call, and what it asks of the answer (ADR 042): for a method whose body is
+/// bytes, which moves neither as JSON.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Raw<'a> {
+    /// A file streamed as the raw request body, so a procedure's input is never held whole.
+    pub upload: Option<&'a std::path::Path>,
+    /// The value of a `Range` request header, for a method that serves part of its answer.
+    pub range: Option<&'a str>,
+    /// Where an answer that is bytes is streamed to. An answer that is JSON, such as a method's
+    /// own error, is returned as the [`Reply`] whatever this says.
+    pub download: Option<&'a std::path::Path>,
+}
+
 /// What the node answered: the HTTP status and the JSON body, whatever the transport. A
 /// non-success status is the operation's own XRPC error envelope, not a failure of the client.
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +111,13 @@ enum Transport {
 pub struct NodeClient {
     transport: Transport,
     mode: Mode,
+    #[cfg(unix)]
+    // The descriptor client API is shared by commands added on top of NodeClient.
+    #[expect(
+        dead_code,
+        reason = "descriptor socket is used by native command integrations"
+    )]
+    fd_socket: Option<std::path::PathBuf>,
     socket: SocketState,
 }
 
@@ -119,13 +146,15 @@ impl NodeClient {
                     let router = big_dispatch::xrpc_router(
                         booted.node.dispatch.client.clone(),
                         Anonymous::Acts(Authorization::identity(booted.node.authority.root)),
-                        MAX_BODY_BYTES,
+                        Edge::Embedded,
                     )
                     .into_router();
                     return Ok(Self {
                         transport: Transport::Holder(Box::new((booted, router))),
                         mode: Mode::InProcess,
                         socket: found,
+                        #[cfg(unix)]
+                        fd_socket: None,
                     });
                 }
                 Err(held) => held,
@@ -162,6 +191,8 @@ impl NodeClient {
                         } else {
                             Mode::InProcess
                         },
+                        #[cfg(unix)]
+                        fd_socket: Some(dir.fd_socket_path()?),
                         socket: SocketState::Live,
                     });
                 }
@@ -235,6 +266,201 @@ impl NodeClient {
         }
     }
 
+    /// [`Self::call`] for a method whose body is bytes (ADR 042). `params` is an object of
+    /// primitives and is the query string for either verb, since the body is the file. An answer
+    /// that is JSON is the [`Reply`]; one that is bytes is streamed to `raw.download` and the
+    /// reply describes it (`contentType`, `contentRange` and `octets`).
+    pub async fn call_raw(
+        &self,
+        nsid: &str,
+        verb: HttpMethod,
+        params: &Value,
+        raw: Raw<'_>,
+    ) -> Res<Reply> {
+        use futures::StreamExt;
+        use tokio::io::AsyncWriteExt;
+        ensure_nsid(nsid)?;
+        let query = query_pairs(params)?;
+        let upload = match raw.upload {
+            Some(path) => Some(
+                tokio::fs::File::open(path)
+                    .await
+                    .wrap_err_with(|| format!("opening {}", path.display()))?,
+            ),
+            None => None,
+        };
+        let header = |headers: &http::HeaderMap, name: http::HeaderName| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let (status, content_type, content_range, mut chunks) = match &self.transport {
+            Transport::Socket(http) => {
+                let url = format!("http://localhost/xrpc/{nsid}");
+                let mut request = match verb {
+                    HttpMethod::Post => http.post(url),
+                    HttpMethod::Get => http.get(url),
+                }
+                .query(&query);
+                if let Some(file) = upload {
+                    request = request
+                        .header(http::header::CONTENT_TYPE, "application/octet-stream")
+                        .body(reqwest::Body::wrap_stream(
+                            tokio_util::io::ReaderStream::new(file),
+                        ));
+                }
+                if let Some(range) = raw.range {
+                    request = request.header(http::header::RANGE, range);
+                }
+                let response = request.send().await?;
+                (
+                    response.status().as_u16(),
+                    header(response.headers(), http::header::CONTENT_TYPE),
+                    header(response.headers(), http::header::CONTENT_RANGE),
+                    response
+                        .bytes_stream()
+                        .map(|chunk| chunk.map_err(eyre::Report::from))
+                        .boxed(),
+                )
+            }
+            Transport::Holder(running) => {
+                let mut request = http::Request::builder()
+                    .method(match verb {
+                        HttpMethod::Post => http::Method::POST,
+                        HttpMethod::Get => http::Method::GET,
+                    })
+                    .uri(format!(
+                        "/xrpc/{nsid}?{}",
+                        serde_urlencoded::to_string(&query)?
+                    ));
+                if let Some(range) = raw.range {
+                    request = request.header(http::header::RANGE, range);
+                }
+                let body = match upload {
+                    Some(file) => {
+                        request =
+                            request.header(http::header::CONTENT_TYPE, "application/octet-stream");
+                        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file))
+                    }
+                    None => axum::body::Body::empty(),
+                };
+                let response = running
+                    .1
+                    .clone()
+                    .oneshot(request.body(body)?)
+                    .await
+                    .unwrap_or_else(|never| match never {});
+                (
+                    response.status().as_u16(),
+                    header(response.headers(), http::header::CONTENT_TYPE),
+                    header(response.headers(), http::header::CONTENT_RANGE),
+                    response
+                        .into_body()
+                        .into_data_stream()
+                        .map(|chunk| chunk.map_err(eyre::Report::from))
+                        .boxed(),
+                )
+            }
+        };
+        if content_type
+            .as_deref()
+            .is_some_and(method_core::is_json_content_type)
+        {
+            let mut body = Vec::new();
+            while let Some(chunk) = chunks.next().await {
+                body.extend_from_slice(&chunk?);
+                eyre::ensure!(
+                    body.len() <= MAX_BODY_BYTES,
+                    "the node's JSON answer is over {MAX_BODY_BYTES} octets"
+                );
+            }
+            return Ok(Reply {
+                status,
+                body: serde_json::from_slice(&body)?,
+            });
+        }
+        let Some(download) = raw.download else {
+            eyre::bail!(
+                "the node answered bytes ({}); pass an output file to receive them",
+                content_type.as_deref().unwrap_or("no content type")
+            );
+        };
+        let mut file = tokio::fs::File::create(download)
+            .await
+            .wrap_err_with(|| format!("creating {}", download.display()))?;
+        let mut octets = 0u64;
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk?;
+            octets += chunk.len() as u64;
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        Ok(Reply {
+            status,
+            body: json!({
+                "contentType": content_type,
+                "contentRange": content_range,
+                "octets": octets,
+            }),
+        })
+    }
+    /// Sends a descriptor batch to `blobs.importFile`, preserving one result per path.
+    #[cfg(unix)]
+    // The descriptor import entry point is consumed by command integrations.
+    #[expect(
+        dead_code,
+        reason = "descriptor import is used by native command integrations"
+    )]
+    pub async fn import_files(
+        &self,
+        operation: &str,
+        parameters: &Value,
+        paths: &[std::path::PathBuf],
+    ) -> Res<Vec<Value>> {
+        if let Transport::Socket(_) = &self.transport {
+            let socket = self
+                .fd_socket
+                .as_ref()
+                .expect("socket clients have a descriptor socket");
+            return DescriptorClient::unix(socket)
+                .call_files(operation, parameters, paths)
+                .await
+                .map_err(Into::into);
+        }
+
+        let descriptors = paths
+            .iter()
+            .map(std::fs::File::open)
+            .map(|file| file.map(Into::into))
+            .collect::<Result<Vec<std::os::fd::OwnedFd>, _>>()?;
+        let Transport::Holder(running) = &self.transport else {
+            unreachable!("transport was checked above");
+        };
+        let envelope = service_utils_rs::Envelope::with_metadata(
+            service_utils_rs::RequestContext::root(),
+            Authorization::identity(running.0.node.authority.root).metadata(),
+            Invoke::json(operation, parameters.clone(), InvocationContext::default()),
+        )
+        .with_body(Body::Descriptors(
+            service_utils_rs::descriptor::DescriptorBody::from_fds(descriptors),
+        ));
+        let response = running
+            .0
+            .node
+            .dispatch
+            .client
+            .call_with_metadata(envelope)
+            .await?;
+        match response.output.body {
+            Body::Json(value) => value
+                .as_array()
+                .cloned()
+                .ok_or_else(|| eyre::eyre!("descriptor call did not return an array")),
+            _ => Err(eyre::eyre!("descriptor call returned a non-JSON body")),
+        }
+    }
+
     /// Stops the node this client booted, once no other client is connected to it. A client of
     /// another process's node has nothing to stop.
     pub async fn stop(self) -> Res<()> {
@@ -244,6 +470,14 @@ impl NodeClient {
                 let (booted, router) = *running;
                 drop(router);
                 // No new client is accepted from here on; the ones already connected finish.
+                #[cfg(unix)]
+                booted
+                    .node
+                    .fd_clients
+                    .as_ref()
+                    .expect("a holder boots with its descriptor socket attached")
+                    .drain()
+                    .await?;
                 booted
                     .node
                     .unix_clients

@@ -1,0 +1,17 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "docId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "docId"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.drawer.metaDoc",
+  "lexicon": 1
+}
