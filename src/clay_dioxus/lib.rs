@@ -480,7 +480,7 @@ fn MountedComponent(
     // only after the close returns, so a render in that window finds the mount live and the
     // renderer gone: it shows what a withdrawn component shows.
     match render {
-        Some(render) => rsx! { RenderedMount { render, mount } },
+        Some(render) => rsx! { NativeMount { render, mount } },
         None => rsx! { p { "Component withdrawn." } },
     }
 }
@@ -551,8 +551,6 @@ async fn drain_element_commands(
 #[component]
 fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) -> Element {
     let path = use_hook(|| try_consume_context::<MountPath>().unwrap_or_default());
-    let light_dom = use_hook(|| try_consume_context::<LightDomStylesheets>().is_some());
-    let user_sheet = use_hook(try_consume_context::<UserStylesheet>);
     let writer = use_hook(|| {
         let mut writer = SurfaceWriter::new(Arc::clone(&mount.0));
         writer.ancestors = path.mounts.clone();
@@ -651,17 +649,41 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
         response
     });
     let tree = writer.tree.lock().unwrap();
-    // The mount's root element. `data-dioxus-shadow` asks the Dioxus interpreter to attach a
-    // shadow root to it and place its children (the guest's content) inside, so a micro's
-    // stylesheet and `:host` rules apply to this mount only. The guest's sanitized stylesheet
-    // reaches that root as the `data-dioxus-shadow-sheet` attribute, which the interpreter adopts
-    // as a constructable sheet: a `<style>` element would be refused by a CSP without
-    // `'unsafe-inline'` in `style-src-elem` (the web shell's). A renderer without shadow roots
-    // (Blitz, which provides [`LightDomStylesheets`]) gets the sheet as a light-DOM `<style>`
-    // ahead of the content instead. `display: contents` keeps the wrapper out of layout.
     // A presentation mounted under another guest's surface is a child: its box stops bubbling.
     let nested = !path.surfaces.is_empty();
-    let mut sheet = tree.stylesheet().to_owned();
+    let content = tree.render(
+        &handler,
+        &|reference| {
+            rsx! {
+                ComponentMount { owner: owner.clone(), reference: *reference }
+            }
+        },
+        &handles,
+        nested,
+    );
+    rsx! {
+        ShadowMount { sheet: tree.stylesheet().to_owned(), {content} }
+    }
+}
+
+/// The root every mount renders into, a wasm guest's surface and a natively linked micro's
+/// alike, so no micro puts a `<style>` element into the host document (a CSP without
+/// `'unsafe-inline'` in `style-src-elem`, the web shell's, refuses one) and every micro gets the
+/// same cascade.
+///
+/// `data-dioxus-shadow` asks the Dioxus interpreter to attach a shadow root to the element and
+/// place its children inside, so a micro's stylesheet and `:host` rules apply to this mount only.
+/// The sheet reaches that root as the `data-dioxus-shadow-sheet` attribute, which the interpreter
+/// adopts as a constructable sheet after the host document's own sheets (the kit's, adopted as
+/// `@layer host`). A renderer without shadow roots (Blitz, which provides
+/// [`LightDomStylesheets`]) gets the sheet as a light-DOM `<style>` ahead of the content
+/// instead. The wrapper is kept out of layout by the kit's reset layer (`[data-dioxus-shadow]
+/// { display: contents }`), not by an inline style.
+#[component]
+fn ShadowMount(sheet: String, children: Element) -> Element {
+    let light_dom = use_hook(|| try_consume_context::<LightDomStylesheets>().is_some());
+    let user_sheet = use_hook(try_consume_context::<UserStylesheet>);
+    let mut sheet = sheet;
     // The end user's theme follows the micro's own sheet, in `@layer user`: the kit's document
     // sheets are adopted into this root as `@layer host`, which the fork's interpreter declares
     // ahead of `user`, so a theme outranks the kit and every host-wide rule. The micro's own
@@ -681,22 +703,43 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
         div {
             "data-dioxus-shadow": "",
             "data-dioxus-shadow-sheet": if !light_dom { sheet.clone() },
-            style: "display: contents",
             if light_dom {
                 style { "{sheet}" }
             }
-            {tree.render(
-                &handler,
-                &|reference| {
-                    rsx! {
-                        ComponentMount { owner: owner.clone(), reference: *reference }
-                    }
-                },
-                &handles,
-                nested,
-            )}
+            {children}
         }
     }
+}
+
+/// The stylesheet of one natively linked micro's mount: the micro sets it through
+/// [`use_mount_stylesheet`] (the native counterpart of a guest's `document::Style`), and the
+/// mount's [`ShadowMount`] adopts it. Shared by every presentation of the micro, one per mount.
+#[derive(Clone, Copy)]
+struct NativeMountSheet(Signal<String>);
+
+/// Set the calling native micro's stylesheet for its mount, replacing the previous one. Returns
+/// `false`, having done nothing, outside a natively linked micro's mount (a guest sets its sheet
+/// through `document::Style`, which its engine forwards to the host's mount). The write happens
+/// during render so the first paint already has the sheet; it is a no-op when the text is
+/// unchanged, so a micro that renders the same sheet on every render does not loop.
+pub fn use_mount_stylesheet(css: &str) -> bool {
+    let Some(NativeMountSheet(mut sheet)) = try_consume_context::<NativeMountSheet>() else {
+        return false;
+    };
+    if *sheet.peek() != css {
+        sheet.set(css.to_owned());
+    }
+    true
+}
+
+/// A natively linked micro's render, inside its mount's shadow root and under the context
+/// [`use_mount_stylesheet`] writes to.
+#[expect(non_snake_case, reason = "Dioxus component naming")]
+fn NativeMount(props: RenderedMountProps) -> Element {
+    let sheet = use_signal(String::new);
+    use_context_provider(|| NativeMountSheet(sheet));
+    let content = rsx! { RenderedMount { render: props.render, mount: props.mount } };
+    rsx! { ShadowMount { sheet: sheet.read().clone(), {content} } }
 }
 
 /// Provided by a host whose renderer has no shadow roots (Blitz): a mount's stylesheet is then

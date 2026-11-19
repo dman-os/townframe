@@ -94,6 +94,33 @@ pub fn PresentationSlot(props: PresentationSlotProps) -> Element {
     unreachable!("without the `view` feature every reference belongs to a guest")
 }
 
+/// The calling micro's stylesheet, scoped to its mount (the shadow root every micro renders
+/// into, ahead of the end user's theme and after the kit's sheets). It is the one spelling of
+/// `document::Style` that works in every backend: in-process the text becomes the mount's
+/// adopted sheet (a `<style>` in the host document would be refused by a strict CSP and would
+/// leak into every other micro), and in a guest it is a `document::Style` that the engine
+/// forwards to the host's mount. The latest rendered sheet wins; it renders nothing.
+#[component]
+pub fn Stylesheet(#[props(into)] css: std::borrow::Cow<'static, str>) -> Element {
+    #[cfg(feature = "in_process")]
+    if clay_dioxus::use_mount_stylesheet(&css) {
+        return VNode::empty();
+    }
+    // `document::Style` creates its head element once per mount, so a changed sheet remounts it
+    // through its key, which is the sheet's hash.
+    #[cfg(feature = "guest")]
+    return {
+        use std::hash::Hash;
+        use std::hash::Hasher;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        css.hash(&mut hasher);
+        let revision = hasher.finish();
+        rsx! { document::Style { key: "{revision}", "{css}" } }
+    };
+    #[cfg(not(feature = "guest"))]
+    unreachable!("without the `guest` feature every micro renders in a native mount")
+}
+
 fn render_state(state: &SlotState, chrome: &Option<Element>) -> Element {
     match state {
         SlotState::Loading => {
