@@ -687,7 +687,12 @@ async fn assert_commit_membership(
         .partition(|key| key.tag().as_str() == big_blobs_core::Blob::ID);
     assert_eq!(blobs.len(), 2, "{blobs:?}");
     let marker = format!("{}/main", work::Commits::ID);
-    let mut held: Vec<_> = held.into_iter().map(|key| key.to_string()).collect();
+    // The document also holds the cabinet's own keys (a document's cipher blobs and jwks).
+    let mut held: Vec<_> = held
+        .into_iter()
+        .map(|key| key.to_string())
+        .filter(|key| key.starts_with("org.example.intxt"))
+        .collect();
     assert_eq!(held.iter().filter(|key| **key == marker).count(), 1);
     held.retain(|key| *key != marker);
     let writer = caller.actor().await.unwrap().to_string();
