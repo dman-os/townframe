@@ -35,6 +35,12 @@ pub use inspection::UnsafeDatumInspection;
 pub use inspection::UnsafeInspectDatum;
 pub use inspection::VerifiedSignatureEvidence;
 
+/// A caller-chosen retry key. It deduplicates retries of one request **on the node that received
+/// it, and only there**: the command ledger is per node, never replicated. A command id is not a
+/// global name. Two nodes that run the same id each execute the command, so a create under a
+/// fixed id on two nodes makes two documents; to converge on one document across nodes, use a
+/// name that is resolved in replicated state (for example a metadata document's `kind`/`name`
+/// slot), not a command id.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
@@ -465,6 +471,8 @@ pub struct MintDocCapability {
 #[serde(rename_all = "camelCase")]
 pub struct CreateDoc {
     pub capability: CapId,
+    /// Deduplicates retries of this create on this node only. Another node given the same id
+    /// creates its own, different document.
     pub command: CommandId,
     pub placement: String,
     pub datums: BTreeMap<DatumKey, Json>,
