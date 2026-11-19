@@ -207,14 +207,10 @@ impl TestNode {
             .call_with(
                 request,
                 Authorization::identity(self.node.authority.root).metadata(),
-                Invoke {
-                    operation: operation.to_owned(),
-                    input,
-                    context,
-                },
+                Invoke::json(operation, input, context),
             )
             .await
-            .map(|output| output.output)
+            .map(|output| output.body.into_json())
             .map_err(|error| match error {
                 ClientError::Method(error) => error,
                 ClientError::Transport { message, .. } => panic!("transport failed: {message}"),

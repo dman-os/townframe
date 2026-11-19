@@ -753,11 +753,11 @@ async fn dispatch_costs(table: &mut Table) {
                     .call_with(
                         RequestContext::root(),
                         operator.metadata(),
-                        big_dispatch_core::Invoke {
-                            operation: WriteDatums::XRPC.nsid.to_owned(),
-                            input: write.clone(),
-                            context: Default::default(),
-                        },
+                        big_dispatch_core::Invoke::json(
+                            WriteDatums::XRPC.nsid,
+                            write.clone(),
+                            Default::default(),
+                        ),
                     )
                     .await
                     .unwrap()
@@ -770,15 +770,16 @@ async fn dispatch_costs(table: &mut Table) {
                     .call_with(
                         RequestContext::root(),
                         operator.metadata(),
-                        big_dispatch_core::Invoke {
-                            operation: ReadDatums::XRPC.nsid.to_owned(),
-                            input: input.clone(),
-                            context: Default::default(),
-                        },
+                        big_dispatch_core::Invoke::json(
+                            ReadDatums::XRPC.nsid,
+                            input.clone(),
+                            Default::default(),
+                        ),
                     )
                     .await
                     .unwrap()
-                    .output
+                    .body
+                    .into_json()
             })
             .await;
         // The check dispatch adds to every call, alone: compiled once, run per call.
