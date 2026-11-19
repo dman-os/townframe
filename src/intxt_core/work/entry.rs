@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// An intxt includes a repository (`repoEntry/<repo uuid>`, on the intxt's descriptor).
+/// An intxt includes a repository (`repoEntry/<repo uuid>`, in the intxt's index document).
 #[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -14,17 +14,20 @@ pub struct RepoEntry {
     pub extra: Extra,
 }
 
-/// An intxt's commits document (`commitsDoc/main`, on the intxt's descriptor): the content
-/// document, in the intxt's drawer, that holds `gitCommit/<sha>` for every commit the intxt
-/// references and the `rewrite`/`rewrittenFrom` links between them. It is not an entry: it is
-/// reached from the descriptor, not listed in the body. Related intxts name the same document
-/// (`day x intxt new --with`), which is then in each of their drawers. A document id is text, as
-/// in [`OpLogDoc`](super::OpLogDoc), because a datum reference names a datum and this names a whole document.
-#[macros::datum(authority = "org.example.intxt.work")]
+/// Marks a content document of an intxt's drawer as one writer's commits
+/// (`org.example.intxt.commits/main`): where that writer's `add`s put `gitCommit/<sha>` for every
+/// commit they reference, the `rewrite`/`rewrittenFrom` links between them, and the pack and diff
+/// blob datums their entries name. A writer is an attested actor, which today is a node's
+/// operator. Commits are content-addressed, so the same commit written by two writers is the same
+/// datum in two documents and readers take either. Readers find every writer's commits by this tag
+/// across the drawer's documents; no slot names "the" commits document, so two nodes' first `add`s
+/// cannot race for one. `new --with` lends a related intxt's commits documents to the new drawer.
+#[macros::datum(authority = "org.example.intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct CommitsDoc {
-    pub doc: String,
+pub struct Commits {
+    /// The actor that created the document, as its uuid text.
+    pub writer: String,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -80,11 +83,11 @@ pub struct GitCommitEntry {
     /// range. None when the range reaches the root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    /// The pack's `org.example.daybook.blob` datum in the intxt's commits document (the one its
-    /// descriptor's `commitsDoc/main` names), not in the descriptor, which stays a small index.
+    /// The pack's `org.example.daybook.blob` datum in the adding writer's commits document, not in
+    /// the index document, which stays a small index.
     pub pack: DatumReference,
-    /// The `org.example.daybook.blob` datum (`text/x-diff`) in the intxt's commits document
-    /// holding `git diff -M <base>..<tip>` (the empty tree when there is no base), so a
+    /// The `org.example.daybook.blob` datum (`text/x-diff`) in the adding writer's commits
+    /// document holding `git diff -M <base>..<tip>` (the empty tree when there is no base), so a
     /// reader can show the diff without parsing a git pack. Derived from the pack's commits and
     /// absent when the diff was too large to carry (ADR 040 §4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,8 +103,8 @@ pub struct GitCommitEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JjChangeEntry {
-    /// The pack's `org.example.daybook.blob` datum in the intxt's commits document, as
-    /// [`GitCommitEntry::pack`].
+    /// The pack's `org.example.daybook.blob` datum in the adding writer's commits document,
+    /// as [`GitCommitEntry::pack`].
     pub pack: DatumReference,
     /// As [`GitCommitEntry::patch`], the diff of the change's current commit against its parent.
     #[serde(default, skip_serializing_if = "Option::is_none")]

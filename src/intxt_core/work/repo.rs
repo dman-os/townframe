@@ -190,8 +190,8 @@ pub struct File {
 }
 
 /// A git commit (`gitCommit/<sha>`). Capture writes it into the repository document, and `add`
-/// writes the commits an intxt references into the intxt's commits document; each writer puts the
-/// same value in the same slot, and none rewrites it: a later fact about a commit goes into its
+/// writes the commits an intxt references into the adding writer's commits document; each writer
+/// puts the same value in the same slot, and none rewrites it: a later fact about a commit goes into its
 /// own datum. Holds no pins; the op that observed the commit does. The commit object itself
 /// travels in a pack (an entry's), where git checks it against its sha on import; this datum is the readable part.
 #[macros::datum(authority = "org.example.intxt.work")]

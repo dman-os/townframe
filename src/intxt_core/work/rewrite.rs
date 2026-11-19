@@ -19,7 +19,7 @@ pub enum RewriteHow {
 }
 
 /// A commit the intxt holds was rewritten (`rewrite/<old sha>`), written in the commits document
-/// that holds the old commit. [`RewrittenFrom`] is its reverse, under the successor's slot, so
+/// of the writer who saw the rewrite. [`RewrittenFrom`] is its reverse, under the successor's slot, so
 /// that following a rewrite in either direction is a slot query.
 #[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
