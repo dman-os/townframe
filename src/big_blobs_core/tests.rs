@@ -503,6 +503,7 @@ fn protocol_requests_results_and_errors_round_trip() {
     let scope = BlobsScope {
         put: true,
         read: BTreeSet::from([blob_id]),
+        ..Default::default()
     };
     assert_eq!(
         serde_json::to_value(&scope).unwrap(),
@@ -512,10 +513,12 @@ fn protocol_requests_results_and_errors_round_trip() {
     assert!(scope.covers(&BlobsScope {
         put: false,
         read: BTreeSet::from([blob_id]),
+        ..Default::default()
     }));
     assert!(!scope.covers(&BlobsScope {
         put: false,
         read: BTreeSet::from([BlobId::new([5; 32])]),
+        ..Default::default()
     }));
     assert!(!BlobsScope::default().covers(&scope));
     protocol_json(MintBlobsCapability {
@@ -578,4 +581,47 @@ fn protocol_requests_results_and_errors_round_trip() {
     ] {
         protocol_wire(error);
     }
+}
+
+#[test]
+fn a_scope_covers_drawer_reaches_only_at_equal_or_lower_access() {
+    use big_cabinet_core::drawer::DrawerAccess;
+    let drawer = ObjKey::new([1; 32]);
+    let other = ObjKey::new([2; 32]);
+    let reach = |drawers: &[(&ObjKey, DrawerAccess)]| BlobsScope {
+        drawers: drawers
+            .iter()
+            .map(|(drawer, access)| ((*drawer).clone(), *access))
+            .collect(),
+        ..Default::default()
+    };
+    let admin = reach(&[(&drawer, DrawerAccess::Admin)]);
+    assert!(admin.covers(&reach(&[(&drawer, DrawerAccess::Read)])));
+    assert!(admin.covers(&reach(&[(&drawer, DrawerAccess::Admin)])));
+    assert!(admin.covers(&BlobsScope::default()));
+    // A stronger access, an unheld drawer, and one unheld drawer among held ones are not covered.
+    assert!(!reach(&[(&drawer, DrawerAccess::Read)]).covers(&admin));
+    assert!(!admin.covers(&reach(&[(&other, DrawerAccess::Relay)])));
+    assert!(!admin.covers(&reach(&[
+        (&drawer, DrawerAccess::Read),
+        (&other, DrawerAccess::Read)
+    ])));
+    // A drawer reach does not cover a named blob, nor a put.
+    assert!(!admin.covers(&BlobsScope {
+        read: BTreeSet::from([BlobId::new([3; 32])]),
+        ..Default::default()
+    }));
+    assert!(!admin.covers(&BlobsScope {
+        put: true,
+        ..Default::default()
+    }));
+    // On the wire it is a map from drawer id to access, absent when empty.
+    assert_eq!(
+        serde_json::to_value(&reach(&[(&drawer, DrawerAccess::Read)])).unwrap(),
+        json!({"put": false, "drawers": {drawer.to_string(): "Read"}})
+    );
+    assert_eq!(
+        serde_json::to_value(BlobsScope::default()).unwrap(),
+        json!({"put": false})
+    );
 }
