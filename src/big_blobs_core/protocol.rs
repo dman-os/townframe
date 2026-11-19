@@ -2,11 +2,14 @@ use crate::BlobId;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::drawer::DrawerAccess;
 use method_core::ByteBody;
 use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 /// The most one put reads, in octets. A put streams, so this is no memory bound; it is the node's
@@ -125,10 +128,13 @@ pub struct StatBlob {
     pub blob_id: BlobId,
 }
 
-/// What a minted blobs handle may do: put new bytes, and read (range or stat) each blob in
-/// `read`. There is no read-everything scope, so a read handle names the blobs it was minted for.
-/// A handle can only be minted with a scope its minter covers, so a scope only ever narrows; the
-/// node operator's own identity covers every scope.
+/// What a minted blobs handle may do: put new bytes, and read (range or stat) the blobs it
+/// reaches. A blob is reached by being named in `read`, or by being held in the blob inventory of
+/// a drawer in `drawers` that the handle reaches at `Read` or more (mirroring `DocScope.drawers`),
+/// so a handle minted ahead of time reads whatever a drawer comes to hold. A drawer reach covers
+/// every `blobInventory` meta doc of the drawer, public and sensitive, by kind. There is no
+/// read-everything scope. A handle can only be minted with a scope its minter covers, so a scope
+/// only ever narrows; the node operator's own identity covers every scope.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -137,11 +143,28 @@ pub struct BlobsScope {
     pub put: bool,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub read: BTreeSet<BlobId>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub drawers: BTreeMap<DocId, DrawerAccess>,
 }
 
 impl BlobsScope {
+    /// Whether every blob `other` reaches is reached here: every named blob is named here, and
+    /// every drawer `other` reaches is reached here at equal or higher access.
     pub fn covers(&self, other: &Self) -> bool {
-        (self.put || !other.put) && other.read.is_subset(&self.read)
+        (self.put || !other.put)
+            && other.read.is_subset(&self.read)
+            && other
+                .drawers
+                .iter()
+                .all(|(drawer, needed)| self.drawers.get(drawer).is_some_and(|held| held >= needed))
+    }
+
+    /// The drawers this scope reaches with enough access to read their blobs.
+    pub fn reading_drawers(&self) -> impl Iterator<Item = &DocId> {
+        self.drawers
+            .iter()
+            .filter(|(_, access)| **access >= DrawerAccess::Read)
+            .map(|(drawer, _)| drawer)
     }
 }
 
