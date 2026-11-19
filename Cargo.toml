@@ -407,12 +407,6 @@ blitz-traits = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2c
 
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
-# Dependencies build without debug info in dev: it is most of what every link reads and
-# writes, so dropping it shortens links, lowers their peak memory and shrinks targets. Our
-# own crates keep full debug info. To debug into a dependency, add its own
-# `[profile.dev.package."<name>"] debug = true` locally.
-[profile.dev.package."*"]
-debug = false
 
 # Keep the application debuggable while optimizing the native UI hot path in dev.
 # These overrides apply to desktop/native builds only; the app and shared UI remain
