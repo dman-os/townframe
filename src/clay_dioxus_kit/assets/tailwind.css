@@ -1123,6 +1123,9 @@
     min-width: 100%;
     min-height: 100%;
   }
+  [data-dioxus-shadow] {
+    display: contents;
+  }
   *, *::before, *::after {
     box-sizing: border-box;
   }
