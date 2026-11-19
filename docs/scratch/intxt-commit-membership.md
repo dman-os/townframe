@@ -9,6 +9,8 @@ Revision 1 proposed `#keyRef` lists in the entries and `x-content-hash` on `gitC
 
 ## The PR names its intxts (operator, 2026-11-17)
 
+> **Superseded 2026-11-17 (operator):** no line grammar. The description carries a collapsed `<details>` block with a JSON code block naming the intxts; see `intxt-review-micro.md`, "The PR description block". The text below is kept for the record.
+
 The primary link is the PR description. A PR and its intxts are many to many, so the description carries one line per intxt:
 
 ```
@@ -44,7 +46,7 @@ Wrong-looking behaviour, reported and not changed: (a) `?` and `!` directly afte
 2. **The lookup is the datum-set index.** "Which intxts hold X" is the datum-set predicate `HasKey { gitCommit/<sha> }`, which already exists (`big_cabinet_core::query::Predicate`), over the documents this node holds and the caller can read. Each hit document is an intxt's commits document, and from there the lookup reaches the intxt in one more hop (or zero, if the commits live in the descriptor document).
 3. **Related intxts share a commits document; unrelated ones don't.** `day x intxt new --with <intxt>` (a stack, a follow-up) shares that intxt's commits document, so overlapping commits are stored once. Otherwise each intxt has its own. Two unrelated intxts holding the same commit each have a copy. The sha is the same identity in both, so nothing needs to coordinate.
 4. **`gitCommit` in an intxt carries no `raw`.** The entry's pack already carries the commit objects, and git verifies them against their shas when it imports the pack. The datum keeps the readable fields (parents, author, committer, message, changed files) for the phone and the review views.
-5. **Capture stops writing `gitCommit`.** The op log already names shas, and the objects stay in the local repository until `add`. The repository document keeps identity only (`gitRepo`: root commits, remotes) and the clone's refs.
+5. ~~**Capture stops writing `gitCommit`.**~~ *Superseded 2026-11-17 (operator): capture always records, commits included, into the repository document in the capture drawer (ADR 040 §7, D29); that document is never shipped. `add` copies only the referenced commits into the intxt's commits document, which is a content document (`CreateDoc`) named by the descriptor's `commitsDoc/main`, and `new --with` adds it to a related intxt's drawer.*
 6. **Rewrites are `rewrite/<old sha>` datums** `{ successor: "<new sha>", how: hook | patchId | jjChange }`, in the same commits document as the old commit. They are written where the rewrite is seen:
    - `hook`: git's `post-rewrite` hook gives exact old → new pairs on amend and rebase.
    - `patchId`: when the rewrite wasn't seen (a teammate's force-push, a rebase on GitHub), `add` matches the new range's commits to held ones by `git patch-id --stable`, the mechanism `git range-diff` uses.
@@ -69,7 +71,7 @@ Only what another machine needs is a datum. Everything else lives in the worktre
 
 ## Open
 
-1. Where the commits document lives: its own document in the intxt's drawer (so `--with` can share it), or the descriptor document (one fewer hop, but not shareable). Proposed: its own document.
-2. Should capture install git's `post-rewrite` in the clones it records, or only read the reflog after the fact? The hook is exact; the reflog gives only a ref's from/to, not per-commit pairs.
+1. ~~Where the commits document lives~~ Resolved 2026-11-17: its own content document in the intxt's drawer, named by `commitsDoc/main` in the descriptor; related intxts share it by adding it to their drawers.
+2. ~~Hook or reflog~~ Resolved 2026-11-17 (operator): capture installs git's `post-rewrite` hook in the clones it records.
 3. **The query needs an anchor** (nodules lane, node-22). *Resolved 2026-11-17 (operator): the lookup becomes a cartridge index built by processors over local-state SQL; no root drawer. The rest of this item is kept for the reasoning.* `HasKey` alone is not one, and only a node-wide authority may send an unanchored predicate. A micro's or agent's capability must send `And[InDrawer{drawer, transitive, at_least: Read}, HasKey{gitCommit/<sha>}]`, and `Or` over drawers doesn't anchor. Proposed: a per-user root drawer for intxts that holds every intxt drawer (created on first `new`), so the phone sends one transitive query per commit. The answer is `PollDatums` with `after: 0, hold_ms: 0`: its events carry doc id, key, heads and version, not values, so it's already a light membership check.
 4. ~~Human edits~~ Deferred (operator, 2026-11-17) with the collaborative VCS work (D59's file documents).

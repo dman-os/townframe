@@ -4,6 +4,8 @@
 
 **Changed 2026-11-12 (later):** filesystem worktrees are recorded without file documents (ledger D59, `docs/scratch/intxt-file-docs.md`, F25–F27). Ops record git object ids (§3), content is git's own objects (§4), commit diffs are git's (§5), and file documents remain only for collaborative worktrees, later. This supersedes the file-document design of §4 and the granularity proposal (`docs/scratch/intxt-granularity.md`).
 
+**Changed 2026-11-17 (operator):** §7 and §8. Recording a worktree is independent of intxts and always on: commits capture records stay in the capture drawer's repository document and are never shipped. An intxt holds the commits it references in its own commits document, a content document in its drawer (`commitsDoc/main` in the descriptor names it), which related intxts share by adding it to their drawers (`day x intxt new --with`). "What ships" no longer includes the repository document (ledger, 2026-11-17).
+
 **Status:** Proposed. Supersedes the code, history and session sections of the earlier ADR 036 ("intxt datums for the review loop"), including D26's ref-driven file documents (ledger D29).
 
 **Depends on:** ADR 036 (intxt core: layers, generic datums), ADR 035 (references), ADR 041 (annotations, which target these datums). **Capture side:** ADR 039 (the adapter that writes them; to be revised against this ADR). Evidence: ledger F1, F5–F7, F10.
@@ -161,6 +163,7 @@ How the datums above split into documents. Each split has a reason: one writer p
 | Document | Holds | Writers | How many |
 |---|---|---|---|
 | Repo | `gitRepo/<root sha>`, `gitCommit/<sha>` | every recorder of the project (commits are content-addressed, so concurrent writes are identical) | one per project; commits shard into more repo docs past ~400 |
+| Commits | `gitCommit/<sha>` for the commits one intxt references, `rewrite/<sha>`, `rewrittenFrom/<sha>` | the commands that add commits to the intxt (`day x intxt add`) | one per intxt, in its drawer; shared by related intxts |
 | Clone | `gitClone/<uuid>`, `gitRef/<clone>/<name>`, `jjOperation`, `jjChange` | that clone's recorder | one per clone |
 | Worktree | `worktree/main` (lists op-log docs) | that worktree's recorder | one per worktree |
 | Op log | `worktreeOp/<seq>` for one seq range | that worktree's recorder | one per ~256 ops; the worktree datum lists them |
@@ -169,13 +172,15 @@ How the datums above split into documents. Each split has a reason: one writer p
 
 For example, one day of this lane's work (one repo, one clone, one worktree, 30 changed files, a main session and five subagents) is about 10 documents: 1 repo, 1 clone, 1 worktree, 1–2 op-log and 6 session documents, plus the intxt's descriptor, a shared notes document (ADR 041) and the pack (§4).
 
+**Changed 2026-11-17 (operator):** the repository document is the capture drawer's record of every commit the recorder saw. It stays in the capture drawer and is never shipped: an intxt is not given it, because it holds commits the intxt does not reference. An intxt holds the commits it references in its own commits document (above), written by `add`, whose descriptor names it (`commitsDoc/main`). It is a content document, placed in the intxt's drawer, so related intxts share it by adding the same document to their drawers (`day x intxt new --with`).
+
 **Readers must expect gaps.** An intxt spread over many documents, some in other drawers, is never guaranteed to arrive whole or at once: an object may be missing from the pack, a session may be private, a pin may name heads not yet synced. Readers render what resolves and mark the rest, as a browser renders a page with a broken image (ADR 036 §1, ADR 035 §2.1).
 
 **Removing content.** A secret is removed by leaving its object out of the pack (§4), or, once shared, by replacing the pack and removing the old one from the drawer's roster. Relays and honest peers then stop holding and serving it. Removal does not retract what peers already synced (ADR 019: a stable id is not a promise that an audience change erases earlier disclosure).
 
 ## 8. Settled (operator, 2026-11-10)
 
-- **What ships:** the worktree's documents themselves, at per-document granularity; unwanted documents are removed and replaced, not filtered (§7). Since D59, content ships as packed git objects, and unwanted objects are left out (§4).
+- **What ships:** the worktree's documents themselves, at per-document granularity (changed 2026-11-17, operator: not the repository document, which stays in the capture drawer; an intxt ships the commits it references in its own commits document, §7); unwanted documents are removed and replaced, not filtered (§7). Since D59, content ships as packed git objects, and unwanted objects are left out (§4).
 - **Granularity:** per observed change, now one op per tool-call window (D59). The single writer per file doc put this back in scope (D26's commit-only rule existed because ref-driven docs had several writers). Interactive editing over an intxt would edit a fork (ADR 007) live and fold back into the worktree's docs after a debounce, writing one op. The per-write dmeta and signature overhead for such fine-grained writes is not yet measured; the node lane is asked for a measurement and for whether intermediate changes can skip signing (ledger).
 - **Repository matching:** shared root commits only *suggest* that two clones are one project; they never merge repos automatically: two clones' repo documents stay separate even though their `gitRepo` datums share a key, and an intxt's `repoEntry` is keyed by the repo document, not the root. Forks and clones of a starter repo share roots and aren't the same project.
 - **Directories outside any checkout:** an opt-in layer later (a worktree without a clone); nothing here blocks it.

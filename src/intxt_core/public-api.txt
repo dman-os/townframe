@@ -42,7 +42,7 @@ pub impl intxt_core::client::Caller < H >::async fn read (& self , doc : & DocId
 pub impl intxt_core::client::Caller < H >::async fn read_datums (& self , doc : & DocId , keys : Option < BTreeSet < DatumKey > > ,) -> Result < (Vec < ChangeHash > , BTreeMap < DatumKey , DatumRead >) , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn record_observations (& self , drawer : & DrawerId , machine : & ActorUrl , batch : & Batch ,) -> Result < RecordedIds , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn remove_entries (& self , intxt : & DrawerId , entries : & BTreeSet < DatumKey > , also : & BTreeSet < DatumKey > ,) -> Result < () , IntxtError >
-pub impl intxt_core::client::Caller < H >::async fn share (& self , intxt : & DrawerId , doc : & DocId) -> Result < () , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn share (& self , intxt : & DrawerId , doc : & DocId , access : DrawerAccess ,) -> Result < () , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn try_read (& self , doc : & DocId , key : & DatumKey ,) -> Result < (Vec < ChangeHash > , Option < Value >) , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn write_capability < 'k > (& self , doc : & DocId , keys : impl IntoIterator < Item = & 'k DatumKey > ,) -> Result < CapId , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn write_datums (& self , doc : & DocId , set : BTreeMap < DatumKey , Value > , remove : BTreeSet < DatumKey > ,) -> Result < () , IntxtError >
@@ -83,7 +83,7 @@ pub struct intxt_core::capture::RecordedIds  { session: Option < String >, subag
 pub struct intxt_core::capture::RecordedWorktree  { docs: WorktreeDocs, next_seq: u64, extra: Extra }
 pub struct intxt_core::capture::SessionBatch  { session_id: String, doc: Option < String >, imported: Imported, subagents: Vec < SubagentBatch >, extra: Extra }
 pub struct intxt_core::capture::SubagentBatch  { agent_id: String, doc: Option < String >, imported: Imported, extra: Extra }
-pub struct intxt_core::capture::WorktreeBatch  { identity: WorktreeIdentity, docs: WorktreeDocs, next_seq: u64, ops: Vec < Op >, refs: BTreeMap < String , GitRef >, reflog_gap: bool, extra: Extra }
+pub struct intxt_core::capture::WorktreeBatch  { identity: WorktreeIdentity, docs: WorktreeDocs, next_seq: u64, ops: Vec < Op >, commits: BTreeMap < String , GitCommit >, refs: BTreeMap < String , GitRef >, reflog_gap: bool, extra: Extra }
 pub struct intxt_core::capture::WorktreeDocs  { worktree: Option < String >, clone: Option < String >, repo: Option < String >, extra: Extra }
 pub struct intxt_core::capture::WorktreeIdentity  { root: String, clone_path: String, clone_id: String, worktree_id: String, remotes: Vec < String >, roots: Vec < String >, extra: Extra }
 pub struct intxt_core::client::Caller< H >  {  }
@@ -102,6 +102,7 @@ pub struct intxt_core::methods::IntxtsSummarized  { results: Vec < IntxtSummary 
 pub struct intxt_core::methods::SummarizeIntxts  { drawers: Vec < DrawerId > }
 pub struct intxt_core::work::AgentSession  { harness: String, session_id: String, title: Option < String >, cwd: String, additional_directories: Vec < String >, parent: Option < DatumReference >, extra: Extra }
 pub struct intxt_core::work::CommitFile  { path: String, status: FileStatus, old_path: Option < String >, extra: Extra }
+pub struct intxt_core::work::CommitsDoc  { doc: String, extra: Extra }
 pub struct intxt_core::work::File  { worktree: DatumReference, blob: Option < DatumReference >, extra: Extra }
 pub struct intxt_core::work::GitClone  { repo: Option < DatumReference >, machine: ActorUrl, path: String, vcs: Vec < Vcs >, extra: Extra }
 pub struct intxt_core::work::GitCommit  { parents: Vec < String >, change_id: Option < String >, author: GitIdent, committer: GitIdent, message: String, files: Vec < CommitFile >, patch_id: Option < String >, extra: Extra }

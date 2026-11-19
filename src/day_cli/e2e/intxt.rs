@@ -533,7 +533,7 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
         let packaging = Packaging::new(client, &repo, &node_root);
         let mut created = Vec::new();
         let drawer = packaging
-            .create(&mut created, "Two files", Some("b and c"))
+            .create(&mut created, "Two files", Some("b and c"), None)
             .await
             .unwrap();
         let created = String::from_utf8(created).unwrap();
@@ -748,14 +748,57 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
             after.contains("commits (1):") && after.contains("sessions (1):"),
             "{after}"
         );
+
+        // `new --with` shares the commits document: the new intxt's descriptor names the same
+        // document, so the membership query anchored on either drawer finds the commits once.
+        let commits_doc_of = async |drawer: &big_cabinet_core::drawer::protocol::DrawerId| {
+            let (_, datum) = read_at(
+                client,
+                drawer,
+                &"org.example.intxt.work.commitsDoc/main".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+            datum["doc"].as_str().unwrap().to_owned()
+        };
+        let mut out = Vec::new();
+        let follow_up = packaging
+            .create(&mut out, "Follow-up", None, Some(&short))
+            .await
+            .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("shares the commits document of"), "{out}");
+        assert_eq!(
+            commits_doc_of(&follow_up).await,
+            commits_doc_of(&drawer).await
+        );
+        let lookup = intxt_core::client::Caller::new(
+            client,
+            service_utils_rs::RequestContext::root(),
+            None,
+            "test-with".to_owned(),
+        );
+        assert_eq!(
+            lookup.commit_holders(&follow_up, &tip).await.unwrap(),
+            lookup.commit_holders(&drawer, &tip).await.unwrap(),
+        );
+        // A name that is no intxt creates nothing.
+        let before = list().await;
+        assert!(
+            packaging
+                .create(&mut Vec::new(), "Orphan", None, Some("nope"))
+                .await
+                .is_err()
+        );
+        assert_eq!(list().await, before);
     })
     .await;
 }
 
-/// FDR 008 W6: a branch made with no capture at all. `add --branch` records its ref and the
-/// identity documents first (no sessions: none were recorded, and `show` says so) and the
-/// intxt holds the commits, read from git; the repository document never holds a `gitCommit`.
-/// A hook afterwards records only the live move, with no second baseline.
+/// FDR 008 W6: a branch made with no capture at all. `add --branch` imports its commits, its
+/// ref and the identity documents first (no sessions: none were recorded, and `show` says
+/// so); a hook afterwards records only the live move, with no second baseline and no
+/// commit twice.
 #[tokio::test(flavor = "multi_thread")]
 async fn intxt_add_branch_imports_history_that_was_never_recorded() {
     use crate::cmds::intxt::capture;
@@ -786,7 +829,7 @@ async fn intxt_add_branch_imports_history_that_was_never_recorded() {
         let packaging = Packaging::new(client, &repo, &node_root);
         let mut created = Vec::new();
         let drawer = packaging
-            .create(&mut created, "Unrecorded", None)
+            .create(&mut created, "Unrecorded", None, None)
             .await
             .unwrap();
         let short = short_ids::ShortIds::new([drawer.to_string()])
@@ -810,23 +853,22 @@ async fn intxt_add_branch_imports_history_that_was_never_recorded() {
         assert!(!shown.contains("sessions ("), "{shown}");
         assert!(shown.contains("sessions: none recorded"), "{shown}");
 
-        // The observation `add` made recorded the identity documents and the branch's ref, and
-        // no commit: the repository document keeps identity only, the intxt holds the commits.
-        // The worktree was clean, so it recorded no op.
+        // The import recorded the identity documents and exactly the range's commits. The
+        // worktree was clean, so it recorded no op.
         let recorded = host::recorded_worktree(&worktree).unwrap();
         assert_eq!(recorded.ops, 0);
         let caller = Caller::new(client, RequestContext::root(), None, "test".to_owned());
         let repo_doc: DocId = recorded.docs.repo.as_deref().unwrap().parse().unwrap();
-        let repo_commits = async || {
+        let commits = async || {
             let (_, datums) = caller.read_datums(&repo_doc, None).await.unwrap();
             datums
                 .into_keys()
                 .filter(|key| key.tag().as_str() == work::GitCommit::ID)
                 .count()
         };
-        assert_eq!(repo_commits().await, 0);
+        assert_eq!(commits().await, 2);
 
-        // A live move is recorded by capture as usual: one commit op, no commit datum, and no
+        // A live move is recorded by capture as usual: one commit op, one more commit, and no
         // second baseline of the ref.
         let transcript = base.join("claude/s1.jsonl");
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
@@ -851,18 +893,18 @@ async fn intxt_add_branch_imports_history_that_was_never_recorded() {
             .await
             .unwrap();
         assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 0);
-        assert_eq!(repo_commits().await, 0);
+        assert_eq!(commits().await, 2);
 
         std::fs::write(repo.join("d.txt"), "d\n").unwrap();
         git(&repo, &["add", "-A"]);
         git(&repo, &["commit", "-q", "-m", "add d.txt"]);
         capture::run(client, &node_root, &hook("Stop")).await.unwrap();
         assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
-        assert_eq!(repo_commits().await, 0);
+        assert_eq!(commits().await, 3);
 
         capture::run(client, &node_root, &hook("Stop")).await.unwrap();
         assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
-        assert_eq!(repo_commits().await, 0);
+        assert_eq!(commits().await, 3);
 
         // Adding the branch again, now that it moved, imports nothing: capture has the move.
         let mut out = Vec::new();
@@ -871,7 +913,7 @@ async fn intxt_add_branch_imports_history_that_was_never_recorded() {
             .await
             .unwrap();
         assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
-        assert_eq!(repo_commits().await, 0);
+        assert_eq!(commits().await, 3);
 
     })
     .await;
@@ -926,7 +968,7 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
 
         let mut created = Vec::new();
         let drawer = operator
-            .create(&mut created, "Review me", None)
+            .create(&mut created, "Review me", None, None)
             .await
             .unwrap();
         let intxt = short_ids::ShortIds::new([drawer.to_string()])
@@ -1321,7 +1363,7 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
         let packaging = Packaging::new(client, tmp.path(), &node_root);
         let mut out = Vec::new();
         let drawer = packaging
-            .create(&mut out, "Port the sync", None)
+            .create(&mut out, "Port the sync", None, None)
             .await
             .unwrap();
         let link = generic::Intxt::reference(&drawer).to_string();
