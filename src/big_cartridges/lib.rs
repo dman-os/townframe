@@ -54,6 +54,8 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::ResolvedCartridge;
 use big_cartridges_core::protocol::CartridgeChanges;
 use big_cartridges_core::protocol::CartridgeList;
 use big_cartridges_core::protocol::CartridgePublisher;
@@ -73,6 +75,8 @@ use big_cartridges_core::protocol::PublishCartridgeVersion;
 use big_cartridges_core::protocol::PublishedCartridgeVersion;
 use big_cartridges_core::protocol::RemoveCartridge;
 use big_cartridges_core::protocol::RemoveCartridgeVersion;
+use big_cartridges_core::protocol::ResolveCartridgeVersion;
+use big_cartridges_core::protocol::StageCartridgeVersion;
 use big_cartridges_core::protocol::WatchCartridges;
 use big_cartridges_core::registry::registry_universe;
 use big_cartridges_core::signature::did_key;
@@ -99,15 +103,35 @@ const SCOPE_PREFIX: &str = "CartridgeService/scope/v1/";
 
 static REGISTRY_UNIVERSE: LazyLock<Universe> = LazyLock::new(registry_universe);
 
-/// The schema registration group for the registry's datums (the envelope and the cartridge identity).
-/// The `Blob` Lexicon the artifact references use is registered beside it by big_blobs.
-pub fn schema_group() -> SchemaRegistrationGroup<'static> {
+/// The schema registration groups for the registry's datums: the envelope and the cartridge
+/// identity (declared by the registry's own universe), and the payload tags a version's pins name
+/// (Lexicons, sidecars and typed components). The payload tags are open objects: a Lexicon is
+/// validated by Lexicon admission and a sidecar or component by the typed view the registry
+/// resolves it through, so the datum schema only has to admit the write. The `Blob` Lexicon the
+/// artifact references use is registered beside them by big_blobs.
+pub fn schema_groups() -> [SchemaRegistrationGroup<'static>; 2] {
+    use big_cartridges_core::registry::COMPONENT_TAG;
+    use big_cartridges_core::registry::LEXICON_TAG;
+    use big_cartridges_core::registry::SIDECAR_TAG;
     let bundle = Bundle::new(&REGISTRY_UNIVERSE, Vec::new());
     let lexicons = bundle.lexicons().expect("registry lexicons publish");
     let registrations = lexicons
         .into_iter()
         .map(|lexicon| SchemaRegistration::new(lexicon.id, lexicon.file));
-    SchemaRegistrationGroup::new(Some(bundle), registrations, Vec::new())
+    let payloads = [LEXICON_TAG, SIDECAR_TAG, COMPONENT_TAG].map(|tag| {
+        SchemaRegistration::new(
+            tag,
+            serde_json::json!({
+                "lexicon": 1,
+                "id": tag,
+                "defs": { "main": { "type": "object", "properties": {} } }
+            }),
+        )
+    });
+    [
+        SchemaRegistrationGroup::new(Some(bundle), registrations, Vec::new()),
+        SchemaRegistrationGroup::new(None, payloads, Vec::new()),
+    ]
 }
 
 type Res<T> = std::result::Result<T, CartridgesError>;
@@ -368,13 +392,24 @@ impl CartridgeService {
             .mint(
                 context,
                 &caller,
-                None,
+                params.subject,
                 params.scope,
                 params.rights,
                 Vec::new(),
             )
             .await
             .map_err(authority_error)
+    }
+
+    async fn stage(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: StageCartridgeVersion,
+    ) -> Res<Cartridge> {
+        self.write_caller(context, authorization, &params.id.namespace)
+            .await?;
+        self.registry.stage(params).await
     }
 
     async fn publish(
@@ -486,6 +521,16 @@ impl CartridgeService {
         self.registry.version(&params.id, &params.version).await
     }
 
+    async fn resolve_version(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: ResolveCartridgeVersion,
+    ) -> Res<ResolvedCartridge> {
+        self.read_caller(context, authorization).await?;
+        self.registry.resolved(&params.id, &params.version).await
+    }
+
     /// The long poll of ADR 023: answers at once when there is a change past the cursor (or the
     /// caller must reset), otherwise holds until one lands, the hold expires, or the service
     /// stops. An expired hold is an ordinary empty page.
@@ -540,6 +585,7 @@ macro_rules! handlers {
     )*};
 }
 handlers! {
+    StageCartridgeVersion => stage: Cartridge;
     MintCartridgesCapability => mint: Capability;
     PublishCartridgeVersion => publish: PublishedCartridgeVersion;
     RemoveCartridgeVersion => remove_version: ();
@@ -549,6 +595,7 @@ handlers! {
     ListCartridges => list: CartridgeList;
     GetCartridge => get: CartridgeRecord;
     GetCartridgeVersion => get_version: CartridgeVersionRecord;
+    ResolveCartridgeVersion => resolve_version: ResolvedCartridge;
     WatchCartridges => watch: CartridgeChanges;
 }
 
@@ -556,6 +603,7 @@ service_utils_rs::bind_service_protocol! {
     pub struct CartridgesBinding for CartridgesProtocol => CartridgesMessage {
         unary {
             MintCartridgesCapability(MintCartridgesCapability),
+            StageCartridgeVersion(StageCartridgeVersion),
             PublishCartridgeVersion(PublishCartridgeVersion),
             RemoveCartridgeVersion(RemoveCartridgeVersion),
             RemoveCartridge(RemoveCartridge),
@@ -564,6 +612,7 @@ service_utils_rs::bind_service_protocol! {
             ListCartridges(ListCartridges),
             GetCartridge(GetCartridge),
             GetCartridgeVersion(GetCartridgeVersion),
+            ResolveCartridgeVersion(ResolveCartridgeVersion),
             WatchCartridges(WatchCartridges)
         }
         stream {}
