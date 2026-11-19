@@ -299,5 +299,6 @@ fn config(secrets: Arc<SecretStore>, sql: Database, storage: big_repo::Storage) 
         blob_storage: big_blobs::Storage::memory().unwrap(),
         listeners: Default::default(),
         peers: None,
+        allow_slot_takeover: false,
     }
 }

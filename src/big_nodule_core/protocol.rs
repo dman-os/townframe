@@ -121,16 +121,32 @@ pub struct ConfirmNoduleResolution {
     pub binding: String,
 }
 
-/// Sets, or with `by` absent clears, the node-local substitution of slot `cartridge_id`: the cartridge `by`
-/// (installed, and holding the slot's authority or none) is run *as* `cartridge_id` (ADR 028 §3). The
-/// caller must manage both cartridges, since `by`'s code runs with the slot's grants.
+/// Sets, or with `by` absent clears, the dev takeover of slot `cartridge_id`: the cartridge `by`
+/// (installed, and holding the slot's authority or none) is run *as* `cartridge_id`, with its actor,
+/// data and drawer grants, to test a dev build against real data (ADR 045 §5). The node refuses it
+/// unless `node.json` sets `dev.allow_slot_takeover`, and the caller must manage both cartridges,
+/// since `by`'s code runs with the slot's grants.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SetNoduleSubstitution {
+pub struct SetNoduleDevTakeover {
     pub cartridge_id: CartridgeId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<CartridgeId>,
+}
+
+/// Sets, or with `provider` absent clears, the node-local route of `pattern`: an exact NSID or an
+/// authority prefix whose calls dispatch sends to the provider with that id, a built-in's or a
+/// cartridge's (ADR 045). The operator's route is also the consent of every dependent: the
+/// resolution locks of the requests it covers move to the routed provider. Served by the nodule
+/// service only until the node has a per-node store of its own.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMethodRoute {
+    pub pattern: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -230,7 +246,7 @@ pub struct NoduleRecord {
     pub revision: Option<Revision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<NoduleActor>,
-    /// The cartridge whose code runs in this slot under a substitution. `version` and `revision`
+    /// The cartridge whose code runs in this slot under a dev takeover. `version` and `revision`
     /// above are then the filler's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filled_by: Option<FilledBy>,
@@ -296,7 +312,7 @@ impl From<InventoryError> for NodulesError {
     }
 }
 
-// Every method that changes nodules (install, enable, grants, substitution) is privileged: a
+// Every method that changes nodules (install, enable, grants, routes, dev takeover) is privileged: a
 // nodule's dispatch scope never reaches them, which is what keeps a nodule from widening its own
 // grants. The reads (`getNodule`, `listNodules`) confer nothing, so a scope naming them reaches
 // them, and minting a nodule handle only narrows the presented one (`scope.covers`).
@@ -309,7 +325,8 @@ method_core::methods! {
     SetNoduleDrawerGrants => NoduleRecord, procedure, "setNoduleDrawerGrants", privileged;
     SetNoduleMethodGrants => NoduleRecord, procedure, "setNoduleMethodGrants", privileged;
     ConfirmNoduleResolution => NoduleRecord, procedure, "confirmNoduleResolution", privileged;
-    SetNoduleSubstitution => NoduleRecord, procedure, "setNoduleSubstitution", privileged;
+    SetNoduleDevTakeover => NoduleRecord, procedure, "setNoduleDevTakeover", privileged;
+    SetMethodRoute => (), procedure, "setMethodRoute", privileged;
     UninstallNodule => (), procedure, "uninstallNodule", privileged;
     GetNodule => NoduleRecord, query, "getNodule";
     ListNodules => NoduleList, query, "listNodules";
@@ -325,7 +342,8 @@ declare_service_protocol! {
             SetNoduleDrawerGrants(SetNoduleDrawerGrants),
             SetNoduleMethodGrants(SetNoduleMethodGrants),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
-            SetNoduleSubstitution(SetNoduleSubstitution),
+            SetNoduleDevTakeover(SetNoduleDevTakeover),
+            SetMethodRoute(SetMethodRoute),
             UninstallNodule(UninstallNodule),
             GetNodule(GetNodule),
             ListNodules(ListNodules)

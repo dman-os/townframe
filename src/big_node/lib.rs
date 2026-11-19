@@ -111,6 +111,10 @@ pub struct Config {
     /// is a complete node that talks to no other node. The endpoint is keyed by
     /// `repo.node_identity_seed`, the same key as the node's keyhive identity.
     pub peers: Option<peers::PeersConfig>,
+    /// The dev takeover hook (`dev.allow_slot_takeover` in `node.json`, ADR 045 §5): whether the
+    /// nodule service lets a dev build run as an installed cartridge, with its data and grants.
+    /// Fixed at boot, so no nodule or runtime call can turn it on.
+    pub allow_slot_takeover: bool,
 }
 
 /// A node's id: the public half of its identity seed in lowercase hex, which is its keyhive
@@ -393,6 +397,7 @@ impl BigNode {
                 &blobs,
                 &cartridges,
                 schemas,
+                config.allow_slot_takeover,
                 config.sql,
                 &mut stop,
             )
@@ -730,6 +735,7 @@ async fn boot_nodules<Host, Hosting>(
     blobs: &big_blobs::Blobs,
     cartridges: &Cartridges,
     schemas: Arc<SchemaRepo>,
+    allow_slot_takeover: bool,
     sql: Database,
     stop: &mut StopToken,
 ) -> Res<(Arc<dyn NoduleExecutor>, Nodules)>
@@ -766,6 +772,7 @@ where
         dispatch_authority,
         executor: Some(Arc::clone(&executor)),
         schemas,
+        allow_slot_takeover,
         sql,
     })
     .await?;

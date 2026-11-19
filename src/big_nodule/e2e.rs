@@ -35,6 +35,7 @@ use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
+use big_cabinet_core::doc::WriteReceipt;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
@@ -91,12 +92,13 @@ use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+mod dev_takeover;
 mod dispatch;
 mod executor;
 mod init;
 mod resolution;
+mod routing;
 mod schemas;
-mod substitution;
 
 const NODULES_PATH: &str = "nodules";
 const NOTE: &str = "org.example.note";
@@ -238,6 +240,7 @@ struct Node {
     dispatch_authority: CapId,
     nodules: Nodules,
     executor: Option<Arc<dyn NoduleExecutor>>,
+    allow_slot_takeover: bool,
     stop: Option<StopToken>,
 }
 
@@ -258,6 +261,14 @@ async fn node() -> Node {
 }
 
 async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
+    node_with_takeover(executor, false).await
+}
+
+/// [`node_with`] on a node whose `dev.allow_slot_takeover` is `allow_slot_takeover`.
+async fn node_with_takeover(
+    executor: Option<Arc<dyn NoduleExecutor>>,
+    allow_slot_takeover: bool,
+) -> Node {
     let keyring = keyring_core::mock::Store::new().expect("mock keyring")
         as Arc<keyring_core::CredentialStore>;
     let secrets = SecretStore::boot_with_store(keyring)
@@ -372,6 +383,7 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         &sql,
         &schemas,
         executor.clone(),
+        allow_slot_takeover,
     )
     .await
     .expect("nodule service boot");
@@ -396,6 +408,7 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         dispatch_authority,
         nodules,
         executor,
+        allow_slot_takeover,
         stop: Some(stop),
     }
 }
@@ -451,6 +464,7 @@ async fn boot_nodules(
     sql: &TestDb,
     schemas: &Arc<SchemaRepo>,
     executor: Option<Arc<dyn NoduleExecutor>>,
+    allow_slot_takeover: bool,
 ) -> Result<(Nodules, StopToken), NodulesError> {
     let namespace = authority
         .service
@@ -471,12 +485,68 @@ async fn boot_nodules(
         dispatch_authority,
         executor,
         schemas: Arc::clone(schemas),
+        allow_slot_takeover,
         sql: (**sql).clone(),
     })
     .await
 }
 
 impl Node {
+    /// Writes `set` straight into the node's config drawer document, as any client holding a
+    /// capability on it can, bypassing the nodule service's own validation.
+    async fn write_config_datums(&self, set: BTreeMap<DatumKey, Value>) -> WriteReceipt {
+        let config_doc = DocId::from(self.drawers.local().config_id.clone());
+        let doc_cap = self
+            .docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(self.drawers_actor.capability).metadata(),
+                MintDocCapability {
+                    scope: DocScope {
+                        write: BTreeSet::from([config_doc.clone()]),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+            .unwrap();
+        self.docs
+            .client
+            .call(
+                RequestContext::root(),
+                WriteDatums {
+                    capability: doc_cap.capability_id,
+                    command: None,
+                    doc_id: config_doc,
+                    mode: WriteMode::AtCurrent,
+                    set,
+                    remove: BTreeSet::new(),
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Waits for the nodule service to reconcile the document at `receipt`'s heads.
+    async fn reconciled_at(&self, receipt: &WriteReceipt, cartridge_id: &str) -> NoduleRecord {
+        loop {
+            let record = self.get(self.operator(), cartridge_id).await.unwrap();
+            if record.observed_heads == receipt.heads {
+                break record;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// [`Self::restart_nodules`] on a node whose `dev.allow_slot_takeover` is now `allow`.
+    async fn restart_with_takeover(&mut self, allow: bool) {
+        self.allow_slot_takeover = allow;
+        self.restart_nodules().await.unwrap();
+    }
+
     /// Stop the nodule service alone, the way a node restart retires it before the authority.
     async fn restart_nodules(&mut self) -> Result<(), NodulesError> {
         self.stop.take().expect("booted").stop().await;
@@ -490,6 +560,7 @@ impl Node {
             &self.sql,
             &self.schemas,
             self.executor.clone(),
+            self.allow_slot_takeover,
         )
         .await?;
         self.nodules = nodules;
@@ -793,7 +864,7 @@ async fn an_enabled_cartridge_holds_its_authority_against_equal_and_nested_prefi
             }));
         rival.authority = Some(authority.into());
         // Installing a rival is not holding: the prefix is refused at enablement, which is what
-        // lets a substitute for a cartridge be installed beside it.
+        // lets a dev build for a cartridge be installed beside it.
         let rival_id = rival.id.clone();
         node.admit(operator, rival).await.unwrap();
         let refused = node
@@ -1382,50 +1453,19 @@ async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
     .unwrap();
 
     // Simulate an invalid imported settings datum written directly to the config drawer doc.
-    let config_doc = DocId::from(node.drawers.local().config_id.clone());
-    let doc_cap = node
-        .docs
-        .client
-        .call_with(
-            RequestContext::root(),
-            Authorization::identity(node.drawers_actor.capability).metadata(),
-            MintDocCapability {
-                scope: DocScope {
-                    write: BTreeSet::from([config_doc.clone()]),
-                    ..DocScope::default()
-                },
-                rights: Rights::USE,
-                subject: None,
-            },
-        )
-        .await
-        .unwrap();
     let bad_settings_key: DatumKey =
         format!("{}/{}", NoduleSettings::ID, example_cartridge!("photos"))
             .parse()
             .unwrap();
     let bad_receipt = node
-        .docs
-        .client
-        .call(
-            RequestContext::root(),
-            WriteDatums {
-                capability: doc_cap.capability_id,
-                command: None,
-                doc_id: config_doc,
-                mode: WriteMode::AtCurrent,
-                set: BTreeMap::from([(
-                    bad_settings_key,
-                    json!({
-                        "$type": NoduleSettings::ID,
-                        "values": { "thumbnails": "not-a-bool" }
-                    }),
-                )]),
-                remove: BTreeSet::new(),
-            },
-        )
-        .await
-        .unwrap();
+        .write_config_datums(BTreeMap::from([(
+            bad_settings_key,
+            json!({
+                "$type": NoduleSettings::ID,
+                "values": { "thumbnails": "not-a-bool" }
+            }),
+        )]))
+        .await;
 
     let refused = loop {
         let record = node

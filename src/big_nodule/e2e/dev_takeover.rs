@@ -1,6 +1,6 @@
-//! Node-local substitution (ADR 028 §3, plan item P6): `fork` is installed *as* `beta`, so
-//! beta's slot keeps its actor, grants, lockfile and dispatch registrations while the fork's code
-//! and manifest run in it. Against the fake executor, with no sleeps.
+//! The dev takeover hook (ADR 045 §5): `fork` is run *as* `beta`, so beta's slot keeps its actor,
+//! grants, lockfile and dispatch registrations while the fork's code and manifest run in it. It
+//! is explicit and gated by `dev.allow_slot_takeover`. Against the fake executor, with no sleeps.
 
 use super::Node;
 use super::executor::FakeExecutor;
@@ -24,9 +24,9 @@ use big_dispatch_core::Readiness;
 use big_nodule_core::inventory::FilledBy;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesError;
+use big_nodule_core::protocol::SetNoduleDevTakeover;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::SetNoduleMethodGrants;
-use big_nodule_core::protocol::SetNoduleSubstitution;
 use big_nodule_core::providers::LockedProvider;
 use big_nodule_core::providers::RequestStatus;
 use std::sync::Arc;
@@ -67,10 +67,10 @@ fn host(cartridge_id: &str, bytes: &str) -> String {
 }
 
 impl Node {
-    async fn substitute(&self, slot: &str, by: Option<&str>) -> Result<NoduleRecord, NodulesError> {
+    async fn take_over(&self, slot: &str, by: Option<&str>) -> Result<NoduleRecord, NodulesError> {
         self.call(
             self.operator(),
-            SetNoduleSubstitution {
+            SetNoduleDevTakeover {
                 cartridge_id: id(slot),
                 by: by.map(id),
             },
@@ -84,7 +84,7 @@ impl Node {
 /// installed beside it, disabled.
 async fn node_with_beta_and(fork: Cartridge) -> (Node, Arc<FakeExecutor>) {
     let executor = FakeExecutor::hosting(Probe::new(), true);
-    let node = super::node_with(Some(Arc::clone(&executor) as _)).await;
+    let node = super::node_with_takeover(Some(Arc::clone(&executor) as _), true).await;
     node.dispatch
         .router
         .register(
@@ -107,11 +107,11 @@ async fn node_with_beta_and(fork: Cartridge) -> (Node, Arc<FakeExecutor>) {
 }
 
 #[tokio::test]
-async fn the_slot_runs_the_substitutes_code_and_reports_who_fills_it() {
+async fn the_slot_runs_the_dev_builds_code_and_reports_who_fills_it() {
     let (node, executor) = node_with_beta_and(fork("1.5.0", &[SYNC])).await;
     let before = node.record(BETA).await;
 
-    let record = node.substitute(BETA, Some(FORK)).await.unwrap();
+    let record = node.take_over(BETA, Some(FORK)).await.unwrap();
     assert_eq!(record.cartridge_id, id(BETA));
     assert_eq!(
         record.filled_by,
@@ -146,7 +146,7 @@ async fn the_slot_runs_the_substitutes_code_and_reports_who_fills_it() {
 }
 
 #[tokio::test]
-async fn dependents_pinned_to_the_slot_stay_satisfied_with_the_substitutes_version() {
+async fn dependents_of_the_slot_stay_satisfied_with_the_dev_builds_version() {
     let (node, _executor) = node_with_beta_and(fork("1.5.0", &[SYNC])).await;
     node.admit(
         node.operator(),
@@ -161,9 +161,9 @@ async fn dependents_pinned_to_the_slot_stay_satisfied_with_the_substitutes_versi
     let record = node.set_enabled_record(ALPHA).await;
     assert_eq!(record.readiness, Readiness::Ready);
 
-    // The operator's substitution is itself the consent and dependents name the slot, so this is
-    // not a provider change: the pin stays on beta and only its version moves.
-    node.substitute(BETA, Some(FORK)).await.unwrap();
+    // Dependents name the slot, which the takeover still offers under its own id with the dev
+    // build's version: no provider change to confirm, only the version moves, as for an upgrade.
+    node.take_over(BETA, Some(FORK)).await.unwrap();
     let record = node.record(ALPHA).await;
     assert_eq!(record.readiness, Readiness::Ready);
     assert_eq!(
@@ -187,7 +187,7 @@ async fn an_identical_request_keeps_its_grant_and_a_new_one_is_ungranted_until_c
     // The fork asks for what beta asked for and one thing more, both covered by beta's
     // `org.example.remote` prefix grant: the prefix must not silently cover the addition.
     let (node, _executor) = node_with_beta_and(fork("1.5.0", &[SYNC, MORE])).await;
-    let record = node.substitute(BETA, Some(FORK)).await.unwrap();
+    let record = node.take_over(BETA, Some(FORK)).await.unwrap();
     assert_eq!(record.readiness, Readiness::NeedsConfiguration);
     let operations = record.methods.unwrap();
     assert_eq!(operations.desired.operations, [SYNC.to_owned()].into());
@@ -220,7 +220,7 @@ async fn an_identical_request_keeps_its_grant_and_a_new_one_is_ungranted_until_c
 
     // A fork that asks for no more than beta did simply carries the grant over.
     let (node2, _executor2) = node_with_beta_and(fork("1.5.0", &[SYNC])).await;
-    let record = node2.substitute(BETA, Some(FORK)).await.unwrap();
+    let record = node2.take_over(BETA, Some(FORK)).await.unwrap();
     assert_eq!(record.readiness, Readiness::Ready);
     assert_eq!(
         record.methods.unwrap().desired.operations,
@@ -231,12 +231,12 @@ async fn an_identical_request_keeps_its_grant_and_a_new_one_is_ungranted_until_c
 }
 
 #[tokio::test]
-async fn clearing_the_substitution_reinstalls_the_slots_own_cartridge() {
+async fn clearing_the_takeover_reinstalls_the_slots_own_cartridge() {
     let (node, executor) = node_with_beta_and(fork("1.5.0", &[SYNC])).await;
     let before = node.record(BETA).await;
-    node.substitute(BETA, Some(FORK)).await.unwrap();
+    node.take_over(BETA, Some(FORK)).await.unwrap();
 
-    let record = node.substitute(BETA, None).await.unwrap();
+    let record = node.take_over(BETA, None).await.unwrap();
     // The stored grants were never rewritten, so beta gets back exactly what it was granted.
     assert_eq!(record.methods, before.methods);
     assert_eq!(record.filled_by, None);
@@ -250,12 +250,12 @@ async fn clearing_the_substitution_reinstalls_the_slots_own_cartridge() {
         "beta's own handler runs again"
     );
     // Clearing what is not set is a no-op.
-    node.substitute(BETA, None).await.unwrap();
+    node.take_over(BETA, None).await.unwrap();
     node.shutdown().await;
 }
 
 #[tokio::test]
-async fn a_substitute_enabled_on_its_own_cannot_fill_a_slot_and_the_reverse() {
+async fn a_dev_build_enabled_on_its_own_cannot_take_over_a_slot_and_the_reverse() {
     let (node, _executor) = node_with_beta_and(fork("1.5.0", &[SYNC])).await;
     let operator = node.operator();
     let enable = |cartridge_id: &str| {
@@ -276,7 +276,7 @@ async fn a_substitute_enabled_on_its_own_cannot_fill_a_slot_and_the_reverse() {
     node.set_enabled(BETA, false).await;
     enable(FORK).await.unwrap();
     let refused = node
-        .substitute(BETA, Some(FORK))
+        .take_over(BETA, Some(FORK))
         .await
         .unwrap_err()
         .to_string();
@@ -284,14 +284,14 @@ async fn a_substitute_enabled_on_its_own_cannot_fill_a_slot_and_the_reverse() {
 
     // And the other way round: once it fills the slot it cannot be enabled on its own.
     node.set_enabled(FORK, false).await;
-    node.substitute(BETA, Some(FORK)).await.unwrap();
+    node.take_over(BETA, Some(FORK)).await.unwrap();
     let refused = enable(FORK).await.unwrap_err().to_string();
     assert!(refused.contains("cannot also be enabled"), "{refused}");
     node.shutdown().await;
 }
 
 #[tokio::test]
-async fn a_substitute_holding_another_authority_is_refused() {
+async fn a_dev_build_holding_another_authority_is_refused() {
     let (node, _executor) = node_with_beta_and(fork("1.5.0", &[SYNC])).await;
     // Gamma holds `org.example.gamma`: a different prefix is a different slot, not a drop-in.
     node.admit(
@@ -301,17 +301,48 @@ async fn a_substitute_holding_another_authority_is_refused() {
     .await
     .unwrap();
     let refused = node
-        .substitute(BETA, Some(GAMMA))
+        .take_over(BETA, Some(GAMMA))
         .await
         .unwrap_err()
         .to_string();
     assert!(refused.contains("holds authority"), "{refused}");
     let refused = node
-        .substitute(BETA, Some(example_cartridge!("absent")))
+        .take_over(BETA, Some(example_cartridge!("absent")))
         .await
         .unwrap_err()
         .to_string();
     assert!(refused.contains("not installed"), "{refused}");
     assert_eq!(node.record(BETA).await.filled_by, None);
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_node_that_did_not_opt_in_refuses_a_takeover_and_does_not_honor_a_stored_one() {
+    let mut node = node_with_beta_and(fork("1.5.0", &[SYNC])).await.0;
+    node.take_over(BETA, Some(FORK)).await.unwrap();
+    node.restart_with_takeover(false).await;
+
+    // The datum is still in the config document but the node did not opt in: the slot is
+    // refused rather than run as the dev build, and it says why.
+    let record = node.record(BETA).await;
+    assert_eq!(record.readiness, Readiness::Refused);
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("takeover is off")),
+        "{record:?}"
+    );
+
+    // Setting one is refused outright, naming the switch; clearing is how the slot recovers.
+    let refused = node
+        .take_over(BETA, Some(FORK))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("dev.allow_slot_takeover"), "{refused}");
+    let record = node.take_over(BETA, None).await.unwrap();
+    assert_eq!(record.readiness, Readiness::Ready);
+    assert_eq!(record.filled_by, None);
     node.shutdown().await;
 }

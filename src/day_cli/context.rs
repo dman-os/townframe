@@ -94,6 +94,28 @@ pub struct NodeSettings {
     /// network attachment, so this requires a `peers` section.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub relay: bool,
+    /// Development hooks, all off unless set here by hand (a command can't turn one on, since
+    /// the node reads this file at boot).
+    #[serde(default, skip_serializing_if = "DevSettings::is_default")]
+    pub dev: DevSettings,
+}
+
+/// The `dev` section of `node.json`. Keys are snake_case, as the file's other top-level keys are.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevSettings {
+    /// Lets `day carts dev-takeover` run an installed dev build as another installed cartridge,
+    /// with its actor, data and grants (ADR 045 section 5). Never a side effect of anything
+    /// else: with it off the node refuses to set a takeover and does not honor one found in
+    /// its config document.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_slot_takeover: bool,
+}
+
+impl DevSettings {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// The `peers` section of `node.json`: its presence is what makes the daemon attach the peers
@@ -252,6 +274,7 @@ impl NodeDir {
             identity_seed: data_encoding::HEXLOWER.encode(&seed),
             peers: None,
             relay: false,
+            dev: DevSettings::default(),
         };
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -487,6 +510,7 @@ impl Booted {
             blob_storage: bindings.blobs,
             listeners,
             peers,
+            allow_slot_takeover: settings.dev.allow_slot_takeover,
         };
         let (node, stop) = BigNode::boot(config).await?;
         Ok(Self {

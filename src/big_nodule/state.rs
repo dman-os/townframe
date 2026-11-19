@@ -106,8 +106,10 @@ pub(crate) struct Stores {
     pub(crate) dispatch_authority: CapId,
     pub(crate) executor: Option<Arc<dyn NoduleExecutor>>,
     /// The node's schema repo: an enabled nodule's held datums are registered here and retired
-    /// when it is disabled, refused, substituted away or uninstalled.
+    /// when it is disabled, refused, taken over or uninstalled.
     pub(crate) schemas: Arc<SchemaRepo>,
+    /// `NodulesConfig::allow_slot_takeover`.
+    pub(crate) allow_slot_takeover: bool,
 }
 
 impl Stores {
@@ -164,7 +166,13 @@ pub(crate) enum Command {
         binding: String,
         reply: Reply<NoduleRecord>,
     },
-    SetSubstitution {
+    SetMethodRoute {
+        context: RequestContext,
+        pattern: String,
+        provider: Option<String>,
+        reply: Reply<()>,
+    },
+    SetDevTakeover {
         context: RequestContext,
         cartridge_id: CartridgeId,
         by: Option<CartridgeId>,
@@ -328,6 +336,8 @@ pub(crate) struct State {
     /// The revision whose datum Lexicons are registered in the node's schema repo for each cartridge,
     /// under the cartridge id as owner. A cartridge is here exactly while it is enabled and admitted.
     registered_schemas: BTreeMap<CartridgeId, Revision>,
+    /// The unusable route datums already reported (see `NoduleConfig::routes`).
+    reported_unreadable_routes: BTreeSet<String>,
     /// Cartridges whose executor asked to be ensured again. The state actor constructs it and
     /// outlives nothing that holds a handle to it in a way that matters (see [`ReensureQueue`]).
     reensure: Arc<ReensureQueue>,
@@ -404,6 +414,7 @@ impl State {
             locks,
             applied_heads: BTreeMap::new(),
             registered_schemas: BTreeMap::new(),
+            reported_unreadable_routes: BTreeSet::new(),
             records: BTreeMap::new(),
             observed_heads: Vec::new(),
             admission_cache: Arc::default(),
@@ -565,12 +576,18 @@ impl State {
                 )
                 .await
             }
-            Command::SetSubstitution {
+            Command::SetMethodRoute {
+                context,
+                pattern,
+                provider,
+                reply,
+            } => answer(reply, self.set_method_route(&context, pattern, provider)).await,
+            Command::SetDevTakeover {
                 context,
                 cartridge_id,
                 by,
                 reply,
-            } => answer(reply, self.set_substitution(&context, &cartridge_id, by)).await,
+            } => answer(reply, self.set_dev_takeover(&context, &cartridge_id, by)).await,
             Command::Uninstall {
                 context,
                 cartridge_id,
@@ -671,22 +688,38 @@ impl State {
             .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
     }
 
-    async fn set_substitution(
+    async fn set_dev_takeover(
         &mut self,
         context: &RequestContext,
         cartridge_id: &CartridgeId,
         by: Option<CartridgeId>,
     ) -> Res<NoduleRecord> {
+        // Clearing is always allowed, which is how a slot refused for a stray takeover recovers.
+        if by.is_some() && !self.stores.allow_slot_takeover {
+            return Err(NodulesError::Rejected(
+                "dev slot takeover is off: set `dev.allow_slot_takeover` in node.json".into(),
+            ));
+        }
         let target = cartridge_id.clone();
         let cache = Arc::clone(&self.admission_cache);
         self.mutate_config(context, move |config| {
-            config.set_substitution(&cache, &target, by)
+            config.set_dev_takeover(&cache, &target, by)
         })
         .await?;
         self.records
             .get(cartridge_id)
             .cloned()
             .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
+    }
+
+    async fn set_method_route(
+        &mut self,
+        context: &RequestContext,
+        pattern: String,
+        provider: Option<String>,
+    ) -> Res<()> {
+        self.mutate_config(context, move |config| config.set_route(&pattern, provider))
+            .await
     }
 
     async fn set_drawer_grants(
@@ -753,7 +786,7 @@ impl State {
         // `refresh_if_needed` brought the records to this snapshot, so the recorded provider
         // change is still what the offers say, and the one offer is the cartridge to pin.
         let resolved = snapshot.value.resolve(&self.admission_cache);
-        let index = ProviderIndex::new(&resolved);
+        let index = ProviderIndex::new(&resolved, snapshot.value.routes().0);
         let Some(NoduleResolution::Admitted { installed, .. }) = resolved.get(cartridge_id) else {
             unreachable!("a request awaiting confirmation belongs to an admitted nodule")
         };
@@ -955,7 +988,20 @@ impl State {
         // Providers are indexed from the snapshot, not read back from the routing table as the
         // loop registers them, so a dependent that sorts before its provider resolves in the
         // same pass.
-        let providers = ProviderIndex::new(&resolved);
+        // Routes and claims are pushed in one pass, so dispatch never routes by a table that
+        // disagrees with the one dependents were resolved against.
+        let (routes, unreadable) = snapshot.value.routes();
+        // Reported once per distinct problem, not on every reconcile; a fixed one is forgotten
+        // so it reports again if it comes back.
+        for problem in &unreadable {
+            if self.reported_unreadable_routes.insert(problem.clone()) {
+                tracing::error!(%problem, "a route datum in the config document is unusable and is ignored");
+            }
+        }
+        self.reported_unreadable_routes
+            .retain(|problem| unreadable.contains(problem));
+        self.stores.dispatch.set_routes(routes.clone());
+        let providers = ProviderIndex::new(&resolved, routes);
         let mut new_records = BTreeMap::new();
         for (cartridge_id, resolution) in resolved {
             match resolution {
@@ -1633,7 +1679,23 @@ impl State {
                 .locks
                 .get(cartridge_id)
                 .and_then(|locks| locks.get(&request.binding))
-                .filter(|pin| pin.contract == request.contract);
+                .filter(|pin| pin.contract == request.contract)
+                // A route is the operator's consent, so a routed request re-pins to whatever
+                // the route names instead of waiting on a confirmation.
+                .filter(|_| !providers.is_routed(&request.contract));
+            if let Some(reason) = providers.route_problem(&request.contract) {
+                statuses.insert(
+                    request.binding.clone(),
+                    RequestStatus {
+                        contract: request.contract.clone(),
+                        locked: pinned.cloned(),
+                        unresolved: Some(Unresolved::RouteInvalid {
+                            reason: reason.to_owned(),
+                        }),
+                    },
+                );
+                continue;
+            }
             let offers = providers.offers(
                 &request.contract,
                 self.stores
@@ -1965,10 +2027,17 @@ impl State {
 impl Stores {
     /// The nodule config as it is now: what every reconcile starts from.
     async fn config(&self) -> Res<StoreSnapshot<NoduleConfig>> {
-        self.datum_store
+        let mut snapshot = self
+            .datum_store
             .snapshot()
             .await
-            .map_err(crate::store_error)
+            .map_err(crate::store_error)?;
+        if !self.allow_slot_takeover {
+            // A takeover datum that reaches the document by any other path (a sync, a hand
+            // edit) must not run another cartridge as a slot on a node that did not opt in.
+            snapshot.value.refuse_dev_takeover();
+        }
+        Ok(snapshot)
     }
 
     async fn open_actor(
