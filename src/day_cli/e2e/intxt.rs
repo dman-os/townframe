@@ -86,7 +86,7 @@ pub(super) async fn read_at(
     let capability = doc_capability(
         client,
         DocScope {
-            read: [doc.clone()].into(),
+            read: DocScope::read_all([doc.clone()]),
             ..DocScope::default()
         },
     )
@@ -169,7 +169,9 @@ async fn create_intxt_creates_a_drawer_marked_as_an_intxt() {
     .await;
 }
 
-/// Runs `git` in `dir` with nothing taken from the machine.
+/// Runs `git` in `dir` with nothing taken from the machine. Hooks do not run: capture installs a
+/// `post-rewrite` hook that execs `day`, which must never find a real one on the `PATH` when a
+/// test amends or rebases.
 fn git(dir: &std::path::Path, args: &[&str]) {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -177,6 +179,9 @@ fn git(dir: &std::path::Path, args: &[&str]) {
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", "/dev/null")
         .env("GIT_AUTHOR_NAME", "Ada")
         .env("GIT_AUTHOR_EMAIL", "ada@example.com")
         .env("GIT_COMMITTER_NAME", "Grace")
@@ -514,6 +519,63 @@ async fn assert_commit_membership(
     assert!(datum.get("raw").is_none(), "{datum}");
 }
 
+/// `new --with` shares the commits document: the new intxt's descriptor names the same
+/// document, so the membership query anchored on either drawer finds the commits once; a name
+/// that is no intxt creates nothing.
+async fn assert_new_with_shares_commits_document(
+    client: &NodeClient,
+    packaging: &crate::cmds::intxt::package::Packaging<'_>,
+    drawer: &big_cabinet_core::drawer::protocol::DrawerId,
+    short: &str,
+    tip: &str,
+) {
+    let commits_doc_of = async |drawer: &big_cabinet_core::drawer::protocol::DrawerId| {
+        let (_, datum) = read_at(
+            client,
+            drawer,
+            &"org.example.intxt.work.commitsDoc/main".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        datum["doc"].as_str().unwrap().to_owned()
+    };
+    let mut out = Vec::new();
+    let follow_up = packaging
+        .create(&mut out, "Follow-up", None, Some(short))
+        .await
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("shares the commits document of"), "{out}");
+    assert_eq!(
+        commits_doc_of(&follow_up).await,
+        commits_doc_of(drawer).await
+    );
+    let lookup = intxt_core::client::Caller::new(
+        client,
+        service_utils_rs::RequestContext::root(),
+        None,
+        "test-with".to_owned(),
+    );
+    assert_eq!(
+        lookup.commit_holders(&follow_up, tip).await.unwrap(),
+        lookup.commit_holders(drawer, tip).await.unwrap(),
+    );
+    // A name that is no intxt creates nothing.
+    let list = async || {
+        let mut out = Vec::new();
+        packaging.list(&mut out).await.unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    let before = list().await;
+    assert!(
+        packaging
+            .create(&mut Vec::new(), "Orphan", None, Some("nope"))
+            .await
+            .is_err()
+    );
+    assert_eq!(list().await, before);
+}
+
 /// Packaging a branch of two commits whose content a recorded session's tool calls produced:
 /// `add --branch` writes one commit entry carrying the pack, tracks the ref on this clone
 /// and brings the session; `show` lists all three; adding again changes nothing; `status`
@@ -751,48 +813,7 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
             "{after}"
         );
 
-        // `new --with` shares the commits document: the new intxt's descriptor names the same
-        // document, so the membership query anchored on either drawer finds the commits once.
-        let commits_doc_of = async |drawer: &big_cabinet_core::drawer::protocol::DrawerId| {
-            let (_, datum) = read_at(
-                client,
-                drawer,
-                &"org.example.intxt.work.commitsDoc/main".parse().unwrap(),
-            )
-            .await
-            .unwrap();
-            datum["doc"].as_str().unwrap().to_owned()
-        };
-        let mut out = Vec::new();
-        let follow_up = packaging
-            .create(&mut out, "Follow-up", None, Some(&short))
-            .await
-            .unwrap();
-        let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("shares the commits document of"), "{out}");
-        assert_eq!(
-            commits_doc_of(&follow_up).await,
-            commits_doc_of(&drawer).await
-        );
-        let lookup = intxt_core::client::Caller::new(
-            client,
-            service_utils_rs::RequestContext::root(),
-            None,
-            "test-with".to_owned(),
-        );
-        assert_eq!(
-            lookup.commit_holders(&follow_up, &tip).await.unwrap(),
-            lookup.commit_holders(&drawer, &tip).await.unwrap(),
-        );
-        // A name that is no intxt creates nothing.
-        let before = list().await;
-        assert!(
-            packaging
-                .create(&mut Vec::new(), "Orphan", None, Some("nope"))
-                .await
-                .is_err()
-        );
-        assert_eq!(list().await, before);
+        assert_new_with_shares_commits_document(client, &packaging, &drawer, &short, &tip).await;
     })
     .await;
 }
@@ -917,6 +938,148 @@ async fn intxt_add_branch_imports_history_that_was_never_recorded() {
         assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
         assert_eq!(commits().await, 3);
 
+    })
+    .await;
+}
+
+/// A rewrite git's `post-rewrite` hook reported (recorded by `capture git-rewrite` in the capture
+/// drawer) is copied by `add` into the intxt's commits document as an exact link, even where the
+/// amended commit's patch id changed and matching could not have found it, and an amend repeated
+/// before the next `add` (held -> amended -> amended again) still links the held commit to the
+/// last.
+#[tokio::test(flavor = "multi_thread")]
+async fn intxt_add_copies_the_rewrites_the_hook_reported() {
+    use crate::cmds::intxt::capture;
+    use crate::cmds::intxt::package::Named;
+    use crate::cmds::intxt::package::Packaging;
+    use big_cabinet_core::datum::DatumMember;
+    use intxt_core::client::Caller;
+    use intxt_core::work;
+    use service_utils_rs::RequestContext;
+
+    with_intxt_node(async |tmp, client| {
+        let node_root = tmp.path().join("node");
+        let base = tmp.path().canonicalize().unwrap();
+        let repo = init_repo(&base, &[("a.txt", "one\n")]);
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "add b.txt"]);
+        let held = rev(&repo, "feat/x");
+
+        let packaging = Packaging::new(client, &repo, &node_root);
+        let drawer = packaging
+            .create(&mut Vec::new(), "Rewritten", None, None)
+            .await
+            .unwrap();
+        let short = short_ids::ShortIds::new([drawer.to_string()])
+            .render(&drawer.to_string())
+            .unique;
+        let add = async || {
+            let mut out = Vec::new();
+            packaging
+                .add(
+                    &mut out,
+                    Some(&short),
+                    Named::Branch("feat/x".to_owned()),
+                    false,
+                )
+                .await
+                .unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert!(add().await.contains("1 commit(s)"));
+
+        // Amends that change the patch (so no patch id would match), each reported by the hook
+        // as git reports it: `<old> <new>`.
+        let amend = async |content: &str| {
+            let old = rev(&repo, "feat/x");
+            std::fs::write(repo.join("b.txt"), content).unwrap();
+            git(&repo, &["commit", "-q", "-a", "--amend", "-m", "add b.txt"]);
+            let new = rev(&repo, "feat/x");
+            let recorded =
+                capture::git_rewrite(client, &node_root, &repo, &format!("{old} {new}\n"))
+                    .await
+                    .unwrap();
+            assert_eq!(recorded, 1);
+            new
+        };
+        let first = amend("bee\n").await;
+        let added = add().await;
+        assert!(
+            added.contains(&format!(
+                "rewrite    {} replaces {} (post-rewrite hook)",
+                &first[..7],
+                &held[..7]
+            )),
+            "{added}"
+        );
+
+        let caller = Caller::new(client, RequestContext::root(), None, "test-hook".to_owned());
+        // The descriptor names the commits document.
+        let (_, descriptor) = read_at(
+            client,
+            &drawer,
+            &"org.example.intxt.work.commitsDoc/main".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        let commits_doc: big_cabinet_core::DocId =
+            descriptor["doc"].as_str().unwrap().parse().unwrap();
+        let slot = |tag: &str, sha: &str| format!("{tag}/{sha}").parse().unwrap();
+        let (_, rewrite) = caller
+            .read(&commits_doc, &slot(work::Rewrite::ID, &held))
+            .await
+            .unwrap();
+        assert_eq!(rewrite, json!({"successor": first, "how": "hook"}));
+        let (_, from) = caller
+            .read(&commits_doc, &slot(work::RewrittenFrom::ID, &first))
+            .await
+            .unwrap();
+        assert_eq!(from, json!({"predecessor": held, "how": "hook"}));
+
+        // Two amends before the next `add`: the intxt holds the first commit of the chain, and
+        // its link goes to the last.
+        amend("bee bee\n").await;
+        let last = amend("bee bee bee\n").await;
+        let added = add().await;
+        assert!(
+            added.contains(&format!(
+                "rewrite    {} replaces {} (post-rewrite hook)",
+                &last[..7],
+                &first[..7]
+            )),
+            "{added}"
+        );
+        let (_, from) = caller
+            .read(&commits_doc, &slot(work::RewrittenFrom::ID, &last))
+            .await
+            .unwrap();
+        assert_eq!(from, json!({"predecessor": first, "how": "hook"}));
+
+        // A hook pair whose chain reaches no held commit does not stop patch-id matching: this
+        // reworded amend has the held commit's patch, and the hook (made to name a commit the
+        // intxt does not hold) says something else.
+        let before = rev(&repo, "feat/x");
+        git(&repo, &["commit", "-q", "--amend", "-m", "reworded"]);
+        let reworded = rev(&repo, "feat/x");
+        let unrelated = rev(&repo, "main");
+        capture::git_rewrite(
+            client,
+            &node_root,
+            &repo,
+            &format!("{unrelated} {reworded}\n"),
+        )
+        .await
+        .unwrap();
+        let added = add().await;
+        assert!(
+            added.contains(&format!(
+                "rewrite    {} replaces {} (same patch id)",
+                &reworded[..7],
+                &before[..7]
+            )),
+            "{added}"
+        );
     })
     .await;
 }

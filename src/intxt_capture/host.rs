@@ -18,6 +18,8 @@ use crate::Error;
 use crate::acp::Resume;
 use crate::acp::Window;
 use crate::git::Git;
+use crate::git_hooks;
+use crate::git_hooks::HookState;
 use crate::hook::Event;
 use crate::hook::Hook;
 use crate::identity;
@@ -33,6 +35,7 @@ use intxt_core::capture::Batch;
 use intxt_core::capture::Cause;
 use intxt_core::capture::Op;
 use intxt_core::capture::RecordedIds;
+use intxt_core::capture::RewritePair;
 use intxt_core::capture::SessionBatch;
 use intxt_core::capture::SubagentBatch;
 use intxt_core::capture::WorktreeBatch;
@@ -86,6 +89,12 @@ struct WorktreeHost {
     /// and not in a datum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     intxt: Option<String>,
+    /// What capture found when it first looked at this clone's `post-rewrite` hook: none until it
+    /// has looked, which is the first observation of the worktree (installed, or left alone
+    /// because a hook of the operator's is there). The hook lives in the clone, shared by its
+    /// worktrees, but each worktree's state is its own and installing is idempotent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_hooks: Option<HookState>,
 }
 
 /// A tool call's window: the snapshot taken before it ran, when (`WorktreeHost::clock`) and which
@@ -380,7 +389,7 @@ fn observe_worktree(
     found: Identity,
     tool_cause: Option<&Cause>,
     tool_turns: &BTreeMap<String, (Option<String>, String)>,
-    import: &[String],
+    reported: &Reported,
     host: &mut WorktreeHost,
 ) -> Result<(Option<WorktreeBatch>, u64), Error> {
     if let (Event::PreToolUse, Some(tool_use_id)) = (event, tool_use_id) {
@@ -401,7 +410,7 @@ fn observe_worktree(
     let closing = tool_use_id.filter(|_| !ends_session);
 
     let (snapshots, sole) = host.segments(closing, tool_cause, tool_turns);
-    let (observation, next) = observe::observe(&host.observed, found, &snapshots, import)?;
+    let (observation, next) = observe::observe(&host.observed, found, &snapshots, reported.import)?;
     host.observed = next;
     host.clock += 1;
     host.observed_at = host.clock;
@@ -480,7 +489,11 @@ fn observe_worktree(
         .filter_map(|change| change.blob.as_deref())
         .collect();
     Git::new(&observation.identity.root).keep(&observation.identity.worktree_id, &blobs)?;
-    if ops.is_empty() && git.commits.is_empty() && git.refs.is_empty() {
+    if ops.is_empty()
+        && git.commits.is_empty()
+        && git.refs.is_empty()
+        && reported.rewrites.is_empty()
+    {
         return Ok((None, uncaused));
     }
     Ok((
@@ -492,10 +505,20 @@ fn observe_worktree(
             commits: git.commits,
             refs: git.refs,
             reflog_gap: git.reflog_gap,
+            rewrites: reported.rewrites.to_vec(),
             extra: Default::default(),
         }),
         uncaused,
     ))
+}
+
+/// What a caller reports to an observation that git state alone does not show.
+#[derive(Default)]
+struct Reported<'a> {
+    /// Commits to record although no reflog move made them ([`git::observe`]).
+    import: &'a [String],
+    /// Pairs git's `post-rewrite` hook reported.
+    rewrites: &'a [RewritePair],
 }
 
 /// Resolve the worktrees of `candidates` and observe each for one window, holding their locks.
@@ -508,7 +531,7 @@ fn observe_worktrees(
     tool_turns: &BTreeMap<String, (Option<String>, String)>,
     candidates: &BTreeSet<PathBuf>,
     stored: &BTreeSet<PathBuf>,
-    import: &[String],
+    reported: &Reported,
 ) -> Result<(Vec<PendingWorktree>, Vec<WorktreeBatch>, u64), Error> {
     let mut identities: BTreeMap<PathBuf, Identity> = BTreeMap::new();
     for candidate in candidates {
@@ -526,13 +549,26 @@ fn observe_worktrees(
         let worktree_lock = lock(&found.git_dir.join("intxt/lock"))?;
         let state_path = found.git_dir.join("intxt/state.json");
         let mut host: WorktreeHost = load(&state_path)?;
+        // First sight of the worktree: put the `post-rewrite` hook in its clone. Persisted with
+        // the rest of the state when the batch is committed, so a failed record installs again,
+        // which is idempotent.
+        // A failed install is recorded, not raised: capture's job is recording, and `status`
+        // shows the failure. The next observation tries again.
+        if HookState::needs_install(&host.git_hooks) {
+            host.git_hooks = Some(match git_hooks::install_post_rewrite(&found.root) {
+                Ok(installed) => installed.state(),
+                Err(error) => HookState::Failed {
+                    reason: error.to_string(),
+                },
+            });
+        }
         let (batch, uncaused) = observe_worktree(
             event,
             tool_use_id,
             found,
             cause,
             tool_turns,
-            import,
+            reported,
             &mut host,
         )?;
         uncaused_tool_calls += uncaused;
@@ -558,6 +594,8 @@ pub struct RecordedWorktree {
     pub ops: u64,
     /// The drawer id of the intxt the worktree is on, see [`put_on_intxt`].
     pub intxt: Option<String>,
+    /// Whether capture's `post-rewrite` hook is in the clone; none before capture first looked.
+    pub git_hooks: Option<HookState>,
 }
 
 /// What capture recorded for the worktree `identity` names, from its stored state; empty for a
@@ -568,7 +606,27 @@ pub fn recorded_worktree(identity: &Identity) -> Result<RecordedWorktree, Error>
         docs: host.docs,
         ops: host.next_seq,
         intxt: host.intxt,
+        git_hooks: host.git_hooks,
     })
+}
+
+/// Installs capture's `post-rewrite` hook in the clone of the worktree `identity` names and
+/// remembers the outcome as the worktree's state (what `day x intxt status` says). Takes the
+/// worktree's lock, so a hook observing it at the same time keeps the change.
+pub fn install_git_hooks(identity: &Identity) -> Result<git_hooks::Install, Error> {
+    let _lock = lock(&identity.git_dir.join("intxt/lock"))?;
+    let path = identity.git_dir.join("intxt/state.json");
+    let mut host: WorktreeHost = load(&path)?;
+    // The explicit command raises the failure to its caller, and records it for `status` too.
+    let installed = git_hooks::install_post_rewrite(&identity.root);
+    host.git_hooks = Some(match &installed {
+        Ok(installed) => installed.state(),
+        Err(error) => HookState::Failed {
+            reason: error.to_string(),
+        },
+    });
+    save(&path, &host)?;
+    installed
 }
 
 /// Put the worktree `identity` names on the intxt `drawer` (a drawer id), or on none. Takes the
@@ -672,7 +730,7 @@ pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
         &session.tool_turns,
         &candidates,
         &session.worktrees,
-        &[],
+        &Reported::default(),
     )?;
     session.worktrees = worktrees
         .iter()
@@ -776,7 +834,7 @@ pub fn prepare_acp(
         &BTreeMap::new(),
         &candidates,
         known,
-        &[],
+        &Reported::default(),
     )?;
     Ok(Prepared {
         batch: Batch {
@@ -792,26 +850,23 @@ pub fn prepare_acp(
     })
 }
 
-/// Observe the worktree `identity` names for an import of git history: the commits in `import`
-/// are recorded with the worktree's identity documents, as a hook's observation records the
-/// commits its moves made (FDR 008 W6; [`crate::git::observe`] says how). It is a full
-/// observation under the worktree's lock, so state and sequence numbers are the ones hooks
-/// continue from: what the observation reports (a first sight's baseline, the refs, moves since
-/// the last look) is what the next hook would have reported, and it will not report it twice.
-///
-/// There is no session, none having been recorded; the batch's session half is empty. The event
-/// is no hook's: it neither opens a pre-snapshot nor drops the ones other sessions' tool calls
-/// have in flight.
-pub fn prepare_import(identity: &Identity, import: &[String]) -> Result<Prepared, Error> {
+/// A full observation of the worktree `identity` names under `event`, with no session: what
+/// [`prepare_import`] and [`prepare_rewrite`] share.
+fn prepare_worktree(
+    event: Event,
+    identity: &Identity,
+    import: &[String],
+    rewrites: &[RewritePair],
+) -> Result<Prepared, Error> {
     let candidates = BTreeSet::from([identity.root.clone()]);
     let (worktrees, batches, uncaused_tool_calls) = observe_worktrees(
-        &Event::Other("import".to_owned()),
+        &event,
         None,
         None,
         &BTreeMap::new(),
         &candidates,
         &BTreeSet::new(),
-        import,
+        &Reported { import, rewrites },
     )?;
     Ok(Prepared {
         batch: Batch {
@@ -831,6 +886,29 @@ pub fn prepare_import(identity: &Identity, import: &[String]) -> Result<Prepared
         worktrees,
         finished_tool: None,
     })
+}
+
+/// Observe the worktree `identity` names for an import of git history: the commits in `import`
+/// are recorded with the worktree's identity documents, as a hook's observation records the
+/// commits its moves made (FDR 008 W6; [`crate::git::observe`] says how). It is a full
+/// observation under the worktree's lock, so state and sequence numbers are the ones hooks
+/// continue from: what the observation reports (a first sight's baseline, the refs, moves since
+/// the last look) is what the next hook would have reported, and it will not report it twice.
+///
+/// There is no session, none having been recorded; the batch's session half is empty. The event
+/// is no hook's: it neither opens a pre-snapshot nor drops the ones other sessions' tool calls
+/// have in flight.
+pub fn prepare_import(identity: &Identity, import: &[String]) -> Result<Prepared, Error> {
+    prepare_worktree(Event::Other("import".to_owned()), identity, import, &[])
+}
+
+/// Observe the worktree `identity` names for a `post-rewrite` hook run: the pairs git reported
+/// are recorded beside the commits (ADR 040 §7) in the same batch as everything the full
+/// observation finds, which is what the next hook would have reported (an amend is a reflog move
+/// and its new commit is a `gitCommit`), so the new commit and its link arrive together. Under
+/// the worktree's lock like every observation. There is no session and no tool call.
+pub fn prepare_rewrite(identity: &Identity, rewrites: &[RewritePair]) -> Result<Prepared, Error> {
+    prepare_worktree(Event::Other("rewrite".to_owned()), identity, &[], rewrites)
 }
 
 impl Prepared {

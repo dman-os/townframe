@@ -171,7 +171,7 @@ impl<H: HttpTransport> Recorder<'_, H> {
         let capability = self
             .caller
             .doc_capability(DocScope {
-                read: [doc.clone()].into(),
+                read: DocScope::read_all([doc.clone()]),
                 ..DocScope::default()
             })
             .await?;
@@ -412,6 +412,13 @@ impl<H: HttpTransport> Recorder<'_, H> {
                 self.write(&step("commits"), repo, new).await?;
             }
         }
+        if !worktree.rewrites.is_empty() {
+            let repo = repo.ok_or_else(|| {
+                invalid("rewrites were observed in a repository without a root commit")
+            })?;
+            self.write_rewrites(&step("rewrites"), worktree, repo)
+                .await?;
+        }
         let refs = worktree
             .refs
             .iter()
@@ -436,6 +443,51 @@ impl<H: HttpTransport> Recorder<'_, H> {
             if !moved.is_empty() {
                 self.write(&step("refs"), clone, moved).await?;
             }
+        }
+        Ok(())
+    }
+
+    /// The batch's hook-reported rewrites into the repository document, beside the commits: for
+    /// each pair `rewrite/<old>` and `rewrittenFrom/<new>`, both `how: hook`. Like a commit, a
+    /// recorded link is never rewritten: the first successor reported for an old commit stands.
+    /// `rewrittenFrom/<new>` has one slot per new commit, so when git reports several old
+    /// commits for one new one (a squash), the first listed is its predecessor and the others
+    /// keep only their `rewrite` link to it.
+    async fn write_rewrites(
+        &self,
+        step: &str,
+        worktree: &WorktreeBatch,
+        repo: &DocId,
+    ) -> Result<(), IntxtError> {
+        let mut wanted = BTreeMap::new();
+        let mut from = BTreeSet::new();
+        for pair in &worktree.rewrites {
+            wanted
+                .entry(key(work::Rewrite::ID, &pair.old)?)
+                .or_insert_with(|| {
+                    to_value(&work::Rewrite {
+                        successor: pair.new.clone(),
+                        how: work::RewriteHow::Hook,
+                        extra: Default::default(),
+                    })
+                });
+            if from.insert(&pair.new) {
+                wanted.insert(
+                    key(work::RewrittenFrom::ID, &pair.new)?,
+                    to_value(&work::RewrittenFrom {
+                        predecessor: pair.old.clone(),
+                        how: work::RewriteHow::Hook,
+                        extra: Default::default(),
+                    }),
+                );
+            }
+        }
+        let known = self
+            .read(repo, &wanted.keys().cloned().collect::<Vec<_>>())
+            .await?;
+        wanted.retain(|key, _| !known.contains_key(key));
+        if !wanted.is_empty() {
+            self.write(step, repo, wanted).await?;
         }
         Ok(())
     }

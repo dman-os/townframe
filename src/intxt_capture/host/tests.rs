@@ -958,3 +958,129 @@ fn the_intxt_a_worktree_is_on_survives_observations_until_changed() {
     put_on_intxt(&identity, None).unwrap();
     assert_eq!(recorded_worktree(&identity).unwrap().intxt, None);
 }
+
+#[test]
+fn the_first_observation_installs_the_post_rewrite_hook_and_remembers_it() {
+    let env = Env::new();
+    let hook = env.repo.root.join(".git/hooks/post-rewrite");
+    assert!(!hook.exists());
+    let start = prepare(&env.hook("SessionStart", json!({})), &env.session_state).unwrap();
+    assert!(
+        hook.exists(),
+        "capture installs the hook when it first looks at the clone"
+    );
+    let recorded = recorded_for(&start, 0);
+    start.commit(recorded).unwrap();
+    let identity = identity::resolve(&env.repo.root).unwrap().unwrap();
+    assert_eq!(
+        recorded_worktree(&identity).unwrap().git_hooks,
+        Some(HookState::Installed)
+    );
+}
+
+#[test]
+fn a_foreign_post_rewrite_hook_is_left_alone_and_remembered() {
+    let env = Env::new();
+    let hook = env.repo.root.join(".git/hooks/post-rewrite");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\necho theirs\n").unwrap();
+    let start = prepare(&env.hook("SessionStart", json!({})), &env.session_state).unwrap();
+    let recorded = recorded_for(&start, 0);
+    start.commit(recorded).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&hook).unwrap(),
+        "#!/bin/sh\necho theirs\n"
+    );
+    let identity = identity::resolve(&env.repo.root).unwrap().unwrap();
+    assert_eq!(
+        recorded_worktree(&identity).unwrap().git_hooks,
+        Some(HookState::ForeignPostRewrite)
+    );
+}
+
+#[test]
+fn explicit_install_replaces_the_remembered_state() {
+    let env = Env::new();
+    let hook = env.repo.root.join(".git/hooks/post-rewrite");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\necho theirs\n").unwrap();
+    let identity = identity::resolve(&env.repo.root).unwrap().unwrap();
+    assert!(matches!(
+        install_git_hooks(&identity).unwrap(),
+        git_hooks::Install::Foreign(_)
+    ));
+    assert_eq!(
+        recorded_worktree(&identity).unwrap().git_hooks,
+        Some(HookState::ForeignPostRewrite)
+    );
+    std::fs::remove_file(&hook).unwrap();
+    assert!(matches!(
+        install_git_hooks(&identity).unwrap(),
+        git_hooks::Install::Installed(_)
+    ));
+    assert_eq!(
+        recorded_worktree(&identity).unwrap().git_hooks,
+        Some(HookState::Installed)
+    );
+}
+
+#[test]
+fn a_rewrite_is_observed_with_the_commit_it_made() {
+    let env = Env::new();
+    let start = prepare(&env.hook("SessionStart", json!({})), &env.session_state).unwrap();
+    let recorded = recorded_for(&start, 0);
+    start.commit(recorded).unwrap();
+    let old = env.repo.git(&["rev-parse", "HEAD"]);
+    env.repo.git(&["commit", "-q", "--amend", "-m", "amended"]);
+    let new = env.repo.git(&["rev-parse", "HEAD"]);
+
+    let identity = identity::resolve(&env.repo.root).unwrap().unwrap();
+    let pairs = crate::git_hooks::parse_post_rewrite(&format!("{old} {new}\n")).unwrap();
+    let prepared = prepare_rewrite(&identity, &pairs).unwrap();
+    assert!(!prepared.batch.is_empty());
+    assert!(prepared.batch.session.imported.is_empty());
+    let [worktree] = &prepared.batch.worktrees[..] else {
+        panic!("one worktree: {:?}", prepared.batch.worktrees);
+    };
+    assert_eq!(worktree.rewrites, pairs);
+    assert!(
+        worktree.commits.contains_key(&new),
+        "the new commit is recorded with its link"
+    );
+    // The recorder answers for the worktree, and its state goes on from there.
+    let recorded = recorded_for(&prepared, worktree.next_seq + worktree.ops.len() as u64);
+    prepared.commit(recorded).unwrap();
+}
+
+#[test]
+fn a_failed_install_is_recorded_and_tried_again_at_the_next_observation() {
+    let env = Env::new();
+    let hooks = env.repo.root.join(".git/hooks");
+    // A file where the hooks directory should be: reading the hook under it is an error.
+    std::fs::remove_dir_all(&hooks).unwrap();
+    std::fs::write(&hooks, "not a directory").unwrap();
+    let identity = identity::resolve(&env.repo.root).unwrap().unwrap();
+
+    let start = prepare(&env.hook("SessionStart", json!({})), &env.session_state).unwrap();
+    let recorded = recorded_for(&start, 0);
+    start.commit(recorded).unwrap();
+    let state = recorded_worktree(&identity).unwrap().git_hooks;
+    assert!(
+        matches!(&state, Some(HookState::Failed { reason }) if !reason.is_empty()),
+        "{state:?}"
+    );
+    assert!(
+        state
+            .unwrap()
+            .describe()
+            .starts_with("hook install failed: ")
+    );
+
+    std::fs::remove_file(&hooks).unwrap();
+    let stop = prepare(&env.hook("Stop", json!({})), &env.session_state).unwrap();
+    stop.commit(RecordedIds::default()).unwrap();
+    assert_eq!(
+        recorded_worktree(&identity).unwrap().git_hooks,
+        Some(HookState::Installed)
+    );
+}

@@ -33,6 +33,19 @@
 //! command needs the node's daemon (`day node start`) and fails fast without one: booting the
 //! node in each hook's process would take seconds, and parallel tool calls run parallel hooks.
 
+//! # git's `post-rewrite` hook
+//!
+//! The first time capture records a clone it installs git's `post-rewrite` hook there (in
+//! `git rev-parse --git-path hooks`, which follows `core.hooksPath`): a two-line `sh` script, marked
+//! as capture's, that runs `day x intxt capture git-rewrite "$1"`. git then reports the exact old
+//! and new commit of every amend and rebase, which capture records beside the worktree's commits
+//! and `day x intxt add` copies into an intxt that holds the old one. The hook needs `day` on
+//! the `PATH` git runs with, and the node's daemon (set `DAY_NODE` in the environment if the node
+//! is not the default). A `post-rewrite` hook that is not capture's is never overwritten or
+//! chained: `day x intxt status` says "hook not installed: foreign post-rewrite", and rewrites are
+//! then matched by patch id only. `day x intxt capture install-git-hooks` installs it on request
+//! and reports what it did.
+//!
 //! # ACP agents
 //!
 //! `day x intxt record -- <agent command>` records an ACP agent for the client that launches it:
@@ -294,10 +307,15 @@ pub enum IntxtCommands {
     /// of Claude Code's hooks (see this module's documentation). It prints nothing unless it has
     /// something to report or `--verbose` is given, and then only to stderr; it never exits with
     /// status 2, which Claude Code feeds back to the model.
+    ///
+    /// Its subcommands are git's side of capture: the `post-rewrite` hook capture installs in the
+    /// clones it records.
     Capture {
         /// Say on stderr what was recorded
-        #[arg(long)]
+        #[arg(long, global = true)]
         verbose: bool,
+        #[command(subcommand)]
+        command: Option<capture::CaptureCommands>,
     },
     /// Work with GitHub pull requests
     Github {
@@ -362,12 +380,7 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
             change,
             full,
         } => {
-            let named = match (commits, branch, change) {
-                (Some(range), None, None) => package::Named::Commits(range),
-                (None, Some(branch), None) => package::Named::Branch(branch),
-                (None, None, Some(change)) => package::Named::Change(change),
-                _ => unreachable!("clap requires exactly one of --commits, --branch and --change"),
-            };
+            let named = package::Named::from_flags(commits, branch, change);
             with_packaging(async |packaging| {
                 packaging
                     .add(&mut std::io::stdout(), intxt.as_deref(), named, full)
@@ -501,17 +514,8 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
             println!("intxt is installed");
             Ok(ExitCode::SUCCESS)
         }
-        IntxtCommands::Capture { verbose } => {
-            // A failure is one line on stderr and status 1: Claude Code shows it to the operator,
-            // and status 2 would be fed back to the model.
-            match capture_hook(verbose).await {
-                Ok(()) => Ok(ExitCode::SUCCESS),
-                Err(error) => {
-                    let line = format!("{error:#}").replace('\n', " ");
-                    eprintln!("intxt capture: {line}");
-                    Ok(ExitCode::FAILURE)
-                }
-            }
+        IntxtCommands::Capture { verbose, command } => {
+            capture::CaptureCommands::run(command, verbose).await
         }
     }
 }
@@ -543,40 +547,6 @@ pub(crate) async fn require_daemon(dir: &crate::context::NodeDir) -> Res<()> {
         dir.root().display()
     );
     Ok(())
-}
-
-/// The hook's JSON from stdin, captured against the node `--node` names.
-async fn capture_hook(verbose: bool) -> Res<()> {
-    let node_dir = lazy::config().await?.node_dir.clone();
-    require_daemon(&node_dir).await?;
-    let mut input = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)
-        .wrap_err("reading the hook's JSON from stdin")?;
-    let client = lazy::node().await?;
-    let summary = capture::run(&client, node_dir.root(), &input).await?;
-    report(&summary, verbose);
-    Ok(())
-}
-
-/// What a run says on stderr: everything under `--verbose`, otherwise only what the operator
-/// should see (a tool call recorded without its cause).
-fn report(summary: &capture::Summary, verbose: bool) {
-    if summary.uncaused_tool_calls > 0 {
-        eprintln!(
-            "intxt capture: {} op(s) of a tool call the transcript did not show yet were recorded without a cause",
-            summary.uncaused_tool_calls
-        );
-    }
-    if verbose {
-        eprintln!(
-            "intxt capture: {}",
-            if summary.recorded.is_some() {
-                "recorded"
-            } else {
-                "nothing to record"
-            }
-        );
-    }
 }
 
 /// Installs intxt with the handler component `wasm` through ADR 044's and ADR 047's cartridge flow, the way a
