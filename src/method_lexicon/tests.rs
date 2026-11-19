@@ -187,7 +187,8 @@ fn a_common_error_is_named_as_dispatch_names_its_refusals() {
 #[test]
 fn every_builtin_error_enum_names_its_context_variant_context() {
     let mut failures = Vec::new();
-    for (nsid, _, schemas) in super::builtin_list() {
+    for (method, _, schemas) in super::builtin_list() {
+        let nsid = method.nsid;
         let schemas = schemas();
         let error = serde_json::to_value(&schemas.error).unwrap();
         let branches = super::resolve(&error, &schemas.definitions)["oneOf"]

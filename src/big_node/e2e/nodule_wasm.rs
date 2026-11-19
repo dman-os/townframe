@@ -239,7 +239,7 @@ fn cartridge_requiring(
     let mut lexicons = Vec::new();
     for nsid in &operations {
         let output = if nsid == &spec.put() {
-            bytes_procedure(nsid, "application/json", &["capability"])
+            bytes_procedure(nsid, "application/json", &[])
         } else if nsid == &spec.read() {
             bytes_procedure(nsid, "*/*", &["capability", "blobId"])
         } else if nsid == &spec.ingest() {
@@ -821,18 +821,14 @@ async fn a_wasm_guest_streams_blob_put_and_read_bodies() {
         Readiness::Ready
     );
 
-    let put_capability = blobs::put_cap_for(&node, Some(actor)).await;
-    let put_capability_text = serde_json::to_value(put_capability)
-        .unwrap()
-        .as_str()
-        .unwrap()
-        .to_owned();
+    // The put presents the blobs handle the routine was minted for its `blobs.put` permbind
+    // (ADR 049 §6.2); nothing is minted for it here.
     let payload: Vec<u8> = (0..150_000).map(|index| (index % 251) as u8).collect();
     let put_output = invoke_bytes(
         &node,
         &spec.put(),
-        json!({"capability": put_capability}),
-        format!("capability={put_capability_text}"),
+        json!({}),
+        String::new(),
         ByteBody::from_bytes(payload.clone()),
         Default::default(),
     )

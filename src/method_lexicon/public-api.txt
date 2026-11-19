@@ -11,6 +11,7 @@ pub impl method_lexicon::MethodContract::fn coerce_query (& self , query : & [(&
 pub impl method_lexicon::MethodContract::fn compile (file : & Value , carried : & [& Value]) -> Result < Self , LexiconAdmissionError >
 pub impl method_lexicon::MethodContract::fn kind (& self) -> OperationKind
 pub method_lexicon::fn body_encodings (file : & Value) -> (DeclaredBody , DeclaredBody)
+pub method_lexicon::fn builtin_method (nsid : & str) -> Option < method_core :: XrpcMethod >
 pub method_lexicon::fn builtin_methods () -> impl Iterator < Item = (& 'static str , Assemble) >
 pub method_lexicon::fn coerce_parameters (parameters : & Value , query : & [(& str , & str)] ,) -> Result < Map < String , Value > , Vec < ParameterError > >
 pub method_lexicon::fn lexicon < M : MethodSchema > () -> Result < Value , MethodLexiconError >

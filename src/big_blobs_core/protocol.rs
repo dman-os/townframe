@@ -166,8 +166,8 @@ service_core_rs::service_method!(MintBlobsCapability => Capability, BlobsError, 
 // it reads, so a client never asserts one, and putting what the node holds is a cheap no-op that
 // returns the same `BlobInfo` (ADR 042 §6). `capability` is a parameter, on the query string over
 // HTTP.
-service_core_rs::service_method!(PutBlob => BlobInfo, BlobsError, procedure("org.example.daybook.blobs.put"), bytes_input);
-service_core_rs::service_method!(ImportFile => ImportFileOutput, BlobsError, procedure("org.example.daybook.blobs.importFile"), descriptors_input, local_only);
+service_core_rs::service_method!(PutBlob => BlobInfo, BlobsError, procedure("org.example.daybook.blobs.put"), bytes_input, needs_handle("org.example.daybook.blobs.mintCapability", &["put"]));
+service_core_rs::service_method!(ImportFile => ImportFileOutput, BlobsError, procedure("org.example.daybook.blobs.importFile"), descriptors_input, local_only, needs_handle("org.example.daybook.blobs.mintCapability", &["put"]));
 // A read answers the blob's raw bytes; `Range` selects part of them (`206 Partial Content`).
 service_core_rs::service_method!(ReadBlob => ByteBody, BlobsError, query("org.example.daybook.blobs.read"), bytes_output);
 /// The result of [`StatBlob`]: `info` is absent when the blob is not held locally.

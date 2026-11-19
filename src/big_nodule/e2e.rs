@@ -465,6 +465,7 @@ async fn node_with_takeover(
         dispatch_authority,
         &cartridges,
         cartridges_authorization,
+        &blobs,
         &sql,
         &schemas,
         executor.clone(),
@@ -606,11 +607,30 @@ async fn boot_nodules(
     dispatch_authority: CapId,
     cartridges: &big_cartridges::Cartridges,
     cartridges_authorization: Authorization,
+    blobs: &big_blobs::Blobs,
     sql: &TestDb,
     schemas: &Arc<SchemaRepo>,
     executor: Option<Arc<dyn NoduleExecutor>>,
     allow_slot_takeover: bool,
 ) -> Result<(Nodules, StopToken), NodulesError> {
+    // As `big_node` does: the operator introduces the service's delegator blobs handle.
+    let blobs_capability = blobs
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(authority.root).metadata(),
+            MintBlobsCapability {
+                scope: BlobsScope {
+                    put: true,
+                    ..Default::default()
+                },
+                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                subject: Some(nodules_actor.actor.actor_id),
+            },
+        )
+        .await
+        .expect("the operator mints the nodule service's blobs delegator")
+        .capability_id;
     let namespace = authority
         .service
         .open_namespace(nodules_actor.actor.actor_id)
@@ -632,6 +652,8 @@ async fn boot_nodules(
         dispatch_authority,
         cartridges: cartridges.client.clone(),
         cartridges_authorization,
+        blobs: blobs.client.clone(),
+        blobs_capability,
         executor,
         schemas: Arc::clone(schemas),
         allow_slot_takeover,
@@ -899,6 +921,7 @@ impl Node {
             self.dispatch_authority,
             &self.cartridges,
             self.cartridges_authorization,
+            &self.blobs,
             &self.sql,
             &self.schemas,
             self.executor.clone(),
