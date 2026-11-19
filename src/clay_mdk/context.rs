@@ -745,16 +745,42 @@ impl Backend {
                 )
             }
             // As `call`: the request is incarnation-owned work, because the `wasi:http` future
-            // can only be polled inside a component-model task. Only the response head is
-            // awaited there; the body is the transport's own pull stream and is read by the
-            // caller.
+            // can only be polled inside a component-model task. The same task then keeps
+            // pulling the body: the transport's stream is fed by a pump on the guest's executor,
+            // and a chunk it delivers wakes only the Dioxus task reading the stream, which
+            // nothing polls on its own wake (see `call`). So the caller reads a second channel
+            // this task fills, and the views are marked dirty after every chunk: the render
+            // pass that follows polls the woken reader. Without it the reader sleeps after the
+            // head until some unrelated render, and the body never completes. The channel holds
+            // one chunk, so a slow reader backpressures the transport as it did directly.
             #[cfg(feature = "guest")]
             Self::Guest(runtime) => {
                 let (answer, answered) = futures::channel::oneshot::channel();
                 let views = Rc::clone(runtime);
                 runtime.spawn(Box::pin(async move {
-                    // A caller that stopped waiting has no use for the answer.
-                    drop(answer.send(crate::guest::call_bytes(input).await));
+                    let mut body = match crate::guest::call_bytes(input).await {
+                        Ok(body) => body,
+                        Err(error) => {
+                            // A caller that stopped waiting has no use for the answer.
+                            drop(answer.send(Err(error)));
+                            views.notify_views();
+                            return;
+                        }
+                    };
+                    let (mut chunks, received) = futures::channel::mpsc::channel(1);
+                    if answer.send(Ok(received)).is_err() {
+                        return;
+                    }
+                    views.notify_views();
+                    while let Some(chunk) = futures::StreamExt::next(&mut body).await {
+                        // The reader dropping the stream (its view unmounted) ends the pull.
+                        if futures::SinkExt::send(&mut chunks, chunk).await.is_err() {
+                            return;
+                        }
+                        views.notify_views();
+                    }
+                    // The end of the body is a wake too: the reader sees the closed channel.
+                    drop(chunks);
                     views.notify_views();
                 }));
                 answered
