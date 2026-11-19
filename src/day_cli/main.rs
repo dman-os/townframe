@@ -232,11 +232,24 @@ const CLAP_STYLE: clap::builder::Styles = clap::builder::Styles::styled()
     .literal(AnsiColor::Green.on_default())
     .placeholder(AnsiColor::Green.on_default());
 
+/// What a `day` command exits with. Every command follows it; the table is in `--help`.
+const EXIT_CODES: &str = "\
+Exit codes:
+  0  success
+  1  failure: the command could not do what was asked (the error is on stderr)
+  2  usage error: the arguments were not understood
+  3  no server running (`day node status`, which still reports what it found)
+
+Output goes to stdout and diagnostics to stderr. Only `day node start` logs as it serves;
+the other commands show warnings, and RUST_LOG overrides the level. Colour is used on a
+terminal unless NO_COLOR is set.";
+
 #[derive(Debug, clap::Parser)]
 #[clap(
     name = "day",
     version,
     about,
+    after_long_help = EXIT_CODES,
     styles = CLAP_STYLE
 )]
 struct Cli {
