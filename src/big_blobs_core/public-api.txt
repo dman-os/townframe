@@ -11,6 +11,7 @@ pub enum big_blobs_core::protocol::BlobsError { # [error ("request context faile
 pub enum big_blobs_core::protocol::ImportFileRefusal { TooLarge { # [serde (rename = "limitOctets")] limit_octets : u64 , }, Unreadable { reason : String , }, InvalidInput { reason : String , }, Storage { reason : String , } }
 pub enum big_blobs_core::protocol::ImportFileResult { Imported { info : BlobInfo }, Refused { error : ImportFileRefusal } }
 pub impl big_blobs_core::protocol::BlobsScope::fn covers (& self , other : & Self) -> bool
+pub impl big_blobs_core::protocol::BlobsScope::fn reading_drawers (& self) -> impl Iterator < Item = & DocId >
 pub mod big_blobs_core::datum
 pub mod big_blobs_core::protocol
 pub static big_blobs_core::datum::UNIVERSE: LazyLock < Universe >
@@ -22,7 +23,7 @@ pub struct big_blobs_core::datum::Representation  { digest: String, length_octet
 pub struct big_blobs_core::datum::Rfc8188EncodingParameters  { record_size: u64, padding: String, extra: Extra }
 pub struct big_blobs_core::protocol::BlobInfo  { blob_id: BlobId, length_octets: u64 }
 pub struct big_blobs_core::protocol::BlobStat  { info: Option < BlobInfo > }
-pub struct big_blobs_core::protocol::BlobsScope  { put: bool, read: BTreeSet < BlobId > }
+pub struct big_blobs_core::protocol::BlobsScope  { put: bool, read: BTreeSet < BlobId >, drawers: BTreeMap < DocId , DrawerAccess > }
 pub struct big_blobs_core::protocol::ImportFile  { capability: CapId }
 pub struct big_blobs_core::protocol::ImportFileOutput  { results: Vec < ImportFileResult > }
 pub struct big_blobs_core::protocol::MintBlobsCapability  { scope: BlobsScope, rights: Rights, subject: Option < Uuid7 > }
