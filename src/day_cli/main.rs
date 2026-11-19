@@ -230,7 +230,7 @@ enum StaticCommands {
         #[clap(subcommand)]
         command: cmds::carts::CartsCommands,
     },
-    /// Manage the peers the node's daemon dials at start
+    /// Manage the peers the node's server dials at start
     #[clap(visible_alias = "peer")]
     Peers {
         #[clap(subcommand)]

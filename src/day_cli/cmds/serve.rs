@@ -109,7 +109,10 @@ async fn start_background(dir: &NodeDir) -> Res<ExitCode> {
             tokio::task::spawn_blocking(move || waiting.wait_until_serving())
                 .await
                 .expect(ERROR_TOKIO)?;
-            println!("daemon already running on {}", dir.socket_path()?.display());
+            println!(
+                "a server is already running on {}",
+                dir.socket_path()?.display()
+            );
             return Ok(ExitCode::SUCCESS);
         }
         let waiting = dir.clone();
@@ -134,7 +137,7 @@ async fn start_background(dir: &NodeDir) -> Res<ExitCode> {
         .stderr(log)
         .process_group(0)
         .spawn()
-        .wrap_err("spawning the daemon")?;
+        .wrap_err("spawning the server")?;
     let pid = child
         .id()
         .expect("a child that has not been waited on has a pid");
@@ -144,15 +147,20 @@ async fn start_background(dir: &NodeDir) -> Res<ExitCode> {
     if stdout.read_line(&mut line).await? == 0 {
         let status = child.wait().await?;
         eyre::bail!(
-            "the daemon exited with {status} before it was serving; see {}",
+            "the server exited with {status} before it was serving; see {}",
             log_path.display()
         );
     }
     eyre::ensure!(
         line.starts_with(READY_PREFIX),
-        "the daemon's first line was not its readiness line: {line:?}"
+        "the server's first line was not its readiness line: {line:?}"
     );
-    println!("daemon started (pid {pid}) {}", line.trim_end());
+    println!(
+        "node serving in the background (pid {pid}) on {}",
+        line.trim_end()
+            .strip_prefix(READY_PREFIX)
+            .expect("the line starts with the readiness prefix, as checked above")
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -165,31 +173,31 @@ pub async fn stop() -> Res<ExitCode> {
             // Nobody has the node. A socket file left behind is a server that died uncleanly.
             if dir.probe_socket().await? == SocketState::Stale {
                 std::fs::remove_file(dir.socket_path()?)?;
-                println!("daemon not running; removed its stale socket");
+                println!("no server running; removed its stale socket");
             } else {
-                println!("daemon not running");
+                println!("no server running");
             }
             return Ok(ExitCode::SUCCESS);
         }
         Err(held) => held,
     };
     if held.role != Some(LockRole::Serve) {
-        println!("daemon not running; {held} has the node open for a command");
+        println!("no server running; {held} has the node open for a command");
         return Ok(ExitCode::SUCCESS);
     }
     let pid = held
         .pid
-        .ok_or_eyre("the daemon holds the node lock but has not recorded its pid")?;
+        .ok_or_eyre("the server holds the node lock but has not recorded its pid")?;
     // SAFETY: kill(2) takes plain integers and has no memory preconditions.
     let sent = unsafe { libc::kill(pid.try_into()?, libc::SIGTERM) };
     if sent != 0 {
         return Err(std::io::Error::last_os_error())
-            .wrap_err_with(|| format!("signalling the daemon (pid {pid})"));
+            .wrap_err_with(|| format!("signalling the server (pid {pid})"));
     }
     let dir = dir.clone();
     tokio::task::spawn_blocking(move || dir.wait_for_lock_release())
         .await
         .expect(ERROR_TOKIO)?;
-    println!("daemon stopped (pid {pid})");
+    println!("server stopped (pid {pid})");
     Ok(ExitCode::SUCCESS)
 }

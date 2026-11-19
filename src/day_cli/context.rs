@@ -6,7 +6,7 @@
 //! ```text
 //! <node>/node.json        node id, operator policy and peers, created by `day node init` (0600)
 //! <node>/node.lock        flock held for as long as a process has the node booted; holds its pid
-//! <node>/run/daemon.log   the background daemon's stderr
+//! <node>/run/serve.log   the background server's stderr
 //! <node>/node.sqlite, repo/, blobs/   the node's own storage, opened by `big_node::Bindings`
 //! ```
 //!
@@ -294,7 +294,7 @@ impl NodeDir {
     }
 
     pub fn log_path(&self) -> PathBuf {
-        self.run_dir().join("daemon.log")
+        self.run_dir().join("serve.log")
     }
 
     pub fn is_initialized(&self) -> bool {

@@ -245,7 +245,7 @@ async fn add_member(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitC
             ..
         }) => {
             error!(
-                "this node has not met {peer}: connect to it first (`day peers add <ticket>` and a daemon restart), then retry"
+                "this node has not met {peer}: connect to it first (`day peers add <ticket>` and a server restart), then retry"
             );
             Ok(ExitCode::FAILURE)
         }

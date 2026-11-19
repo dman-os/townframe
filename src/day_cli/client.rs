@@ -49,7 +49,6 @@ pub const CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs
 #[serde(rename_all = "camelCase")]
 pub enum Mode {
     /// The node is held by `day node start`, with the peers service its `node.json` asks for.
-    #[serde(rename = "daemon")]
     Serving,
     /// The node is held by a command (this one, or another running at the same time), which
     /// attaches no peers service.
@@ -59,7 +58,7 @@ pub enum Mode {
 impl Mode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Serving => "daemon",
+            Self::Serving => "serving",
             Self::InProcess => "in-process",
         }
     }
@@ -67,8 +66,8 @@ impl Mode {
     /// Why a node reached this way may report no peers service.
     pub fn peers_note(self) -> &'static str {
         match self {
-            Self::Serving => "the daemon's node.json has no peers section",
-            Self::InProcess => "only a daemon attaches peers",
+            Self::Serving => "the server's node.json has no peers section",
+            Self::InProcess => "only a server attaches peers",
         }
     }
 }
