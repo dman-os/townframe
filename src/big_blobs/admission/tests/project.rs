@@ -45,6 +45,7 @@ impl Harness {
             storage: crate::Storage::memory().unwrap(),
             sql: runtime.ephemeral(&[])?,
             authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+            operator: Uuid7::new(),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: CapId::from_bytes([93; 16]),

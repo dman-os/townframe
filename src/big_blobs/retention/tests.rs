@@ -269,6 +269,7 @@ impl Harness {
             storage: crate::Storage::memory().unwrap(),
             sql: sql.clone(),
             authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+            operator: Uuid7::new(),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: capability(),
@@ -1157,7 +1158,7 @@ async fn missing_pending_denied_and_unadmitted_references_preserve_previous_clai
 }
 
 #[tokio::test]
-async fn retention_does_not_adopt_or_release_another_upload_owner() -> Res<()> {
+async fn retention_releases_every_upload_hold_on_the_digests_it_retains() -> Res<()> {
     let h = Harness::new().await?;
     let mut retention = h.retention().await?;
     let import =
@@ -1168,30 +1169,40 @@ async fn retention_does_not_adopt_or_release_another_upload_owner() -> Res<()> {
     let a = first.info.blob_id;
     let b = other.info.blob_id;
     assert_eq!(second.info, first.info);
+    // Adoption names a document claim that is committed; none is yet.
     assert!(h.service.adopt_import(&first, &id(20)).await.is_err());
+    let uploads = async |digest: BlobId| {
+        h.sql
+            .query(
+                "SELECT COUNT(*) FROM big_blobs_byte_owners WHERE digest = ? AND owner GLOB 'upload:*'",
+                (digest.to_string(),),
+            )
+            .await
+            .unwrap()
+            .all::<i64>()
+            .unwrap()[0]
+    };
+    assert_eq!((uploads(a).await, uploads(b).await), (2, 1));
     retention
         .replace(&id(20), &[], BTreeMap::from([(a, 13), (b, 12)]), false)
         .await?;
     retention.flush().await?;
-    assert_eq!(h.sql.query(
-        "SELECT COUNT(*) FROM big_blobs_byte_owners WHERE digest = ? AND owner GLOB 'upload:*'",
-        (a.to_string(),),
-    ).await?.all::<i64>()?, vec![2]);
+    // The document claim carries the bytes now, so the holds that kept them until something
+    // referenced them are all released: both of `a`'s independent uploads, not just one.
+    assert_eq!((uploads(a).await, uploads(b).await), (0, 0));
+    assert!(h.service.ownership.contains(&a).await?);
+    assert!(h.service.ownership.contains(&b).await?);
+    // Adopting or releasing an already released import is a no-op.
     h.service.adopt_import(&first, &id(20)).await?;
-    h.service.adopt_import(&first, &id(20)).await?;
-    assert_eq!(h.sql.query(
-        "SELECT COUNT(*) FROM big_blobs_byte_owners WHERE digest = ? AND owner GLOB 'upload:*'",
-        (a.to_string(),),
-    ).await?.all::<i64>()?, vec![1]);
+    h.service.release_import(&first).await?;
+    h.service.release_import(&second).await?;
+    h.service.release_import(&other).await?;
+    assert!(h.service.ownership.contains(&a).await?);
+    assert!(h.service.ownership.contains(&b).await?);
     retention
         .replace(&id(20), &[], BTreeMap::from([(b, 12)]), false)
         .await?;
     retention.flush().await?;
-    assert!(h.service.ownership.contains(&a).await?);
-    assert!(h.service.ownership.contains(&b).await?);
-    h.service.release_import(&first).await?;
-    assert!(h.service.ownership.contains(&a).await?);
-    h.service.release_import(&second).await?;
     assert!(!h.service.ownership.contains(&a).await?);
     assert!(
         h.service
@@ -1201,7 +1212,6 @@ async fn retention_does_not_adopt_or_release_another_upload_owner() -> Res<()> {
             .await?
             .is_none()
     );
-    h.service.release_import(&other).await?;
     assert!(h.service.ownership.contains(&b).await?);
     retention
         .replace(&id(20), &[], BTreeMap::new(), false)
