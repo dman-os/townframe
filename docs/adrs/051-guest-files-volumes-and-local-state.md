@@ -74,15 +74,23 @@ Two kinds:
 1. **Host-mediated SQLite (today's, the default, and the only kind another cartridge may depend on).** It is correct
    under concurrency because SQLite's own locking runs on the host. The ADR 047 manifest gains it as a cartridge-level
    declaration, keyed by name, with `visibility` (§5).
-2. **A raw directory (new, private only).** A persistent per-cartridge directory under the node directory, preopened
-   into the cartridge's instances. Because `wasi:filesystem` has no locking API (only `advise`), guests cannot coordinate
-   writers, so the host enforces **single writer**: one live instance holds the read-write mount (a lease), any other
-   instance of the same cartridge gets it read-only or waits. A read-only mount suits plain files and SQLite opened with
-   `immutable=1`; SQLite in WAL mode cannot even read from a read-only mount (readers write the `-shm` file).
+2. **A raw directory (new).** A persistent per-cartridge directory under the node directory, preopened **read-write
+   into every instance** of the cartridge, including concurrent ones (HTTP-handler-shaped routines run several at once,
+   so "read-only while occupied" would fail exactly where it matters). **Every raw local state comes with locks**, and
+   coordinating writers is the guest's job, as it is for native programs.
 
-No "unsafe" multi-writer mode ships. The upgrade path is a small host lock interface (`locks`: acquire shared or
-exclusive on a name, released with its guard, implemented with `flock`), the counterpart of the Web Locks API that
-exists because OPFS files have no locks. With it, a raw directory could admit several writers that cooperate.
+**Locks.** `wasi:filesystem` has no locking API in 0.2.8 or the 0.3 draft (only a `no-lock` error code). Advisory
+locking was in the preview-2 drafts (`lock-shared`, `lock-exclusive`, `try-lock-shared`, `try-lock-exclusive`,
+`unlock`: whole-file, advisory, essentially `flock`, implementable with `LockFileEx` on Windows) and was removed at
+preview 2's release "to keep the scope down"; WASI issue #773 tracks re-adding it and is inactive. We ship **that exact
+shape** as our own interface on descriptors in local state (and the working mount), implemented host-side with
+`flock`, so moving to an upstream interface if it returns is a rename. Locks are released when the descriptor or the
+instance goes away, so a crashed instance cannot leave one held. This is also the Web Locks lesson: OPFS files have no
+locks, so the web grew a separate lock API.
+
+SQLite inside a guest needs a VFS whose lock methods call this interface, and the rollback journal rather than WAL
+(WAL's shared-memory index has no WASI equivalent). Host-mediated SQLite (kind 1) stays the simpler choice for
+databases; the raw directory with locks is for files a guest manages itself.
 
 Quota and lifetime: each local state has a quota and a class (`persistent`, never evicted; `cache`, evictable under
 disk pressure). Local state **survives uninstall**, as grants do (D57); clearing it is an explicit call.
@@ -117,11 +125,21 @@ Every provided resource (method, view, collection, local state) gains `visibilit
   state host refuse other cartridges before consulting any grant.
 - `public`: another cartridge may declare a dependency on it, and the person grants it as usual.
 
-On depending on another cartridge's permbinds: **reusing a declaration** (its shape and consent text, like importing a
-type) is allowed. **Inheriting another cartridge's grant** is not: that is the confused-deputy pattern, since the person
-granted B, not A. The construct for "A uses what B is allowed to do" is B publishing a public method that performs the
-work, with A depending on it: B stays the deputy and decides what it exposes. "Once linked it's linked" is what grants
-already do: a grant persists, survives uninstall and is not re-asked.
+Visibility applies to **permbinds** too, and a `public` permbind can be **inherited** (decided, operator, 2026-11-19).
+The case: a cartridge built on intxt should reach every drawer intxt creates without the person granting each one
+again. So:
+
+- B marks a permbind `public`. A declares a dependency on it (`uses` names `B#permbind`).
+- **Linking takes one grant**, to A, with consent text that says what it is: "A may act with intxt's access to its
+  drawers, including drawers intxt is granted later". After that, A's use rides on B's grants for that permbind as they
+  change; it is not re-asked ("once it's linked, it's linked").
+- **Revocation** works at both ends: revoking A's link grant cuts A off; revoking B's grant cuts A off too.
+- **The link can narrow but never widen.** A may link at a lower access than B holds (e.g. read-only); never higher.
+- **Attribution** records A acting through B's permbind, so the person's audit view shows who did what.
+
+The risk is real (A's authority grows with B's), which is why only permbinds B explicitly makes `public` can be linked,
+and the link grant's consent text names the growth. A public method on B (B as deputy) remains the alternative where B
+should decide each request.
 
 **To confirm:** the default (`private`), and whether micros' collections (ADR 050, written into by other cartridges)
 are `public` by construction.
@@ -142,7 +160,7 @@ comes: eryx-vfs's `VfsStorage` trait, monaka's `vfs-host` design, and wasmtime-w
 
 1. Chunked byte-body reads in `big_ndk` (intxt's `forward_body`, PR #213), independent of everything here.
 2. The working mount and `materialize` for blobs (§2), with hard-link, copy and cross-device tests.
-3. Visibility on provided resources (§5).
+3. Visibility on provided resources and permbind linking (§5).
 4. Host-mediated local state in the cartridge manifest (§3.1).
-5. Raw-directory local state with the single-writer lease (§3.2); the `locks` interface only when a cartridge needs it.
+5. Raw-directory local state with its locks interface (§3.2).
 6. dpath lenses on demand (§4), after FDR 001's lens questions are settled.
