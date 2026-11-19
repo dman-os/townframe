@@ -166,7 +166,7 @@ async fn forget(drawer: &str) -> Res<ExitCode> {
 /// Learns the known-drawers drawer's id from `getNodeInfo` and mints an admin handle on just that
 /// drawer, which is what listing, remembering and forgetting authorize against, for the one call
 /// that follows.
-async fn known_drawers_handle(
+pub(super) async fn known_drawers_handle(
     client: &crate::client::NodeClient,
 ) -> Res<big_cabinet_core::authority::CapId> {
     let info = super::status::node_info(client).await?;
