@@ -14,6 +14,7 @@ pub const intxt_core::client::MAX_REWRITE_HOPS: usize
 pub const intxt_core::edit::EDIT_TYPE: & str
 pub const intxt_core::methods::MAX_SUMMARIZED: usize
 pub enum intxt_core::annotation::Motivation { # [serde (rename = "assessing")] Assessing, # [serde (rename = "bookmarking")] Bookmarking, # [serde (rename = "classifying")] Classifying, # [serde (rename = "commenting")] Commenting, # [serde (rename = "describing")] Describing, # [serde (rename = "editing")] Editing, # [serde (rename = "highlighting")] Highlighting, # [serde (rename = "identifying")] Identifying, # [serde (rename = "linking")] Linking, # [serde (rename = "moderating")] Moderating, # [serde (rename = "questioning")] Questioning, # [serde (rename = "replying")] Replying, # [serde (rename = "tagging")] Tagging, # [datum (other)] Unknown (String) }
+pub enum intxt_core::annotation::ParticipantKind { # [serde (rename = "Person")] Person, # [serde (rename = "Organization")] Organization, # [serde (rename = "Software")] Software, # [datum (other)] Unknown (String) }
 pub enum intxt_core::annotation::Progress { # [serde (rename = "pending")] Pending, # [serde (rename = "in_progress")] InProgress, # [serde (rename = "completed")] Completed, # [datum (other)] Unknown (String) }
 pub enum intxt_core::annotation::StructureKind { # [serde (rename = "task")] Task, # [serde (rename = "decision")] Decision, # [serde (rename = "section")] Section, # [datum (other)] Unknown (String) }
 pub enum intxt_core::capture::ChangeKind { # [serde (rename = "added")] Added, # [serde (rename = "modified")] Modified, # [serde (rename = "deleted")] Deleted, # [datum (other)] Unknown (String) }
@@ -25,10 +26,13 @@ pub enum intxt_core::edit::Summary { # [doc = " A range of commits: `base..tip`,
 pub enum intxt_core::generic::PrBlockError { # [doc = " The block is there but is not the shape: bad JSON, a missing `ref`, a `ref` that is not a"] # [doc = " `dtxt:doc:` URL."] # [error ("the intxt block in the PR description is malformed: {0}")] Malformed (# [from] serde_json :: Error), # [doc = " A `<details>` holding the block never closes, so there is no span to read or replace."] # [error ("the `<details>` holding the intxt block in the PR description is never closed")] Unterminated }
 pub enum intxt_core::methods::IntxtError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [doc = " A call the handler made was refused or failed; `reason` is what the callee answered."] # [error ("{operation} failed: {reason}")] Upstream { operation : String , reason : String }, # [doc = " The request named something an intxt cannot include or a document that is not what it"] # [doc = " was said to be."] # [error ("invalid request: {0}")] Invalid (String), # [doc = " The caller reaches the part through no drawer at Read or above, so there is nothing to"] # [doc = " lend the intxt's drawer."] # [error ("the part's document {0} is reached through no drawer at Read or above")] NotReachable (DocId) }
 pub enum intxt_core::methods::SummaryStatus { # [doc = " The drawer is an intxt the caller can read."] Found, # [doc = " The caller reads the drawer's descriptor and it holds no intxt marker."] NotFound, # [doc = " A read failed (the caller may not read it, or the node does not hold it) or the intxt's"] # [doc = " descriptor is malformed; `reason` says which."] Unreadable }
+pub impl intxt_core::annotation::Participant::fn is (& self , other : & Participant) -> bool
+pub impl intxt_core::annotation::Participant::fn person () -> Self
+pub impl intxt_core::annotation::Participant::fn seen_scope (& self) -> Option < String >
 pub impl intxt_core::annotation::Thread::fn group (posted : Vec < Posted >) -> Vec < Thread >
 pub impl intxt_core::annotation::Thread::fn last (& self) -> & Posted
-pub impl intxt_core::annotation::Thread::fn unseen_by (& self , reader : & Uuid7 , seen : & BTreeMap < String , Vec < String > >) -> bool
-pub impl intxt_core::annotation::Thread::fn waiting_on (& self , reader : & Uuid7) -> bool
+pub impl intxt_core::annotation::Thread::fn unseen_by (& self , reader : & Participant , seen : & BTreeMap < String , Vec < String > >) -> bool
+pub impl intxt_core::annotation::Thread::fn waiting_on (& self , reader : & Participant) -> bool
 pub impl intxt_core::capture::Batch::fn is_empty (& self) -> bool
 pub impl intxt_core::capture::Imported::fn is_empty (& self) -> bool
 pub impl intxt_core::client::Caller < H >::async fn actor (& self) -> Result < Uuid7 , IntxtError >
@@ -86,9 +90,10 @@ pub mod intxt_core::methods
 pub mod intxt_core::work
 pub static intxt_core::UNIVERSE: LazyLock < Universe >
 pub struct intxt_core::annotation::AnnotationsEntry  { empty: Option < bool >, extra: Extra }
-pub struct intxt_core::annotation::Comment  { targets: Vec < Target >, body: Content, motivation: Motivation, reply_to: Option < DatumReference >, extra: Extra }
+pub struct intxt_core::annotation::Comment  { targets: Vec < Target >, body: Content, motivation: Motivation, reply_to: Option < DatumReference >, creator: Participant, generator: Option < Participant >, extra: Extra }
 pub struct intxt_core::annotation::Content  { mime: String, content: String, extra: Extra }
 pub struct intxt_core::annotation::LineRange  { start: u32, end: u32, extra: Extra }
+pub struct intxt_core::annotation::Participant  { kind: ParticipantKind, id: Option < DatumReference >, name: Option < String >, version: Option < String >, extra: Extra }
 pub struct intxt_core::annotation::Posted  { key: DatumKey, comment: Comment, heads: Vec < String >, authors: Vec < Uuid7 > }
 pub struct intxt_core::annotation::Seen  { datums: BTreeMap < String , Vec < String > >, reviewed: BTreeMap < String , String >, extra: Extra }
 pub struct intxt_core::annotation::Structure  { kind: StructureKind, title: String, body: Option < Content >, status: Option < Progress >, targets: Vec < Target >, parent: Option < DatumReference >, order: Option < String >, extra: Extra }
