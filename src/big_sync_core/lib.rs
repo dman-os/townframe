@@ -90,25 +90,6 @@ pub use tasks::TaskCounts;
 pub use tasks::TaskCtx;
 pub use tasks::TaskId;
 
-#[cfg(feature = "uniffi")]
-uniffi::setup_scaffolding!();
-
-#[cfg(feature = "uniffi")]
-uniffi::custom_type!(ByteKey, String, {
-    remote,
-    lower: |id| format!("{id}"),
-    try_lift: |str| {
-        use std::str::FromStr;
-        ByteKey::from_str(&str).map_err(|err| uniffi::deps::anyhow::anyhow!("unable to parse ByteKey from {str:?}: {err:?}"))
-    }
-});
-#[cfg(feature = "uniffi")]
-uniffi::custom_newtype!(PeerKey, ByteKey);
-#[cfg(feature = "uniffi")]
-uniffi::custom_newtype!(PartKey, ByteKey);
-#[cfg(feature = "uniffi")]
-uniffi::custom_newtype!(ObjKey, ByteKey);
-
 structstruck::strike! {
     #[structstruck::each[derive(Debug)]]
     pub enum BigSyncEvent {
