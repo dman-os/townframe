@@ -117,4 +117,28 @@ pub enum SessionError {
     Limit,
     /// the request is malformed: {0}
     Invalid(String),
+    /// the request context failed: {0}
+    Context(#[from] method_core::ContextError),
+}
+
+// The three methods of the protocol. Updates and closes change the server's session table, so
+// they are procedures; a page is a procedure too, since a held round waits on the server's
+// clock and is not cacheable.
+service_core_rs::service_method!(UpdateSession => SessionUpdated, SessionError, procedure("org.townframe.bigsync.replay.updateSession"));
+service_core_rs::service_method!(PageSession => SessionPage, SessionError, procedure("org.townframe.bigsync.replay.pageSession"));
+service_core_rs::service_method!(CloseSession => (), SessionError, procedure("org.townframe.bigsync.replay.closeSession"));
+
+// The irpc enum is the in-process and same-node binding. Its derive emits irpc's `rpc` (QUIC)
+// half unconditionally, which does not build for the browser, so the web build has the methods
+// above (an XRPC client needs nothing more) and not this enum.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+service_core_rs::declare_service_protocol! {
+    pub enum ReplayProtocol => ReplayMessage {
+        unary {
+            UpdateSession(UpdateSession),
+            PageSession(PageSession),
+            CloseSession(CloseSession)
+        }
+        stream {}
+    }
 }

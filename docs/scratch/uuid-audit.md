@@ -1,5 +1,7 @@
 # UUID audit
 
+Status: Audit report (proposals, not decisions).
+Owner: prod-readiness lane.
 Scope: every UUID use in the Rust code under `src/` (non-test code classified in depth, test fixtures grouped); excludes `target/` and generated code. No `Uuid::from_u128`, `new_v5` or `new_v8` exists outside tests.
 Updated: 2026-11-19
 

@@ -17,6 +17,11 @@ test-support = ["dep:proptest"]
 
 [dependencies]
 utils_rs = { workspace = true, features = ["hash"] }
+method_core.workspace = true
+service_core_rs.workspace = true
+# `declare_service_protocol!` expands to `irpc::` paths in the caller. Not `irpc.workspace`: its
+# default features (noq, rustls, aws-lc) do not build for wasm; see service_core_rs.
+irpc = { version = "0.17.0", default-features = false, features = ["derive"] }
 
 structstruck.workspace = true
 
@@ -61,6 +66,7 @@ proptest = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
+serde_json.workspace = true
 
 # `rand` pulls in getrandom 0.3. On the web, `.cargo/config.toml` selects its `wasm_js`
 # backend, which only compiles with the feature of the same name turned on.

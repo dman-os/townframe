@@ -10,6 +10,10 @@ mod interlude {
     pub use std::collections::HashSet as Set;
 }
 
+pub use ids::ObjKey;
+pub use ids::PartKey;
+pub use ids::PeerKey;
+
 mod bucket;
 mod cursor;
 mod fingerprint;

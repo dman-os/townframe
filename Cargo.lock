@@ -1432,10 +1432,14 @@ dependencies = [
  "future_form",
  "futures",
  "getrandom 0.3.4",
+ "irpc",
  "json-canon",
+ "method_core",
  "proptest",
  "rand 0.9.5",
  "serde",
+ "serde_json",
+ "service_core_rs",
  "siphasher",
  "structstruck",
  "surelock",
@@ -1444,6 +1448,23 @@ dependencies = [
  "tracing",
  "utils_rs",
  "web-time",
+]
+
+[[package]]
+name = "big_automata_service"
+version = "0.1.0"
+dependencies = [
+ "big_automata",
+ "future_form",
+ "futures",
+ "iroh",
+ "method_core",
+ "service_client_core_rs",
+ "service_client_iroh_rs",
+ "service_client_native_rs",
+ "service_utils_rs",
+ "tokio",
+ "utils_rs",
 ]
 
 [[package]]
@@ -14540,6 +14561,7 @@ dependencies = [
  "http",
  "irpc",
  "method_core",
+ "rand 0.9.5",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
