@@ -6,7 +6,7 @@
 //! [`Authorization`], resolves the provider for the NSID and forwards. Like every service
 //! operation, the caller's `Authorization` is not in the request body: it is the request's
 //! `Authorization: Bearer` credential (the envelope's HTTP metadata). It is the operator's
-//! identity capability, or a handle minted through [`MintDispatchCapability`] that carries a
+//! root capability, or a handle minted through [`MintDispatchCapability`] that carries a
 //! [`DispatchScope`]. Nothing here serves a provider; routing, readiness and the providers
 //! themselves are the host's.
 
