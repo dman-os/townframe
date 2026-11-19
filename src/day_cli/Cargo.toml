@@ -11,20 +11,19 @@ name = "day"
 path = "main.rs"
 
 [dependencies]
-method_core.workspace = true
 #
 # internal
+method_core.workspace = true
 utils_rs.workspace = true
 sqlite_rs.workspace = true
 secrets_rs.workspace = true
-service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 big_node.workspace = true
 big_dispatch.workspace = true
 big_nodule_core.workspace = true
 big_repo.workspace = true
-big_cabinet = { path = "../big_cabinet" }
-big_cabinet_core = { path = "../big_cabinet_core" }
+big_cabinet.workspace = true
+big_cabinet_core = { workspace = true, features = ["manifest"] }
 
 #
 # cli
@@ -39,6 +38,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync",
 # http, to serve the router in process without a socket
 axum = { workspace = true }
 http.workspace = true
+reqwest.workspace = true
 serde_urlencoded = "0.7"
 tower = { workspace = true, features = ["util"] }
 
@@ -62,7 +62,12 @@ directories.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+#
+# internal
+secrets_rs = { workspace = true, features = ["test-support"] }
+
+#
+# misc
 trycmd = "1.2.1"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-secrets_rs = { workspace = true, features = ["test-support"] }

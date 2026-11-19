@@ -7,13 +7,13 @@ edition = "2021"
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 clay_docs = { workspace = true }
 clay_host = { workspace = true }
 clay_mdk = { workspace = true, features = ["in_process", "view", "wasmtime", "package"] }
 clay_store = { workspace = true }
 dayframe_composition = { workspace = true }
-dioxus = { workspace = true }
-dioxus-native = { workspace = true, optional = true }
 micro_counter_manifest = { workspace = true }
 micro_sample = { workspace = true }
 micro_settings = { workspace = true }
@@ -22,9 +22,14 @@ micro_shell = { workspace = true }
 micro_shell_manifest = { workspace = true }
 micro_toolbar = { workspace = true }
 micro_toolbar_manifest = { workspace = true }
-serde_json = { workspace = true }
 sqlite_rs = { workspace = true }
 ui = { workspace = true }
+
+#
+# misc
+dioxus = { workspace = true }
+dioxus-native = { workspace = true, optional = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
 [features]

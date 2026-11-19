@@ -12,5 +12,7 @@ crate-type = ["cdylib"]
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 big_ndk.workspace = true
 test_nodule_handlers.workspace = true

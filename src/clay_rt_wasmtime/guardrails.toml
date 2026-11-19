@@ -12,6 +12,15 @@ allowed_dependencies = [
 allow_external_api_types = false
 
 [[exemptions]]
+code = "ERROR_DEPENDENCY_GROUP"
+path = "src/clay_rt_wasmtime/Cargo.toml"
+symbol = "dependency-groups"
+ceiling = 7
+class = "LEGACY_DEBT"
+reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
+reference = "docs/scratch/nodule-runtime-ledger.md"
+
+[[exemptions]]
 code = "ERROR_SEND_DISCARDED"
 path = "src/clay_rt_wasmtime/lib.rs"
 symbol = "module::WasmPackage::from_bytes"

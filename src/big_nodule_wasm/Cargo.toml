@@ -10,10 +10,11 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
 # internal
-big_blobs = { path = "../big_blobs" }
-big_blobs_core = { path = "../big_blobs_core" }
-big_cabinet_core = { path = "../big_cabinet_core" }
+big_blobs.workspace = true
+big_blobs_core.workspace = true
+big_cabinet_core = { workspace = true, features = ["manifest"] }
 big_dispatch.workspace = true
 big_dispatch_core.workspace = true
 big_nodule.workspace = true
@@ -24,6 +25,7 @@ service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 utils_rs.workspace = true
 
+#
 # wasm host
 wash-runtime.workspace = true
 wasmtime-wasi-http.workspace = true
@@ -31,7 +33,6 @@ hyper.workspace = true
 http-body-util = "0.1"
 bytes.workspace = true
 blake3.workspace = true
-
 # encoding, errors and state
 serde.workspace = true
 serde_json.workspace = true

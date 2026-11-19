@@ -14,8 +14,12 @@ path = "lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-utils_rs = { path = "../utils_rs", default-features = false }
+#
+# internal
+utils_rs.workspace = true
 
+#
+# misc
 getrandom = "0.4.3"
 # getrandom 0.3.x is pulled in transitively (ahash/irpc-iroh/jobserver) and
 # needs the wasm_js backend for the hydrate (wasm32-unknown-unknown) build.
@@ -104,6 +108,11 @@ bin-features = ["ssr"]
 # (it failed to remove base as a src/wasm_utils_rs member), and a standalone
 # closure keeps root-workspace feature unification out of hydrate builds.
 [workspace]
+
+[workspace.dependencies]
+#
+# internal
+utils_rs = { path = "../utils_rs", default-features = false }
 
 [profile.dev]
 opt-level = 3

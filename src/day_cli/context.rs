@@ -398,42 +398,104 @@ impl NodeDir {
         }
     }
 
-    /// Takes the node lock, or reports the pid of whoever holds it. The lock is what makes a
-    /// node's storage single-process (the node opens SQLite and keyhive archives that a second
-    /// process must not): a booting daemon holds it before its socket exists, so a command that
-    /// would otherwise boot its own in-process node sees it.
-    pub fn try_lock(&self) -> Res<Result<NodeLock, LockHeld>> {
+    fn boot_lock_path(&self) -> PathBuf {
+        self.root.join("node.boot")
+    }
+
+    /// Takes the node lock as `role`, or reports who holds it. The lock is what makes a node's
+    /// storage single-process (the node opens SQLite and keyhive archives that a second process
+    /// must not), and whoever holds it serves the node's socket.
+    ///
+    /// Two files carry that. `node.lock` is the holder's identity, held for as long as it lives,
+    /// and records the holder's pid, its socket and its role. `node.boot` is held from before
+    /// `node.lock` is taken until the holder's socket accepts connections ([`NodeLock::serving`]),
+    /// so a process that finds the node held can block on it ([`Self::wait_until_serving`])
+    /// instead of polling for the socket. A process that only probes holds `node.boot` briefly
+    /// too, which can make a booting holder see the node as held for that moment; it then waits
+    /// out the probe and takes the lock on its next attempt.
+    pub fn try_lock(&self, role: LockRole) -> Res<Result<NodeLock, LockHeld>> {
         let path = self.lock_path();
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&path)
-            .wrap_err_with(|| format!("opening {}", path.display()))?;
+        let boot = Self::open_lock_file(&self.boot_lock_path())?;
+        match boot.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(Err(LockHeld::read(&path)?)),
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(error).wrap_err("locking the node's boot lock");
+            }
+        }
+        let file = Self::open_lock_file(&path)?;
         match file.try_lock() {
             Ok(()) => {
                 file.set_len(0)?;
-                std::io::Write::write_all(&mut &file, std::process::id().to_string().as_bytes())?;
-                Ok(Ok(NodeLock { _file: file }))
+                std::io::Write::write_all(
+                    &mut &file,
+                    format!(
+                        "{}
+{}
+{}",
+                        std::process::id(),
+                        self.socket_path()?.display(),
+                        role.as_str()
+                    )
+                    .as_bytes(),
+                )?;
+                Ok(Ok(NodeLock {
+                    _file: file,
+                    boot: Some(boot),
+                }))
             }
-            Err(std::fs::TryLockError::WouldBlock) => Ok(Err(LockHeld {
-                pid: std::fs::read_to_string(&path)?.trim().parse().ok(),
-            })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(Err(LockHeld::read(&path)?)),
             Err(std::fs::TryLockError::Error(error)) => {
                 Err(error).wrap_err_with(|| format!("locking {}", path.display()))
             }
         }
     }
 
+    fn open_lock_file(path: &Path) -> Res<std::fs::File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)
+            .wrap_err_with(|| format!("opening {}", path.display()))
+    }
+
     /// Blocks until the holder of the node lock has exited. Run on a blocking thread.
     pub fn wait_for_lock_release(&self) -> Res<()> {
         let path = self.lock_path();
-        let file =
-            std::fs::File::open(&path).wrap_err_with(|| format!("opening {}", path.display()))?;
-        file.lock_shared()
+        Self::open_lock_file(&path)?
+            .lock_shared()
             .wrap_err_with(|| format!("waiting on {}", path.display()))
+    }
+
+    /// Blocks until whoever is booting the node has its socket up (or has given up, which
+    /// leaves the node free). Run on a blocking thread.
+    pub fn wait_until_serving(&self) -> Res<()> {
+        let path = self.boot_lock_path();
+        Self::open_lock_file(&path)?
+            .lock_shared()
+            .wrap_err_with(|| format!("waiting on {}", path.display()))
+    }
+}
+
+/// What the holder of the node lock is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockRole {
+    /// `day node run`: it serves until stopped, and attaches the peers service.
+    Daemon,
+    /// A command that opened the node for itself: it serves its socket while it runs and for as
+    /// long as clients remain connected after, and attaches no peers service.
+    Command,
+}
+
+impl LockRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Daemon => "daemon",
+            Self::Command => "command",
+        }
     }
 }
 
@@ -441,13 +503,51 @@ impl NodeDir {
 #[derive(Debug)]
 pub struct NodeLock {
     _file: std::fs::File,
+    /// Held until the socket accepts connections.
+    boot: Option<std::fs::File>,
 }
 
-/// Another process holds the node lock. `pid` is what it recorded, absent if it has not written
-/// it yet.
-#[derive(Debug, Clone, Copy)]
+impl NodeLock {
+    /// Announces that the holder's socket accepts connections: processes waiting on it proceed.
+    pub fn serving(&mut self) -> Res<()> {
+        self.boot
+            .take()
+            .expect("a node announces it is serving once")
+            .unlock()
+            .wrap_err("releasing the node's boot lock")
+    }
+}
+
+/// Another process holds the node lock, and what it recorded there. Each field is absent if the
+/// holder has not written it yet.
+#[derive(Debug, Clone)]
 pub struct LockHeld {
     pub pid: Option<u32>,
+    pub socket: Option<PathBuf>,
+    pub role: Option<LockRole>,
+}
+
+impl LockHeld {
+    fn read(path: &Path) -> Res<Self> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            // The holder has the boot lock but has not created its lock file yet.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(error).wrap_err_with(|| format!("reading {}", path.display()));
+            }
+        };
+        let mut lines = text.lines();
+        Ok(Self {
+            pid: lines.next().and_then(|line| line.parse().ok()),
+            socket: lines.next().map(PathBuf::from),
+            role: lines.next().and_then(|line| match line {
+                "daemon" => Some(LockRole::Daemon),
+                "command" => Some(LockRole::Command),
+                _ => None,
+            }),
+        })
+    }
 }
 
 impl std::fmt::Display for LockHeld {
@@ -469,26 +569,24 @@ pub struct Booted {
 }
 
 impl Booted {
-    /// Boots the node in `dir` on the lock the caller holds. `serving` is how it attaches to
-    /// the outside: a daemon serves its socket and attaches the peers service when `node.json`
-    /// has a `peers` section; a command's own node (not serving) attaches neither, since it
-    /// lives for one command and must not dial or hold the node's endpoint.
-    pub async fn boot(dir: &NodeDir, lock: NodeLock, serving: bool) -> Res<Self> {
+    /// Boots the node in `dir` on the lock the caller holds, serving its socket. `role` is how
+    /// it attaches to the network: a daemon attaches the peers service when `node.json` has a
+    /// `peers` section; a command's own node attaches none, since it lives for one command and
+    /// must not dial or hold the node's endpoint. The lock announces it is serving once the
+    /// socket accepts connections.
+    pub async fn boot(dir: &NodeDir, mut lock: NodeLock, role: LockRole) -> Res<Self> {
         let settings = dir.settings()?;
-        let (listeners, peers) = if serving {
-            (
-                Listeners {
-                    unix_socket: Some(dir.socket_path()?),
-                    ..default()
-                },
-                settings
-                    .peers
-                    .as_ref()
-                    .map(|peers| peers.peers_config(settings.relay))
-                    .transpose()?,
-            )
-        } else {
-            (default(), None)
+        let listeners = Listeners {
+            unix_socket: Some(dir.socket_path()?),
+            ..default()
+        };
+        let peers = match role {
+            LockRole::Daemon => settings
+                .peers
+                .as_ref()
+                .map(|peers| peers.peers_config(settings.relay))
+                .transpose()?,
+            LockRole::Command => None,
         };
         let runtime = Arc::new(SqliteRuntime::new(default()));
         let bindings = big_node::Bindings::in_directory(&runtime, dir.root(), None).await?;
@@ -513,6 +611,7 @@ impl Booted {
             allow_slot_takeover: settings.dev.allow_slot_takeover,
         };
         let (node, stop) = BigNode::boot(config).await?;
+        lock.serving()?;
         Ok(Self {
             node,
             stop,
