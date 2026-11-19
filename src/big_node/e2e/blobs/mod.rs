@@ -1246,9 +1246,13 @@ async fn a_blobs_handle_reaching_a_drawer_reads_what_the_drawer_inventories_pin(
     ))
     .await
     .unwrap();
-    // A drawer is its public root doc; its default inventories hang off it as meta docs.
-    let drawer = node.drawers.local().present_id.clone();
+    let drawer = node.drawers.local().originated_id.clone();
     let unheld = DocId::new([9; 32]);
+    // The default sensitive inventory and a second, differently named one.
+    let inventories = [
+        inventory(&node, &drawer, MetaRoot::Sensitive, "plaintext").await,
+        inventory(&node, &drawer, MetaRoot::Sensitive, "intxt-bob").await,
+    ];
     let info = put_bytes(&node, b"a blob a drawer inventories").await;
     let loose = put_bytes(&node, b"a blob no drawer inventories").await;
     let placement = format!("drawer {}", node.drawers.local().present_id);
@@ -1279,6 +1283,30 @@ async fn a_blobs_handle_reaching_a_drawer_reads_what_the_drawer_inventories_pin(
         )
         .await
         .unwrap();
+    let mut changes = node
+        .blob_workers
+        .parts
+        .open_revision_reader_all(0)
+        .await
+        .unwrap()
+        .unwrap();
+    loop {
+        let mut ready = true;
+        for inventory in &inventories {
+            ready &= node
+                .blob_workers
+                .parts
+                .member_count(big_blobs::workers::inventory_part(inventory))
+                .await
+                .unwrap()
+                > 0;
+        }
+        if ready {
+            break;
+        }
+        changes.next(RevisionReadLimits::default()).await.unwrap();
+    }
+    drop(changes);
     // The pins reach the admission projection after the inventory part gains the member, so wait
     // on its change feed until the digest is pinned in an inventory of the drawer.
     let mut admission_changes = node.blob_workers.mirrors.subscribe_changes();
