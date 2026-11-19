@@ -141,6 +141,10 @@ pub fn xrpc_router(
                         metadata: Default::default(),
                         body,
                     },
+                    #[cfg(unix)]
+                    Body::Descriptors(_) => {
+                        unreachable!("descriptor body cannot be serialized over XRPC")
+                    }
                 })
             }
         }))

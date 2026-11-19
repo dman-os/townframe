@@ -24,6 +24,12 @@ use crate::interlude::*;
 
 use big_cabinet_core::authority::Authorization;
 use big_dispatch::Anonymous;
+use big_dispatch_core::InvocationContext;
+use big_dispatch_core::Invoke;
+#[cfg(unix)]
+use service_utils_rs::__client_native::DescriptorClient;
+use service_utils_rs::Body;
+
 use big_dispatch::Edge;
 use method_core::HttpMethod;
 use serde_json::Value;
@@ -105,6 +111,13 @@ enum Transport {
 pub struct NodeClient {
     transport: Transport,
     mode: Mode,
+    #[cfg(unix)]
+    // The descriptor client API is shared by commands added on top of NodeClient.
+    #[expect(
+        dead_code,
+        reason = "descriptor socket is used by native command integrations"
+    )]
+    fd_socket: Option<std::path::PathBuf>,
     socket: SocketState,
 }
 
@@ -140,6 +153,8 @@ impl NodeClient {
                         transport: Transport::Holder(Box::new((booted, router))),
                         mode: Mode::InProcess,
                         socket: found,
+                        #[cfg(unix)]
+                        fd_socket: None,
                     });
                 }
                 Err(held) => held,
@@ -176,6 +191,8 @@ impl NodeClient {
                         } else {
                             Mode::InProcess
                         },
+                        #[cfg(unix)]
+                        fd_socket: Some(dir.fd_socket_path()?),
                         socket: SocketState::Live,
                     });
                 }
@@ -388,6 +405,61 @@ impl NodeClient {
             }),
         })
     }
+    /// Sends a descriptor batch to `blobs.importFile`, preserving one result per path.
+    #[cfg(unix)]
+    // The descriptor import entry point is consumed by command integrations.
+    #[expect(
+        dead_code,
+        reason = "descriptor import is used by native command integrations"
+    )]
+    pub async fn import_files(
+        &self,
+        operation: &str,
+        parameters: &Value,
+        paths: &[std::path::PathBuf],
+    ) -> Res<Vec<Value>> {
+        if let Transport::Socket(_) = &self.transport {
+            let socket = self
+                .fd_socket
+                .as_ref()
+                .expect("socket clients have a descriptor socket");
+            return DescriptorClient::unix(socket)
+                .call_files(operation, parameters, paths)
+                .await
+                .map_err(Into::into);
+        }
+
+        let descriptors = paths
+            .iter()
+            .map(std::fs::File::open)
+            .map(|file| file.map(Into::into))
+            .collect::<Result<Vec<std::os::fd::OwnedFd>, _>>()?;
+        let Transport::Holder(running) = &self.transport else {
+            unreachable!("transport was checked above");
+        };
+        let envelope = service_utils_rs::Envelope::with_metadata(
+            service_utils_rs::RequestContext::root(),
+            Authorization::identity(running.0.node.authority.root).metadata(),
+            Invoke::json(operation, parameters.clone(), InvocationContext::default()),
+        )
+        .with_body(Body::Descriptors(
+            service_utils_rs::descriptor::DescriptorBody::from_fds(descriptors),
+        ));
+        let response = running
+            .0
+            .node
+            .dispatch
+            .client
+            .call_with_metadata(envelope)
+            .await?;
+        match response.output.body {
+            Body::Json(value) => value
+                .as_array()
+                .cloned()
+                .ok_or_else(|| eyre::eyre!("descriptor call did not return an array")),
+            _ => Err(eyre::eyre!("descriptor call returned a non-JSON body")),
+        }
+    }
 
     /// Stops the node this client booted, once no other client is connected to it. A client of
     /// another process's node has nothing to stop.
@@ -398,6 +470,14 @@ impl NodeClient {
                 let (booted, router) = *running;
                 drop(router);
                 // No new client is accepted from here on; the ones already connected finish.
+                #[cfg(unix)]
+                booted
+                    .node
+                    .fd_clients
+                    .as_ref()
+                    .expect("a holder boots with its descriptor socket attached")
+                    .drain()
+                    .await?;
                 booted
                     .node
                     .unix_clients
