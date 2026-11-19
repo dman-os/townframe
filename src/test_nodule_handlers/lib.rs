@@ -27,6 +27,11 @@
 //!   body is not JSON; `authority` is the capability id the call presented), or the `UpstreamFailed` domain error when the outgoing request fails. With a
 //!   `query` it sends `GET /xrpc/<operation>?<query>` with no body instead, which is how a
 //!   query is called.
+//! - `/xrpc/<nsid>.fetch` takes `{ url, method?, headers? }` (`method` defaults to `GET`) and sends
+//!   that request to the URL with `Cx::fetch`, answering 200 `{ status, body }` (`body` is the
+//!   upstream JSON, or its text when it is not JSON), or the `UpstreamFailed` domain error when
+//!   the request could not be sent. A refusal by the host is a `status` of 403 with its XRPC error
+//!   as `body`.
 //! - `/xrpc/<nsid>.ingest` takes a byte body and answers 200 with `{ chunks, octets, mime, sum }`:
 //!   how many chunks the stream yielded to the guest, their total length, the request's
 //!   `content-type` and the wrapping sum of every octet. It reads the stream one chunk at a time.
@@ -114,6 +119,62 @@ method_core::methods! {
     Echo => Value, procedure, "echo";
     Relay => Value, procedure, "relay";
     Config => Value, procedure, "config";
+}
+
+/// `fetch`: one request to a URL that is not dispatch, through `Cx::fetch`.
+async fn fetch(cx: &Cx, body: XrpcBody) -> Reply {
+    #[derive(Deserialize)]
+    struct Fetch {
+        url: String,
+        method: Option<String>,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    }
+    let reply = |status: http::StatusCode, body: Value| Reply {
+        status,
+        body: XrpcBody::json(serde_json::to_vec(&body).expect("a JSON value serializes")),
+    };
+    let XrpcBody::Json(body) = body else {
+        return reply(
+            http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            json!({"error": "InvalidRequest", "message": "fetch takes a JSON body"}),
+        );
+    };
+    let Ok(Fetch {
+        url,
+        method,
+        headers,
+    }) = serde_json::from_slice(&body)
+    else {
+        return reply(
+            http::StatusCode::BAD_REQUEST,
+            json!({"error": "InvalidRequest", "message": "fetch takes { url, method?, headers? }"}),
+        );
+    };
+    let method = method.map_or(Method::GET, |method| {
+        Method::from_bytes(method.as_bytes()).expect("a test names a valid method")
+    });
+    let mut sent = HeaderMap::new();
+    for (name, value) in headers {
+        sent.insert(
+            http::HeaderName::from_bytes(name.as_bytes()).expect("a test names a valid header"),
+            HeaderValue::from_str(&value).expect("a test gives a valid header value"),
+        );
+    }
+    match cx.fetch(method, &url, sent, Vec::new()).await {
+        Ok((status, _, body)) => reply(
+            http::StatusCode::OK,
+            json!({
+                "status": status.as_u16(),
+                "body": serde_json::from_slice::<Value>(&body)
+                    .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned())),
+            }),
+        ),
+        Err(error) => reply(
+            http::StatusCode::BAD_GATEWAY,
+            json!({"error": "UpstreamFailed", "message": error.message}),
+        ),
+    }
 }
 
 /// How many chunks `emit` answers, and how long each is.
@@ -253,6 +314,7 @@ impl Nodule for Fixture {
             "echo" => Some(invoke::<Self, Echo>(self, cx, body).await),
             "relay" => Some(invoke::<Self, Relay>(self, cx, body).await),
             "put" | "read" => Some(forward_blob(cx, nsid, body).await),
+            "fetch" => Some(fetch(cx, body).await),
             "ingest" => Some(ingest(body).await),
             "emit" => Some(emit()),
             "config" => Some(invoke::<Self, Config>(self, cx, body).await),
