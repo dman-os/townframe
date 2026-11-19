@@ -841,8 +841,10 @@ impl From<collection_registration::MutationError> for Error {
             MutationError::KeyTooLarge | MutationError::ValueTooLarge => {
                 Self::Rejected("row exceeds the collection's size limits".into())
             }
+            // The host's rejection keeps the WIT's word, `attachment`, until the 0.5.0 bump: the
+            // in-process backend says the same and the conformance run asserts it for both.
             MutationError::InvalidAttachment => {
-                Self::Rejected("row names a link it does not carry".into())
+                Self::Rejected("row names an attachment it does not carry".into())
             }
         }
     }
