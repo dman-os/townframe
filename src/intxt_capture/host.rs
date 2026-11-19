@@ -685,6 +685,25 @@ pub fn put_on_intxt(identity: &Identity, drawer: Option<String>) -> Result<(), E
     save(&path, &host)
 }
 
+/// The document capture recorded for hook session `session_id`, read from its state file in
+/// `sessions_dir` (`<node dir>/intxt/sessions/<session id>.json`): none when no hook has recorded
+/// the session yet or the recorder has not created its document. The id names a file, so it is
+/// checked to be the bytes a hook's id is made of before it is joined to the directory.
+pub fn session_doc(sessions_dir: &Path, session_id: &str) -> Result<Option<String>, Error> {
+    if session_id.is_empty()
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(Error::State {
+            path: sessions_dir.display().to_string(),
+            reason: format!("the session id `{session_id}` is not a safe file name"),
+        });
+    }
+    let host: SessionHost = load(&sessions_dir.join(format!("{session_id}.json")))?;
+    Ok(host.doc)
+}
+
 /// A session capture holds state for, as `sessions_in` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedSession {
