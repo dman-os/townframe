@@ -1,0 +1,111 @@
+version: 1
+
+script:
+  - rm -rf AppDir || true
+  - mkdir -p AppDir/usr/libexec AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+  - cp -a ../../src/daybook_compose/composeApp/build/compose/binaries/main/app/org.example.daybook AppDir/usr/libexec/daybook
+  - test -f ../../target/debug/libdaybook_ffi.so
+  - cp ../../target/debug/libdaybook_ffi.so AppDir/usr/libexec/daybook/lib/app/
+  - ln -sf ../libexec/daybook/bin/org.example.daybook AppDir/usr/bin/org.example.daybook
+  - cp ../../src/daybook_compose/composeApp/src/androidMain/res/mipmap-xxxhdpi/ic_launcher.png AppDir/usr/share/icons/hicolor/256x256/apps/org.example.daybook.png
+  - |
+    cat > AppDir/usr/share/applications/org.example.daybook.desktop <<'EOF'
+    [Desktop Entry]
+    Type=Application
+    Name=Daybook
+    Comment=Daybook Desktop Application
+    Exec=org.example.daybook
+    Icon=org.example.daybook
+    Categories=Office;
+    EOF
+
+AppDir:
+  path: ./AppDir
+  app_info:
+    id: org.example.daybook
+    name: daybook
+    icon: org.example.daybook
+    version: 1.0.0
+    exec: usr/bin/org.example.daybook
+    exec_args: $@
+  apt:
+    arch: amd64
+    sources:
+      - sourceline: deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+        key_url: "http://keyserver.ubuntu.com/pks/lookup?op=get&search=0x871920D1991BC93C"
+      - sourceline: deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
+        key_url: "http://keyserver.ubuntu.com/pks/lookup?op=get&search=0x871920D1991BC93C"
+      - sourceline: deb [arch=amd64] http://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
+        key_url: "http://keyserver.ubuntu.com/pks/lookup?op=get&search=0x871920D1991BC93C"
+    include:
+      - openjdk-21-jdk-headless
+      - libasound2
+      - libatk-bridge2.0-0
+      - libatk1.0-0
+      - libatspi2.0-0
+      - libavahi-client3
+      - libavahi-common3
+      - libbrotli1
+      - libbz2-1.0
+      - libc6
+      - libcairo2
+      - libcups2
+      - libdbus-1-3
+      - libegl1
+      - libepoxy0
+      - libexpat1
+      - libfontconfig1
+      - libfreetype6
+      - libfribidi0
+      - libgcc-s1
+      - libgdk-pixbuf-2.0-0
+      - libgdk-pixbuf2.0-common
+      - libgl1
+      - libglib2.0-0
+      - libgmp10
+      - libgnutls30
+      - libgraphite2-3
+      - libgtk-3-0
+      - libgtk-3-common
+      - libharfbuzz0b
+      - libjpeg-turbo8
+      - liblcms2-2
+      - liblzma5
+      - libmagic1
+      - libmount1
+      - libp11-kit0
+      - libpango-1.0-0
+      - libpangocairo-1.0-0
+      - libpangoft2-1.0-0
+      - libpng16-16
+      - libselinux1
+      - libstdc++6
+      - libsystemd0
+      - libtasn1-6
+      - libudev1
+      - libwayland-client0
+      - libwayland-cursor0
+      - libwayland-egl1
+      - libx11-6
+      - libx11-xcb1
+      - libxau6
+      - libxcb-render0
+      - libxcb-shm0
+      - libxcb1
+      - libxcomposite1
+      - libxcursor1
+      - libxdamage1
+      - libxdmcp6
+      - libxext6
+      - libxfixes3
+      - libxi6
+      - libxinerama1
+      - libxkbcommon0
+      - libxrandr2
+      - libxrender1
+      - protobuf-compiler
+      - zlib1g
+
+AppImage:
+  arch: x86_64
+  file_name: daybook-appimage-builder-x86_64.AppImage

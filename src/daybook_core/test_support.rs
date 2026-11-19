@@ -1,0 +1,762 @@
+use crate::interlude::*;
+
+use big_repo::BigRepo;
+use big_repo::SharedBigRepo;
+
+use crate::drawer::DrawerRepo;
+use crate::plugs::PlugsRepo;
+
+/// The band these harnesses run. They mirror the daybook embedder, which opts out of the
+/// bucket path because bucket-diff was observed stalling in its offline-reopen scenario, so
+/// its tests stay on the cursor path rather than inheriting the new default.
+const HARNESS_SYNC_MODE: Option<big_sync::SyncMode> = Some(big_sync::SyncMode::CursorOnly);
+
+pub struct DaybookTestContext {
+    pub _acx: SharedBigRepo,
+    pub big_sync_stop: big_sync::StopToken,
+    pub drawer_repo: Arc<DrawerRepo>,
+    pub dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
+    pub _config_repo: Arc<crate::config::ConfigRepo>,
+    pub drawer_stop: crate::repos::RepoStopToken,
+    pub plugs_stop: crate::repos::RepoStopToken,
+    pub config_stop: crate::repos::RepoStopToken,
+    pub dispatch_stop: crate::repos::RepoStopToken,
+    pub progress_stop: crate::repos::RepoStopToken,
+    pub init_stop: crate::repos::RepoStopToken,
+    pub sqlite_local_state_stop: crate::repos::RepoStopToken,
+    pub rt_stop: crate::rt::RtStopToken,
+    pub rt: Arc<crate::rt::Rt>,
+    pub _temp_dir: tempfile::TempDir,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DaybookTestCxOptions {
+    pub provision_mltools_models: bool,
+}
+
+impl DaybookTestContext {
+    /// Wait until there are no active jobs, with a timeout
+    pub async fn _wait_until_no_active_jobs(&self, timeout_secs: u64) -> Res<()> {
+        use tokio::time::Duration;
+        use tokio::time::Instant;
+
+        let start = Instant::now();
+        let timeout_duration = Duration::from_secs(timeout_secs);
+        let mut change_rx = self.rt.wflow_part_state.change_receiver();
+
+        // Get initial counts without holding a lock
+        let mut counts = *change_rx.borrow();
+        if counts.active == 0 && counts.archive > 0 {
+            // No active jobs, we're done
+            tracing::info!(
+                "done, {} active jobs, {} archived jobs",
+                counts.active,
+                counts.archive
+            );
+            return Ok(());
+        }
+
+        loop {
+            // Calculate remaining time
+            let elapsed = start.elapsed();
+            let remaining = timeout_duration.saturating_sub(elapsed);
+            if remaining.is_zero() {
+                return Err(ferr!(
+                    "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {})",
+                    timeout_secs,
+                    elapsed,
+                    counts.active
+                ));
+            }
+
+            tracing::debug!(
+                "Waiting for count change or timeout (active jobs: {}, remaining: {:?})",
+                counts.active,
+                remaining
+            );
+
+            // Wait for the next count change or timeout
+            match tokio::time::timeout(remaining, change_rx.changed()).await {
+                Ok(Ok(())) => {
+                    // Counts changed, update our local copy
+                    counts = *change_rx.borrow();
+                    if counts.active == 0 && counts.archive > 0 {
+                        // No active jobs, we're done
+                        tracing::info!(
+                            "done, {} active jobs, {} archived jobs",
+                            counts.active,
+                            counts.archive
+                        );
+                        return Ok(());
+                    }
+                    // Continue waiting
+                    tracing::debug!("Counts changed, rechecking active jobs");
+                    continue;
+                }
+                Ok(Err(_)) => {
+                    // Channel closed, worker might be shutting down
+                    return Err(ferr!("worker state channel closed"));
+                }
+                Err(_) => {
+                    // Timeout reached
+                    let final_elapsed = start.elapsed();
+                    let final_counts = self.rt.wflow_part_state.get_job_counts().await;
+                    return Err(ferr!(
+                        "timeout waiting for no active jobs after {} seconds (elapsed: {:?}, active jobs: {})",
+                        timeout_secs,
+                        final_elapsed,
+                        final_counts.active
+                    ));
+                }
+            }
+        }
+    }
+
+    pub async fn stop(self) -> Res<()> {
+        let Self {
+            _acx: _,
+            big_sync_stop,
+            drawer_repo: _,
+            dispatch_repo: _,
+            _config_repo: _,
+            drawer_stop,
+            plugs_stop,
+            config_stop,
+            dispatch_stop,
+            progress_stop,
+            init_stop,
+            sqlite_local_state_stop,
+            rt_stop,
+            rt,
+            _temp_dir: _,
+        } = self;
+
+        rt_stop.stop().await?;
+        let rcx = Arc::clone(&rt.rcx);
+        drop(rt);
+        rcx.shutdown().await?;
+        drawer_stop.stop().await?;
+        progress_stop.stop().await?;
+        dispatch_stop.stop().await?;
+        config_stop.stop().await?;
+        plugs_stop.stop().await?;
+        init_stop.stop().await?;
+        sqlite_local_state_stop.stop().await?;
+        big_sync_stop.stop().await?;
+        Ok(())
+    }
+}
+
+pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
+    test_cx_with_options(test_name, DaybookTestCxOptions::default()).await
+}
+
+/// Stage the ADR 003 §19 key-material shape: a key document holding `key` as a
+/// JWK facet, returned with that branch's heads.
+///
+/// Needed wherever a test writes a `cipherBlob` facet, because its `keyRef` is
+/// cross-document - the key doc is readable by decryptors, the content doc by
+/// whoever may serve the ciphertext - and the drawer reads an *empty*-heads
+/// reference as "self, in this document", demanding the target facet exist in
+/// the same document (`validate_facet_reference`). Pinning the key doc's real
+/// heads is the same thing the encryption worker does in production.
+pub async fn stage_key_doc(
+    drawer: &DrawerRepo,
+    key: &big_blobs::encrypt::MasterKey,
+) -> Res<(daybook_types::doc::DocId, daybook_types::doc::ChangeHashSet)> {
+    let key_doc_id = drawer
+        .add(daybook_types::doc::AddDocArgs {
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+
+            idempotency_key: None,
+        })
+        .await?;
+    let heads = write_jwk_facet(drawer, &key_doc_id, key).await?;
+    Ok((key_doc_id, heads))
+}
+
+/// Write `key` into the JWK facet of `doc_id` - what a rotation does in place
+/// (ADR 003 §15) - and return the heads of that write.
+pub async fn write_jwk_facet(
+    drawer: &DrawerRepo,
+    doc_id: &daybook_types::doc::DocId,
+    key: &big_blobs::encrypt::MasterKey,
+) -> Res<daybook_types::doc::ChangeHashSet> {
+    // The JWK facet is system-managed like the cipherBlob that references it.
+    let jwk = big_blobs::encrypt::JwkOct::from_master_key(key);
+    drawer
+        .update_at_heads_with_scope(
+            daybook_types::doc::DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    daybook_types::doc::FacetKey {
+                        tag: daybook_types::doc::WellKnownFacetTag::Jwk.into(),
+                        id: "relay".into(),
+                    },
+                    daybook_types::doc::FacetRaw::from(daybook_types::doc::WellKnownFacet::Jwk(
+                        daybook_types::doc::Jwk {
+                            kty: jwk.kty,
+                            members: serde_json::json!({ "k": jwk.k }),
+                        },
+                    )),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            daybook_types::doc::BranchPath::new("main"),
+            None,
+            crate::drawer::FacetWriteScope::System,
+        )
+        .await?;
+    drawer
+        .get_branch_heads_for_path(doc_id, daybook_types::doc::BranchPath::new("main"))
+        .await?
+        .ok_or_eyre("key document has no main branch")
+}
+
+pub async fn test_cx_with_options(
+    _test_name: &'static str,
+    options: DaybookTestCxOptions,
+) -> Res<DaybookTestContext> {
+    tokio::task::block_in_place(|| {
+        utils_rs::testing::load_envs_once();
+        utils_rs::testing::setup_tracing_once();
+    });
+
+    // Generate unique IDs for this test to ensure complete isolation across parallel test runs
+    let device_id = format!("test_{}", uuid::Uuid::new_v4().simple());
+    let peer_id = crate::peer_id_from_label(&format!("test_{}", uuid::Uuid::new_v4().simple()));
+
+    let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
+    // Initialize SharedBigRepo with memory storage
+    let (big_repo, acx_stop) = BigRepo::boot(big_repo::Config {
+        node_identity_seed: rand::random::<[u8; 32]>(),
+        storage: big_repo::Storage::memory(&sqlite_runtime).unwrap(),
+        scope_key: Arc::from("daybook-core-test"),
+        hidden_parts: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+    })
+    .await?;
+    let part_store = big_repo.shared_part_store();
+    let (_worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
+        Arc::clone(&part_store),
+        HashMap::new(),
+        "daybook-test-cx",
+        None,
+        HARNESS_SYNC_MODE,
+        Arc::from("daybook-core-test"),
+    )?;
+
+    // Create a drawer document
+    let drawer_doc_id = {
+        let doc = automerge::Automerge::load(&crate::drawer::version_updates::version_latest()?)?;
+        let handle = big_repo.create_doc(doc).await?;
+        handle.document_id()
+    };
+
+    // Create an app document for all stores (config, plugs, dispatch, triage)
+    let app_doc_id = {
+        let doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
+        let handle = big_repo.create_doc(doc).await?;
+        handle.document_id()
+    };
+
+    // ADR 007 §2: the repo config doc (third core doc) hosting the plugg
+    // config facet.
+    let config_doc_id = {
+        let doc =
+            automerge::Automerge::load(&crate::drawer::doc_version_updates::version_latest()?)?;
+        let handle = big_repo.create_doc(doc).await?;
+        handle.document_id()
+    };
+
+    // Load config first to get local identity
+    let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user");
+    let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
+    let temp_dir = tempfile::tempdir()?;
+
+    let blob_part_store = crate::repo::open_blob_part_store(big_repo.database()).await?;
+    let blobs =
+        crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs"), local_user_path.clone())
+            .await?;
+    let (sqlite_local_state_repo, sqlite_local_state_stop) =
+        crate::local_state::SqliteLocalStateRepo::boot(
+            Arc::clone(&sqlite_runtime),
+            temp_dir.path().join("local_state"),
+        )
+        .await?;
+
+    let (plugs_repo, plugs_stop) = PlugsRepo::load(
+        Arc::clone(&big_repo),
+        Arc::clone(&blobs),
+        config_doc_id.clone(),
+        local_user_path.clone(),
+        Arc::clone(&sqlite_local_state_repo),
+    )
+    .await?;
+    let sql_ctx =
+        crate::app::open_database(&sqlite_runtime, crate::app::SqlConfig::memory()).await?;
+    let (config_repo, config_stop) = crate::config::ConfigRepo::load(
+        Arc::clone(&big_repo),
+        app_doc_id.clone(),
+        Arc::clone(&plugs_repo),
+        local_user_path.clone(),
+        sql_ctx.clone(),
+    )
+    .await?;
+
+    let config_user_path =
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "config-repo")?;
+    let config_actor_id = daybook_types::doc::user_path::to_actor_id(&config_user_path);
+    config_repo
+        .upsert_actor_user_path(config_actor_id, config_user_path)
+        .await?;
+
+    let plugs_user_path =
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "plugs-repo")?;
+    let plugs_actor_id = daybook_types::doc::user_path::to_actor_id(&plugs_user_path);
+    config_repo
+        .upsert_actor_user_path(plugs_actor_id, plugs_user_path)
+        .await?;
+    let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
+        Arc::clone(&big_repo),
+        app_doc_id.clone(),
+        local_user_path.clone(),
+        sql_ctx.clone(),
+    )
+    .await?;
+    let dispatch_user_path =
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "dispatch-repo")?;
+    let dispatch_actor_id = daybook_types::doc::user_path::to_actor_id(&dispatch_user_path);
+    config_repo
+        .upsert_actor_user_path(dispatch_actor_id, dispatch_user_path)
+        .await?;
+    let (progress_repo, progress_stop) =
+        crate::progress::ProgressRepo::boot(sql_ctx.clone()).await?;
+    let (drawer_repo, drawer_stop) = DrawerRepo::load(
+        Arc::clone(&big_repo),
+        Arc::clone(&part_store),
+        drawer_doc_id.clone(),
+        local_user_path.clone(),
+        sql_ctx.clone(),
+        temp_dir.path().join("local_state"),
+        Arc::new(surelock::mutex::Mutex::new(
+            utils_rs::lru::KeyedLruPool::new(1000),
+        )),
+        Arc::new(surelock::mutex::Mutex::new(
+            utils_rs::lru::KeyedLruPool::new(1000),
+        )),
+        #[cfg(not(test))]
+        Arc::clone(&plugs_repo),
+        #[cfg(test)]
+        Some(Arc::clone(&plugs_repo)),
+    )
+    .await?;
+    let drawer_user_path =
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "drawer-repo")?;
+    let drawer_actor_id = daybook_types::doc::user_path::to_actor_id(&drawer_user_path);
+    config_repo
+        .upsert_actor_user_path(drawer_actor_id, drawer_user_path)
+        .await?;
+
+    if options.provision_mltools_models {
+        let mltools_config = mltools::models::mobile_default(mltools::models::test_cache_dir())
+            .await
+            .wrap_err("error provisioning default mltools models for e2e")?;
+        config_repo
+            .set_mltools_config(mltools_config)
+            .await
+            .wrap_err("error storing e2e mltools config")?;
+    }
+
+    let repo_root = temp_dir.path().join("repo");
+    tokio::fs::create_dir_all(&repo_root).await?;
+    let layout = crate::repo::RepoLayout {
+        repo_root: repo_root.clone(),
+        big_repo_root: repo_root.join("big_repo"),
+        sqlite_path: repo_root.join("sqlite.db"),
+        blobs_root: repo_root.join("blobs"),
+        marker_path: repo_root.join("db.repo.txt"),
+        lock_path: repo_root.join("repo.lock"),
+    };
+    let lock_guard = crate::repo::RepoLockGuard::acquire(layout.lock_path.clone()).await?;
+    let secret_store = secrets_rs::SecretStore::boot().await?;
+    let iroh_secret_key = iroh::SecretKey::generate();
+    let local_peer_key =
+        daybook_types::doc::format_peer_key(&peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
+    let authority = crate::authority::ensure(&big_repo, &sql_ctx, None).await?;
+    let core_inventory_daybook_id = drawer_repo
+        .add(daybook_types::doc::AddDocArgs {
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+
+            idempotency_key: None,
+        })
+        .await?;
+    let docs_inventory_daybook_id = drawer_repo
+        .add(daybook_types::doc::AddDocArgs {
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+
+            idempotency_key: None,
+        })
+        .await?;
+    let encryption_inventory_daybook_id = drawer_repo
+        .add(daybook_types::doc::AddDocArgs {
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+
+            idempotency_key: None,
+        })
+        .await?;
+    let core_entry = drawer_repo
+        .get_entry(&core_inventory_daybook_id)
+        .await?
+        .ok_or_eyre("missing core inventory doc entry")?;
+    let docs_entry = drawer_repo
+        .get_entry(&docs_inventory_daybook_id)
+        .await?
+        .ok_or_eyre("missing docs inventory doc entry")?;
+    let encryption_entry = drawer_repo
+        .get_entry(&encryption_inventory_daybook_id)
+        .await?
+        .ok_or_eyre("missing encryption inventory doc entry")?;
+    let core_inventory_doc_id = core_entry
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch for core inventory doc")?
+        .branch_doc_id
+        .clone();
+    let docs_inventory_doc_id = docs_entry
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch for docs inventory doc")?
+        .branch_doc_id
+        .clone();
+    let encryption_inventory_doc_id = encryption_entry
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch for encryption inventory doc")?
+        .branch_doc_id
+        .clone();
+
+    big_repo
+        .add_admin_member_to_doc(
+            core_inventory_doc_id.clone(),
+            authority.blob_inventories.clone(),
+        )
+        .await?;
+    big_repo
+        .add_admin_member_to_doc(
+            docs_inventory_doc_id.clone(),
+            authority.blob_inventories.clone(),
+        )
+        .await?;
+    big_repo
+        .add_admin_member_to_doc(
+            encryption_inventory_doc_id.clone(),
+            authority.blob_inventories.clone(),
+        )
+        .await?;
+
+    config_repo
+        .set_blob_inventories(crate::config::AppBlobInventories {
+            core_inventory_doc_id: core_inventory_doc_id.clone(),
+            docs_inventory_doc_id: docs_inventory_doc_id.clone(),
+            encryption_inventory_doc_id: encryption_inventory_doc_id.clone(),
+        })
+        .await?;
+
+    crate::authority::grant_docs_admin(
+        &big_repo,
+        &authority.core_docs,
+        [
+            app_doc_id.clone(),
+            drawer_doc_id.clone(),
+            core_inventory_doc_id.clone(),
+            docs_inventory_doc_id.clone(),
+            encryption_inventory_doc_id.clone(),
+        ],
+    )
+    .await?;
+    crate::authority::grant_docs_admin(
+        &big_repo,
+        &authority.encryption_candidates,
+        [app_doc_id.clone(), drawer_doc_id.clone()],
+    )
+    .await?;
+    crate::repo::ensure_authority_partitions(
+        &part_store,
+        &authority,
+        &core_inventory_doc_id,
+        &docs_inventory_doc_id,
+    )
+    .await?;
+    crate::repo::ensure_blob_partitions(
+        &blob_part_store,
+        &core_inventory_doc_id,
+        &docs_inventory_doc_id,
+        &encryption_inventory_doc_id,
+    )
+    .await?;
+    let rcx = crate::repo::RepoCtx::from_parts(
+        crate::repo::RepoCtxParts {
+            layout,
+            lock_guard,
+            options: crate::repo::RepoOpenOptions::default(),
+            sql: sql_ctx.clone(),
+            sqlite_runtime,
+            sqlite_local_state_repo: Arc::clone(&sqlite_local_state_repo),
+            sqlite_local_state_stop: std::sync::Mutex::new(None),
+            part_store: Arc::clone(&part_store),
+            blob_part_store: Arc::clone(&blob_part_store),
+            blob_presence_store: crate::repo::open_blob_presence_part_store(sql_ctx.clone())
+                .await?,
+            frontier_part_store: big_repo.frontier_part_store(),
+            derived_part_store: big_repo.derived_part_store(),
+            big_repo: Arc::clone(&big_repo),
+            big_repo_stop: std::sync::Mutex::new(Some(acx_stop)),
+            local_peer_key,
+            local_actor_id: local_actor_id.clone(),
+            local_user_path: local_user_path.clone(),
+            local_device_name: device_id.clone(),
+            repo_id: format!("test-repo-{}", uuid::Uuid::new_v4().simple()),
+            checkout_id: format!("test-checkout-{}", uuid::Uuid::new_v4().simple()),
+            repo_name: format!("test-repo-{}", uuid::Uuid::new_v4().simple()),
+            iroh_public_key: peer_id.to_string(),
+            iroh_secret_key,
+            secret_store,
+        },
+        big_repo
+            .get_doc(&app_doc_id)
+            .await?
+            .into_ready(app_doc_id.clone())?,
+        big_repo
+            .get_doc(&drawer_doc_id)
+            .await?
+            .into_ready(drawer_doc_id)?,
+        big_repo
+            .get_doc(&config_doc_id)
+            .await?
+            .into_ready(config_doc_id)?,
+        core_inventory_doc_id,
+        docs_inventory_doc_id,
+        encryption_inventory_doc_id,
+    );
+
+    let (init_repo, init_stop) = crate::rt::init::InitRepo::load(
+        Arc::clone(&big_repo),
+        app_doc_id,
+        local_user_path.clone(),
+        sql_ctx.clone(),
+        Arc::clone(&progress_repo),
+        None,
+    )
+    .await?;
+    let init_user_path =
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "init-repo")?;
+    let init_actor_id = daybook_types::doc::user_path::to_actor_id(&init_user_path);
+    config_repo
+        .upsert_actor_user_path(init_actor_id, init_user_path)
+        .await?;
+
+    let (rt, rt_stop) = crate::rt::Rt::boot(
+        crate::rt::RtConfig {
+            device_id: device_id.clone(),
+            startup_progress_task_id: None,
+            // Tests drive the worker they assert on. An ambient worker would
+            // also be eligible for the same documents and domains, so its
+            // writes would be indistinguishable from the code under test.
+            spawn_blob_workers: false,
+        },
+        rcx,
+        Arc::clone(&drawer_repo),
+        Arc::clone(&plugs_repo),
+        Arc::clone(&dispatch_repo),
+        Arc::clone(&progress_repo),
+        Arc::clone(&blobs),
+        Arc::clone(&config_repo),
+        init_repo,
+        sqlite_local_state_repo,
+    )
+    .await?;
+
+    Ok(DaybookTestContext {
+        _acx: big_repo,
+        big_sync_stop,
+        drawer_repo,
+        rt,
+        dispatch_repo,
+        _config_repo: config_repo,
+        drawer_stop,
+        plugs_stop,
+        config_stop,
+        dispatch_stop,
+        progress_stop,
+        init_stop,
+        sqlite_local_state_stop,
+        rt_stop,
+        _temp_dir: temp_dir,
+    })
+}
+
+pub fn plug_oci_root(plug_id: &str) -> std::path::PathBuf {
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
+        });
+    target_dir.join("oci").join(plug_id)
+}
+
+#[cfg(test)]
+pub async fn import_test_plug_oci(test_cx: &DaybookTestContext) -> Res<crate::plugs::ImportedPlug> {
+    let artifact_path = plug_oci_root("@daybook/test");
+    eyre::ensure!(
+        artifact_path.exists(),
+        "missing OCI plug artifact at '{}'. Build it first with: cargo x plug build-oci --plug-root ./src/plug_test_manifest",
+        artifact_path.display()
+    );
+    test_cx
+        .rt
+        .plugs_repo
+        .import_from_oci_layout(&artifact_path, crate::plugs::OciImportOptions::default())
+        .await
+}
+
+/// ADR 007: authoring imports make a plug known; runtime behavior (processors,
+/// pins) requires it to be enabled. Tests that need dispatch/pin behavior must
+/// import AND enable.
+#[cfg(test)]
+pub async fn import_and_enable_test_plug(test_cx: &DaybookTestContext) -> Res<()> {
+    let imported = import_test_plug_oci(test_cx).await?;
+    let doc_id = imported
+        .doc_id
+        .ok_or_eyre("imported test plug missing manifest doc id")?;
+    let ref_url: url::Url =
+        format!("dtxt:datum:{doc_id}/org.example.daybook.plugManifest/main?branch=main").parse()?;
+    test_cx.rt.plugs_repo.enable_plug(&ref_url).await?;
+    Ok(())
+}
+pub async fn boot_part_store(
+    sql: Database,
+    scope_key: &str,
+) -> Res<(big_sync::Ctx, big_sync::StopToken)> {
+    let store = Arc::new(
+        big_sync::SqlitePartStore::new(sql, scope_key.to_owned(), big_sync_core::BuckId::MAX_LEVEL)
+            .await?,
+    );
+    let store: Arc<dyn big_sync::HostPartStore> = store as _;
+    let (worker, stop) = big_sync::spawn_big_sync_worker_with_options(
+        Arc::clone(&store),
+        HashMap::new(),
+        "daybook-test-part-store",
+        None,
+        HARNESS_SYNC_MODE,
+        Arc::from("daybook-core-test"),
+    )?;
+    Ok((big_sync::Ctx { store, worker }, stop))
+}
+
+pub async fn boot_repo() -> Res<(
+    Arc<BigRepo>,
+    big_sync::Ctx,
+    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
+)> {
+    let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
+    let (repo, stop) = BigRepo::boot(big_repo::Config {
+        node_identity_seed: [7_u8; 32],
+        storage: big_repo::Storage::memory(&sqlite_runtime).unwrap(),
+        scope_key: Arc::from("daybook-core-test"),
+        hidden_parts: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+    })
+    .await?;
+    let part_store = repo.shared_part_store();
+    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
+        Arc::clone(&part_store),
+        HashMap::new(),
+        "daybook-boot-repo",
+        None,
+        HARNESS_SYNC_MODE,
+        Arc::from("daybook-core-test"),
+    )?;
+    let big_sync_host = big_sync::Ctx {
+        store: part_store,
+        worker,
+    };
+    Ok((
+        repo,
+        big_sync_host,
+        Box::new(move || {
+            async move {
+                stop.stop().await?;
+                big_sync_stop.stop().await?;
+                eyre::Ok(())
+            }
+            .boxed()
+        }),
+    ))
+}
+
+pub async fn boot_disk_repo(
+    path: PathBuf,
+) -> Res<(
+    Arc<BigRepo>,
+    big_sync::Ctx,
+    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
+)> {
+    tokio::fs::create_dir_all(&path)
+        .await
+        .wrap_err_with(|| format!("failed creating disk repo path: {}", path.display()))?;
+    let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
+    let (repo, stop) = BigRepo::boot(big_repo::Config {
+        node_identity_seed: [7_u8; 32],
+        storage: big_repo::Storage::in_directory(
+            &sqlite_runtime,
+            &path,
+            Some(Arc::new(secrets_rs::SecretStore::boot().await?)),
+        )?,
+        scope_key: Arc::from("daybook-core-test"),
+        hidden_parts: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+    })
+    .await?;
+    let part_store = repo.shared_part_store();
+    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
+        Arc::clone(&part_store),
+        HashMap::new(),
+        "daybook-boot-disk",
+        None,
+        HARNESS_SYNC_MODE,
+        Arc::from("daybook-core-test"),
+    )?;
+    let big_sync_host = big_sync::Ctx {
+        store: part_store,
+        worker,
+    };
+    Ok((
+        repo,
+        big_sync_host,
+        Box::new(move || {
+            async move {
+                stop.stop().await?;
+                big_sync_stop.stop().await?;
+                eyre::Ok(())
+            }
+            .boxed()
+        }),
+    ))
+}

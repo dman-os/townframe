@@ -1,0 +1,34 @@
+version = 1
+role = "plugin"
+dependency_reason = "WASM workflows consume portable types and helpers from the native manifest crate"
+allowed_dependencies = [
+    "am_utils_rs",
+    "daybook_pdk",
+    "daybook_types",
+    "plug_test_manifest",
+    "utils_rs",
+    "sqlite_rs",
+    "wasm_utils_rs",
+    "wflow_sdk",
+]
+allow_external_api_types = false
+
+[builds.wasm32-wasip3]
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/plug_test_routines/wflows/index_embedding.rs"
+symbol = "module::run"
+ceiling = 171
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DEPENDENCY_GROUP"
+path = "src/plug_test_routines/Cargo.toml"
+symbol = "dependency-groups"
+ceiling = 8
+class = "LEGACY_DEBT"
+reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
+reference = "docs/scratch/nodule-runtime-ledger.md"

@@ -1,0 +1,195 @@
+use crate::interlude::*;
+
+use crate::ffi::FfiError;
+use crate::ffi::SharedFfiCtx;
+use crate::repos::plugs::PlugsRepoFfi;
+
+use daybook_core::drawer::DocBundle;
+use daybook_core::drawer::DocEntry;
+use daybook_core::drawer::DocNBranches;
+use daybook_core::drawer::DrawerEvent;
+use daybook_core::drawer::DrawerRepo;
+use daybook_core::drawer::types::UpdateDocArgsV2 as UpdateDocArgs;
+use daybook_types::doc::AddDocArgs;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::Doc;
+use daybook_types::doc::DocId;
+use daybook_types::doc::DocPatch;
+
+#[derive(uniffi::Object)]
+pub struct DrawerRepoFfi {
+    fcx: SharedFfiCtx,
+    pub repo: Arc<DrawerRepo>,
+    _plugs_repo: Arc<PlugsRepoFfi>,
+    stop_token: tokio::sync::Mutex<Option<daybook_core::repos::RepoStopToken>>,
+}
+
+impl daybook_core::repos::Repo for DrawerRepoFfi {
+    type Event = DrawerEvent;
+    fn registry(&self) -> &Arc<daybook_core::repos::ListenersRegistry> {
+        &self.repo.registry
+    }
+
+    fn cancel_token(&self) -> &tokio_util::sync::CancellationToken {
+        self.repo.cancel_token()
+    }
+}
+
+crate::uniffi_repo_listeners!(DrawerRepoFfi, DrawerEvent);
+
+#[uniffi::export]
+impl DrawerRepoFfi {
+    #[uniffi::constructor]
+    #[tracing::instrument(err, skip(fcx, plugs_repo))]
+    async fn load(fcx: SharedFfiCtx, plugs_repo: Arc<PlugsRepoFfi>) -> Result<Arc<Self>, FfiError> {
+        let (repo, stop_token) = fcx
+            .do_on_rt(DrawerRepo::load(
+                Arc::clone(&fcx.rcx.big_repo),
+                Arc::clone(&fcx.rcx.part_store),
+                fcx.rcx.doc_drawer.document_id(),
+                fcx.rcx.local_user_path.clone(),
+                fcx.rcx.sql.clone(),
+                fcx.rcx.layout.repo_root.join("local_state"),
+                Arc::new(surelock::mutex::Mutex::new(
+                    utils_rs::lru::KeyedLruPool::new(1000),
+                )),
+                Arc::new(surelock::mutex::Mutex::new(
+                    utils_rs::lru::KeyedLruPool::new(1000),
+                )),
+                Arc::clone(&plugs_repo.repo),
+            ))
+            .await
+            .inspect_err(|err| tracing::error!(?err))?;
+        Ok(Arc::new(Self {
+            fcx,
+            repo,
+            _plugs_repo: plugs_repo,
+            stop_token: Some(stop_token).into(),
+        }))
+    }
+
+    async fn stop(&self) -> Result<(), FfiError> {
+        let stop_token = self.stop_token.lock().await.take();
+        self.fcx
+            .do_on_rt(async move {
+                if let Some(token) = stop_token {
+                    token.stop().await?;
+                }
+                Ok::<(), FfiError>(())
+            })
+            .await
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn list(self: Arc<Self>) -> Vec<DocNBranches> {
+        let this = Arc::clone(&self);
+        self.fcx
+            .do_on_rt(async move { this.repo.list().await })
+            .await
+            .expect("error listing docs")
+    }
+
+    #[tracing::instrument(err, skip(self))]
+    async fn get(self: Arc<Self>, id: DocId, branch_path: String) -> Result<Option<Doc>, FfiError> {
+        let this = Arc::clone(&self);
+        let branch_path = daybook_types::doc::BranchPathBuf::from(branch_path);
+        Ok(self
+            .fcx
+            .do_on_rt(async move {
+                this.repo
+                    .get_doc_with_facets_at_branch(&id, &branch_path, None)
+                    .await
+                    .map(|opt| opt.map(|arc| (*arc).clone()))
+            })
+            .await?)
+    }
+
+    #[tracing::instrument(err, skip(self))]
+    async fn get_bundle(
+        self: Arc<Self>,
+        id: DocId,
+        branch_path: String,
+    ) -> Result<Option<DocBundle>, FfiError> {
+        let this = Arc::clone(&self);
+        let branch_path = daybook_types::doc::BranchPathBuf::from(branch_path);
+        Ok(self
+            .fcx
+            .do_on_rt(async move {
+                this.repo
+                    .get_doc_bundle_at_branch(&id, &branch_path, None)
+                    .await
+            })
+            .await?)
+    }
+
+    #[tracing::instrument(err, skip(self))]
+    async fn get_entry(self: Arc<Self>, id: DocId) -> Result<Option<DocEntry>, FfiError> {
+        let this = Arc::clone(&self);
+        Ok(self
+            .fcx
+            .do_on_rt(async move { this.repo.get_entry(&id).await })
+            .await?)
+    }
+
+    #[tracing::instrument(err, skip(self))]
+    async fn add(self: Arc<Self>, args: AddDocArgs) -> Result<DocId, FfiError> {
+        let this = Arc::clone(&self);
+        Ok(self
+            .fcx
+            .do_on_rt(async move { this.repo.add(args).await.map_err(eyre::Report::from) })
+            .await?)
+    }
+
+    #[tracing::instrument(err, skip(self))]
+    async fn batch_add(self: Arc<Self>, args: Vec<AddDocArgs>) -> Result<Vec<DocId>, FfiError> {
+        let this = Arc::clone(&self);
+        Ok(self
+            .fcx
+            .do_on_rt(async move { this.repo.batch_add(args).await.map_err(eyre::Report::from) })
+            .await?)
+    }
+
+    #[tracing::instrument(err, skip(self))]
+    async fn update(
+        self: Arc<Self>,
+        patch: DocPatch,
+        branch_path: String,
+        heads: Option<ChangeHashSet>,
+    ) -> Result<(), FfiError> {
+        let this = Arc::clone(&self);
+        let branch_path = daybook_types::doc::BranchPathBuf::from(branch_path);
+        Ok(self
+            .fcx
+            .do_on_rt(async move {
+                this.repo
+                    .update_at_heads(patch, &branch_path, heads)
+                    .await
+                    .wrap_err("error applying patch")
+            })
+            .await?)
+    }
+
+    #[tracing::instrument(err, skip(self))]
+    async fn update_batch(self: Arc<Self>, patches: Vec<UpdateDocArgs>) -> Result<(), FfiError> {
+        let this = Arc::clone(&self);
+        Ok(self
+            .fcx
+            .do_on_rt(async move {
+                this.repo
+                    .update_batch(patches)
+                    .await
+                    .inspect_err(|err| error!(?err, "drawer update_batch failed"))
+                    .wrap_err("error applying patches")
+            })
+            .await?)
+    }
+
+    #[tracing::instrument(err, skip(self))]
+    async fn del(self: Arc<Self>, id: DocId) -> Result<bool, FfiError> {
+        let this = Arc::clone(&self);
+        Ok(self
+            .fcx
+            .do_on_rt(async move { this.repo.del(&id).await.map_err(eyre::Report::from) })
+            .await?)
+    }
+}

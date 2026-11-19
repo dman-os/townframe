@@ -1,0 +1,1402 @@
+@file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)
+
+package org.example.daybook.tables
+
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.*
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.PermanentDrawerSheet
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.material3.VerticalDivider
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.launch
+import org.example.daybook.ChromeState
+import org.example.daybook.ChromeStateTopAppBar
+import org.example.daybook.ConfigViewModel
+import org.example.daybook.DaybookContentType
+import org.example.daybook.DrawerViewModel
+import org.example.daybook.LocalChromeStateManager
+import org.example.daybook.LocalContainer
+import org.example.daybook.LocalDocEditorStore
+import org.example.daybook.LocalDrawerViewModel
+import org.example.daybook.Routes
+import org.example.daybook.TablesState
+import org.example.daybook.TablesViewModel
+import org.example.daybook.dockable.DockableDivider
+import org.example.daybook.drawer.DocList
+import org.example.daybook.layouts.ProvideScreenChromeSpec
+import org.example.daybook.layouts.ScreenChromeSpec
+import org.example.daybook.navigation.DaybookNavKey
+import org.example.daybook.navigation.DaybookNavigationState
+import org.example.daybook.progress.ProgressList
+import org.example.daybook.uniffi.core.Uuid
+import org.example.daybook.uniffi.core.Window
+import org.example.daybook.uniffi.core.WindowLayout
+import org.example.daybook.uniffi.core.WindowLayoutPane
+import org.example.daybook.uniffi.core.WindowLayoutPaneVariant
+import org.example.daybook.uniffi.core.WindowLayoutRegion
+import org.example.daybook.uniffi.core.WindowLayoutRegionSize
+import org.example.daybook.uniffi.core.WindowLayoutOrientation as ConfigOrientation
+
+/**
+ * Constants for sidebar layout weights and sizes
+ */
+private object SidebarLayoutConstants {
+    /** Default expanded sidebar weight (40% of available space) */
+    const val DEFAULT_SIDEBAR_WEIGHT = 0.4f
+
+    /** Collapsed/rail sidebar weight (10% of available space) */
+    const val COLLAPSED_SIDEBAR_WEIGHT = 0.10f
+
+    /** Threshold weight to determine if sidebar is expanded or collapsed */
+    const val SIDEBAR_EXPANDED_THRESHOLD = 0.15f
+
+    /** Minimum weight for any pane to prevent it from disappearing */
+    const val MIN_PANE_WEIGHT = 0.10f
+
+    /** Rail mode transition point in dp (icon-only navigation rail vs drawer) */
+    const val RAIL_TRANSITION_DP = 80f
+
+    /** Maximum dp for discrete regime (transition point from rail to drawer) */
+    const val DISCRETE_REGIME_MAX_DP = 235f
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ExpandedLayout(
+    modifier: Modifier = Modifier,
+    navState: DaybookNavigationState,
+    extraAction: (() -> Unit)? = null,
+    contentType: DaybookContentType,
+    onShowCloneShare: () -> Unit = {},
+) {
+    val menuFeatures = rememberMenuFeatures(navState, onShowCloneShare = onShowCloneShare)
+
+    // Tables ViewModel
+    val tablesRepo = LocalContainer.current.tablesRepo
+    val tablesVm = viewModel { TablesViewModel(tablesRepo) }
+
+    // Config ViewModel (for error handling)
+    val configRepo = LocalContainer.current.configRepo
+    val progressRepo = LocalContainer.current.progressRepo
+    val configVm = viewModel { ConfigViewModel(configRepo, progressRepo) }
+
+    // Observe layout config from the selected window
+    val tablesState by tablesVm.tablesState.collectAsState()
+    val selectedTableId by tablesVm.selectedTableId.collectAsState()
+
+    val layoutConfig: WindowLayout? =
+        remember(tablesState, selectedTableId) {
+            if (tablesState is TablesState.Data && selectedTableId != null) {
+                val state = tablesState as TablesState.Data
+                // Find the window that contains this table
+                val windowId =
+                    state.tables[selectedTableId]?.window?.let { windowPolicy ->
+                        when (windowPolicy) {
+                            is org.example.daybook.uniffi.core.TableWindow.Specific -> windowPolicy.id
+                            is org.example.daybook.uniffi.core.TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                        }
+                    }
+                windowId?.let { state.windows[it]?.layout }
+            } else {
+                null
+            }
+        }
+
+    // Error handling
+    val snackbarHostState = remember { SnackbarHostState() }
+    val configError = configVm.error.collectAsState()
+    LaunchedEffect(configError.value) {
+        configError.value?.let { error ->
+            snackbarHostState.showSnackbar(error.message)
+            configVm.clearError()
+        }
+    }
+
+    // Get chrome state manager and observe the current state (from the current screen)
+    val chromeStateManager = LocalChromeStateManager.current
+    val screenChromeState by chromeStateManager.currentState.collectAsState()
+
+    // Merge layout-specific chrome with screen chrome
+    // Check if screen chrome is empty (no title, no navigation icon, no actions, and showTopBar is false)
+    val isScreenChromeEmpty =
+        screenChromeState.title == null &&
+            screenChromeState.navigationIcon == null &&
+            screenChromeState.actions == null &&
+            !screenChromeState.showTopBar
+    val mergedChromeState =
+        ChromeState(
+            title = screenChromeState.title ?: "Daybook",
+            navigationIcon = screenChromeState.navigationIcon,
+            onBack = screenChromeState.onBack,
+            actions = {
+                // Screen actions first, then layout actions
+                screenChromeState.actions?.invoke()
+            },
+            showTopBar = if (isScreenChromeEmpty) true else screenChromeState.showTopBar,
+        )
+
+    if (layoutConfig != null) {
+        LayoutFromConfig(
+            layoutConfig = layoutConfig,
+            tablesVm = tablesVm,
+            navState = navState,
+            extraAction = extraAction,
+            chromeState = mergedChromeState,
+            menuFeatures = menuFeatures,
+            modifier = modifier.fillMaxSize(),
+            contentType = contentType,
+        )
+    } else {
+        // Loading state - show empty or default layout
+        Box(modifier = modifier.fillMaxSize()) {
+            Text("Loading layout...")
+        }
+    }
+    // Scaffold(
+    //     modifier = modifier,
+    //     snackbarHost = { SnackbarHost(snackbarHostState) },
+    // ) { innerPadding ->
+    // }
+}
+
+@Composable
+fun LayoutFromConfig(
+    layoutConfig: WindowLayout,
+    tablesVm: TablesViewModel,
+    navState: DaybookNavigationState,
+    extraAction: (() -> Unit)?,
+    chromeState: ChromeState,
+    menuFeatures: List<FeatureItem>,
+    modifier: Modifier = Modifier,
+    contentType: DaybookContentType,
+) {
+    val scope = rememberCoroutineScope()
+    val tablesState by tablesVm.tablesState.collectAsState()
+    val selectedTableId by tablesVm.selectedTableId.collectAsState()
+
+    fun updateWeights(newWeights: Map<Any, Float>) {
+        val selectedWindow = resolveSelectedWindow(tablesState, selectedTableId) ?: return
+        val (windowId, window) = selectedWindow
+        val currentLayout = window.layout
+        val newLayout =
+            currentLayout.copy(
+                leftRegion =
+                currentLayout.leftRegion.copy(
+                    size =
+                    WindowLayoutRegionSize.Weight(
+                        newWeights[currentLayout.leftRegion.deets.key]
+                            ?: (currentLayout.leftRegion.size as? WindowLayoutRegionSize.Weight)?.v1
+                            ?: SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT,
+                    ),
+                ),
+                centerRegion =
+                currentLayout.centerRegion.copy(
+                    size =
+                    WindowLayoutRegionSize.Weight(
+                        newWeights[currentLayout.centerRegion.deets.key]
+                            ?: (currentLayout.centerRegion.size as? WindowLayoutRegionSize.Weight)?.v1
+                            ?: 1.0f,
+                    ),
+                ),
+                rightRegion =
+                currentLayout.rightRegion.copy(
+                    size =
+                    WindowLayoutRegionSize.Weight(
+                        newWeights[currentLayout.rightRegion.deets.key]
+                            ?: (currentLayout.rightRegion.size as? WindowLayoutRegionSize.Weight)?.v1
+                            ?: SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT,
+                    ),
+                ),
+            )
+        scope.launch {
+            tablesVm.tablesRepo.setWindow(windowId, window.copy(layout = newLayout))
+        }
+    }
+
+    val initialWeights =
+        remember(layoutConfig) {
+            val weights = mutableMapOf<Any, Float>()
+            weights[layoutConfig.leftRegion.deets.key] =
+                (layoutConfig.leftRegion.size as? WindowLayoutRegionSize.Weight)?.v1
+                    ?: SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
+            weights[layoutConfig.centerRegion.deets.key] =
+                (layoutConfig.centerRegion.size as? WindowLayoutRegionSize.Weight)?.v1 ?: 1.0f
+            weights[layoutConfig.rightRegion.deets.key] =
+                (layoutConfig.rightRegion.size as? WindowLayoutRegionSize.Weight)?.v1
+                    ?: SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
+            weights
+        }
+
+    DockableRegion(
+        orientation = Orientation.Horizontal,
+        initialWeights = initialWeights,
+        onWeightsChanged = { updateWeights(it) },
+        modifier = modifier,
+    ) {
+        // Left region (if visible)
+        if (layoutConfig.leftVisible) {
+            val leftPane = layoutConfig.leftRegion.deets
+            val leftRegimes =
+                if (leftPane.variant is WindowLayoutPaneVariant.Sidebar) {
+                    // Sidebar: discrete 0-RAIL_TRANSITION_DP for rail mode, continuous above
+                    listOf(
+                        PaneSizeRegime.Discrete(
+                            minDp = 0f,
+                            maxDp = SidebarLayoutConstants.DISCRETE_REGIME_MAX_DP,
+                            sizeDp = SidebarLayoutConstants.RAIL_TRANSITION_DP,
+                        ),
+                        PaneSizeRegime.Continuous(minDp = SidebarLayoutConstants.RAIL_TRANSITION_DP),
+                    )
+                } else {
+                    // Default: continuous
+                    listOf(PaneSizeRegime.Continuous())
+                }
+            pane(
+                key = leftPane.key,
+                regimes = leftRegimes,
+                dividerContent =
+                {
+                    SidebarPaneDividerToggleButton(
+                        tablesVm = tablesVm,
+                        tablesState = tablesState,
+                        selectedTableId = selectedTableId,
+                    )
+                },
+            ) {
+                RenderLayoutPane(
+                    pane = leftPane,
+                    navState = navState,
+                    extraAction = extraAction,
+                    menuFeatures = menuFeatures,
+                    modifier = Modifier.fillMaxSize(),
+                    contentType = contentType,
+                )
+            }
+        }
+
+        // Center region (always visible)
+        pane(key = layoutConfig.centerRegion.deets.key) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                ChromeStateTopAppBar(chromeState)
+                RenderLayoutPane(
+                    pane = layoutConfig.centerRegion.deets,
+                    navState = navState,
+                    extraAction = extraAction,
+                    menuFeatures = menuFeatures,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentType = contentType,
+                )
+            }
+        }
+
+        // Right region (if visible)
+        if (layoutConfig.rightVisible) {
+            pane(key = layoutConfig.rightRegion.deets.key) {
+                RenderLayoutPane(
+                    pane = layoutConfig.rightRegion.deets,
+                    navState = navState,
+                    extraAction = extraAction,
+                    menuFeatures = menuFeatures,
+                    modifier = Modifier.fillMaxSize(),
+                    contentType = contentType,
+                )
+            }
+        }
+    }
+}
+
+private fun resolveSelectedWindow(tablesState: TablesState, selectedTableId: Uuid?): Pair<Uuid, Window>? {
+    if (tablesState !is TablesState.Data || selectedTableId == null) return null
+    val windowId =
+        tablesState.tables[selectedTableId]?.window?.let { windowPolicy ->
+            when (windowPolicy) {
+                is org.example.daybook.uniffi.core.TableWindow.Specific -> windowPolicy.id
+                is org.example.daybook.uniffi.core.TableWindow.AllWindows -> tablesState.windows.keys.firstOrNull()
+            }
+        } ?: return null
+    val window = tablesState.windows[windowId] ?: return null
+    return windowId to window
+}
+
+@Composable
+private fun SidebarPaneDividerToggleButton(
+    tablesVm: TablesViewModel,
+    tablesState: TablesState,
+    selectedTableId: Uuid?,
+    modifier: Modifier = Modifier,
+) {
+    val scope = rememberCoroutineScope()
+    val selection = resolveSelectedWindow(tablesState, selectedTableId) ?: return
+    val (windowId, window) = selection
+    val currentWeight = (window.layout.leftRegion.size as WindowLayoutRegionSize.Weight).v1
+
+    val nextWeight =
+        if (currentWeight > SidebarLayoutConstants.SIDEBAR_EXPANDED_THRESHOLD) {
+            SidebarLayoutConstants.COLLAPSED_SIDEBAR_WEIGHT
+        } else {
+            SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
+        }
+
+    IconButton(
+        onClick = {
+            scope.launch {
+                tablesVm.tablesRepo.setWindow(
+                    windowId,
+                    window.copy(
+                        layout =
+                        window.layout.copy(
+                            leftVisible = true,
+                            leftRegion =
+                            window.layout.leftRegion.copy(
+                                size =
+                                WindowLayoutRegionSize.Weight(nextWeight),
+                            ),
+                        ),
+                    ),
+                )
+            }
+        },
+        modifier = modifier.width(32.dp).height(32.dp),
+        colors = IconButtonDefaults.iconButtonColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+        ),
+    ) {
+        Icon(
+            imageVector = if (currentWeight > SidebarLayoutConstants.SIDEBAR_EXPANDED_THRESHOLD) {
+                Icons.AutoMirrored.Filled.KeyboardArrowLeft
+            } else {
+                Icons.AutoMirrored.Filled.KeyboardArrowRight
+            },
+            contentDescription = "Toggle sidebar",
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SidebarContent(navState: DaybookNavigationState, menuFeatures: List<FeatureItem>, modifier: Modifier = Modifier) {
+    val density = LocalDensity.current
+    var widthPx by remember { mutableIntStateOf(0) }
+    val widthDp = with(density) { widthPx.toDp() }
+    val isWide = widthDp >= 200.dp
+
+    val sidebarFeatures = rememberSidebarFeatures(navState)
+    val scope = rememberCoroutineScope()
+    val drawerVm: DrawerViewModel = LocalDrawerViewModel.current
+    val docEditorStore = LocalDocEditorStore.current
+    val selectedDrawerDocId by docEditorStore.selectedDocId.collectAsState()
+
+    val currentDestination = navState.currentDestination
+
+    // Get chrome state to check for main feature action button and prominent buttons
+    val chromeStateManager = LocalChromeStateManager.current
+    val chromeState by chromeStateManager.currentState.collectAsState()
+    val prominentButtons = chromeState.additionalFeatureButtons.filter { it.prominent }
+
+    // Combine sidebar features with prominent chrome buttons
+    val allSidebarFeatures =
+        remember(sidebarFeatures, prominentButtons) {
+            sidebarFeatures.withAdditionalFeatureButtons(prominentButtons)
+        }
+
+    // Map feature keys to routes for selection
+    fun getDestinationForFeature(feature: FeatureItem): DaybookNavKey? = when (feature.key) {
+        FeatureKeys.Home -> DaybookNavKey.Home
+        FeatureKeys.Capture -> DaybookNavKey.Capture
+        FeatureKeys.Drawer -> DaybookNavKey.Drawer
+        FeatureKeys.Settings -> DaybookNavKey.Settings
+        else -> null
+    }
+
+    Box(
+        modifier =
+        modifier.onSizeChanged {
+            widthPx = it.width
+        },
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            if (isWide) {
+                var selectedSidebarPane by remember { mutableIntStateOf(1) }
+                // Wide mode: navigation row + tabbed pane (tabs/progress)
+                PermanentDrawerSheet(
+                    modifier =
+                    Modifier
+                        .widthIn(min = 240.dp)
+                        .fillMaxSize(),
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(
+                                horizontal = 16.dp,
+                                vertical = 8.dp,
+                            ),
+                        ) {
+                            SidebarMenuButton(menuItems = menuFeatures)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceAround,
+                            ) {
+                                allSidebarFeatures.forEach { item ->
+                                    val featureDestination = getDestinationForFeature(item)
+                                    val isDocEditorRoute = currentDestination == DaybookNavKey.DocEditor
+                                    val isSelected =
+                                        when {
+                                            featureDestination == null -> false
+                                            featureDestination == currentDestination -> true
+                                            item.key == FeatureKeys.Drawer && isDocEditorRoute -> true
+                                            else -> false
+                                        }
+                                    NavigationRailItem(
+                                        selected = isSelected,
+                                        onClick = {
+                                            scope.launch {
+                                                if (item.enabled) {
+                                                    item.onActivate()
+                                                }
+                                            }
+                                        },
+                                        enabled = item.enabled,
+                                        icon = { item.icon() },
+                                        label = { item.labelContent?.invoke() ?: Text(item.label) },
+                                        alwaysShowLabel = true,
+                                    )
+                                }
+                            }
+                        }
+                        HorizontalDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                        ) {
+                            NavigationRail(
+                                modifier = Modifier.fillMaxHeight().padding(top = 8.dp),
+                            ) {
+                                NavigationRailItem(
+                                    selected = selectedSidebarPane == 2,
+                                    onClick = { selectedSidebarPane = 2 },
+                                    icon = {
+                                        Icon(
+                                            Icons.Default.FolderOpen,
+                                            contentDescription = "Drawer",
+                                        )
+                                    },
+                                    label = { Text("Drawer") },
+                                    alwaysShowLabel = true,
+                                )
+                                NavigationRailItem(
+                                    selected = selectedSidebarPane == 1,
+                                    onClick = { selectedSidebarPane = 1 },
+                                    icon = {
+                                        Icon(
+                                            Icons.Default.MoreVert,
+                                            contentDescription = "Progress",
+                                        )
+                                    },
+                                    label = { Text("Progress") },
+                                    alwaysShowLabel = true,
+                                )
+                            }
+                            VerticalDivider()
+                            Column(
+                                modifier = Modifier.weight(1f).fillMaxHeight(),
+                            ) {
+                                val paneTitle =
+                                    when (selectedSidebarPane) {
+                                        1 -> "Progress"
+                                        else -> "Drawer"
+                                    }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(
+                                        horizontal = 12.dp,
+                                        vertical = 8.dp,
+                                    ),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = paneTitle,
+                                        style = MaterialTheme.typography.titleSmall,
+                                    )
+                                }
+                                HorizontalDivider()
+                                when (selectedSidebarPane) {
+                                    1 -> {
+                                        ProvideScreenChromeSpec(
+                                            ScreenChromeSpec(
+                                                topBar = ScreenChromeSpec.TopBarSpec(title = "Progress"),
+                                            ),
+                                        ) {
+                                            ProgressList(
+                                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                                            )
+                                        }
+                                    }
+
+                                    else -> {
+                                        DocList(
+                                            drawerViewModel = drawerVm,
+                                            selectedDocId = selectedDrawerDocId,
+                                            onDocClick = { docId ->
+                                                docEditorStore.selectDoc(docId)
+                                                if (currentDestination != DaybookNavKey.DocEditor) {
+                                                    navState.navigate(DaybookNavKey.DocEditor)
+                                                }
+                                            },
+                                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                Box(
+                    modifier = Modifier.fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .align(Alignment.Start),
+                ) {
+                    SidebarMenuButton(menuItems = menuFeatures)
+                }
+                // Narrow mode: NavigationRail with features only
+                NavigationRail(
+                    modifier = Modifier.fillMaxHeight(),
+                ) {
+                    allSidebarFeatures.forEach { item ->
+                        val featureDestination = getDestinationForFeature(item)
+                        val isDocEditorRoute = currentDestination == DaybookNavKey.DocEditor
+                        val isSelected =
+                            when {
+                                featureDestination == null -> false
+                                featureDestination == currentDestination -> true
+                                item.key == FeatureKeys.Drawer && isDocEditorRoute -> true
+                                else -> false
+                            }
+
+                        NavigationRailItem(
+                            selected = isSelected,
+                            onClick = {
+                                if (item.enabled) {
+                                    scope.launch {
+                                        item.onActivate()
+                                    }
+                                }
+                            },
+                            enabled = item.enabled,
+                            icon = {
+                                item.icon()
+                            },
+                            label = null, // Rail mode: icon-only, no labels
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun RenderLayoutPane(
+    pane: WindowLayoutPane,
+    navState: DaybookNavigationState,
+    extraAction: (() -> Unit)? = null,
+    onShowCloneShare: () -> Unit = {},
+    menuFeatures: List<FeatureItem>,
+    modifier: Modifier = Modifier,
+    contentType: DaybookContentType,
+) {
+    when (val variant = pane.variant) {
+        is WindowLayoutPaneVariant.Sidebar -> {
+            // Render sidebar UI
+            SidebarContent(
+                navState = navState,
+                menuFeatures = menuFeatures,
+                modifier = modifier,
+            )
+        }
+
+        is WindowLayoutPaneVariant.Routes -> {
+            // Render routes
+            Routes(
+                onShowCloneShare = onShowCloneShare,
+                navState = navState,
+                modifier = modifier,
+                contentType = contentType,
+            )
+        }
+
+        is WindowLayoutPaneVariant.Region -> {
+            // Render nested region recursively
+            RenderLayoutRegion(
+                region = variant.v1,
+                navState = navState,
+                extraAction = extraAction,
+                onShowCloneShare = onShowCloneShare,
+                menuFeatures = menuFeatures,
+                modifier = modifier,
+                contentType = contentType,
+            )
+        }
+    }
+}
+
+@Composable
+fun RenderLayoutRegion(
+    region: WindowLayoutRegion,
+    navState: DaybookNavigationState,
+    extraAction: (() -> Unit)? = null,
+    onShowCloneShare: () -> Unit = {},
+    menuFeatures: List<FeatureItem>,
+    modifier: Modifier = Modifier,
+    contentType: DaybookContentType,
+) {
+    val orientation =
+        when (region.orientation) {
+            ConfigOrientation.HORIZONTAL -> Orientation.Horizontal
+            ConfigOrientation.VERTICAL -> Orientation.Vertical
+        }
+
+    val initialWeights =
+        remember(region) {
+            region.children.associate { child ->
+                child.deets.key as Any to
+                    ((child.size as? WindowLayoutRegionSize.Weight)?.v1 ?: 1.0f)
+            }
+        }
+
+    DockableRegion(
+        orientation = orientation,
+        initialWeights = initialWeights,
+        onWeightsChanged = { /* TODO: Implement persistence for nested regions */ },
+        modifier = modifier,
+    ) {
+        region.children.forEach { child ->
+            val childPane = child.deets
+            val childRegimes =
+                if (childPane.variant is WindowLayoutPaneVariant.Sidebar) {
+                    // Sidebar: discrete 0-RAIL_TRANSITION_DP for rail mode, continuous above
+                    listOf(
+                        PaneSizeRegime.Discrete(
+                            minDp = 0f,
+                            maxDp = SidebarLayoutConstants.DISCRETE_REGIME_MAX_DP,
+                            sizeDp = SidebarLayoutConstants.RAIL_TRANSITION_DP,
+                        ),
+                        PaneSizeRegime.Continuous(minDp = SidebarLayoutConstants.RAIL_TRANSITION_DP),
+                    )
+                } else {
+                    // Default: continuous
+                    listOf(PaneSizeRegime.Continuous())
+                }
+            pane(key = childPane.key, regimes = childRegimes) {
+                RenderLayoutPane(
+                    pane = child.deets,
+                    navState = navState,
+                    extraAction = extraAction,
+                    onShowCloneShare = onShowCloneShare,
+                    menuFeatures = menuFeatures,
+                    modifier = Modifier.fillMaxSize(),
+                    contentType = contentType,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Defines how a pane's size behaves during resizing.
+ */
+sealed class PaneSizeRegime {
+    /**
+     * Continuous sizing - pane can be resized to any size within the regime range.
+     */
+    data class Continuous(val minDp: Float = 0f, val maxDp: Float = Float.MAX_VALUE) : PaneSizeRegime()
+
+    /**
+     * Discrete sizing - pane has a fixed explicit size that must fall within the range.
+     * Size only changes when crossing to another regime.
+     */
+    data class Discrete(val minDp: Float, val maxDp: Float, val sizeDp: Float) : PaneSizeRegime() {
+        init {
+            require(sizeDp >= minDp && sizeDp <= maxDp) {
+                "Discrete sizeDp ($sizeDp) must be between minDp ($minDp) and maxDp ($maxDp)"
+            }
+        }
+    }
+}
+
+interface DockedRegionScope {
+    fun pane(
+        key: Any,
+        modifier: Modifier = Modifier,
+        regimes: List<PaneSizeRegime> = listOf(PaneSizeRegime.Continuous()),
+        dividerContent: (@Composable () -> Unit)? = null,
+        content: @Composable (() -> Unit),
+    )
+}
+
+interface GenericLayoutScope {
+    fun Modifier.weight(weight: Float, fill: Boolean = true): Modifier
+}
+
+@Composable
+fun DockableRegion(
+    modifier: Modifier,
+    orientation: Orientation,
+    initialWeights: Map<Any, Float> = emptyMap(),
+    onWeightsChanged: ((Map<Any, Float>) -> Unit)? = null,
+    block: DockedRegionScope.() -> Unit,
+) {
+    data class RegionPaneData(
+        val key: Any,
+        val modifier: Modifier,
+        val regimes: List<PaneSizeRegime>,
+        val dividerContent: (@Composable () -> Unit)?,
+        val content: @Composable (() -> Unit),
+    )
+
+    class DockedRegionScopeImpl : DockedRegionScope {
+        val items = mutableListOf<RegionPaneData>()
+
+        override fun pane(
+            key: Any,
+            modifier: Modifier,
+            regimes: List<PaneSizeRegime>,
+            dividerContent: (@Composable () -> Unit)?,
+            content: @Composable (() -> Unit),
+        ) {
+            items.add(RegionPaneData(key, modifier, regimes, dividerContent, content))
+        }
+    }
+
+    @Stable
+    class State(
+        private val density: androidx.compose.ui.unit.Density,
+        private val paneRegimes: Map<Any, List<PaneSizeRegime>>,
+        initialWeights: Map<Any, Float>,
+        private val onWeightsChanged: ((Map<Any, Float>) -> Unit)? = null,
+    ) {
+        // We map Keys to Weights.
+        // This ensures if you reorder items, their size travels with them.
+        private val weightMap =
+            mutableStateMapOf<Any, Float>().apply {
+                putAll(initialWeights)
+            }
+
+        // Track size in dp for regime detection
+        private val sizeDpMap = mutableStateMapOf<Any, Float>()
+
+        // Track virtual drag offset (cumulative delta during drag, as if continuous)
+        private var dragOffsetPx: Float = 0f
+        private var dragStartSizeDpA: Float? = null
+        private var dragStartSizeDpB: Float? = null
+        private var dragStartKeyA: Any? = null
+        private var dragStartKeyB: Any? = null
+        private var lastTotalSizePx: Int = 0
+
+        // Accessor to get weight for a specific key
+        fun getWeight(key: Any): Float = weightMap[key] ?: 1f
+
+        private fun sizeDpToWeight(sizeDp: Float, totalSizeDp: Float, totalWeight: Float): Float =
+            if (totalSizeDp <= 0f) 0f else (sizeDp / totalSizeDp) * totalWeight
+
+        private fun resolveDiscreteTargetSizeDp(regime: PaneSizeRegime.Discrete, virtualSizeDp: Float): Float = when {
+            virtualSizeDp < regime.minDp -> regime.sizeDp
+            virtualSizeDp <= regime.maxDp -> regime.sizeDp
+            else -> virtualSizeDp
+        }
+
+        private fun rebalanceDiscreteWeights(keys: List<Any>, totalSizePx: Int) {
+            if (totalSizePx <= 0 || keys.isEmpty()) return
+
+            val totalSizeDp = with(density) { totalSizePx.toDp().value }
+            if (totalSizeDp <= 0f) return
+
+            val totalWeight = keys.sumOf { getWeight(it).toDouble() }.toFloat()
+            if (totalWeight <= 0f) return
+
+            val currentWeights = keys.associateWith { getWeight(it) }
+            val discreteTargets = linkedMapOf<Any, Pair<PaneSizeRegime.Discrete, Float>>()
+
+            keys.forEach { key ->
+                val currentSizeDp = getSizeDp(key, totalSizePx, totalWeight)
+                val regime = getCurrentRegime(key, currentSizeDp)
+                if (regime is PaneSizeRegime.Discrete) {
+                    discreteTargets[key] =
+                        regime to sizeDpToWeight(regime.sizeDp, totalSizeDp, totalWeight)
+                }
+            }
+
+            if (discreteTargets.isEmpty()) return
+
+            val discreteTargetSum =
+                discreteTargets.values.sumOf { it.second.toDouble() }.toFloat()
+            val fixedScale =
+                if (discreteTargetSum > totalWeight && discreteTargetSum > 0f) {
+                    totalWeight / discreteTargetSum
+                } else {
+                    1f
+                }
+
+            val appliedDiscreteWeights =
+                discreteTargets.mapValues { (_, value) -> value.second * fixedScale }
+            val appliedDiscreteSum = appliedDiscreteWeights.values.sum()
+
+            val remainingKeys = keys.filterNot { appliedDiscreteWeights.containsKey(it) }
+            val remainingBudget = (totalWeight - appliedDiscreteSum).coerceAtLeast(0f)
+            val remainingCurrentSum =
+                remainingKeys.sumOf { currentWeights.getValue(it).toDouble() }.toFloat()
+
+            val redistributedRemainingWeights =
+                when {
+                    remainingKeys.isEmpty() -> emptyMap()
+
+                    remainingCurrentSum > 0f -> {
+                        remainingKeys.associateWith { key ->
+                            (currentWeights.getValue(key) / remainingCurrentSum) * remainingBudget
+                        }
+                    }
+
+                    else -> {
+                        val fallbackWeight = remainingBudget / remainingKeys.size.toFloat()
+                        remainingKeys.associateWith { fallbackWeight }
+                    }
+                }
+
+            (
+                appliedDiscreteWeights.mapValues {
+                    it.value
+                } + redistributedRemainingWeights
+                ).forEach { (key, weight) ->
+                weightMap[key] = weight
+            }
+
+            val newTotalWeight = getTotalWeight()
+            keys.forEach { key ->
+                sizeDpMap[key] = getSizeDp(key, totalSizePx, newTotalWeight)
+            }
+        }
+
+        // Get current size in dp for a key
+        private fun getSizeDp(key: Any, totalSizePx: Int, totalWeight: Float): Float {
+            if (totalSizePx == 0 || totalWeight == 0f) return sizeDpMap[key] ?: 0f
+            val weight = getWeight(key)
+            val sizePx = (weight / totalWeight) * totalSizePx
+            return with(density) { sizePx.toDp().value }
+        }
+
+        // Determine which regime a pane is currently in based on its size
+        private fun getCurrentRegime(key: Any, sizeDp: Float): PaneSizeRegime? {
+            val regimes = paneRegimes[key] ?: return null
+            val firstRegime = regimes.firstOrNull()
+            if (sizeDp < 0f && firstRegime is PaneSizeRegime.Discrete) {
+                return firstRegime
+            }
+            return regimes.find { regime ->
+                when (regime) {
+                    is PaneSizeRegime.Discrete -> sizeDp >= regime.minDp && sizeDp <= regime.maxDp
+                    is PaneSizeRegime.Continuous -> sizeDp >= regime.minDp && sizeDp <= regime.maxDp
+                }
+            }
+        }
+
+        // The Logic: Syncs the incoming N items with our storage
+        fun reconcile(keys: List<Any>, totalSizePx: Int) {
+            lastTotalSizePx = totalSizePx
+            val totalWeight = keys.sumOf { getWeight(it).toDouble() }.toFloat()
+
+            keys.forEach { key ->
+                if (!weightMap.containsKey(key)) {
+                    weightMap[key] = 1.0f // Default new items to 1.0
+                }
+                // Update size in dp
+                sizeDpMap[key] = getSizeDp(key, totalSizePx, totalWeight)
+            }
+
+            val currentKeySet = keys.toSet()
+            val sizeIterator = sizeDpMap.iterator()
+            while (sizeIterator.hasNext()) {
+                if (!currentKeySet.contains(sizeIterator.next().key)) {
+                    sizeIterator.remove()
+                }
+            }
+
+            val weightIterator = weightMap.iterator()
+            while (weightIterator.hasNext()) {
+                if (!currentKeySet.contains(weightIterator.next().key)) {
+                    weightIterator.remove()
+                }
+            }
+
+            rebalanceDiscreteWeights(keys, totalSizePx)
+        }
+
+        // Start drag - track initial state of both panes
+        fun startDrag(keyA: Any, keyB: Any, totalSizePx: Int) {
+            val totalWeight = getTotalWeight()
+            dragStartKeyA = keyA
+            dragStartKeyB = keyB
+            dragStartSizeDpA = getSizeDp(keyA, totalSizePx, totalWeight)
+            dragStartSizeDpB = getSizeDp(keyB, totalSizePx, totalWeight)
+            dragOffsetPx = 0f
+        }
+
+        // End drag - resolve final handle position based on regimes
+        // Uses the virtual handle position to determine final sizes
+        fun endDrag(keys: List<Any>, indexA: Int, totalSizePx: Int) {
+            lastTotalSizePx = totalSizePx
+            val keyA = keys[indexA]
+            val keyB = keys[indexA + 1]
+
+            // Calculate final virtual sizes
+            val dragStartDpA = dragStartSizeDpA ?: getSizeDp(keyA, totalSizePx, getTotalWeight())
+            val dragStartDpB = dragStartSizeDpB ?: getSizeDp(keyB, totalSizePx, getTotalWeight())
+            val deltaDp = with(density) { dragOffsetPx.toDp().value }
+            val virtualSizeDpA = dragStartDpA + deltaDp
+            val virtualSizeDpB = dragStartDpB - deltaDp
+
+            // Determine which regimes these virtual sizes fall into
+            val regimeA = getCurrentRegime(keyA, virtualSizeDpA)
+            val regimeB = getCurrentRegime(keyB, virtualSizeDpB)
+
+            val totalWeight = getTotalWeight()
+            val totalSizeDp = with(density) { totalSizePx.toDp().value }
+            val weightA = getWeight(keyA)
+            val weightB = getWeight(keyB)
+            val totalCurrentWeight = weightA + weightB
+
+            // Resolve final sizes based on regimes
+            when {
+                // Both discrete: larger one wins
+                regimeA is PaneSizeRegime.Discrete && regimeB is PaneSizeRegime.Discrete -> {
+                    val sizeA = regimeA.sizeDp
+                    val sizeB = regimeB.sizeDp
+                    val inRangeA =
+                        virtualSizeDpA >= regimeA.minDp && virtualSizeDpA <= regimeA.maxDp
+                    val inRangeB =
+                        virtualSizeDpB >= regimeB.minDp && virtualSizeDpB <= regimeB.maxDp
+
+                    if (inRangeA && inRangeB) {
+                        // Both in discrete ranges - larger one wins
+                        if (sizeA >= sizeB) {
+                            val targetWeightA = sizeDpToWeight(sizeA, totalSizeDp, totalWeight)
+                            val targetWeightB = sizeDpToWeight(sizeB, totalSizeDp, totalWeight)
+                            val newWeightA = targetWeightA.coerceIn(
+                                SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                                totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            )
+                            val newWeightB = totalCurrentWeight - newWeightA
+                            weightMap[keyA] = newWeightA
+                            weightMap[keyB] = newWeightB
+                        } else {
+                            val targetWeightA = sizeDpToWeight(sizeA, totalSizeDp, totalWeight)
+                            val targetWeightB = sizeDpToWeight(sizeB, totalSizeDp, totalWeight)
+                            val newWeightB = targetWeightB.coerceIn(
+                                SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                                totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            )
+                            val newWeightA = totalCurrentWeight - newWeightB
+                            weightMap[keyA] = newWeightA
+                            weightMap[keyB] = newWeightB
+                        }
+                    } else {
+                        // One or both outside discrete range - use virtual sizes
+                        val targetSizeDpA = resolveDiscreteTargetSizeDp(regimeA, virtualSizeDpA)
+                        val targetWeightA = sizeDpToWeight(targetSizeDpA, totalSizeDp, totalWeight)
+                        val newWeightA = targetWeightA.coerceIn(
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                        )
+                        val newWeightB = totalCurrentWeight - newWeightA
+                        weightMap[keyA] = newWeightA
+                        weightMap[keyB] = newWeightB
+                    }
+                }
+
+                // A is discrete: snap to A's size if in range
+                regimeA is PaneSizeRegime.Discrete -> {
+                    val inRangeA =
+                        virtualSizeDpA >= regimeA.minDp && virtualSizeDpA <= regimeA.maxDp
+                    if (inRangeA) {
+                        val targetWeightA = sizeDpToWeight(regimeA.sizeDp, totalSizeDp, totalWeight)
+                        val targetWeightB = sizeDpToWeight(virtualSizeDpB, totalSizeDp, totalWeight)
+                        val newWeightA = targetWeightA.coerceIn(
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                        )
+                        val newWeightB = totalCurrentWeight - newWeightA
+                        weightMap[keyA] = newWeightA
+                        weightMap[keyB] = newWeightB
+                    } else {
+                        // Outside discrete range - use virtual size
+                        val targetSizeDpA = resolveDiscreteTargetSizeDp(regimeA, virtualSizeDpA)
+                        val targetWeightA = sizeDpToWeight(targetSizeDpA, totalSizeDp, totalWeight)
+                        val newWeightA = targetWeightA.coerceIn(
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                        )
+                        val newWeightB = totalCurrentWeight - newWeightA
+                        weightMap[keyA] = newWeightA
+                        weightMap[keyB] = newWeightB
+                    }
+                }
+
+                // B is discrete: snap to B's size if in range
+                regimeB is PaneSizeRegime.Discrete -> {
+                    val inRangeB =
+                        virtualSizeDpB >= regimeB.minDp && virtualSizeDpB <= regimeB.maxDp
+                    if (inRangeB) {
+                        val targetWeightA = sizeDpToWeight(virtualSizeDpA, totalSizeDp, totalWeight)
+                        val targetWeightB = sizeDpToWeight(regimeB.sizeDp, totalSizeDp, totalWeight)
+                        val newWeightB = targetWeightB.coerceIn(
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                        )
+                        val newWeightA = totalCurrentWeight - newWeightB
+                        weightMap[keyA] = newWeightA
+                        weightMap[keyB] = newWeightB
+                    } else {
+                        // Outside discrete range - use virtual size
+                        val targetSizeDpB = resolveDiscreteTargetSizeDp(regimeB, virtualSizeDpB)
+                        val targetWeightB = sizeDpToWeight(targetSizeDpB, totalSizeDp, totalWeight)
+                        val newWeightB = targetWeightB.coerceIn(
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                        )
+                        val newWeightA = totalCurrentWeight - newWeightB
+                        weightMap[keyA] = newWeightA
+                        weightMap[keyB] = newWeightB
+                    }
+                }
+
+                // Both continuous: use virtual sizes
+                else -> {
+                    val targetWeightA = sizeDpToWeight(virtualSizeDpA, totalSizeDp, totalWeight)
+                    val newWeightA = targetWeightA.coerceIn(
+                        SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                        totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                    )
+                    val newWeightB = totalCurrentWeight - newWeightA
+                    weightMap[keyA] = newWeightA
+                    weightMap[keyB] = newWeightB
+                }
+            }
+
+            onWeightsChanged?.invoke(weightMap.toMap())
+
+            // Reset drag state
+            dragStartSizeDpA = null
+            dragStartSizeDpB = null
+            dragStartKeyA = null
+            dragStartKeyB = null
+            dragOffsetPx = 0f
+        }
+
+        fun syncWeights(newWeights: Map<Any, Float>) {
+            if (dragStartKeyA == null) {
+                newWeights.forEach { (k, v) ->
+                    if (weightMap[k] != v) {
+                        weightMap[k] = v
+                    }
+                }
+                if (lastTotalSizePx > 0) {
+                    rebalanceDiscreteWeights(paneRegimes.keys.toList(), lastTotalSizePx)
+                }
+            }
+        }
+
+        private fun getTotalWeight(): Float = weightMap.values.sum()
+
+        // Handle dragging: Track virtual handle position and apply regime constraints
+        // During drag, we track a virtual position as if both are continuous
+        // Then apply discrete regime constraints if the virtual position falls within discrete ranges
+        fun resize(keys: List<Any>, indexA: Int, delta: Float, totalSizePx: Int): Boolean {
+            if (totalSizePx == 0) return false
+            lastTotalSizePx = totalSizePx
+
+            val keyA = keys[indexA]
+            val keyB = keys[indexA + 1]
+
+            // Accumulate drag offset (virtual handle position)
+            dragOffsetPx += delta
+
+            // Calculate virtual sizes as if both are continuous
+            val dragStartDpA = dragStartSizeDpA ?: getSizeDp(keyA, totalSizePx, getTotalWeight())
+            val dragStartDpB = dragStartSizeDpB ?: getSizeDp(keyB, totalSizePx, getTotalWeight())
+            val deltaDp = with(density) { dragOffsetPx.toDp().value }
+            val virtualSizeDpA = dragStartDpA + deltaDp
+            val virtualSizeDpB = dragStartDpB - deltaDp
+
+            // Determine which regimes these virtual sizes would fall into
+            val regimeA = getCurrentRegime(keyA, virtualSizeDpA)
+            val regimeB = getCurrentRegime(keyB, virtualSizeDpB)
+
+            // Calculate target sizes based on regimes
+            val targetSizeDpA =
+                when (regimeA) {
+                    is PaneSizeRegime.Discrete -> {
+                        // If virtual position is within discrete range, use discrete size
+                        if (virtualSizeDpA >= regimeA.minDp && virtualSizeDpA <= regimeA.maxDp) {
+                            regimeA.sizeDp
+                        } else {
+                            // Outside discrete range, clamp below the rail and allow expansion above it
+                            resolveDiscreteTargetSizeDp(regimeA, virtualSizeDpA)
+                        }
+                    }
+
+                    is PaneSizeRegime.Continuous -> {
+                        virtualSizeDpA
+                    }
+
+                    null -> {
+                        virtualSizeDpA
+                    }
+                }
+
+            val targetSizeDpB =
+                when (regimeB) {
+                    is PaneSizeRegime.Discrete -> {
+                        // If virtual position is within discrete range, use discrete size
+                        if (virtualSizeDpB >= regimeB.minDp && virtualSizeDpB <= regimeB.maxDp) {
+                            regimeB.sizeDp
+                        } else {
+                            // Outside discrete range, clamp below the rail and allow expansion above it
+                            resolveDiscreteTargetSizeDp(regimeB, virtualSizeDpB)
+                        }
+                    }
+
+                    is PaneSizeRegime.Continuous -> {
+                        virtualSizeDpB
+                    }
+
+                    null -> {
+                        virtualSizeDpB
+                    }
+                }
+
+            // Handle both discrete case: larger one wins
+            if (regimeA is PaneSizeRegime.Discrete && regimeB is PaneSizeRegime.Discrete) {
+                val sizeA = regimeA.sizeDp
+                val sizeB = regimeB.sizeDp
+                val inRangeA = virtualSizeDpA >= regimeA.minDp && virtualSizeDpA <= regimeA.maxDp
+                val inRangeB = virtualSizeDpB >= regimeB.minDp && virtualSizeDpB <= regimeB.maxDp
+
+                if (inRangeA && inRangeB) {
+                    // Both in discrete ranges - larger one wins
+                    if (sizeA >= sizeB) {
+                        // A wins
+                        val totalWeight = getTotalWeight()
+                        val totalSizeDp = with(density) { totalSizePx.toDp().value }
+                        val targetWeightA = sizeDpToWeight(sizeA, totalSizeDp, totalWeight)
+                        val targetWeightB = sizeDpToWeight(sizeB, totalSizeDp, totalWeight)
+                        val weightA = getWeight(keyA)
+                        val weightB = getWeight(keyB)
+                        val totalCurrentWeight = weightA + weightB
+                        val newWeightA = targetWeightA.coerceIn(
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                        )
+                        val newWeightB = totalCurrentWeight - newWeightA
+                        weightMap[keyA] = newWeightA
+                        weightMap[keyB] = newWeightB
+                        return true
+                    } else {
+                        // B wins
+                        val totalWeight = getTotalWeight()
+                        val totalSizeDp = with(density) { totalSizePx.toDp().value }
+                        val targetWeightA = sizeDpToWeight(sizeA, totalSizeDp, totalWeight)
+                        val targetWeightB = sizeDpToWeight(sizeB, totalSizeDp, totalWeight)
+                        val weightA = getWeight(keyA)
+                        val weightB = getWeight(keyB)
+                        val totalCurrentWeight = weightA + weightB
+                        val newWeightB = targetWeightB.coerceIn(
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                        )
+                        val newWeightA = totalCurrentWeight - newWeightB
+                        weightMap[keyA] = newWeightA
+                        weightMap[keyB] = newWeightB
+                        return true
+                    }
+                }
+            }
+
+            // Convert target sizes to weights and apply
+            val totalWeight = getTotalWeight()
+            val totalSizeDp = with(density) { totalSizePx.toDp().value }
+            val targetWeightA = sizeDpToWeight(targetSizeDpA, totalSizeDp, totalWeight)
+            val targetWeightB = sizeDpToWeight(targetSizeDpB, totalSizeDp, totalWeight)
+
+            // Ensure weights don't invert
+            val weightA = getWeight(keyA)
+            val weightB = getWeight(keyB)
+            val totalCurrentWeight = weightA + weightB
+
+            val newWeightA =
+                targetWeightA.coerceIn(
+                    SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                    totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                )
+            val newWeightB = totalCurrentWeight - newWeightA
+
+            // Update state
+            weightMap[keyA] = newWeightA
+            weightMap[keyB] = newWeightB
+
+            // Update size in dp
+            val newTotalWeight = getTotalWeight()
+            sizeDpMap[keyA] = getSizeDp(keyA, totalSizePx, newTotalWeight)
+            sizeDpMap[keyB] = getSizeDp(keyB, totalSizePx, newTotalWeight)
+
+            return true
+        }
+    }
+
+    val density = LocalDensity.current
+
+    val scope = remember { DockedRegionScopeImpl() }
+    scope.items.clear()
+    block(scope)
+
+    val paneRegimes =
+        remember(scope.items) {
+            scope.items.associate { it.key to it.regimes }
+        }
+    val state =
+        remember(density, paneRegimes) {
+            State(density, paneRegimes, initialWeights, onWeightsChanged)
+        }
+
+    val currentKeys = scope.items.map { it.key }
+    var totalSizePx by remember { mutableIntStateOf(0) }
+
+    // Reconcile when keys or total size changes
+    androidx.compose.runtime.LaunchedEffect(currentKeys, totalSizePx) {
+        state.reconcile(currentKeys, totalSizePx)
+    }
+
+    // Sync weights from DB when they change
+    androidx.compose.runtime.LaunchedEffect(initialWeights) {
+        state.syncWeights(initialWeights)
+    }
+
+    val draw: @Composable GenericLayoutScope.() -> Unit = @Composable {
+        scope.items.forEachIndexed { index, item ->
+            Box(
+                modifier = item.modifier.weight(state.getWeight(item.key)),
+            ) {
+                item.content()
+            }
+            // return@forEachIndexed
+            if (index < scope.items.size - 1) {
+                var dragStarted by remember { mutableStateOf(false) }
+                DockableDivider(
+                    orientation = orientation,
+                    centerContentVisibleOnlyOnHover = true,
+                    onDragStart = {
+                        dragStarted = true
+                        state.startDrag(
+                            currentKeys[index],
+                            currentKeys[index + 1],
+                            totalSizePx,
+                        )
+                    },
+                    onDrag = { dragAmount ->
+                        state.resize(currentKeys, index, dragAmount, totalSizePx)
+                    },
+                    onDragEnd = {
+                        if (dragStarted) {
+                            state.endDrag(currentKeys, index, totalSizePx)
+                            dragStarted = false
+                        }
+                    },
+                    onDragCancel = {
+                        if (dragStarted) {
+                            state.endDrag(currentKeys, index, totalSizePx)
+                            dragStarted = false
+                        }
+                    },
+                    centerContent = scope.items[index].dividerContent,
+                )
+            }
+        }
+    }
+
+    when (orientation) {
+        Orientation.Horizontal -> {
+            class RowScopeAdapter(private val rowScope: RowScope) : GenericLayoutScope {
+                override fun Modifier.weight(weight: Float, fill: Boolean): Modifier =
+                    with(rowScope) { this@weight.weight(weight, fill) }
+            }
+            Row(
+                modifier =
+                modifier.onSizeChanged {
+                    totalSizePx = it.width
+                },
+            ) {
+                val adapter = remember(this) { RowScopeAdapter(this) }
+                draw(adapter)
+            }
+        }
+
+        Orientation.Vertical -> {
+            class ColumnScopeAdapter(private val colScope: ColumnScope) : GenericLayoutScope {
+                override fun Modifier.weight(weight: Float, fill: Boolean): Modifier =
+                    with(colScope) { this@weight.weight(weight, fill) }
+            }
+            Column(
+                modifier =
+                modifier.onSizeChanged {
+                    totalSizePx = it.height
+                },
+            ) {
+                val adapter = remember(this) { ColumnScopeAdapter(this) }
+                draw(adapter)
+            }
+        }
+    }
+}

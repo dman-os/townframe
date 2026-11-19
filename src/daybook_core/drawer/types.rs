@@ -1,0 +1,172 @@
+use crate::interlude::*;
+
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::Doc;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct UpdateDocArgsV2 {
+    pub branch_path: daybook_types::doc::BranchPathBuf,
+    pub heads: Option<ChangeHashSet>,
+    pub patch: daybook_types::doc::DocPatch,
+}
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+pub enum DrawerError {
+    /// patch for unrecognized document: {id}
+    DocNotFound { id: DocId },
+    /// headless patch for unrecognized branch: {name}
+    BranchNotFound { name: String },
+    /// branch already exists: {name}
+    BranchAlreadyExists { name: String },
+    /// patch has an invalid key: {inner}
+    InvalidKey {
+        #[from]
+        inner: daybook_types::doc::FacetTagParseError,
+    },
+    /// unexpected error: {inner}
+    Other {
+        #[from]
+        inner: eyre::Report,
+    },
+}
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+/// error applying some patches at given indices: {map:?}
+pub struct UpdateDocBatchErrV2 {
+    pub map: HashMap<u64, DrawerError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct StoredBranchRef {
+    pub branch_doc_id: DocumentId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct BranchSnapshot {
+    pub branch_doc_id: DocumentId,
+    pub branch_heads: ChangeHashSet,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct BranchDeleteTombstone {
+    pub vtag: VersionTag,
+    pub branch_doc_id: DocumentId,
+    pub branch_heads: ChangeHashSet,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DocDeleteTombstone {
+    pub vtag: VersionTag,
+    pub branches: HashMap<String, BranchSnapshot>,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DocEntry {
+    pub branches: HashMap<String, StoredBranchRef>,
+    pub branches_deleted: HashMap<String, Vec<BranchDeleteTombstone>>,
+    // WARN: field ordering is imporant here, we want reconciliation
+    // to create changes on the map before the atomic map so that changes
+    // to the atmoic version increment will be always observed after the
+    // other fields
+    pub vtag: VersionTag,
+    pub previous_version_heads: Option<ChangeHashSet>,
+}
+
+#[derive(Debug, Clone, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DocNBranches {
+    pub doc_id: DocId,
+    pub branches: HashMap<String, ChangeHashSet>,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DocBundle {
+    pub doc: Doc,
+    pub entry: DocEntry,
+    pub branch_heads: ChangeHashSet,
+    pub facet_heads_by_key: HashMap<FacetKey, ChangeHashSet>,
+}
+
+impl DocNBranches {
+    pub fn main_branch_path(&self) -> Option<daybook_types::doc::BranchPathBuf> {
+        if self.branches.contains_key("main") {
+            Some(daybook_types::doc::BranchPathBuf::from("main"))
+        } else {
+            self.branches
+                .keys()
+                .next()
+                .map(|key| daybook_types::doc::BranchPathBuf::from(key.as_str()))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DocEntryDiff {
+    pub changed_facet_keys: Vec<FacetKey>,
+    pub added_facet_keys: Vec<FacetKey>,
+    pub removed_facet_keys: Vec<FacetKey>,
+    pub moved_branch_names: Vec<String>,
+}
+
+impl DocEntryDiff {
+    pub fn new(
+        old_entry: &DocEntry,
+        new_entry: &DocEntry,
+        mut changed_facet_keys: Vec<FacetKey>,
+    ) -> Self {
+        changed_facet_keys.sort();
+        changed_facet_keys.dedup();
+        let added_facet_keys = Vec::new();
+        let removed_facet_keys = Vec::new();
+        let mut moved_branch_names = Vec::new();
+        let all_branch_names: HashSet<String> = old_entry
+            .branches
+            .keys()
+            .chain(new_entry.branches.keys())
+            .cloned()
+            .collect();
+        for branch_name in all_branch_names {
+            let old_heads = old_entry.branches.get(&branch_name);
+            let new_heads = new_entry.branches.get(&branch_name);
+            if old_heads != new_heads {
+                moved_branch_names.push(branch_name);
+            }
+        }
+        moved_branch_names.sort();
+
+        Self {
+            changed_facet_keys,
+            added_facet_keys,
+            removed_facet_keys,
+            moved_branch_names,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum DrawerEvent {
+    DocAdded {
+        id: DocId,
+        entry: DocNBranches,
+        drawer_heads: ChangeHashSet,
+        origin: crate::event_origin::EventOrigin,
+    },
+    DocDeleted {
+        id: DocId,
+        drawer_heads: ChangeHashSet,
+        deleted_facet_keys: Vec<FacetKey>,
+        entry: Option<DocEntry>,
+        origin: crate::event_origin::EventOrigin,
+    },
+}

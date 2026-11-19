@@ -1,0 +1,5 @@
+[overrides]
+"townframe:api-utils" = { path = "../wasm_utils_rs/wit" }
+"townframe:sqlite" = { path = "../wash_plugin_sqlite/wit" }
+"townframe:mltools" = { path = "../mltools/wit" }
+"townframe:wflow" = { path = "../wash_plugin_wflow/wit" }

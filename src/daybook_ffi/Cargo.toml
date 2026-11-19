@@ -1,0 +1,80 @@
+[package]
+name = "daybook_ffi"
+version.workspace = true
+edition.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["am_utils_rs"]
+
+[lints]
+workspace = true
+
+[[bin]]
+# This can be whatever name makes sense for your project, but the rest of this tutorial assumes uniffi-bindgen.
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+name = "daybook_ffi"
+path = "lib.rs"
+
+[features]
+default = ["nokhwa"]
+nokhwa = ["dep:nokhwa"]
+
+[dependencies]
+#
+# internal
+utils_rs = { workspace = true, features = ["hash"] }
+am_utils_rs = { workspace = true }
+daybook_core = { workspace = true, features = ["uniffi"] }
+daybook_types = { workspace = true, features = ["uniffi"] }
+big_sync_core = { workspace = true, features = ["uniffi"] }
+mltools = { workspace = true, features = ["hf_hub"] }
+
+#
+# encoding
+serde_json.workspace = true
+
+#
+# error
+thiserror.workspace = true
+
+#
+# log
+tracing.workspace = true
+
+#
+# ds
+surelock.workspace = true
+
+#
+# async
+tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs", "tracing"] }
+tokio-util.workspace = true
+regex = "1"
+
+#
+# ffi
+uniffi = { workspace = true, features = ["cli"] }
+
+#
+# sync
+autosurgeon = { workspace = true, features = ["uuid"] }
+
+#
+# macros
+pastey.workspace = true
+
+#
+# misc
+rqrr = "0.10.1"
+image = { version = "0.25", default-features = true, features = ["jpeg", "png"] }
+qrcode = { workspace = true, features = ["image"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+nokhwa = { version = "0.10.10", default-features = false, features = ["input-native", "output-threaded", "decoding"], optional = true }
+
+[build-dependencies]
+uniffi = { workspace = true, features = [ "build" ] }

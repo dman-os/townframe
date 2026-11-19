@@ -1,0 +1,1478 @@
+use crate::interlude::*;
+
+use crate::app::*;
+use crate::sync::PeerId;
+
+use big_repo::BigDocHandle;
+use big_repo::SharedPartStore;
+use daybook_types::doc::UserPath;
+use daybook_types::doc::UserPathBuf;
+use fs4::fs_std::FileExt;
+
+const REPO_MARKER_FILE: &str = "db.repo.txt";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoLayout {
+    pub repo_root: PathBuf,
+    pub big_repo_root: PathBuf,
+    pub sqlite_path: PathBuf,
+    pub blobs_root: PathBuf,
+    pub marker_path: PathBuf,
+    pub lock_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RepoOpenOptions {
+    pub sync_max_task_backoff: Option<std::time::Duration>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct RepoLockInfo {
+    pid: u32,
+    created_at_unix_secs: i64,
+}
+
+pub struct RepoLockGuard {
+    _file: std::fs::File,
+    _path: PathBuf,
+}
+
+impl RepoLockGuard {
+    #[tracing::instrument(level = "debug", skip_all, err(Debug), fields(worker = "repo-lock"))]
+    pub async fn acquire(lock_path: PathBuf) -> Res<Self> {
+        if let Some(parent) = lock_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::task::spawn_blocking(move || {
+            let mut _file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .wrap_err_with(|| {
+                    format!("error opening repo lock file {}", lock_path.display())
+                })?;
+
+            // NOTE: lock is released when file is dropped
+            _file.try_lock_exclusive().map_err(|err| {
+                let holder = std::fs::read_to_string(&lock_path)
+                    .ok()
+                    .and_then(|content| serde_json::from_str::<RepoLockInfo>(&content).ok());
+                if let Some(holder) = holder {
+                    eyre::eyre!(
+                        "repo is already in use by pid={} (lock file: {})",
+                        holder.pid,
+                        lock_path.display()
+                    )
+                } else {
+                    eyre::eyre!(
+                        "repo is already in use (lock file: {}, cause: {})",
+                        lock_path.display(),
+                        err
+                    )
+                }
+            })?;
+
+            let lock_info = RepoLockInfo {
+                pid: std::process::id(),
+                created_at_unix_secs: jiff::Timestamp::now().as_second(),
+            };
+            _file.set_len(0)?;
+            let json = serde_json::to_string(&lock_info)?;
+            std::io::Write::write_all(&mut _file, json.as_bytes())?;
+            std::io::Write::flush(&mut _file)?;
+            Ok(Self {
+                _file,
+                _path: lock_path.to_path_buf(),
+            })
+        })
+        .await
+        .expect(ERROR_TOKIO)
+    }
+}
+
+pub struct RepoCtx {
+    pub layout: RepoLayout,
+    pub lock_guard: RepoLockGuard,
+    pub options: RepoOpenOptions,
+
+    pub sql: Database,
+    pub sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
+    pub sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
+    sqlite_local_state_stop: std::sync::Mutex<Option<crate::repos::RepoStopToken>>,
+    pub part_store: SharedPartStore,
+    /// Standalone, policy-free store backing the blob partitions.
+    pub blob_part_store: SharedPartStore,
+    /// Local-only store backing the blob presence plane (the `/blobs`
+    /// partition).
+    pub blob_presence_store: SharedPartStore,
+    /// Local-only store backing the automerge frontier (heads) partitions.
+    pub frontier_part_store: SharedPartStore,
+    /// Local-only store backing consumer-derived objects that are not documents.
+    pub derived_part_store: SharedPartStore,
+
+    pub big_repo: SharedBigRepo,
+    big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
+
+    pub doc_app: BigDocHandle,
+    pub doc_drawer: BigDocHandle,
+    /// ADR 007 §2: the repo config doc (third core doc).
+    pub doc_config: BigDocHandle,
+    pub core_inventory_doc_id: DocumentId,
+    pub docs_inventory_doc_id: DocumentId,
+    /// The encrypted-representation inventory: ciphertext (`C`) pins only.
+    /// Every repository has one (ADR 003 §13): the init dance creates it, and
+    /// a clone learns it from the source's config doc before standing up.
+    pub encryption_inventory_doc_id: DocumentId,
+
+    pub local_peer_key: PeerId,
+    pub local_actor_id: automerge::ActorId,
+    pub local_user_path: UserPathBuf,
+    pub local_device_name: String,
+    pub repo_id: String,
+    pub checkout_id: String,
+    pub repo_name: String,
+
+    pub iroh_public_key: String,
+    pub iroh_secret_key: iroh::SecretKey,
+    pub secret_store: secrets_rs::SecretStore,
+}
+
+pub(crate) struct RepoCtxParts {
+    pub layout: RepoLayout,
+    pub lock_guard: RepoLockGuard,
+    pub options: RepoOpenOptions,
+    pub sql: Database,
+    pub sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
+    pub sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
+    pub sqlite_local_state_stop: std::sync::Mutex<Option<crate::repos::RepoStopToken>>,
+    pub part_store: SharedPartStore,
+    /// Standalone, policy-free store backing the blob partitions.
+    pub blob_part_store: SharedPartStore,
+    /// Local-only store backing the blob presence plane (the `/blobs`
+    /// partition).
+    pub blob_presence_store: SharedPartStore,
+    /// Local-only store backing the automerge frontier (heads) partitions.
+    pub frontier_part_store: SharedPartStore,
+    /// Local-only store backing consumer-derived objects that are not documents.
+    pub derived_part_store: SharedPartStore,
+    pub big_repo: SharedBigRepo,
+    pub big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
+    pub local_peer_key: PeerId,
+    pub local_actor_id: automerge::ActorId,
+    pub local_user_path: UserPathBuf,
+    pub local_device_name: String,
+    pub repo_id: String,
+    pub checkout_id: String,
+    pub repo_name: String,
+    pub iroh_public_key: String,
+    pub iroh_secret_key: iroh::SecretKey,
+    pub secret_store: secrets_rs::SecretStore,
+}
+
+/// SQLite scope key of the standalone part store backing the blob partitions.
+///
+/// A part's identity is the `(scope, part_id)` pair, so anything that addresses
+/// blob-part rows directly needs this key: `Database` is shared by every scope in the
+/// database and carries none of them.
+pub(crate) const BLOB_SCOPE_KEY: &str = "daybook-blobs";
+
+/// Local-only scope for the blob presence plane (ADR 003 §13, "the blob
+/// plane follows the docs plane's stream architecture"). Deliberately not
+/// registered with the sync RPC and not seeded with access rows: presence is
+/// a local fact, and advertising held blobs cross-node is the eager-retention
+/// design decision, not a default.
+pub(crate) const BLOB_PRESENCE_SCOPE_KEY: &str = "daybook-blobs-presence";
+
+/// The blob presence plane's single partition. Members are the digests this
+/// node holds on disk; the store records membership where the bytes land,
+/// mirroring `/seds`.
+pub(crate) fn blob_presence_part_id() -> PartKey {
+    PartKey::new("/blobs")
+}
+
+pub(crate) async fn open_blob_presence_part_store(sql: Database) -> Res<SharedPartStore> {
+    let store = big_sync::SqlitePartStore::new(
+        sql,
+        BLOB_PRESENCE_SCOPE_KEY,
+        big_sync_core::BuckId::MAX_LEVEL,
+    )
+    .await?;
+    Ok(Arc::new(store))
+}
+
+/// Opens the standalone, policy-free part store backing the blob partitions.
+/// Blob data is content-addressed (possession of the hash is authorization);
+/// the keyhive membership policy lives on the doc store and is deliberately
+/// absent here.
+pub(crate) async fn open_blob_part_store(sql: Database) -> Res<SharedPartStore> {
+    let store =
+        big_sync::SqlitePartStore::new(sql, BLOB_SCOPE_KEY, big_sync_core::BuckId::MAX_LEVEL)
+            .await?;
+    Ok(Arc::new(store))
+}
+
+impl RepoCtx {
+    pub(crate) fn from_parts(
+        parts: RepoCtxParts,
+        doc_app: BigDocHandle,
+        doc_drawer: BigDocHandle,
+        doc_config: BigDocHandle,
+        core_inventory_doc_id: DocumentId,
+        docs_inventory_doc_id: DocumentId,
+        encryption_inventory_doc_id: DocumentId,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            secret_store: parts.secret_store,
+            local_peer_key: parts.local_peer_key,
+            repo_name: parts.repo_name,
+            layout: parts.layout,
+            lock_guard: parts.lock_guard,
+            options: parts.options,
+            sql: parts.sql,
+            sqlite_runtime: parts.sqlite_runtime,
+            sqlite_local_state_repo: parts.sqlite_local_state_repo,
+            sqlite_local_state_stop: parts.sqlite_local_state_stop,
+            part_store: parts.part_store,
+            blob_part_store: parts.blob_part_store,
+            blob_presence_store: parts.blob_presence_store,
+            frontier_part_store: parts.frontier_part_store,
+            derived_part_store: parts.derived_part_store,
+            big_repo: parts.big_repo,
+            big_repo_stop: parts.big_repo_stop,
+            doc_app,
+            doc_drawer,
+            doc_config,
+            core_inventory_doc_id,
+            docs_inventory_doc_id,
+            encryption_inventory_doc_id,
+            local_actor_id: parts.local_actor_id,
+            local_user_path: parts.local_user_path,
+            repo_id: parts.repo_id,
+            checkout_id: parts.checkout_id,
+            iroh_public_key: parts.iroh_public_key,
+            iroh_secret_key: parts.iroh_secret_key,
+            local_device_name: parts.local_device_name,
+        })
+    }
+
+    pub async fn shutdown(self: Arc<Self>) -> Res<()> {
+        match Arc::try_unwrap(self) {
+            Ok(self2) => {
+                let RepoCtx {
+                    doc_app,
+                    doc_drawer,
+                    secret_store,
+                    big_repo_stop,
+                    sqlite_local_state_stop,
+                    ..
+                } = self2;
+
+                drop(doc_app);
+                drop(doc_drawer);
+                secret_store.stop().await?;
+
+                let stop = big_repo_stop
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .take()
+                    .expect("big repo stop token missing, double shutdown!");
+                stop.stop().await?;
+                // Some embedders (notably the in-crate test harness) retain
+                // this worker token and stop it after their child repos.
+                if let Some(stop) = sqlite_local_state_stop.into_inner().expect(ERROR_MUTEX) {
+                    stop.stop().await?;
+                }
+            }
+            Err(self2) => {
+                // The count is the whole point of the log: 2 is the documented test-harness case (it
+                // retains the worker token past shutdown), anything higher is a real holder ordering bug.
+                warn!(
+                    strong_count = std::sync::Arc::strong_count(&self2),
+                    "someone is still holding on to the RepoCtx, shutdown order bug lurks!"
+                );
+                let stop = self2
+                    .big_repo_stop
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .take()
+                    .expect("big repo stop token missing, double shutdown!");
+                stop.stop().await?;
+                let sqlite_local_state_stop = self2
+                    .sqlite_local_state_stop
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .take();
+                if let Some(stop) = sqlite_local_state_stop {
+                    stop.stop().await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn open(
+        sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
+        repo_root: &std::path::Path,
+        options: RepoOpenOptions,
+        local_device_name: String,
+    ) -> Res<Arc<Self>> {
+        let layout = repo_layout(repo_root)?;
+        info!(repo_root = %layout.repo_root.display(), lock_path = %layout.lock_path.display(), "repo open: acquiring lock");
+        let lock_guard = RepoLockGuard::acquire(layout.lock_path.clone()).await?;
+        info!(repo_root = %layout.repo_root.display(), "repo open: lock acquired");
+        if !is_repo_initialized(&layout.repo_root).await? {
+            eyre::bail!(
+                "repo not initialized at path {} (missing marker {})",
+                layout.repo_root.display(),
+                layout.marker_path.display()
+            );
+        }
+        info!(repo_root = %layout.repo_root.display(), "repo open: marker check passed");
+        Self::open_inner(
+            sqlite_runtime,
+            layout,
+            lock_guard,
+            options,
+            local_device_name,
+            false,
+            None,
+        )
+        .await
+    }
+
+    pub async fn init(
+        sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
+        repo_root: &std::path::Path,
+        options: RepoOpenOptions,
+        repo_name: String,
+        local_device_name: String,
+    ) -> Res<Arc<Self>> {
+        let layout = repo_layout(repo_root)?;
+        info!(repo_root = %layout.repo_root.display(), lock_path = %layout.lock_path.display(), "repo init: acquiring lock");
+        let lock_guard = RepoLockGuard::acquire(layout.lock_path.clone()).await?;
+        info!(repo_root = %layout.repo_root.display(), "repo init: lock acquired");
+        if is_repo_initialized(&layout.repo_root).await? {
+            eyre::bail!(
+                "repo already initialized at path {}",
+                layout.repo_root.display()
+            );
+        }
+        info!(repo_root = %layout.repo_root.display(), "repo init: marker absent, continuing");
+        Self::open_inner(
+            sqlite_runtime,
+            layout,
+            lock_guard,
+            options,
+            local_device_name,
+            true,
+            Some(repo_name),
+        )
+        .await
+    }
+
+    async fn open_inner(
+        sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
+        layout: RepoLayout,
+        lock_guard: RepoLockGuard,
+        options: RepoOpenOptions,
+        local_device_name: String,
+        initialize_repo: bool,
+        repo_name: Option<String>,
+    ) -> Res<Arc<Self>> {
+        info!(
+            repo_root = %layout.repo_root.display(),
+            initialize_repo,
+            "repo open_inner: begin"
+        );
+        cleanup_blobs_staging_dir(&layout.blobs_root).await?;
+        info!(repo_root = %layout.repo_root.display(), "repo open_inner: blobs staging cleaned");
+
+        let sql =
+            crate::app::open_database(&sqlite_runtime, SqlConfig::file(layout.sqlite_path.clone()))
+                .await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            crate::local_state::SqliteLocalStateRepo::boot(
+                Arc::clone(&sqlite_runtime),
+                layout.repo_root.join("local_state"),
+            )
+            .await?;
+        info!(
+            repo_root = %layout.repo_root.display(),
+            sqlite_path = %layout.sqlite_path.display(),
+            "repo open_inner: sqlite ready"
+        );
+
+        let secret_store = secrets_rs::SecretStore::boot().await?;
+        let repo_id = if initialize_repo {
+            format!("repo-{}", Uuid::new_v4().simple())
+        } else {
+            globals::get_string_global(&sql, "global.repo_id")
+                .await?
+                .ok_or_eyre("global.repo_id missing in initialized repo")?
+        };
+        info!(repo_root = %layout.repo_root.display(), repo_id, "repo open_inner: repo id ready");
+
+        let repo_name = if initialize_repo {
+            repo_name.ok_or_eyre("missing repo_name for repo init")?
+        } else {
+            globals::get_string_global(&sql, "global.repo_name")
+                .await?
+                .ok_or_eyre("missing global from repo: repo_name")?
+        };
+
+        let repo_user_id = if initialize_repo {
+            format!(
+                "{}{}",
+                daybook_types::doc::user_path::USER_ID_PREFIX,
+                Uuid::new_v4().bs58()
+            )
+        } else {
+            globals::get_string_global(&sql, "global.user_id")
+                .await?
+                .ok_or_eyre("global.user_id missing in initialized repo")?
+        };
+
+        let checkout_id = if initialize_repo {
+            format!("dcheckout_{}", Uuid::new_v4().bs58())
+        } else {
+            globals::get_string_global(&sql, "global.checkout_id")
+                .await?
+                .ok_or_eyre("missing global from repo: checkout_id")?
+        };
+
+        if initialize_repo {
+            tokio::try_join!(
+                globals::set_string_global(&sql, "global.repo_id", &repo_id),
+                globals::set_string_global(&sql, "global.checkout_id", &checkout_id),
+                globals::set_string_global(&sql, "global.repo_name", &repo_name),
+                globals::set_string_global(&sql, "global.user_id", &repo_user_id),
+            )?;
+        }
+
+        let identity = if initialize_repo {
+            let secret = iroh::SecretKey::generate();
+            crate::secrets::set_identity(&secret_store, &checkout_id, secret).await?
+        } else {
+            crate::secrets::load_identity(&secret_store, &checkout_id)
+                .await?
+                .ok_or_eyre("missing secret from keyring")?
+        };
+
+        let UserInfo {
+            local_peer_key,
+            local_user_path,
+            local_actor_id,
+        } = compute_user_info(&repo_id, &repo_user_id, &identity);
+
+        let (big_repo, big_repo_stop) = boot_big_repo(&sqlite_runtime, &layout, &identity).await?;
+        let part_store = big_repo.shared_part_store();
+        let blob_part_store = open_blob_part_store(big_repo.database()).await?;
+        let blob_presence_store = open_blob_presence_part_store(big_repo.database()).await?;
+        let frontier_part_store = big_repo.frontier_part_store();
+        let derived_part_store = big_repo.derived_part_store();
+        let authority = crate::authority::ensure(&big_repo, &sql, None).await?;
+        info!(repo_root = %layout.repo_root.display(), "repo open_inner: BigRepo and authority booted");
+
+        let (
+            doc_app,
+            doc_drawer,
+            doc_config,
+            core_inventory_doc_id,
+            docs_inventory_doc_id,
+            encryption_inventory_doc_id,
+        ) = if initialize_repo {
+            let (doc_app, doc_drawer, doc_config) = init_core_docs(&big_repo, &authority).await?;
+            info!(repo_root = %layout.repo_root.display(), "repo open_inner: running init dance");
+            let (core_id, docs_id, encryption_id) = Self::run_repo_init_dance(
+                &big_repo,
+                &part_store,
+                &blob_part_store,
+                &doc_app,
+                &doc_drawer,
+                &doc_config,
+                &authority,
+                &local_user_path,
+                &sqlite_local_state_repo,
+                &sql,
+                layout.blobs_root.clone(),
+            )
+            .await?;
+            mark_repo_initialized(&layout.repo_root).await?;
+            info!(repo_root = %layout.repo_root.display(), "repo open_inner: init marker written");
+            (
+                doc_app,
+                doc_drawer,
+                doc_config,
+                core_id,
+                docs_id,
+                encryption_id,
+            )
+        } else {
+            let (doc_app, doc_drawer, doc_config, core_id, docs_id, encryption_id) =
+                load_core_docs(&big_repo, &sql).await?;
+            crate::authority::grant_docs_admin(
+                &big_repo,
+                &authority.core_docs,
+                [
+                    doc_app.document_id(),
+                    doc_drawer.document_id(),
+                    doc_config.document_id(),
+                    core_id.clone(),
+                    docs_id.clone(),
+                    encryption_id.clone(),
+                ],
+            )
+            .await?;
+            // Every doc created on this node joins the local encryption-eligibility
+            // set: there is one drawer per node and no way to sort docs into sets yet,
+            // so the worker's candidate set is exactly "the docs this node created".
+            // The three inventories are included for uniformity and it is inert for
+            // them: the encrypted-representation inventory names ciphertext digests
+            // and never plaintexts, and the docs inventory names plaintexts whose own
+            // documents are eligible in their own right. Sponsorship narrows this to
+            // the sponsored set (ADR 005).
+            crate::authority::grant_docs_admin(
+                &big_repo,
+                &authority.encryption_candidates,
+                [
+                    doc_app.document_id(),
+                    doc_drawer.document_id(),
+                    doc_config.document_id(),
+                    core_id.clone(),
+                    docs_id.clone(),
+                    encryption_id.clone(),
+                ],
+            )
+            .await?;
+            (
+                doc_app,
+                doc_drawer,
+                doc_config,
+                core_id,
+                docs_id,
+                encryption_id,
+            )
+        };
+        info!(
+            repo_root = %layout.repo_root.display(),
+            doc_app_id = %doc_app.document_id(),
+            doc_drawer_id = %doc_drawer.document_id(),
+            doc_config_id = %doc_config.document_id(),
+            core_inventory_doc_id = %core_inventory_doc_id,
+            docs_inventory_doc_id = %docs_inventory_doc_id,
+            encryption_inventory_doc_id = ?encryption_inventory_doc_id,
+            "repo open_inner: core docs ready"
+        );
+
+        ensure_authority_partitions(
+            &part_store,
+            &authority,
+            &core_inventory_doc_id,
+            &docs_inventory_doc_id,
+        )
+        .await?;
+        ensure_blob_partitions(
+            &blob_part_store,
+            &core_inventory_doc_id,
+            &docs_inventory_doc_id,
+            &encryption_inventory_doc_id,
+        )
+        .await?;
+        ensure_derived_partitions(&derived_part_store).await?;
+        info!(repo_root = %layout.repo_root.display(), "repo open_inner: core partitions ensured");
+
+        info!(repo_root = %layout.repo_root.display(), initialize_repo, "repo open_inner: completed");
+        let parts = RepoCtxParts {
+            layout,
+            lock_guard,
+            options,
+            sql,
+            sqlite_runtime,
+            sqlite_local_state_repo,
+            sqlite_local_state_stop: std::sync::Mutex::new(Some(sqlite_local_state_stop)),
+            part_store,
+            blob_part_store,
+            blob_presence_store,
+            frontier_part_store,
+            derived_part_store,
+            big_repo,
+            big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
+            local_peer_key,
+            local_actor_id,
+            local_user_path,
+            local_device_name,
+            repo_id,
+            checkout_id,
+            repo_name,
+            iroh_public_key: identity.iroh_public_key.to_string(),
+            iroh_secret_key: identity.iroh_secret_key,
+            secret_store,
+        };
+        Ok(RepoCtx::from_parts(
+            parts,
+            doc_app,
+            doc_drawer,
+            doc_config,
+            core_inventory_doc_id,
+            docs_inventory_doc_id,
+            encryption_inventory_doc_id,
+        ))
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    async fn run_repo_init_dance(
+        big_repo: &SharedBigRepo,
+        partition_store: &SharedPartStore,
+        _blob_part_store: &SharedPartStore,
+        doc_app: &BigDocHandle,
+        doc_drawer: &BigDocHandle,
+        doc_config: &BigDocHandle,
+        authority: &crate::authority::RepoAuthority,
+        local_user_path: &UserPath,
+        sqlite_local_state_repo: &Arc<crate::local_state::SqliteLocalStateRepo>,
+        sql: &Database,
+        blobs_root: PathBuf,
+    ) -> Res<(DocumentId, DocumentId, DocumentId)> {
+        info!(
+            doc_app_id = %doc_app.document_id(),
+            doc_drawer_id = %doc_drawer.document_id(),
+            "repo init dance: starting"
+        );
+        use crate::blobs::BlobsRepo;
+        use crate::config::ConfigRepo;
+        use crate::drawer::DrawerRepo;
+        use crate::plugs::PlugsRepo;
+        use crate::rt::dispatch::DispatchRepo;
+        use crate::tables::TablesRepo;
+
+        let blobs_repo = BlobsRepo::new(blobs_root.clone(), local_user_path.to_owned()).await?;
+        info!("repo init dance: blobs repo loaded");
+        let mut plugs_repo: Option<Arc<PlugsRepo>> = None;
+        let mut plugs_stop: Option<crate::repos::RepoStopToken> = None;
+        let mut config_stop: Option<crate::repos::RepoStopToken> = None;
+        let mut tables_stop: Option<crate::repos::RepoStopToken> = None;
+        let mut dispatch_stop: Option<crate::repos::RepoStopToken> = None;
+        let mut drawer_stop: Option<crate::repos::RepoStopToken> = None;
+        let mut init_stop: Option<crate::repos::RepoStopToken> = None;
+
+        let init_result: Res<(DocumentId, DocumentId, DocumentId)> = async {
+            info!("repo init dance: loading plugs repo");
+            let (repo, stop) = PlugsRepo::load(
+                Arc::clone(big_repo),
+                Arc::clone(&blobs_repo),
+                doc_config.document_id(),
+                local_user_path.to_owned(),
+                Arc::clone(sqlite_local_state_repo),
+            )
+            .await
+            .wrap_err("error loading plugs repo during init dance")?;
+            plugs_repo = Some(repo);
+            plugs_stop = Some(stop);
+
+            info!("repo init dance: loading config repo");
+            let (config_repo, stop) = ConfigRepo::load(
+                Arc::clone(big_repo),
+                doc_app.document_id(),
+                Arc::clone(plugs_repo.as_ref().expect("plugs repo must be loaded")),
+                local_user_path.to_owned(),
+                sql.clone(),
+            )
+            .await?;
+            config_stop = Some(stop);
+
+            let config_user_path =
+                daybook_types::doc::user_path::for_repo(local_user_path.to_owned(), "config-repo")?;
+            let config_actor_id = daybook_types::doc::user_path::to_actor_id(&config_user_path);
+            config_repo
+                .upsert_actor_user_path(config_actor_id, config_user_path)
+                .await?;
+
+            let plugs_user_path =
+                daybook_types::doc::user_path::for_repo(local_user_path.to_owned(), "plugs-repo")?;
+            let plugs_actor_id = daybook_types::doc::user_path::to_actor_id(&plugs_user_path);
+            config_repo
+                .upsert_actor_user_path(plugs_actor_id, plugs_user_path)
+                .await?;
+
+            info!("repo init dance: loading tables repo");
+            let (_tables_repo, stop) = TablesRepo::load(
+                Arc::clone(big_repo),
+                doc_app.document_id(),
+                local_user_path.to_owned(),
+            )
+            .await?;
+            tables_stop = Some(stop);
+            let tables_user_path =
+                daybook_types::doc::user_path::for_repo(local_user_path.to_owned(), "tables-repo")?;
+            let tables_actor_id = daybook_types::doc::user_path::to_actor_id(&tables_user_path);
+            config_repo
+                .upsert_actor_user_path(tables_actor_id, tables_user_path)
+                .await?;
+
+            info!("repo init dance: loading dispatch repo");
+            let (_dispatch_repo, stop) = DispatchRepo::load(
+                Arc::clone(big_repo),
+                doc_app.document_id(),
+                UserPathBuf::from(local_user_path.to_string()),
+                sql.clone(),
+            )
+            .await?;
+            dispatch_stop = Some(stop);
+            let dispatch_user_path = daybook_types::doc::user_path::for_repo(
+                local_user_path.to_owned(),
+                "dispatch-repo",
+            )?;
+            let dispatch_actor_id = daybook_types::doc::user_path::to_actor_id(&dispatch_user_path);
+            config_repo
+                .upsert_actor_user_path(dispatch_actor_id, dispatch_user_path)
+                .await?;
+
+            info!("repo init dance: loading drawer repo");
+            let (_drawer_repo, stop) = DrawerRepo::load(
+                Arc::clone(big_repo),
+                Arc::clone(partition_store),
+                doc_drawer.document_id(),
+                UserPathBuf::from(local_user_path.to_string()),
+                sql.clone(),
+                blobs_root
+                    .parent()
+                    .ok_or_eyre("blobs root missing parent")?
+                    .join("local_state"),
+                Arc::new(surelock::mutex::Mutex::new(
+                    utils_rs::lru::KeyedLruPool::new(1000),
+                )),
+                Arc::new(surelock::mutex::Mutex::new(
+                    utils_rs::lru::KeyedLruPool::new(1000),
+                )),
+                #[cfg(not(test))]
+                Arc::clone(plugs_repo.as_ref().expect("plugs repo must be loaded")),
+                #[cfg(test)]
+                Some(Arc::clone(
+                    plugs_repo.as_ref().expect("plugs repo must be loaded"),
+                )),
+            )
+            .await?;
+
+            drawer_stop = Some(stop);
+            let drawer_user_path =
+                daybook_types::doc::user_path::for_repo(local_user_path.to_owned(), "drawer-repo")?;
+            let drawer_actor_id = daybook_types::doc::user_path::to_actor_id(&drawer_user_path);
+            config_repo
+                .upsert_actor_user_path(drawer_actor_id, drawer_user_path)
+                .await?;
+
+            info!("repo init dance: creating inventory docs via drawer");
+            let core_inventory_daybook_id = _drawer_repo
+                .add(daybook_types::doc::AddDocArgs {
+                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                    facets: default(),
+                    user_path: None,
+
+                    idempotency_key: Some("init:core-inventory".to_string()),
+                })
+                .await?;
+            let docs_inventory_daybook_id = _drawer_repo
+                .add(daybook_types::doc::AddDocArgs {
+                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                    facets: default(),
+                    user_path: None,
+
+                    idempotency_key: Some("init:docs-inventory".to_string()),
+                })
+                .await?;
+            let encryption_inventory_daybook_id = _drawer_repo
+                .add(daybook_types::doc::AddDocArgs {
+                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                    facets: default(),
+                    user_path: None,
+
+                    idempotency_key: Some("init:encryption-inventory".to_string()),
+                })
+                .await?;
+
+            let core_entry = _drawer_repo
+                .get_entry(&core_inventory_daybook_id)
+                .await?
+                .ok_or_eyre("missing core inventory doc entry")?;
+            let docs_entry = _drawer_repo
+                .get_entry(&docs_inventory_daybook_id)
+                .await?
+                .ok_or_eyre("missing docs inventory doc entry")?;
+            let encryption_entry = _drawer_repo
+                .get_entry(&encryption_inventory_daybook_id)
+                .await?
+                .ok_or_eyre("missing encryption inventory doc entry")?;
+            let core_inventory_doc_id = core_entry
+                .branches
+                .get("main")
+                .ok_or_eyre("missing main branch for core inventory doc")?
+                .branch_doc_id
+                .clone();
+            let docs_inventory_doc_id = docs_entry
+                .branches
+                .get("main")
+                .ok_or_eyre("missing main branch for docs inventory doc")?
+                .branch_doc_id
+                .clone();
+            let encryption_inventory_doc_id = encryption_entry
+                .branches
+                .get("main")
+                .ok_or_eyre("missing main branch for encryption inventory doc")?
+                .branch_doc_id
+                .clone();
+
+            big_repo
+                .add_admin_member_to_doc(
+                    core_inventory_doc_id.clone(),
+                    authority.blob_inventories.clone(),
+                )
+                .await?;
+            big_repo
+                .add_admin_member_to_doc(
+                    docs_inventory_doc_id.clone(),
+                    authority.blob_inventories.clone(),
+                )
+                .await?;
+            big_repo
+                .add_admin_member_to_doc(
+                    encryption_inventory_doc_id.clone(),
+                    authority.blob_inventories.clone(),
+                )
+                .await?;
+
+            crate::authority::grant_docs_admin(
+                big_repo,
+                &authority.core_docs,
+                [
+                    doc_app.document_id(),
+                    doc_drawer.document_id(),
+                    doc_config.document_id(),
+                    core_inventory_doc_id.clone(),
+                    docs_inventory_doc_id.clone(),
+                    encryption_inventory_doc_id.clone(),
+                ],
+            )
+            .await?;
+            // See the load path: core docs are encryption-eligible, the
+            // inventories are not.
+            crate::authority::grant_docs_admin(
+                big_repo,
+                &authority.encryption_candidates,
+                [
+                    doc_app.document_id(),
+                    doc_drawer.document_id(),
+                    doc_config.document_id(),
+                ],
+            )
+            .await?;
+
+            config_repo
+                .set_blob_inventories(crate::config::AppBlobInventories {
+                    core_inventory_doc_id: core_inventory_doc_id.clone(),
+                    docs_inventory_doc_id: docs_inventory_doc_id.clone(),
+                    encryption_inventory_doc_id: encryption_inventory_doc_id.clone(),
+                })
+                .await?;
+
+            globals::set_init_state(
+                sql,
+                &globals::InitState::Created {
+                    doc_id_app: doc_app.document_id(),
+                    doc_id_drawer: doc_drawer.document_id(),
+                    doc_id_config: Some(doc_config.document_id()),
+                    core_inventory_doc_id: Some(core_inventory_doc_id.clone()),
+                    docs_inventory_doc_id: Some(docs_inventory_doc_id.clone()),
+                    encryption_inventory_doc_id: encryption_inventory_doc_id.clone(),
+                },
+            )
+            .await?;
+
+            info!("repo init dance: ensuring core plug");
+            plugs_repo
+                .as_ref()
+                .expect("plugs repo must be loaded")
+                .ensure_core_plug()
+                .await?;
+            info!("repo init dance: core plug ensured");
+
+            Ok((
+                core_inventory_doc_id,
+                docs_inventory_doc_id,
+                encryption_inventory_doc_id,
+            ))
+        }
+        .await;
+
+        if let Err(err) = init_result {
+            info!(?err, "repo init dance: failed, starting cleanup");
+            if let Some(stop) = drawer_stop.take() {
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
+            }
+            if let Some(stop) = plugs_stop.take() {
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
+            }
+            if let Some(stop) = config_stop.take() {
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
+            }
+            if let Some(stop) = tables_stop.take() {
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
+            }
+            if let Some(stop) = dispatch_stop.take() {
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
+            }
+            if let Some(stop) = init_stop.take() {
+                stop.stop()
+                    .await
+                    .inspect_err(|err| warn!("shutdown error: {err}"))
+                    .ok();
+            }
+            if let Err(shutdown_err) = blobs_repo.shutdown().await {
+                return Err(err.wrap_err(format!(
+                    "error shutting down blobs repo during init cleanup: {shutdown_err:?}"
+                )));
+            }
+            info!("repo init dance: cleanup finished after failure");
+            return Err(err);
+        }
+
+        let (core_inventory_doc_id, docs_inventory_doc_id, encryption_inventory_doc_id) =
+            init_result?;
+
+        info!("repo init dance: stopping repos");
+        drawer_stop
+            .expect("drawer stop token missing")
+            .stop()
+            .await?;
+        plugs_stop.expect("plugs stop token missing").stop().await?;
+        config_stop
+            .expect("config stop token missing")
+            .stop()
+            .await?;
+        tables_stop
+            .expect("tables stop token missing")
+            .stop()
+            .await?;
+        dispatch_stop
+            .expect("dispatch stop token missing")
+            .stop()
+            .await?;
+        blobs_repo.shutdown().await?;
+        info!("repo init dance: completed");
+        Ok((
+            core_inventory_doc_id,
+            docs_inventory_doc_id,
+            encryption_inventory_doc_id,
+        ))
+    }
+}
+
+struct UserInfo {
+    local_peer_key: PeerId,
+    local_user_path: UserPathBuf,
+    local_actor_id: automerge::ActorId,
+}
+
+fn compute_user_info(
+    _repo_id: &str,
+    user_id: &str,
+    identity: &crate::secrets::RepoIdentity,
+) -> UserInfo {
+    let pkey_bs58 = utils_rs::hash::encode_base58_multibase(identity.iroh_public_key.as_bytes());
+    let device_id = format!(
+        "{}{}",
+        daybook_types::doc::user_path::DEVICE_ID_PREFIX,
+        pkey_bs58
+    );
+    let local_user_path = UserPathBuf::new().join("/").join(user_id).join(device_id);
+    let local_peer_key = daybook_types::doc::format_peer_key(identity.iroh_public_key.as_bytes());
+    let local_actor_id =
+        daybook_types::doc::user_path::to_actor_id(&UserPathBuf::from(local_user_path.clone()));
+    UserInfo {
+        local_peer_key,
+        local_user_path,
+        local_actor_id,
+    }
+}
+
+async fn boot_big_repo(
+    sqlite_runtime: &sqlite_rs::SqliteRuntime,
+    layout: &RepoLayout,
+    identity: &crate::secrets::RepoIdentity,
+) -> Res<(SharedBigRepo, big_repo::BigRepoStopToken)> {
+    let config = big_repo::Config {
+        node_identity_seed: identity.iroh_secret_key.to_bytes(),
+        storage: big_repo::Storage::in_directory(
+            sqlite_runtime,
+            &layout.big_repo_root,
+            Some(Arc::new(secrets_rs::SecretStore::boot().await?)),
+        )?,
+        scope_key: Arc::from("daybook-core"),
+        hidden_parts: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+    };
+    big_repo::BigRepo::boot(config).await
+}
+
+async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
+    let staging_root = blobs_root.join("staging");
+    if tokio::fs::try_exists(&staging_root).await? {
+        tokio::fs::remove_dir_all(&staging_root).await?;
+    }
+    tokio::fs::create_dir_all(&staging_root).await?;
+    Ok(())
+}
+
+pub(crate) async fn finish_clone_init(parts: RepoCtxParts) -> Res<Arc<RepoCtx>> {
+    let sql = &parts.sql;
+    let init_state = globals::get_init_state(sql).await?;
+    let (
+        doc_id_app,
+        doc_id_drawer,
+        doc_id_config,
+        mut core_inv,
+        mut docs_inv,
+        encryption_inventory_doc_id,
+    ) = match init_state {
+        globals::InitState::Created {
+            doc_id_app,
+            doc_id_drawer,
+            doc_id_config,
+            core_inventory_doc_id,
+            docs_inventory_doc_id,
+            encryption_inventory_doc_id,
+        } => (
+            doc_id_app,
+            doc_id_drawer,
+            doc_id_config,
+            core_inventory_doc_id,
+            docs_inventory_doc_id,
+            encryption_inventory_doc_id,
+        ),
+        globals::InitState::None => {
+            eyre::bail!("clone init: InitState not set");
+        }
+    };
+    let doc_id_config =
+        doc_id_config.ok_or_else(|| eyre::eyre!("clone init: InitState missing doc_id_config"))?;
+    let doc_app = parts
+        .big_repo
+        .get_doc(&doc_id_app)
+        .await?
+        .into_ready(doc_id_app.clone())?;
+    let doc_drawer = parts
+        .big_repo
+        .get_doc(&doc_id_drawer)
+        .await?
+        .into_ready(doc_id_drawer.clone())?;
+    let doc_config = parts
+        .big_repo
+        .get_doc(&doc_id_config)
+        .await?
+        .into_ready(doc_id_config.clone())?;
+
+    if core_inv.is_none() || docs_inv.is_none() {
+        let Some(inventories) = blob_inventories_from_app_doc(&parts.big_repo, &doc_id_app).await?
+        else {
+            eyre::bail!("clone init: app doc carries no blob inventories");
+        };
+        core_inv = core_inv.or(Some(inventories.core_inventory_doc_id));
+        docs_inv = docs_inv.or(Some(inventories.docs_inventory_doc_id));
+    }
+
+    let core_inventory_doc_id = core_inv
+        .ok_or_else(|| eyre::eyre!("missing core_inventory_doc_id during finish_clone_init"))?;
+    let docs_inventory_doc_id = docs_inv
+        .ok_or_else(|| eyre::eyre!("missing docs_inventory_doc_id during finish_clone_init"))?;
+
+    globals::set_init_state(
+        sql,
+        &globals::InitState::Created {
+            doc_id_app,
+            doc_id_drawer,
+            doc_id_config: Some(doc_id_config),
+            core_inventory_doc_id: Some(core_inventory_doc_id.clone()),
+            docs_inventory_doc_id: Some(docs_inventory_doc_id.clone()),
+            encryption_inventory_doc_id: encryption_inventory_doc_id.clone(),
+        },
+    )
+    .await?;
+
+    let authority = crate::authority::ensure(&parts.big_repo, sql, None).await?;
+    ensure_authority_partitions(
+        &parts.part_store,
+        &authority,
+        &core_inventory_doc_id,
+        &docs_inventory_doc_id,
+    )
+    .await?;
+    ensure_blob_partitions(
+        &parts.blob_part_store,
+        &core_inventory_doc_id,
+        &docs_inventory_doc_id,
+        &encryption_inventory_doc_id,
+    )
+    .await?;
+    ensure_derived_partitions(&parts.derived_part_store).await?;
+    Ok(RepoCtx::from_parts(
+        parts,
+        doc_app,
+        doc_drawer,
+        doc_config,
+        core_inventory_doc_id,
+        docs_inventory_doc_id,
+        encryption_inventory_doc_id,
+    ))
+}
+
+pub(crate) async fn ensure_authority_partitions(
+    partition_store: &SharedPartStore,
+    authority: &crate::authority::RepoAuthority,
+    _core_inventory_doc_id: &DocumentId,
+    _docs_inventory_doc_id: &DocumentId,
+) -> Res<()> {
+    for part_id in [
+        authority.core_docs_part_id(),
+        authority.content_docs_part_id(),
+        authority.encryption_candidates_part_id(),
+        authority.default_drawer_part_id(),
+        authority.blob_inventories_part_id(),
+    ] {
+        partition_store.ensure_part(part_id).await?;
+    }
+    Ok(())
+}
+
+/// The app doc's `blob_inventories` config facet, if the doc carries one.
+/// The one shared source for inventory ids learned from a clone/carrier: the
+/// init dance writes it, everything else reads through here.
+pub(crate) async fn blob_inventories_from_app_doc(
+    big_repo: &SharedBigRepo,
+    doc_id_app: &DocumentId,
+) -> Res<Option<crate::config::AppBlobInventories>> {
+    let doc_app = big_repo
+        .get_doc(doc_id_app)
+        .await?
+        .into_ready(doc_id_app.clone())?;
+    let (config_store, _) = doc_app
+        .hydrate_path::<crate::config::ConfigStore>(
+            automerge::ROOT,
+            vec![crate::config::ConfigStore::prop().into()],
+        )
+        .await?
+        .unwrap_or_default();
+    Ok(config_store.blob_inventories.map(|entry| entry.val.0))
+}
+
+/// Ensure the derived-scope partitions exist in the local-only derived store.
+///
+/// The processor runlog is local derived state, so it must not live in the
+/// document scope: the automerge frontier worker reads that scope's match-all
+/// part stream as documents. The derived scope is deliberately not registered
+/// with the big-sync RPC server, so nothing here is replicated.
+pub(crate) async fn ensure_derived_partitions(partition_store: &SharedPartStore) -> Res<()> {
+    partition_store
+        .ensure_part(crate::part_id_from_label(
+            crate::rt::PROCESSOR_RUNLOG_PARTITION_ID,
+        ))
+        .await?;
+    Ok(())
+}
+
+/// Ensure the blob-scope partitions exist in the standalone blob part store.
+/// These are the partitions the blob sync worker serves; they must be known
+/// to the store so peer summaries succeed even before any blob is put.
+pub(crate) async fn ensure_blob_partitions(
+    partition_store: &SharedPartStore,
+    core_inventory_doc_id: &DocumentId,
+    docs_inventory_doc_id: &DocumentId,
+    encryption_inventory_doc_id: &DocumentId,
+) -> Res<()> {
+    for part_id in [
+        crate::blobs::blob_inventory_part_id(core_inventory_doc_id),
+        crate::blobs::blob_inventory_part_id(docs_inventory_doc_id),
+        crate::blobs::blob_inventory_part_id(encryption_inventory_doc_id),
+    ] {
+        partition_store.ensure_part(part_id).await?;
+    }
+    Ok(())
+}
+fn repo_layout(repo_root: &std::path::Path) -> Res<RepoLayout> {
+    let repo_root = std::path::absolute(repo_root)
+        .wrap_err_with(|| format!("error absolutizing repo root {}", repo_root.display()))?;
+    let big_repo_root = repo_root.join("big_repo");
+    Ok(RepoLayout {
+        repo_root: repo_root.clone(),
+        big_repo_root,
+        sqlite_path: repo_root.join("sqlite.db"),
+        blobs_root: repo_root.join("blobs"),
+        marker_path: repo_root.join(REPO_MARKER_FILE),
+        lock_path: repo_root.join("repo.lock"),
+    })
+}
+
+pub async fn mark_repo_initialized(repo_root: &std::path::Path) -> Res<()> {
+    let layout = repo_layout(repo_root)?;
+    if let Some(parent) = layout.marker_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let _file = tokio::fs::File::create(layout.marker_path).await?;
+    Ok(())
+}
+pub async fn is_repo_initialized(repo_root: &std::path::Path) -> Res<bool> {
+    let layout = repo_layout(repo_root)?;
+    Ok(native_utils_rs::file_exists(&layout.marker_path).await?)
+}
+
+pub async fn is_repo_bootstrapped(
+    sqlite_runtime: &sqlite_rs::SqliteRuntime,
+    repo_root: &std::path::Path,
+) -> Res<bool> {
+    if !is_repo_initialized(repo_root).await? {
+        return Ok(false);
+    }
+    let layout = repo_layout(repo_root)?;
+    if !layout.sqlite_path.exists() {
+        return Ok(false);
+    }
+    let sql =
+        crate::app::open_database(sqlite_runtime, SqlConfig::file(layout.sqlite_path.clone()))
+            .await
+            .wrap_err_with(|| {
+                format!(
+                    "failed opening repo sqlite while checking bootstrap state: {}",
+                    layout.sqlite_path.display()
+                )
+            })?;
+    let init_state = globals::get_init_state(&sql).await?;
+    Ok(matches!(init_state, globals::InitState::Created { .. }))
+}
+
+async fn get_ready_doc(
+    big_repo: &SharedBigRepo,
+    doc_id: big_repo::DocumentId,
+) -> Res<BigDocHandle> {
+    let timeout = utils_rs::scale_timeout(Duration::from_secs(45));
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match big_repo.get_doc(&doc_id).await? {
+            big_repo::DocLookup::Ready(handle) => return Ok(handle),
+            big_repo::DocLookup::PendingMaterialization => {
+                if tokio::time::Instant::now() >= deadline {
+                    eyre::bail!("document {doc_id} is pending materialization");
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            big_repo::DocLookup::Missing => {
+                eyre::bail!("document {doc_id} is missing");
+            }
+        }
+    }
+}
+
+async fn load_core_docs(
+    big_repo: &SharedBigRepo,
+    repo_sql: &Database,
+) -> Res<(
+    BigDocHandle,
+    BigDocHandle,
+    BigDocHandle,
+    DocumentId,
+    DocumentId,
+    DocumentId,
+)> {
+    let init_state = globals::get_init_state(repo_sql).await?;
+    let globals::InitState::Created {
+        doc_id_app,
+        doc_id_drawer,
+        doc_id_config,
+        core_inventory_doc_id,
+        docs_inventory_doc_id,
+        encryption_inventory_doc_id,
+    } = init_state
+    else {
+        eyre::bail!("repo init_state missing for existing repository");
+    };
+    let (handle_app, handle_drawer, handle_config) = tokio::try_join!(
+        get_ready_doc(big_repo, doc_id_app),
+        get_ready_doc(big_repo, doc_id_drawer),
+        async {
+            let doc_id_config = doc_id_config
+                .ok_or_eyre("repo init_state missing doc_id_config for existing repository")?;
+            get_ready_doc(big_repo, doc_id_config).await
+        },
+    )?;
+
+    // Either local init_state or the (possibly cloned) repo config doc knows
+    // the inventories; one of them must. The encrypted-representation
+    // inventory is concrete in init_state, so it comes from there alone.
+    let mut known_core_id = core_inventory_doc_id;
+    let mut known_docs_id = docs_inventory_doc_id;
+    if known_core_id.is_none() || known_docs_id.is_none() {
+        let Some(inventories) =
+            blob_inventories_from_app_doc(big_repo, &handle_app.document_id()).await?
+        else {
+            eyre::bail!("blob inventories not found in init_state or app_doc config");
+        };
+        known_core_id = known_core_id.or(Some(inventories.core_inventory_doc_id));
+        known_docs_id = known_docs_id.or(Some(inventories.docs_inventory_doc_id));
+    }
+    let core_id = known_core_id
+        .ok_or_else(|| eyre::eyre!("blob inventories not found in init_state or app_doc config"))?;
+    let docs_id = known_docs_id
+        .ok_or_else(|| eyre::eyre!("blob inventories not found in init_state or app_doc config"))?;
+
+    Ok((
+        handle_app,
+        handle_drawer,
+        handle_config,
+        core_id,
+        docs_id,
+        encryption_inventory_doc_id,
+    ))
+}
+
+async fn init_core_docs(
+    big_repo: &SharedBigRepo,
+    authority: &crate::authority::RepoAuthority,
+) -> Res<(BigDocHandle, BigDocHandle, BigDocHandle)> {
+    let app_doc = {
+        let bytes = version_updates::version_latest()?;
+        let doc = automerge::Automerge::load(&bytes)
+            .wrap_err("error loading version_latest for app doc")?;
+        big_repo
+            .create_doc_with_parents(doc, vec![authority.core_docs_parent()])
+            .await
+            .map_err(|err| ferr!("{err}"))?
+    };
+    let drawer_doc = {
+        let bytes = crate::drawer::version_updates::version_latest()?;
+        let doc = automerge::Automerge::load(&bytes)
+            .wrap_err("error loading version_latest for drawer doc")?;
+        big_repo
+            .create_doc_with_parents(doc, vec![authority.core_docs_parent()])
+            .await
+            .map_err(|err| ferr!("{err}"))?
+    };
+    // ADR 007 §2: the repo config doc, created alongside app/drawer with the
+    // same parents. It hosts synced config facets (the plugg config facet).
+    let config_doc = {
+        let bytes = crate::drawer::doc_version_updates::version_latest()?;
+        let doc = automerge::Automerge::load(&bytes)
+            .wrap_err("error loading version_latest for config doc")?;
+        big_repo
+            .create_doc_with_parents(doc, vec![authority.core_docs_parent()])
+            .await
+            .map_err(|err| ferr!("{err}"))?
+    };
+    Ok((app_doc, drawer_doc, config_doc))
+}
+
+pub mod globals {
+    use crate::app::Database;
+    use crate::interlude::*;
+    use crate::sqlite::queries;
+
+    #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+    pub enum InitState {
+        None,
+        Created {
+            doc_id_app: DocumentId,
+            doc_id_drawer: DocumentId,
+            /// ADR 007 §2: the repo config doc (third core doc).
+            #[serde(default)]
+            doc_id_config: Option<DocumentId>,
+            #[serde(default)]
+            core_inventory_doc_id: Option<DocumentId>,
+            #[serde(default)]
+            docs_inventory_doc_id: Option<DocumentId>,
+            /// ADR 003 §13: the encrypted-representation inventory. Concrete:
+            /// the init dance creates it and clones resolve it from the
+            /// source's config doc before this state is written.
+            encryption_inventory_doc_id: DocumentId,
+        },
+    }
+    const INIT_STATE_KEY: &str = "global.init_state";
+
+    pub async fn get_init_state(sql: &Database) -> Res<InitState> {
+        let rec = queries::kv_get(sql, INIT_STATE_KEY.to_owned()).await?;
+        let state = match rec {
+            Some(json) => serde_json::from_str::<InitState>(&json)?,
+            None => InitState::None,
+        };
+        Ok(state)
+    }
+    pub async fn set_init_state(sql: &Database, state: &InitState) -> Res<()> {
+        let json = serde_json::to_string(state)?;
+        queries::kv_upsert(sql, INIT_STATE_KEY.to_owned(), json).await?;
+        Ok(())
+    }
+
+    pub async fn get_string_global(sql: &Database, key: &str) -> Res<Option<String>> {
+        Ok(queries::kv_get(sql, key.to_owned()).await?)
+    }
+
+    pub async fn set_string_global(sql: &Database, key: &str, value: &str) -> Res<()> {
+        let tx = sql.begin_write().await?;
+
+        if let Some(existing) = queries::kv_get(&tx, key.to_owned()).await? {
+            eyre::bail!("{key} already set: {existing}");
+        }
+        queries::kv_insert(&tx, key.to_owned(), value.to_owned()).await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn upsert_string_global(sql: &Database, key: &str, value: &str) -> Res<()> {
+        queries::kv_upsert(sql, key.to_owned(), value.to_owned()).await?;
+        Ok(())
+    }
+    const SYNC_CONFIG_KEY: &str = "global.sync_config";
+    #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+    pub struct SyncConfig {
+        pub known_devices: Vec<SyncDeviceEntry>,
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct SyncDeviceEntry {
+        pub endpoint_id: iroh::EndpointId,
+        #[serde(default)]
+        pub agent_peer_id: Option<big_sync_core::PeerKey>,
+        pub name: String,
+        pub added_at: Timestamp,
+        pub last_connected_at: Option<Timestamp>,
+    }
+    pub async fn get_sync_config(sql: &Database) -> Res<SyncConfig> {
+        let rec = queries::kv_get(sql, SYNC_CONFIG_KEY.to_owned()).await?;
+        let state = match rec {
+            Some(json) => serde_json::from_str::<SyncConfig>(&json)?,
+            None => SyncConfig::default(),
+        };
+        Ok(state)
+    }
+
+    pub async fn set_sync_config(sql: &Database, state: &SyncConfig) -> Res<()> {
+        let json = serde_json::to_string(state)?;
+        queries::kv_upsert(sql, SYNC_CONFIG_KEY.to_owned(), json).await?;
+        Ok(())
+    }
+}

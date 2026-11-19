@@ -1,0 +1,30 @@
+[package]
+name = "plug_test_manifest"
+version.workspace = true
+edition.workspace = true
+
+[package.metadata.townframe]
+routines = "../plug_test_routines"
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[[bin]]
+name = "manifest"
+path = "manifest.rs"
+
+[dependencies]
+utils_rs = { workspace = true, default-features = false }
+daybook_pdk = { workspace = true }
+daybook_types = { workspace = true, default-features = false, features = ["manifest", "schemars"] }
+serde.workspace = true
+serde_json.workspace = true
+schemars = { version = "1.2", features = ["url2"] }
+
+[dev-dependencies]
+daybook_core = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true }
+sqlite_rs = { workspace = true }

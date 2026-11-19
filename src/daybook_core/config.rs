@@ -1,0 +1,867 @@
+use crate::interlude::*;
+
+use daybook_types::manifest::FacetDisplayHint;
+use tokio_util::sync::CancellationToken;
+
+use crate::plugs::PlugsRepo;
+use crate::stores::Versioned;
+
+#[derive(Reconcile, Hydrate, Clone)]
+pub struct ConfigStore {
+    pub facet_display: HashMap<String, Versioned<ThroughJson<FacetDisplayHint>>>,
+    pub facet_display_deleted: HashMap<String, Vec<VersionTag>>,
+    pub users: HashMap<String, Versioned<ThroughJson<UserMeta>>>,
+    pub users_deleted: HashMap<String, Vec<VersionTag>>,
+    pub mltools: Versioned<ThroughJson<mltools::Config>>,
+    pub blob_inventories: Option<Versioned<ThroughJson<AppBlobInventories>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AppBlobInventories {
+    pub core_inventory_doc_id: DocumentId,
+    pub docs_inventory_doc_id: DocumentId,
+    /// The encrypted-representation inventory (ADR 003 §13: ciphertext pins
+    /// live in their own inventory so a relay learns only ciphertext digests).
+    /// Every repository has one: the init dance creates it, and a clone/carrier
+    /// learns it from the source's config doc before standing up. There is no
+    /// inventory-less repository.
+    pub encryption_inventory_doc_id: DocumentId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reconcile, Hydrate)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct UserMeta {
+    #[autosurgeon(with = "am_utils_rs::codecs::utf8_path")]
+    pub user_path: daybook_types::doc::UserPathBuf,
+    #[autosurgeon(with = "am_utils_rs::codecs::date")]
+    pub seen_at: Timestamp,
+}
+
+impl Default for ConfigStore {
+    fn default() -> Self {
+        use daybook_types::manifest::*;
+
+        let mut key_configs = HashMap::new();
+
+        key_configs.insert(
+            "created_at".to_string(),
+            Versioned {
+                vtag: VersionTag::nil(),
+                val: FacetDisplayHint {
+                    always_visible: false,
+                    display_title: Some("Created At".to_string()),
+                    deets: FacetDisplayDeets::DateTime {
+                        display_type: DateTimeFacetDisplayType::Relative,
+                    },
+                }
+                .into(),
+            },
+        );
+        key_configs.insert(
+            "updated_at".to_string(),
+            Versioned {
+                vtag: VersionTag::nil(),
+                val: FacetDisplayHint {
+                    always_visible: false,
+                    display_title: Some("Updated At".to_string()),
+                    deets: FacetDisplayDeets::DateTime {
+                        display_type: DateTimeFacetDisplayType::Relative,
+                    },
+                }
+                .into(),
+            },
+        );
+
+        Self {
+            facet_display: key_configs,
+            facet_display_deleted: HashMap::new(),
+            users: HashMap::new(),
+            users_deleted: HashMap::new(),
+            mltools: Versioned {
+                vtag: VersionTag::nil(),
+                val: mltools::Config {
+                    ocr: mltools::OcrConfig { backends: vec![] },
+                    embed: mltools::EmbedConfig { backends: vec![] },
+                    image_embed: mltools::ImageEmbedConfig { backends: vec![] },
+                    llm: mltools::LlmConfig { backends: vec![] },
+                }
+                .into(),
+            },
+            blob_inventories: None,
+        }
+    }
+}
+
+#[async_trait]
+impl crate::stores::AmStore for ConfigStore {
+    fn prop() -> Cow<'static, str> {
+        "config".into()
+    }
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum ConfigEvent {
+    Changed {
+        heads: ChangeHashSet,
+        origin: crate::event_origin::EventOrigin,
+    },
+    SyncDevicesChanged {
+        origin: crate::event_origin::EventOrigin,
+    },
+}
+
+pub struct ConfigRepo {
+    big_repo: SharedBigRepo,
+    app_doc_id: DocumentId,
+    app_doc_handle: big_repo::BigDocHandle,
+    store: crate::stores::AmStoreHandle<ConfigStore>,
+    pub registry: Arc<crate::repos::ListenersRegistry>,
+    plug_repo: Arc<PlugsRepo>,
+    local_actor_id: ActorId,
+    local_peer_id: PeerKey,
+    repo_sql: Database,
+    cancel_token: CancellationToken,
+    sync_config_lock: tokio::sync::Mutex<()>,
+    _change_listener_tickets: Vec<big_repo::BigRepoChangeListenerRegistration>,
+}
+
+impl crate::repos::Repo for ConfigRepo {
+    type Event = ConfigEvent;
+    fn registry(&self) -> &Arc<crate::repos::ListenersRegistry> {
+        &self.registry
+    }
+    fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel_token
+    }
+}
+
+impl ConfigRepo {
+    fn local_origin(&self) -> crate::event_origin::EventOrigin {
+        crate::event_origin::EventOrigin::Local {
+            actor_id: self.local_actor_id.to_string(),
+        }
+    }
+
+    fn origin_from_live(
+        &self,
+        live_origin: Option<&big_repo::BigRepoChangeOrigin>,
+    ) -> crate::event_origin::EventOrigin {
+        match live_origin {
+            Some(big_repo::BigRepoChangeOrigin::Local) => self.local_origin(),
+            Some(big_repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
+                crate::event_origin::EventOrigin::Remote {
+                    peer_id: peer_id.to_string(),
+                }
+            }
+            Some(big_repo::BigRepoChangeOrigin::Bootstrap)
+            | Some(big_repo::BigRepoChangeOrigin::Keyhive) => {
+                crate::event_origin::EventOrigin::Bootstrap
+            }
+            None => crate::event_origin::EventOrigin::Remote {
+                peer_id: "unknown".to_string(),
+            },
+        }
+    }
+
+    async fn latest_deleted_actor(
+        &self,
+        deleted_prop: &str,
+        key: &str,
+        heads: &Arc<[automerge::ChangeHash]>,
+    ) -> Res<Option<ActorId>> {
+        let Some(tags) = self
+            .app_doc_handle
+            .hydrate_path_at_heads::<Vec<VersionTag>>(
+                heads,
+                automerge::ROOT,
+                vec![
+                    ConfigStore::prop().into(),
+                    std::borrow::Cow::<str>::Owned(deleted_prop.to_string()).into(),
+                    autosurgeon::Prop::Key(key.to_string().into()),
+                ],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(tags.last().map(|tag| tag.actor_id.clone()))
+    }
+
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "config-notifs", doc_id = %app_doc_id),
+    )]
+    pub async fn load(
+        big_repo: SharedBigRepo,
+        app_doc_id: DocumentId,
+        plug_repo: Arc<PlugsRepo>,
+        local_user_path: daybook_types::doc::UserPathBuf,
+        repo_sql: Database,
+    ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
+        let registry = crate::repos::ListenersRegistry::new();
+
+        let app_doc_handle = big_repo
+            .get_doc(&app_doc_id)
+            .await?
+            .into_ready(app_doc_id.clone())?;
+
+        let store_val = ConfigStore::load(&app_doc_handle).await?;
+        let local_user_path =
+            daybook_types::doc::user_path::for_repo(local_user_path, "config-repo")?;
+        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
+
+        let store = crate::stores::AmStoreHandle::new(
+            store_val,
+            app_doc_handle.clone(),
+            local_actor_id.clone(),
+        );
+
+        let cancel_token = CancellationToken::new();
+        // Register change listener to automatically notify repo listeners
+        let (ticket, notif_rx) =
+            ConfigStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
+
+        let repo = Self {
+            big_repo: Arc::clone(&big_repo),
+            app_doc_id,
+            app_doc_handle,
+            store,
+            registry: Arc::clone(&registry),
+            plug_repo,
+            local_actor_id,
+            local_peer_id: big_repo.local_peer_id(),
+            repo_sql,
+            cancel_token: cancel_token.clone(),
+            sync_config_lock: tokio::sync::Mutex::new(()),
+            _change_listener_tickets: vec![ticket],
+        };
+        let repo = Arc::new(repo);
+
+        let worker_handle = tokio::spawn({
+            let repo = Arc::clone(&repo);
+            let cancel_token = cancel_token.child_token();
+            async move {
+                repo.notifs_loop(notif_rx, cancel_token)
+                    .await
+                    .expect("error handling notifs")
+            }
+        });
+
+        Ok((
+            repo,
+            crate::repos::RepoStopToken {
+                cancel_token,
+                worker_handle: Some(worker_handle),
+            },
+        ))
+    }
+
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "config-notifs", doc_id = %self.app_doc_id),
+    )]
+    async fn notifs_loop(
+        &self,
+        mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
+            Vec<big_repo::BigRepoChangeNotification>,
+        >,
+        cancel_token: CancellationToken,
+    ) -> Res<()> {
+        // FIXME: this is suspicous
+        let mut events = vec![];
+        loop {
+            let notifs = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    break;
+                }
+                msg = notif_rx.recv() => {
+                    match msg {
+                        Some(notifs) => notifs,
+                        None => break,
+                    }
+                }
+            };
+
+            events.clear();
+            let mut last_heads = None;
+            for notif in notifs {
+                let big_repo::BigRepoChangeNotification::DocChanged {
+                    patch,
+                    heads,
+                    origin,
+                    ..
+                } = notif
+                else {
+                    continue;
+                };
+                let len = events.len();
+                self.events_for_patch(
+                    &patch,
+                    &heads,
+                    &mut events,
+                    Some(&origin),
+                    Some(&self.local_peer_id),
+                )
+                .await?;
+                // events were added
+                if len != events.len() {
+                    last_heads = Some(ChangeHashSet(Arc::clone(&heads)));
+                }
+            }
+            // for event in &events {
+            //     match event {
+            //         ConfigEvent::Changed { heads } => todo!(),
+            //         ConfigEvent::SyncDevicesChanged => todo!(),
+            //     }
+            // }
+
+            if let Some(heads) = last_heads {
+                let new_store = self
+                    .app_doc_handle
+                    .hydrate_path_at_heads::<ConfigStore>(
+                        &heads,
+                        automerge::ROOT,
+                        vec![ConfigStore::prop().into()],
+                    )
+                    .await?
+                    .expect(ERROR_INVALID_PATCH);
+
+                self.store
+                    .mutate_sync(|store| {
+                        store.facet_display = new_store.facet_display;
+                        store.facet_display_deleted = new_store.facet_display_deleted;
+                        store.users = new_store.users;
+                        store.users_deleted = new_store.users_deleted;
+                        store.mltools = new_store.mltools;
+                        store.blob_inventories = new_store.blob_inventories;
+                    })
+                    .await?;
+
+                self.registry.notify(events.drain(..));
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn upsert_actor_user_path(
+        &self,
+        actor_id: automerge::ActorId,
+        user_path: daybook_types::doc::UserPathBuf,
+    ) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let actor_id_str = actor_id.to_string();
+        let (_, changed) = self
+            .store
+            .mutate_sync(move |store| {
+                let next = UserMeta {
+                    user_path,
+                    seen_at: Timestamp::now(),
+                };
+                if let Some(existing) = store.users.get_mut(&actor_id_str) {
+                    existing.replace(self.local_actor_id.clone(), next.into());
+                } else {
+                    store.users.insert(
+                        actor_id_str,
+                        Versioned::mint(self.local_actor_id.clone(), next.into()),
+                    );
+                }
+            })
+            .await?;
+        if changed.is_some() {
+            self.registry.notify([ConfigEvent::Changed {
+                heads: ChangeHashSet(self.get_config_heads().await?),
+                origin: self.local_origin(),
+            }]);
+        }
+        Ok(())
+    }
+
+    pub async fn diff_events(
+        &self,
+        from: ChangeHashSet,
+        to: Option<ChangeHashSet>,
+    ) -> Res<Vec<ConfigEvent>> {
+        let (patches, heads) = self
+            .app_doc_handle
+            .with_document_read(|am_doc| {
+                let heads = if let Some(ref to_set) = to {
+                    to_set.clone()
+                } else {
+                    ChangeHashSet(am_doc.get_heads().into())
+                };
+                let patches = am_doc
+                    .diff_obj(&automerge::ROOT, &from, &heads, true)
+                    .expect("diff_obj failed");
+                (patches, heads)
+            })
+            .await;
+        let heads = heads.0;
+        let mut events = vec![];
+        for patch in patches {
+            // Replay path: no live-origin semantics apply.
+            self.events_for_patch(&patch, &heads, &mut events, None, None)
+                .await?;
+        }
+        Ok(events)
+    }
+
+    pub async fn events_for_init(&self) -> Res<Vec<ConfigEvent>> {
+        // Init snapshot is a single "current heads changed" event.
+        Ok(vec![ConfigEvent::Changed {
+            heads: ChangeHashSet(self.get_config_heads().await?),
+            origin: crate::event_origin::EventOrigin::Bootstrap,
+        }])
+    }
+
+    async fn events_for_patch(
+        &self,
+        patch: &automerge::Patch,
+        patch_heads: &Arc<[automerge::ChangeHash]>,
+        out: &mut Vec<ConfigEvent>,
+        live_origin: Option<&big_repo::BigRepoChangeOrigin>,
+        exclude_peer_id: Option<&PeerKey>,
+    ) -> Res<()> {
+        // Live notification path: local writes are emitted directly by mutators.
+        // Historical replay passes `live_origin = None` and must not be skipped.
+        if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id) {
+            return Ok(());
+        }
+        let heads = ChangeHashSet(Arc::clone(patch_heads));
+
+        match &patch.action {
+            automerge::PatchAction::PutMap {
+                key,
+                value: (val, _),
+                ..
+            } if patch.path.len() == 2 && key == "vtag" => {
+                let Some((_obj, automerge::Prop::Map(section_key))) = patch.path.get(1) else {
+                    return Ok(());
+                };
+                let automerge::Value::Scalar(scalar) = val else {
+                    warn!(?patch.path, key = %key, "ignoring malformed config vtag patch");
+                    return Ok(());
+                };
+                let automerge::ScalarValue::Bytes(bytes) = &**scalar else {
+                    warn!(?patch.path, key = %key, "ignoring malformed config vtag patch");
+                    return Ok(());
+                };
+                let Some(vtag) =
+                    VersionTag::hydrate_bytes_or_warn(bytes, &patch.path, key, "config")
+                else {
+                    return Ok(());
+                };
+                let event_origin = crate::repos::resolve_origin_from_vtag_actor(
+                    &self.local_actor_id,
+                    &vtag.actor_id,
+                    live_origin,
+                );
+
+                if matches!(
+                    section_key.as_ref(),
+                    "facet_display" | "users" | "mltools" | "blob_inventories"
+                ) {
+                    out.push(ConfigEvent::Changed {
+                        heads,
+                        origin: event_origin.clone(),
+                    });
+                }
+            }
+            automerge::PatchAction::DeleteMap { key } if patch.path.len() == 2 => {
+                let Some((_obj, automerge::Prop::Map(section_key))) = patch.path.get(1) else {
+                    return Ok(());
+                };
+                let deleted_prop = match section_key.as_ref() {
+                    "facet_display" => Some("facet_display_deleted"),
+                    "users" => Some("users_deleted"),
+                    _ => None,
+                };
+                let event_origin = if let Some(deleted_prop) = deleted_prop {
+                    let tombstone_actor = self
+                        .latest_deleted_actor(deleted_prop, key, patch_heads)
+                        .await?;
+                    crate::repos::resolve_origin_for_delete(
+                        &self.local_actor_id,
+                        live_origin,
+                        tombstone_actor.as_ref(),
+                    )
+                } else {
+                    self.origin_from_live(live_origin)
+                };
+                if matches!(
+                    section_key.as_ref(),
+                    "facet_display"
+                        | "users"
+                        | "mltools"
+                        | "facet_display_deleted"
+                        | "users_deleted"
+                ) {
+                    out.push(ConfigEvent::Changed {
+                        heads,
+                        origin: event_origin,
+                    });
+                }
+            }
+            automerge::PatchAction::PutMap { .. }
+            | automerge::PatchAction::PutSeq { .. }
+            | automerge::PatchAction::Insert { .. }
+                if patch.path.len() >= 2 =>
+            {
+                let Some((_obj, automerge::Prop::Map(section_key))) = patch.path.get(1) else {
+                    return Ok(());
+                };
+                if matches!(
+                    section_key.as_ref(),
+                    "facet_display_deleted" | "users_deleted"
+                ) {
+                    out.push(ConfigEvent::Changed {
+                        heads,
+                        origin: self.origin_from_live(live_origin),
+                    });
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub async fn get_config_heads(&self) -> Res<Arc<[automerge::ChangeHash]>> {
+        let handle = self
+            .big_repo
+            .get_doc(&self.app_doc_id)
+            .await?
+            .into_ready(self.app_doc_id.clone())?;
+        let heads = handle.with_document_read(|doc| doc.get_heads()).await;
+        Ok(Arc::from(heads))
+    }
+
+    pub async fn get_facet_display_hint(&self, key: String) -> Option<FacetDisplayHint> {
+        let hint = self
+            .store
+            .query_sync(|store| store.facet_display.get(&key).cloned())
+            .await;
+        if let Some(hint) = hint {
+            return Some(hint.val.0);
+        }
+        let hint = self.plug_repo.get_display_hint(&key).await;
+        if let Some(hint) = hint {
+            return Some(hint);
+        }
+        None
+    }
+
+    pub async fn list_display_hints(&self) -> HashMap<String, FacetDisplayHint> {
+        let mut defaults: HashMap<_, _> = self
+            .plug_repo
+            .list_display_hints()
+            .await
+            .into_iter()
+            .collect();
+
+        self.store
+            .query_sync(move |store| {
+                for (key, val) in &store.facet_display {
+                    defaults.insert(key.clone(), val.0.clone());
+                }
+                defaults
+            })
+            .await
+    }
+
+    pub async fn set_facet_display_hint(&self, key: String, hint: FacetDisplayHint) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let (_, changed) = self
+            .store
+            .mutate_sync(move |store| {
+                let Some(old) = store.facet_display.get_mut(&key) else {
+                    store.facet_display.insert(
+                        key,
+                        Versioned::mint(self.local_actor_id.clone(), hint.into()),
+                    );
+                    return;
+                };
+                old.replace(self.local_actor_id.clone(), hint.into());
+            })
+            .await?;
+        if changed.is_some() {
+            self.registry.notify([ConfigEvent::Changed {
+                heads: ChangeHashSet(self.get_config_heads().await?),
+                origin: self.local_origin(),
+            }]);
+        }
+        Ok(())
+    }
+
+    pub async fn get_mltools_config(&self) -> mltools::Config {
+        self.store
+            .query_sync(|store| store.mltools.val.0.clone())
+            .await
+    }
+
+    pub async fn set_mltools_config(&self, config: mltools::Config) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+
+        let (_, changed) = self
+            .store
+            .mutate_sync(move |store| {
+                store
+                    .mltools
+                    .replace(self.local_actor_id.clone(), config.into());
+            })
+            .await?;
+        if changed.is_some() {
+            self.registry.notify([ConfigEvent::Changed {
+                heads: ChangeHashSet(self.get_config_heads().await?),
+                origin: self.local_origin(),
+            }]);
+        }
+        Ok(())
+    }
+
+    pub async fn get_blob_inventories(&self) -> Option<AppBlobInventories> {
+        self.store
+            .query_sync(|store| {
+                store
+                    .blob_inventories
+                    .as_ref()
+                    .map(|entry| entry.val.0.clone())
+            })
+            .await
+    }
+
+    pub async fn set_blob_inventories(&self, inventories: AppBlobInventories) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+
+        let (_, changed) = self
+            .store
+            .mutate_sync(move |store| {
+                if let Some(existing) = store.blob_inventories.as_mut() {
+                    existing.replace(self.local_actor_id.clone(), inventories.into());
+                } else {
+                    store.blob_inventories = Some(Versioned::mint(
+                        self.local_actor_id.clone(),
+                        inventories.into(),
+                    ));
+                }
+            })
+            .await?;
+        if changed.is_some() {
+            self.registry.notify([ConfigEvent::Changed {
+                heads: ChangeHashSet(self.get_config_heads().await?),
+                origin: self.local_origin(),
+            }]);
+        }
+        Ok(())
+    }
+
+    pub async fn get_actor_user_path(
+        &self,
+        actor_id: &automerge::ActorId,
+    ) -> Option<daybook_types::doc::UserPathBuf> {
+        let actor_id_str = actor_id.to_string();
+        self.store
+            .query_sync(move |store| {
+                store
+                    .users
+                    .get(&actor_id_str)
+                    .map(|doc| doc.user_path.clone())
+            })
+            .await
+    }
+
+    pub async fn list_known_sync_devices(&self) -> Res<Vec<crate::repo::globals::SyncDeviceEntry>> {
+        let config = crate::repo::globals::get_sync_config(&self.repo_sql).await?;
+        Ok(config.known_devices)
+    }
+
+    pub async fn upsert_known_sync_device(
+        &self,
+        device: crate::repo::globals::SyncDeviceEntry,
+    ) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let _sync_config_guard = self.sync_config_lock.lock().await;
+        let mut config = crate::repo::globals::get_sync_config(&self.repo_sql).await?;
+        if let Some(existing) = config
+            .known_devices
+            .iter_mut()
+            .find(|entry| entry.endpoint_id == device.endpoint_id)
+        {
+            *existing = device;
+        } else {
+            config.known_devices.push(device);
+        }
+        crate::repo::globals::set_sync_config(&self.repo_sql, &config).await?;
+        self.registry.notify([ConfigEvent::SyncDevicesChanged {
+            origin: self.local_origin(),
+        }]);
+        Ok(())
+    }
+
+    pub async fn remove_known_sync_device(&self, endpoint_id: &iroh::EndpointId) -> Res<bool> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let _sync_config_guard = self.sync_config_lock.lock().await;
+        let mut config = crate::repo::globals::get_sync_config(&self.repo_sql).await?;
+        let before = config.known_devices.len();
+        config
+            .known_devices
+            .retain(|entry| &entry.endpoint_id != endpoint_id);
+        let removed = config.known_devices.len() != before;
+        if removed {
+            crate::repo::globals::set_sync_config(&self.repo_sql, &config).await?;
+            self.registry.notify([ConfigEvent::SyncDevicesChanged {
+                origin: self.local_origin(),
+            }]);
+        }
+        Ok(removed)
+    }
+
+    pub async fn ensure_local_sync_device(
+        &self,
+        endpoint_id: iroh::EndpointId,
+        device_name: &str,
+    ) -> Res<()> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let _sync_config_guard = self.sync_config_lock.lock().await;
+        let mut config = crate::repo::globals::get_sync_config(&self.repo_sql).await?;
+        if config
+            .known_devices
+            .iter()
+            .any(|entry| entry.endpoint_id == endpoint_id)
+        {
+            return Ok(());
+        }
+        config
+            .known_devices
+            .push(crate::repo::globals::SyncDeviceEntry {
+                endpoint_id,
+                agent_peer_id: None,
+                name: device_name.to_string(),
+                added_at: jiff::Timestamp::now(),
+                last_connected_at: None,
+            });
+        crate::repo::globals::set_sync_config(&self.repo_sql, &config).await?;
+        self.registry.notify([ConfigEvent::SyncDevicesChanged {
+            origin: self.local_origin(),
+        }]);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn upsert_actor_user_path_registers_directory_entries() -> Res<()> {
+        let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
+        let (big_repo, _big_sync_host, _acx_stop) = crate::test_support::boot_repo().await?;
+
+        let app_doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
+        let app_doc_handle = big_repo.create_doc(app_doc).await?;
+        let app_doc_id = app_doc_handle.document_id();
+
+        let temp = tempfile::tempdir()?;
+        let blobs_repo =
+            crate::blobs::BlobsRepo::new(temp.path().join("blobs"), local_user_path.clone())
+                .await?;
+        let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            crate::local_state::SqliteLocalStateRepo::boot(
+                Arc::clone(&sqlite_runtime),
+                temp.path().join("local_state"),
+            )
+            .await?;
+        let (plugs_repo, plugs_stop) = crate::plugs::PlugsRepo::load(
+            Arc::clone(&big_repo),
+            Arc::clone(&blobs_repo),
+            app_doc_id.clone(),
+            local_user_path.clone(),
+            Arc::clone(&sqlite_local_state_repo),
+        )
+        .await?;
+        let sql_ctx =
+            crate::app::open_database(&sqlite_runtime, crate::app::SqlConfig::memory()).await?;
+        let (config_repo, config_stop) = ConfigRepo::load(
+            Arc::clone(&big_repo),
+            app_doc_id,
+            plugs_repo,
+            local_user_path.clone(),
+            sql_ctx.clone(),
+        )
+        .await?;
+
+        for scope in [
+            "config-repo",
+            "plugs-repo",
+            "drawer-repo",
+            "dispatch-repo",
+            "tables-repo",
+            "init-repo",
+        ] {
+            let scoped_path =
+                daybook_types::doc::user_path::for_repo(local_user_path.clone(), scope)?;
+            let scoped_actor = daybook_types::doc::user_path::to_actor_id(&scoped_path);
+            config_repo
+                .upsert_actor_user_path(scoped_actor.clone(), scoped_path.clone())
+                .await?;
+            let found = config_repo
+                .get_actor_user_path(&scoped_actor)
+                .await
+                .ok_or_else(|| eyre::eyre!("missing actor mapping for scope {scope}"))?;
+            assert_eq!(found, scoped_path);
+        }
+
+        config_stop.stop().await?;
+        plugs_stop.stop().await?;
+        sqlite_local_state_stop.stop().await?;
+        blobs_repo.shutdown().await?;
+        _acx_stop().await?;
+        Ok(())
+    }
+}
+
+pub mod version_updates {
+    use crate::interlude::*;
+
+    use automerge::ROOT;
+    use automerge::transaction::Transactable;
+    use autosurgeon::reconcile_prop;
+
+    pub fn version_latest() -> Res<Vec<u8>> {
+        let mut doc = automerge::Automerge::new();
+        doc.transact(|tx| {
+            tx.put(ROOT, "version", "0")?;
+            tx.put(ROOT, "$schema", "daybook.config")?;
+            reconcile_prop(
+                tx,
+                ROOT,
+                super::ConfigStore::prop().as_ref(),
+                super::ConfigStore::default(),
+            )
+            .map_err(|_| automerge::AutomergeError::Fail)?;
+            Ok::<_, automerge::AutomergeError>(())
+        })
+        .map_err(|err| ferr!("{err:?}"))?;
+        Ok(doc.save_nocompress())
+    }
+}

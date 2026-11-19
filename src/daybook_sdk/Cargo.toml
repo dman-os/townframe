@@ -1,0 +1,17 @@
+[package]
+name = "daybook_sdk"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "daybook_sdk"
+path = "lib.rs"
+
+# [features]
+# default = ["uniffi"]
+# uniffi = ["dep:uniffi"]
+
+[dependencies]

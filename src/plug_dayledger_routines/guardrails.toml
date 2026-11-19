@@ -1,0 +1,31 @@
+version = 1
+role = "plugin"
+dependency_reason = "WASM workflows consume portable ledger types and helpers from the native manifest crate"
+allowed_dependencies = [
+    "daybook_types",
+    "plug_dayledger_manifest",
+    "utils_rs",
+    "wasm_utils_rs",
+    "wflow_sdk",
+]
+allow_external_api_types = false
+
+[builds.wasm32-wasip3]
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/plug_dayledger_routines/wflows/parse_hledger.rs"
+symbol = "module::run"
+ceiling = 304
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DEPENDENCY_GROUP"
+path = "src/plug_dayledger_routines/Cargo.toml"
+symbol = "dependency-groups"
+ceiling = 5
+class = "LEGACY_DEBT"
+reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
+reference = "docs/scratch/nodule-runtime-ledger.md"

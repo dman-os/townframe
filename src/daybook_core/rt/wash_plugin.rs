@@ -1,0 +1,657 @@
+use crate::interlude::*;
+use crate::rt::dispatch;
+use daybook_types::doc::BranchPath;
+use daybook_types::doc::{self as root_doc};
+
+fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
+    wasmtime::Error::msg(msg.to_string())
+}
+
+mod binds_guest {
+    wash_runtime::wasmtime::component::bindgen!({
+        world: "all-guest",
+
+        imports: { default: async | trappable | tracing },
+        exports: { default: async | trappable | tracing },
+        with: {
+            "townframe:daybook/capabilities.doc-token": super::caps::DocToken,
+            "townframe:daybook/capabilities.facet-token": super::caps::FacetToken,
+            "townframe:daybook/capabilities.facet-create-token": super::caps::FacetCreateToken,
+            "townframe:daybook/capabilities.facet-tag-token": super::caps::FacetTagToken,
+            "townframe:daybook/capabilities.command-invoke-token": super::caps::CommandInvokeToken,
+            "townframe:sqlite/sqlite-connection.connection": wash_plugin_sqlite::SqliteConnectionToken,
+            "townframe:sqlite/sqlite-connection.transaction": wash_plugin_sqlite::SqliteTransactionToken,
+        }
+    });
+}
+
+mod caps;
+mod mltools;
+mod stateless_view_host;
+
+pub(crate) use binds_guest::AllGuestPre;
+pub(crate) use binds_guest::exports::townframe::daybook::stateless_view;
+pub use binds_guest::townframe::daybook::capabilities;
+pub use binds_guest::townframe::daybook::drawer;
+pub use binds_guest::townframe::daybook::facet_routine;
+pub use binds_guest::townframe::daybook::mltools_embed;
+pub use binds_guest::townframe::daybook::mltools_image_tools;
+pub use binds_guest::townframe::daybook::mltools_llm_chat;
+pub use binds_guest::townframe::daybook::mltools_ocr;
+use binds_guest::townframe::daybook_types::doc as bindgen_doc;
+pub use binds_guest::townframe::sqlite::sqlite_connection;
+pub(crate) use stateless_view_host::StatelessViewPlugin;
+
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::wit::doc as wit_doc;
+use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
+use wash_runtime::plugin::WitInterfaces;
+use wash_runtime::wit::WitInterface;
+use wash_runtime::wit::WitWorld;
+
+pub struct DaybookPlugin {
+    drawer_repo: Arc<crate::drawer::DrawerRepo>,
+    dispatch_repo: Arc<crate::rt::DispatchRepo>,
+    blobs_repo: Arc<crate::blobs::BlobsRepo>,
+    sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
+    config_repo: Arc<crate::config::ConfigRepo>,
+    plugs_repo: Arc<crate::plugs::PlugsRepo>,
+    rt: RwLock<Option<std::sync::Weak<crate::rt::Rt>>>,
+}
+
+impl DaybookPlugin {
+    pub fn new(
+        drawer_repo: Arc<crate::drawer::DrawerRepo>,
+        dispatch_repo: Arc<crate::rt::DispatchRepo>,
+        blobs_repo: Arc<crate::blobs::BlobsRepo>,
+        sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
+        config_repo: Arc<crate::config::ConfigRepo>,
+        plugs_repo: Arc<crate::plugs::PlugsRepo>,
+    ) -> Self {
+        Self {
+            drawer_repo,
+            dispatch_repo,
+            blobs_repo,
+            sqlite_local_state_repo,
+            config_repo,
+            plugs_repo,
+            rt: default(),
+        }
+    }
+
+    pub const ID: &str = "townframe:daybook";
+
+    fn from_ctx(wcx: &SharedWashCtx) -> Arc<Self> {
+        wcx.active_ctx.get_plugin::<Self>(Self::ID)
+    }
+
+    async fn get_doc(
+        &self,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPathBuf,
+        heads: &ChangeHashSet,
+    ) -> Res<Option<Arc<daybook_types::doc::Doc>>> {
+        self.drawer_repo
+            .get_doc_with_facets_at_branch_heads(doc_id, branch_path, heads, None)
+            .await
+    }
+
+    async fn patch_doc(
+        &self,
+        branch_path: &BranchPath,
+        heads: Option<ChangeHashSet>,
+        patch: root_doc::DocPatch,
+    ) -> Result<(), crate::drawer::types::DrawerError> {
+        self.drawer_repo
+            .update_at_heads(patch, branch_path, heads)
+            .await
+    }
+
+    pub fn attach_rt(&self, rt: std::sync::Weak<crate::rt::Rt>) {
+        let mut rt_slot = self.rt.write().expect(ERROR_MUTEX);
+        *rt_slot = Some(rt);
+    }
+
+    fn rt(&self) -> Res<Arc<crate::rt::Rt>> {
+        let weak = self
+            .rt
+            .read()
+            .expect(ERROR_MUTEX)
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| ferr!("daybook runtime not attached to plugin"))?;
+        weak.upgrade()
+            .ok_or_else(|| ferr!("daybook runtime is no longer available"))
+    }
+}
+
+#[async_trait]
+impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+
+    fn world(&self) -> WitWorld {
+        WitWorld {
+            exports: std::collections::HashSet::new(),
+            imports: std::collections::HashSet::from([
+                WitInterface::from("townframe:utils/types"),
+                WitInterface::from("townframe:api-utils/utils"),
+                WitInterface::from(
+                    "townframe:daybook/drawer,capabilities,facet-routine,mltools-ocr,mltools-embed,mltools-image-tools,mltools-llm-chat",
+                ),
+            ]),
+        }
+    }
+
+    async fn start(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn on_workload_bind(
+        &self,
+        _workload: &wash_runtime::engine::workload::UnresolvedWorkload,
+        _interface_configs: WitInterfaces<'_>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn on_workload_item_bind<'a>(
+        &self,
+        item: &mut wash_runtime::engine::workload::WorkloadItem<'a>,
+        _interfaces: WitInterfaces<'_>,
+    ) -> anyhow::Result<()> {
+        let world = item.world();
+        for iface in world.imports {
+            if iface.namespace == "townframe" && iface.package == "daybook" {
+                if iface.interfaces.contains("drawer") {
+                    drawer::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                        item.linker(),
+                        |ctx| ctx,
+                    )?;
+                }
+                if iface.interfaces.contains("capabilities") {
+                    capabilities::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                        item.linker(),
+                        |ctx| ctx,
+                    )?;
+                }
+                if iface.interfaces.contains("facet-routine") {
+                    facet_routine::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                        item.linker(),
+                        |ctx| ctx,
+                    )?;
+                }
+                if iface.interfaces.contains("mltools-ocr") {
+                    mltools_ocr::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                        item.linker(),
+                        |ctx| ctx,
+                    )?;
+                }
+                if iface.interfaces.contains("mltools-embed") {
+                    mltools_embed::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                        item.linker(),
+                        |ctx| ctx,
+                    )?;
+                }
+                if iface.interfaces.contains("mltools-image-tools") {
+                    mltools_image_tools::add_to_linker::<
+                        _,
+                        wasmtime::component::HasSelf<SharedWashCtx>,
+                    >(item.linker(), |ctx| ctx)?;
+                }
+                if iface.interfaces.contains("mltools-llm-chat") {
+                    mltools_llm_chat::add_to_linker::<
+                        _,
+                        wasmtime::component::HasSelf<SharedWashCtx>,
+                    >(item.linker(), |ctx| ctx)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn on_workload_resolved(
+        &self,
+        resolved: &wash_runtime::engine::workload::ResolvedWorkload,
+        component_id: &str,
+    ) -> anyhow::Result<()> {
+        let _resolved = (resolved, component_id);
+        Ok(())
+    }
+
+    async fn on_workload_unbind(
+        &self,
+        workload_id: &str,
+        _interfaces: WitInterfaces<'_>,
+    ) -> anyhow::Result<()> {
+        let _workload_id = workload_id;
+        Ok(())
+    }
+
+    async fn stop(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl drawer::Host for &mut SharedWashCtx {}
+
+impl<T: 'static> drawer::HostWithStore<T> for wasmtime::component::HasSelf<SharedWashCtx> {
+    async fn get_doc_at_heads(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        doc_id: drawer::DocId,
+        heads: drawer::Heads,
+    ) -> wasmtime::Result<Result<drawer::Doc, drawer::GetDocError>> {
+        use crate::rt::dispatch::ActiveDispatchArgs;
+        use crate::rt::dispatch::FacetRoutineArgs;
+
+        let heads = match am_utils_rs::parse_commit_heads(&heads) {
+            Ok(val) => val,
+            Err(err) => return Ok(Err(drawer::GetDocError::InvalidHeads(format!("{err:?}")))),
+        };
+        let heads = ChangeHashSet(heads);
+
+        let (plugin, job_id) = accessor.with(|mut access| {
+            let ctx = access.get();
+            let plugin = DaybookPlugin::from_ctx(ctx);
+            let wflow_plugin = wflow::wash_plugin_wflow::WflowPlugin::try_from_ctx(ctx)
+                .ok_or_else(|| wasmtime_err("only wflows are supported as drawer host"))?;
+            let job_id = wflow_plugin
+                .job_id_of_ctx(ctx)
+                .ok_or_else(|| wasmtime_err("there should be a job??"))?;
+            Ok::<_, wasmtime::Error>((plugin, job_id))
+        })?;
+
+        let Some(dispatch) = plugin.dispatch_repo.get_by_wflow_job(&job_id[..]).await else {
+            return Err(wasmtime_err(format!(
+                "no active dispatch found for job: {job_id}"
+            )));
+        };
+        let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+            branch_path,
+            doc_id: dispatch_doc_id,
+            ..
+        }) = &dispatch.args;
+        if *dispatch_doc_id != doc_id {
+            return Err(wasmtime_err(format!(
+                "doc_id mismatch for get_doc_at_heads: requested={doc_id} dispatch={dispatch_doc_id}"
+            )));
+        }
+
+        match plugin
+            .get_doc(&doc_id, branch_path, &heads)
+            .await
+            .map_err(wasmtime_err)?
+        {
+            Some(doc) => {
+                let bind_doc: bindgen_doc::Doc = binds_guest::townframe::daybook_types::doc::Doc {
+                    id: doc.id.clone(),
+                    facets: doc
+                        .facets
+                        .iter()
+                        .map(|(facet_key, facet_value)| {
+                            (facet_key.to_string(), wit_doc::facet_from(facet_value))
+                        })
+                        .collect(),
+                };
+                Ok(Ok(bind_doc))
+            }
+            None => Ok(Err(drawer::GetDocError::DocNotFound)),
+        }
+    }
+
+    async fn update_doc_at_heads(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        branch_path: String,
+        heads: Option<drawer::Heads>,
+        patch: drawer::DocPatch,
+    ) -> wasmtime::Result<Result<(), drawer::UpdateDocError>> {
+        let heads = match heads {
+            Some(heads) => match am_utils_rs::parse_commit_heads(&heads) {
+                Ok(val) => Some(ChangeHashSet(val)),
+                Err(err) => {
+                    return Ok(Err(drawer::UpdateDocError::InvalidHeads(format!(
+                        "{err:?}"
+                    ))));
+                }
+            },
+            None => None,
+        };
+        let patch = wit_doc::DocPatch {
+            id: patch.id,
+            facets_set: patch.facets_set.into_iter().collect(),
+            facets_remove: patch.facets_remove,
+            user_path: None,
+        };
+        let patch: daybook_types::doc::DocPatch =
+            patch.try_into().map_err(|err: serde_json::Error| {
+                drawer::UpdateDocError::InvalidPatch(err.to_string())
+            })?;
+
+        let plugin = accessor.with(|mut access| DaybookPlugin::from_ctx(access.get()));
+        match plugin
+            .patch_doc(BranchPath::new(&branch_path), heads, patch)
+            .await
+        {
+            Ok(_) => Ok(Ok(())),
+            Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => {
+                Ok(Err(drawer::UpdateDocError::DocNotFound))
+            }
+            Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => {
+                Ok(Err(drawer::UpdateDocError::BranchNotFound))
+            }
+            Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => Err(
+                wasmtime_err("unexpected branch already exists on patch_doc"),
+            ),
+            Err(crate::drawer::types::DrawerError::InvalidKey {
+                inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
+            }) => Ok(Err(drawer::UpdateDocError::InvalidKey(tag))),
+            Err(crate::drawer::types::DrawerError::Other { inner }) => {
+                Err(wasmtime_err(format!("unexepcted error: {inner}")))
+            }
+        }
+    }
+}
+
+pub(crate) async fn build_doc_facet_tokens(
+    ctx: &mut SharedWashCtx,
+    plugin: &Arc<DaybookPlugin>,
+    doc_tokens: &dispatch::DocFacetTokens,
+) -> wasmtime::Result<facet_routine::DocFacetTokens> {
+    let doc_rights = caps::doc_rights_from_facet_acl(&doc_tokens.facet_acl);
+    let doc_token = ctx.table.push(caps::DocToken {
+        doc_id: doc_tokens.doc_id.clone(),
+        branch_path: doc_tokens.branch_path.clone(),
+        staging_branch_path: doc_tokens.staging_branch_path.clone(),
+        heads: doc_tokens.heads.clone(),
+        rights: doc_rights,
+        facet_acl: doc_tokens.facet_acl.clone(),
+    })?;
+
+    let doc = match plugin
+        .get_doc(
+            &doc_tokens.doc_id,
+            &doc_tokens.branch_path,
+            &doc_tokens.heads,
+        )
+        .await
+        .map_err(wasmtime_err)?
+    {
+        Some(doc) => doc,
+        None => {
+            return Ok(facet_routine::DocFacetTokens {
+                doc: doc_token,
+                facets: vec![],
+                tags: vec![],
+            });
+        }
+    };
+
+    // Build facet tokens: for every existing facet that matches any ACL entry,
+    // aggregate rights from all matching entries (tag-wide + key-specific).
+    let mut facet_tokens: Vec<wasmtime::component::Resource<capabilities::FacetToken>> = Vec::new();
+    for facet_key in doc.facets.keys() {
+        let mut rights = capabilities::FacetRights::empty();
+        for access in &doc_tokens.facet_acl {
+            if access.tag.0 != facet_key.tag.to_string() {
+                continue;
+            }
+            if let Some(id) = &access.key_id
+                && id != &facet_key.id
+            {
+                continue;
+            }
+            rights |= caps::facet_rights_from_access(access);
+        }
+        if rights == capabilities::FacetRights::empty() {
+            continue;
+        }
+        let ftoken = ctx.table.push(caps::FacetToken {
+            doc_id: doc_tokens.doc_id.clone(),
+            branch_path: doc_tokens.branch_path.clone(),
+            staging_branch_path: doc_tokens.staging_branch_path.clone(),
+            heads: doc_tokens.heads.clone(),
+            facet_key: facet_key.clone(),
+            rights,
+        })?;
+        facet_tokens.push(ftoken);
+    }
+
+    // Build tag tokens: one per tag that has at least one tag-wide ACL entry.
+    // Aggregate rights from all tag-wide entries for that tag.
+    let mut tag_tokens: Vec<wasmtime::component::Resource<capabilities::FacetTagToken>> =
+        Vec::new();
+    let mut tag_rights_map: std::collections::HashMap<String, capabilities::FacetRights> =
+        std::collections::HashMap::new();
+    for access in &doc_tokens.facet_acl {
+        let tag_str = access.tag.0.clone();
+        if access.key_id.is_some() {
+            // Key-specific entries: only contribute CREATE to the tag token
+            // (facet-scoped READ/UPDATE/DELETE are handled by the facet loop above).
+            // This ensures routines can call tag_token.create(key_id, data) for
+            // key-specific create ACLs even when the facet doesn't exist yet.
+            if !access.create {
+                continue;
+            }
+            tag_rights_map
+                .entry(tag_str)
+                .and_modify(|rights| *rights |= capabilities::FacetRights::CREATE)
+                .or_insert(capabilities::FacetRights::CREATE);
+        } else {
+            let entry_rights = caps::facet_rights_from_access(access);
+            tag_rights_map
+                .entry(tag_str)
+                .and_modify(|rights| *rights |= entry_rights)
+                .or_insert(entry_rights);
+        }
+    }
+    for (tag_str, rights) in tag_rights_map {
+        let ttoken = ctx.table.push(caps::FacetTagToken {
+            doc_id: doc_tokens.doc_id.clone(),
+            branch_path: doc_tokens.branch_path.clone(),
+            staging_branch_path: doc_tokens.staging_branch_path.clone(),
+            heads: doc_tokens.heads.clone(),
+            tag: tag_str.clone(),
+            rights,
+            facet_acl: doc_tokens.facet_acl.clone(),
+        })?;
+        tag_tokens.push(ttoken);
+    }
+
+    Ok(facet_routine::DocFacetTokens {
+        doc: doc_token,
+        facets: facet_tokens,
+        tags: tag_tokens,
+    })
+}
+
+impl facet_routine::Host for SharedWashCtx {
+    async fn get_args(&mut self) -> wasmtime::Result<facet_routine::FacetRoutineArgs> {
+        use crate::rt::*;
+
+        let wflow_plugin = wflow::wash_plugin_wflow::WflowPlugin::try_from_ctx(self)
+            .ok_or_else(|| wasmtime_err("only wflows are supported as facet-routine"))?;
+        let dayook_plugin = DaybookPlugin::from_ctx(self);
+        let job_id = wflow_plugin
+            .job_id_of_ctx(self)
+            .expect("there should be a job??");
+        let Some(dispatch) = dayook_plugin
+            .dispatch_repo
+            .get_by_wflow_job(&job_id[..])
+            .await
+        else {
+            return Err(wasmtime_err(format!(
+                "no active dispatch found for job: {job_id}"
+            )));
+        };
+        let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+            doc_id,
+            branch_path: _,
+            staging_branch_path: _,
+            heads,
+            invocation,
+            primary_doc,
+            config_docs,
+            local_state_acl,
+            command_invoke_acl_snapshot,
+            wflow_args_json: _,
+        }) = &dispatch.args;
+        let ActiveDispatchDeets::Wflow { plug_id, .. } = &dispatch.deets;
+
+        let primary_doc_tokens = build_doc_facet_tokens(self, &dayook_plugin, primary_doc).await?;
+
+        let mut config_doc_tokens: Vec<facet_routine::DocFacetTokens> = Vec::new();
+        if !config_docs.is_empty() {
+            let mut owner_config_docs: HashMap<String, (String, ChangeHashSet)> = HashMap::new();
+            for config_doc_meta in config_docs {
+                let owner_plug_id =
+                    config_doc_owner_plug_id(&config_doc_meta.facet_acl, plug_id.as_str())?;
+                let (config_doc_id, config_heads) =
+                    if let Some(found) = owner_config_docs.get(&owner_plug_id) {
+                        found.clone()
+                    } else {
+                        let config_doc_id = dayook_plugin
+                        .plugs_repo
+                        .get_plug_config_doc_id(&owner_plug_id)
+                        .await
+                        .ok_or_else(|| {
+                            wasmtime_err(format!(
+                                "plug {owner_plug_id} has no config doc; expected one at enablement"
+                            ))
+                        })?;
+                        let config_heads = dayook_plugin
+                            .drawer_repo
+                            .get_doc_branches(&config_doc_id)
+                            .await
+                            .map_err(|err| {
+                                wasmtime_err(format!("error getting config doc branches: {err}"))
+                            })?
+                            .and_then(|doc| doc.branches.get("main").cloned())
+                            .ok_or_else(|| {
+                                wasmtime_err(format!(
+                                    "config doc missing main branch for plug {owner_plug_id}"
+                                ))
+                            })?;
+                        owner_config_docs.insert(
+                            owner_plug_id.clone(),
+                            (config_doc_id.clone(), config_heads.clone()),
+                        );
+                        (config_doc_id, config_heads)
+                    };
+                let config_doc_tokens_meta = dispatch::DocFacetTokens {
+                    doc_id: config_doc_id,
+                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                    staging_branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                    heads: config_heads,
+                    facet_acl: config_doc_meta.facet_acl.clone(),
+                };
+                let tokens =
+                    build_doc_facet_tokens(self, &dayook_plugin, &config_doc_tokens_meta).await?;
+                config_doc_tokens.push(tokens);
+            }
+        }
+
+        let mut sqlite_connections: Vec<(
+            String,
+            wasmtime::component::Resource<sqlite_connection::Connection>,
+        )> = Vec::new();
+        for local_state_access in local_state_acl {
+            let local_state_id = crate::local_state::SqliteLocalStateRepo::local_state_id(
+                &local_state_access.plug_id,
+                &local_state_access.local_state_key.0,
+            );
+            // Eagerly resolve the sqlite ctx + file path here (the orchestrator),
+            // then hand a fully-resolved token to the sqlite plugin which only
+            // manages the wasm resource table + query execution.
+            let sqlite_file_path = dayook_plugin
+                .sqlite_local_state_repo
+                .get_sqlite_file_path(&local_state_id)
+                .await
+                .map_err(|err| {
+                    wasmtime_err(format!(
+                        "error resolving sqlite file path for {local_state_id}: {err}"
+                    ))
+                })?;
+            let db = dayook_plugin
+                .sqlite_local_state_repo
+                .ensure_sqlite_db(&local_state_id)
+                .await
+                .map_err(|err| {
+                    wasmtime_err(format!(
+                        "error initializing sqlite db for {local_state_id}: {err}"
+                    ))
+                })?;
+            let handle = wash_plugin_sqlite::SqlPlugin::create_connection(
+                self,
+                wash_plugin_sqlite::SqliteConnectionToken {
+                    sqlite_file_path: sqlite_file_path.to_string_lossy().to_string(),
+                    db,
+                },
+            )?;
+            sqlite_connections.push((
+                format!(
+                    "{}/{}",
+                    local_state_access.plug_id, local_state_access.local_state_key.0
+                ),
+                handle,
+            ));
+        }
+
+        let mut command_invoke_tokens: Vec<(
+            String,
+            wasmtime::component::Resource<capabilities::CommandInvokeToken>,
+        )> = Vec::new();
+        for target_url in command_invoke_acl_snapshot {
+            let token = self.table.push(caps::CommandInvokeToken {
+                parent_wflow_job_id: Arc::clone(&job_id),
+                target_url: target_url.to_string(),
+            })?;
+            command_invoke_tokens.push((target_url.to_string(), token));
+        }
+
+        let wit_invocation = match invocation {
+            dispatch::RoutineInvocation::Processor(proc) => {
+                facet_routine::RoutineInvocation::Processor(facet_routine::ProcessorInvocation {
+                    trigger_doc_id: proc.trigger_doc_id.clone(),
+                    changed_facet_keys: proc.changed_facet_keys.clone(),
+                })
+            }
+            dispatch::RoutineInvocation::Command => facet_routine::RoutineInvocation::Command,
+        };
+
+        Ok(facet_routine::FacetRoutineArgs {
+            doc_id: doc_id.clone(),
+            heads: am_utils_rs::serialize_commit_heads(heads.as_ref()),
+            invocation: wit_invocation,
+            primary_doc: primary_doc_tokens,
+            config_docs: config_doc_tokens,
+            command_invoke_tokens,
+            sqlite_connections,
+        })
+    }
+}
+
+fn config_doc_owner_plug_id(
+    facet_acl: &[daybook_types::manifest::RoutineFacetAccess],
+    default_owner_plug_id: &str,
+) -> wasmtime::Result<String> {
+    let mut owner_plug_id: Option<String> = None;
+    for access in facet_acl {
+        let access_owner = access
+            .owner_plug_id
+            .as_deref()
+            .unwrap_or(default_owner_plug_id);
+        match owner_plug_id.as_deref() {
+            None => owner_plug_id = Some(access_owner.to_string()),
+            Some(existing) if existing == access_owner => {}
+            Some(existing) => {
+                return Err(wasmtime_err(format!(
+                    "config doc facet ACL mixes owner_plug_id values: expected {existing}, found {access_owner}"
+                )));
+            }
+        }
+    }
+
+    Ok(owner_plug_id.unwrap_or_else(|| default_owner_plug_id.to_string()))
+}

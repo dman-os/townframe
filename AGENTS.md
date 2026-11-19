@@ -48,6 +48,7 @@
 
 <!--FIXME: rewrite this in CONTRIBUTING.md -->
 - Source-only checks (nixfmt/statix/deadnix, rustfmt on every `.rs` file, deno fmt/lint/check of `x/`, biome, JSON/TOML/YAML validity) are hermetic Nix checks: run `nix flake check`, fix formatting with `nix fmt`. New files are invisible to the flake until tracked.
+- The legacy daybook stack (`./src/daybook_*`, `./src/plug_*`, and the Kotlin app `./src/daybook_compose`) stays in the tree but is out of the Cargo workspaces and off the validation path: don't build, type check or lint it as part of a change. It stays until its remaining claytxt concerns are settled; `./x/check-dayb.ts` still type checks the Kotlin app when asked.
 - xtask groups its subcommands: `cargo x sql check|gen|migrate`, `cargo x guardrails lint|api|doctor|check-matrix|plan|overlap|bless|...`.
 - Prefer `cargo clippy --all-targets --all-features -p myCrate` over `cargo check`.
 - When working with rust, in addition to `cargo clippy`, small tests can be used to validate ideas.

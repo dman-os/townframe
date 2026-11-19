@@ -95,6 +95,20 @@ exclude = [
   "src/clay_rt_wcmp_web",
   "src/test_wflows",
   "src/btress_sysadmin",
+  # Legacy daybook stack, kept in the tree but out of the workspace: it does not
+  # build against the current workspace dependencies and nothing depends on it.
+  "src/daybook_cli",
+  "src/daybook_core",
+  "src/daybook_ffi",
+  "src/daybook_pdk",
+  "src/daybook_sdk",
+  "src/daybook_types",
+  "src/plug_dayledger_manifest",
+  "src/plug_dayledger_routines",
+  "src/plug_plabels_manifest",
+  "src/plug_plabels_routines",
+  "src/plug_test_manifest",
+  "src/plug_test_routines",
 ]
 
 [workspace.package]

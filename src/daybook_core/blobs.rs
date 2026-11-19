@@ -1,0 +1,1610 @@
+use crate::interlude::*;
+
+use crate::repo::blob_presence_part_id;
+use big_repo::SharedPartStore;
+use big_sync_core::ObjKey;
+use iroh_blobs::api::blobs::AddPathOptions;
+use iroh_blobs::api::blobs::ImportMode;
+use iroh_blobs::store::fs::FsStore;
+use serde::Deserialize;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::path::Component;
+use std::path::Path;
+use tokio::io::AsyncWriteExt;
+
+pub mod permission_writer;
+pub(crate) use permission_writer::spawn_blob_inventory_permission_writer;
+pub mod encryption_worker;
+pub mod key_source;
+pub mod pin_worker;
+pub mod pins_part_worker;
+/// Repository-database tables owned by the blob pin worker and the pair-root
+/// ledger. The doc-blob-pins consumer keeps its own local-state unit under
+/// `pins_part_worker`.
+pub(crate) mod sqlite {
+    // `count_plug_pins` is a test probe.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) mod queries {
+        include!("blobs/sqlite/gen.rs");
+    }
+}
+pub mod sync;
+
+pub(crate) use encryption_worker::BlobEncryptionWorkerArgs;
+pub(crate) use encryption_worker::spawn_blob_encryption_worker;
+pub(crate) use pin_worker::BlobPinWorkerArgs;
+pub(crate) use pin_worker::spawn_blob_pin_worker;
+pub(crate) use pins_part_worker::spawn_blob_pins_part_worker;
+
+pub fn blob_inventory_part_id(doc_id: &DocumentId) -> PartKey {
+    let mut hasher = blake3::Hasher::new_derive_key("daybook.blob_inventory_partition.v1");
+    hasher.update(doc_id.as_bytes());
+    PartKey::new(*hasher.finalize().as_bytes())
+}
+
+pub fn blob_inventory_part_id_from_doc_id(doc_id: &str) -> PartKey {
+    if let Ok(id) = doc_id.parse::<DocumentId>() {
+        blob_inventory_part_id(&id)
+    } else {
+        let mut hasher = blake3::Hasher::new_derive_key("daybook.blob_inventory_partition.v1");
+        hasher.update(doc_id.as_bytes());
+        PartKey::new(*hasher.finalize().as_bytes())
+    }
+}
+
+/// The blob presence plane's write edge (ADR 003 §13). Implemented over the
+/// local presence part store; `BlobsRepo` invokes it at the exact points the
+/// bytes land, so the membership lands with the fact rather than after it —
+/// the same principle the big repo store's `/seds` partition applies to
+/// sedimentrees. Idempotent: the store no-ops a membership that is already
+/// live, so restart announcements and repeated puts cost one no-op row read.
+#[async_trait::async_trait]
+pub trait BlobPresenceSink: Send + Sync {
+    /// The blob's bytes are now on disk at this node. `length_octets` is the
+    /// byte length the materialization observed.
+    async fn blob_now_held(&self, blob_id: BlobId, length_octets: u64) -> Res<()>;
+}
+
+/// The presence sink over a local part store: payload row with the length,
+/// membership of the `/blobs` partition. Both calls are idempotent and the
+/// store publishes exactly one revision event per state change, so replays
+/// and repeats converge.
+struct BlobPresencePartStoreSink(SharedPartStore);
+
+#[async_trait::async_trait]
+impl BlobPresenceSink for BlobPresencePartStoreSink {
+    async fn blob_now_held(&self, blob_id: BlobId, length_octets: u64) -> Res<()> {
+        let obj_id = ObjKey::from(blob_id);
+        self.0
+            .set_obj_payload(
+                obj_id.clone(),
+                serde_json::json!({ "lengthOctets": length_octets }),
+            )
+            .await?;
+        self.0
+            .add_obj_to_parts(obj_id, vec![blob_presence_part_id()])
+            .await?;
+        Ok(())
+    }
+}
+
+pub struct BlobsRepo {
+    root: PathBuf,
+    src_local_user_path: UserPathBuf,
+    iroh_store: iroh_blobs::api::Store,
+    /// Serves a representation's ciphertext from its plaintext. One instance
+    /// repo-wide, because it is also the registry of installed pairs: the worker
+    /// that installs a representation and the store path that serves it must be
+    /// the same object.
+    cipher_provider: Arc<big_blobs::encrypt::CipherBlobProvider>,
+    // FIXME: use surelock
+    hash_locks: Arc<std::sync::Mutex<HashMap<BlobId, Arc<tokio::sync::Mutex<()>>>>>,
+    sync_backend: Arc<surelock::mutex::Mutex<Option<crate::blobs::sync::BlobSyncBackend>>>,
+    /// The presence plane's write edge. `None` until the repository boot wires
+    /// it — a standalone `BlobsRepo` (no repo around it) has no presence plane.
+    presence_sink: std::sync::RwLock<Option<std::sync::Arc<dyn BlobPresenceSink>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BlobMode {
+    OwnedCopy,
+    Reference,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BlobMetaV1 {
+    version: u32,
+    hash: BlobId,
+    mode: BlobMode,
+    size_bytes: u64,
+    mime: Option<String>,
+    src_local_user_path: UserPathBuf,
+    source_paths: Vec<String>,
+    created_at_unix_secs: i64,
+    iroh_ingested: bool,
+}
+
+struct ObjectPaths {
+    dir: PathBuf,
+    blob: PathBuf,
+    meta: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobMaterializeRequest {
+    Filename(String),
+    Extension(String),
+}
+
+/// A blob URL: `dtxt:blob:<digest>` (ADR 035 §3).
+///
+/// This crate still appends a `?via=<cipher key>` query to a `Blob` facet's URL as the
+/// resolution hint of its encryption worker, which ADR 035 retires for the Cabinet in favour
+/// of the naming convention. The hint goes away with this crate's migration.
+pub fn blob_url(digest: &(impl std::fmt::Display + ?Sized)) -> String {
+    format!("dtxt:blob:{digest}")
+}
+
+/// The digest text of a `dtxt:blob:<digest>` URL, ignoring any query; `None` for any other URL.
+pub fn blob_url_digest(url: &url::Url) -> Option<&str> {
+    if url.scheme() != "dtxt" {
+        return None;
+    }
+    url.path().strip_prefix("blob:")
+}
+
+/// The digest text of a `Blob` facet's URL: a `dtxt:blob:` URL or the older `daybook-blob`
+/// spelling that stored facets may still carry.
+pub fn blob_facet_url_digest(url: &url::Url) -> Option<&str> {
+    blob_url_digest(url)
+        .or_else(|| (url.scheme() == "daybook-blob").then(|| url.path().trim_start_matches('/')))
+}
+
+/// The content digest of a blob: the blake3 hash of its bytes.
+///
+/// Deliberately not an `ObjKey` alias, though a blob's object key in the blob
+/// part store is these bytes. ADR 012 made an object key any byte string, and a
+/// key read back from a peer's part store or written into a facet is whatever
+/// its author wrote; a digest is exactly 32 bytes. Keeping that width an
+/// invariant of the type is what stops text that is not a digest from reaching
+/// the on-disk layout, where `Path::join` reads an absolute spelling as a
+/// replacement for the blob root, and what makes the conversions every real
+/// consumer needs (iroh `Hash`, the multihash digest text) total instead of
+/// panicking on a length that cannot vary.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlobId([u8; 32]);
+
+impl BlobId {
+    /// A digest from its 32 bytes.
+    #[must_use]
+    pub fn new(digest: [u8; 32]) -> Self {
+        Self(digest)
+    }
+
+    /// A digest no blob is expected to have, for tests and "missing" lookups.
+    #[must_use]
+    pub fn random() -> Self {
+        Self(rand::random())
+    }
+
+    /// The digest bytes every fixed-width consumer takes. Total: the width is
+    /// the type's invariant, so no caller guards a length that cannot vary.
+    #[must_use]
+    pub fn to_bytes32(&self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl From<BlobId> for ObjKey {
+    /// The object key a blob's object carries in the blob part store: the
+    /// digest itself, not the text it was authored as (the digest spelling and
+    /// the `Display` spelling of one digest are the same object).
+    fn from(blob_id: BlobId) -> Self {
+        ObjKey::new(blob_id.0)
+    }
+}
+
+impl TryFrom<&ObjKey> for BlobId {
+    type Error = BlobIdDecodeError;
+
+    /// The digest a blob part store object key names, if it names one.
+    ///
+    /// Fallible because that key came from a peer: a key that is not a digest
+    /// names no blob here, and saying so must not be able to become a panic or
+    /// a path outside the blob root.
+    fn try_from(obj_key: &ObjKey) -> Result<Self, Self::Error> {
+        obj_key
+            .as_bytes()
+            .try_into()
+            .map(Self)
+            .map_err(|_| BlobIdDecodeError)
+    }
+}
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+/// Blob id text is neither a blake3 multihash nor a 32-byte multibase digest
+pub struct BlobIdDecodeError;
+
+impl std::fmt::Display for BlobId {
+    /// The digest as multibase base58btc, which is what names the blob's object
+    /// on disk and in a `dtxt:blob:` URL. It never contains a path separator, and
+    /// that is the point: the blob's paths are built from this text.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&utils_rs::hash::encode_base58_multibase(self.0))
+    }
+}
+
+impl std::fmt::Debug for BlobId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::str::FromStr for BlobId {
+    type Err = BlobIdDecodeError;
+
+    /// The two spellings of one digest, and nothing else.
+    ///
+    /// One is the blake3 multihash text [`blob_id_to_digest_str`] emits and
+    /// that facet digests carry, the other is the plain multibase text
+    /// `Display` emits and that `dtxt:blob:` URLs carry. Both decode to the same
+    /// 32 bytes and so name the same blob; reserved `/…` keys, `o:` object-part
+    /// keys, arbitrary text and the empty string are not digests and are
+    /// rejected here, at the boundary the text enters through.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Ok(digest) = utils_rs::hash::decode_base58_multihash_blake3(value) {
+            return Ok(Self(digest));
+        }
+        // Not `utils_rs::hash::decode_base58_multibase`: it indexes the first
+        // byte and so panics on the empty string rather than rejecting it.
+        if value.is_empty() {
+            return Err(BlobIdDecodeError);
+        }
+        let bytes =
+            utils_rs::hash::decode_base58_multibase(value).map_err(|_| BlobIdDecodeError)?;
+        bytes
+            .as_slice()
+            .try_into()
+            .map(Self)
+            .map_err(|_| BlobIdDecodeError)
+    }
+}
+
+impl Serialize for BlobId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&self.to_string())
+        } else {
+            serializer.serialize_bytes(&self.0)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BlobId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            let text = String::deserialize(deserializer)?;
+            std::str::FromStr::from_str(&text).map_err(serde::de::Error::custom)
+        } else {
+            let bytes = <Vec<u8>>::deserialize(deserializer)?;
+            bytes
+                .as_slice()
+                .try_into()
+                .map(Self)
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+/// The blob id a text spelling names.
+///
+/// The text is peer-authored (a facet digest, a `dtxt:blob:` URL, a pin in the
+/// local state), so text that names no digest is an error rather than a fresh
+/// identity or a panic.
+pub fn blob_id_from_hash(hash: &str) -> Res<BlobId> {
+    hash.parse()
+        .map_err(|_| eyre::eyre!("not a valid blob hash: {hash}"))
+}
+
+pub(crate) fn blob_hash_from_id(blob_id: BlobId) -> String {
+    blob_id.to_string()
+}
+
+async fn blob_id_from_reader(reader: tokio::fs::File) -> Result<BlobId, eyre::Report> {
+    use tokio::io::AsyncReadExt;
+
+    let mut hasher = blake3::Hasher::new();
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut buf = vec![0u8; 65536];
+    loop {
+        let read = reader.read(&mut buf).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(BlobId::new(*hasher.finalize().as_bytes()))
+}
+
+impl BlobsRepo {
+    pub async fn new(
+        root: PathBuf,
+        src_local_user_path: UserPathBuf,
+    ) -> Result<Arc<Self>, eyre::Report> {
+        let objects_root = root.join("objects");
+        tokio::fs::create_dir_all(&objects_root).await?;
+        let iroh_root = root.join("iroh");
+        tokio::fs::create_dir_all(&iroh_root).await?;
+        // `load_with_virtuals` is the only public way to obtain the provider
+        // registry the store actor consults; `FsStore::load` drops it, and a
+        // virtual entry whose provider is not registered is served as not found.
+        let (fs_store, virtual_providers) = FsStore::load_with_virtuals(
+            iroh_root.join("blobs.db"),
+            iroh_blobs::store::fs::options::Options::new(&iroh_root),
+        )
+        .await
+        .map_err(|err| eyre::eyre!("error loading iroh fs store: {err:?}"))?;
+        let cipher_provider = Arc::new(big_blobs::encrypt::CipherBlobProvider::new());
+        cipher_provider
+            .register(&virtual_providers)
+            .map_err(|err| eyre::eyre!("registering the cipher blob provider: {err:?}"))?;
+
+        Ok(Arc::new(Self {
+            root,
+            src_local_user_path,
+            iroh_store: fs_store.into(),
+            cipher_provider,
+            hash_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            sync_backend: Arc::new(surelock::mutex::Mutex::new(default())),
+            presence_sink: std::sync::RwLock::new(None),
+        }))
+    }
+    /// Wire the presence plane. Called once at repository boot, before any
+    /// caller can put a blob: from the first put on, membership lands with the
+    /// fact.
+    pub fn set_blob_presence_sink(&self, presence_store: SharedPartStore) {
+        let sink: std::sync::Arc<dyn BlobPresenceSink> =
+            std::sync::Arc::new(BlobPresencePartStoreSink(presence_store));
+        *self
+            .presence_sink
+            .write()
+            .expect("presence sink lock poisoned") = Some(sink);
+    }
+
+    async fn blob_now_held(&self, blob_id: BlobId) -> Res<()> {
+        let Some(sink) = self
+            .presence_sink
+            .read()
+            .expect("presence sink lock poisoned")
+            .clone()
+        else {
+            return Ok(());
+        };
+        let length = tokio::fs::metadata(self.object_paths(blob_id.clone())?.blob)
+            .await
+            .ok()
+            .map(|meta| meta.len())
+            .unwrap_or_default();
+        sink.blob_now_held(blob_id, length).await
+    }
+
+    /// Replay every blob currently held on disk into the presence plane. Run
+    /// once at repository boot, after the sink is wired and before anything
+    /// reacts to the plane. Membership is idempotent in the store, so a
+    /// restart's replay collapses to no-op row reads.
+    pub async fn announce_held_blobs(&self) -> Res<()> {
+        let objects = self.root.join("objects");
+        let mut read = 0usize;
+        let mut announcements = std::collections::HashSet::new();
+        let mut level0 = tokio::fs::read_dir(&objects)
+            .await
+            .wrap_err_with(|| format!("blob presence announce: listing {}", objects.display()))?;
+        while let Some(l0) = level0.next_entry().await? {
+            if !l0.path().is_dir() {
+                continue;
+            }
+            let mut level1 = tokio::fs::read_dir(l0.path()).await?;
+            while let Some(l1) = level1.next_entry().await? {
+                if !l1.path().is_dir() {
+                    continue;
+                }
+                let mut leaves = tokio::fs::read_dir(l1.path()).await?;
+                while let Some(entry) = leaves.next_entry().await? {
+                    let name = entry.file_name();
+                    let Some(name) = name.to_str() else { continue };
+                    let Some(stem) = name.strip_suffix(".blob") else {
+                        continue;
+                    };
+                    // The filename is the bare multibase base58btc `Display`
+                    // spelling `object_paths` wrote — never hex, and never the
+                    // multihash-framed digest text — so only the blob-id parse
+                    // reads back the spelling the objects tree names files
+                    // with. A name that is not a digest names no blob; skip it.
+                    let Ok(blob_id) = blob_id_from_hash(stem) else {
+                        continue;
+                    };
+                    if announcements.insert(blob_id.clone()) {
+                        self.blob_now_held(blob_id).await?;
+                        read += 1;
+                    }
+                }
+            }
+        }
+        tracing::debug!(blobs = read, "blob presence plane: boot announce complete");
+        Ok(())
+    }
+
+    pub fn set_sync_backend(&self, backend: crate::blobs::sync::BlobSyncBackend) {
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.sync_backend);
+            *guard = Some(backend);
+        });
+    }
+
+    pub async fn has_blob_on_disk(&self, blob_id: BlobId) -> Res<bool> {
+        let object_paths = self.object_paths(blob_id)?;
+        tokio::fs::try_exists(&object_paths.blob)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn ensure_hash_materialized(&self, blob_id: BlobId) -> Res<()> {
+        if self.has_blob_on_disk(blob_id.clone()).await? {
+            return Ok(());
+        }
+        let backend = surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.sync_backend);
+            guard.clone()
+        });
+        if let Some(backend) = backend {
+            let peers = backend.active_peer_ids();
+            for peer_id in peers {
+                if let Ok(()) = backend.ensure_local_blob(peer_id, blob_id.clone()).await {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn put_path_copy(&self, source_path: &Path) -> Res<BlobId> {
+        let source_path = source_path.canonicalize()?;
+        let source_meta = tokio::fs::metadata(&source_path).await?;
+        if !source_meta.is_file() {
+            eyre::bail!("source path is not a file: {}", source_path.display());
+        }
+
+        let source_snapshot = self.create_source_snapshot(&source_path).await?;
+        let result = async {
+            let hash = blob_id_from_reader(tokio::fs::File::open(&source_snapshot).await?).await?;
+            let object_paths = self.object_paths(hash.clone())?;
+
+            tokio::fs::create_dir_all(&object_paths.dir).await?;
+            if !tokio::fs::try_exists(&object_paths.blob).await? {
+                self.atomic_copy_file(&source_snapshot, &object_paths.blob)
+                    .await?;
+            }
+
+            let blob_meta = tokio::fs::metadata(&object_paths.blob).await?;
+            let mut meta = self.build_meta(
+                hash.clone(),
+                BlobMode::OwnedCopy,
+                blob_meta.len(),
+                Vec::new(),
+                false,
+            );
+            self.write_meta(&object_paths.meta, &meta).await?;
+            self.ingest_path_with_iroh(&object_paths.blob, hash.clone())
+                .await?;
+            meta.iroh_ingested = true;
+            self.write_meta(&object_paths.meta, &meta).await?;
+            self.blob_now_held(hash.clone()).await?;
+
+            Ok(hash)
+        }
+        .await;
+        tokio::fs::remove_file(&source_snapshot)
+            .await
+            .inspect_err(|err| error!("error deleting temp file: {err}"))
+            .ok();
+        result
+    }
+
+    pub async fn put_path_reference(&self, source_path: &Path) -> Res<BlobId> {
+        if !source_path.is_absolute() {
+            eyre::bail!("reference path must be absolute: {}", source_path.display());
+        }
+
+        let source_meta = tokio::fs::metadata(source_path).await?;
+        if !source_meta.is_file() {
+            eyre::bail!("source path is not a file: {}", source_path.display());
+        }
+
+        let source_snapshot = self.create_source_snapshot(source_path).await?;
+        let result = async {
+            let snapshot_meta = tokio::fs::metadata(&source_snapshot).await?;
+            let hash = blob_id_from_reader(tokio::fs::File::open(&source_snapshot).await?).await?;
+            let object_paths = self.object_paths(hash.clone())?;
+            tokio::fs::create_dir_all(&object_paths.dir).await?;
+            let hash_lock = self.lock_for_hash(hash.clone());
+            let _hash_guard = hash_lock.lock().await;
+
+            let source_path_string = source_path
+                .to_str()
+                .ok_or_else(|| eyre::eyre!("reference path must be valid UTF-8"))?
+                .to_string();
+            let mut meta = self.build_meta(
+                hash.clone(),
+                BlobMode::Reference,
+                snapshot_meta.len(),
+                vec![source_path_string.clone()],
+                false,
+            );
+            if let Some(existing) = self.read_meta(&object_paths.meta).await? {
+                let mut merged = existing.source_paths;
+                if !merged.iter().any(|value| value == &source_path_string) {
+                    merged.push(source_path_string);
+                }
+                meta.source_paths = merged;
+            }
+
+            self.write_meta(&object_paths.meta, &meta).await?;
+            self.ingest_path_with_iroh(&source_snapshot, hash.clone())
+                .await?;
+            meta.iroh_ingested = true;
+            self.write_meta(&object_paths.meta, &meta).await?;
+            self.blob_now_held(hash.clone()).await?;
+
+            Ok(hash)
+        }
+        .await;
+        tokio::fs::remove_file(&source_snapshot)
+            .await
+            .inspect_err(|err| warn!("error deleting temp file: {err}"))
+            .ok();
+        result
+    }
+
+    /// Compatibility alias that ingests bytes as an owned blob.
+    pub async fn put(&self, data: &[u8]) -> Result<BlobId, eyre::Report> {
+        let hash = BlobId::new(*blake3::hash(data).as_bytes());
+        let object_paths = self.object_paths(hash.clone())?;
+
+        tokio::fs::create_dir_all(&object_paths.dir).await?;
+        if !tokio::fs::try_exists(&object_paths.blob).await? {
+            self.atomic_write(&object_paths.blob, data).await?;
+        }
+
+        let blob_meta = tokio::fs::metadata(&object_paths.blob).await?;
+        let mut meta = self.build_meta(
+            hash.clone(),
+            BlobMode::OwnedCopy,
+            blob_meta.len(),
+            Vec::new(),
+            false,
+        );
+        self.write_meta(&object_paths.meta, &meta).await?;
+        self.ingest_path_with_iroh(&object_paths.blob, hash.clone())
+            .await?;
+        meta.iroh_ingested = true;
+        self.write_meta(&object_paths.meta, &meta).await?;
+        self.blob_now_held(hash.clone()).await?;
+
+        Ok(hash)
+    }
+
+    pub async fn get_path(&self, blob_id: BlobId) -> Result<PathBuf, eyre::Report> {
+        let object_paths = self.object_paths(blob_id.clone())?;
+        if !tokio::fs::try_exists(&object_paths.blob).await? {
+            self.ensure_hash_materialized(blob_id.clone()).await.ok();
+        }
+        if tokio::fs::try_exists(&object_paths.blob).await? {
+            if self.read_meta(&object_paths.meta).await?.is_none() {
+                let blob_meta = tokio::fs::metadata(&object_paths.blob).await?;
+                let recovered = self.build_meta(
+                    blob_id,
+                    BlobMode::OwnedCopy,
+                    blob_meta.len(),
+                    Vec::new(),
+                    false,
+                );
+                self.write_meta(&object_paths.meta, &recovered).await?;
+            }
+            return Ok(object_paths.blob);
+        }
+
+        let Some(meta) = self.read_meta(&object_paths.meta).await? else {
+            eyre::bail!("Blob not found: {blob_id}");
+        };
+
+        match meta.mode {
+            BlobMode::OwnedCopy => {
+                eyre::bail!("Blob not found: {blob_id}");
+            }
+            BlobMode::Reference => {
+                if meta.source_paths.is_empty() {
+                    eyre::bail!("reference metadata missing source_paths");
+                }
+                let mut drift_error: Option<String> = None;
+                for source_path in &meta.source_paths {
+                    let source_path = PathBuf::from(source_path);
+                    if !tokio::fs::try_exists(&source_path).await? {
+                        continue;
+                    }
+                    let source_hash =
+                        blob_id_from_reader(tokio::fs::File::open(&source_path).await?).await?;
+                    if source_hash == meta.hash {
+                        return Ok(source_path);
+                    } else if tokio::fs::try_exists(&object_paths.blob).await? {
+                        return Ok(object_paths.blob);
+                    } else if drift_error.is_none() {
+                        drift_error = Some(format!(
+                            "Referenced blob hash diverged for {}: expected={}, got={}",
+                            source_path.display(),
+                            blob_hash_from_id(meta.hash.clone()),
+                            blob_hash_from_id(source_hash)
+                        ));
+                    }
+                }
+                if let Some(err) = drift_error {
+                    eyre::bail!(err);
+                }
+                eyre::bail!("Referenced blob source missing for hash {blob_id}");
+            }
+        }
+    }
+
+    pub async fn get_bytes(&self, blob_id: BlobId) -> Result<Vec<u8>, eyre::Report> {
+        let path = self.get_path(blob_id).await?;
+        Ok(tokio::fs::read(path).await?)
+    }
+
+    pub fn iroh_store(&self) -> iroh_blobs::api::Store {
+        self.iroh_store.clone()
+    }
+
+    /// The repo's cipher blob provider: it serves `C` from `P` for entries the
+    /// encryption worker installed (ADR 003 §12). Shared, not cloned per caller:
+    /// the pairs it holds are the installed representations.
+    pub(crate) fn cipher_provider(&self) -> Arc<big_blobs::encrypt::CipherBlobProvider> {
+        Arc::clone(&self.cipher_provider)
+    }
+
+    /// Is this blob possessed by the store without stored bytes: a virtual
+    /// entry whose cipher pair is still rooted (`ct:`/`pt:` tags), so its
+    /// bytes are produced on demand by the registered provider and possession
+    /// needs no transfer (ADR 003 §14 "ready to be served, physically or
+    /// virtually").
+    ///
+    /// How the pieces compose: `blobs().has()` reports virtual entries as
+    /// complete because they are servable; only an entry with *stored* bytes
+    /// hands out a sync reader (the store's `sync_reader` returns `None` for
+    /// absent, partial *and* virtual), so "has but no reader" is exactly
+    /// "virtual". The pair tags are the servability half: an unrooted virtual
+    /// entry would serve as not-found, so there the honest state is "want",
+    /// not "possessed".
+    pub async fn blob_is_possessed_without_bytes(&self, blob_id: &BlobId) -> Res<bool> {
+        let iroh_hash = blob_id_to_iroh_hash(blob_id.clone());
+        let blobs = self.iroh_store.blobs();
+        if !blobs.has(iroh_hash).await? {
+            return Ok(false);
+        }
+        if blobs.sync_reader(iroh_hash).await?.is_some() {
+            return Ok(false);
+        }
+        big_blobs::encrypt::has_pair_tags(&self.iroh_store, iroh_hash).await
+    }
+
+    pub async fn shutdown(&self) -> Res<()> {
+        self.iroh_store
+            .shutdown()
+            .await
+            .map_err(|err| eyre::eyre!("error shutting down iroh blob store: {err:?}"))?;
+        Ok(())
+    }
+
+    pub async fn has_hash(&self, blob_id: BlobId) -> Res<bool> {
+        Ok(self.get_path(blob_id).await.is_ok())
+    }
+
+    pub async fn cleanup_staging(&self) -> Res<()> {
+        let staging_root = self.root.join("staging");
+        if tokio::fs::try_exists(&staging_root).await? {
+            tokio::fs::remove_dir_all(&staging_root).await?;
+        }
+        tokio::fs::create_dir_all(&staging_root).await?;
+        Ok(())
+    }
+
+    pub async fn materialize(
+        &self,
+        blob_id: BlobId,
+        request: BlobMaterializeRequest,
+    ) -> Res<PathBuf> {
+        let hash = blob_hash_from_id(blob_id.clone());
+        self.ensure_local_object_no_meta_rewrite(blob_id.clone())
+            .await?;
+        // First materialization *is* the bytes landing: announce presence here
+        // too, or a get/materialize-only blob never joins the presence plane.
+        self.blob_now_held(blob_id.clone()).await?;
+        let source_path = self.object_paths(blob_id)?.blob;
+        let filename = match request {
+            BlobMaterializeRequest::Filename(name) => Self::sanitize_requested_filename(&name)?,
+            BlobMaterializeRequest::Extension(ext) => {
+                let ext = Self::sanitize_requested_extension(&ext)?;
+                format!("{hash}.{ext}")
+            }
+        };
+        let staging_dir = self.root.join("staging").join(&hash);
+        tokio::fs::create_dir_all(&staging_dir).await?;
+        let materialized_path = staging_dir.join(filename);
+        if tokio::fs::try_exists(&materialized_path).await? {
+            return Ok(materialized_path);
+        }
+        match tokio::fs::hard_link(&source_path, &materialized_path).await {
+            Ok(_) => Ok(materialized_path),
+            Err(_) => {
+                self.atomic_copy_file(&source_path, &materialized_path)
+                    .await?;
+                Ok(materialized_path)
+            }
+        }
+    }
+
+    pub async fn materialize_id(
+        &self,
+        blob_id: BlobId,
+        request: BlobMaterializeRequest,
+    ) -> Res<PathBuf> {
+        self.materialize(blob_id, request).await
+    }
+
+    pub async fn materialize_with_meta_extension(
+        &self,
+        blob_id: BlobId,
+        filename_stem: &str,
+    ) -> Res<PathBuf> {
+        let hash = blob_hash_from_id(blob_id.clone());
+        let object_paths = self.object_paths(blob_id.clone())?;
+        let meta = self
+            .read_meta(&object_paths.meta)
+            .await?
+            .ok_or_else(|| eyre::eyre!("blob metadata not found for hash {hash}"))?;
+        eyre::ensure!(
+            meta.mime.as_deref().is_some() || !meta.source_paths.is_empty(),
+            "materialize_with_meta_extension requires blob metadata with mime or source_paths for hash {hash}"
+        );
+        let ext = self.preferred_extension_from_meta(blob_id.clone()).await?;
+        let stem = Self::sanitize_requested_stem(filename_stem)?;
+        self.materialize(
+            blob_id,
+            BlobMaterializeRequest::Filename(format!("{stem}.{ext}")),
+        )
+        .await
+    }
+
+    pub async fn put_from_store(&self, blob_id: BlobId) -> Res<BlobId> {
+        let object_paths = self.object_paths(blob_id.clone())?;
+        tokio::fs::create_dir_all(&object_paths.dir).await?;
+
+        if !tokio::fs::try_exists(&object_paths.blob).await? {
+            let iroh_hash = blob_id_to_iroh_hash(blob_id.clone());
+            self.iroh_store
+                .blobs()
+                .export(iroh_hash, &object_paths.blob)
+                .await
+                .map_err(|err| eyre::eyre!("error exporting blob from iroh store: {err:?}"))?;
+        }
+
+        let blob_meta = tokio::fs::metadata(&object_paths.blob).await?;
+        let meta = self.build_meta(
+            blob_id.clone(),
+            BlobMode::OwnedCopy,
+            blob_meta.len(),
+            Vec::new(),
+            true,
+        );
+        self.write_meta(&object_paths.meta, &meta).await?;
+        self.blob_now_held(blob_id.clone()).await?;
+
+        Ok(blob_id)
+    }
+
+    async fn ensure_local_object_no_meta_rewrite(&self, blob_id: BlobId) -> Res<()> {
+        let object_paths = self.object_paths(blob_id.clone())?;
+        tokio::fs::create_dir_all(&object_paths.dir).await?;
+        if !tokio::fs::try_exists(&object_paths.blob).await? {
+            let iroh_hash = blob_id_to_iroh_hash(blob_id);
+            self.iroh_store
+                .blobs()
+                .export(iroh_hash, &object_paths.blob)
+                .await
+                .map_err(|err| eyre::eyre!("error exporting blob from iroh store: {err:?}"))?;
+        }
+        Ok(())
+    }
+
+    /// The on-disk paths of a blob's object.
+    ///
+    /// The two fan-out levels are taken from the digest text, which is multibase
+    /// base58 of 32 bytes by construction: no part of it can read as an absolute
+    /// path or a parent, so every consumer of these paths stays inside the blob
+    /// root.
+    fn object_paths(&self, blob_id: BlobId) -> Res<ObjectPaths> {
+        let hash = blob_hash_from_id(blob_id);
+        let (l0, rest) = hash.split_at_checked(2).ok_or_eyre("invalid blob hash")?;
+        let (l1, _) = rest.split_at_checked(2).ok_or_eyre("invalid blob hash")?;
+        let dir = self.root.join("objects").join(l0).join(l1);
+        Ok(ObjectPaths {
+            blob: dir.join(format!("{hash}.blob")),
+            meta: dir.join(format!("{hash}.meta")),
+            dir,
+        })
+    }
+
+    async fn preferred_extension_from_meta(&self, blob_id: BlobId) -> Res<String> {
+        let hash = blob_hash_from_id(blob_id.clone());
+        let object_paths = self.object_paths(blob_id)?;
+        if let Some(meta) = self.read_meta(&object_paths.meta).await? {
+            if let Some(mime) = meta.mime.as_deref()
+                && let Some(ext) = Self::extension_from_mime(mime)
+            {
+                return Ok(ext.to_string());
+            }
+            if let Some(source_ext) = meta
+                .source_paths
+                .iter()
+                .filter_map(|path| Path::new(path).extension())
+                .filter_map(|ext| ext.to_str())
+                .find(|ext| !ext.is_empty())
+            {
+                return Self::sanitize_requested_extension(source_ext);
+            }
+        }
+        eyre::bail!("blob metadata has no materializable extension for hash {hash}");
+    }
+
+    fn extension_from_mime(mime: &str) -> Option<&'static str> {
+        match mime.split(';').next().map(str::trim) {
+            Some("image/jpeg" | "image/jpg") => Some("jpg"),
+            Some("image/png") => Some("png"),
+            Some("image/gif") => Some("gif"),
+            Some("image/bmp") => Some("bmp"),
+            Some("image/webp") => Some("webp"),
+            Some("text/plain") => Some("txt"),
+            Some("application/json") => Some("json"),
+            Some("application/yaml" | "text/yaml" | "text/x-yaml") => Some("yaml"),
+            _ => None,
+        }
+    }
+
+    fn sanitize_requested_stem(stem: &str) -> Res<String> {
+        let stem = stem.trim();
+        eyre::ensure!(!stem.is_empty(), "filename stem must not be empty");
+        let mut components = Path::new(stem).components();
+        let Some(first) = components.next() else {
+            eyre::bail!("filename stem must not be empty");
+        };
+        eyre::ensure!(
+            matches!(first, Component::Normal(_)) && components.next().is_none(),
+            "filename stem must be a single normal path component"
+        );
+        eyre::ensure!(
+            !stem.contains(':'),
+            "filename stem must not contain path prefixes"
+        );
+        Ok(stem.to_string())
+    }
+
+    fn sanitize_requested_extension(extension: &str) -> Res<String> {
+        let ext = extension.trim().trim_start_matches('.');
+        eyre::ensure!(!ext.is_empty(), "extension must not be empty");
+        eyre::ensure!(
+            !ext.contains('/') && !ext.contains('\\'),
+            "extension must not contain path separators"
+        );
+        eyre::ensure!(
+            ext.bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-'),
+            "extension contains invalid characters: '{ext}'"
+        );
+        Ok(ext.to_ascii_lowercase())
+    }
+
+    fn sanitize_requested_filename(filename: &str) -> Res<String> {
+        let filename = filename.trim();
+        eyre::ensure!(!filename.is_empty(), "filename must not be empty");
+        let mut components = Path::new(filename).components();
+        let Some(first) = components.next() else {
+            eyre::bail!("filename must not be empty");
+        };
+        eyre::ensure!(
+            matches!(first, Component::Normal(_)) && components.next().is_none(),
+            "filename must be a single normal path component"
+        );
+        eyre::ensure!(
+            !filename.contains(':'),
+            "filename must not contain path prefixes"
+        );
+        Ok(filename.to_string())
+    }
+
+    async fn read_meta(&self, path: &Path) -> Res<Option<BlobMetaV1>> {
+        if !tokio::fs::try_exists(path).await? {
+            return Ok(None);
+        }
+        let raw = tokio::fs::read(path).await?;
+        let meta = serde_json::from_slice::<BlobMetaV1>(&raw)
+            .wrap_err_with(|| format!("invalid blob metadata json at {}", path.display()))?;
+        Ok(Some(meta))
+    }
+
+    async fn write_meta(&self, path: &Path, meta: &BlobMetaV1) -> Res<()> {
+        let data = serde_json::to_vec(meta)?;
+        self.atomic_write(path, &data).await
+    }
+
+    fn build_meta(
+        &self,
+        hash: BlobId,
+        mode: BlobMode,
+        size_bytes: u64,
+        source_paths: Vec<String>,
+        iroh_ingested: bool,
+    ) -> BlobMetaV1 {
+        BlobMetaV1 {
+            version: 1,
+            hash,
+            mode,
+            size_bytes,
+            mime: None,
+            src_local_user_path: self.src_local_user_path.clone(),
+            source_paths,
+            created_at_unix_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_secs() as i64,
+            iroh_ingested,
+        }
+    }
+
+    async fn ingest_path_with_iroh(&self, path: &Path, blob_id: BlobId) -> Res<()> {
+        self.iroh_store
+            .blobs()
+            .add_path_with_opts(AddPathOptions {
+                path: path.to_path_buf(),
+                format: iroh_blobs::BlobFormat::Raw,
+                mode: ImportMode::TryReference,
+            })
+            .with_named_tag(blob_hash_from_id(blob_id).as_bytes())
+            .await
+            .map_err(|err| ferr!("error ingesting path into iroh store: {err:?}"))?;
+        Ok(())
+    }
+
+    fn lock_for_hash(&self, blob_id: BlobId) -> Arc<tokio::sync::Mutex<()>> {
+        let mut guard = self.hash_locks.lock().expect(ERROR_MUTEX);
+        Arc::clone(
+            guard
+                .entry(blob_id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+
+    fn is_exists_error(err: &std::io::Error) -> bool {
+        err.kind() == std::io::ErrorKind::AlreadyExists
+            || matches!(err.raw_os_error(), Some(17 | 183))
+    }
+
+    async fn atomic_copy_file(&self, source: &Path, dest: &Path) -> Res<()> {
+        let dir = dest
+            .parent()
+            .ok_or_eyre("destination path for copy has no parent directory")?;
+        tokio::fs::create_dir_all(dir).await?;
+
+        let temp = dir.join(format!(
+            ".{}.{}.tmp",
+            dest.file_name()
+                .expect("destination path should have filename")
+                .to_string_lossy(),
+            rand::random::<u64>()
+        ));
+
+        tokio::fs::copy(source, &temp).await?;
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&temp)
+            .await?;
+        file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+
+        match tokio::fs::rename(&temp, dest).await {
+            Ok(_) => {}
+            Err(err) if Self::is_exists_error(&err) => match tokio::fs::remove_file(&temp).await {
+                Ok(_) => {}
+                Err(remove_err) if remove_err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(remove_err) => return Err(remove_err.into()),
+            },
+            Err(err) => return Err(err.into()),
+        }
+        self.sync_dir(dir).await?;
+        Ok(())
+    }
+
+    async fn create_source_snapshot(&self, source: &Path) -> Res<PathBuf> {
+        let snapshot_dir = self.root.join("snapshots");
+        tokio::fs::create_dir_all(&snapshot_dir).await?;
+        let snapshot_path = snapshot_dir.join(format!(
+            "blob-src-{}-{}.snapshot",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        self.atomic_copy_file(source, &snapshot_path).await?;
+        Ok(snapshot_path)
+    }
+
+    async fn atomic_write(&self, path: &Path, data: &[u8]) -> Res<()> {
+        let dir = path
+            .parent()
+            .ok_or_eyre("target path for atomic write has no parent directory")?;
+        tokio::fs::create_dir_all(dir).await?;
+
+        let temp = dir.join(format!(
+            ".{}.{}.tmp",
+            path.file_name()
+                .expect("target path should have filename")
+                .to_string_lossy(),
+            rand::random::<u64>()
+        ));
+
+        let mut file = tokio::fs::File::create(&temp).await?;
+        file.write_all(data).await?;
+        file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+
+        match tokio::fs::rename(&temp, path).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                match tokio::fs::remove_file(path).await {
+                    Ok(_) => {}
+                    Err(remove_err) if remove_err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(remove_err) => return Err(remove_err.into()),
+                }
+                tokio::fs::rename(&temp, path).await?;
+            }
+            Err(err) => return Err(err.into()),
+        }
+        self.sync_dir(dir).await?;
+        Ok(())
+    }
+
+    async fn sync_dir(&self, dir: &Path) -> Res<()> {
+        let dir_file = tokio::fs::OpenOptions::new().read(true).open(dir).await?;
+        dir_file.sync_all().await?;
+        Ok(())
+    }
+}
+
+// #[cfg(test)]
+// pub(crate) fn daybook_hash_to_iroh_hash(hash: &str) -> Res<iroh_blobs::Hash> {
+//     use std::str::FromStr;
+//     let blob_id = BlobId::from_str(hash).wrap_err("invalid daybook blob hash")?;
+//     Ok(blob_id_to_iroh_hash(blob_id))
+// }
+
+pub(crate) fn blob_id_to_iroh_hash(blob_id: BlobId) -> iroh_blobs::Hash {
+    iroh_blobs::Hash::from_bytes(blob_id.to_bytes32())
+}
+
+/// The digest in the blake3 multihash spelling our writers put in facet
+/// digests and blob URLs. [`BlobId`]'s `FromStr` decodes it back to the same
+/// digest as `Display` does.
+pub fn blob_id_to_digest_str(blob_id: BlobId) -> String {
+    utils_rs::hash::encode_base58_multihash_blake3(blob_id.to_bytes32())
+}
+
+#[tracing::instrument]
+pub fn digest_str_to_blob_id(digest: &str) -> Res<BlobId> {
+    let bytes = utils_rs::hash::decode_base58_multihash_blake3(digest)?;
+    Ok(BlobId::new(bytes))
+}
+
+/// Parse a digest string in either spelling of the same 32-octet BLAKE3 digest.
+///
+/// ADR 003 §3 makes the multihash form canonical for `representation.digest`
+/// and for a plaintext content digest; a `dtxt:blob:` URL instead carries the
+/// bare base58 form. A facet value is authored by whoever wrote the facet, so a
+/// reader cannot assume one spelling. Both forms decode to the same digest, so
+/// accepting either cannot name a different blob.
+pub fn digest_str_to_blob_id_lenient(digest: &str) -> Option<BlobId> {
+    if let Ok(blob_id) = digest_str_to_blob_id(digest) {
+        return Some(blob_id);
+    }
+    // `ObjId`'s `FromStr` is the bare base58 form. It zero-pads a short input
+    // rather than rejecting it, so it is a weaker check than its name suggests.
+    // Kept as-is here: pins are already stored and compared in whatever form
+    // their facet used, and narrowing the rule would silently un-pin existing
+    // rows. Tightening it is a separate change with its own migration.
+    digest.parse::<BlobId>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn setup() -> (Arc<BlobsRepo>, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo = BlobsRepo::new(temp_dir.path().to_path_buf(), "/local/test-user".into())
+            .await
+            .unwrap();
+        (repo, temp_dir)
+    }
+
+    fn bytes_hash_to_iroh_hash(bytes: &[u8]) -> iroh_blobs::Hash {
+        iroh_blobs::Hash::new(bytes)
+    }
+
+    #[tokio::test]
+    async fn put_bytes_smoke_owned_copy() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let data = b"hello world";
+
+        let hash = repo.put(data).await?;
+        let expected_hash = BlobId::new(*blake3::hash(data).as_bytes());
+        assert_eq!(hash, expected_hash);
+
+        let path = repo.get_path(hash.clone()).await?;
+        let saved_data = tokio::fs::read(path).await?;
+        assert_eq!(saved_data, data);
+
+        let object_paths = repo.object_paths(hash)?;
+        let meta: BlobMetaV1 = serde_json::from_slice(&tokio::fs::read(&object_paths.meta).await?)?;
+        assert_eq!(meta.mode, BlobMode::OwnedCopy);
+        assert_eq!(meta.src_local_user_path, "/local/test-user");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_bytes_dedup() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let data = b"duplicate data";
+
+        let hash1 = repo.put(data).await?;
+        let hash2 = repo.put(data).await?;
+
+        assert_eq!(hash1, hash2);
+
+        let object_paths = repo.object_paths(hash1)?;
+        assert!(tokio::fs::try_exists(&object_paths.blob).await?);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_path_copy_survives_source_delete() -> Res<()> {
+        let (repo, temp) = setup().await;
+        let source = temp.path().join("source.bin");
+        tokio::fs::write(&source, b"copy me").await?;
+
+        let hash = repo.put_path_copy(&source).await?;
+        tokio::fs::remove_file(&source).await?;
+
+        let path = repo.get_path(hash).await?;
+        let saved = tokio::fs::read(path).await?;
+        assert_eq!(saved, b"copy me");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_path_reference_breaks_if_source_deleted() -> Res<()> {
+        let (repo, temp) = setup().await;
+        let source = temp.path().join("source-ref.bin");
+        tokio::fs::write(&source, b"ref me").await?;
+
+        let source_abs = source.canonicalize()?;
+        let hash = repo.put_path_reference(&source_abs).await?;
+        tokio::fs::remove_file(&source_abs).await?;
+
+        let err = repo.get_path(hash).await.unwrap_err();
+        assert!(
+            err.to_string().contains("Referenced blob source missing"),
+            "unexpected error: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_path_prefers_owned_over_reference() -> Res<()> {
+        let (repo, temp) = setup().await;
+        let source = temp.path().join("owned.bin");
+        tokio::fs::write(&source, b"owned wins").await?;
+
+        let hash = repo.put_path_copy(&source).await?;
+        let object_paths = repo.object_paths(hash.clone())?;
+
+        let bogus_ref = BlobMetaV1 {
+            version: 1,
+            hash: hash.clone(),
+            mode: BlobMode::Reference,
+            size_bytes: 123,
+            mime: None,
+            src_local_user_path: "/local/test-user".into(),
+            source_paths: vec!["/tmp/does/not/exist".to_string()],
+            created_at_unix_secs: 1,
+            iroh_ingested: true,
+        };
+        repo.write_meta(&object_paths.meta, &bogus_ref).await?;
+
+        let got = repo.get_path(hash).await?;
+        assert_eq!(got, object_paths.blob);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn metadata_roundtrip() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let data = b"roundtrip";
+
+        let hash = repo.put(data).await?;
+        let object_paths = repo.object_paths(hash.clone())?;
+        let meta: BlobMetaV1 = serde_json::from_slice(&tokio::fs::read(&object_paths.meta).await?)?;
+
+        assert_eq!(meta.hash, hash);
+        assert_eq!(meta.mode, BlobMode::OwnedCopy);
+        assert_eq!(meta.size_bytes, data.len() as u64);
+        assert_eq!(meta.src_local_user_path, "/local/test-user");
+        assert!(meta.iroh_ingested);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn iroh_ingest_presence_smoke() -> Res<()> {
+        let (repo, temp) = setup().await;
+
+        let hash_a = repo.put(b"bytes-path").await?;
+        let has_a = repo
+            .iroh_store
+            .blobs()
+            .has(bytes_hash_to_iroh_hash(b"bytes-path"))
+            .await
+            .map_err(|err| eyre::eyre!("iroh has check failed: {err:?}"))?;
+        assert!(has_a, "iroh should contain bytes from put, hash={hash_a}");
+
+        let copy_src = temp.path().join("copy-src.bin");
+        tokio::fs::write(&copy_src, b"copy-path").await?;
+        repo.put_path_copy(&copy_src).await?;
+        let has_b = repo
+            .iroh_store
+            .blobs()
+            .has(bytes_hash_to_iroh_hash(b"copy-path"))
+            .await
+            .map_err(|err| eyre::eyre!("iroh has check failed: {err:?}"))?;
+        assert!(has_b, "iroh should contain bytes from put_path_copy");
+
+        let ref_src = temp.path().join("ref-src.bin");
+        tokio::fs::write(&ref_src, b"ref-path").await?;
+        let ref_src_abs = ref_src.canonicalize()?;
+        repo.put_path_reference(&ref_src_abs).await?;
+        let has_c = repo
+            .iroh_store
+            .blobs()
+            .has(bytes_hash_to_iroh_hash(b"ref-path"))
+            .await
+            .map_err(|err| eyre::eyre!("iroh has check failed: {err:?}"))?;
+        assert!(has_c, "iroh should contain bytes from put_path_reference");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_from_store_materializes_owned_blob() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let data = b"materialize-from-store";
+        let hash = BlobId::new(*blake3::hash(data).as_bytes());
+
+        repo.iroh_store
+            .blobs()
+            .add_bytes(data.to_vec())
+            .await
+            .map_err(|err| eyre::eyre!("iroh add bytes failed: {err:?}"))?;
+
+        assert!(repo.get_path(hash.clone()).await.is_err());
+
+        repo.put_from_store(hash.clone()).await?;
+        let path = repo.get_path(hash).await?;
+        let got = tokio::fs::read(path).await?;
+        assert_eq!(got, data);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_put_api_still_works() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let hash = repo.put(b"legacy").await?;
+        let path = repo.get_path(hash).await?;
+        assert_eq!(tokio::fs::read(path).await?, b"legacy");
+        Ok(())
+    }
+
+    #[test]
+    fn both_digest_spellings_name_the_same_blob() {
+        let blob_id = BlobId::random();
+        let canonical = blob_id_to_digest_str(blob_id.clone());
+        let bare = blob_id.to_string();
+        assert_ne!(canonical, bare, "the two spellings must differ");
+        let bytes = blob_id.to_bytes32();
+        assert_eq!(
+            digest_str_to_blob_id_lenient(&canonical).map(|id| id.to_bytes32()),
+            Some(bytes),
+            "ADR 003 §3's multihash spelling must resolve"
+        );
+        assert_eq!(
+            digest_str_to_blob_id_lenient(&bare).map(|id| id.to_bytes32()),
+            Some(bytes),
+            "a `dtxt:blob:` URL's bare spelling must resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn blob_url_contract_unchanged() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let hash = repo.put(b"url").await?;
+        let url = blob_url(&hash);
+        let parsed = url::Url::parse(&url)?;
+        let parsed_hash = blob_url_digest(&parsed).ok_or_eyre("invalid blob URL")?;
+        let path = repo.get_path(parsed_hash.parse::<BlobId>()?).await?;
+        assert!(tokio::fs::try_exists(path).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_blobs_missing() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let res = repo.get_path(BlobId::random()).await;
+        assert!(res.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_path_reference_keeps_multiple_source_candidates() -> Res<()> {
+        let (repo, temp) = setup().await;
+        let source_a = temp.path().join("source-a.bin");
+        let source_b = temp.path().join("source-b.bin");
+        tokio::fs::write(&source_a, b"same-bytes").await?;
+        tokio::fs::write(&source_b, b"same-bytes").await?;
+        let source_a_abs = source_a.canonicalize()?;
+        let source_b_abs = source_b.canonicalize()?;
+
+        let hash_a = repo.put_path_reference(&source_a_abs).await?;
+        let hash_b = repo.put_path_reference(&source_b_abs).await?;
+        assert_eq!(hash_a, hash_b);
+
+        tokio::fs::remove_file(&source_a_abs).await?;
+        let got = repo.get_path(hash_a).await?;
+        assert_eq!(got, source_b_abs);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_path_reference_merges_source_paths_under_concurrency() -> Res<()> {
+        let (repo, temp) = setup().await;
+        let source_a = temp.path().join("source-a-concurrent.bin");
+        let source_b = temp.path().join("source-b-concurrent.bin");
+        tokio::fs::write(&source_a, b"same-bytes").await?;
+        tokio::fs::write(&source_b, b"same-bytes").await?;
+        let source_a_abs = source_a.canonicalize()?;
+        let source_b_abs = source_b.canonicalize()?;
+
+        let repo_a = Arc::clone(&repo);
+        let repo_b = Arc::clone(&repo);
+        let (hash_a, hash_b) = tokio::try_join!(
+            repo_a.put_path_reference(&source_a_abs),
+            repo_b.put_path_reference(&source_b_abs)
+        )?;
+        assert_eq!(hash_a, hash_b);
+
+        let object_paths = repo.object_paths(hash_a)?;
+        let meta = repo
+            .read_meta(&object_paths.meta)
+            .await?
+            .ok_or_eyre("expected metadata for concurrent references")?;
+        assert!(
+            meta.source_paths
+                .iter()
+                .any(|value| value == &source_a_abs.to_string_lossy()),
+            "expected first source path to be preserved"
+        );
+        assert!(
+            meta.source_paths
+                .iter()
+                .any(|value| value == &source_b_abs.to_string_lossy()),
+            "expected second source path to be preserved"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blob_hash_must_be_valid_base58() -> Res<()> {
+        assert!("not_base58_hash".parse::<BlobId>().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn materialize_uses_hash_filename_layout() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let hash = repo.put(b"materialize-layout").await?;
+        let out = repo
+            .materialize(
+                hash.clone(),
+                BlobMaterializeRequest::Filename("preview.yaml".into()),
+            )
+            .await?;
+        let expected = repo
+            .root
+            .join("staging")
+            .join(blob_hash_from_id(hash))
+            .join("preview.yaml");
+        assert_eq!(out, expected);
+        assert!(tokio::fs::try_exists(&out).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cleanup_staging_removes_materialized_files() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let hash = repo.put(b"cleanup-me").await?;
+        let out = repo
+            .materialize(hash, BlobMaterializeRequest::Extension("jpg".into()))
+            .await?;
+        assert!(tokio::fs::try_exists(&out).await?);
+        repo.cleanup_staging().await?;
+        assert!(!tokio::fs::try_exists(&out).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn materialize_reference_blob_survives_source_mutation_and_delete() -> Res<()> {
+        let (repo, temp) = setup().await;
+        let source = temp.path().join("ref-source.txt");
+        tokio::fs::write(&source, b"original-reference-bytes").await?;
+        let source_abs = source.canonicalize()?;
+
+        let hash = repo.put_path_reference(&source_abs).await?;
+        let out = repo
+            .materialize(
+                hash,
+                BlobMaterializeRequest::Filename("snapshot.txt".into()),
+            )
+            .await?;
+        let before = tokio::fs::read(&out).await?;
+        assert_eq!(before, b"original-reference-bytes");
+
+        tokio::fs::write(&source_abs, b"mutated-reference-bytes").await?;
+        let after_mutation = tokio::fs::read(&out).await?;
+        assert_eq!(after_mutation, b"original-reference-bytes");
+
+        tokio::fs::remove_file(&source_abs).await?;
+        assert!(tokio::fs::try_exists(&out).await?);
+        let after_delete = tokio::fs::read(&out).await?;
+        assert_eq!(after_delete, b"original-reference-bytes");
+
+        repo.cleanup_staging().await?;
+        assert!(!tokio::fs::try_exists(&out).await?);
+        Ok(())
+    }
+
+    /// Blob id text arrives from peers (facet digests, `dtxt:blob:` URLs, part
+    /// store keys). Text that is not a digest must be rejected where it enters:
+    /// a blob id is what the on-disk path is built from, and `Path::join` reads
+    /// an absolute spelling as a replacement for the blob root.
+    #[tokio::test]
+    async fn blob_id_rejects_reserved_and_non_digest_spellings() -> Res<()> {
+        for spelling in [
+            "/etc/daybook-escape",
+            "o:/object/path",
+            "../daybook-escape",
+            "not_base58_hash",
+            "",
+        ] {
+            assert!(
+                spelling.parse::<BlobId>().is_err(),
+                "not a blob digest, must not be a blob id: {spelling:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The multihash spelling our writers put in facet digests
+    /// (`blob_id_to_digest_str`) and the plain `Display` spelling of a `dtxt:blob:`
+    /// URL name one digest: both parse to the same 32 bytes, and so to the same
+    /// blob on disk.
+    #[tokio::test]
+    async fn blob_digest_spelling_names_the_same_blob_on_disk() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let blob_id = repo.put(b"digest-spelling-round-trip").await?;
+
+        let digest = blob_id_to_digest_str(blob_id.clone());
+        let from_digest = digest.parse::<BlobId>()?;
+        assert_eq!(from_digest, blob_id, "digest spelling: {digest:?}");
+        assert_eq!(digest_str_to_blob_id(&digest)?, blob_id, "{digest:?}");
+        assert_eq!(blob_id_to_digest_str(from_digest.clone()), digest);
+
+        let from_display = blob_id.to_string().parse::<BlobId>()?;
+        assert_eq!(from_display, blob_id, "display spelling: {blob_id}");
+
+        assert_eq!(
+            repo.get_path(from_digest).await?,
+            repo.get_path(blob_id).await?,
+            "the digest spelling must resolve to the blob's object on disk"
+        );
+        Ok(())
+    }
+
+    /// A presence sink that records what the announce announced, so a test can
+    /// observe the presence plane without wiring a full part store under it.
+    struct RecordingPresenceSink(std::sync::Mutex<Vec<(BlobId, u64)>>);
+
+    #[async_trait::async_trait]
+    impl BlobPresenceSink for RecordingPresenceSink {
+        async fn blob_now_held(&self, blob_id: BlobId, length_octets: u64) -> Res<()> {
+            self.0
+                .lock()
+                .expect("recording presence sink lock poisoned")
+                .push((blob_id, length_octets));
+            Ok(())
+        }
+    }
+
+    /// The boot announce reads back the filenames `object_paths` wrote: the
+    /// bare multibase base58btc `Display` spelling of the digest. Regression:
+    /// the walker once parsed filenames with `blake3::Hash::from_hex`, rejected
+    /// every real filename, and announced zero blobs, so pre-existing blobs
+    /// were never re-armed via the presence plane across a restart.
+    #[tokio::test]
+    async fn boot_announce_reads_bare_base58_object_filenames() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let data = b"boot-announce-payload";
+        let blob_id = BlobId::random();
+        let object_paths = repo.object_paths(blob_id.clone())?;
+        tokio::fs::create_dir_all(&object_paths.dir).await?;
+        tokio::fs::write(&object_paths.blob, data).await?;
+        // A filename that is not a digest names no blob: it must be skipped,
+        // not announced under a zero-padded or guessed identity.
+        tokio::fs::write(object_paths.dir.join("not-a-digest.blob"), b"junk").await?;
+
+        let recording = Arc::new(RecordingPresenceSink(std::sync::Mutex::new(Vec::new())));
+        *repo
+            .presence_sink
+            .write()
+            .expect("presence sink lock poisoned") =
+            Some(Arc::clone(&recording) as Arc<dyn BlobPresenceSink>);
+
+        repo.announce_held_blobs().await?;
+
+        let announced = recording
+            .0
+            .lock()
+            .expect("recording presence sink lock poisoned")
+            .clone();
+        assert_eq!(
+            announced,
+            vec![(blob_id, data.len() as u64)],
+            "the boot announce must re-arm blobs the objects tree already holds"
+        );
+        Ok(())
+    }
+}
