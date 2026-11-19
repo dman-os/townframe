@@ -17,7 +17,7 @@ Scope: Where an intxt's datums live among its drawer's documents. Supersedes ADR
 
 **The index document** is one content document, created by `createIntxt` in the same step as the drawer. Only the intxt's creator ever creates it, so nothing races. It holds the title and description (`title/main`), the entry datums, and the `body` order. `edit` writes here. Concurrent changes to these datums follow the CRDT rules they already have.
 
-**Per-participant content documents** hold everything several people add to:
+**Per-writer content documents** hold everything several people add to. A writer is an attested actor: today, a node's operator. The race exists only between nodes, because command ids already dedupe within one node. So agent sessions on one node share their node's documents, and a comment still names its own `creator` (D69). Refined 2026-11-19, when the work was briefed.
 - **Notes:** each participant writes comments, replies, structure and their own seen records into notes documents they created. A reply points at its parent with a concrete reference, so a thread can span documents. A thread's state (`threadState/<root>`) lives in the root comment's document, which exists before anyone resolves it, and anyone may write it there.
 - **Commits:** each participant's `add` writes `gitCommit`, `rewrite`/`rewrittenFrom` and the pack and diff blob records into commits documents they created. Commits are content-addressed, so the same commit written by two people is the same datum in two documents, and readers take either.
 - **Rotation:** a participant starts a new document of a kind when the current one nears the ~500-datum update limit (F10), as op logs rotate (ADR 040 §7).
