@@ -308,7 +308,10 @@ async fn denied_queries_disclose_neither_known_nor_unknown_documents() {
     }
     let capability = node
         .capability(DocScope {
-            write: BTreeSet::from([known.clone()]),
+            write: std::collections::BTreeMap::from([(
+                known.clone(),
+                big_cabinet_core::doc::DatumKinds::All,
+            )]),
             ..DocScope::default()
         })
         .await;
@@ -497,7 +500,10 @@ async fn quiet_retraction_ends_a_stream_without_repository_changes() {
     let doc_id = DocId::new([5; 32]);
     let capability = node
         .capability(DocScope {
-            write: BTreeSet::from([doc_id.clone()]),
+            write: std::collections::BTreeMap::from([(
+                doc_id.clone(),
+                big_cabinet_core::doc::DatumKinds::All,
+            )]),
             ..DocScope::default()
         })
         .await;

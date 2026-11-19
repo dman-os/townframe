@@ -1,4 +1,5 @@
 use crate::DatumKey;
+use crate::DatumTag;
 use crate::authority::AuthorityServiceError;
 use crate::authority::CapId;
 use crate::authority::Capability;
@@ -328,12 +329,42 @@ impl DocsError {
     }
 }
 
+/// The datum kinds writable through a document capability.
+/// `All` covers every datum; `Only` covers datum keys whose tags are in its set.
+/// A requested `Only` grant is covered only when its tags are a subset of the held grant's tags.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DatumKinds {
+    All,
+    Only(BTreeSet<DatumTag>),
+}
+
+impl DatumKinds {
+    /// Returns whether this grant permits writing the datum key.
+    pub fn allows(&self, key: &DatumKey) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(tags) => tags.contains(key.tag()),
+        }
+    }
+
+    /// Returns whether the requested grant is covered by this grant.
+    pub fn covers(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::All, _) => true,
+            (Self::Only(_), Self::All) => false,
+            (Self::Only(held), Self::Only(requested)) => requested.is_subset(held),
+        }
+    }
+}
+
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocScope {
     pub read: BTreeSet<DocId>,
-    pub write: BTreeSet<DocId>,
+    pub write: BTreeMap<DocId, DatumKinds>,
     pub create: BTreeSet<String>,
     pub drawers: BTreeMap<DocId, DrawerAccess>,
 }
@@ -343,7 +374,7 @@ impl DocScope {
     pub fn ensure_doc_ids(&self) -> Result<(), DocsError> {
         self.read
             .iter()
-            .chain(&self.write)
+            .chain(self.write.keys())
             .chain(self.drawers.keys())
             .try_for_each(DocsError::ensure_doc_id)
     }

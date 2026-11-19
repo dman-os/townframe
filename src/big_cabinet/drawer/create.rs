@@ -94,7 +94,10 @@ impl Core {
                             context,
                             caller.via,
                             DocScope {
-                                write: [doc_id.clone()].into(),
+                                write: std::collections::BTreeMap::from([(
+                                    doc_id.clone(),
+                                    big_cabinet_core::doc::DatumKinds::All,
+                                )]),
                                 ..Default::default()
                             },
                             |authorization| {
