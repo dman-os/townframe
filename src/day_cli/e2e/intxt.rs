@@ -908,8 +908,7 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
         assert!(shown.contains("sessions (1):"), "{shown}");
         assert!(shown.contains("s1  claude-code"), "{shown}");
 
-        // The entry's pack is a blob datum in the writer's commits document, not in the index
-        // document, which holds no blob datums at all.
+        // The entry's pack is a blob datum in the writer's commits document, not the index.
         let (_, entry) = read_at(
             client,
             &index_of(client, &drawer).await,
@@ -954,8 +953,7 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
             in_index.is_empty(),
             "the index document holds no blob datums: {in_index:?}"
         );
-        // Whatever `new` and `add` wrote, the drawer's own document stays the descriptor, the
-        // marker and the pointer.
+        // After `new` and `add`, the drawer's own document is still only the pointers.
         assert_drawer_document_holds_only_the_pointers(client, &drawer).await;
         let (_, blob) = read_at(client, pack_doc, pack.key()).await.unwrap();
         assert_eq!(blob["mime"], "application/x-git-pack");
