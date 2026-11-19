@@ -3,22 +3,33 @@
 # configuration: {"target":"x86_64-unknown-linux-gnu","default_features":true,"features":["schemars"]}
 # exposed_external_crates: [semver, serde_json]
 
+impl Deserialize < 'de > for big_cartridges_core::config::GrantKey
 impl FromStr for big_cartridges_core::CartridgeId
 impl FromStr for big_cartridges_core::Version
 impl FromStr for big_cartridges_core::VersionReq
+impl FromStr for big_cartridges_core::config::GrantKey
+impl Serialize for big_cartridges_core::config::GrantKey
 impl fmt :: Display for big_cartridges_core::CartridgeId
 impl fmt :: Display for big_cartridges_core::Version
 impl fmt :: Display for big_cartridges_core::VersionReq
+impl fmt :: Display for big_cartridges_core::config::Component
+impl fmt :: Display for big_cartridges_core::config::GrantKey
+impl schemars :: JsonSchema for big_cartridges_core::config::GrantKey
+pub big_cartridges_core::config::fn config_declarations () -> Vec < big_cabinet_core :: datum :: Declaration >
+pub big_cartridges_core::config::fn config_identity_key () -> DatumKey
+pub big_cartridges_core::config::fn install_key (cartridge_id : & CartridgeId) -> DatumKey
 pub big_cartridges_core::registry::fn artifact_key (version : & Version , artifact : & str) -> DatumKey
 pub big_cartridges_core::registry::fn artifact_slot_version (key : & DatumKey) -> Option < String >
 pub big_cartridges_core::registry::fn identity_key () -> DatumKey
 pub big_cartridges_core::registry::fn registry_universe () -> big_cabinet_core :: datum :: Universe
 pub big_cartridges_core::registry::fn version_key (version : & Version) -> DatumKey
+pub big_cartridges_core::registry::fn version_pin (doc_id : DocId , version : & Version , heads : impl IntoIterator < Item = ChangeHash > ,) -> DatumPin
 pub big_cartridges_core::signature::fn did_key (public_key : & [u8 ; 32]) -> String
 pub big_cartridges_core::test_support::fn cartridge_id (name : & str) -> CartridgeId
 pub big_cartridges_core::test_support::fn sign_as_example (cartridge : Cartridge) -> Cartridge
 pub big_cartridges_core::test_support::fn sign_with_seed (mut cartridge : Cartridge , seed : & [u8 ; 32]) -> Cartridge
 pub const big_cartridges_core::AUTHORITY: & str
+pub const big_cartridges_core::config::CONFIG_AUTHORITY: & str
 pub const big_cartridges_core::registry::ARTIFACT_SLOT_PREFIX: & str
 pub const big_cartridges_core::signature::ED25519: & str
 pub const big_cartridges_core::signature::SIGNING_DOMAIN: & [u8]
@@ -26,6 +37,8 @@ pub const big_cartridges_core::test_support::EXAMPLE_NAMESPACE: & str
 pub const big_cartridges_core::test_support::EXAMPLE_SEED: [u8 ; 32]
 pub enum big_cartridges_core::CartridgeError { # [error ("cartridge envelope invalid at `{path}`: {reason}")] Invalid { path : String , reason : String }, # [doc = " One version of a package names one revision. A second envelope claiming the same version is"] # [doc = " a republish under an existing label, which would make the label mean two different byte"] # [doc = " strings; the catalog refuses it instead of picking one."] # [error ("cartridge `{id}` {version} is already catalogued at revision {existing}; this envelope is \ {incoming}")] Conflict { id : CartridgeId , version : Box < Version > , existing : Revision , incoming : Revision , } }
 pub enum big_cartridges_core::Contribution { Nodule (NoduleContribution), Micro (MicroContribution), # [datum (other)] Unknown (big_cabinet_core :: datum :: UnknownMember) }
+pub enum big_cartridges_core::config::Component { Nodule, Micro }
+pub enum big_cartridges_core::config::GrantKey { # [doc = " `drawer:<drawerId>`: access to a local drawer."] Drawer (DrawerId), # [doc = " `method:<nsid>`: one operation the component may invoke through dispatch."] Method (String), # [doc = " `authority:<prefix>`: every operation under an NSID authority prefix, or `*`."] Authority (String) }
 pub enum big_cartridges_core::protocol::CartridgesError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("registry state failed: {0}")] Storage (String), # [error ("the envelope was refused: {0}")] Rejected (String), # [doc = " A published version never changes content: the label is taken by another envelope."] # [error ("cartridge `{id}` {version} is already published at revision {existing}; this envelope is \ {incoming}")] VersionExists { id : CartridgeId , version : Box < Version > , existing : Revision , incoming : Revision , }, # [doc = " The envelope's signature is missing or does not verify against its namespace DID, or the"] # [doc = " DID's method cannot be verified without resolution (fail closed)."] # [error ("the envelope's signature was refused: {0}")] Signature (# [from] SignatureError), # [doc = " An unsigned envelope can be signed by the node only for the node's own DID."] # [error ("the envelope is unsigned and `{namespace}` is not this node's publisher DID, so the node \ cannot sign it")] UnsignedForeignNamespace { namespace : String }, # [doc = " A new label must order after every label the cartridge has or had, so a validly signed older"] # [doc = " version cannot be published as new (a downgrade attack). Taking an older version is an"] # [doc = " explicit runtime action, not a registry one."] # [error ("cartridge `{id}` {version} does not order after {newest}, the newest version it has had")] Downgrade { id : CartridgeId , version : Box < Version > , newest : Box < Version > , }, # [doc = " The handle's namespace scope does not include the cartridge's namespace."] # [error ("the presented capability may not publish under `{namespace}`")] NamespaceNotPermitted { namespace : String }, # [doc = " The version exists in the drawer but its signature did not verify, so it is not served."] # [error ("cartridge `{id}` {version} is not served: {reason}")] Unverified { id : CartridgeId , version : Box < Version > , reason : String , }, # [doc = " An artifact's bytes are not in the local blob store, so the registry would pin bytes it"] # [doc = " cannot serve."] # [error ("artifact `{artifact}` of cartridge `{id}` is not in the local blob store")] ArtifactUnavailable { id : CartridgeId , artifact : String }, # [error ("cartridge `{0}` is not in the registry")] UnknownCartridge (CartridgeId), # [error ("cartridge `{id}` has no version {version}")] UnknownVersion { id : CartridgeId , version : Box < Version > , } }
 pub enum big_cartridges_core::request::Necessity { # [default] Required, Optional, # [datum (other)] Unknown (String) }
 pub enum big_cartridges_core::request::Resolution { # [doc = " Configuration binds it, with defaults derived from the manifest."] # [default] Configured, # [doc = " Bound later by the user's consent through a picker, issuing the same handle."] AtRuntime, # [datum (other)] Unknown (String) }
@@ -41,6 +54,15 @@ pub impl big_cartridges_core::catalog::Catalog::fn cartridge (& self , revision 
 pub impl big_cartridges_core::catalog::Catalog::fn import (& mut self , cartridge : Cartridge) -> Result < Revision , CartridgeError >
 pub impl big_cartridges_core::catalog::Catalog::fn new () -> Self
 pub impl big_cartridges_core::catalog::Catalog::fn resolve (& self , id : & CartridgeId , requirement : & VersionReq) -> Option < & Cartridge >
+pub impl big_cartridges_core::config::CartridgeInstall::fn component (& self , component : Component) -> Option < & ComponentInstall >
+pub impl big_cartridges_core::config::CartridgeInstall::fn component_mut (& mut self , component : Component) -> & mut Option < ComponentInstall >
+pub impl big_cartridges_core::config::Component::const fn grant_tag (self) -> & 'static str
+pub impl big_cartridges_core::config::ComponentInstall::fn new (enabled : bool) -> Self
+pub impl big_cartridges_core::config::GrantBody::fn drawer (access : EntryAccess) -> Self
+pub impl big_cartridges_core::config::GrantBody::fn method (privileged : bool) -> Self
+pub impl big_cartridges_core::config::GrantKey::fn accepts (& self , body : & GrantBody) -> bool
+pub impl big_cartridges_core::config::GrantKey::fn datum_key (& self , component : Component) -> DatumKey
+pub impl big_cartridges_core::config::GrantKey::fn from_slot (slot : & [u8]) -> Option < Self >
 pub impl big_cartridges_core::protocol::CartridgesScope::fn covers (& self , other : & Self) -> bool
 pub impl big_cartridges_core::protocol::CartridgesScope::fn may_publish_under (& self , namespace : & str) -> bool
 pub impl big_cartridges_core::request::Necessity::fn is_required (& self) -> bool
@@ -53,6 +75,7 @@ pub impl big_cartridges_core::signature::Cartridge::fn verify_signature (& self)
 pub macro big_cartridges_core::example_cartridge! { ($ name : literal) }
 pub macro big_cartridges_core::example_namespace! { () }
 pub mod big_cartridges_core::catalog
+pub mod big_cartridges_core::config
 pub mod big_cartridges_core::protocol
 pub mod big_cartridges_core::registry
 pub mod big_cartridges_core::request
@@ -68,6 +91,11 @@ pub struct big_cartridges_core::NoduleContribution  { schema: String, descriptio
 pub struct big_cartridges_core::Version  { 0: semver :: Version }
 pub struct big_cartridges_core::VersionReq  { 0: semver :: VersionReq }
 pub struct big_cartridges_core::catalog::Catalog  {  }
+pub struct big_cartridges_core::config::CartridgeConfigIdentity  { cartridge: CartridgeId, extra: Extra }
+pub struct big_cartridges_core::config::CartridgeInstall  { cartridge: DatumPin, config_doc: DocId, nodule: Option < ComponentInstall >, micro: Option < ComponentInstall >, extra: Extra }
+pub struct big_cartridges_core::config::ComponentInstall  { enabled: bool, extra: Extra }
+pub struct big_cartridges_core::config::GrantBody  { access: Option < EntryAccess >, privileged: bool }
+pub struct big_cartridges_core::config::InvalidGrantKey  { 0: String }
 pub struct big_cartridges_core::protocol::CartridgeChange  { seq: u64, cartridge_id: CartridgeId, removed: bool }
 pub struct big_cartridges_core::protocol::CartridgeChanges  { changes: Vec < CartridgeChange >, through: CartridgesCursor, caught_up: bool, reset: bool }
 pub struct big_cartridges_core::protocol::CartridgeList  { cartridges: Vec < CartridgeRecord > }
@@ -91,3 +119,12 @@ pub struct big_cartridges_core::protocol::WatchCartridges  { after: Option < Car
 pub struct big_cartridges_core::registry::CartridgeIdentity  { id: CartridgeId, extra: Extra }
 pub struct big_cartridges_core::request::Request  { binding: String, contract: String, access: Option < String >, necessity: Necessity, resolution: Resolution, min_revision: Option < u32 >, extra: Extra }
 pub struct big_cartridges_core::signature::CartridgeSignature  { alg: String, value: String, extra: Extra }
+pub use big_cartridges_core::protocol::installs :: CartridgeInstallRecord
+pub use big_cartridges_core::protocol::installs :: CartridgeInstalls
+pub use big_cartridges_core::protocol::installs :: ClearCartridgeConfig
+pub use big_cartridges_core::protocol::installs :: InstallCartridge
+pub use big_cartridges_core::protocol::installs :: ListCartridgeInstalls
+pub use big_cartridges_core::protocol::installs :: ObserveCartridgeInstalls
+pub use big_cartridges_core::protocol::installs :: SetCartridgeEnabled
+pub use big_cartridges_core::protocol::installs :: SetCartridgeGrant
+pub use big_cartridges_core::protocol::installs :: UninstallCartridge

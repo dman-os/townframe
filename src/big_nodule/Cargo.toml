@@ -49,6 +49,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 [dev-dependencies]
 #
 # internal
+big_cartridges = { workspace = true }
 big_cartridges_core = { workspace = true, features = ["test-support"] }
 big_blobs_core.workspace = true
 big_repo.workspace = true

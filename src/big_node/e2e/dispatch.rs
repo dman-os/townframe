@@ -102,7 +102,7 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
         ),
         (
             "builtin:nodules",
-            big_nodule_core::protocol::AdmitNodule::XRPC.nsid,
+            big_cartridges_core::protocol::InstallCartridge::XRPC.nsid,
         ),
         ("builtin:node", crate::GET_NODE_INFO),
     ] {
@@ -121,20 +121,29 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
     // which never holds privilege, reaches exactly the second kind.
     {
         use big_cabinet_core::authority as authority_methods;
+        use big_cartridges_core::protocol as cartridge_methods;
         use big_nodule_core::protocol as nodule_methods;
         for (nsid, privileged) in [
             (authority_methods::OpenActor::XRPC.nsid, true),
             (authority_methods::MintCapability::XRPC.nsid, true),
             (authority_methods::AttenuateCapability::XRPC.nsid, false),
             (authority_methods::RetractCapability::XRPC.nsid, false),
-            (nodule_methods::AdmitNodule::XRPC.nsid, true),
-            (nodule_methods::SetNoduleMethodGrants::XRPC.nsid, true),
+            (cartridge_methods::InstallCartridge::XRPC.nsid, true),
+            (cartridge_methods::SetCartridgeEnabled::XRPC.nsid, true),
+            (cartridge_methods::UninstallCartridge::XRPC.nsid, true),
+            (cartridge_methods::SetCartridgeGrant::XRPC.nsid, true),
+            (cartridge_methods::ClearCartridgeConfig::XRPC.nsid, true),
+            (cartridge_methods::ListCartridgeInstalls::XRPC.nsid, false),
+            (nodule_methods::SetNoduleDevTakeover::XRPC.nsid, true),
             (nodule_methods::ListNodules::XRPC.nsid, false),
             (nodule_methods::MintNoduleCapability::XRPC.nsid, false),
             (big_blobs_core::PutBlob::XRPC.nsid, false),
         ] {
             assert_eq!(
-                router.resolve(nsid).unwrap().privileged,
+                router
+                    .resolve(nsid)
+                    .unwrap_or_else(|error| panic!("{nsid}: {error:?}"))
+                    .privileged,
                 privileged,
                 "{nsid}"
             );
