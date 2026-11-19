@@ -1,6 +1,6 @@
 # FDR 010: Why this change: intents, interpretations and tasks
 
-**Status:** Proposed (2026-11-18, first draft). Names are proposals (see Open questions). Builds on FDR 006 (intxt), FDR 008 (the intxt surface), ledger D9 (work structure is its own datums; adapters map harness task systems into them) and D16 (grouping is a datum with references).
+**Status:** Accepted 2026-11-19 (operator; ledger D73), first draft. Its four open questions are settled below. Builds on FDR 006 (intxt), FDR 008 (the intxt surface), ledger D9 (work structure is its own datums; adapters map harness task systems into them) and D16 (grouping is a datum with references).
 
 ## The problem
 
@@ -70,7 +70,11 @@ When something looks wrong, they can say which layer is wrong: "this interpretat
 
 ## Open questions
 
-1. **Names.** Intent, interpretation, task, decision, action and guide are proposals. ADR 041's generic `structure` datum goes away in favour of these specific kinds, related by references.
-2. **Does an interpretation live inside its intent, or apart from it?** Apart lets two agents interpret one intent; inside is simpler.
-3. **How an agent names the source turn.** Today `current` names a session and `<session>:20-45` names turns (FDR 008). An agent may need "the operator's last message" without knowing turn numbers.
-4. **Do actions other than edits belong in the alpha** (walkthrough 5), or only after edits and commits work?
+1. ~~**Names**~~ Settled (D73): intent, interpretation, task, decision, action and guide. ADR 041's generic `structure` datum goes away in favour of these specific kinds, related by references.
+2. ~~**Does an interpretation live inside its intent, or apart from it?**~~ Settled (D73): **apart**, its own datum referencing the intent, so two agents can interpret one intent and a misreading stays visible beside what was asked.
+3. ~~**How an agent names the source turn**~~ Settled (D73): **recording tells the agent.** On each operator turn, the recorder injects the turn's short id (`<session>:<turn>`, FDR 008) into what the agent sees:
+   - Claude Code: the capture hook answers `UserPromptSubmit` with `additionalContext`, which the harness adds to the turn;
+   - ACP: the recording proxy (`record acp`) prepends a text block to the prompt it forwards.
+   
+   Capture numbers turns itself as the prompts arrive, so the id is known before the transcript catches up. An intent then quotes its source by the id it was handed, with no lookup.
+4. ~~**Do actions other than edits belong in the alpha?**~~ Settled (D73): **no.** The alpha records edits and commits; shell commands that change a system come after.
