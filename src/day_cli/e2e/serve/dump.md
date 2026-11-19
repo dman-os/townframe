@@ -14,7 +14,7 @@ node serving in the background (pid [..]) on [..]/run/day/[..].sock
 
 $ sh -c 'cap=$("$DAY" exec org.example.daybook.drawers.mintDrawerCapability "{\"scope\":{\"drawers\":{},\"create\":true},\"rights\":[\"use\"]}" | sed -n "s/.*\"capabilityId\": \"\(.*\)\".*/\1/p"); "$DAY" exec org.example.daybook.drawers.createDrawer "{\"capability\":\"$cap\",\"command\":\"c1\",\"layout\":\"singleGroup\"}" | sed -n "s/.*\"drawerId\": \"\(.*\)\".*/\1/p" > "$DAY_NODE/drawer-id"; "$DAY" drawers remember "$(cat "$DAY_NODE/drawer-id")" >/dev/null'
 
-$ sh -c 'drawer=$(cat "$DAY_NODE/drawer-id"); "$DAY" dump drawer "$drawer" | grep -c "\"drawerId\": \"$drawer\""'
+$ sh -c 'drawer=$(cat "$DAY_NODE/drawer-id"); "$DAY" dump drawer "$drawer" | grep -c "^  \"drawerId\": \"$drawer\""'
 1
 
 $ sh -c 'drawer=$(cat "$DAY_NODE/drawer-id"); "$DAY" dump drawer "$drawer" | grep -o "\"status\": \"accepted\"" | head -1'
