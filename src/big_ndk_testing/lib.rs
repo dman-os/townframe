@@ -54,12 +54,19 @@ use big_nodule::executor::NoduleExecutor;
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesProtocol;
+pub use executor::CartridgeHandles;
 use executor::Hosting;
 use executor::NativeExecutor;
 use executor::Registered;
 use method_core::Unary;
 use secrets_rs::SecretStore;
 use serde_json::Value;
+use service_client_core_rs::xrpc::HttpTransport;
+use service_client_core_rs::xrpc::HttpTransportError;
+use service_client_core_rs::xrpc::Xrpc;
+use service_client_core_rs::xrpc::XrpcBody;
+use service_client_core_rs::xrpc::XrpcRequest;
+use service_client_core_rs::xrpc::XrpcResponse;
 use service_core_rs::xrpc::DOMAIN_ERROR_FIELD;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
@@ -69,6 +76,8 @@ use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
+use tower::ServiceExt;
 
 /// Starts a [`TestNodeBuilder`].
 pub fn node() -> TestNodeBuilder {
@@ -113,28 +122,39 @@ impl TestNodeBuilder {
             sql,
             big_repo::Storage::memory(&runtime).expect("in-memory repo storage"),
         );
-        let (node, stop) = BigNode::boot_with(config, move |deps| async move {
-            let executor = NativeExecutor::new(registered, deps.dispatch);
-            let (stop, spawner) = service_utils_rs::StopToken::new();
-            // The executor stops what a test left enabled when the node is stopped, after the
-            // nodule service that calls it and before the services it calls.
-            let stopping = Arc::clone(&executor);
-            spawner
-                .spawn({
-                    let spawner = spawner.clone();
-                    async move {
-                        spawner.cancelled().await;
-                        stopping.stop_all().await;
-                    }
-                })
-                .expect("a fresh stop token accepts tasks");
-            Ok((executor as Arc<dyn NoduleExecutor>, stop))
+        let hosting = Arc::new(OnceLock::new());
+        let (node, stop) = BigNode::boot_with(config, {
+            let hosting = Arc::clone(&hosting);
+            move |deps| async move {
+                let executor = NativeExecutor::new(registered, deps.dispatch);
+                hosting
+                    .set(Arc::clone(&executor))
+                    .unwrap_or_else(|_| unreachable!("the node boots once"));
+                let (stop, spawner) = service_utils_rs::StopToken::new();
+                // The executor stops what a test left enabled when the node is stopped, after the
+                // nodule service that calls it and before the services it calls.
+                let stopping = Arc::clone(&executor);
+                spawner
+                    .spawn({
+                        let spawner = spawner.clone();
+                        async move {
+                            spawner.cancelled().await;
+                            stopping.stop_all().await;
+                        }
+                    })
+                    .expect("a fresh stop token accepts tasks");
+                Ok((executor as Arc<dyn NoduleExecutor>, stop))
+            }
         })
         .await
         .expect("booting the test node");
         let node = TestNode {
             node,
             stop,
+            executor: hosting
+                .get()
+                .cloned()
+                .expect("the node booted its executor"),
             _runtime: runtime,
         };
         for cartridge in cartridges {
@@ -155,11 +175,61 @@ pub enum CallError<E> {
     Dispatch(DispatchError),
 }
 
+/// The node's XRPC router served without a socket, from [`TestNode::caller`].
+#[derive(Clone)]
+pub struct NodeCaller(axum::Router);
+
+impl NodeCaller {
+    /// Calls `M` as the operator, which the router admits when no credential is presented.
+    pub async fn call<M: Unary>(&self, input: M) -> Result<M::Output, ClientError<M::Error>> {
+        service_client_core_rs::Client::new(Xrpc(self.clone()))
+            .call(RequestContext::root(), input)
+            .await
+    }
+
+    /// Calls `M` presenting `authorization` as its credential: a cartridge's
+    /// [`CartridgeHandles::actor`] signing for one of its routines' `dispatch` capability.
+    pub async fn call_as<M: Unary>(
+        &self,
+        authorization: Authorization,
+        input: M,
+    ) -> Result<M::Output, ClientError<M::Error>> {
+        service_client_core_rs::Client::new(Xrpc(self.clone()))
+            .call_with(RequestContext::root(), authorization.metadata(), input)
+            .await
+    }
+}
+
+impl HttpTransport for NodeCaller {
+    async fn send(&self, request: XrpcRequest) -> Result<XrpcResponse, HttpTransportError> {
+        let XrpcBody::Json(body) = request.body else {
+            panic!("the node's methods carry JSON bodies only");
+        };
+        let mut builder = http::Request::builder()
+            .method(request.method)
+            .uri(format!("/{}", request.path));
+        *builder.headers_mut().unwrap() = request.headers;
+        let response = self
+            .0
+            .clone()
+            .oneshot(builder.body(axum::body::Body::from(body)).unwrap())
+            .await
+            .unwrap_or_else(|never| match never {});
+        let (parts, body) = response.into_parts();
+        Ok(XrpcResponse {
+            status: parts.status,
+            headers: parts.headers,
+            body: XrpcBody::json(axum::body::to_bytes(body, usize::MAX).await.unwrap()),
+        })
+    }
+}
+
 /// A real in-memory node hosting the registered nodules natively. Stop it with
 /// [`TestNode::stop`].
 pub struct TestNode {
     node: BigNode,
     stop: StopToken,
+    executor: Arc<NativeExecutor>,
     _runtime: Arc<SqliteRuntime>,
 }
 
@@ -167,6 +237,28 @@ impl TestNode {
     /// The booted node, for what the wrappers here do not cover.
     pub fn big_node(&self) -> &BigNode {
         &self.node
+    }
+
+    /// A caller over the node's own XRPC router, in process: it acts as the operator (the root
+    /// capability) the way `day`'s embedded connection does, and [`NodeCaller::call_as`] acts as
+    /// any other holder. It is also the [`HttpTransport`] a typed client of the node takes.
+    pub fn caller(&self) -> NodeCaller {
+        NodeCaller(
+            big_dispatch::xrpc_router(
+                self.node.dispatch.client.clone(),
+                big_dispatch::Anonymous::Acts(Authorization::identity(self.node.authority.root)),
+                big_dispatch::Edge::Embedded,
+            )
+            .into_router(),
+        )
+    }
+
+    /// What the node minted for the nodule of `cartridge_id` (its actor and each routine's
+    /// capabilities), as of its last reconcile: a test calls as the cartridge with them instead
+    /// of as the operator. `None` until the nodule is enabled. A grant change re-mints them, so ask again after
+    /// changing one.
+    pub fn handles(&self, cartridge_id: &CartridgeId) -> Option<CartridgeHandles> {
+        self.executor.handles(cartridge_id)
     }
 
     /// Calls method `M` through dispatch as the operator, with no budget. The handler's own
