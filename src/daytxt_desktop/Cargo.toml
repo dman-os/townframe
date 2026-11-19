@@ -8,7 +8,8 @@ name = "daytxt_desktop"
 path = "main.rs"
 
 [dependencies]
-dioxus = { workspace = true }
+#
+# internal
 daytxt_core = { workspace = true }
 daytxt_native = { workspace = true }
 day_node = { workspace = true }
@@ -27,6 +28,10 @@ micro_toolbar_manifest = { workspace = true }
 micro_sample = { workspace = true }
 micro_counter_manifest = { workspace = true }
 daybook_types = { workspace = true }
+
+#
+# misc
+dioxus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
@@ -58,12 +63,17 @@ blitz = [
 ]
 
 [dev-dependencies]
-ciborium.workspace = true
+#
+# internal
 micro_layout_manifest = { workspace = true }
 micro_lab_manifest = { workspace = true }
 clay_guest_session = { workspace = true }
 clay_surface = { workspace = true }
 clay_rt_wcmp = { workspace = true }
+
+#
+# misc
+ciborium.workspace = true
 wcmp = { workspace = true }
 wcmp-wasm-core-wasmi = { workspace = true }
 blitz-dom.workspace = true

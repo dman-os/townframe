@@ -1,6 +1,6 @@
 # Styling contract
 
-Status: approved by the operator 2026-11-18; first applied by the kit's contract components (`Button`, `Tabs`, `Card`, `Separator`, `Alert`, `Chip`, `ScrubStrip`) and not yet by the older kit components or the micros (see [Out of scope](#out-of-scope-the-next-lane)).
+Status: approved by the operator 2026-11-18; applied by every kit component (`Button`, `Tabs`, `Card`, `Separator`, `Alert`, `Chip`, `ScrubStrip`, `AppBar`, `Drawer`, `ListDetails`, `ListRow`, `NavButton`, `PanelPage`, `Sections`, `Sheet`) and by our micros except `micro_review` (see [What is left](#what-is-left)).
 
 A component's appearance is a stylesheet, and a stylesheet is something an end user can replace. The contract says what a component emits so that a stylesheet, any stylesheet, can restyle it without touching code. It is written for the DOM and CSS, not for Rust: a micro written in Solid or React meets the same contract by emitting the same vocabulary (see [Other frameworks](#other-frameworks)).
 
@@ -104,7 +104,7 @@ Order, lowest precedence first:
 
 | # | Layer | Contents | Where it comes from |
 |---|---|---|---|
-| 1 | Tailwind's own (`theme`, `base`, `components`, `utilities`) | utilities the not-yet-converted components still use | the Tailwind bundle (`src/clay_dioxus_kit/assets/tailwind.css`) |
+| 1 | Tailwind's own (`theme`, `base`, `components`, `utilities`) | preflight, and the utilities the showcase and the micros not yet converted still use | the Tailwind bundle (`src/clay_dioxus_kit/assets/tailwind.css`) |
 | 2 | `reset` | `box-sizing`, margin and padding resets | `styles/reset.css` in the same bundle |
 | 3 | `tokens` | every `--ct-*` custom property: the generated foundation, then the Material theme-provider adapter | `styles/tokens.generated.css` (from `src/clay_dioxus_kit/styles/tokens/*.tokens.json` by `x/design-tokens.ts`) and `styles/tokens.css` |
 | 4 | `kit` | the contract components' skins, one file per component | `styles/kit/<component>.css` in the same bundle |
@@ -116,13 +116,13 @@ Order, lowest precedence first:
 How each reaches a mount, as built today (`docs/scratch/theme-lab-micro.md` has the full account):
 
 - **Host document (the shell and native, light-DOM micros).** The bundle is linked once by `FoundationStyles` (`document::Link`, an `asset!`), so layers 1 to 4 are ordinary document layers. The theme is a `<style>` of `@layer user { ... }` that `use_theme` renders at the top of the frame. Layer order is the one declared in the bundle.
-- **A micro mounted in a shadow root.** The Dioxus fork's interpreter (`packages/interpreter/src/ts/core.ts`, `rebuildKit`) flattens every stylesheet of the host document into one constructable sheet wrapped in `@layer kit { ... }`, declared as `@layer kit, user;`, and adopts it into every mount's root. Layers 1 to 4 therefore arrive as the sublayers `kit.theme ... kit.kit` in the same relative order. The micro's own sanitized sheet (the `data-dioxus-shadow-sheet` attribute that `clay_dioxus::MountedSurface` sets) follows, unlayered, and `MountedSurface` appends the theme to it as a top-level `@layer user { ... }` from the `UserStylesheet` context. A top-level layer declared after `kit` outranks everything inside `kit`, and unlayered rules outrank both.
+- **A micro mounted in a shadow root.** The Dioxus fork's interpreter (`packages/interpreter/src/ts/core.ts`, `rebuildHost`) flattens every stylesheet of the host document into one constructable sheet wrapped in `@layer host { ... }`, declared as `@layer host, user;`, and adopts it into every mount's root. Layers 1 to 4 therefore arrive as the sublayers `host.theme ... host.reset`, `host.tokens`, `host.kit` in the same relative order, and the end user's theme in the host document (a `@layer user` block) as `host.user`. The micro's own sanitized sheet (the `data-dioxus-shadow-sheet` attribute that `clay_dioxus::MountedSurface` sets) follows, unlayered, and `MountedSurface` appends the theme to it as a top-level `@layer user { ... }` from the `UserStylesheet` context. A top-level layer declared after `host` outranks everything inside `host`, and unlayered rules outrank both.
 - **A renderer without shadow roots (Blitz).** The mount's sheet is a light-DOM `<style>` ahead of its content, in the same order.
 - **A micro in another framework.** It cannot bring the kit's stylesheet (a guest's stylesheet is its own, sanitized, unlayered sheet) and does not need to: the host document's sheets are adopted into its mount, so emitting the vocabulary is enough.
 
-Naming trap: inside a shadow root the host's `kit` layer is the layer that holds *all* host sheets (Tailwind, reset, tokens and the contract's own `kit` sublayer). They are different things that share a name; the contract's layer is `kit.kit` there.
+The two names do not collide: the layer that holds all host sheets in a shadow root is `host`, so the contract's own layer reads `host.kit` there and `kit` in the host document. (It was once also called `kit`, which read `kit.kit`.) A theme's `@layer user` rule beats a kit rule in both places: in the document `user` is declared after `kit`; in a mount the theme is a top-level `user` layer after `host`.
 
-Where a theme sets tokens: custom properties inherit through shadow roots, so a token set on `:root` (or on `.ct-theme`, below) in the host document reaches every mount. The Material adapter sets the colour roles on `.ct-theme`, an element closer to the content than `:root`, so a theme that overrides a colour role must target `.ct-theme`, not `:root`, until the adapter is retired (see the blockers).
+Where a theme sets tokens: custom properties inherit through shadow roots, so a token set on `:root` in the host document reaches every mount. That includes the colour roles: the Material adapter sets them on `:root` in the `tokens` layer, so a theme's `:root { --ct-color-primary: ... }` in the `user` layer replaces them. A `var()` in a custom property resolves where it is declared, so the adapter reads the Material scheme of the root itself; `material.css` applies a scheme class that a descendant carries (the `.ct-theme.dark` element of `ThemeRoot`) to the root with `:root:has(.dark)`, so an engine without `:has()` keeps only the light default there.
 
 ## Other frameworks
 
@@ -158,14 +158,14 @@ Things that stop a theme from restyling the app today, seeded 2026-11-18. Counts
 | Blocker | Size | Status |
 |---|---|---|
 | The old `ui` crate's inline `style:` strings (tiles, `ArcIndex`, `CanvasProbe`) | 63 | Removed with the crate in the lane that wrote this contract. `ArcIndex` returns as `ScrubStrip` with no inline style. |
-| Tailwind utility strings as the skin of the existing kit components (`app_bar`, `drawer`, `list_row`, `nav_button`, `panel_page`, `sheet`, `sections`) and their `*Skin` structs | about 30 | Open. A theme reaches them only through the `utilities` layer's tokens, never by part. |
-| Tailwind utility strings in `micro_review` | about 37 | Open. |
-| Tailwind utility strings in `micro_theme_lab` | about 19 | Open. |
-| Tailwind utility strings in `micro_shell` | about 7 | Open. |
-| Tailwind utility strings in the other micros (`micro_settings`, `micro_sample`, `micro_counter`, `micro_lab`, `micro_layout`, `micro_toolbar`) | smaller | Open; not on the operator's seed list. |
-| The foundation had no type scale and no `success`, `warning` or `info` colour roles; the kit now carries `--ct-dimension-font-size-{sm,md,lg}` and the three roles (with `on-` pairs). The roles are provisional (FOUND-012: Material has no equivalent, so `info` follows its secondary colour and the other two keep their authored values in every Material scheme). | 2 token files | Open: review the roles' contrast in dark schemes. |
+| Tailwind utility strings as the skin of the old kit components (`app_bar`, `drawer`, `list_row`, `nav_button`, `panel_page`, `sheet`, `sections`, `list_details`) and their `*Skin` structs | about 30 | Fixed 2026-11-18: each is a headless part and `styles/kit/<name>.css`; `Layer`, `SCRIM` and `styles/motion.css` are gone with them. |
+| Tailwind utility strings in `micro_theme_lab`, `micro_shell`, `micro_settings`, `micro_sample`, `micro_counter`, `micro_lab`, `micro_layout` | about 60 | Fixed 2026-11-18: kit components, and a micro stylesheet (`styles.css`, one `ct-<micro>` root and local `data-part`s, layout and token-built looks only) for what the kit has no component for. `micro_toolbar` emits the `ct-button` vocabulary by hand (see below). |
+| Tailwind utility strings in `micro_review` (and `review_mock`) | about 37 | Open; the intxt lane converts it from this document. |
+| Tailwind utility strings in `daytxt_core/lifecycle.rs` (the Settings lifecycle section), `clay_mdk/tests.rs` (a fixture) and the showcase's layout glue (`flex`, `gap`) | about 15 | Open; not on the lane's list. The showcase's glue is by design (the contract's specimens are cells in a page). |
+| A micro stylesheet that names `--ct-color-*` tokens (the `micro_sample` text field, the `micro_lab` experiment rows, the `micro_theme_lab` field and text roles) outranks the `user` layer, so a theme restyles them only through the tokens, not by part. | 3 micros | Open; needs the design-session items below (a text input, a list-row primitive that can stand alone, text roles) so these stop being local looks. |
+| `Button` cannot carry `aria-description`: it is not in the guest wire vocabulary (`clay_surface::render`), which a kit component is held to, so `micro_toolbar`'s unavailable-because-X button emits `ct-button`, `data-variant`, `data-part="label"` itself. | 1 micro | Open design question: admit `aria-description` to the wire vocabulary, then give `Button` a `description` prop. |
+| The status roles (`info`, `success`, `warning`, `danger`, with `on-` pairs) are provisional (FOUND-012: Material has no equivalent, so `info` follows its secondary colour, `danger` its error, and the other two keep authored values). Checked 2026-11-18 as text on the Material surface: `info` and `danger` pass in every scheme (5.8 to 14.4:1); `success` was 3.05 to 3.19:1 in the three dark schemes and now takes green 400 there (6.3 to 6.6:1, ink on it 6.3:1); `warning` is 8.1 to 8.5:1 on dark and **1.8:1 on the light schemes**, which fails AA as text (it is used as a border and a tint, with `--ct-color-text` for the words, so no kit skin reads it as text today). | 2 token files, `tokens.css` | Open for `warning` as text on light: it needs a text-safe role or a darker light value (a design question). The type scale is three sizes (`--ct-dimension-font-size-{sm,md,lg}`). |
 | `url()` is refused in a theme and in a micro's sheet, and `@font-face` and `@import` with it. Custom fonts and images cannot be themed. | n/a | Open. Needs a design: `data:` or `blob:` font and image sources, admitted by `clay_surface::refuse_fetching_stylesheet` (which exists to stop the host fetching on a guest's behalf, so a payload carried inline is a different case). |
-| The Material adapter sets colour roles on `.ct-theme`, below `:root`, so a theme that sets `--ct-color-*` on `:root` loses silently. | 1 file | Open; a theme must target `.ct-theme` for now. |
 | The `reset` layer sits above Tailwind's `utilities` (the contract's layers are declared after Tailwind's so that `user` outranks a utility), so a reset rule beats a utility on the same property. The reset only sets `box-sizing` and zeroes `html`/`body` margin and padding. | 1 file | Open; harmless today, revisit if a utility must override it. |
 | Focus pseudo-classes (`:focus-visible`, `:focus-within`) did not show in the headless sway/WebKitGTK check, where the webview never becomes the active page, though the keys reached the focused element. The skins' focus rings and `ScrubStrip`'s keyboard reveal are therefore verified by unit tests only. | n/a | Open, verification gap. |
 | A micro's own unlayered rules outrank `user`, so a micro that hard-codes colours in its own sheet is not themeable. | by design | Decision recorded in `docs/scratch/theme-lab-micro.md`; revisit if micros start styling themselves. |
@@ -173,10 +173,16 @@ Things that stop a theme from restyling the app today, seeded 2026-11-18. Counts
 | The web shell's CSP (`style-src-elem 'self'`) refuses the host document's inline `<style>`, so the shell's own document is not themed there, only the mounts. | web shell | Open; the web shell is superseded. |
 | `x/design-tokens.ts` authors tokens only. A component-level token (`--ct-button-radius`) has no authoring path, so the kit's skins read foundation tokens directly. | n/a | Open; add component tokens only when a reusable primitive needs a stable contract (FOUND-011). |
 
-## Out of scope: the next lane
+## What is left
 
-Converting these to the contract is the next lane, not this one:
+Design-session items (decide the vocabulary first; none is built):
 
-- The existing kit components: `app_bar`, `drawer`, `list_row`, `nav_button`, `panel_page`, `sheet`, `sections` (and its resize handle), and `width` / `layer` (not components, but `layer` writes `z-index` inline and `width` classifies for the others). Each becomes a root class, parts and states, a stylesheet under `styles/kit/`, and loses its `*Skin` struct.
-- The micros: `micro_shell`, `micro_review`, `micro_theme_lab`, `micro_settings`, `micro_sample`, `micro_counter`, `micro_lab`, `micro_layout`, `micro_toolbar`.
-- The README's legacy rules (`KIT-011`, `KIT-012`, `KIT-013`) are superseded by the contract rules (`KIT-2xx`) once the last legacy component is converted.
+- Text roles and typography beyond three sizes (`--ct-dimension-font-size-{sm,md,lg}` only): headings, body, muted and subtle text, an emphasis weight, a type scale a theme can step. Micros build their text from the colour roles locally today.
+- Line clamping (`-webkit-line-clamp` or a `max-lines` axis) for a title or a summary that must stop at N lines.
+- A stack or gap layout primitive (a flex column or row with a `--ct-dimension-spacing-*` gap): every micro stylesheet is mostly this today.
+- A scroll-container part (an element that scrolls on its own axis, with the scrollbar and the shadow cues a theme can restyle); `PanelPage`'s body is the one instance.
+- An inline-code component (monospace run, background, padding) over `--ct-font-family-mono`.
+- A text input component (the `micro_sample` field and the `micro_theme_lab` textarea), a standalone list row, and the `warning` text role named above.
+- Not designed: `aria-description` in the guest vocabulary; directionality; a way to hand safe-area insets to guests.
+
+Not converted yet: `micro_review` (the intxt lane) and the other sites in the blockers table above. The README's legacy rules (`KIT-011` to `KIT-013`) are retired: every component follows `KIT-200` to `KIT-205`.

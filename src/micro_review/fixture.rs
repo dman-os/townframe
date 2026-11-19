@@ -9,6 +9,9 @@ use crate::model::key;
 use crate::node::CallError;
 use crate::node::Configuration;
 use crate::node::NodeCalls;
+use big_blobs_core::Blob;
+use big_blobs_core::BlobId;
+use big_blobs_core::ReadBlob;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::CapId;
@@ -55,6 +58,8 @@ const SAMPLE_PATCH: &str = "diff --git a/src/review.rs b/src/review.rs
 #[derive(Clone, Default)]
 struct Held {
     docs: BTreeMap<DocId, Datums>,
+    /// The blob store: what `blobs.read` serves, by id.
+    blobs: BTreeMap<BlobId, Vec<u8>>,
     /// The `githubPull` datums of the GitHub drawer, which a poll reports.
     pulls: Vec<(DocId, DatumKey)>,
 }
@@ -85,6 +90,32 @@ impl Fixture {
         Rc::make_mut(&mut self.held)
             .docs
             .insert(doc, datums.into_iter().collect());
+        self
+    }
+
+    /// Hold `bytes` as a patch blob: the `org.example.daybook.blob` datum at `slot` in `doc`
+    /// (`text/x-diff`, as the node writes it) and the bytes in the blob store. The fixture does
+    /// not hash: a blob's id is its place in the store, repeated, which only has to be stable.
+    #[must_use]
+    pub fn patch_blob(mut self, doc: &DocId, slot: &str, bytes: &str) -> Self {
+        let held = Rc::make_mut(&mut self.held);
+        let id = BlobId::new([u8::try_from(held.blobs.len()).expect("few blobs"); 32]);
+        held.blobs.insert(id, bytes.as_bytes().to_vec());
+        let blob = Blob {
+            mime: "text/x-diff".to_owned(),
+            length_octets: bytes.len() as u64,
+            digest: id.digest_str(),
+            inline: None,
+            urls: None,
+            extra: Default::default(),
+        };
+        held.docs
+            .get_mut(doc)
+            .expect("the document is held")
+            .insert(
+                key(Blob::ID, slot),
+                serde_json::to_value(blob).expect("a blob datum is plain JSON"),
+            );
         self
     }
 
@@ -200,11 +231,10 @@ impl Fixture {
             if let Some(base) = base {
                 entry["base"] = json!(format!("{}/{base}", work::GitCommit::ID));
             }
-            // A commits entry names its commits by pack, not by patch, so no vocabulary carries
-            // a patch to show. The fixture carries one beside the entry's own fields, as the
-            // datum's open members may, until the review micro is told where patches come from.
-            if let Some(patch) = patch {
-                entry["patch"] = json!(patch);
+            // A patch is a reference to a blob datum in the entry's own document (`self`); an
+            // entry without one is a diff too large to carry. `patch_blob` holds the datum.
+            if patch.is_some() {
+                entry["patch"] = json!(format!("dtxt:datum:self/{}/patch-{}", Blob::ID, &tip[..7]));
             }
             (key(work::GitCommitEntry::ID, &tip[..7]), entry)
         };
@@ -248,7 +278,7 @@ impl Fixture {
                 "",
             )
             .intxt(
-                first,
+                first.clone(),
                 "intxt: commits live with the intxt",
                 Some("Commits travel with the intxt that names them."),
                 vec![
@@ -257,6 +287,7 @@ impl Fixture {
                     pull_entry.clone(),
                 ],
             )
+            .patch_blob(&first, "patch-4c1f0a7", SAMPLE_PATCH)
             .intxt(
                 second,
                 "review micro: the PR on the phone",
@@ -363,11 +394,25 @@ impl NodeCalls for Fixture {
         )
     }
 
+    fn read_blob(&self, input: ReadBlob) -> impl Future<Output = Result<Vec<u8>, CallError>> {
+        self.calls
+            .borrow_mut()
+            .push(micro_review_manifest::READ_BLOB);
+        ready(
+            self.held
+                .blobs
+                .get(&input.blob_id)
+                .cloned()
+                .ok_or_else(|| CallError::Refused("blob is not locally available".to_owned())),
+        )
+    }
+
     fn configuration(&self) -> Result<Configuration, CallError> {
         Ok(Configuration {
             github_drawer: Fixture::doc_id("91"),
             intxt_drawers: vec![Fixture::doc_id("92")],
             doc_cap: CapId::from_bytes([0; 16]),
+            blob_cap: CapId::from_bytes([1; 16]),
         })
     }
 }

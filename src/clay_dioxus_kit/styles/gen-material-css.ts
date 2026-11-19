@@ -117,8 +117,14 @@ async function main() {
       allSchemeKeys.add(tokenName);
       lines.push(`  --scheme-color-${tokenName}: ${toOklch(value)};`);
     }
+    // The root takes a scheme that a descendant (`ThemeRoot`'s element) carries, so the colour
+    // roles that tokens.css sets on `:root` read that scheme (see tokens.css). `:is()` forgives
+    // an engine without `:has()` the one selector it cannot parse, where a plain list would drop
+    // `.${schemeName}` with it.
     const selector =
-      schemeName === "light" ? ":root,\n.light" : `.${schemeName}`;
+      schemeName === "light"
+        ? ":root,\n.light"
+        : `:is(:root:has(.${schemeName}), .${schemeName})`;
     schemeVarBlocks.push(`${selector} {\n${lines.join("\n")}\n}`);
   }
 

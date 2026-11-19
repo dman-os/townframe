@@ -266,6 +266,7 @@ function dimension(value: unknown, path: string): string {
     path === "dimension.radius-pill";
   const isBorder = /(^|\.)border(?:[-.]|$)/.test(path);
   const isFontSize = /(^|\.)font-size(?:[-.]|$)/.test(path);
+  const isTarget = /(^|\.)target(?:[-.]|$)/.test(path);
 
   if (isPill) {
     if (value.unit !== "px" || value.value !== 999) {
@@ -273,7 +274,7 @@ function dimension(value: unknown, path: string): string {
     }
   } else if (isShadow || isBorder) {
     if (value.unit !== "px") fail(`dimension ${path} must use px`);
-  } else if (isSpacing || isRadius || isFontSize) {
+  } else if (isSpacing || isRadius || isFontSize || isTarget) {
     if (value.unit !== "rem") fail(`dimension ${path} must use rem`);
   } else {
     fail(`dimension ${path} has no documented unit policy`);
@@ -428,6 +429,7 @@ const runtimeAliases: Record<string, string> = {
   "color.danger": "color-danger",
   "color.on-danger": "color-on-danger",
   "font.family.sans": "font-family-sans",
+  "font.family.mono": "font-family-mono",
   "elevation.none": "shadow-none",
   "elevation.sm": "shadow-sm",
   "elevation.md": "shadow-md",
@@ -527,6 +529,7 @@ const generated = [
   ...tailwindAliases,
   ...compatibilityAliases,
   "  --font-sans: var(--ct-font-family-sans);",
+  "  --font-mono: var(--ct-font-family-mono);",
   "}",
   "",
 ].join("\n");
@@ -588,6 +591,15 @@ function selfTest(): void {
   expectFailure(
     "shadow em",
     () => dimension({ value: 1, unit: "em" }, "shadow.sm[0].offsetX"),
+  );
+  if (
+    dimension({ value: 3, unit: "rem" }, "dimension.target-coarse") !== "3rem"
+  ) {
+    fail("self-test rem target serialization failed");
+  }
+  expectFailure(
+    "target px",
+    () => dimension({ value: 48, unit: "px" }, "dimension.target-coarse"),
   );
   expectFailure(
     "unclassified dimension",
@@ -667,6 +679,9 @@ function selfTest(): void {
   );
   if (!generated.includes("--ct-font-family: var(--ct-font-family-sans);")) {
     fail("self-test generated legacy font alias is missing");
+  }
+  if (!generated.includes("--ct-font-family-mono:")) {
+    fail("self-test generated monospace font family is missing");
   }
   console.log("design token self-tests passed");
 }

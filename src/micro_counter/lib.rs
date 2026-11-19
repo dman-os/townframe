@@ -4,6 +4,8 @@
 //! current value and an `increment` call, which the toolbar's Increment button performs.
 //! [`clay_mdk::export_micro!`] exports it as the `micro-client` guest on wasm32-wasip3 and as
 //! the native `ACTIVATE` entry everywhere else; nothing here names a backend.
+use clay_dioxus_kit::Button;
+use clay_dioxus_kit::ButtonVariant;
 use clay_mdk::Context;
 use clay_mdk::Error;
 use clay_mdk::Facet;
@@ -107,6 +109,10 @@ async fn activate(context: Context) -> Result<(), Error> {
 
 clay_mdk::export_micro!(activate, micro_counter_manifest::manifest);
 
+/// The counter's own stylesheet: the layout of its parts, which the kit has no component for. It
+/// names no colour, so a theme restyles the counter through the kit's tokens and parts.
+const STYLES: &str = include_str!("styles.css");
+
 /// Bumped whenever the standalone count changes. A global signal lives in its `VirtualDom`, so
 /// every mount of the `view` presentation subscribes to the same one.
 static STANDALONE_COUNTED: GlobalSignal<u64> = Signal::global(|| 0);
@@ -125,12 +131,13 @@ fn view(counter: Counter) -> Element {
     let increment = counter.clone();
     let document = counter.facet.clone().zip(snapshot);
     rsx! {
-        div { class: "flex flex-col gap-4",
-            button {
-                class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                "aria-label": "Increment Wasm counter",
+        div { class: "ct-counter",
+            document::Style { "{STYLES}" }
+            Button {
+                variant: ButtonVariant::Outline,
+                label: "Increment Wasm counter".to_owned(),
                 disabled: matches!(value, FacetState::Loading),
-                onclick: move |_| match increment.increment() {
+                onclick: move |()| match increment.increment() {
                     // A standalone count has no document to notify the view of it changing, so
                     // the global tells every mount of this presentation to re-read it.
                     Ok(None) => *STANDALONE_COUNTED.write() += 1,
@@ -160,10 +167,10 @@ fn view(counter: Counter) -> Element {
                 if let Some(error) = error() {
                     p { role: "status", "{error}" }
                 }
-                button {
-                    class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                    "aria-label": "Refresh Wasm counter",
-                    onclick: move |_| {
+                Button {
+                    variant: ButtonVariant::Outline,
+                    label: "Refresh Wasm counter".to_owned(),
+                    onclick: move |()| {
                         error.set(facet.refresh().err().map(|failure| format!("Refresh failed: {failure}")));
                     },
                     "Refresh counter"

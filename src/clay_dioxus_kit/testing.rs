@@ -255,82 +255,6 @@ const WIRE_ATTRIBUTES: &[&str] = &[
     "clip-rule",
     "slot",
 ];
-const WIRE_STYLE_PROPERTIES: &[&str] = &[
-    "display",
-    "position",
-    "top",
-    "right",
-    "bottom",
-    "left",
-    "inset",
-    "z-index",
-    "width",
-    "height",
-    "min-width",
-    "max-width",
-    "min-height",
-    "max-height",
-    "margin",
-    "margin-top",
-    "margin-right",
-    "margin-bottom",
-    "margin-left",
-    "padding",
-    "padding-top",
-    "padding-right",
-    "padding-bottom",
-    "padding-left",
-    "gap",
-    "row-gap",
-    "column-gap",
-    "flex",
-    "flex-direction",
-    "flex-wrap",
-    "flex-grow",
-    "flex-shrink",
-    "flex-basis",
-    "align-items",
-    "align-self",
-    "justify-content",
-    "grid-template-columns",
-    "grid-template-rows",
-    "grid-column",
-    "grid-row",
-    "overflow",
-    "overflow-x",
-    "overflow-y",
-    "color",
-    "background",
-    "background-color",
-    "border",
-    "border-color",
-    "border-width",
-    "border-style",
-    "border-radius",
-    "font",
-    "font-family",
-    "font-size",
-    "font-weight",
-    "font-style",
-    "line-height",
-    "text-align",
-    "text-decoration",
-    "text-overflow",
-    "white-space",
-    "word-break",
-    "cursor",
-    "pointer-events",
-    "touch-action",
-    "user-select",
-    "opacity",
-    "visibility",
-    "box-sizing",
-    "box-shadow",
-    "transform",
-    "transform-origin",
-    "transition",
-    "object-fit",
-];
 
 /// The serialized converter, except that a mounted event carries the element backing the test
 /// supplies (the serialized one has none), so a test can observe what a handler asks of the
@@ -614,7 +538,10 @@ impl WriteMutations for Dom {
                             .bytes()
                             .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_')))
             }
-            Some("style") => WIRE_STYLE_PROPERTIES.contains(&name),
+            // A per-property `style:` attribute is never admitted: the contract (`KIT-200`) leaves
+            // layout and appearance to the stylesheet, and the only inline style is the raw
+            // `style` of custom properties below.
+            Some("style") => false,
             Some(_) => false,
         };
         assert!(
@@ -765,11 +692,6 @@ impl Page {
             Kind::Element { attrs, .. } => attrs.get(name).cloned(),
             _ => None,
         }
-    }
-
-    /// A per-property `style:` attribute (the guest wire has no raw `style`).
-    pub(crate) fn style(&self, node: Node, property: &str) -> Option<String> {
-        self.attr(node, &format!("style:{property}"))
     }
 
     fn role_of(&self, node: Node) -> Option<String> {

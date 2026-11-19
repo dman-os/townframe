@@ -1,7 +1,6 @@
 mod diff_fixtures;
 mod diffs;
 mod foundations;
-mod kit;
 mod specimens;
 
 use foundations::ColorFoundation;
@@ -219,7 +218,7 @@ fn App() -> Element {
                 }
                 p {
                     class: "mb-6 max-w-3xl text-foreground-muted leading-relaxed",
-                    "One page per component of the styling contract, each showing every variant and state, then the legacy component specimens, the foundations and the diff view. Every cell is vocabulary a theme can restyle: see docs/design-language/styling-contract.md, and apply a theme from the theme lab micro."
+                    "One page per kit component, each showing every variant and state, then the foundations and the diff view. Every cell is vocabulary a theme can restyle: see docs/design-language/styling-contract.md, and apply a theme from the theme lab micro."
                 }
                 div { class: "mb-6",
                     Button {
@@ -233,24 +232,19 @@ fn App() -> Element {
                         "Toggle {mode:?} mode"
                     }
                 }
-                // A screenshot run names one legacy kit specimen group; see `kit::KitSpecimens`.
-                if let Some(group) = lab_setting("DAYTXT_SHOWCASE_KIT", "kit") {
-                    kit::KitSpecimens { only: Some(group) }
-                } else {
-                    Tabs {
-                        items: items.to_vec(),
-                        value: tab().value().to_string(),
-                        on_value_change: move |value: String| {
-                            tab.set(LabTab::from_value(&value).expect("the tab list is LabTab::ALL"));
-                        },
-                        label: "Showcase pages".to_string(),
-                        renderer: specimens::renderer(),
-                        for each in LabTab::ALL {
-                            TabPanel { key: "{each.value()}", value: each.value().to_string(),
-                                if tab() == each {
-                                    ThemeLabNav { viewport: (available_width(), 860.0), tab: each }
-                                    {each.page(theme.clone(), available_width())}
-                                }
+                Tabs {
+                    items: items.to_vec(),
+                    value: tab().value().to_string(),
+                    on_value_change: move |value: String| {
+                        tab.set(LabTab::from_value(&value).expect("the tab list is LabTab::ALL"));
+                    },
+                    label: "Showcase pages".to_string(),
+                    renderer: specimens::renderer(),
+                    for each in LabTab::ALL {
+                        TabPanel { key: "{each.value()}", value: each.value().to_string(),
+                            if tab() == each {
+                                ThemeLabNav { viewport: (available_width(), 860.0), tab: each }
+                                {each.page(theme.clone(), available_width())}
                             }
                         }
                     }
@@ -260,8 +254,8 @@ fn App() -> Element {
     }
 }
 
-/// The showcase's pages, one tab each: a specimen page per contract component, then the legacy
-/// component specimens, the foundations and the diff view.
+/// The showcase's pages, one tab each: a specimen page per kit component, then the foundations
+/// and the diff view.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LabTab {
     Button,
@@ -271,14 +265,21 @@ enum LabTab {
     Alert,
     Chip,
     ScrubStrip,
-    Layout,
+    NavButton,
+    AppBar,
+    ListRow,
+    PanelPage,
+    Sheet,
+    Drawer,
+    Sections,
+    ListDetails,
     Tokens,
     Colors,
     Diffs,
 }
 
 impl LabTab {
-    const ALL: [LabTab; 11] = [
+    const ALL: [LabTab; 18] = [
         LabTab::Button,
         LabTab::Tabs,
         LabTab::Card,
@@ -286,7 +287,14 @@ impl LabTab {
         LabTab::Alert,
         LabTab::Chip,
         LabTab::ScrubStrip,
-        LabTab::Layout,
+        LabTab::NavButton,
+        LabTab::AppBar,
+        LabTab::ListRow,
+        LabTab::PanelPage,
+        LabTab::Sheet,
+        LabTab::Drawer,
+        LabTab::Sections,
+        LabTab::ListDetails,
         LabTab::Tokens,
         LabTab::Colors,
         LabTab::Diffs,
@@ -302,7 +310,14 @@ impl LabTab {
             LabTab::Alert => "alert",
             LabTab::Chip => "chip",
             LabTab::ScrubStrip => "scrub-strip",
-            LabTab::Layout => "layout",
+            LabTab::NavButton => "nav-button",
+            LabTab::AppBar => "app-bar",
+            LabTab::ListRow => "list-row",
+            LabTab::PanelPage => "panel-page",
+            LabTab::Sheet => "sheet",
+            LabTab::Drawer => "drawer",
+            LabTab::Sections => "sections",
+            LabTab::ListDetails => "list-details",
             LabTab::Tokens => "tokens",
             LabTab::Colors => "colors",
             LabTab::Diffs => "diffs",
@@ -322,7 +337,14 @@ impl LabTab {
             LabTab::Alert => "Alert",
             LabTab::Chip => "Chip",
             LabTab::ScrubStrip => "ScrubStrip",
-            LabTab::Layout => "Layout kit",
+            LabTab::NavButton => "NavButton",
+            LabTab::AppBar => "AppBar",
+            LabTab::ListRow => "ListRow",
+            LabTab::PanelPage => "PanelPage",
+            LabTab::Sheet => "Sheet",
+            LabTab::Drawer => "Drawer",
+            LabTab::Sections => "Sections",
+            LabTab::ListDetails => "ListDetails",
             LabTab::Tokens => "Tokens",
             LabTab::Colors => "Colors",
             LabTab::Diffs => "Diffs",
@@ -343,7 +365,11 @@ impl LabTab {
                 ("tabs-horizontal", "Horizontal"),
                 ("tabs-vertical", "Vertical"),
             ],
-            LabTab::Card => &[("card-variants", "Variants"), ("card-parts", "Parts")],
+            LabTab::Card => &[
+                ("card-variants", "Variants"),
+                ("card-statuses", "Statuses"),
+                ("card-parts", "Parts"),
+            ],
             LabTab::Separator => &[
                 ("separator-orientations", "Orientations"),
                 ("separator-roles", "Roles"),
@@ -357,7 +383,14 @@ impl LabTab {
                 ("chip-interactive", "Interactive"),
             ],
             LabTab::ScrubStrip => &[],
-            LabTab::Layout => &[("kit", "Layout kit")],
+            LabTab::NavButton => &[("nav-button-modes", "Modes")],
+            LabTab::AppBar => &[("app-bar-slots", "Slots")],
+            LabTab::ListRow => &[("list-row-states", "States")],
+            LabTab::PanelPage => &[("panel-page-scroll", "Scroll")],
+            LabTab::Sheet => &[("sheet-widths", "Widths")],
+            LabTab::Drawer => &[("drawer-widths", "Widths")],
+            LabTab::Sections => &[("sections-widths", "Resizable panes")],
+            LabTab::ListDetails => &[("list-details-widths", "Width classes")],
             LabTab::Tokens => &[
                 ("typography", "Typography"),
                 ("spacing", "Spacing"),
@@ -381,14 +414,14 @@ impl LabTab {
             LabTab::ScrubStrip => {
                 rsx! { specimens::ScrubStripSpecimens { viewport: (available_width, 860.0) } }
             }
-            LabTab::Layout => rsx! {
-                FoundationSection {
-                    id: "kit".to_string(),
-                    title: "Layout kit".to_string(),
-                    description: "The older clay_dioxus_kit components (Tailwind-skinned until the styling contract reaches them) at a compact and an expanded host width. The kit never measures: each frame is the host, and hands the component its width class.".to_string(),
-                    kit::KitSpecimens { only: None }
-                }
-            },
+            LabTab::NavButton => rsx! { specimens::NavButtonSpecimens {} },
+            LabTab::AppBar => rsx! { specimens::AppBarSpecimens {} },
+            LabTab::ListRow => rsx! { specimens::ListRowSpecimens {} },
+            LabTab::PanelPage => rsx! { specimens::PanelPageSpecimens {} },
+            LabTab::Sheet => rsx! { specimens::SheetSpecimens {} },
+            LabTab::Drawer => rsx! { specimens::DrawerSpecimens {} },
+            LabTab::Sections => rsx! { specimens::SectionsSpecimens {} },
+            LabTab::ListDetails => rsx! { specimens::ListDetailsSpecimens {} },
             LabTab::Tokens => rsx! { foundations::TokenFoundations {} },
             LabTab::Colors => rsx! {
                 FoundationSection {

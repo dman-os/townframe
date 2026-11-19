@@ -509,6 +509,45 @@ fn RenderedMount(props: RenderedMountProps) -> Element {
     (props.render)(&props.mount)
 }
 
+/// Runs the element commands a surface's guest sent, one at a time and in the order issued, and
+/// answers each with an `element-reply` event (see the ordering contract in `MountedSurface`).
+async fn drain_element_commands(
+    session: Option<Rc<SurfaceSession>>,
+    writer: SurfaceWriter,
+    handles: ElementHandles,
+    revision: Signal<u64>,
+) {
+    let Some(session) = session else { return };
+    let mut commands = writer
+        .command_receiver
+        .lock()
+        .unwrap()
+        .take()
+        .expect("one command drain per surface writer");
+    let dispatch = session.handler();
+    while let Some((element, command)) = commands.recv().await {
+        // A command can race the removal of its element, which dropped the handle.
+        let outcome = match handles.get(element) {
+            Some(mounted) => run_element_action(&mounted, command.action).await,
+            None => Err("element is not mounted".to_owned()),
+        };
+        let data_json = match outcome {
+            Ok(value) => serde_json::json!({ "request": command.request, "value": value }),
+            Err(error) => serde_json::json!({ "request": command.request, "error": error }),
+        }
+        .to_string();
+        dispatch(clay_surface::Event {
+            revision: writer.revision(),
+            element,
+            name: ELEMENT_REPLY.to_owned(),
+            bubbles: false,
+            data_json,
+        });
+        let mut rev = revision;
+        rev.set(writer.revision());
+    }
+}
+
 #[component]
 fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) -> Element {
     let path = use_hook(|| try_consume_context::<MountPath>().unwrap_or_default());
@@ -564,40 +603,12 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
     let command_writer = writer.clone();
     let command_handles = handles.clone();
     use_future(move || {
-        let session = command_session.clone();
-        let writer = command_writer.clone();
-        let handles = command_handles.clone();
-        async move {
-            let Some(session) = session else { return };
-            let mut commands = writer
-                .command_receiver
-                .lock()
-                .unwrap()
-                .take()
-                .expect("one command drain per surface writer");
-            let dispatch = session.handler();
-            while let Some((element, command)) = commands.recv().await {
-                // A command can race the removal of its element, which dropped the handle.
-                let outcome = match handles.get(element) {
-                    Some(mounted) => run_element_action(&mounted, command.action).await,
-                    None => Err("element is not mounted".to_owned()),
-                };
-                let data_json = match outcome {
-                    Ok(value) => serde_json::json!({ "request": command.request, "value": value }),
-                    Err(error) => serde_json::json!({ "request": command.request, "error": error }),
-                }
-                .to_string();
-                dispatch(clay_surface::Event {
-                    revision: writer.revision(),
-                    element,
-                    name: ELEMENT_REPLY.to_owned(),
-                    bubbles: false,
-                    data_json,
-                });
-                let mut rev = revision;
-                rev.set(writer.revision());
-            }
-        }
+        drain_element_commands(
+            command_session.clone(),
+            command_writer.clone(),
+            command_handles.clone(),
+            revision,
+        )
     });
     // Drop the host handles of elements the tree retired since the last render, before this
     // render can project (and so mount) a new element under a recycled id.
@@ -652,7 +663,7 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
     let nested = !path.surfaces.is_empty();
     let mut sheet = tree.stylesheet().to_owned();
     // The end user's theme follows the micro's own sheet, in `@layer user`: the kit's document
-    // sheets are adopted into this root as `@layer kit`, which the fork's interpreter declares
+    // sheets are adopted into this root as `@layer host`, which the fork's interpreter declares
     // ahead of `user`, so a theme outranks the kit and every host-wide rule. The micro's own
     // unlayered rules still outrank a layered theme, which is what lets a micro that previews
     // a draft theme (the theme lab) see the draft and not the applied sheet. Reading the signal

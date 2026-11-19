@@ -14,8 +14,20 @@
 //!
 //! [`clay_mdk::export_micro!`] exports the lab as the `micro-client` guest on wasm32-wasip3 and as
 //! the native `ACTIVATE` entry everywhere else.
+use clay_dioxus_kit::Alert;
 use clay_dioxus_kit::AppBar;
+use clay_dioxus_kit::Button;
+use clay_dioxus_kit::ButtonVariant;
+use clay_dioxus_kit::Card;
+use clay_dioxus_kit::CardContent;
+use clay_dioxus_kit::CardHeader;
+use clay_dioxus_kit::CardVariant;
+use clay_dioxus_kit::ListDetails;
+use clay_dioxus_kit::ListRow;
 use clay_dioxus_kit::PanelPage;
+use clay_dioxus_kit::Split;
+use clay_dioxus_kit::Status as Tone;
+use clay_dioxus_kit::WidthClass;
 use clay_mdk::Capability;
 use clay_mdk::Context;
 use clay_mdk::Error;
@@ -54,9 +66,11 @@ async fn activate(context: Context) -> Result<(), Error> {
 
 clay_mdk::export_micro!(activate, micro_theme_lab_manifest::manifest);
 
-/// The editor's own classes: one place for the monospace field's look.
-const FIELD: &str = "box-border min-h-64 w-full resize-y rounded-md border border-border bg-surface-sunken p-3 font-mono text-sm leading-relaxed text-foreground focus-visible:outline-2";
-const BUTTON: &str = "min-h-12 cursor-pointer rounded-md border border-border px-4 py-2 focus-visible:outline-2 disabled:cursor-default disabled:opacity-50";
+/// The lab's own stylesheet: the layout of its parts, the monospace field and the text roles, which
+/// the kit has no component for. It names no colour that is not a kit token. While the draft
+/// previews, the draft follows it in the same `document::Style` (a micro has one stylesheet, the
+/// latest `document::Style`), so a draft rule beats a rule here.
+const STYLES: &str = include_str!("styles.css");
 
 /// The outcome the status line shows after the last Apply.
 #[derive(Clone, PartialEq)]
@@ -112,7 +126,7 @@ fn view(host: Host) -> Element {
     let apply = {
         let host = host.clone();
         let text = text.clone();
-        move |_| {
+        move |()| {
             let host = host.clone();
             let sheet = ThemeSheet { css: text.clone() };
             applying.set(true);
@@ -135,14 +149,14 @@ fn view(host: Host) -> Element {
         leading,
         rsx! {
             // The draft is this micro's stylesheet while it previews, which the host adopts for
-            // this mount alone.
-            document::Style { key: "{revision}", "{preview_css}" }
-            div { class: "mx-4 flex flex-col gap-6 pb-6",
-                section { class: "flex flex-col gap-2", "aria-label": "Theme CSS",
-                    label { class: "font-medium", r#for: "theme-css", "Theme CSS" }
+            // this mount alone. It follows the lab's own rules in the one stylesheet a micro has.
+            document::Style { key: "{revision}", "{STYLES}\n{preview_css}" }
+            div { class: "ct-theme-lab",
+                section { "data-part": "editor", "aria-label": "Theme CSS",
+                    label { "data-part": "heading", r#for: "theme-css", "Theme CSS" }
                     textarea {
                         id: "theme-css",
-                        class: FIELD,
+                        "data-part": "field",
                         spellcheck: "false",
                         rows: "14",
                         value: "{text}",
@@ -152,26 +166,26 @@ fn view(host: Host) -> Element {
                             revision += 1;
                         },
                     }
-                    div { class: "flex flex-wrap items-center gap-2",
-                        button {
-                            class: BUTTON,
-                            "aria-label": "Apply theme",
+                    div { "data-part": "actions",
+                        Button {
+                            variant: ButtonVariant::Outline,
+                            label: "Apply theme".to_owned(),
                             disabled: !dirty || applying(),
                             onclick: apply,
                             "Apply"
                         }
-                        button {
-                            class: BUTTON,
-                            "aria-label": "Revert to the applied theme",
+                        Button {
+                            variant: ButtonVariant::Outline,
+                            label: "Revert to the applied theme".to_owned(),
                             disabled: !dirty,
-                            onclick: move |_| {
+                            onclick: move |()| {
                                 draft.set(None);
                                 status.set(Status::Idle);
                                 revision += 1;
                             },
                             "Revert"
                         }
-                        label { class: "flex min-h-12 items-center gap-2",
+                        label { "data-part": "toggle",
                             input {
                                 r#type: "checkbox",
                                 checked: preview(),
@@ -186,10 +200,10 @@ fn view(host: Host) -> Element {
                     match status() {
                         Status::Idle => rsx! {},
                         Status::Applied => rsx! {
-                            p { role: "status", "Applied to the whole app." }
+                            Alert { status: Tone::Success, "Applied to the whole app." }
                         },
                         Status::Failed(reason) => rsx! {
-                            p { role: "alert", class: "text-destructive", "Not applied: {reason}" }
+                            Alert { status: Tone::Danger, "Not applied: {reason}" }
                         },
                     }
                 }
@@ -213,30 +227,41 @@ fn page(leading: Element, body: Element) -> Element {
 #[component]
 fn Specimens() -> Element {
     rsx! {
-        section { class: "flex flex-col gap-4", "aria-label": "Preview",
-            h2 { class: "m-0 text-lg font-semibold", "Preview" }
-            div { class: "overflow-hidden rounded-lg border border-border bg-background",
+        section { "data-part": "preview", "aria-label": "Preview",
+            h2 { "Preview" }
+            div { "data-part": "specimens",
                 AppBar { title: "App bar" }
-                div { class: "flex flex-col gap-3 p-4",
-                    p { class: "m-0 text-foreground", "Body text in the foreground role." }
-                    p { class: "m-0 text-sm text-foreground-muted", "Muted text, for secondary detail." }
-                    div { class: "flex flex-wrap gap-2",
-                        button { class: "{BUTTON} bg-primary text-primary-foreground", "Primary" }
-                        button { class: "{BUTTON} bg-secondary text-secondary-foreground", "Secondary" }
-                        button { class: "{BUTTON} bg-destructive text-destructive-foreground", "Destructive" }
+                div { "data-part": "samples",
+                    p { "data-part": "text", "Body text in the text role." }
+                    p { "data-part": "muted", "Muted text, for secondary detail." }
+                    div { "data-part": "buttons",
+                        Button { onclick: |()| {}, "Primary" }
+                        Button { variant: ButtonVariant::Secondary, onclick: |()| {}, "Secondary" }
+                        Button { variant: ButtonVariant::Destructive, onclick: |()| {}, "Destructive" }
                     }
-                    ul { class: "m-0 flex list-none flex-col gap-1 p-0",
-                        for (index , name) in ["Inbox", "Today", "Archive"].into_iter().enumerate() {
-                            li {
-                                key: "{name}",
-                                class: if index == 0 { "rounded-md bg-selected px-4 py-3 text-on-selected" } else { "rounded-md bg-surface-sunken px-4 py-3" },
-                                "{name}"
-                            }
+                    div { "data-part": "rows",
+                        ListDetails {
+                            width: WidthClass::Compact,
+                            list_name: "Examples",
+                            list: rsx! {
+                                for name in ["Inbox", "Today", "Archive"] {
+                                    ListRow { key: "{name}", id: name, name: "{name}", "{name}" }
+                                }
+                            },
+                            details_name: "Example details",
+                            details: None,
+                            current: Some("Inbox".to_owned()),
+                            split: Split::new(vec![1.0], 320.0),
+                            on_resize: |_| {},
+                            on_open: |_| {},
+                            on_back: |()| {},
                         }
                     }
-                    div { class: "rounded-lg bg-card p-4 text-card-foreground shadow-sm",
-                        p { class: "m-0 font-medium", "A card" }
-                        p { class: "m-0 text-sm text-foreground-subtle", "On the card role, with subtle text." }
+                    Card { variant: CardVariant::Raised,
+                        CardHeader { "A card" }
+                        CardContent {
+                            p { "data-part": "subtle", "On the card role, with subtle text." }
+                        }
                     }
                 }
             }

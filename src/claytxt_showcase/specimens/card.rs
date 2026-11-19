@@ -7,6 +7,7 @@ use clay_dioxus_kit::CardContent;
 use clay_dioxus_kit::CardFooter;
 use clay_dioxus_kit::CardHeader;
 use clay_dioxus_kit::CardVariant;
+use clay_dioxus_kit::Status;
 use dioxus::prelude::*;
 
 /// `Card`: the three variants with all three parts, and a card with only its content.
@@ -30,6 +31,24 @@ pub(crate) fn CardSpecimens() -> Element {
                             Button { variant: ButtonVariant::Ghost, onclick: |()| {}, "Dismiss" }
                             Button { onclick: |()| {}, "Open" }
                         }
+                    }
+                }
+            }
+        }
+        FoundationSection {
+            id: "card-statuses".to_string(),
+            title: "Statuses".to_string(),
+            description: "data-status info|success|warning|danger, the colour roles Alert and Chip use; absent is neutral.".to_string(),
+            div { class: "grid grid-cols-[repeat(auto-fit,minmax(12rem,1fr))] gap-4",
+                for (status , name) in [
+                    (Status::Info, "Info"),
+                    (Status::Success, "Success"),
+                    (Status::Warning, "Warning"),
+                    (Status::Danger, "Danger"),
+                ] {
+                    Card { key: "{name}", status: Some(status),
+                        CardHeader { "{name}" }
+                        CardContent { "What the card says about its content." }
                     }
                 }
             }

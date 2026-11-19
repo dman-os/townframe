@@ -1,0 +1,88 @@
+/*
+ * ct-sections (headless/sections.rs). Parts: pane, handle (with a grip in it), gesture. States:
+ * data-state on a pane (collapsed, while a drag would shut it) and on a handle (idle|dragging);
+ * data-edge on the handle that reopens a folded first pane.
+ *
+ * Rust computes the geometry and hands it over as custom properties on a pane:
+ * --ct-sections-weight (the flex weight), --ct-sections-min and, when the pane has a limit,
+ * --ct-sections-max (px). This sheet turns them into the layout.
+ *
+ * A handle's hit area is --ct-sections-hit wide (24px, the WCAG 2.5.8 minimum, the one pressable
+ * narrower than a touch target: KIT-106). It overlaps the panes on both sides and takes no layout
+ * space, because a pane's own scrollbar and first controls lie under half of it.
+ */
+.ct-sections {
+  --ct-sections-hit: 24px;
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: var(--ct-color-canvas);
+  color: var(--ct-color-text);
+}
+
+.ct-sections [data-part="pane"] {
+  position: relative;
+  z-index: var(--ct-layer-content);
+  flex: var(--ct-sections-weight) 1 0px;
+  min-width: var(--ct-sections-min);
+  min-height: 0;
+  max-width: var(--ct-sections-max, none);
+  background: var(--ct-color-surface);
+}
+
+.ct-sections [data-part="pane"][data-state="collapsed"] {
+  overflow: hidden;
+}
+
+.ct-sections [data-part="handle"] {
+  position: relative;
+  z-index: var(--ct-layer-raised);
+  display: flex;
+  flex: none;
+  justify-content: center;
+  width: var(--ct-sections-hit);
+  margin-inline: calc(var(--ct-sections-hit) / -2);
+  touch-action: none;
+  cursor: col-resize;
+}
+
+/* The strip on the leading edge: the half of a handle's hit area that lies inside the window. */
+.ct-sections [data-part="handle"][data-edge] {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: calc(var(--ct-sections-hit) / 2);
+  margin-inline: 0;
+}
+
+.ct-sections [data-part="handle"]:focus-visible {
+  outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
+}
+
+.ct-sections [data-part="grip"] {
+  width: var(--ct-dimension-border-width-thin);
+  height: 100%;
+  background: var(--ct-color-border);
+}
+
+.ct-sections [data-part="handle"]:hover [data-part="grip"],
+.ct-sections [data-part="handle"][data-state="dragging"] [data-part="grip"] {
+  width: var(--ct-dimension-border-width-thick);
+  background: var(--ct-color-primary);
+}
+
+/* The overlay that takes a gesture's pointer events once a drag is live (KIT-041). Absolute inside
+   the presentation: a guest box cannot be fixed to the viewport. */
+.ct-sections [data-part="gesture"] {
+  position: absolute;
+  inset: 0;
+  z-index: var(--ct-layer-gesture);
+  touch-action: none;
+  cursor: col-resize;
+}

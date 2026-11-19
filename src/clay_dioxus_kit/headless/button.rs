@@ -2,7 +2,9 @@
 //!
 //! Parts: `label`. Axes: `data-variant` (`primary`, `secondary`, `outline`, `ghost`,
 //! `destructive`), `data-size` (`sm`, `md`, `lg`). States: `data-disabled`; with `pressed` set it
-//! is a toggle and carries `aria-pressed` and `data-state` (`on`, `off`). It is a native
+//! is a toggle and carries `aria-pressed` and `data-state` (`on`, `off`); with `current` set it is
+//! the entry of a run of buttons that is open now (a sidebar's destination) and carries
+//! `aria-current` and `data-current`. It is a native
 //! `<button type="button">`, so Enter and Space activate it wherever the renderer has focus; a
 //! disabled one ignores its click whatever the renderer does.
 use dioxus::prelude::*;
@@ -69,6 +71,9 @@ pub fn Button(
     /// `onclick`.
     #[props(default)]
     pressed: Option<bool>,
+    /// The button is the open entry of a run of navigation buttons.
+    #[props(default)]
+    current: bool,
     /// The accessible name, for a button whose children are an icon.
     #[props(default)]
     label: Option<String>,
@@ -86,6 +91,8 @@ pub fn Button(
             "data-size": size.as_str(),
             "data-state": pressed.map(|pressed| if pressed { "on" } else { "off" }),
             "data-disabled": if disabled { Some("") } else { None },
+            "aria-current": if current { Some("true") } else { None },
+            "data-current": if current { Some("") } else { None },
             onclick: move |_| {
                 if !disabled {
                     onclick.call(());
@@ -110,6 +117,7 @@ mod tests {
         size: ButtonSize,
         disabled: bool,
         pressed: Option<bool>,
+        current: bool,
         clicks: Rc<RefCell<u32>>,
     }
 
@@ -121,6 +129,7 @@ mod tests {
                 size: probe.size,
                 disabled: probe.disabled,
                 pressed: probe.pressed,
+                current: probe.current,
                 onclick: move |()| *clicks.borrow_mut() += 1,
                 "Save"
             }
@@ -134,6 +143,7 @@ mod tests {
             size: ButtonSize::default(),
             disabled: false,
             pressed: None,
+            current: false,
             clicks: Rc::clone(&clicks),
         };
         configure(&mut probe);
@@ -152,6 +162,16 @@ mod tests {
         assert_eq!(page.attr(button, "aria-pressed"), None);
         assert_eq!(page.attr(button, "data-state"), None);
         assert_eq!(page.attr(button, "data-disabled"), None);
+        assert_eq!(page.attr(button, "aria-current"), None);
+        assert_eq!(page.attr(button, "data-current"), None);
+    }
+
+    #[test]
+    fn the_open_entry_of_a_run_says_it_is_current() {
+        let (page, _) = render(|probe| probe.current = true);
+        let button = page.by_role("button", "Save");
+        assert_eq!(page.attr(button, "aria-current").as_deref(), Some("true"));
+        assert_eq!(page.attr(button, "data-current").as_deref(), Some(""));
     }
 
     #[test]

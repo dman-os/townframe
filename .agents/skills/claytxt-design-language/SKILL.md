@@ -34,7 +34,7 @@ For any component that holds state, handles gestures, or writes signals from a t
 ## Source-of-truth rules
 
 - Authored token JSON is canonical. Generated CSS and bundled Tailwind output are derived artifacts and MUST NOT be hand-edited.
-- Run `x/design-tokens.ts --check` after token changes. Regenerate with `--write`, then regenerate `src/clay_dioxus_kit/assets/tailwind.css` through the documented Tailwind command.
+- Run `x/check-kit-bundle.ts --write` after token or skin changes: it regenerates the token CSS and `src/clay_dioxus_kit/assets/tailwind.css`. The `kit-bundle` pre-commit hook runs it without `--write` and fails on any difference.
 - Foundation tokens are application-agnostic. They MUST NOT contain tiles, columns, widgets, screens, routes, workflows, or other product-specific grammar.
 - Keep the dependency direction `primitive -> semantic -> optional reusable component`. A primitive MUST NOT depend on a semantic or feature token.
 - The showcase is curated executable evidence, not the normative source and not an exhaustive token catalog.
@@ -117,7 +117,8 @@ deno check x/design-tokens.ts
 deno run --allow-read --allow-write x/design-tokens.ts --self-test
 deno run --allow-read --allow-write x/design-tokens.ts --write
 deno run --allow-read --allow-write x/design-tokens.ts --check
-tailwindcss -i src/clay_dioxus_kit/tailwind.css -o src/clay_dioxus_kit/assets/tailwind.css
+deno run --allow-all x/check-kit-bundle.ts --write   # token CSS and the Tailwind bundle
+deno run --allow-all x/check-kit-bundle.ts           # what the pre-commit hook runs: fails on a stale bundle
 cargo fmt --all -- --check
 ```
 

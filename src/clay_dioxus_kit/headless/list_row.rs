@@ -1,4 +1,10 @@
-//! ListRow: one openable row of a list that sits inside a [`ListDetails`](super::list_details).
+//! ListRow (`ct-list-row`): one openable row of a list that sits inside a
+//! [`ListDetails`](super::list_details).
+//!
+//! No parts: the children are the row. State: `data-state` is `current` for the open row and
+//! `idle` for the others, and the open row also carries `aria-current="true"` (a button cannot be
+//! `aria-selected`, `KIT-107`). The skin paints it with the `selected` colour roles and keeps every
+//! row at least a touch target tall (`KIT-106`).
 //!
 //! The row opens itself through the scaffold's action channel (`use_list_details`) and marks
 //! itself with `aria-current` while the scaffold's owner says it is the open one, so a list does
@@ -11,26 +17,19 @@
 use super::list_details::use_list_details;
 use dioxus::prelude::*;
 
-/// The classes a skin gives [`ListRow`].
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ListRowSkin {
-    pub root: &'static str,
-}
-
 #[component]
 pub fn ListRow(
     /// The key the scaffold's `on_open` receives and `current` is compared with.
     id: String,
     /// The accessible name (`KIT-050`).
     name: String,
-    #[props(default)] skin: ListRowSkin,
     children: Element,
 ) -> Element {
     let actions = use_list_details();
     let current = actions.is_current(&id);
     rsx! {
         button {
-            class: skin.root,
+            class: "ct-list-row",
             r#type: "button",
             "aria-label": "{name}",
             "aria-current": current.then_some("true"),
@@ -93,18 +92,25 @@ mod tests {
         );
         let sync = page.by_role("button", "Open Sync");
         let about = page.by_role("button", "Open About");
-        assert_eq!(page.attr(sync, "aria-current"), None);
-        assert_eq!(page.attr(about, "aria-current"), None);
+        for row in [sync, about] {
+            assert_eq!(page.attr(row, "class").as_deref(), Some("ct-list-row"));
+            assert_eq!(page.attr(row, "type").as_deref(), Some("button"));
+            assert_eq!(page.attr(row, "data-state").as_deref(), Some("idle"));
+            assert_eq!(page.attr(row, "aria-current"), None);
+        }
 
         page.click(sync);
         assert_eq!(*opened.borrow(), ["sync"]);
         assert_eq!(page.attr(sync, "aria-current").as_deref(), Some("true"));
         assert_eq!(page.attr(sync, "data-state").as_deref(), Some("current"));
         assert_eq!(page.attr(about, "aria-current"), None);
+        assert_eq!(page.attr(about, "data-state").as_deref(), Some("idle"));
 
         // Another row replaces it.
         page.click(about);
         assert_eq!(page.attr(sync, "aria-current"), None);
+        assert_eq!(page.attr(sync, "data-state").as_deref(), Some("idle"));
         assert_eq!(page.attr(about, "aria-current").as_deref(), Some("true"));
+        assert_eq!(page.attr(about, "data-state").as_deref(), Some("current"));
     }
 }

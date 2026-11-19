@@ -21,9 +21,9 @@ same order.
 
 1. **Baseline / kit.** Every stylesheet of the host document (Tailwind with the generated
    token variables, the kit's utilities) is flattened by the Dioxus fork's interpreter into
-   one constructable sheet inside `@layer kit` and adopted into every mount's shadow root
-   (`packages/interpreter/src/ts/core.ts`, `rebuildKit`; it watches `<head>`). The fork
-   declares `@layer kit, user;` first, so the order of those two layers is fixed whatever
+   one constructable sheet inside `@layer host` and adopted into every mount's shadow root
+   (`packages/interpreter/src/ts/core.ts`, `rebuildHost`; it watches `<head>`). The fork
+   declares `@layer host, user;` first, so the order of those two layers is fixed whatever
    order their rules arrive in. Layered rules lose to every unlayered rule.
 2. **Micro.** The micro's own stylesheet, sanitized by `clay_surface` and set on the mount as
    the `data-dioxus-shadow-sheet` attribute of the mount root (`clay_dioxus::MountedSurface`),

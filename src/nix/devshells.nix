@@ -175,6 +175,8 @@ _: {
         pnpm
         nodejs_24
         biome
+        # The kit's bundle check (`x/check-kit-bundle.ts`) regenerates the stylesheet.
+        tailwindcss_4
         playwright-driver
         playwrightBrowsers
 
@@ -237,7 +239,6 @@ _: {
         wasm-tools
         cargo-leptos
         trunk
-        tailwindcss_4
         watchexec
 
         # maestro

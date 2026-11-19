@@ -3,6 +3,11 @@
 //! mounted from its row link). The shell owns which one is shown and where.
 use crate::SettingsMicro;
 use clay_dioxus_kit::AppBar;
+use clay_dioxus_kit::Button;
+use clay_dioxus_kit::ButtonVariant;
+use clay_dioxus_kit::Card;
+use clay_dioxus_kit::CardContent;
+use clay_dioxus_kit::CardVariant;
 use clay_dioxus_kit::ListRow;
 use clay_dioxus_kit::PanelPage;
 use clay_mdk::Error;
@@ -15,6 +20,10 @@ use clay_mdk::hooks::use_rows;
 use dioxus::prelude::*;
 use micro_settings_manifest::ID;
 use micro_settings_manifest::Section;
+
+/// The settings' own stylesheet: the layout of its parts, which the kit has no component for. It
+/// names no colour, so a theme restyles the panels through the kit's tokens and parts.
+const STYLES: &str = include_str!("styles.css");
 
 #[derive(Props, Clone, PartialEq)]
 pub struct SettingsListProps {
@@ -70,9 +79,13 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
                     leading: rsx! { PresentationSlot { reference: props.micro.shell.nav_button.clone() } },
                 }
             },
-        div { class: "flex flex-col gap-4",
-            details { class: "mx-4 rounded-md border border-border p-4",
-                summary { "Choose settings sections" }
+        div { class: "ct-settings", "data-state": "list",
+            document::Style { "{STYLES}" }
+            div { "data-part": "preferences",
+              Card { variant: CardVariant::Outline,
+                CardContent {
+                  details {
+                    summary { "Choose settings sections" }
                 if preferences.is_none() { p { role: "status", "Settings preferences are loading." } }
                 for row in &available {
                     {
@@ -83,22 +96,22 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
                         let toggle_name = row.key.clone();
                         let order_name = row.key.clone();
                         rsx! {
-                            div { key: "{row.key}", class: "mt-4 flex flex-wrap gap-2",
-                                button {
-                                    class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
+                            div { key: "{row.key}", "data-part": "preference",
+                                Button {
+                                    variant: ButtonVariant::Outline,
                                     disabled: preferences.is_none(),
-                                    "aria-label": "Show {title} section",
-                                    "aria-pressed": !hidden,
-                                    onclick: move |_| track(toggle_micro.edit(|config| {
+                                    label: format!("Show {title} section"),
+                                    pressed: Some(!hidden),
+                                    onclick: move |()| track(toggle_micro.edit(|config| {
                                         if !config.hidden.remove(&toggle_name) { config.hidden.insert(toggle_name.clone()); }
                                     })),
                                     if hidden { "{title}: hidden" } else { "{title}: shown" }
                                 }
-                                button {
-                                    class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
+                                Button {
+                                    variant: ButtonVariant::Outline,
                                     disabled: preferences.is_none(),
-                                    "aria-label": "Move {title} first",
-                                    onclick: move |_| track(order_micro.edit(|config| {
+                                    label: format!("Move {title} first"),
+                                    onclick: move |()| track(order_micro.edit(|config| {
                                         config.order.retain(|name| name != &order_name);
                                         config.order.insert(0, order_name.clone());
                                     })),
@@ -110,8 +123,11 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
                 }
                 if let Some(problem) = error() { p { role: "alert", "{problem}" } }
                 if let Some(receipt) = receipt() { p { role: "status", "Settings operation {receipt.id}: {receipt.status:?}" } }
+                  }
+                }
+              }
             }
-            nav { class: "flex flex-col gap-1 px-2", "aria-label": "Settings sections",
+            nav { "data-part": "sections", "aria-label": "Settings sections",
                 for row in &shown {
                     ListRow {
                         key: "{row.key}",
@@ -120,7 +136,7 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
                         "{row.value.title}"
                     }
                 }
-                if shown.is_empty() { p { class: "px-2", "No settings sections are available." } }
+                if shown.is_empty() { p { "No settings sections are available." } }
             }
         }
         }
@@ -153,7 +169,8 @@ pub fn SettingsSection(props: SettingsSectionProps) -> Element {
         return rsx! { p { role: "alert", "The {key} section is not available." } };
     };
     rsx! {
-        section { "aria-label": "{row.value.title}", height: "100%",
+        section { class: "ct-settings", "data-state": "section", "aria-label": "{row.value.title}",
+            document::Style { "{STYLES}" }
             PanelPage {
                 app_bar: rsx! {
                     AppBar {
@@ -161,7 +178,7 @@ pub fn SettingsSection(props: SettingsSectionProps) -> Element {
                         leading: rsx! { PresentationSlot { reference: props.micro.shell.nav_button.clone() } },
                     }
                 },
-                div { class: "px-4 pb-4",
+                div { "data-part": "detail",
                     PresentationSlot {
                         reference: row.links[row.value.detail.index()].clone(),
                     }

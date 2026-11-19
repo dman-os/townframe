@@ -33,9 +33,11 @@
     --ct-color-blue-900: #0f1f61;
     --ct-color-red-100: #ffe0e0;
     --ct-color-red-600: #bd1f1f;
+    --ct-color-green-400: #45b56b;
     --ct-color-green-600: #1f7a3d;
     --ct-color-amber-500: #f5a624;
     --ct-font-family-sans: system-ui, sans-serif;
+    --ct-font-family-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     --ct-font-weight-regular: 400;
     --ct-font-weight-medium: 500;
     --ct-font-weight-semibold: 600;
@@ -75,6 +77,7 @@
     --ct-color-on-info: #ffffff;
     --ct-dimension-spacing: 0.25rem;
     --ct-spacing: 0.25rem;
+    --ct-dimension-target-coarse: 3rem;
     --ct-radius-sm: 0.25rem;
     --ct-radius-md: 0.5rem;
     --ct-radius-lg: 0.75rem;
@@ -152,4 +155,5 @@
   --color-destructive-foreground: var(--ct-color-on-danger);
   --color-ring: var(--ct-color-focus);
   --font-sans: var(--ct-font-family-sans);
+  --font-mono: var(--ct-font-family-mono);
 }

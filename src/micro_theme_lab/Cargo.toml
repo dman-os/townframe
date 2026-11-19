@@ -16,7 +16,7 @@ micro_shell_manifest = { workspace = true }
 micro_theme_lab_manifest = { workspace = true }
 #
 # external
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "1696518a2c449f44c0d2d4ac1fedd00127058d63", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 
 # One authored micro, two backends (isomorphic MDK): a wasm32-wasip3 build is the guest, every
 # other target links the in-process backend.

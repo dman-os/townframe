@@ -1,6 +1,6 @@
 /*
  * ct-button (headless/button.rs). Parts: label. Axes: data-variant, data-size.
- * States: data-state (on|off, toggles only), data-disabled.
+ * States: data-state (on|off, toggles only), data-current (the open entry of a run), data-disabled.
  * Imported into the `kit` layer (../../tailwind.css); a theme overrides these rules from `user`.
  */
 .ct-button {
@@ -42,10 +42,10 @@
   font-size: var(--ct-dimension-font-size-lg);
 }
 
-/* A touch screen asks for a 48px target whatever the size. */
+/* A touch screen asks for a target of at least --ct-dimension-target-coarse (48px) whatever the size. */
 @media (pointer: coarse) {
   .ct-button {
-    min-height: 3rem;
+    min-height: var(--ct-dimension-target-coarse);
   }
 }
 
@@ -84,8 +84,10 @@
   filter: brightness(0.94);
 }
 
-/* A toggle that is on reads as selected whatever its variant. */
-.ct-button[data-state="on"] {
+/* A toggle that is on, and the open entry of a run of buttons, read as selected whatever their
+   variant. */
+.ct-button[data-state="on"],
+.ct-button[data-current] {
   --ct-button-bg: var(--ct-color-selected);
   --ct-button-fg: var(--ct-color-on-selected);
   --ct-button-border: var(--ct-color-primary);

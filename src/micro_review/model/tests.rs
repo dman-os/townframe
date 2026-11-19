@@ -292,7 +292,7 @@ async fn an_intxt_shows_its_title_description_and_entries_in_the_bodys_order() {
             (
                 entry.kind.name(),
                 entry.label.as_str(),
-                entry.patch.is_some(),
+                matches!(entry.changes, Changes::Blob(_)),
             )
         })
         .collect();
@@ -303,6 +303,96 @@ async fn an_intxt_shows_its_title_description_and_entries_in_the_bodys_order() {
             ("commits", "77b2d03", false),
             ("pull request", "dman-os/townframe/150", false),
         ]
+    );
+}
+
+#[tokio::test]
+async fn a_commit_without_a_patch_says_its_diff_was_too_large_to_carry() {
+    let Read::Ready(intxt) = review(&Fixture::sample())
+        .intxt(&Fixture::doc_id("31"))
+        .await
+        .unwrap()
+    else {
+        panic!("the sample intxt is readable")
+    };
+    assert_eq!(intxt.entries[1].label, "77b2d03");
+    assert_eq!(intxt.entries[1].changes, Changes::TooLarge);
+    // Entries of other kinds have no changes to say anything of.
+    assert_eq!(intxt.entries[2].changes, Changes::Absent);
+}
+
+#[tokio::test]
+async fn a_patch_is_read_only_when_asked_for_and_resolves_self_and_concrete_references() {
+    let fixture = Fixture::sample();
+    let review = review(&fixture);
+    let Read::Ready(intxt) = review.intxt(&Fixture::doc_id("31")).await.unwrap() else {
+        panic!("the sample intxt is readable")
+    };
+    // Reading the intxt reads documents, never a blob.
+    assert!(!fixture.calls().contains(&micro_review_manifest::READ_BLOB));
+    let Changes::Blob(source) = &intxt.entries[0].changes else {
+        panic!("the first commit carries a patch")
+    };
+    // `self` is the document the entry is in.
+    assert_eq!(source.doc, Fixture::doc_id("31"));
+    assert!(
+        review
+            .patch(source)
+            .await
+            .unwrap()
+            .starts_with("diff --git a/src/review.rs")
+    );
+    assert_eq!(
+        fixture
+            .calls()
+            .iter()
+            .filter(|nsid| **nsid == micro_review_manifest::READ_BLOB)
+            .count(),
+        1
+    );
+
+    // A concrete reference names its own document, where the blob datum may have moved to.
+    let commits = Fixture::doc_id("5");
+    let held = Fixture::empty().doc(commits.clone(), []).patch_blob(
+        &commits,
+        "moved",
+        "diff --git a/x b/x\n",
+    );
+    let entry = (
+        key(work::GitCommitEntry::ID, "abcdef0"),
+        serde_json::json!({
+            "tip": format!("{}/abcdef0", work::GitCommit::ID),
+            "pack": "dtxt:datum:self/org.example.daybook.blob/pack",
+            "patch": format!("dtxt:datum:{commits}/org.example.daybook.blob/moved"),
+        }),
+    );
+    let drawer = Fixture::doc_id("6");
+    let held = held.intxt(drawer.clone(), "moved", None, vec![entry]);
+    let Read::Ready(intxt) = Review::new(held.clone()).intxt(&drawer).await.unwrap() else {
+        panic!("the intxt is readable")
+    };
+    let Changes::Blob(source) = &intxt.entries[0].changes else {
+        panic!("the commit carries a patch")
+    };
+    assert_eq!(source.doc, commits);
+    assert_eq!(
+        Review::new(held).patch(source).await.unwrap(),
+        "diff --git a/x b/x\n"
+    );
+}
+
+#[tokio::test]
+async fn a_patch_that_cannot_be_read_is_an_error_not_an_empty_diff() {
+    let drawer = Fixture::doc_id("7");
+    let missing = PatchSource {
+        doc: drawer.clone(),
+        key: key(big_blobs_core::Blob::ID, "nope"),
+    };
+    let fixture = Fixture::empty().doc(drawer, []);
+    let error = review(&fixture).patch(&missing).await.unwrap_err();
+    assert!(
+        matches!(&error, CallError::Refused(reason) if reason.contains("absent")),
+        "{error:?}"
     );
 }
 
