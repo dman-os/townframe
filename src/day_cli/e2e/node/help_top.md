@@ -29,10 +29,10 @@ Options:
           Print version
 
 Exit codes:
-  0  success
-  1  failure: the command could not do what was asked (the error is on stderr)
-  2  usage error: the arguments were not understood
-  3  no server running (`day node status`, which still reports what it found)
+- 0: success
+- 1: failure, the command could not do what was asked (the error is on stderr)
+- 2: usage error, the arguments were not understood
+- 3: no server running (`day node status`, which still reports what it found)
 
 Output goes to stdout and diagnostics to stderr. Only `day node start` logs as it serves;
 the other commands show warnings, and RUST_LOG overrides the level. Colour is used on a
