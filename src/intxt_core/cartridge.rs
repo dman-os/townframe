@@ -8,7 +8,7 @@
 //! writer replacing the value. Without the sidecar every position would keep the plain JSON kind
 //! its Lexicon states.
 //!
-//! It also serves two operations, `createIntxt` and `addToIntxt`, as routines of its one nodule
+//! It also serves three operations, `createIntxt`, `addToIntxt` and `summarizeIntxts`, as routines of its one nodule
 //! (ADR 047 §3): each is an export of the handler component (`intxt_nodule::Intxt`) and `uses`
 //! the operations of other authorities its handler calls, which are the cartridge's method
 //! permbinds (§5) and what an operator grants. The operations' Lexicons are projected from the
@@ -39,6 +39,7 @@ use serde_json::Value;
 use crate::methods::AddToIntxt;
 use crate::methods::CreateIntxt;
 use crate::methods::REQUIRED_OPERATIONS;
+use crate::methods::SummarizeIntxts;
 
 /// The authority every intxt record is under. A cartridge registers only NSIDs it owns, so the
 /// generic datums intxt holds until they migrate out before the beta (ledger D39) are under it too.
@@ -67,6 +68,8 @@ const ADD_TO_INTXT_USES: [&str; 6] = [
     ListDocDrawers::XRPC.nsid,
     AddDoc::XRPC.nsid,
 ];
+
+const SUMMARIZE_INTXTS_USES: [&str; 2] = [ReadDatums::XRPC.nsid, MintDocCapability::XRPC.nsid];
 
 /// The permbind key of the operation `nsid`: its last segment, which is unique among
 /// [`REQUIRED_OPERATIONS`].
@@ -115,6 +118,10 @@ pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
         .with_lexicon(as_map(
             method_lexicon::lexicon::<AddToIntxt>().expect("addToIntxt's types project a Lexicon"),
         ))
+        .with_lexicon(as_map(
+            method_lexicon::lexicon::<SummarizeIntxts>()
+                .expect("summarizeIntxts's types project a Lexicon"),
+        ))
         .with_wasm(HANDLER_COMPONENT, wasm);
 
     cartridge.permbinds = REQUIRED_OPERATIONS
@@ -154,6 +161,7 @@ pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
         routines: [
             routine(CreateIntxt::XRPC.nsid, &CREATE_INTXT_USES),
             routine(AddToIntxt::XRPC.nsid, &ADD_TO_INTXT_USES),
+            routine(SummarizeIntxts::XRPC.nsid, &SUMMARIZE_INTXTS_USES),
         ]
         .into(),
         ..Default::default()
@@ -185,7 +193,7 @@ mod tests {
 
     /// The cartridge is admitted as a manifest, holds every record intxt declares so none is left
     /// for another holder, ships the sidecar of each record that declares storage forms, and
-    /// serves both operations.
+    /// serves its operations.
     #[test]
     fn the_cartridge_holds_every_intxt_record() {
         let fixture = cartridge(b"a handler");
@@ -200,7 +208,11 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            [AddToIntxt::XRPC.nsid, CreateIntxt::XRPC.nsid],
+            [
+                AddToIntxt::XRPC.nsid,
+                CreateIntxt::XRPC.nsid,
+                SummarizeIntxts::XRPC.nsid
+            ],
         );
         // Every operation the cartridge requests is one some routine uses, so nothing is
         // requested (and granted) that no handler calls.
