@@ -409,6 +409,36 @@ blitz-traits = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2c
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
 
+# The service crates build at opt-level 1 in dev so LLVM reuses a stack slot once its value is
+# dead. At opt-level 0 every awaited temporary and every match arm of an async fn's poll frame
+# gets its own slot, so in-process service hops (dispatch → drawers → docs → authority) piled
+# up frames of hundreds of KB: creating a drawer at boot peaked at 1.18 MB of a 2 MiB thread,
+# and 0.33 MB at opt-level 1.
+[profile.dev.package.service_utils_rs]
+opt-level = 1
+[profile.dev.package.service_client_core_rs]
+opt-level = 1
+[profile.dev.package.service_client_native_rs]
+opt-level = 1
+[profile.dev.package.big_blobs]
+opt-level = 1
+[profile.dev.package.big_cabinet]
+opt-level = 1
+[profile.dev.package.big_cartridges]
+opt-level = 1
+[profile.dev.package.big_dispatch]
+opt-level = 1
+[profile.dev.package.big_node]
+opt-level = 1
+[profile.dev.package.big_nodule]
+opt-level = 1
+[profile.dev.package.big_repo]
+opt-level = 1
+[profile.dev.package.big_sync]
+opt-level = 1
+[profile.dev.package.day_cli]
+opt-level = 1
+
 # Keep the application debuggable while optimizing the native UI hot path in dev.
 # These overrides apply to desktop/native builds only; the app and shared UI remain
 # at the normal dev profile for fast iteration and useful debug information.
