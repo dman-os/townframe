@@ -16,4 +16,10 @@ $ day peers ls
 bootstrap 0
 connected none attached (only a server attaches peers)
 
+$ day peers ls --json
+{
+  "bootstrap": [],
+  "peers": null
+}
+
 ```

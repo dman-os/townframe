@@ -6,4 +6,11 @@ The positional directory wins over `--node` and `DAY_NODE`.
 $ day node init elsewhere
 initialized node [..] at [..]/elsewhere
 
+$ day node init --json other
+{
+  "created": true,
+  "nodeId": "[..]",
+  "path": "[..]/other"
+}
+
 ```

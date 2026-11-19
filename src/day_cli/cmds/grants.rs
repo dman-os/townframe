@@ -33,7 +33,7 @@ pub enum GrantsCommands {
     /// One per line: its id, the cartridge, what it asks and when. Requests live in the running
     /// node's memory, so this needs the node running (`day node start`).
     Pending {
-        /// Print the node's raw answer as JSON
+        /// Print JSON instead of text
         #[arg(long)]
         json: bool,
     },
@@ -62,7 +62,7 @@ pub enum GrantsCommands {
     List {
         /// Only this cartridge's answers, as `<did>/<name>`
         cartridge: Option<String>,
-        /// Print the node's raw answer as JSON
+        /// Print JSON instead of text
         #[arg(long)]
         json: bool,
     },
