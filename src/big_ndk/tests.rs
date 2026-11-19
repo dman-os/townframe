@@ -243,6 +243,8 @@ fn cx_with(transport: &Recording, nodule: Option<&str>, budget: Option<Duration>
         caller: Some("caller-cap".to_owned()),
         nodule: nodule.map(str::to_owned),
         idempotency_key: Some("outer-key".to_owned()),
+        config_doc: None,
+        config_capability: None,
         transport: HttpHandle::new(transport.clone()),
     }
 }

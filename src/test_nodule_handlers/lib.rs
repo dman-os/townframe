@@ -49,12 +49,15 @@ use service_client_core_rs::xrpc::write_context_headers;
 
 use service_core_rs::HttpMetadata;
 use service_core_rs::xrpc::bearer_header_value;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Serialize, Deserialize)]
 enum FixtureError {
     Context(ContextError),
     InvalidRequest(String),
     UpstreamFailed(String),
+    Config(String),
 }
 
 impl std::fmt::Display for FixtureError {
@@ -62,6 +65,7 @@ impl std::fmt::Display for FixtureError {
         match self {
             Self::Context(error) => error.fmt(f),
             Self::InvalidRequest(reason) => write!(f, "invalid request: {reason}"),
+            Self::Config(error) => write!(f, "config: {error}"),
             Self::UpstreamFailed(reason) => write!(f, "upstream failed: {reason}"),
         }
     }
@@ -88,12 +92,17 @@ struct Relay {
     query: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+struct Config(Value);
+
 // The NSIDs are bare route names: `Fixture::route` matches the last segment of whatever
 // authority the cartridge declared, so these `XRPC.nsid`s are never compared.
 method_core::methods! {
     error = FixtureError, nsid_prefix = "";
     Echo => Value, procedure, "echo";
     Relay => Value, procedure, "relay";
+    Config => Value, procedure, "config";
 }
 
 /// The fixture nodule: `echo` and `relay` under any authority.
@@ -105,6 +114,7 @@ impl Nodule for Fixture {
         match nsid.rsplit('.').next().unwrap_or_default() {
             "echo" => Some(invoke::<Self, Echo>(self, cx, body).await),
             "relay" => Some(invoke::<Self, Relay>(self, cx, body).await),
+            "config" => Some(invoke::<Self, Config>(self, cx, body).await),
             _ => None,
         }
     }
@@ -122,6 +132,52 @@ impl Handler<Echo> for Fixture {
             "traceparent": request.trace.traceparent(),
             "noduleCapability": cx.nodule_capability(),
         }))
+    }
+}
+#[derive(Debug, Deserialize)]
+
+struct ConfigRequest {
+    action: String,
+    tag: Option<String>,
+    slot: Option<String>,
+    value: Option<Value>,
+}
+
+impl Handler<Config> for Fixture {
+    async fn call(&self, cx: &Cx, input: Config) -> Result<Value, FixtureError> {
+        let request: ConfigRequest = serde_json::from_value(input.0)
+            .map_err(|error| FixtureError::InvalidRequest(error.to_string()))?;
+        match request.action.as_str() {
+            "capability" => Ok(json!({
+                "docId": cx.config_doc_id(),
+                "capability": cx.config_capability(),
+            })),
+            "read" => cx
+                .read_config(None)
+                .await
+                .map(|read| read.get("datums").cloned().unwrap_or_else(|| json!({})))
+                .map_err(|error| FixtureError::Config(error.to_string())),
+            "write" => {
+                let tag = request
+                    .tag
+                    .as_deref()
+                    .ok_or_else(|| FixtureError::InvalidRequest("config tag is required".into()))?;
+                let slot = request.slot.as_deref().ok_or_else(|| {
+                    FixtureError::InvalidRequest("config slot is required".into())
+                })?;
+                let key = format!("{tag}/{slot}");
+                let value = request.value.ok_or_else(|| {
+                    FixtureError::InvalidRequest("config value is required".into())
+                })?;
+                cx.write_config(BTreeMap::from([(key, value)]), BTreeSet::new())
+                    .await
+                    .map(|receipt| serde_json::to_value(receipt).expect("write receipt serializes"))
+                    .map_err(|error| FixtureError::Config(error.to_string()))
+            }
+            action => Err(FixtureError::InvalidRequest(format!(
+                "unknown config action `{action}`"
+            ))),
+        }
     }
 }
 
