@@ -922,6 +922,36 @@ mod blackbox {
         );
     }
 
+    /// Output whose reader has gone away (`day exec ... | head`) ends the command with status 0
+    /// and nothing on stderr: the broken pipe is not a failure and not a panic. The pipe's read
+    /// end is closed before the command starts, so its first write fails with `EPIPE` however
+    /// little it writes.
+    #[test]
+    fn a_closed_stdout_ends_the_command_quietly() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        for args in [
+            &["completions", "bash"][..],
+            &["exec", "--get", "org.example.daybook.nodules.listNodules"],
+        ] {
+            let (reader, writer) = std::io::pipe().unwrap();
+            drop(reader);
+            let output = Command::new(day_bin())
+                .env("RUST_LOG", "error")
+                .env("NO_COLOR", "1")
+                .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+                .arg("--node")
+                .arg(sandbox.node())
+                .args(args)
+                .stdout(writer)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(0), "{args:?}: {stderr}");
+            assert_eq!(stderr, "", "{args:?}");
+        }
+    }
+
     /// A server killed without cleaning up leaves a socket and no lock: every command still
     /// works, and `node stop` and `node start` clean up after it.
     #[test]

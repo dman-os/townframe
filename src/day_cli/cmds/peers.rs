@@ -1,5 +1,6 @@
 use crate::context::SocketState;
 use crate::interlude::*;
+use crate::out::out;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum PeersCommands {
@@ -24,6 +25,7 @@ pub async fn run(command: PeersCommands) -> Res<ExitCode> {
 /// the new peer. Adding the first peer also creates the `peers` section, which is what makes the
 /// server attach the network endpoint at all.
 async fn add(ticket: &str) -> Res<ExitCode> {
+    let mut out = out();
     let conf = lazy::config().await?;
     let dir = &conf.node_dir;
     let changed = dir
@@ -34,38 +36,39 @@ async fn add(ticket: &str) -> Res<ExitCode> {
                 .add_bootstrap(ticket)
         })
         .await?;
-    println!(
+    writeln!(out,
         "{}",
         if changed {
             "added to the bootstrap list"
         } else {
             "already in the bootstrap list"
         }
-    );
+    )?;
     if changed && dir.probe_socket().await? == SocketState::Live {
-        println!("the running server dials it after `day node stop` and `day node start --bg`");
+        writeln!(out, "the running server dials it after `day node stop` and `day node start --bg`")?;
     }
     Ok(ExitCode::SUCCESS)
 }
 
 async fn ls() -> Res<ExitCode> {
+    let mut out = out();
     let conf = lazy::config().await?;
     let settings = conf.node_dir.settings()?;
     let bootstrap = settings
         .peers
         .as_ref()
         .map_or(&[][..], |peers| peers.bootstrap.as_slice());
-    println!("bootstrap {}", bootstrap.len());
+    writeln!(out, "bootstrap {}", bootstrap.len())?;
     for ticket in bootstrap {
-        println!("  {ticket}");
+        writeln!(out, "  {ticket}")?;
     }
     let client = lazy::node().await?;
     match crate::cmds::status::node_info(&client).await?.peers {
-        None => println!("connected none attached ({})", client.mode().peers_note()),
+        None => writeln!(out, "connected none attached ({})", client.mode().peers_note())?,
         Some(peers) => {
-            println!("connected {}", peers.connected.len());
+            writeln!(out, "connected {}", peers.connected.len())?;
             for peer in &peers.connected {
-                println!("  {peer}");
+                writeln!(out, "  {peer}")?;
             }
         }
     }

@@ -1,5 +1,6 @@
 use crate::client::Raw;
 use crate::interlude::*;
+use crate::out::out;
 use method_core::HttpMethod;
 
 /// Executes one operation through the node's dispatch router and prints the JSON answer. The
@@ -17,6 +18,7 @@ pub async fn run(
     range: Option<String>,
     output: Option<std::path::PathBuf>,
 ) -> Res<ExitCode> {
+    let mut out = out();
     let input: serde_json::Value = match input {
         Some(text) => serde_json::from_str(&text).wrap_err("the input is not valid JSON")?,
         None => json!({}),
@@ -42,7 +44,7 @@ pub async fn run(
     } else {
         node.call_untyped(&nsid, verb, &input).await?
     };
-    println!("{}", serde_json::to_string_pretty(&reply.body)?);
+    writeln!(out, "{}", serde_json::to_string_pretty(&reply.body)?)?;
     if !reply.is_success() {
         error!(status = reply.status, %nsid, "the node refused the call");
         return Ok(ExitCode::FAILURE);

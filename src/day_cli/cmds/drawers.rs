@@ -1,5 +1,6 @@
 use crate::client::CallError;
 use crate::interlude::*;
+use crate::out::out;
 
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::Rights;
@@ -105,6 +106,7 @@ pub async fn run(command: DrawersCommands) -> Res<ExitCode> {
 
 /// Lists the known-drawers list through an admin handle on just that drawer.
 async fn ls(as_json: bool) -> Res<ExitCode> {
+    let mut out = out();
     let client = lazy::node().await?;
     let capability = known_drawers_handle(&client).await?;
 
@@ -113,14 +115,14 @@ async fn ls(as_json: bool) -> Res<ExitCode> {
         .await
         .wrap_err("listing the known drawers failed")?;
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&known)?);
+        writeln!(out, "{}", serde_json::to_string_pretty(&known)?)?;
         return Ok(ExitCode::SUCCESS);
     }
     for drawer in known.drawers {
         if drawer.mirror {
-            println!("{}  mirror", drawer.drawer_id);
+            writeln!(out, "{}  mirror", drawer.drawer_id)?;
         } else {
-            println!("{}", drawer.drawer_id);
+            writeln!(out, "{}", drawer.drawer_id)?;
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -128,6 +130,7 @@ async fn ls(as_json: bool) -> Res<ExitCode> {
 
 /// Remembers `drawer` on this node's known-drawers list, mirrored or not.
 async fn remember(drawer: &str, mirror: bool) -> Res<ExitCode> {
+    let mut out = out();
     let client = lazy::node().await?;
     let drawer_id = parse_drawer(drawer)?;
     let capability = known_drawers_handle(&client).await?;
@@ -140,15 +143,16 @@ async fn remember(drawer: &str, mirror: bool) -> Res<ExitCode> {
         .await
         .wrap_err("remembering the drawer failed")?;
     if mirror {
-        println!("remembered {drawer}, mirrored");
+        writeln!(out, "remembered {drawer}, mirrored")?;
     } else {
-        println!("remembered {drawer}, not mirrored");
+        writeln!(out, "remembered {drawer}, not mirrored")?;
     }
     Ok(ExitCode::SUCCESS)
 }
 
 /// Drops `drawer` from this node's known-drawers list.
 async fn forget(drawer: &str) -> Res<ExitCode> {
+    let mut out = out();
     let client = lazy::node().await?;
     let drawer_id = parse_drawer(drawer)?;
     let capability = known_drawers_handle(&client).await?;
@@ -159,7 +163,7 @@ async fn forget(drawer: &str) -> Res<ExitCode> {
         })
         .await
         .wrap_err("forgetting the drawer failed")?;
-    println!("forgot {drawer}");
+    writeln!(out, "forgot {drawer}")?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -224,6 +228,7 @@ async fn admin_handle(
 /// Adds the peer as a member of the drawer. The node refuses a peer it has not met, which this
 /// says in the terms of the commands that fix it.
 async fn add_member(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitCode> {
+    let mut out = out();
     let client = lazy::node().await?;
     let (drawer_id, peer_id, capability) = admin_handle(&client, drawer, peer).await?;
     let invited = client
@@ -236,7 +241,7 @@ async fn add_member(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitC
         .await;
     match invited {
         Ok(()) => {
-            println!("added {peer} to {drawer} at {access:?}");
+            writeln!(out, "added {peer} to {drawer} at {access:?}")?;
             Ok(ExitCode::SUCCESS)
         }
         Err(CallError::Transport(error)) => Err(error),
@@ -261,6 +266,7 @@ async fn add_member(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitC
 
 /// Removes the peer's membership of the drawer.
 async fn revoke_member(drawer: &str, peer: &str) -> Res<ExitCode> {
+    let mut out = out();
     let client = lazy::node().await?;
     let (drawer_id, peer_id, capability) = admin_handle(&client, drawer, peer).await?;
     let revoked = client
@@ -272,7 +278,7 @@ async fn revoke_member(drawer: &str, peer: &str) -> Res<ExitCode> {
         .await;
     match revoked {
         Ok(()) => {
-            println!("revoked {peer} from {drawer}");
+            writeln!(out, "revoked {peer} from {drawer}")?;
             Ok(ExitCode::SUCCESS)
         }
         Err(CallError::Transport(error)) => Err(error),
