@@ -47,22 +47,17 @@ use crate::rev::laws::StreamBackend;
 use crate::rev::laws::WakeCount;
 use crate::rev::laws::any_limits;
 use crate::rev::laws::limits;
-use future_form::Sendable;
 
 pub type Bytes = Vec<u8>;
 type Batches = Vec<Vec<Mutation<Bytes, Bytes>>>;
-type Tx<B> = <<B as Backend>::Store as OkvStore<Sendable>>::Tx;
+type Tx<B> = <<B as Backend>::Store as OkvStore>::Tx;
 
 /// What a backend supplies to run the laws: a fresh db per law, tables in it, and its
 /// transactions, which span the db's tables.
 #[async_trait]
 pub trait Backend: Clone + Send + Sync + 'static {
     type Db: Clone + Send + Sync + 'static;
-    type Store: OkvStore<Sendable, Key = Bytes, Value = Bytes, Tx: Send>
-        + Clone
-        + Send
-        + Sync
-        + 'static;
+    type Store: OkvStore<Key = Bytes, Value = Bytes, Tx: Send> + Clone + Send + Sync + 'static;
 
     /// A new, empty db, sharing nothing with any other.
     async fn open(&self) -> Res<Self::Db>;

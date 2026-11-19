@@ -15,25 +15,20 @@ pub struct SetPeerPartCursorTask {
 
 impl SetPeerPartCursorTask {
     #[tracing::instrument(skip(cx))]
-    pub async fn run<K, PStore, Rpc, Rng>(
-        self,
-        cx: &mut TaskCtx<K, PStore, Rpc, Rng>,
-    ) -> TaskResultDeets
+    pub async fn run<PStore, Rpc, Rng>(self, cx: &mut TaskCtx<PStore, Rpc, Rng>) -> TaskResultDeets
     where
-        K: FutureForm,
-        PStore: PartStoreRead<K>,
-        Rpc: BigSyncRpcClient<K>,
+        PStore: PartStoreRead,
+        Rpc: BigSyncRpcClient,
         Rng: rand::Rng,
     {
         self.run_run(cx).await;
         TaskResultDeets::SetPeerPartCursor(())
     }
 
-    async fn run_run<K, PStore, Rpc, Rng>(self, cx: &mut TaskCtx<K, PStore, Rpc, Rng>)
+    async fn run_run<PStore, Rpc, Rng>(self, cx: &mut TaskCtx<PStore, Rpc, Rng>)
     where
-        K: FutureForm,
-        PStore: PartStoreRead<K>,
-        Rpc: BigSyncRpcClient<K>,
+        PStore: PartStoreRead,
+        Rpc: BigSyncRpcClient,
         Rng: rand::Rng,
     {
         cx.part_store

@@ -13,9 +13,7 @@ path = "lib.rs"
 big_automata = { path = "../big_automata" }
 service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
-future_form.workspace = true
 tokio = { workspace = true, features = ["time"] }
-futures.workspace = true
 
 [dev-dependencies]
 big_automata = { path = "../big_automata", features = ["test-support"] }

@@ -1,6 +1,5 @@
 //! The part store laws against the memory store, and the rev stream laws over its log.
 
-use future_form::Sendable;
 use futures::executor::block_on;
 use proptest::prelude::*;
 
@@ -165,7 +164,7 @@ proptest! {
 fn a_transaction_belongs_to_its_store() {
     let store = MemoryPartStore::default();
     let mut tx = MemoryPartStore::default().begin();
-    block_on(PartStoreWrite::<Sendable>::ensure_parts(
+    block_on(PartStoreWrite::ensure_parts(
         &store,
         &mut tx,
         &[laws::part(0)],
@@ -180,7 +179,7 @@ fn bucket_leaves_page_without_loss() -> Res<()> {
     let store = MemoryPartStore::default();
     let mut tx = store.begin();
     let objs = (0..12).map(laws::obj).collect::<Vec<_>>();
-    block_on(PartStoreWrite::<Sendable>::set_payloads(
+    block_on(PartStoreWrite::set_payloads(
         &store,
         &mut tx,
         objs.iter()
@@ -191,16 +190,14 @@ fn bucket_leaves_page_without_loss() -> Res<()> {
         .iter()
         .map(|obj| (obj.clone(), laws::part(0)))
         .collect::<Vec<_>>();
-    block_on(PartStoreWrite::<Sendable>::add_members(
-        &store, &mut tx, &members,
-    ))?;
-    block_on(PartStoreWrite::<Sendable>::remove_members(
+    block_on(PartStoreWrite::add_members(&store, &mut tx, &members))?;
+    block_on(PartStoreWrite::remove_members(
         &store,
         &mut tx,
         &members[..3],
     ))?;
     let (part, peer) = (laws::part(0), laws::principal(0));
-    block_on(PartStoreWrite::<Sendable>::grant_access(
+    block_on(PartStoreWrite::grant_access(
         &store,
         &mut tx,
         &[(part.clone(), peer.clone(), AccessLevel::Read)],
@@ -208,7 +205,7 @@ fn bucket_leaves_page_without_loss() -> Res<()> {
     tx.commit();
 
     let leaves = |after: Option<ObjKey>, limit| {
-        block_on(PartStoreServe::<Sendable>::bucket_leaves(
+        block_on(PartStoreServe::bucket_leaves(
             &store,
             &peer,
             &part,
@@ -231,85 +228,5 @@ fn bucket_leaves_page_without_loss() -> Res<()> {
         paged.push(entry);
     }
     assert_eq!(paged, all);
-    Ok(())
-}
-
-/// The memory part store through the `Local` form, as the single-threaded web node drives it:
-/// writes, the client's batched reads, the log as a stream and the responder's counts.
-#[test]
-fn the_local_form_drives_the_memory_part_store() -> Res<()> {
-    use future_form::Local;
-
-    use crate::rev::Page;
-    use crate::rev::RevStream;
-    use crate::rev::laws::limits;
-
-    let store = MemoryPartStore::default();
-    let mut tx = store.begin();
-    let (obj, part, peer) = (laws::obj(0), laws::part(0), laws::principal(0));
-    block_on(PartStoreWrite::<Local>::set_payloads(
-        &store,
-        &mut tx,
-        vec![(obj.clone(), laws::payload(1))],
-    ))?;
-    block_on(PartStoreWrite::<Local>::add_members(
-        &store,
-        &mut tx,
-        &[(obj.clone(), part.clone())],
-    ))?;
-    block_on(PartStoreWrite::<Local>::grant_access(
-        &store,
-        &mut tx,
-        &[(part.clone(), peer.clone(), AccessLevel::Read)],
-    ))?;
-    assert_eq!(tx.commit(), Some(1));
-
-    let states = block_on(PartStoreRead::<Local>::obj_states(
-        &store,
-        std::slice::from_ref(&obj),
-    ))?;
-    assert_eq!(
-        states,
-        vec![Some(ObjState {
-            content: Some((laws::payload(1), PayloadDigest::of(&laws::payload(1))?)),
-            parts: [part.clone()].into(),
-        })]
-    );
-    assert_eq!(
-        block_on(PartStoreServe::<Local>::part_summaries(
-            &store,
-            &peer,
-            &[(part.clone(), 0)]
-        ))?,
-        vec![Some(PartSummary {
-            latest_cursor: 1,
-            member_count: 1,
-            deepest_bucket_level: BuckId::MAX_LEVEL,
-            dirty: PartDirtyCount {
-                member_changes: 1,
-                access_changes: 1,
-            },
-        })]
-    );
-
-    let mut stream = RevStream::<Local, _>::new(store.clone(), LogSelector::All, 0);
-    let mut page = Page::default();
-    block_on(stream.next_into(&mut page, limits(10, None)))?;
-    assert_eq!(
-        page.entries
-            .iter()
-            .map(|entry| entry.key.clone())
-            .collect::<Vec<_>>(),
-        vec![
-            LogKey::Member {
-                obj: obj.clone(),
-                part: part.clone(),
-            },
-            LogKey::Access {
-                part,
-                principal: peer,
-            },
-        ]
-    );
     Ok(())
 }

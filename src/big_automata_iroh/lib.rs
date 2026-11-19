@@ -27,9 +27,6 @@ use big_automata::replay::wire::SessionError;
 use big_automata::replay::wire::SessionPage;
 use big_automata::replay::wire::SessionUpdated;
 use big_automata::replay::wire::UpdateSession;
-use future_form::Sendable;
-use futures::FutureExt;
-use futures::future::BoxFuture;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
 use service_utils_rs::CallOrigin;
@@ -47,9 +44,9 @@ mod tests;
 /// The tokio sleep a held round waits on.
 struct TokioTimer;
 
-impl Timer<Sendable> for TokioTimer {
-    fn sleep(&self, duration: std::time::Duration) -> BoxFuture<'static, ()> {
-        tokio::time::sleep(duration).boxed()
+impl Timer for TokioTimer {
+    fn sleep(&self, duration: std::time::Duration) -> impl Future<Output = ()> + Send + use<> {
+        tokio::time::sleep(duration)
     }
 }
 
@@ -78,7 +75,7 @@ pub struct ReplayService<S> {
 
 impl<S> ReplayService<S>
 where
-    S: PartStoreServe<Sendable> + Clone,
+    S: PartStoreServe + Clone,
 {
     fn principal(
         &self,
@@ -90,7 +87,7 @@ where
 
     /// A responder for one call. It subscribes to the store's watch and starts with empty
     /// buffers, so a call pays for the page it builds and nothing carried over from another.
-    fn responder(&self) -> Responder<Sendable, S, TokioTimer> {
+    fn responder(&self) -> Responder<S, TokioTimer> {
         Responder::new(self.store.clone(), TokioTimer)
     }
 
@@ -106,7 +103,7 @@ const STORE_FAILED: &str = "the part store failed a replay read";
 
 impl<S> Handler<UpdateSession> for ReplayService<S>
 where
-    S: PartStoreServe<Sendable> + Clone + Send + Sync + 'static,
+    S: PartStoreServe + Clone + Send + Sync + 'static,
 {
     async fn call(
         &self,
@@ -127,7 +124,7 @@ where
 
 impl<S> Handler<PageSession> for ReplayService<S>
 where
-    S: PartStoreServe<Sendable> + Clone + Send + Sync + 'static,
+    S: PartStoreServe + Clone + Send + Sync + 'static,
 {
     async fn call(
         &self,
@@ -150,7 +147,7 @@ where
 
 impl<S> Handler<CloseSession> for ReplayService<S>
 where
-    S: PartStoreServe<Sendable> + Clone + Send + Sync + 'static,
+    S: PartStoreServe + Clone + Send + Sync + 'static,
 {
     async fn call(
         &self,
@@ -192,7 +189,7 @@ pub fn boot<S>(
     + 'static,
 ) -> (Replay<S>, StopToken)
 where
-    S: PartStoreServe<Sendable> + Clone + Send + Sync + 'static,
+    S: PartStoreServe + Clone + Send + Sync + 'static,
 {
     let service = Arc::new(ReplayService {
         store,

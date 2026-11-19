@@ -53,8 +53,8 @@ impl Fixture {
         self.server
             .resolve_round(&principal(0), &request, at(1), &mut self.round)
             .unwrap();
-        let until = block_on(PartStoreServe::<Sendable>::latest_rev(&self.store)).unwrap();
-        block_on(PartStoreServe::<Sendable>::read_authorized(
+        let until = block_on(PartStoreServe::latest_rev(&self.store)).unwrap();
+        block_on(PartStoreServe::read_authorized(
             &self.store,
             &principal(0),
             self.round.routes(),

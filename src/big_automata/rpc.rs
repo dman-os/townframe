@@ -3,61 +3,60 @@ use crate::interlude::*;
 pub mod bucket;
 pub mod summary;
 
-pub trait BigSyncRpcClient<K: FutureForm> {
-    fn get_peer_part_summaries<'a>(
-        &'a self,
+pub trait BigSyncRpcClient {
+    fn get_peer_part_summaries(
+        &self,
         req: summary::PeerPartsSummaryRequest,
-    ) -> K::Future<
-        'a,
-        BigSyncRpcResult<Result<summary::PeerPartsSummaryResponse, summary::PeerPartsSummaryError>>,
-    >;
+    ) -> impl Future<
+        Output = BigSyncRpcResult<
+            Result<summary::PeerPartsSummaryResponse, summary::PeerPartsSummaryError>,
+        >,
+    > + Send;
 
     // FIXME(port): the replay methods move onto the service stack binding; their types are in
     // `crate::replay::wire`.
-    fn update_replay_session<'a>(
-        &'a self,
+    fn update_replay_session(
+        &self,
         req: crate::replay::wire::UpdateSession,
-    ) -> K::Future<
-        'a,
-        BigSyncRpcResult<
+    ) -> impl Future<
+        Output = BigSyncRpcResult<
             Result<crate::replay::wire::SessionUpdated, crate::replay::wire::SessionError>,
         >,
-    >;
+    > + Send;
 
-    fn page_replay_session<'a>(
-        &'a self,
+    fn page_replay_session(
+        &self,
         req: crate::replay::wire::PageSession,
-    ) -> K::Future<
-        'a,
-        BigSyncRpcResult<
+    ) -> impl Future<
+        Output = BigSyncRpcResult<
             Result<crate::replay::wire::SessionPage, crate::replay::wire::SessionError>,
         >,
-    >;
+    > + Send;
 
-    fn close_replay_session<'a>(
-        &'a self,
+    fn close_replay_session(
+        &self,
         req: crate::replay::wire::CloseSession,
-    ) -> K::Future<'a, BigSyncRpcResult<Result<(), crate::replay::wire::SessionError>>>;
+    ) -> impl Future<Output = BigSyncRpcResult<Result<(), crate::replay::wire::SessionError>>> + Send;
 
-    fn get_changed_buckets<'a>(
-        &'a self,
+    fn get_changed_buckets(
+        &self,
         req: bucket::GetChangedBucketsRequest,
-    ) -> K::Future<
-        'a,
-        BigSyncRpcResult<Result<bucket::GetChangedBucketsResponse, bucket::GetChangedBucketsError>>,
-    >;
+    ) -> impl Future<
+        Output = BigSyncRpcResult<
+            Result<bucket::GetChangedBucketsResponse, bucket::GetChangedBucketsError>,
+        >,
+    > + Send;
 
     /// FIXME: this this warning true?
     /// WARN: this doesn't limit the number of returned results
     /// It only accepts buckets at the level the requesting part advertises in
     /// its per-part [`PartStratSummary::Bucket`] summary.
-    fn leaf_buckets<'a>(
-        &'a self,
+    fn leaf_buckets(
+        &self,
         req: bucket::LeafBucketsRequest,
-    ) -> K::Future<
-        'a,
-        BigSyncRpcResult<Result<bucket::LeafBucketsResponse, bucket::LeafBucketsError>>,
-    >;
+    ) -> impl Future<
+        Output = BigSyncRpcResult<Result<bucket::LeafBucketsResponse, bucket::LeafBucketsError>>,
+    > + Send;
 }
 
 #[derive(

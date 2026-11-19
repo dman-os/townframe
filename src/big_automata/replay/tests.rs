@@ -7,10 +7,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use future_form::Sendable;
-use futures::FutureExt;
 use futures::executor::block_on;
-use futures::future::BoxFuture;
 use proptest::prelude::*;
 
 use crate::interlude::*;
@@ -73,9 +70,9 @@ fn route(index: u8) -> Route {
 #[derive(Clone, Copy)]
 struct Expired;
 
-impl Timer<Sendable> for Expired {
-    fn sleep(&self, _: Duration) -> BoxFuture<'static, ()> {
-        futures::future::ready(()).boxed()
+impl Timer for Expired {
+    fn sleep(&self, _: Duration) -> impl Future<Output = ()> + Send + use<> {
+        std::future::ready(())
     }
 }
 
@@ -122,7 +119,7 @@ struct Sim {
     store: MemoryPartStore,
     /// The store's twin, written alongside it: what the client must end up with.
     oracle: PartOracle,
-    responder: Responder<Sendable, MemoryPartStore, Expired>,
+    responder: Responder<MemoryPartStore, Expired>,
     net: Vec<Msg>,
     wanted: BTreeSet<Route>,
     /// The cursor machine's cursors.

@@ -6,7 +6,7 @@
 impl Handler < CloseSession > for big_automata_iroh::ReplayService < S >
 impl Handler < PageSession > for big_automata_iroh::ReplayService < S >
 impl Handler < UpdateSession > for big_automata_iroh::ReplayService < S >
-impl Timer < Sendable > for big_automata_iroh::TokioTimer
-pub big_automata_iroh::fn boot < S > (store : S , principal_of : impl Fn (& RequestContext , & TransportContext) -> Result < PeerKey , SessionError > + Send + Sync + 'static ,) -> (Replay < S > , StopToken) where S : PartStoreServe < Sendable > + Clone + Send + Sync + 'static ,
+impl Timer for big_automata_iroh::TokioTimer
+pub big_automata_iroh::fn boot < S > (store : S , principal_of : impl Fn (& RequestContext , & TransportContext) -> Result < PeerKey , SessionError > + Send + Sync + 'static ,) -> (Replay < S > , StopToken) where S : PartStoreServe + Clone + Send + Sync + 'static ,
 pub struct big_automata_iroh::Replay< S >  { service: Arc < ReplayService < S > >, host: Arc < Host < Arc < ReplayService < S > > > >, client: Client < ReplayProtocol > }
 pub struct big_automata_iroh::ReplayService< S >  {  }

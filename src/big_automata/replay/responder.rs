@@ -9,7 +9,6 @@
 //! Time is a [`Timer`]: the crate builds for `wasm32-unknown-unknown`, where there is no tokio
 //! timer, so the embedder supplies the sleep its runtime has.
 
-use std::marker::PhantomData;
 use std::pin::pin;
 
 use futures::future::Either;
@@ -29,9 +28,10 @@ use crate::rev::RevWatch;
 #[cfg(test)]
 mod tests;
 
-/// A runtime's sleep. Dropping the future cancels it.
-pub trait Timer<Async: FutureForm> {
-    fn sleep(&self, duration: Duration) -> Async::Future<'static, ()>;
+/// A runtime's sleep. Dropping the future cancels it. The future is `Send` and owns what it
+/// needs, so it does not borrow the timer.
+pub trait Timer {
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + use<Self>;
 }
 
 /// Serves one client connection's replay requests from a part store, one at a time. It owns
@@ -41,7 +41,7 @@ pub trait Timer<Async: FutureForm> {
 /// Every call is cancel safe: dropping its future part way leaves nothing behind. The calls keep
 /// no state between requests (law 9), the buffers are refilled by the next call, and a dropped
 /// hold drops its sleep and its wait on the watch with it.
-pub struct Responder<Async: FutureForm, S, T> {
+pub struct Responder<S, T> {
     store: S,
     timer: T,
     /// The store's watch, held for the responder's life: a hold waits on it without
@@ -54,14 +54,12 @@ pub struct Responder<Async: FutureForm, S, T> {
     admit_parts: Vec<(PartKey, Rev)>,
     /// The objects an update adds, sorted; after [`Responder::admission`], the readable ones.
     admit_objects: Vec<ObjKey>,
-    _form: PhantomData<fn() -> Async>,
 }
 
-impl<Async, S, T> Responder<Async, S, T>
+impl<S, T> Responder<S, T>
 where
-    Async: FutureForm,
-    S: PartStoreServe<Async>,
-    T: Timer<Async>,
+    S: PartStoreServe,
+    T: Timer,
 {
     pub fn new(store: S, timer: T) -> Self {
         let watch = store.watch();
@@ -77,7 +75,6 @@ where
             },
             admit_parts: default(),
             admit_objects: default(),
-            _form: PhantomData,
         }
     }
 

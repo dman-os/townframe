@@ -63,21 +63,20 @@ use crate::rev::laws::StreamBackend;
 use crate::rev::laws::WakeCount;
 use crate::rev::laws::any_limits;
 use crate::rev::laws::limits;
-use future_form::Sendable;
 
 mod generators;
 pub use generators::part_ops;
 use generators::*;
 
-type Tx<B> = <<B as Backend>::Store as PartStoreWrite<Sendable>>::Tx;
+type Tx<B> = <<B as Backend>::Store as PartStoreWrite>::Tx;
 
 /// What a backend supplies to run the laws.
 #[async_trait]
 pub trait Backend: Clone + Send + Sync + 'static {
-    type Store: PartStoreWrite<Sendable, Tx: Send>
-        + PartStoreRead<Sendable>
-        + PartStoreServe<Sendable>
-        + RevSource<Sendable, Key = LogKey, Value = LogEntry, Selector = LogSelector>
+    type Store: PartStoreWrite<Tx: Send>
+        + PartStoreRead
+        + PartStoreServe
+        + RevSource<Key = LogKey, Value = LogEntry, Selector = LogSelector>
         + Clone
         + Send
         + Sync
@@ -91,6 +90,9 @@ pub trait Backend: Clone + Send + Sync + 'static {
 }
 
 mod universe;
+use universe::OBJS;
+use universe::PARTS;
+use universe::PRINCIPALS;
 pub use universe::add;
 pub use universe::grant;
 pub use universe::obj;
@@ -101,9 +103,6 @@ pub use universe::remove;
 pub use universe::revoke;
 pub use universe::set;
 pub use universe::stage;
-use universe::OBJS;
-use universe::PARTS;
-use universe::PRINCIPALS;
 
 /// A store, its watches, and the oracle it must agree with.
 pub struct Harness<B: Backend> {
@@ -391,7 +390,7 @@ pub async fn replay_reconstructs_membership_and_access<B: Backend>(backend: &B) 
         .commit(vec![set(&[(2, 0), (0, 2)]), grant(&[(2, 0)])])
         .await?;
 
-    let mut stream = RevStream::<Sendable, _>::new(harness.store.clone(), LogSelector::All, 0);
+    let mut stream = RevStream::new(harness.store.clone(), LogSelector::All, 0);
     let mut page = Page::default();
     let mut members = BTreeSet::new();
     let mut access = BTreeMap::new();

@@ -4,11 +4,8 @@
 
 use std::pin::pin;
 
-use future_form::Sendable;
-use futures::FutureExt;
 use futures::channel::oneshot;
 use futures::executor::block_on;
-use futures::future::BoxFuture;
 
 use super::*;
 use crate::part_store::laws;
@@ -42,11 +39,11 @@ struct ManualTimer {
 
 type Sleep = (Duration, oneshot::Sender<()>);
 
-impl Timer<Sendable> for ManualTimer {
-    fn sleep(&self, duration: Duration) -> BoxFuture<'static, ()> {
+impl Timer for ManualTimer {
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + use<> {
         let (wake, woken) = oneshot::channel();
         self.sleeps.lock().unwrap().push((duration, wake));
-        async move { woken.await.expect("the test ends every sleep it keeps") }.boxed()
+        async move { woken.await.expect("the test ends every sleep it keeps") }
     }
 }
 
@@ -128,7 +125,7 @@ struct Fixture {
     store: MemoryPartStore,
     server: ReplayServer,
     timer: ManualTimer,
-    responder: Responder<Sendable, MemoryPartStore, ManualTimer>,
+    responder: Responder<MemoryPartStore, ManualTimer>,
     now: Instant,
 }
 

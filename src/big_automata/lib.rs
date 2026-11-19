@@ -1,8 +1,6 @@
 mod interlude {
     pub use utils_rs::prelude::*;
 
-    pub use future_form::FutureForm;
-
     pub use crate::ids::*;
     pub use structstruck::strike;
 

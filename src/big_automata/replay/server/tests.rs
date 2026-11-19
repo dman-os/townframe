@@ -1,6 +1,5 @@
 //! The server machine's laws, one test per law, and the round's mapping over the memory store.
 
-use future_form::Sendable;
 use futures::executor::block_on;
 
 use super::*;

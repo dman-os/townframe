@@ -39,8 +39,7 @@ tokio = { workspace = true, features = ["sync"] }
 surelock.workspace = true
 async-channel.workspace = true
 async-trait.workspace = true
-future_form.workspace = true
-# `#[future_form]` expands to `::futures::future::{BoxFuture, LocalBoxFuture}`
+# `futures::future::select` races the replay responder's hold against its timer
 futures.workspace = true
 
 #

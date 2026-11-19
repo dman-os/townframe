@@ -287,78 +287,78 @@ pub struct LeafEntry {
 /// is after. A committed transaction that changed any log row stamps them all with one new rev.
 ///
 /// Batches are slices of keys (cheap to clone) or owned payloads; there is no per-key call.
-pub trait PartStoreWrite<Async: FutureForm> {
+pub trait PartStoreWrite {
     type Tx;
 
     /// Make sure the parts exist. Membership and grants create their part too.
-    fn ensure_parts<'a>(
-        &'a self,
-        tx: &'a mut Self::Tx,
-        parts: &'a [PartKey],
-    ) -> Async::Future<'a, Res<()>>;
+    fn ensure_parts(
+        &self,
+        tx: &mut Self::Tx,
+        parts: &[PartKey],
+    ) -> impl Future<Output = Res<()>> + Send;
     /// Set objects' payloads. A changed payload re-stamps the object's member rows and promotes
     /// its pending memberships; an unchanged one is a no-op.
-    fn set_payloads<'a>(
-        &'a self,
-        tx: &'a mut Self::Tx,
+    fn set_payloads(
+        &self,
+        tx: &mut Self::Tx,
         payloads: Vec<(ObjKey, ObjPayload)>,
-    ) -> Async::Future<'a, Res<()>>;
+    ) -> impl Future<Output = Res<()>> + Send;
     /// Add objects to parts, `(obj, part)`. An object without a payload is pending in the part.
-    fn add_members<'a>(
-        &'a self,
-        tx: &'a mut Self::Tx,
-        members: &'a [(ObjKey, PartKey)],
-    ) -> Async::Future<'a, Res<()>>;
+    fn add_members(
+        &self,
+        tx: &mut Self::Tx,
+        members: &[(ObjKey, PartKey)],
+    ) -> impl Future<Output = Res<()>> + Send;
     /// Remove objects from parts, `(obj, part)`. A live membership leaves a tombstone; a pending
     /// one leaves nothing. The payload stays.
-    fn remove_members<'a>(
-        &'a self,
-        tx: &'a mut Self::Tx,
-        members: &'a [(ObjKey, PartKey)],
-    ) -> Async::Future<'a, Res<()>>;
+    fn remove_members(
+        &self,
+        tx: &mut Self::Tx,
+        members: &[(ObjKey, PartKey)],
+    ) -> impl Future<Output = Res<()>> + Send;
     /// Grant principals access to parts, `(part, principal, level)`.
-    fn grant_access<'a>(
-        &'a self,
-        tx: &'a mut Self::Tx,
-        grants: &'a [(PartKey, PeerKey, AccessLevel)],
-    ) -> Async::Future<'a, Res<()>>;
+    fn grant_access(
+        &self,
+        tx: &mut Self::Tx,
+        grants: &[(PartKey, PeerKey, AccessLevel)],
+    ) -> impl Future<Output = Res<()>> + Send;
     /// Revoke principals' access to parts, `(part, principal)`; a revocation is a tombstone.
-    fn revoke_access<'a>(
-        &'a self,
-        tx: &'a mut Self::Tx,
-        revokes: &'a [(PartKey, PeerKey)],
-    ) -> Async::Future<'a, Res<()>>;
+    fn revoke_access(
+        &self,
+        tx: &mut Self::Tx,
+        revokes: &[(PartKey, PeerKey)],
+    ) -> impl Future<Output = Res<()>> + Send;
 }
 
 /// The sync client's reads, batched, and its cursor writes.
-pub trait PartStoreRead<Async: FutureForm> {
+pub trait PartStoreRead {
     /// The objects' states, in the order asked; `None` for an object with no payload (unknown,
     /// or only pending).
-    fn obj_states<'a>(
-        &'a self,
-        objs: &'a [ObjKey],
-    ) -> Async::Future<'a, Res<Vec<Option<ObjState>>>>;
+    fn obj_states(
+        &self,
+        objs: &[ObjKey],
+    ) -> impl Future<Output = Res<Vec<Option<ObjState>>>> + Send;
     /// The part's bucket summaries, in the order asked; a bucket with no members is the empty
     /// summary.
-    fn bucket_summaries<'a>(
-        &'a self,
-        part: &'a PartKey,
-        ids: &'a [BuckId],
-    ) -> Async::Future<'a, Res<Vec<BucketSummary>>>;
+    fn bucket_summaries(
+        &self,
+        part: &PartKey,
+        ids: &[BuckId],
+    ) -> impl Future<Output = Res<Vec<BucketSummary>>> + Send;
     /// The part's live members.
-    fn member_count<'a>(&'a self, part: &'a PartKey) -> Async::Future<'a, Res<u64>>;
+    fn member_count(&self, part: &PartKey) -> impl Future<Output = Res<u64>> + Send;
     /// The peer's cursors on the parts, in the order asked.
-    fn peer_part_cursors<'a>(
-        &'a self,
-        peer: &'a PeerKey,
-        parts: &'a [PartKey],
-    ) -> Async::Future<'a, Res<Vec<Option<Rev>>>>;
+    fn peer_part_cursors(
+        &self,
+        peer: &PeerKey,
+        parts: &[PartKey],
+    ) -> impl Future<Output = Res<Vec<Option<Rev>>>> + Send;
     /// Move peers' cursors, `(peer, part, cursor)`. A cursor only advances: a lower one than
     /// stored is ignored.
-    fn set_peer_part_cursors<'a>(
-        &'a self,
-        cursors: &'a [(PeerKey, PartKey, Rev)],
-    ) -> Async::Future<'a, Res<()>>;
+    fn set_peer_part_cursors(
+        &self,
+        cursors: &[(PeerKey, PartKey, Rev)],
+    ) -> impl Future<Output = Res<()>> + Send;
 }
 
 /// The responder's reads. Every one answers a principal, and every one decides access and
@@ -378,10 +378,10 @@ pub trait PartStoreRead<Async: FutureForm> {
 /// local consumers (its embedder, indexes, replays), never to a peer. Its rev and its watch
 /// are, because they disclose nothing per principal: a responder picks a read's `until` from
 /// [`latest_rev`](Self::latest_rev) and waits on [`watch`](Self::watch) for a held round.
-pub trait PartStoreServe<Async: FutureForm> {
+pub trait PartStoreServe {
     /// The rev of the last committed transaction: a valid `until` for
     /// [`read_authorized`](Self::read_authorized).
-    fn latest_rev(&self) -> Async::Future<'_, Res<Rev>>;
+    fn latest_rev(&self) -> impl Future<Output = Res<Rev>> + Send;
     /// A handle on the latest committed rev, moved from the commit path after the commit is
     /// visible to reads (as [`RevSource::watch`](crate::rev::RevSource::watch)).
     fn watch(&self) -> RevWatch;
@@ -405,51 +405,51 @@ pub trait PartStoreServe<Async: FutureForm> {
     /// `after == until` decides every verdict and reads no row (`rows.through == until`). A
     /// responder whose targets are all caught up still owes the client their verdicts (law 7 of
     /// [`replay`](crate::replay)).
-    fn read_authorized<'a>(
-        &'a self,
-        principal: &'a PeerKey,
-        routes: &'a LogRoutes,
+    fn read_authorized(
+        &self,
+        principal: &PeerKey,
+        routes: &LogRoutes,
         after: Rev,
         until: Rev,
         limits: Limits,
-        page: &'a mut AuthorizedPage,
-    ) -> Async::Future<'a, Res<()>>;
+        page: &mut AuthorizedPage,
+    ) -> impl Future<Output = Res<()>> + Send;
     /// For each `(part, since)`, the part's summary as `principal` sees it from `since`, in the
     /// order asked; `None` for a part it may not read or the store does not know.
-    fn part_summaries<'a>(
-        &'a self,
-        principal: &'a PeerKey,
-        parts: &'a [(PartKey, Rev)],
-    ) -> Async::Future<'a, Res<Vec<Option<PartSummary>>>>;
+    fn part_summaries(
+        &self,
+        principal: &PeerKey,
+        parts: &[(PartKey, Rev)],
+    ) -> impl Future<Output = Res<Vec<Option<PartSummary>>>> + Send;
     /// The objects' states as `principal` may see them, in the order asked: the content, and
     /// the live parts it may read. `None` for an object that is not a live member of any part
     /// it may read: content is only ever readable through a part.
-    fn readable_obj_states<'a>(
-        &'a self,
-        principal: &'a PeerKey,
-        objs: &'a [ObjKey],
-    ) -> Async::Future<'a, Res<Vec<Option<ObjState>>>>;
+    fn readable_obj_states(
+        &self,
+        principal: &PeerKey,
+        objs: &[ObjKey],
+    ) -> impl Future<Output = Res<Vec<Option<ObjState>>>> + Send;
     /// The part's non-empty buckets changed past `since`, in bucket order, from `from` up to
     /// `to_level`, at most `limit`; `None` for a part `principal` may not read.
-    fn bucket_list<'a>(
-        &'a self,
-        principal: &'a PeerKey,
-        part: &'a PartKey,
+    fn bucket_list(
+        &self,
+        principal: &PeerKey,
+        part: &PartKey,
         from: BuckId,
         to_level: BuckLevel,
         since: Rev,
         limit: usize,
-    ) -> Async::Future<'a, Res<Option<Vec<BucketSummary>>>>;
+    ) -> impl Future<Output = Res<Option<Vec<BucketSummary>>>> + Send;
     /// For each `(bucket, after)`, the part's members (live and dead) in that bucket in
     /// (deepest bucket, key) order after `after`, at most `limit`, in the order asked; a bucket
     /// unchanged past `since` has none. `None` for a part `principal` may not read. One call
     /// answers a whole leaf request, so all its buckets come from one snapshot.
-    fn bucket_leaves<'a>(
-        &'a self,
-        principal: &'a PeerKey,
-        part: &'a PartKey,
-        bucks: &'a [(BuckId, Option<ObjKey>)],
+    fn bucket_leaves(
+        &self,
+        principal: &PeerKey,
+        part: &PartKey,
+        bucks: &[(BuckId, Option<ObjKey>)],
         since: Rev,
         limit: usize,
-    ) -> Async::Future<'a, Res<Option<Vec<Vec<LeafEntry>>>>>;
+    ) -> impl Future<Output = Res<Option<Vec<Vec<LeafEntry>>>>> + Send;
 }
