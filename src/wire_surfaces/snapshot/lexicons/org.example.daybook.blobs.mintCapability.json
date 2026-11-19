@@ -2,6 +2,9 @@
   "defs": {
     "BlobsScope": {
       "properties": {
+        "drawers": {
+          "type": "unknown"
+        },
         "put": {
           "default": false,
           "type": "boolean"
