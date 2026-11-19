@@ -128,10 +128,8 @@ service_core_rs::service_method!(UpdateSession => SessionUpdated, SessionError, 
 service_core_rs::service_method!(PageSession => SessionPage, SessionError, procedure("org.townframe.bigsync.replay.pageSession"));
 service_core_rs::service_method!(CloseSession => (), SessionError, procedure("org.townframe.bigsync.replay.closeSession"));
 
-// The irpc enum is the in-process and same-node binding. Its derive emits irpc's `rpc` (QUIC)
-// half unconditionally, which does not build for the browser, so the web build has the methods
-// above (an XRPC client needs nothing more) and not this enum.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+// The irpc enum is the in-process and same-node binding; in the browser it has no remote half
+// (see `declare_service_protocol!`).
 service_core_rs::declare_service_protocol! {
     pub enum ReplayProtocol => ReplayMessage {
         unary {

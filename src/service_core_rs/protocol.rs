@@ -52,7 +52,17 @@ macro_rules! declare_service_protocol {
         unary { $( $variant:ident($params:ty) ),* $(,)? }
         stream { $( $stream_variant:ident($stream_params:ty) ),* $(,)? }
     }) => {
-        #[$crate::__irpc::rpc_requests(message = $message)]
+        // irpc's remote (QUIC) half needs noq, which irpc leaves out in the browser; there the
+        // enum keeps its in-process half only (`no_rpc`), as iroh-blobs does. A native caller
+        // enables irpc's `rpc` feature for the remote half.
+        #[cfg_attr(
+            not(all(target_family = "wasm", target_os = "unknown")),
+            $crate::__irpc::rpc_requests(message = $message)
+        )]
+        #[cfg_attr(
+            all(target_family = "wasm", target_os = "unknown"),
+            $crate::__irpc::rpc_requests(message = $message, no_rpc)
+        )]
         #[derive(Debug, serde::Serialize, serde::Deserialize)]
         $vis enum $protocol {
             $( #[rpc(tx = $crate::Reply<$params>)] $variant($crate::Envelope<$params>), )*
