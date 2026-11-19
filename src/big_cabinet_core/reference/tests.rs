@@ -480,6 +480,95 @@ fn doc_references_round_trip_with_and_without_heads() {
     assert_eq!(DocReference::parse(&shuffled).unwrap().to_string(), text);
 }
 
+fn other_node_key() -> MultibaseKey {
+    MultibaseKey::try_from([3u8; 32].as_slice()).unwrap()
+}
+
+#[test]
+fn doc_via_hints_round_trip_sorted_and_canonical() {
+    let (low, high) = (other_node_key(), node_key());
+    let via = DocReference::new(doc()).with_via([high.clone(), low.clone(), high.clone()]);
+    assert_eq!(via.via(), [low.clone(), high.clone()]);
+    let text = format!("dtxt:doc:{DOC}?via={low}|{high}");
+    assert_eq!(via.to_string(), text);
+    let parsed = DocReference::parse(&text).unwrap();
+    assert_eq!(parsed.via(), via.via());
+    assert_eq!(parsed.to_string(), text);
+
+    // Alongside heads: heads first when printing, any order when parsing.
+    let both = DocReference::new(doc())
+        .pinned([head(1)])
+        .with_via([high.clone(), low.clone()]);
+    let text = format!(
+        "dtxt:doc:{DOC}?heads={}&via={low}|{high}",
+        head_text(&head(1))
+    );
+    assert_eq!(both.to_string(), text);
+    let swapped = format!(
+        "dtxt:doc:{DOC}?via={high}|{low}&heads={}",
+        head_text(&head(1))
+    );
+    let parsed = DocReference::parse(&swapped).unwrap();
+    assert_eq!(parsed.to_string(), text);
+    assert_eq!(parsed.heads(), [head(1)]);
+    assert_eq!(parsed.via(), [low, high]);
+}
+
+#[test]
+fn doc_via_is_a_hint_that_identity_ignores() {
+    use std::hash::BuildHasher;
+    let bare = DocReference::new(doc());
+    let hinted = DocReference::new(doc()).with_via([node_key()]);
+    assert_eq!(bare, hinted);
+    let state = std::collections::hash_map::RandomState::new();
+    assert_eq!(state.hash_one(&bare), state.hash_one(&hinted));
+    // The pin still distinguishes, with or without a hint.
+    assert_ne!(
+        hinted,
+        DocReference::new(doc())
+            .pinned([head(1)])
+            .with_via([node_key()])
+    );
+    assert_eq!(hinted.via(), [node_key()]);
+    assert!(bare.via().is_empty());
+}
+
+#[test]
+fn malformed_via_hints_are_refused() {
+    let good = node_key();
+    for value in [
+        format!("dtxt:doc:{DOC}?via="),
+        format!("dtxt:doc:{DOC}?via={good}|"),
+        format!("dtxt:doc:{DOC}?via=|{good}"),
+        format!("dtxt:doc:{DOC}?via=nope"),
+        format!("dtxt:doc:{DOC}?via={good}|nope"),
+        format!("dtxt:doc:{DOC}?via=z1"),
+        format!("dtxt:doc:{DOC}?via={good}&via={good}"),
+        format!("dtxt:doc:{DOC}?heads={0}&heads={0}", head_text(&head(1))),
+        format!("dtxt:doc:{DOC}?via={good}&other=1"),
+        format!("dtxt:doc:{DOC}?via={good}&"),
+        format!("dtxt:doc:{DOC}?via"),
+        format!("dtxt:doc:{DOC}?via={good}#frag"),
+    ] {
+        assert!(DocReference::parse(&value).is_err(), "{value}");
+    }
+    assert!(matches!(
+        DocReference::parse(&format!("dtxt:doc:{DOC}?via=")),
+        Err(ReferenceError::EmptyVia)
+    ));
+    assert!(matches!(
+        DocReference::parse(&format!("dtxt:doc:{DOC}?via={good}&via={good}")),
+        Err(ReferenceError::DuplicateQueryKey(_))
+    ));
+    // `datum` references take no `via` for now.
+    assert!(
+        DatumReference::parse(&format!(
+            "dtxt:datum:{DOC}/org.example.note/main?via={good}"
+        ))
+        .is_err()
+    );
+}
+
 #[test]
 fn malformed_doc_references_and_kind_mismatches_are_refused() {
     for value in [

@@ -28,12 +28,12 @@ No custom grammar: a collapsed `<details>` holding a JSON code block. `$type` na
   "$type": "org.example.intxt.prLinks",
   "intxts": [
     {
-      "ref": "dtxt:doc:z5KdV9aHq3vXr2M8sT1bNcE7wYpJfLgU4oQiZkDxR6m?via=z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH|z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+      "ref": "dtxt:doc:z5KdV9aHq3vXr2M8sT1bNcE7wYpJfLgU4oQiZkDxR6m?via=zNodeA…|zRelay…",
       "title": "intxt: commits live with the intxt",
       "refs": ["refs/heads/stack/intxt-16-capture-records-commits"]
     },
     {
-      "ref": "dtxt:doc:z9QaW2bTn5yLk8P3vR7cHdF1xMsJgEoU6iZpKfDqA4t?via=z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH",
+      "ref": "dtxt:doc:z9QaW2bTn5yLk8P3vR7cHdF1xMsJgEoU6iZpKfDqA4t?via=zNodeA…",
       "title": "review micro: the PR on the phone"
     }
   ]
