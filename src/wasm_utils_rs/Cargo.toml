@@ -40,8 +40,8 @@ method_core = { path = "../method_core", default-features = false }
 service_core_rs = { path = "../service_core_rs", default-features = false }
 service_client_core_rs = { path = "../service_client_core_rs", default-features = false }
 clay_rt_wcmp = { path = "../clay_rt_wcmp" }
-wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "da35a9b4e4cc71dacb57323b906093f9e18e78b6" }
-wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "da35a9b4e4cc71dacb57323b906093f9e18e78b6" }
+wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "2a8d11a01d6630fabcca1730423e7103b4466d41" }
+wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "2a8d11a01d6630fabcca1730423e7103b4466d41" }
 plug_test_manifest = { path = "../plug_test_manifest" }
 plug_plabels_manifest = { path = "../plug_plabels_manifest" }
 plug_dayledger_manifest = { path = "../plug_dayledger_manifest" }
