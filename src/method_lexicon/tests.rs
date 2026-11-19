@@ -586,6 +586,39 @@ fn unknown_admits_objects_only_and_an_open_union_admits_other_variants() {
             .is_empty()
     );
 }
+
+/// Tagged variants that type a field as `T` and `Option<T>` agree on `T`: `ObservedDatum`'s
+/// `present` and `removed` both carry `docHeads` as a string array, so a page with either passes
+/// the `pollDatums` output check rather than meeting an `unknown` that refuses arrays.
+#[test]
+fn a_poll_page_with_present_and_removed_datums_passes_its_output_check() {
+    let file = lexicon_of::<big_cabinet_core::doc::PollDatums>();
+    let validator = super::position_validator(&file, &[], super::Position::Output)
+        .unwrap()
+        .unwrap();
+    let heads = json!(["aa", "bb"]);
+    let version = json!({"heads": heads, "clock": 1});
+    let page = |datum: Value| {
+        json!({"events": [{
+            "kind": "datum", "revision": 1, "docId": "z11111111111111111111111111111111",
+            "datumKey": "org.example.note", "datum": datum,
+        }], "through": 1, "caughtUp": true})
+    };
+    for datum in [
+        json!({"state": "present", "docHeads": heads, "version": version}),
+        json!({"state": "removed", "docHeads": heads, "version": version}),
+        json!({"state": "removed", "docHeads": null, "version": version}),
+    ] {
+        let page = page(datum);
+        assert_eq!(validator.violations(&page), Vec::<String>::new(), "{page}");
+    }
+    assert!(
+        !validator
+            .violations(&page(json!({"state": "present", "docHeads": [1], "version": version})))
+            .is_empty(),
+        "docHeads stays a string array, not any value"
+    );
+}
 /// A struct that flattens a tagged enum states its own fields and the enum's, both required where
 /// the type requires them (`CreateDrawer`'s `capability` and `command` beside the layout).
 #[test]
