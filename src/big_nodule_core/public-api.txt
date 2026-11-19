@@ -33,10 +33,10 @@ pub impl big_nodule_core::config::AdmissionCache::fn needs_read (& self , cartri
 pub impl big_nodule_core::config::AdmissionCache::fn new () -> Self
 pub impl big_nodule_core::config::AdmissionCache::fn restore (& self , cartridge_id : & CartridgeId , displaced : Displaced)
 pub impl big_nodule_core::config::CartridgeConfig::fn clear (& mut self)
-pub impl big_nodule_core::config::CartridgeConfig::fn grants (& self , component : Component ,) -> impl Iterator < Item = (& GrantKey , & DatumSlot < GrantBody >) >
+pub impl big_nodule_core::config::CartridgeConfig::fn grants (& self) -> impl Iterator < Item = (& GrantKey , & DatumSlot < GrantBody >) >
 pub impl big_nodule_core::config::CartridgeConfig::fn identity (& self) -> & DatumSlot < CartridgeConfigIdentity >
-pub impl big_nodule_core::config::CartridgeConfig::fn resolve_grants (& self , component : Component ,) -> Result < (BTreeMap < DrawerId , DrawerAccess > , DispatchScope) , String >
-pub impl big_nodule_core::config::CartridgeConfig::fn set_grant (& mut self , component : Component , grant : GrantKey , value : Option < GrantBody > ,) -> Result < () , InventoryError >
+pub impl big_nodule_core::config::CartridgeConfig::fn resolve_grants (& self) -> Result < ResolvedGrants , String >
+pub impl big_nodule_core::config::CartridgeConfig::fn set_grant (& mut self , grant : GrantKey , value : Option < GrantBody > ,) -> Result < () , InventoryError >
 pub impl big_nodule_core::config::DatumSlot < T >::fn accepted (& self) -> Option < & T >
 pub impl big_nodule_core::config::DatumSlot < T >::fn is_absent (& self) -> bool
 pub impl big_nodule_core::config::NoduleConfig::fn attach_cartridge_docs (& mut self , docs : BTreeMap < CartridgeId , CartridgeConfig >)
@@ -78,6 +78,7 @@ pub struct big_nodule_core::config::MethodRoute  { provider: String, extra: Extr
 pub struct big_nodule_core::config::NoduleConfig  {  }
 pub struct big_nodule_core::config::NoduleDevTakeover  { by: CartridgeId, extra: Extra }
 pub struct big_nodule_core::config::NoduleEntry  { install: DatumSlot < CartridgeInstall >, dev_takeover: DatumSlot < NoduleDevTakeover >, artifacts: BTreeMap < String , DatumSlot < Blob > > }
+pub struct big_nodule_core::config::ResolvedGrants  { drawers: BTreeMap < DrawerId , DrawerAccess >, cartridges: BTreeMap < CartridgeId , DrawerAccess >, origins: BTreeSet < String >, operations: DispatchScope }
 pub struct big_nodule_core::inventory::Artifact  { digest: big_cartridges_core :: Digest, size: Option < u64 >, media_type: Option < String > }
 pub struct big_nodule_core::inventory::FilledBy  { cartridge_id: CartridgeId, version: Version }
 pub struct big_nodule_core::inventory::InstalledNodule  { cartridge_id: CartridgeId, config_doc: DocId, version: Version, revision: Revision, resolved: ResolvedCartridge, nodule: Nodule, admitted: Admitted, artifacts: BTreeMap < String , (Artifact , ArtifactState) >, enabled: bool, filled_by: Option < FilledBy > }

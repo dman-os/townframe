@@ -13,9 +13,6 @@
             "Admin"
           ],
           "type": "string"
-        },
-        "privileged": {
-          "type": "boolean"
         }
       },
       "type": "object"
@@ -28,13 +25,6 @@
         "cartridgeId": {
           "type": "string"
         },
-        "component": {
-          "enum": [
-            "nodule",
-            "micro"
-          ],
-          "type": "string"
-        },
         "grant": {
           "type": "string"
         },
@@ -45,13 +35,12 @@
       },
       "required": [
         "cartridgeId",
-        "component",
         "grant"
       ],
       "type": "object"
     },
     "main": {
-      "description": "Sets, or with `value` absent revokes, one grant of one component: the datum `grant` names in the\ncartridge's config document. A drawer grant's value states its access and a method or authority\ngrant's states whether it is privileged (see [`GrantKey::accepts`]).",
+      "description": "Sets, or with `value` absent revokes, one grant of the cartridge: the datum `grant` names in\nits config document. Grants are per cartridge, in the person's nouns, and feed the nodule and\nthe micro alike (ADR 049 §4.1). A drawer or cartridge grant's value states its access; an\norigin, method or authority grant states none (see [`GrantKey::accepts`]). Only this method\nwrites grant datums, never the cartridge.",
       "errors": [
         {
           "name": "Denied"

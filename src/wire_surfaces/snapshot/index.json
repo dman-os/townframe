@@ -279,6 +279,51 @@
     "stableItems": {}
   },
   {
+    "crate": "big_nodule",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridges.grant.authority",
+    "revision": null,
+    "sidecar": true,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
+    "crate": "big_nodule",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridges.grant.cartridge",
+    "revision": null,
+    "sidecar": true,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
+    "crate": "big_nodule",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridges.grant.drawer",
+    "revision": null,
+    "sidecar": true,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
+    "crate": "big_nodule",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridges.grant.method",
+    "revision": null,
+    "sidecar": true,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
+    "crate": "big_nodule",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridges.grant.origin",
+    "revision": null,
+    "sidecar": true,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
     "crate": "big_cartridges_core",
     "kind": "procedure",
     "nsid": "org.example.daybook.cartridges.importCartridgeDocument",
@@ -891,15 +936,6 @@
     "stableItems": {}
   },
   {
-    "crate": "big_nodule",
-    "kind": "object",
-    "nsid": "org.example.daybook.micro.grant",
-    "revision": null,
-    "sidecar": true,
-    "stability": "unstable",
-    "stableItems": {}
-  },
-  {
     "crate": "big_cartridges",
     "kind": "object",
     "nsid": "org.example.daybook.nodule",
@@ -912,15 +948,6 @@
     "crate": "big_nodule",
     "kind": "object",
     "nsid": "org.example.daybook.nodule.devTakeover",
-    "revision": null,
-    "sidecar": true,
-    "stability": "unstable",
-    "stableItems": {}
-  },
-  {
-    "crate": "big_nodule",
-    "kind": "object",
-    "nsid": "org.example.daybook.nodule.grant",
     "revision": null,
     "sidecar": true,
     "stability": "unstable",
