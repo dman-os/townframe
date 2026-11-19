@@ -6,19 +6,21 @@
 //! component's bytes go into the blob store first, because the registry refuses a version whose
 //! components it cannot find and the executor loads them from there when the nodule is enabled;
 //! the version's payloads are then staged and the envelope published to the node's registry,
-//! installed by the pin of the version just published, granted the methods its handler calls, and
-//! enabled.
+//! installed by the pin of the version just published, granted what its permbinds name (the
+//! methods, and the drawers the caller passes in), and enabled.
 
 use crate::cartridge::cartridge;
+use crate::cartridge::requested_methods;
 use crate::client::Caller;
 use crate::methods::IntxtError;
-use crate::methods::REQUIRED_OPERATIONS;
 use big_blobs_core::BlobInfo;
 use big_blobs_core::BlobsScope;
 use big_blobs_core::MAX_PUT_OCTETS;
 use big_blobs_core::MintBlobsCapability;
 use big_blobs_core::PutBlob;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
@@ -50,16 +52,25 @@ pub struct Installed {
 /// enables it. `caller` must hold the node's operator authority: it publishes to the registry,
 /// installs, grants and enables.
 ///
-/// Idempotent by cartridge version: when the node already has the version this build of
-/// `intxt_core` carries installed and enabled, it answers that nodule's record without storing or
-/// publishing anything. The handler's bytes do not enter that comparison, so a rebuilt handler
-/// under an unchanged version is not reinstalled; the cartridge's version moves with the handler.
+/// The grants are the cartridge's (ADR 049 §4.1), one per thing its permbinds name: each
+/// operation its method permbinds name as `grant/method/<nsid>`, and each of `drawers` (the
+/// intxts the node already holds at `Write`, its GitHub drawer at `Read`) as
+/// `grant/drawer/<id>`. A drawer intxt makes itself is not among them: the cartridge's grants
+/// name drawers that exist when they are written.
+///
+/// Idempotent: when the node already has the version this build of `intxt_core` carries installed
+/// and enabled, and every one of `drawers` is already granted at its access, it answers that
+/// nodule's record without storing, publishing or granting anything. Drawers it is not yet
+/// granted are granted, so installing again after the node holds new intxts extends the grants.
+/// The handler's bytes do not enter that comparison, so a rebuilt handler under an unchanged
+/// version is not reinstalled; the cartridge's version moves with the handler.
 ///
 /// The envelope is signed as the fixture namespace's owner, the namespace intxt's cartridge sits
 /// under until it has its own (see [`crate::cartridge::cartridge`]).
 pub async fn install<H: HttpTransport>(
     caller: &Caller<H>,
     guest_wasm: &[u8],
+    drawers: &[(DrawerId, DrawerAccess)],
 ) -> Result<Installed, IntxtError> {
     let fixture = cartridge(guest_wasm);
     let (cartridge_id, version) = (fixture.id.clone(), fixture.version.clone());
@@ -69,59 +80,83 @@ pub async fn install<H: HttpTransport>(
         .nodules
         .into_iter()
         .find(|record| record.cartridge_id == cartridge_id);
-    if let Some(record) = present
-        && record.enabled
-        && record.version.as_ref() == Some(&version)
-    {
+    let current = present
+        .as_ref()
+        .is_some_and(|record| record.enabled && record.version.as_ref() == Some(&version));
+    let ungranted: Vec<_> = drawers
+        .iter()
+        .filter(|(drawer, access)| {
+            !present
+                .as_ref()
+                .filter(|_| current)
+                .and_then(|record| record.drawers.get(drawer))
+                .is_some_and(|status| status.granted && status.desired == *access)
+        })
+        .collect();
+    if current && ungranted.is_empty() {
         return Ok(Installed {
-            record,
+            record: present.expect("a current version is a present one"),
             already_installed: true,
         });
     }
 
-    put_blob(caller, guest_wasm).await?;
-    // The payloads (Lexicons, sidecars, components) are datums of the registry document the
-    // envelope pins (ADR 047 §1), so they are staged first and the envelope that carries their
-    // pins is published, signed as the fixture namespace's owner.
-    let staged = caller.call(fixture.stage_request()).await?;
-    caller
-        .call(PublishCartridgeVersion {
-            envelope: fixture.publishable(staged),
-        })
-        .await?;
-    // The pin names the version at the heads of the registry document it was published to.
-    let doc_id = caller
-        .call(GetCartridge {
-            id: cartridge_id.clone(),
-        })
-        .await?
-        .doc_id;
-    let (heads, _) = caller.read(&doc_id, &version_key(&version)).await?;
-    caller
-        .call(InstallCartridge {
-            cartridge: version_pin(doc_id, &version, heads),
-        })
-        .await?;
-    for operation in REQUIRED_OPERATIONS {
+    if !current {
+        put_blob(caller, guest_wasm).await?;
+        // The payloads (Lexicons, sidecars, components) are datums of the registry document the
+        // envelope pins (ADR 047 §1), so they are staged first and the envelope that carries
+        // their pins is published, signed as the fixture namespace's owner.
+        let staged = caller.call(fixture.stage_request()).await?;
+        caller
+            .call(PublishCartridgeVersion {
+                envelope: fixture.publishable(staged),
+            })
+            .await?;
+        // The pin names the version at the heads of the registry document it was published to.
+        let doc_id = caller
+            .call(GetCartridge {
+                id: cartridge_id.clone(),
+            })
+            .await?
+            .doc_id;
+        let (heads, _) = caller.read(&doc_id, &version_key(&version)).await?;
+        caller
+            .call(InstallCartridge {
+                cartridge: version_pin(doc_id, &version, heads),
+            })
+            .await?;
+        for method in requested_methods(&fixture) {
+            caller
+                .call(SetCartridgeGrant {
+                    cartridge_id: cartridge_id.clone(),
+                    grant: GrantKey::Method(method.to_owned()),
+                    value: Some(GrantBody::present()),
+                })
+                .await?;
+        }
+    }
+    for (drawer, access) in ungranted {
         caller
             .call(SetCartridgeGrant {
                 cartridge_id: cartridge_id.clone(),
-                grant: GrantKey::Method(operation.to_owned()),
-                value: Some(GrantBody::present()),
+                grant: GrantKey::Drawer(drawer.clone()),
+                value: Some(GrantBody::access((*access).into())),
             })
             .await?;
     }
-    caller
-        .call(SetCartridgeEnabled {
-            cartridge_id: cartridge_id.clone(),
-            component: Component::Nodule,
-            enabled: true,
-        })
-        .await?;
+    if !current {
+        caller
+            .call(SetCartridgeEnabled {
+                cartridge_id: cartridge_id.clone(),
+                component: Component::Nodule,
+                enabled: true,
+            })
+            .await?;
+    }
     let record = caller.call(GetNodule { cartridge_id }).await?;
-    // A nodule holds its dispatch capability only while enabled, so whether the grant took is
-    // known from the enabled record. Every method intxt's handler calls is grantable, so a refusal
-    // means the node and this build disagree about them.
+    // A nodule holds its dispatch capability only while enabled, so whether the grants took is
+    // known from the enabled record. Every method intxt's handler calls is grantable, and every
+    // drawer the caller names is one the node holds, so a refusal means the node and this build
+    // disagree about them.
     let grants = record.methods.as_ref().ok_or_else(|| {
         IntxtError::Invalid("the node reports no method grants for intxt".to_owned())
     })?;
@@ -130,6 +165,19 @@ pub async fn install<H: HttpTransport>(
             "the node did not grant intxt the methods its handler calls: {}",
             grants.error.as_deref().unwrap_or("no reason given")
         )));
+    }
+    for (drawer, _) in drawers {
+        match record.drawers.get(drawer) {
+            Some(status) if status.granted => {}
+            other => {
+                return Err(IntxtError::Invalid(format!(
+                    "the node did not grant intxt the drawer {drawer}: {}",
+                    other
+                        .and_then(|status| status.error.as_deref())
+                        .unwrap_or("it reports no grant")
+                )));
+            }
+        }
     }
     Ok(Installed {
         record,
