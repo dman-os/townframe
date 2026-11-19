@@ -715,13 +715,11 @@ pub(crate) fn declared_publications(
 
 pub(crate) fn routine_facets(
     facets: &[FacetAccess],
-) -> Vec<daybook_types::manifest::RoutineFacetAccess> {
+) -> Vec<clay_docs::FacetAccess> {
     facets
         .iter()
-        .map(|facet| daybook_types::manifest::RoutineFacetAccess {
-            // A manifest request never names the plug that owns the document (ADR 028 §4).
-            owner_plug_id: None,
-            tag: facet.tag.as_str().into(),
+        .map(|facet| clay_docs::FacetAccess {
+            tag: facet.tag.as_str().to_owned(),
             key_id: facet.key_id.clone(),
             read: facet.read,
             write: facet.write,

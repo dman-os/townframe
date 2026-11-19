@@ -362,7 +362,7 @@ pub struct Request {
 }
 
 /// One requested facet access right (manifest-as-allowlist, ADR 015 §8). Neutral data; the
-/// native backend lowers it into the node seam's `RoutineFacetAccess` vocabulary (D6). The
+/// native backend lowers it into `clay_docs::FacetAccess` (D6). The
 /// request names the facet's datum by NSID `tag` and never the plug or document that holds it:
 /// configuration picks the document, so a substituted plug keeps working (ADR 028 §4).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

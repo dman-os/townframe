@@ -1329,7 +1329,7 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
             vec![DocumentGrant {
                 document: route.document.clone(),
                 branch: route.branch.clone(),
-                facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                facets: vec![clay_docs::FacetAccess {
                     tag: route.tag.clone().into(),
                     key_id: Some(route.key_id.clone()),
                     read: true,

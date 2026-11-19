@@ -434,7 +434,7 @@ mod tests {
                 vec![DocumentGrant {
                     document: "allowed".into(),
                     branch: "main".into(),
-                    facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                    facets: vec![clay_docs::FacetAccess {
                         tag: "config".into(),
                         key_id: Some("count".into()),
                         read: true,
@@ -585,7 +585,7 @@ mod tests {
                 vec![DocumentGrant {
                     document: "allowed".into(),
                     branch: "main".into(),
-                    facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                    facets: vec![clay_docs::FacetAccess {
                         tag: "config".into(),
                         write: true,
                         ..Default::default()

@@ -26,6 +26,5 @@ ciborium = { workspace = true }
 test-utils = ["tokio/rt"]
 
 [dev-dependencies]
-daybook_types = { workspace = true, default-features = false, features = ["manifest"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

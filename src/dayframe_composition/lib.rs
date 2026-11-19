@@ -263,7 +263,7 @@ fn watch_installs(documents: &DocumentService, host: &Host, shell: &Instance) ->
                 document: INSTALLS_DOCUMENT.into(),
                 branch: INSTALLS_BRANCH.into(),
                 facets: [INSTALL_TAG, bindings::BINDINGS_TAG]
-                    .map(|tag| daybook_types::manifest::RoutineFacetAccess {
+                    .map(|tag| clay_docs::FacetAccess {
                         tag: tag.into(),
                         read: true,
                         ..Default::default()

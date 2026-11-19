@@ -44,7 +44,7 @@ fn grant(
                 .map(|document| DocumentGrant {
                     document: (*document).into(),
                     branch: "main".into(),
-                    facets: vec![RoutineFacetAccess {
+                    facets: vec![FacetAccess {
                         tag: "org.example.config".into(),
                         key_id: key_id.map(str::to_owned),
                         read: true,
@@ -126,13 +126,13 @@ fn config_binding_resolution_and_manifest_rights_are_not_conflated() {
             &instance,
             "alpha",
             vec![
-                RoutineFacetAccess {
+                FacetAccess {
                     tag: "org.example.config".into(),
                     key_id: Some("main".into()),
                     read: true,
                     ..Default::default()
                 },
-                RoutineFacetAccess {
+                FacetAccess {
                     tag: "org.example.config".into(),
                     key_id: Some("main".into()),
                     write: true,
@@ -146,7 +146,7 @@ fn config_binding_resolution_and_manifest_rights_are_not_conflated() {
             &host,
             &instance,
             "beta",
-            vec![RoutineFacetAccess {
+            vec![FacetAccess {
                 tag: "org.example.config".into(),
                 key_id: Some("new".into()),
                 create: true,
@@ -201,30 +201,6 @@ fn config_binding_resolution_and_manifest_rights_are_not_conflated() {
     node.settle(/*accept*/ true);
     assert_eq!(node.reads(), vec![route("a", "main"), route("b", "new")]);
     host.close();
-}
-
-#[test]
-#[should_panic(expected = "a config ACL names no owner plug")]
-fn a_config_acl_naming_an_owner_plug_is_a_programming_error() {
-    let host = Host::new();
-    let service = DocumentService::new(32);
-    service
-        .mock_documents()
-        .bind_config("alpha".into(), "a".into(), "main".into());
-    let instance = host.start("alpha");
-    service
-        .grant_config(
-            &host,
-            &instance,
-            "alpha",
-            vec![RoutineFacetAccess {
-                owner_plug_id: Some("beta".into()),
-                tag: "org.example.config".into(),
-                read: true,
-                ..Default::default()
-            }],
-        )
-        .unwrap();
 }
 
 #[test]
@@ -374,7 +350,7 @@ fn read_only_grants_reject_every_mutation_without_hydration() {
             vec![DocumentGrant {
                 document: "a".into(),
                 branch: "main".into(),
-                facets: vec![RoutineFacetAccess {
+                facets: vec![FacetAccess {
                     tag: "org.example.config".into(),
                     key_id: Some("main".into()),
                     read: true,
@@ -425,7 +401,7 @@ fn document_ref_access_preserves_the_grant_and_its_revocation() {
             vec![DocumentGrant {
                 document: "a".into(),
                 branch: "approved-branch".into(),
-                facets: vec![RoutineFacetAccess {
+                facets: vec![FacetAccess {
                     tag: "org.example.config".into(),
                     key_id: Some("main".into()),
                     read: true,
