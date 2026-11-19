@@ -1642,6 +1642,15 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
         let broken = format!("{:#}", broken.unwrap_err());
         assert!(broken.contains("intxt block") && broken.contains("ref"), "{broken}");
 
+        let mut broken_show = Vec::new();
+        let broken_show_error = packaging
+            .github_show(&mut broken_show, "o/r#12")
+            .await
+            .unwrap_err();
+        let broken_show_error = format!("{broken_show_error:#}");
+        assert!(broken_show_error.starts_with("intxt block:"), "{broken_show_error}");
+        assert!(String::from_utf8(broken_show).unwrap().contains("o/r#12  Open  \"t\""));
+
         let first = pull("First title", "2026-11-17T10:00:00Z", "o/r#12").await;
         assert!(
             first.contains("o/r#12 \"First title\"") && first.contains("imported"),
@@ -1649,6 +1658,23 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
         );
         assert!(first.contains("\"Port the sync\""), "{first}");
         assert!(first.contains(&format!("link: {link}")), "{first}");
+
+        let mut listed = Vec::new();
+        packaging.github_ls(&mut listed).await.unwrap();
+        assert_eq!(
+            String::from_utf8(listed).unwrap(),
+            "o/r#12  Open  \"First title\"\n"
+        );
+        let mut shown = Vec::new();
+        packaging.github_show(&mut shown, "https://github.com/o/r/pull/12").await.unwrap();
+        let shown = String::from_utf8(shown).unwrap();
+        assert!(shown.contains("o/r#12  Open  \"First title\""), "{shown}");
+        assert!(shown.contains("url: https://github.com/o/r/pull/12"), "{shown}");
+        assert!(shown.contains("Part of the port."), "{shown}");
+        assert!(
+            shown.contains(&format!("dtxt:doc:{drawer}  \"Port the sync\"  1 entries")),
+            "{shown}"
+        );
 
         // The drawer and the pull request's own document are remembered, and hold the datum.
         let state: Value =
