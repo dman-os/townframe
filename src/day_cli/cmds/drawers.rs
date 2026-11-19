@@ -10,6 +10,7 @@ use big_cabinet_core::drawer::protocol::InvitePrincipal;
 use big_cabinet_core::drawer::protocol::ListKnownDrawers;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::drawer::protocol::Principal;
+use big_cabinet_core::drawer::protocol::RevokePrincipal;
 use method_core::Method;
 
 #[derive(Debug, clap::Subcommand)]
@@ -23,19 +24,26 @@ pub enum DrawersCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Give another node keyhive access to a drawer
+    /// Add another node as a member of a drawer, with keyhive access
     ///
     /// The peer must be known to this node, which it is once the two have connected (see
     /// `day peers add`): its keyhive identity arrives with the connection.
-    Invite {
+    AddMember {
         /// The drawer's id
         drawer: String,
-        /// The peer's node id, as `day status` prints it
+        /// The peer's node id, as `day node status` prints it
         peer: String,
         /// What the peer may do: relay stores and forwards ciphertext, read decrypts, write
         /// also changes documents, admin also manages members
         #[arg(long, value_enum)]
         access: AccessArg,
+    },
+    /// Remove another node's membership of a drawer
+    RevokeMember {
+        /// The drawer's id
+        drawer: String,
+        /// The peer's node id, as `day node status` prints it
+        peer: String,
     },
 }
 
@@ -61,11 +69,12 @@ impl From<AccessArg> for DrawerAccess {
 pub async fn run(command: DrawersCommands) -> Res<ExitCode> {
     match command {
         DrawersCommands::Ls { json } => ls(json).await,
-        DrawersCommands::Invite {
+        DrawersCommands::AddMember {
             drawer,
             peer,
             access,
-        } => invite(&drawer, &peer, access.into()).await,
+        } => add_member(&drawer, &peer, access.into()).await,
+        DrawersCommands::RevokeMember { drawer, peer } => revoke_member(&drawer, &peer).await,
     }
 }
 
@@ -126,9 +135,13 @@ async fn ls(as_json: bool) -> Res<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Mints an admin handle on the drawer for this one call, then invites the peer through it. The
-/// node refuses a peer it has not met, which this says in the terms of the commands that fix it.
-async fn invite(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitCode> {
+/// Parses the drawer and peer arguments, and mints an admin handle on the drawer for the one
+/// call that follows.
+async fn admin_handle(
+    client: &crate::client::NodeClient,
+    drawer: &str,
+    peer: &str,
+) -> Res<(DocId, GroupKey, big_cabinet_core::authority::CapId)> {
     let drawer_id: DocId = drawer
         .parse()
         .map_err(|error| eyre::eyre!("`{drawer}` is not a drawer id: {error}"))?;
@@ -138,11 +151,9 @@ async fn invite(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitCode>
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or_else(|| {
             eyre::eyre!(
-                "`{peer}` is not a node id (64 lowercase hex digits, as `day status` prints)"
+                "`{peer}` is not a node id (64 lowercase hex digits, as `day node status` prints)"
             )
         })?;
-    let client = lazy::node().await?;
-
     let minted = client
         .call(
             MintDrawerCapability::XRPC.nsid,
@@ -165,7 +176,14 @@ async fn invite(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitCode>
     );
     let capability = serde_json::from_value(minted.body["capabilityId"].clone())
         .wrap_err("the node's answer carries no capability id")?;
+    Ok((drawer_id, GroupKey(peer_bytes), capability))
+}
 
+/// Adds the peer as a member of the drawer. The node refuses a peer it has not met, which this
+/// says in the terms of the commands that fix it.
+async fn add_member(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitCode> {
+    let client = lazy::node().await?;
+    let (drawer_id, peer_id, capability) = admin_handle(&client, drawer, peer).await?;
     let reply = client
         .call(
             InvitePrincipal::XRPC.nsid,
@@ -173,15 +191,13 @@ async fn invite(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitCode>
             &serde_json::to_value(InvitePrincipal {
                 capability,
                 drawer_id,
-                principal: Principal::Peer {
-                    peer_id: GroupKey(peer_bytes),
-                },
+                principal: Principal::Peer { peer_id },
                 access,
             })?,
         )
         .await?;
     if reply.is_success() {
-        println!("invited {peer} to {drawer} at {access:?}");
+        println!("added {peer} to {drawer} at {access:?}");
         return Ok(ExitCode::SUCCESS);
     }
     if reply.body["error"] == "UnknownPeer" {
@@ -191,10 +207,38 @@ async fn invite(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitCode>
     } else {
         error!(
             status = reply.status,
-            "the node refused the invite: {}: {}",
+            "the node refused the member: {}: {}",
             reply.body["error"].as_str().unwrap_or("unnamed error"),
             reply.body["message"].as_str().unwrap_or_default()
         );
     }
+    Ok(ExitCode::FAILURE)
+}
+
+/// Removes the peer's membership of the drawer.
+async fn revoke_member(drawer: &str, peer: &str) -> Res<ExitCode> {
+    let client = lazy::node().await?;
+    let (drawer_id, peer_id, capability) = admin_handle(&client, drawer, peer).await?;
+    let reply = client
+        .call(
+            RevokePrincipal::XRPC.nsid,
+            RevokePrincipal::XRPC.method,
+            &serde_json::to_value(RevokePrincipal {
+                capability,
+                drawer_id,
+                principal: Principal::Peer { peer_id },
+            })?,
+        )
+        .await?;
+    if reply.is_success() {
+        println!("revoked {peer} from {drawer}");
+        return Ok(ExitCode::SUCCESS);
+    }
+    error!(
+        status = reply.status,
+        "the node refused the revocation: {}: {}",
+        reply.body["error"].as_str().unwrap_or("unnamed error"),
+        reply.body["message"].as_str().unwrap_or_default()
+    );
     Ok(ExitCode::FAILURE)
 }

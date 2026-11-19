@@ -31,6 +31,12 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
         .ok_or_eyre("listNodules did not answer a `nodules` list")?;
 
     let socket_path = conf.node_dir.socket_path()?;
+    // Any exit but 0 means "no daemon serving", the convention `systemctl status` follows.
+    let exit = if client.socket_state() == crate::context::SocketState::Live {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(3)
+    };
     if as_json {
         let status = json!({
             "nodeId": info.node_id,
@@ -43,7 +49,7 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
             "relay": conf.node_dir.settings()?.relay,
         });
         println!("{}", serde_json::to_string_pretty(&status)?);
-        return Ok(ExitCode::SUCCESS);
+        return Ok(exit);
     }
     println!("node      {}", info.node_id);
     println!("path      {}", conf.node_dir.root().display());
@@ -86,7 +92,7 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
             }
         }
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(exit)
 }
 
 /// Asks the node who it is and what it is connected to.

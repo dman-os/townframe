@@ -2,7 +2,7 @@
 //!
 //! There is no service behind it (no state to host, no client to hold), so it is a [`Provider`]
 //! registered directly in dispatch's router, next to the providers that front the hosted
-//! services. It is what lets `day status` and any other client learn the same facts over a
+//! services. It is what lets `day node status` and any other client learn the same facts over a
 //! socket that an embedder reads in process through [`crate::BigNode::node_id`] and
 //! [`crate::BigNode::peers`].
 

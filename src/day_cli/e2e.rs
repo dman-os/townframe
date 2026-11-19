@@ -639,26 +639,26 @@ mod blackbox {
         }
     }
 
-    /// `init`, `--help`, argument errors and completions: nothing that boots a node.
+    /// `node init`, `--help`, argument errors and completions: nothing that boots a node.
     #[test]
     fn node_cases() {
         run_cases("node");
     }
 
-    /// `status` and `exec` with no daemon: the command boots the node itself.
+    /// `node status` and `exec` with no daemon: the command boots the node itself.
     #[test]
     fn in_process_cases() {
         run_cases("in_process");
     }
 
-    /// `daemon start | status | stop` and the commands reaching the node over its socket.
+    /// `node start | status | stop` and the commands reaching the node over its socket.
     #[test]
     fn daemon_cases() {
         run_cases("daemon");
     }
 
     /// A daemon killed without cleaning up leaves a socket and no lock: every command still
-    /// works, and `daemon stop` and `daemon start` clean up after it.
+    /// works, and `node stop` and `node start` clean up after it.
     #[test]
     fn a_killed_daemon_leaves_a_stale_socket_that_commands_survive() {
         let sandbox = Sandbox::new();
@@ -668,8 +668,8 @@ mod blackbox {
             String::from_utf8_lossy(&output.stdout).into_owned()
                 + &String::from_utf8_lossy(&output.stderr)
         };
-        assert!(day(&["init"]).status.success());
-        let started = day(&["daemon", "start"]);
+        assert!(day(&["node", "init"]).status.success());
+        let started = day(&["node", "start"]);
         assert!(started.status.success(), "{}", text(&started));
         let pid: u32 = std::fs::read_to_string(node.join("node.lock"))
             .unwrap()
@@ -689,11 +689,8 @@ mod blackbox {
         let socket = sandbox.socket();
         assert!(socket.exists());
 
-        let status = day(&["daemon", "status"]);
-        assert_eq!(status.status.code(), Some(3), "{}", text(&status));
-        assert!(text(&status).contains("stale socket"), "{}", text(&status));
-        let node_status = day(&["status"]);
-        assert!(node_status.status.success(), "{}", text(&node_status));
+        let node_status = day(&["node", "status"]);
+        assert_eq!(node_status.status.code(), Some(3), "{}", text(&node_status));
         assert!(
             text(&node_status).contains("in-process"),
             "{}",
@@ -705,7 +702,7 @@ mod blackbox {
             text(&node_status)
         );
 
-        let stopped = day(&["daemon", "stop"]);
+        let stopped = day(&["node", "stop"]);
         assert!(stopped.status.success(), "{}", text(&stopped));
         assert!(
             text(&stopped).contains("removed its stale socket"),
@@ -715,10 +712,10 @@ mod blackbox {
         assert!(!socket.exists());
 
         // And a daemon can start over a stale socket too.
-        assert!(day(&["daemon", "start"]).status.success());
+        assert!(day(&["node", "start"]).status.success());
         let pid_again = std::fs::read_to_string(node.join("node.lock")).unwrap();
         assert_ne!(pid_again.trim().parse::<u32>().unwrap(), pid);
-        let stopped = day(&["daemon", "stop"]);
+        let stopped = day(&["node", "stop"]);
         assert!(stopped.status.success(), "{}", text(&stopped));
     }
 }

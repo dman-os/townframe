@@ -1,19 +1,19 @@
 # Commands on a directory with no node say so
 
 `status`, `exec` and `daemon` need a node; without one they fail with a pointer to
-`day init` instead of creating anything.
+`day node init` instead of creating anything.
 
 ```console
-$ day status
+$ day node status
 ? 1
-[..]node not initialized at resolved path; run `day init`[..]
+[..]node not initialized at resolved path; run `day node init`[..]
 
 $ day exec org.example.nothing.here
 ? 1
-[..]node not initialized at resolved path; run `day init`[..]
+[..]node not initialized at resolved path; run `day node init`[..]
 
-$ day daemon start
+$ day node start
 ? 1
-[..]node not initialized at resolved path; run `day init`[..]
+[..]node not initialized at resolved path; run `day node init`[..]
 
 ```
