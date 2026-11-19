@@ -204,9 +204,9 @@ async fn activate(cx: Context) -> Result<(), Error> {
     cx.publish::<Report>(move || {
         // The same granted call from a view's Dioxus resource: Dioxus polls it from the
         // synchronous `mount` and `dispatch` exports, where no component-model task exists.
-        let view_cx = view_cx.clone();
+        let echo_cx = view_cx.clone();
         let resource = use_resource(move || {
-            let cx = view_cx.clone();
+            let cx = echo_cx.clone();
             async move {
                 outcome(
                     cx.call(Echo {
