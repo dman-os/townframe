@@ -1,4 +1,4 @@
-# `exec` with no daemon
+# `exec` with no server
 
 The raw dispatch porcelain: the answer is the operation's JSON output. `x` is the short
 spelling of `exec`.

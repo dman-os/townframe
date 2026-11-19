@@ -1,6 +1,6 @@
 # Commands on a directory with no node say so
 
-`status`, `exec` and `daemon` need a node; without one they fail with a pointer to
+`status`, `exec` and `start` need a node; without one they fail with a pointer to
 `day node init` instead of creating anything.
 
 ```console
