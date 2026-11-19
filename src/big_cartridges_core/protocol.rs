@@ -3,7 +3,7 @@
 //!
 //! Every operation names its caller by the request's `Authorization: Bearer` credential (the
 //! envelope's HTTP metadata, `Authorization::from_metadata`), never by a body field; a request
-//! without one fails with `ContextError::Unauthenticated`. The credential is the operator's own identity
+//! without one fails with `ContextError::Unauthenticated`. The credential is the operator's root
 //! capability, or a handle the registry minted through [`MintCartridgesCapability`] that carries a
 //! [`CartridgesScope`]. An arbitrary actor presenting its identity is refused. The registry does no
 //! enablement: it versions what is published and keeps a published version immutable, and each
@@ -37,7 +37,7 @@ use std::collections::BTreeSet;
 /// What a minted registry handle may do. Without `publish` it reads the registry (list, get,
 /// watch); with it, it also publishes and removes. `namespaces` narrows publishing and removal to
 /// cartridges whose id lives under one of those DIDs; absent means any namespace, which is what the
-/// operator's own identity has. A handle can only be minted with a scope its minter covers, so a
+/// operator's root capability has. A handle can only be minted with a scope its minter covers, so a
 /// namespace set only ever narrows.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
