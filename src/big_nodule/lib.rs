@@ -147,7 +147,7 @@ pub fn schema_group() -> SchemaRegistrationGroup<'static> {
 /// drawers services it reads config from and applies grants through, the node's config drawer, the
 /// registry drawer whose documents installs pin and the shared config drawer (from
 /// [`ensure_shared_config_drawer`]) that holds each cartridge's config document, the subsystem actor it provisions nodule actors under and that actor's registry path, the
-/// namespace it mints management handles in, the operator whose identity administers nodules,
+/// namespace it mints management handles in,
 /// the dispatch router it registers each admitted nodule's implemented operations in, the dispatch
 /// client and dispatch handle it mints every nodule's own handle from (a
 /// handle covering every authority but no privileged method), the optional executor that hosts their
@@ -166,7 +166,6 @@ pub struct NodulesConfig {
     pub actor: OpenedActor,
     pub actor_path: String,
     pub namespace: Namespace,
-    pub operator: Uuid7,
     pub dispatch: Arc<big_dispatch::Router>,
     pub dispatch_client: Client<DispatchProtocol>,
     pub dispatch_authority: CapId,
@@ -197,7 +196,6 @@ pub struct NoduleService {
     /// The authority service, for the two methods a cartridge's own actor presents a dispatch
     /// handle to (see [`Self::presenter`]).
     authority: Client<AuthorityProtocol>,
-    operator: Uuid7,
     state: state::Handle,
 }
 
@@ -205,7 +203,7 @@ type Res<T> = std::result::Result<T, NodulesError>;
 
 /// Who presents a call to one of the methods a cartridge makes on its own behalf.
 enum Presenter {
-    /// The operator's own identity.
+    /// The operator, presenting its root capability.
     Operator,
     /// An actor holding a handle bound to it, which for a call through dispatch is a nodule's
     /// actor presenting the handle dispatch minted for it.
@@ -299,13 +297,14 @@ impl NoduleService {
             )
             .await
             .map_err(authority_error)?;
-        let identity = resolved.actor.map(|actor| actor.actor_id);
-        let actor = identity
-            .or(resolved.capability.subject)
-            .ok_or(NodulesError::Denied)?;
-        if identity == Some(self.operator) {
+        if resolved.is_operator_root() {
             return Ok(Presenter::Operator);
         }
+        let actor = resolved
+            .actor
+            .map(|actor| actor.actor_id)
+            .or(resolved.capability.subject)
+            .ok_or(NodulesError::Denied)?;
         let signer = self
             .authority
             .call(
@@ -503,7 +502,7 @@ impl NoduleService {
         }
     }
 
-    /// What the caller may administer: everything for the operator's identity, the scope of a
+    /// What the caller may administer: everything for the operator's root capability, the scope of a
     /// handle this domain minted, nothing for any other identity. Another actor is refused
     /// rather than looked up in a grant table: this domain has no entitlements beyond the
     /// handles it minted.
@@ -512,7 +511,7 @@ impl NoduleService {
             return Err(NodulesError::Denied);
         }
         match &caller.authority {
-            DomainAuthority::Identity(actor) if *actor == self.operator => Ok(None),
+            DomainAuthority::Operator => Ok(None),
             DomainAuthority::Identity(_) => Err(NodulesError::Denied),
             DomainAuthority::Scoped(scope) => Ok(Some(scope)),
         }
@@ -739,7 +738,7 @@ impl NoduleService {
             .await
     }
 
-    /// Routes are node-wide, so only the operator's own identity may set them: a scoped handle
+    /// Routes are node-wide, so only the operator's root capability may set them: a scoped handle
     /// manages named cartridges and never decides where every caller's data goes.
     async fn set_method_route(
         &self,
@@ -988,7 +987,6 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
     let service = Arc::new(NoduleService {
         capabilities,
         authority,
-        operator: config.operator,
         state,
     });
     let (host, host_stop) = Host::new(Arc::clone(&service));

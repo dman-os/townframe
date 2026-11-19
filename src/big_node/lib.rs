@@ -375,7 +375,6 @@ impl BigNode {
                 sql: config.sql.clone(),
                 authority: authority.client.clone(),
                 namespace: blobs_namespace,
-                operator: authority.service.operator_uuid(),
             })
             .await?;
             stop.stages.push(Stage::Service(blobs_stop));
@@ -630,7 +629,6 @@ async fn boot_cartridges(
         registry_drawer: registry_drawer.clone(),
         actor: actor.clone(),
         namespace,
-        operator: authority.service.operator_uuid(),
         blobs: Arc::clone(&blobs.service),
         node_key: big_cartridges::NodeKey {
             public_key: authority.service.node_public_key(),
@@ -668,10 +666,10 @@ pub fn schema_groups() -> Vec<(&'static str, big_cabinet::SchemaRegistrationGrou
     groups
 }
 
-/// Opens the drawer access policy the docs service consults, as the drawers actor. The
-/// authority's root identity is handed to it as the operator, the cabinet's superuser: it reaches
-/// every drawer on this node without a standing grant, so it can lend a handle on a drawer that
-/// synced in from a peer, where no local actor holds one.
+/// Opens the drawer access policy the docs service consults, as the drawers actor. The policy
+/// knows the operator only as the holder of the authority's root capability, the cabinet's
+/// superuser: that capability reaches every drawer on this node without a standing grant, so it
+/// can lend a handle on a drawer that synced in from a peer, where no local actor holds one.
 async fn open_drawer_access(
     repo: &SharedBigRepo,
     authority: &Authority,
@@ -689,7 +687,6 @@ async fn open_drawer_access(
         authority.client.clone(),
         drawers_actor.capability,
         namespace,
-        authority.service.operator_uuid(),
         sql.clone(),
         Arc::clone(&indexes.datum_set),
     )
@@ -906,7 +903,7 @@ where
         .capability_id;
     // The nodule service mints each routine's blobs handle for the blobs operations its permbinds
     // name (ADR 049 §6.2), so it holds, as their delegator, a handle for every operation-level
-    // blobs flag. Only the operator's identity mints a blobs handle unscoped by another, so the
+    // blobs flag. Only the operator's root capability mints a blobs handle unscoped by another, so the
     // operator introduces this one to the service's actor.
     let blobs_delegator = blobs
         .client
@@ -934,7 +931,6 @@ where
         actor: nodules_actor.clone(),
         actor_path: "nodules".into(),
         namespace,
-        operator: authority.service.operator_uuid(),
         dispatch: Arc::clone(&dispatch.router),
         dispatch_client: dispatch.client.clone(),
         dispatch_authority,
@@ -976,7 +972,6 @@ async fn boot_dispatch(
     let (dispatch, dispatch_stop) = big_dispatch::boot(DispatchConfig {
         authority: authority.client.clone(),
         namespace,
-        operator: authority.service.operator_uuid(),
     });
     stop.stages.push(Stage::Service(dispatch_stop));
     let capability = dispatch

@@ -1,4 +1,5 @@
 use super::*;
+use crate::authority::Holder;
 use crate::test_poll::Poller;
 use big_cabinet_core::authority::AttenuateCapability;
 use big_cabinet_core::authority::AuthorityServiceError;
@@ -189,7 +190,7 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
             .access
             .check(
                 &RequestContext::root(),
-                signer.actor.actor_id,
+                Holder::Actor(signer.actor.actor_id),
                 AccessRequest::Write(&created.doc_id),
             )
             .await
@@ -945,19 +946,19 @@ impl DocAccess for InterruptedPlacement {
     fn prove<'a>(
         &'a self,
         context: &'a RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         scope: &'a DocScope,
     ) -> AccessFuture<'a, Vec<CapId>> {
-        self.ledger.prove(context, actor, scope)
+        self.ledger.prove(context, holder, scope)
     }
 
     fn check<'a>(
         &'a self,
         context: &'a RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         request: AccessRequest<'a>,
     ) -> AccessFuture<'a, bool> {
-        self.ledger.check(context, actor, request)
+        self.ledger.check(context, holder, request)
     }
 
     fn place<'a>(
@@ -990,7 +991,11 @@ async fn assert_doc_access(
             for &(subject, expected) in subjects {
                 assert_eq!(
                     access
-                        .check(&RequestContext::root(), subject.actor.actor_id, request)
+                        .check(
+                            &RequestContext::root(),
+                            Holder::Actor(subject.actor.actor_id),
+                            request
+                        )
                         .await
                         .unwrap(),
                     expected
@@ -1336,7 +1341,7 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
         fn prove<'a>(
             &'a self,
             _context: &'a RequestContext,
-            _actor: Uuid7,
+            _holder: Holder,
             scope: &'a DocScope,
         ) -> AccessFuture<'a, Vec<CapId>> {
             assert_eq!(scope.drawers, self.drawers);
@@ -1346,7 +1351,7 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
         fn check<'a>(
             &'a self,
             _context: &'a RequestContext,
-            _actor: Uuid7,
+            _holder: Holder,
             _request: AccessRequest<'a>,
         ) -> AccessFuture<'a, bool> {
             panic!("reference queries must not check identity grants")
@@ -1537,24 +1542,24 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
 async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_dependency() {
     struct Policy {
         ledger: Arc<LedgerAccess>,
-        proofs: std::sync::Mutex<Vec<(Uuid7, DocScope)>>,
+        proofs: std::sync::Mutex<Vec<(Holder, DocScope)>>,
     }
 
     impl DocAccess for Policy {
         fn prove<'a>(
             &'a self,
             context: &'a RequestContext,
-            actor: Uuid7,
+            holder: Holder,
             scope: &'a DocScope,
         ) -> AccessFuture<'a, Vec<CapId>> {
-            self.proofs.lock().unwrap().push((actor, scope.clone()));
-            self.ledger.prove(context, actor, scope)
+            self.proofs.lock().unwrap().push((holder, scope.clone()));
+            self.ledger.prove(context, holder, scope)
         }
 
         fn check<'a>(
             &'a self,
             _context: &'a RequestContext,
-            _actor: Uuid7,
+            _holder: Holder,
             _request: AccessRequest<'a>,
         ) -> AccessFuture<'a, bool> {
             panic!("mint and scoped invocation must not perform identity checks")
@@ -1612,7 +1617,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
     assert_eq!(dependencies.len(), objects.len());
     assert_eq!(
         node.access
-            .prove(&context, owner.actor.actor_id, &scope)
+            .prove(&context, Holder::Actor(owner.actor.actor_id), &scope)
             .await
             .unwrap(),
         dependencies
@@ -1621,7 +1626,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
     overlapping.read.insert(write_doc.clone(), DatumKinds::All);
     assert_eq!(
         node.access
-            .prove(&context, owner.actor.actor_id, &overlapping)
+            .prove(&context, Holder::Actor(owner.actor.actor_id), &overlapping)
             .await
             .unwrap(),
         dependencies
@@ -1714,8 +1719,9 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
         node.capability(&owner, unsupported.clone()).await,
         Err(DocsError::Denied)
     );
-    let mut expected = vec![(owner.actor.actor_id, scope); objects.len() * 3];
-    expected.push((owner.actor.actor_id, unsupported));
+    let holder = Holder::Actor(owner.actor.actor_id);
+    let mut expected = vec![(holder, scope); objects.len() * 3];
+    expected.push((holder, unsupported));
     assert_eq!(*policy.proofs.lock().unwrap(), expected);
     node.stop().await;
 }
@@ -1896,7 +1902,7 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
     let namespace = node.docs_namespace;
     let access = Arc::clone(&node.access);
     let gates = access
-        .prove(&context, owner.actor.actor_id, &scope)
+        .prove(&context, Holder::Actor(owner.actor.actor_id), &scope)
         .await
         .unwrap();
     assert_eq!(gates.len(), 3);
@@ -2041,13 +2047,15 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
     node.start().await.unwrap();
     let fresh_gates = node
         .access
-        .prove(&context, owner.actor.actor_id, &scope)
+        .prove(&context, Holder::Actor(owner.actor.actor_id), &scope)
         .await
         .unwrap();
     assert_eq!(fresh_gates.len(), gates.len());
     assert!(fresh_gates.iter().all(|gate| !gates.contains(gate)));
     assert!(matches!(
-        access.prove(&context, owner.actor.actor_id, &scope).await,
+        access
+            .prove(&context, Holder::Actor(owner.actor.actor_id), &scope)
+            .await,
         Err(AccessError::Refused(_))
     ));
     let fresh = node.capability(&owner, scope).await.unwrap();

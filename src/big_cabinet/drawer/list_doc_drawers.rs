@@ -39,10 +39,10 @@ impl DrawerService {
                 // Identity access on a drawer is what `Projection::granted` computes over the
                 // bounds the doc's drawers confer; offering it this drawer's bound alone yields
                 // what the actor reaches through this drawer and no other.
-                DomainAuthority::Identity(actor) => core
+                DomainAuthority::Operator | DomainAuthority::Identity(_) => core
                     .granted(
                         context,
-                        *actor,
+                        caller.authority.holder().expect("not a scoped authority"),
                         BTreeMap::from([(drawer_id.clone(), bound)]),
                     )
                     .await?

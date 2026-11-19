@@ -38,7 +38,6 @@ use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::Bundle;
 use big_cabinet_core::datum::Universe;
-use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsError;
@@ -320,8 +319,7 @@ pub type NodeSigner = Arc<dyn Fn(&[u8]) -> [u8; 64] + Send + Sync>;
 
 /// What the embedder hands the service: the authority it mints handles from, the docs service it
 /// reads and writes the registry drawer through, the drawer (from [`ensure_registry_drawer`]) and
-/// the actor holding Admin on it, the namespace it mints handles in, the operator whose identity
-/// administers the registry, the blob service it checks artifact bytes against, the node's
+/// the actor holding Admin on it, the namespace it mints handles in, the blob service it checks artifact bytes against, the node's
 /// publisher key, and the database.
 pub struct CartridgesConfig {
     pub authority: Client<AuthorityProtocol>,
@@ -329,7 +327,6 @@ pub struct CartridgesConfig {
     pub registry_drawer: DrawerId,
     pub actor: OpenedActor,
     pub namespace: Namespace,
-    pub operator: Uuid7,
     pub blobs: Arc<BlobService>,
     pub drawers: Client<DrawersProtocol>,
     pub node_key: NodeKey,
@@ -339,7 +336,6 @@ pub struct CartridgesConfig {
 /// The hosted surface: it settles who the caller is, then hands the work to the registry.
 pub struct CartridgeService {
     capabilities: DomainCapabilities,
-    operator: Uuid7,
     registry: Arc<Registry>,
     /// The `did:key` of the node's key, and the key's signer: an unsigned envelope in this
     /// namespace is signed by the node on publish.
@@ -361,7 +357,7 @@ impl CartridgeService {
             .map_err(authority_error)
     }
 
-    /// What the caller may do: everything for the operator's identity, the scope of a handle this
+    /// What the caller may do: everything for the operator's root capability, the scope of a handle this
     /// domain minted, nothing for any other identity.
     fn scope_of<'a>(
         &self,
@@ -371,7 +367,7 @@ impl CartridgeService {
             return Err(CartridgesError::Denied);
         }
         match &caller.authority {
-            DomainAuthority::Identity(actor) if *actor == self.operator => Ok(None),
+            DomainAuthority::Operator => Ok(None),
             DomainAuthority::Identity(_) => Err(CartridgesError::Denied),
             DomainAuthority::Scoped(scope) => Ok(Some(scope)),
         }
@@ -737,7 +733,6 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
     let publisher = did_key(&config.node_key.public_key);
     let service = Arc::new(CartridgeService {
         capabilities,
-        operator: config.operator,
         registry,
         publisher: publisher.clone(),
         node_key: config.node_key,

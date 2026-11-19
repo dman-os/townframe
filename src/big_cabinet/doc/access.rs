@@ -12,6 +12,7 @@
 //! for tests, not a stand-in.
 
 use crate::authority::DomainAuthority;
+use crate::authority::Holder;
 use crate::doc::DocsService;
 use crate::grants::GrantError;
 use crate::grants::Grants;
@@ -56,15 +57,15 @@ pub trait DocAccess: Send + Sync + 'static {
     fn prove<'a>(
         &'a self,
         context: &'a RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         scope: &'a DocScope,
     ) -> AccessFuture<'a, Vec<CapId>>;
 
-    /// Whether `actor` may perform `request`.
+    /// Whether `holder` may perform `request`.
     fn check<'a>(
         &'a self,
         context: &'a RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         request: AccessRequest<'a>,
     ) -> AccessFuture<'a, bool>;
 
@@ -79,12 +80,12 @@ pub trait DocAccess: Send + Sync + 'static {
         placement: &'a str,
     ) -> AccessFuture<'a, ()>;
 
-    /// Every document in `drawer_id` that `actor` may read (`Read` or stronger) through that
-    /// drawer, or `Ok(None)` when `actor` does not hold at least `Read` on `drawer_id`.
+    /// Every document in `drawer_id` that `holder` may read (`Read` or stronger) through that
+    /// drawer, or `Ok(None)` when `holder` does not hold at least `Read` on `drawer_id`.
     fn readable_in_drawer<'a>(
         &'a self,
         _context: &'a RequestContext,
-        _actor: Uuid7,
+        _holder: Holder,
         _drawer_id: &'a DocId,
     ) -> AccessFuture<'a, Option<BTreeSet<DocId>>> {
         Box::pin(async {
@@ -158,10 +159,15 @@ impl DocAccess for LedgerAccess {
     fn prove<'a>(
         &'a self,
         context: &'a RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         scope: &'a DocScope,
     ) -> AccessFuture<'a, Vec<CapId>> {
         Box::pin(async move {
+            // Standing grants name actors, and the operator holds none: its authority is the
+            // drawers' (see `Holder`), which this policy does not have.
+            let Holder::Actor(actor) = holder else {
+                return Err(AccessError::Refused("document scope is not granted".into()));
+            };
             if !scope.drawers.is_empty() {
                 return Err(AccessError::Refused(
                     "drawers are not configured on this repository".into(),
@@ -207,10 +213,13 @@ impl DocAccess for LedgerAccess {
     fn check<'a>(
         &'a self,
         context: &'a RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         request: AccessRequest<'a>,
     ) -> AccessFuture<'a, bool> {
         Box::pin(async move {
+            let Holder::Actor(actor) = holder else {
+                return Ok(false);
+            };
             let proof = self
                 .grants
                 .matching(context, actor, &[Self::object(request)])
@@ -266,9 +275,13 @@ impl DocsService {
         // without a per-document `authorize`, so its ids are checked once here.
         request.scope.ensure_doc_ids()?;
         let dependencies = match &caller.authority {
-            DomainAuthority::Identity(actor) => self
+            DomainAuthority::Operator | DomainAuthority::Identity(_) => self
                 .access
-                .prove(context, *actor, &request.scope)
+                .prove(
+                    context,
+                    caller.authority.holder().expect("not a scoped authority"),
+                    &request.scope,
+                )
                 .await
                 .map_err(super::access_error)?,
             DomainAuthority::Scoped(scope) => {
@@ -364,7 +377,7 @@ mod tests {
         fn prove<'a>(
             &'a self,
             _context: &'a RequestContext,
-            _actor: Uuid7,
+            _holder: Holder,
             _scope: &'a DocScope,
         ) -> AccessFuture<'a, Vec<CapId>> {
             panic!("resource filtering must not prove identity grants")
@@ -373,7 +386,7 @@ mod tests {
         fn check<'a>(
             &'a self,
             _context: &'a RequestContext,
-            _actor: Uuid7,
+            _holder: Holder,
             _request: AccessRequest<'a>,
         ) -> AccessFuture<'a, bool> {
             panic!("resource filtering must not check identity grants")

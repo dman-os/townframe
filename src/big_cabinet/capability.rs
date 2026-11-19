@@ -213,6 +213,7 @@ impl DomainCapabilities {
                 },
             )
             .await?;
+        let is_operator_root = resolved.is_operator_root();
         let signing = if authorization.signer == authorization.authority {
             resolved.capability.clone()
         } else {
@@ -223,7 +224,11 @@ impl DomainCapabilities {
             .await?;
         match resolved.actor {
             Some(actor) => Ok(Invocation {
-                authority: DomainAuthority::Identity(actor.actor_id),
+                authority: if is_operator_root {
+                    DomainAuthority::Operator
+                } else {
+                    DomainAuthority::Identity(actor.actor_id)
+                },
                 handle: authorization.authority,
                 via: authorization.signer,
                 originating_actor: Some(actor.actor_id),
@@ -299,5 +304,102 @@ impl DomainCapabilities {
                 },
             )
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authority::Authority;
+    use crate::authority::{self};
+    use big_cabinet_core::authority::AttenuateCapability;
+    use big_cabinet_core::authority::OpenActor;
+    use secrets_rs::SecretStore;
+    use std::sync::Arc;
+
+    /// A domain recognizes the operator by the root capability alone: an actor under the operator
+    /// holding every right is an ordinary identity, and a capability derived from the root is
+    /// no identity at all, so neither is admitted as the operator.
+    #[tokio::test]
+    async fn only_the_root_capability_presents_as_the_operator() {
+        let sql = sqlite_rs::test_support::db(&[]).unwrap().clone();
+        let store = keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
+        let secrets = SecretStore::boot_with_store(store).await.unwrap();
+        let (authority, stop): (Authority, _) =
+            authority::boot(&secrets, "test-node", sql).await.unwrap();
+        let namespace = authority
+            .service
+            .open_namespace(Uuid7::new())
+            .await
+            .unwrap();
+        let domain = DomainCapabilities::new(authority.client.clone(), namespace, "test/");
+        let context = RequestContext::root();
+
+        let root = domain
+            .source::<()>(&context, Authorization::identity(authority.root))
+            .await
+            .unwrap();
+        assert!(matches!(root.authority, DomainAuthority::Operator));
+        assert_eq!(
+            root.signer.actor_id,
+            authority.service.operator_uuid(),
+            "the operator signs as its own actor"
+        );
+
+        let child = authority
+            .client
+            .call(
+                context.child(),
+                OpenActor {
+                    parent: authority.root,
+                    path: "child".into(),
+                    rights: Rights::all(),
+                },
+            )
+            .await
+            .unwrap();
+        let invocation = domain
+            .source::<()>(&context, Authorization::identity(child.capability))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                invocation.authority,
+                DomainAuthority::Identity(actor) if actor == child.actor.actor_id
+            ),
+            "an actor holding every right under the operator is not the operator"
+        );
+
+        // The root's own derivative is a capability over the operator object that no domain
+        // minted, and not an identity capability: refused rather than read as the operator.
+        let derived = authority
+            .client
+            .call(
+                context.child(),
+                AttenuateCapability {
+                    capability: authority.root,
+                    rights: Rights::USE,
+                },
+            )
+            .await
+            .unwrap();
+        let refused = domain
+            .source::<()>(
+                &context,
+                Authorization {
+                    authority: derived.capability_id,
+                    signer: authority.root,
+                },
+            )
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(ClientError::Method(AuthorityServiceError::Unauthorized))
+            ),
+            "{:?}",
+            refused.map(|_| ())
+        );
+        stop.stop().await;
     }
 }
