@@ -1171,6 +1171,7 @@ async fn blobs_handles_are_minted_by_the_operator_and_a_handle_only_narrows() {
         BlobsScope {
             put: true,
             read: BTreeSet::from([a, b]),
+            ..Default::default()
         },
         Rights::USE | Rights::NARROW,
     )
@@ -1188,6 +1189,7 @@ async fn blobs_handles_are_minted_by_the_operator_and_a_handle_only_narrows() {
             BlobsScope {
                 put: true,
                 read: BTreeSet::from([a, b, c]),
+                ..Default::default()
             },
             Rights::USE,
         )
@@ -1226,5 +1228,143 @@ async fn blobs_handles_are_minted_by_the_operator_and_a_handle_only_narrows() {
         ),
         "{anonymous:?}"
     );
+    shutdown(node, stop).await;
+}
+
+/// A handle reaching a drawer reads the blobs its inventories pin, through real handles: the
+/// operator mints the reach, a narrower handle can only be minted for a drawer it holds at no more
+/// than its own access, and a blob the drawer does not pin is refused.
+#[tokio::test]
+async fn a_blobs_handle_reaching_a_drawer_reads_what_the_drawer_inventories_pin() {
+    let secrets = secrets().await;
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let sql = runtime.ephemeral(&[]).unwrap();
+    let (node, stop) = BigNode::boot(config(
+        Arc::clone(&secrets),
+        sql.clone(),
+        big_repo::Storage::memory(&runtime).unwrap(),
+    ))
+    .await
+    .unwrap();
+    // A drawer is its public root doc; its default inventories hang off it as meta docs.
+    let drawer = node.drawers.local().present_id.clone();
+    let unheld = DocId::new([9; 32]);
+    let info = put_bytes(&node, b"a blob a drawer inventories").await;
+    let loose = put_bytes(&node, b"a blob no drawer inventories").await;
+    let placement = format!("drawer {}", node.drawers.local().present_id);
+    node.docs
+        .client
+        .call(
+            RequestContext::root(),
+            CreateDoc {
+                capability: capability(
+                    &node,
+                    DocScope {
+                        create: BTreeSet::from([placement.clone()]),
+                        ..Default::default()
+                    },
+                )
+                .await,
+                command: "drawer-reach-content".to_owned().try_into().unwrap(),
+                placement,
+                datums: BTreeMap::from([(
+                    DatumKey::from_text(big_blobs_core::Blob::ID, "main").unwrap(),
+                    json!({
+                        "mime": "application/octet-stream",
+                        "digest": info.blob_id.digest_str(),
+                        "lengthOctets": info.length_octets,
+                    }),
+                )]),
+            },
+        )
+        .await
+        .unwrap();
+    // The pins reach the admission projection after the inventory part gains the member, so wait
+    // on its change feed until the digest is pinned in an inventory of the drawer.
+    let mut admission_changes = node.blob_workers.mirrors.subscribe_changes();
+    loop {
+        let pinned: Vec<(String,)> = sql
+            .query(
+                "SELECT pair.digest FROM big_blobs_admission_pairs AS pair JOIN big_cabinet_drawer_meta_docs AS meta ON meta.doc_id = pair.inventory_id WHERE meta.drawer_id = ? AND pair.digest = ? AND pair.length_octets IS NOT NULL",
+                (drawer.to_string(), info.blob_id.to_string()),
+            )
+            .await
+            .unwrap()
+            .all()
+            .unwrap();
+        if !pinned.is_empty() {
+            break;
+        }
+        admission_changes.changed().await.unwrap();
+    }
+
+    let mint = async |authorization: Authorization, drawers: &[(&DocId, DrawerAccess)], rights| {
+        node.blobs
+            .client
+            .call_with(
+                RequestContext::root(),
+                authorization.metadata(),
+                MintBlobsCapability {
+                    scope: BlobsScope {
+                        drawers: drawers
+                            .iter()
+                            .map(|(drawer, access)| ((*drawer).clone(), *access))
+                            .collect(),
+                        ..Default::default()
+                    },
+                    rights,
+                    subject: None,
+                },
+            )
+            .await
+            .map(|capability| Authorization {
+                authority: capability.capability_id,
+                signer: authorization.signer,
+            })
+    };
+    let operator = operator(&node);
+    let reading = mint(
+        operator,
+        &[(&drawer, DrawerAccess::Read)],
+        Rights::USE | Rights::NARROW,
+    )
+    .await
+    .unwrap();
+    let unheld_reach = mint(operator, &[(&unheld, DrawerAccess::Read)], Rights::USE)
+        .await
+        .unwrap();
+    let read = async |handle: Authorization, blob: BlobId| {
+        let body = node
+            .blobs
+            .read(RequestContext::root(), handle.authority, blob, None)
+            .await?;
+        Ok::<_, ClientError<BlobsError>>(body.collect(1 << 20).await.unwrap())
+    };
+    assert_eq!(
+        read(reading, info.blob_id).await.unwrap().as_ref(),
+        b"a blob a drawer inventories"
+    );
+    for (handle, blob) in [(reading, loose.blob_id), (unheld_reach, info.blob_id)] {
+        assert!(
+            matches!(
+                read(handle, blob).await,
+                Err(ClientError::Method(BlobsError::Denied))
+            ),
+            "{blob}"
+        );
+    }
+    // A handle mints only drawer reaches it holds, at no more than the access it holds.
+    mint(reading, &[(&drawer, DrawerAccess::Read)], Rights::USE)
+        .await
+        .unwrap();
+    for refused in [
+        mint(reading, &[(&drawer, DrawerAccess::Write)], Rights::USE).await,
+        mint(reading, &[(&unheld, DrawerAccess::Read)], Rights::USE).await,
+    ] {
+        assert!(
+            matches!(refused, Err(ClientError::Method(BlobsError::Denied))),
+            "{refused:?}"
+        );
+    }
     shutdown(node, stop).await;
 }
