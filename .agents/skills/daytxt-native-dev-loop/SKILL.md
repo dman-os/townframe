@@ -3,6 +3,10 @@ name: daytxt-native-dev-loop
 description: Run, screenshot, and semantically inspect the daytxt Dioxus/Blitz native desktop app. Use when building or visually verifying src, when the wrapped Dioxus serve process misbehaves, when taking app screenshots under niri, or when driving the native app with accessibility-cli over AT-SPI.
 ---
 
+> **Agents: start with `daytxt-gui-loop`.** It screenshots, inspects and scripts the shell headlessly
+> (web build in WebKit/Chromium) without a window, focus or accessibility on the operator's session.
+> This native loop is for what only the desktop app has.
+
 # daytxt native dev loop
 
 Use this for any build/run/screenshot/inspect cycle on `src` (the Dioxus 0.8-alpha
