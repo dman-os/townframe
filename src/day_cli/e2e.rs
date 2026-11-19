@@ -985,6 +985,30 @@ mod blackbox {
         );
     }
 
+    /// Colour is for terminals: tracing written to a pipe carries no ANSI escapes even when
+    /// `NO_COLOR` is not set (the formatter colours unconditionally unless it is told not to).
+    #[test]
+    fn tracing_to_a_pipe_carries_no_colour() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        let output = Command::new(day_bin())
+            .env("RUST_LOG", "debug")
+            .env_remove("NO_COLOR")
+            .env_remove("CLICOLOR_FORCE")
+            .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+            .arg("--node")
+            .arg(sandbox.node())
+            .args(["node", "status", "--json"])
+            .output()
+            .unwrap();
+        assert!(!output.stderr.is_empty(), "debug tracing reaches stderr");
+        assert!(
+            !output.stderr.contains(&0x1b),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// A server killed without cleaning up leaves a socket and no lock: every command still
     /// works, and `node stop` and `node start` clean up after it.
     #[test]
