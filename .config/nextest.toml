@@ -23,11 +23,13 @@ slow-timeout = { period = "60s", terminate-after = 8 }
 [profile.ci]
 fail-fast = false
 retries = { backoff = "exponential", count = 3, delay = "2s", max-delay = "10s", jitter = true }
+# Test output stays out of the job log (its volume broke the GitHub pipelines); failures carry
+# their output in the JUnit file instead, which each job uploads as an artifact.
 failure-output = "never"
  
 [profile.ci.junit]
 path = "target/nextest/ci/results.xml"
-store-failure-output = false
+store-failure-output = true
 store-success-output = false
 
 # Nightly cron runs keep the CI retry schedule but report any test that needed a retry as a
@@ -39,5 +41,5 @@ flaky-result = "fail"
 
 [profile.nightly.junit]
 path = "target/nextest/ci/results.xml"
-store-failure-output = false
+store-failure-output = true
 store-success-output = false
