@@ -62,6 +62,9 @@ use service_core_rs::xrpc::bearer_header_value;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+/// How many rewrites deep [`Caller::commit_holders`] follows a commit back.
+const MAX_REWRITE_HOPS: usize = 16;
+
 /// What a caller needs to call cabinet methods on behalf of whoever it presents the authority of:
 /// the transport to the node, the capability it presents (none when the node already admits the
 /// connection as its operator), and the base of the command ids.
@@ -217,18 +220,67 @@ impl<H: HttpTransport> Caller<H> {
         Ok((read.heads, read.datums))
     }
 
-    /// The documents in `drawer`, and in the drawers it reaches, that hold the commit `sha`: an
-    /// intxt's commits document holds `gitCommit/<sha>` for every commit the intxt holds, so a
-    /// hit is membership. The query is anchored on the drawer (`And[InDrawer, HasKey]`), which
-    /// is what lets a capability of less than node-wide authority ask it, and the caller needs
-    /// Read on the drawer. It is a poll from the start with no hold, paged until caught up, and
-    /// asks only for the one key, so a page carries no values.
+    /// The documents in `drawer`, and in the drawers it reaches, that hold the commit `sha` or
+    /// any commit it rewrote: an intxt's commits document holds `gitCommit/<sha>` for every
+    /// commit the intxt holds, so a hit is membership. `add` also writes
+    /// `rewrittenFrom/<new sha>` beside a matched predecessor, and the lookup follows those back
+    /// whether or not `sha` itself is held (each hop is the same query on the new slot), so the
+    /// answer holds both the intxt of the new commit and the intxt whose work sits on a
+    /// predecessor. A chain is followed at most `MAX_REWRITE_HOPS` deep, and a commit met twice
+    /// is not asked again, so a cycle ends.
+    ///
+    /// The query is anchored on the drawer (`And[InDrawer, HasKey]`), which is what lets a
+    /// capability of less than node-wide authority ask it, and the caller needs Read on the
+    /// drawer.
     pub async fn commit_holders(
         &self,
         drawer: &DrawerId,
         sha: &str,
     ) -> Result<BTreeSet<DocId>, IntxtError> {
-        let commit = key(work::GitCommit::ID, sha)?;
+        let mut seen = BTreeSet::from([sha.to_owned()]);
+        let mut wanted = vec![sha.to_owned()];
+        let mut holders = BTreeSet::new();
+        for _ in 0..=MAX_REWRITE_HOPS {
+            let mut predecessors = Vec::new();
+            for sha in &wanted {
+                holders.extend(
+                    self.key_holders(drawer, key(work::GitCommit::ID, sha)?)
+                        .await?,
+                );
+                let from_key = key(work::RewrittenFrom::ID, sha)?;
+                for doc in self.key_holders(drawer, from_key.clone()).await? {
+                    // The poll just said the document holds it.
+                    let (_, value) = self.try_read(&doc, &from_key).await?;
+                    let value = value.ok_or_else(|| {
+                        IntxtError::Invalid(format!(
+                            "{doc} was found holding {from_key} and does not"
+                        ))
+                    })?;
+                    let from: work::RewrittenFrom =
+                        serde_json::from_value(value).map_err(|error| {
+                            IntxtError::Invalid(format!("{from_key} in {doc}: {error}"))
+                        })?;
+                    if seen.insert(from.predecessor.clone()) {
+                        predecessors.push(from.predecessor);
+                    }
+                }
+            }
+            if predecessors.is_empty() {
+                break;
+            }
+            wanted = predecessors;
+        }
+        Ok(holders)
+    }
+
+    /// The documents in `drawer`, and in the drawers it reaches, that hold the datum `commit`:
+    /// a poll from the start with no hold, paged until caught up, asking only for the one key,
+    /// so a page carries no values.
+    async fn key_holders(
+        &self,
+        drawer: &DrawerId,
+        commit: DatumKey,
+    ) -> Result<BTreeSet<DocId>, IntxtError> {
         let predicate = Predicate::And {
             clauses: vec![
                 Predicate::InDrawer {
@@ -243,7 +295,7 @@ impl<H: HttpTransport> Caller<H> {
         };
         let datums = DatumSelection::Of {
             tags: BTreeSet::new(),
-            keys: [commit].into(),
+            keys: [commit.clone()].into(),
         };
         let capability = self
             .doc_capability(DocScope {
@@ -291,7 +343,7 @@ impl<H: HttpTransport> Caller<H> {
             }
             if page.through <= after {
                 return Err(IntxtError::Invalid(format!(
-                    "the poll for {sha} in {drawer} is not caught up and made no progress past {after}"
+                    "the poll for {commit} in {drawer} is not caught up and made no progress past {after}"
                 )));
             }
             after = page.through;
