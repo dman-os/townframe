@@ -10,13 +10,17 @@ pub enum PeersCommands {
         ticket: String,
     },
     /// List the bootstrap peers and, when a server is serving, who it is connected to
-    Ls,
+    Ls {
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub async fn run(command: PeersCommands) -> Res<ExitCode> {
     match command {
         PeersCommands::Add { ticket } => add(&ticket).await,
-        PeersCommands::Ls => ls().await,
+        PeersCommands::Ls { json } => ls(json).await,
     }
 }
 
@@ -53,7 +57,7 @@ async fn add(ticket: &str) -> Res<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn ls() -> Res<ExitCode> {
+async fn ls(as_json: bool) -> Res<ExitCode> {
     let mut out = out();
     let conf = lazy::config().await?;
     let settings = conf.node_dir.settings()?;
@@ -61,12 +65,18 @@ async fn ls() -> Res<ExitCode> {
         .peers
         .as_ref()
         .map_or(&[][..], |peers| peers.bootstrap.as_slice());
+    let client = lazy::node().await?;
+    let peers = crate::cmds::status::node_info(&client).await?.peers;
+    if as_json {
+        let listed = json!({ "bootstrap": bootstrap, "peers": peers });
+        writeln!(out, "{}", serde_json::to_string_pretty(&listed)?)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     writeln!(out, "bootstrap {}", bootstrap.len())?;
     for ticket in bootstrap {
         writeln!(out, "  {ticket}")?;
     }
-    let client = lazy::node().await?;
-    match crate::cmds::status::node_info(&client).await?.peers {
+    match peers {
         None => writeln!(
             out,
             "connected none attached ({})",

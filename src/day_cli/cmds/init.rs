@@ -8,7 +8,7 @@ use crate::out::out;
 /// is, so running this twice cannot change a node's identity. A directory that holds something
 /// that is not a node (an unreadable or unparsable `node.json`, a version this `day` does not
 /// understand) is an error, and is not touched either.
-pub async fn run(dir: Option<PathBuf>, relay: bool) -> Res<ExitCode> {
+pub async fn run(dir: Option<PathBuf>, relay: bool, as_json: bool) -> Res<ExitCode> {
     let mut out = out();
     let node_dir = match dir {
         Some(dir) => {
@@ -24,12 +24,16 @@ pub async fn run(dir: Option<PathBuf>, relay: bool) -> Res<ExitCode> {
                 node_dir.root().display()
             )
         })?;
-        writeln!(
-            out,
-            "node {} already initialized at {}",
-            settings.node_id(),
-            node_dir.root().display()
-        )?;
+        if as_json {
+            report_json(&mut out, &settings.node_id(), node_dir.root(), false)?;
+        } else {
+            writeln!(
+                out,
+                "node {} already initialized at {}",
+                settings.node_id(),
+                node_dir.root().display()
+            )?;
+        }
         return Ok(ExitCode::SUCCESS);
     }
     node_dir.init().await?;
@@ -43,11 +47,22 @@ pub async fn run(dir: Option<PathBuf>, relay: bool) -> Res<ExitCode> {
             .await?;
     }
     let settings = node_dir.settings()?;
-    writeln!(
-        out,
-        "initialized node {} at {}",
-        settings.node_id(),
-        node_dir.root().display()
-    )?;
+    if as_json {
+        report_json(&mut out, &settings.node_id(), node_dir.root(), true)?;
+    } else {
+        writeln!(
+            out,
+            "initialized node {} at {}",
+            settings.node_id(),
+            node_dir.root().display()
+        )?;
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `created` is false when the directory already held a node, which `init` leaves as it is.
+fn report_json(out: &mut crate::out::Out, node_id: &str, path: &Path, created: bool) -> Res<()> {
+    let report = json!({ "nodeId": node_id, "path": path, "created": created });
+    writeln!(out, "{}", serde_json::to_string_pretty(&report)?)?;
+    Ok(())
 }

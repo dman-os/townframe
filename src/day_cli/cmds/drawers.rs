@@ -24,7 +24,7 @@ pub enum DrawersCommands {
     /// One drawer per line: its id, and `mirror` when the node mirrors it. The list is the
     /// node's known-drawers list (`listKnownDrawers`), the drawers it was asked to remember.
     Ls {
-        /// Print the node's raw answer as JSON
+        /// Print JSON instead of text
         #[arg(long)]
         json: bool,
     },
