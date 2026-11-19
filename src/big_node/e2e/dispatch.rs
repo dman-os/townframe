@@ -211,7 +211,7 @@ async fn built_in_and_nodule_operations_share_one_router_and_one_admission() {
     let reading = capability(
         &node,
         DocScope {
-            read: BTreeSet::from([receipt.doc_id.clone()]),
+            read: DocScope::read_all([receipt.doc_id.clone()]),
             ..DocScope::default()
         },
     )
@@ -262,7 +262,7 @@ async fn built_in_and_nodule_operations_share_one_router_and_one_admission() {
     let unrelated = capability(
         &node,
         DocScope {
-            read: BTreeSet::from([other.doc_id]),
+            read: DocScope::read_all([other.doc_id]),
             ..DocScope::default()
         },
     )

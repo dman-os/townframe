@@ -170,7 +170,8 @@ impl DocAccess for LedgerAccess {
             let write_docs: BTreeSet<_> = scope.write.keys().cloned().collect();
             let objects: Vec<_> = scope
                 .read
-                .union(&write_docs)
+                .keys()
+                .chain(write_docs.iter())
                 .map(|document| Self::object(AccessRequest::Read(document)))
                 .chain(
                     scope
@@ -272,9 +273,18 @@ impl DocsService {
                 .map_err(super::access_error)?,
             DomainAuthority::Scoped(scope) => {
                 let write_docs: BTreeSet<_> = request.scope.write.keys().cloned().collect();
-                for doc in request.scope.read.union(&write_docs) {
+                for doc in &write_docs {
                     self.authorize(context, &caller.authority, AccessRequest::Read(doc))
                         .await?;
+                }
+                // A document the caller reaches through a drawer is held at every kind, so
+                // the kinds a narrower handle names are checked against what the caller
+                // holds of it, not against the documents its scope lists.
+                for (doc, requested) in &request.scope.read {
+                    let held = self.authorize_read(context, &caller.authority, doc).await?;
+                    if !held.covers(requested) {
+                        return Err(DocsError::Denied);
+                    }
                 }
                 for (doc, requested) in &request.scope.write {
                     let held = self
@@ -414,7 +424,7 @@ mod tests {
             calls: AtomicUsize::new(0),
         };
         let mut scope = DocScope {
-            read: BTreeSet::from([read.clone()]),
+            read: DocScope::read_all([read.clone()]),
             write: std::collections::BTreeMap::from([(
                 write.clone(),
                 big_cabinet_core::doc::DatumKinds::All,
@@ -495,7 +505,7 @@ mod tests {
         );
         assert_eq!(policy.calls.load(Ordering::SeqCst), 2);
         let read_only = DomainAuthority::Scoped(DocScope {
-            read: BTreeSet::from([read]),
+            read: DocScope::read_all([read]),
             write: writable
                 .clone()
                 .into_iter()

@@ -306,6 +306,7 @@ struct Node {
     drawers_stop: StopToken,
     drawers_actor: OpenedActor,
     nodules_actor: OpenedActor,
+    drawer_access: Arc<PolicyAccess>,
     /// Where the pinned versions live (a registry drawer, as `big_node` creates it) and where
     /// the cartridge config documents live (the shared config drawer the service creates).
     registry_drawer: DrawerId,
@@ -484,6 +485,7 @@ async fn node_with_takeover(
         drawers_stop,
         drawers_actor,
         nodules_actor,
+        drawer_access,
         registry_drawer,
         shared_config_drawer,
         blobs,
@@ -1087,7 +1089,7 @@ impl Node {
                 self.operator().metadata(),
                 MintDocCapability {
                     scope: DocScope {
-                        read: BTreeSet::from([doc_id.clone()]),
+                        read: DocScope::read_all([doc_id.clone()]),
                         ..DocScope::default()
                     },
                     rights: Rights::USE,
@@ -1915,7 +1917,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
             Authorization::identity(actor.capability).metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    read: BTreeSet::from([receipt.doc_id.clone()]),
+                    read: DocScope::read_all([receipt.doc_id.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,

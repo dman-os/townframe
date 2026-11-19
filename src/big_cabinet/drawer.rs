@@ -840,7 +840,7 @@ impl Core {
                 context,
                 self.issuer,
                 DocScope {
-                    read: [doc.clone()].into(),
+                    read: DocScope::read_all([doc.clone()]),
                     ..Default::default()
                 },
                 |Authorization {
@@ -954,7 +954,7 @@ impl Core {
                     context,
                     self.issuer,
                     DocScope {
-                        read: [drawer_id.clone()].into(),
+                        read: DocScope::read_all([drawer_id.clone()]),
                         ..Default::default()
                     },
                     |Authorization {

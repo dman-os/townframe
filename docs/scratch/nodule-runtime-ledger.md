@@ -128,6 +128,7 @@ Answers review question 4. Precedents: Kubernetes init containers and lifecycle 
 - **Who invokes:**
   - A **local** target (an operation the nodule implements) is called by the runtime directly on the nodule's provider from the executor, not through dispatch. This is the host running its own lifecycle hook, like the kubelet. The `Caller` is the nodule service.
   - A **foreign** target (a `requires` operation) goes through dispatch as an ordinary call by the nodule actor under its own operations cap (D2e), so it needs a grant like any other call.
+  - **Foreign targets dropped (operator, 2026-11-17).** An initializer targets an operation its own cartridge implements; admission refuses any other, and the dispatch route, the wait for a foreign provider and the cycle report are gone. A routine that needs another service calls it itself under its routine capability (ADR 047 §3, §6).
 - **Gating:** `Readiness` gains `Initializing` and `InitFailed`. Dispatch registers the nodule `NotReady(Initializing)` until all its inits for the current revision and start have succeeded. Callers get the retryable NotReady (503); nothing queues.
 - **Ordering:** inits run in declaration order. A foreign target whose provider is not Ready leaves the nodule `Initializing` and is retried when that provider becomes ready (the next reconcile). A dependency cycle is reported as `InitFailed` on the record, not executed.
 - **Failure:** `InitFailed`, with the error and attempt count on the `NoduleRecord`. It is retried on the next reconcile trigger (boot, config change, enable). There is no hidden retry loop or backoff yet; CrashLoopBackOff-style backoff is a follow-up.
@@ -681,6 +682,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 3. Closed (2026-11-11, won't fix): no orphan dispatch authority after a crash is possible. The authority's capability ledger is in memory only (`authority/cap.rs`, empty at every boot; pinned by `reboot_loses_handles_but_preserves_actors_and_keys`), so a dead process takes every handle with it. For the same reason, nodule handles rotate on every restart; keeping them stable would need a persistent capability ledger, which is out of scope for #84.
 4. Compare the heavy `big_cabinet` drawer test timings against an origin/main baseline (our 4th boot drawer).
 5. Done (2026-11-06): the NSID-prefix check is one function (`DispatchScope::authority_owns`), and guest requests and handler responses share one size cap (`MAX_MESSAGE_OCTETS`, `big_nodule_wasm`).
+6. Not now: a typed input record for initializers (trigger install/upgrade/start, previous and current revision). Today the host passes `{}`.
 
 ### Follow-ups found during the merge
 - [perf] big_node blob_discovery tests (`selected_inventory_replacement_removes_old_inventory` and 3 others) hit nextest's 120 s timeout at `--test-threads 12` under load ~13. Not a stall: traced against a solo run, the same work (236 `reconcile_readers`, ~80 `ensure_coverage` tasks for 2 nodes and 3 drawers) runs 4-10x slower, no log gap over 1 s, and the waits subscribe before checking. Lever: the per-fixture keyhive work, not timeouts.

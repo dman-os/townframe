@@ -42,7 +42,7 @@ async fn listed(
                     .capability(
                         actor,
                         DocScope {
-                            read: BTreeSet::from([document.clone()]),
+                            read: DocScope::read_all([document.clone()]),
                             ..DocScope::default()
                         },
                     )

@@ -23,10 +23,9 @@ impl DrawerService {
             context,
             core.issuer,
             DocScope {
-                read: records
-                    .iter()
-                    .map(|(record, _)| record.drawer_id.clone())
-                    .collect(),
+                read: DocScope::read_all(
+                    records.iter().map(|(record, _)| record.drawer_id.clone()),
+                ),
                 ..Default::default()
             },
             |Authorization {

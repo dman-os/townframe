@@ -515,7 +515,7 @@ async fn a_query_is_served_over_get_and_the_wrong_verb_is_invalid() {
     let capability = capability(
         &node,
         DocScope {
-            read: BTreeSet::from([note.doc_id.clone()]),
+            read: DocScope::read_all([note.doc_id.clone()]),
             ..DocScope::default()
         },
     )

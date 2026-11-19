@@ -198,16 +198,6 @@ pub async fn upsert_applied_grant(db: &impl crate::sqlite_rs_alias::Executor, ca
     db.execute(UPSERT_APPLIED_GRANT_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id), crate::sqlite_rs_alias::IntoValue::into_value(drawer_id), crate::sqlite_rs_alias::IntoValue::into_value(access), crate::sqlite_rs_alias::IntoValue::into_value(capability_id)]).await
 }
 
-pub const UPSERT_APPLIED_OPERATIONS_SQL: &str = include_str!("queries/upsert_applied_operations.sql");
-pub async fn upsert_applied_operations(db: &impl crate::sqlite_rs_alias::Executor, cartridge_id: String, scope: String, capability_id: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(UPSERT_APPLIED_OPERATIONS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id), crate::sqlite_rs_alias::IntoValue::into_value(scope), crate::sqlite_rs_alias::IntoValue::into_value(capability_id)]).await
-}
-
-pub const UPSERT_APPLIED_SETTINGS_SQL: &str = include_str!("queries/upsert_applied_settings.sql");
-pub async fn upsert_applied_settings(db: &impl crate::sqlite_rs_alias::Executor, cartridge_id: String, doc_id: String, kinds: String, capability_id: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(UPSERT_APPLIED_SETTINGS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id), crate::sqlite_rs_alias::IntoValue::into_value(doc_id), crate::sqlite_rs_alias::IntoValue::into_value(kinds), crate::sqlite_rs_alias::IntoValue::into_value(capability_id)]).await
-}
-
 pub const UPSERT_CONFIG_DOC_SQL: &str = include_str!("queries/upsert_config_doc.sql");
 pub async fn upsert_config_doc(db: &impl crate::sqlite_rs_alias::Executor, cartridge_id: String, doc_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(UPSERT_CONFIG_DOC_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id), crate::sqlite_rs_alias::IntoValue::into_value(doc_id)]).await
