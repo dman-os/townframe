@@ -1,0 +1,25 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "description": {
+          "type": "unknown"
+        },
+        "schema": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "schema",
+        "description"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.cartridge.micro",
+  "lexicon": 1
+}

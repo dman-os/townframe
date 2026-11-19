@@ -1,0 +1,74 @@
+{
+  "$defs": {
+    "CipherBlob": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "contentEncoding": {
+          "type": "string"
+        },
+        "encodingParameters": {
+          "$ref": "#/$defs/Rfc8188EncodingParameters"
+        },
+        "keyRef": {
+          "type": "string"
+        },
+        "keyRefHeads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "representation": {
+          "$ref": "#/$defs/Representation"
+        }
+      },
+      "required": [
+        "representation",
+        "contentEncoding",
+        "keyRef",
+        "keyRefHeads",
+        "encodingParameters"
+      ],
+      "title": "CipherBlob",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cipherBlob"
+    },
+    "Representation": {
+      "additionalProperties": true,
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "lengthOctets": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "digest",
+        "lengthOctets"
+      ],
+      "type": "object"
+    },
+    "Rfc8188EncodingParameters": {
+      "additionalProperties": true,
+      "properties": {
+        "padding": {
+          "type": "string"
+        },
+        "recordSize": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "recordSize",
+        "padding"
+      ],
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/CipherBlob",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

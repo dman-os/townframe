@@ -1,0 +1,167 @@
+{
+  "defs": {
+    "Drawer": {
+      "properties": {
+        "layout": {
+          "refs": [
+            "org.example.daybook.drawer.selfDoc",
+            "org.example.daybook.drawer.singleGroup"
+          ],
+          "type": "union"
+        }
+      },
+      "required": [
+        "layout"
+      ],
+      "type": "object"
+    },
+    "ListedDrawer": {
+      "properties": {
+        "access": {
+          "enum": [
+            "Relay",
+            "Read",
+            "Write",
+            "Admin"
+          ],
+          "type": "string"
+        },
+        "descriptor": {
+          "ref": "#Drawer",
+          "type": "ref"
+        },
+        "drawerId": {
+          "type": "string"
+        },
+        "layout": {
+          "refs": [
+            "org.example.daybook.drawer.selfDoc",
+            "org.example.daybook.drawer.singleGroup"
+          ],
+          "type": "union"
+        }
+      },
+      "required": [
+        "drawerId",
+        "layout",
+        "descriptor",
+        "access"
+      ],
+      "type": "object"
+    },
+    "ListedDrawers": {
+      "properties": {
+        "drawers": {
+          "items": {
+            "ref": "#ListedDrawer",
+            "type": "ref"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "drawers"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "SelfChild"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Docs"
+        },
+        {
+          "name": "DocsUnavailable"
+        },
+        {
+          "description": "Keyhive storage or the engine failed; nothing the caller named is at fault.",
+          "name": "Keyhive"
+        },
+        {
+          "description": "A named group or doc id that is not a 32-byte Ed25519 point.",
+          "name": "InvalidKey"
+        },
+        {
+          "description": "A Keyhive group this node does not hold, perhaps not yet synced.",
+          "name": "UnknownGroup"
+        },
+        {
+          "description": "A principal group the caller named that this node does not hold.",
+          "name": "UnknownPrincipal"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "UnknownDrawer"
+        },
+        {
+          "description": "A peer this node has not met: its keyhive identity arrives with a live connection.",
+          "name": "UnknownPeer"
+        },
+        {
+          "name": "SelfDoc"
+        },
+        {
+          "name": "AlreadyDrawer"
+        },
+        {
+          "name": "NotAnEntry"
+        },
+        {
+          "name": "ForeignLayout"
+        },
+        {
+          "name": "CommandInFlight"
+        },
+        {
+          "name": "CommandReused"
+        },
+        {
+          "name": "RosterUnreadable"
+        },
+        {
+          "name": "InvalidMetaDocSlot"
+        },
+        {
+          "name": "SuccessorCycle"
+        },
+        {
+          "name": "SuccessorSelf"
+        }
+      ],
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#ListedDrawers",
+          "type": "ref"
+        }
+      },
+      "parameters": {
+        "properties": {
+          "capability": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "capability"
+        ],
+        "type": "params"
+      },
+      "type": "query"
+    }
+  },
+  "id": "org.example.daybook.drawers.listDrawers",
+  "lexicon": 1
+}

@@ -1,0 +1,60 @@
+{
+  "defs": {
+    "RetractCapability": {
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "via": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "via",
+        "capability"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "InvalidCapability"
+        },
+        {
+          "name": "Unauthorized"
+        },
+        {
+          "name": "Escalation"
+        },
+        {
+          "name": "UnrecognizedActor"
+        },
+        {
+          "name": "InvalidActorPath"
+        },
+        {
+          "name": "ActorNotFound"
+        },
+        {
+          "name": "StateCorrupt"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "Claim"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#RetractCapability",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.authority.retractCapability",
+  "lexicon": 1
+}
