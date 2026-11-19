@@ -22,6 +22,7 @@ mod cartridge_docs;
 pub mod egress;
 pub use service_client_core_rs::xrpc::XrpcBody;
 pub mod executor;
+mod requests;
 mod state;
 mod store;
 pub mod wire;
@@ -44,8 +45,10 @@ use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
+use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::OpenedActor;
+use big_cabinet_core::authority::ResolveAuthority;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::Bundle;
 use big_cabinet_core::datum::Universe;
@@ -65,14 +68,25 @@ use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::protocol::AWAIT_MAX_HOLD_MS;
+use big_cartridges_core::protocol::AnswerCartridgeGrantRequest;
+use big_cartridges_core::protocol::AwaitCartridgeGrantRequest;
+use big_cartridges_core::protocol::CartridgeGrants;
 use big_cartridges_core::protocol::CartridgeInstallRecord;
 use big_cartridges_core::protocol::CartridgeInstalls;
 use big_cartridges_core::protocol::CartridgesError;
 use big_cartridges_core::protocol::CartridgesProtocol;
 use big_cartridges_core::protocol::ClearCartridgeConfig;
+use big_cartridges_core::protocol::FiledGrantRequest;
+use big_cartridges_core::protocol::GrantRequestAnswer;
+use big_cartridges_core::protocol::GrantRequestState;
+use big_cartridges_core::protocol::GrantRequests;
 use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::ListCartridgeGrantRequests;
+use big_cartridges_core::protocol::ListCartridgeGrants;
 use big_cartridges_core::protocol::ListCartridgeInstalls;
 use big_cartridges_core::protocol::ObserveCartridgeInstalls;
+use big_cartridges_core::protocol::RequestCartridgeGrant;
 use big_cartridges_core::protocol::SetCartridgeEnabled;
 use big_cartridges_core::protocol::SetCartridgeGrant;
 use big_cartridges_core::protocol::UninstallCartridge;
@@ -106,6 +120,8 @@ use state::Command;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// The prefix of every capability object this domain mints; the scope follows it as JSON.
 const SCOPE_PREFIX: &str = "NoduleService/scope/v1/";
@@ -175,11 +191,23 @@ pub struct NodulesConfig {
 /// work to the state task that owns the reconciled inventory.
 pub struct NoduleService {
     capabilities: DomainCapabilities,
+    /// The authority service, for the two methods a cartridge's own actor presents a dispatch
+    /// handle to (see [`Self::presenter`]).
+    authority: Client<AuthorityProtocol>,
     operator: Uuid7,
     state: state::Handle,
 }
 
 type Res<T> = std::result::Result<T, NodulesError>;
+
+/// Who presents a call to one of the methods a cartridge makes on its own behalf.
+enum Presenter {
+    /// The operator's own identity.
+    Operator,
+    /// An actor holding a handle bound to it, which for a call through dispatch is a nodule's
+    /// actor presenting the handle dispatch minted for it.
+    Actor(Uuid7),
+}
 
 pub(crate) fn authority_error(error: ClientError<AuthorityServiceError>) -> NodulesError {
     match error {
@@ -246,6 +274,192 @@ impl NoduleService {
             .source::<NoduleScope>(context, authorization)
             .await
             .map_err(authority_error)
+    }
+
+    /// Who presents `authorization`. The grant-request methods a cartridge's runtime calls
+    /// through dispatch carry the routine's dispatch handle, which this domain does not mint and
+    /// so cannot read as a [`NoduleScope`]: the presenter is the actor the handle is bound to,
+    /// accepted only when the signer is bound to that same actor (holder binding, ADR 037), the
+    /// check dispatch itself ran before admitting the call.
+    async fn presenter(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+    ) -> Res<Presenter> {
+        let resolved = self
+            .authority
+            .call(
+                context.child(),
+                ResolveAuthority {
+                    capability: authorization.authority,
+                },
+            )
+            .await
+            .map_err(authority_error)?;
+        let identity = resolved.actor.map(|actor| actor.actor_id);
+        let actor = identity
+            .or(resolved.capability.subject)
+            .ok_or(NodulesError::Denied)?;
+        if identity == Some(self.operator) {
+            return Ok(Presenter::Operator);
+        }
+        let signer = self
+            .authority
+            .call(
+                context.child(),
+                InspectCapability {
+                    capability: authorization.signer,
+                },
+            )
+            .await
+            .map_err(authority_error)?;
+        if !signer.rights.contains(Rights::USE) || signer.subject != Some(actor) {
+            return Err(NodulesError::Denied);
+        }
+        Ok(Presenter::Actor(actor))
+    }
+
+    /// The cartridge a presenting actor runs for.
+    async fn cartridge_of(&self, actor_id: Uuid7) -> Res<CartridgeId> {
+        self.state
+            .ask(|reply| Command::CartridgeOfActor { actor_id, reply })
+            .await
+    }
+
+    /// Files a request on behalf of the cartridge the calling actor runs for. The cartridge is
+    /// never a field of the request, so one cartridge cannot file for another, and the operator,
+    /// who runs for none, cannot file.
+    async fn request_grant(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: RequestCartridgeGrant,
+    ) -> Res<FiledGrantRequest> {
+        let Presenter::Actor(actor_id) = self.presenter(context, authorization).await? else {
+            return Err(NodulesError::Denied);
+        };
+        let cartridge_id = self.cartridge_of(actor_id).await?;
+        self.state
+            .ask(|reply| Command::FileGrantRequest {
+                cartridge_id,
+                permbind: params.permbind,
+                drawer: params.drawer,
+                reply,
+            })
+            .await
+    }
+
+    /// The long poll of ADR 023 over one request: answers at once when it is no longer pending,
+    /// otherwise holds until the state actor answers it, the hold expires, or the service stops.
+    /// Only the cartridge that filed the request (or the operator) may ask after it.
+    async fn await_grant_request(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: AwaitCartridgeGrantRequest,
+    ) -> Res<GrantRequestAnswer> {
+        let owner = match self.presenter(context, authorization).await? {
+            Presenter::Operator => None,
+            Presenter::Actor(actor_id) => Some(self.cartridge_of(actor_id).await?),
+        };
+        let deadline = Instant::now()
+            + Duration::from_millis(u64::from(params.hold_ms.min(AWAIT_MAX_HOLD_MS)));
+        let mut requests = self.state.requests.clone();
+        loop {
+            let state = {
+                let current = requests.borrow_and_update();
+                current
+                    .get(&params.request)
+                    .filter(|entry| {
+                        owner
+                            .as_ref()
+                            .is_none_or(|own| *own == entry.record.cartridge_id)
+                    })
+                    .map(|entry| entry.state)
+                    .ok_or_else(|| {
+                        NodulesError::Rejected(format!(
+                            "there is no grant request `{}`",
+                            params.request
+                        ))
+                    })?
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if state != GrantRequestState::Pending || remaining.is_zero() {
+                return Ok(GrantRequestAnswer { state });
+            }
+            // The sender lives as long as the state actor: a closed channel is the service
+            // stopping, which ends the hold like an expiry.
+            if let Ok(Err(_)) = tokio::time::timeout(remaining, requests.changed()).await {
+                return Ok(GrantRequestAnswer { state });
+            }
+        }
+    }
+
+    /// The pending requests, for the operator.
+    async fn list_grant_requests(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        _: ListCartridgeGrantRequests,
+    ) -> Res<GrantRequests> {
+        let caller = self.caller(context, authorization).await?;
+        if self.scope_of(&caller)?.is_some() {
+            return Err(NodulesError::Denied);
+        }
+        Ok(GrantRequests {
+            requests: self
+                .state
+                .requests
+                .borrow()
+                .values()
+                .filter(|entry| entry.state == GrantRequestState::Pending)
+                .map(|entry| entry.record.clone())
+                .collect(),
+        })
+    }
+
+    async fn answer_grant_request(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: AnswerCartridgeGrantRequest,
+    ) -> Res<GrantRequestAnswer> {
+        let caller = self.caller(context, authorization).await?;
+        if self.scope_of(&caller)?.is_some() {
+            return Err(NodulesError::Denied);
+        }
+        let context = context.clone();
+        let state = self
+            .state
+            .ask(|reply| Command::AnswerGrantRequest {
+                context,
+                request: params.request,
+                answer: params.answer,
+                drawer: params.drawer,
+                reply,
+            })
+            .await?;
+        Ok(GrantRequestAnswer { state })
+    }
+
+    async fn list_cartridge_grants(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: ListCartridgeGrants,
+    ) -> Res<CartridgeGrants> {
+        let caller = self.caller(context, authorization).await?;
+        if self.scope_of(&caller)?.is_some() {
+            return Err(NodulesError::Denied);
+        }
+        let grants = self
+            .state
+            .ask(|reply| Command::ListGrants {
+                cartridge_id: params.cartridge_id,
+                reply,
+            })
+            .await?;
+        Ok(CartridgeGrants { grants })
     }
 
     /// What the caller may administer: everything for the operator's identity, the scope of a
@@ -592,6 +806,11 @@ handlers! {
     SetCartridgeGrant => set_cartridge_grant: ();
     ClearCartridgeConfig => clear_cartridge_config: ();
     ListCartridgeInstalls => list_installs: CartridgeInstalls;
+    RequestCartridgeGrant => request_grant: FiledGrantRequest;
+    AwaitCartridgeGrantRequest => await_grant_request: GrantRequestAnswer;
+    ListCartridgeGrantRequests => list_grant_requests: GrantRequests;
+    AnswerCartridgeGrantRequest => answer_grant_request: GrantRequestAnswer;
+    ListCartridgeGrants => list_cartridge_grants: CartridgeGrants;
 }
 
 impl Handler<ObserveCartridgeInstalls> for NoduleService {
@@ -618,6 +837,11 @@ service_utils_rs::bind_service_protocol! {
             SetCartridgeGrant(SetCartridgeGrant),
             ClearCartridgeConfig(ClearCartridgeConfig),
             ListCartridgeInstalls(ListCartridgeInstalls),
+            RequestCartridgeGrant(RequestCartridgeGrant),
+            AwaitCartridgeGrantRequest(AwaitCartridgeGrantRequest),
+            ListCartridgeGrantRequests(ListCartridgeGrantRequests),
+            AnswerCartridgeGrantRequest(AnswerCartridgeGrantRequest),
+            ListCartridgeGrants(ListCartridgeGrants),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
             SetNoduleDevTakeover(SetNoduleDevTakeover),
             SetMethodRoute(SetMethodRoute),
@@ -684,6 +908,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
     )
     .await
     .map_err(store_error)?;
+    let authority = config.authority.clone();
     let capabilities =
         DomainCapabilities::new(config.authority.clone(), config.namespace, SCOPE_PREFIX);
     let domain_stop = capabilities.stop_token();
@@ -718,6 +943,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
     };
     let service = Arc::new(NoduleService {
         capabilities,
+        authority,
         operator: config.operator,
         state,
     });

@@ -15,6 +15,8 @@ use crate::executor::NoduleExecutor;
 use crate::executor::ReensureQueue;
 use crate::executor::RoutineCapabilities;
 use crate::executor::RoutineSpec;
+use crate::requests::GrantRequests;
+use crate::requests::Requests;
 use crate::store;
 use big_cabinet::DatumStore;
 use big_cabinet::DatumStoreHandle;
@@ -58,8 +60,14 @@ use big_cartridges_core::RunMode;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::protocol::AwaitCartridgeGrantRequest;
+use big_cartridges_core::protocol::CartridgeGrantRecord;
 use big_cartridges_core::protocol::CartridgeInstallRecord;
 use big_cartridges_core::protocol::CartridgesProtocol;
+use big_cartridges_core::protocol::FiledGrantRequest;
+use big_cartridges_core::protocol::GrantAnswer;
+use big_cartridges_core::protocol::GrantRequestState;
+use big_cartridges_core::protocol::RequestCartridgeGrant;
 use big_dispatch::Caller;
 use big_dispatch::LexiconSource;
 use big_dispatch::Operation;
@@ -77,6 +85,7 @@ use big_dispatch_core::Readiness;
 use big_nodule_core::NoduleAdmission;
 use big_nodule_core::config::AdmissionCache;
 use big_nodule_core::config::CartridgeConfig;
+use big_nodule_core::config::DatumSlot;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::NoduleResolution;
 use big_nodule_core::inventory::ArtifactState;
@@ -94,6 +103,7 @@ use big_nodule_core::providers::ProviderIndex;
 use big_nodule_core::providers::RequestStatus;
 use big_nodule_core::providers::Unresolved;
 use indexmap::IndexMap;
+use method_core::Method as _;
 use serde_json::Value;
 use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
@@ -227,6 +237,29 @@ pub(crate) enum Command {
         context: RequestContext,
         reply: Reply<Vec<CartridgeInstallRecord>>,
     },
+    /// The cartridge whose nodule runs as `actor_id`, which is how a request is attributed to a
+    /// cartridge: from the caller's actor, never from a body.
+    CartridgeOfActor {
+        actor_id: Uuid7,
+        reply: Reply<CartridgeId>,
+    },
+    FileGrantRequest {
+        cartridge_id: CartridgeId,
+        permbind: String,
+        drawer: Option<DrawerId>,
+        reply: Reply<FiledGrantRequest>,
+    },
+    AnswerGrantRequest {
+        context: RequestContext,
+        request: Uuid7,
+        answer: GrantAnswer,
+        drawer: Option<DrawerId>,
+        reply: Reply<GrantRequestState>,
+    },
+    ListGrants {
+        cartridge_id: Option<CartridgeId>,
+        reply: Reply<Vec<CartridgeGrantRecord>>,
+    },
 }
 
 /// What caused a reconcile, which decides what it re-runs: a failed initializer is retried by
@@ -278,6 +311,8 @@ pub(crate) struct Handle {
     /// The install rows as the last reconcile left them, for [`crate::NoduleService`]'s
     /// subscription to follow.
     pub(crate) installs: watch::Receiver<Vec<CartridgeInstallRecord>>,
+    /// The grant requests of this boot, for the service's list and its long polls to follow.
+    pub(crate) requests: watch::Receiver<Requests>,
 }
 
 impl Handle {
@@ -333,6 +368,8 @@ pub(crate) struct State {
     docs_changed: Arc<Notify>,
     /// The install rows of the last reconcile.
     installs: watch::Sender<Vec<CartridgeInstallRecord>>,
+    /// The runtime grant requests of this boot and the grants that last as long (ADR 049 §4.2).
+    grant_requests: GrantRequests,
 }
 
 fn nodule_actor(actor: &OpenedActor) -> NoduleActor {
@@ -610,6 +647,18 @@ fn desired_routine_scopes(
                     }
                     Permbind::Unknown(_) => {}
                 }
+            }
+            // A routine with something in its `uses` may always ask for it and wait for the
+            // answer: filing confers nothing, and the grant that would admit the call is the very
+            // thing the request is for, so it cannot be a precondition of it (ADR 049 §4.2).
+            if !routine.uses.is_empty() {
+                operations.extend(
+                    [
+                        RequestCartridgeGrant::XRPC.nsid,
+                        AwaitCartridgeGrantRequest::XRPC.nsid,
+                    ]
+                    .map(str::to_owned),
+                );
             }
             let docs = routine_docs_scope(
                 installed,
@@ -1038,6 +1087,7 @@ impl State {
         )
         .await?;
         let (installs, installs_rx) = watch::channel(Vec::new());
+        let (grant_requests, requests_rx) = GrantRequests::new();
 
         let mut state = Self {
             stores,
@@ -1064,6 +1114,7 @@ impl State {
             docs,
             docs_changed,
             installs,
+            grant_requests,
         };
         let context = RequestContext::root();
         // The boot reconcile may already have started initializers, and the config documents it
@@ -1152,6 +1203,7 @@ impl State {
             Handle {
                 commands,
                 installs: installs_rx,
+                requests: requests_rx,
             },
             stop,
         ))
@@ -1175,8 +1227,13 @@ impl State {
             snapshot.value.refuse_dev_takeover();
         }
         self.docs.sync(&snapshot.value.config_docs()).await?;
-        let (heads, docs) = self.docs.snapshots().await?;
+        let (heads, mut docs) = self.docs.snapshots().await?;
         snapshot.heads.extend(heads);
+        for (cartridge_id, doc) in &mut docs {
+            if let Some(grants) = self.grant_requests.boot_grants(cartridge_id) {
+                doc.attach_boot_grants(grants.clone());
+            }
+        }
         snapshot.value.attach_cartridge_docs(docs);
         self.docs
             .read_pins(&snapshot.value, &self.admission_cache)
@@ -1273,6 +1330,54 @@ impl State {
                 scope,
                 reply,
             } => answer(reply, self.list(&context, scope)).await,
+            Command::CartridgeOfActor { actor_id, reply } => {
+                answer(reply, async {
+                    self.actors
+                        .iter()
+                        .find(|(_, actor)| actor.actor.actor_id == actor_id)
+                        .map(|(cartridge_id, _)| cartridge_id.clone())
+                        .ok_or(NodulesError::Denied)
+                })
+                .await
+            }
+            Command::FileGrantRequest {
+                cartridge_id,
+                permbind,
+                drawer,
+                reply,
+            } => {
+                answer(reply, async {
+                    let held = self.records.get(&cartridge_id);
+                    self.grant_requests
+                        .file(cartridge_id.clone(), permbind, drawer, held)
+                })
+                .await
+            }
+            Command::AnswerGrantRequest {
+                context,
+                request,
+                answer: given,
+                drawer,
+                reply,
+            } => {
+                answer(
+                    reply,
+                    self.answer_grant_request(&context, request, given, drawer),
+                )
+                .await
+            }
+            Command::ListGrants {
+                cartridge_id,
+                reply,
+            } => {
+                answer(reply, async {
+                    let snapshot = self.config().await?;
+                    Ok(self
+                        .grant_requests
+                        .list(snapshot.value.cartridge_docs(), cartridge_id.as_ref()))
+                })
+                .await
+            }
             Command::ListInstalls { context, reply } => {
                 answer(reply, async {
                     self.refresh_if_needed(&context).await?;
@@ -1392,6 +1497,12 @@ impl State {
         value: Option<GrantBody>,
     ) -> Res<()> {
         self.install_record(cartridge_id)?;
+        if value.is_none() {
+            // A revoke takes back an "only this time" answer too; the reconcile the edit runs
+            // below re-mints without it.
+            self.grant_requests
+                .revoke_boot_grants(cartridge_id, Some(&grant));
+        }
         self.edit_cartridge_config(context, cartridge_id, move |config| {
             config.set_grant(grant, value)
         })
@@ -1405,6 +1516,7 @@ impl State {
         context: &RequestContext,
         cartridge_id: &CartridgeId,
     ) -> Res<()> {
+        self.grant_requests.revoke_boot_grants(cartridge_id, None);
         self.edit_cartridge_config(context, cartridge_id, |config| {
             config.clear();
             Ok(())
@@ -1434,6 +1546,53 @@ impl State {
         let snapshot = self.config().await?;
         drop(self.reconcile(context, snapshot, Trigger::Change).await?);
         Ok(())
+    }
+
+    /// Answers a pending request. An allow or an only-this-boot answer re-mints the cartridge's
+    /// handles (the reconcile every grant change runs) before the request reads as answered, so
+    /// whoever awaits it finds the access in place.
+    async fn answer_grant_request(
+        &mut self,
+        context: &RequestContext,
+        request: Uuid7,
+        answer: GrantAnswer,
+        drawer: Option<DrawerId>,
+    ) -> Res<GrantRequestState> {
+        let record = self.grant_requests.pending(request)?;
+        let cartridge_id = record.cartridge_id.clone();
+        let state = match answer {
+            GrantAnswer::Decline => {
+                self.grant_requests.decline(&record);
+                return Ok(GrantRequestState::Declined);
+            }
+            GrantAnswer::Allow => {
+                let (grant, body) = GrantRequests::grant_for(&record, drawer)?;
+                self.edit_cartridge_config(context, &cartridge_id, move |config| {
+                    // An answer never narrows: a wider grant of the same thing stays.
+                    let access = |body: &GrantBody| body.access.as_ref().and_then(|a| a.known());
+                    let wider = config.grants().any(|(key, slot)| {
+                        *key == grant
+                            && matches!(slot, DatumSlot::Accepted { value, .. } if access(value) >= access(&body))
+                    });
+                    if wider {
+                        return Ok(());
+                    }
+                    config.set_grant(grant, Some(body))
+                })
+                .await?;
+                GrantRequestState::Allowed
+            }
+            GrantAnswer::OnlyThisBoot => {
+                let (grant, body) = GrantRequests::grant_for(&record, drawer)?;
+                self.grant_requests
+                    .grant_this_boot(cartridge_id, grant, body);
+                let snapshot = self.config().await?;
+                drop(self.reconcile(context, snapshot, Trigger::Change).await?);
+                GrantRequestState::OnlyThisBoot
+            }
+        };
+        self.grant_requests.settle(request, state);
+        Ok(state)
     }
 
     async fn set_dev_takeover(
@@ -1570,6 +1729,7 @@ impl State {
             }
             return Err(crate::store_error(err));
         }
+        self.grant_requests.forget(cartridge_id);
         let snapshot = self.config().await?;
         let revoke_errors = self.reconcile(context, snapshot, Trigger::Change).await?;
         if let Some(err) = revoke_errors.get(cartridge_id) {
@@ -1734,6 +1894,18 @@ impl State {
             .retain(|problem| unreadable.contains(problem));
         self.stores.dispatch.set_routes(routes.clone());
         let providers = ProviderIndex::new(&resolved, routes);
+        self.grant_requests.declare(
+            resolved
+                .iter()
+                .filter_map(|(cartridge_id, resolution)| match resolution {
+                    NoduleResolution::Admitted { installed, .. } => Some((
+                        cartridge_id.clone(),
+                        installed.resolved.cartridge.permbinds.clone(),
+                    )),
+                    NoduleResolution::Refused { .. } => None,
+                })
+                .collect(),
+        );
         let mut new_records = BTreeMap::new();
         for (cartridge_id, resolution) in resolved {
             match resolution {

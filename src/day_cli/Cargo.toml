@@ -24,6 +24,7 @@ big_dispatch_core.workspace = true
 big_nodule_core.workspace = true
 big_repo.workspace = true
 big_cabinet.workspace = true
+big_cartridges_core.workspace = true
 big_cabinet_core = { workspace = true, features = ["manifest"] }
 
 #
