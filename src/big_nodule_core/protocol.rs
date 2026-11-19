@@ -3,10 +3,10 @@
 //!
 //! Every operation names its caller by the request's `Authorization: Bearer` credential (the
 //! envelope's HTTP metadata, `Authorization::from_metadata`), never by a body field; a request
-//! without one fails with `ContextError::Unauthenticated`. The credential is either the operator's own identity
+//! without one fails with `ContextError::Unauthenticated`. The credential is either the operator's root
 //! capability, or a handle this domain minted through [`MintNoduleCapability`] that carries a
 //! [`NoduleScope`]. Identity is not access by itself: an arbitrary actor presenting its identity
-//! is refused, only the operator's identity and scoped handles narrowed from it administer
+//! is refused, only the operator's root capability and scoped handles narrowed from it administer
 //! nodules. Nothing here serves a handler; a record reports readiness so a caller can see that
 //! execution is unavailable rather than be told a dispatch succeeded.
 
@@ -51,7 +51,7 @@ use std::collections::BTreeSet;
 /// What a minted management handle may do. `cartridges` names the packages the holder may read, and
 /// whose enablement and grants it may change. `admit` additionally lets it install or upgrade
 /// those same packages and no others, so a handle can never introduce a cartridge id it was not minted
-/// for. The operator's identity is unrestricted without a scope.
+/// for. The operator's root capability is unrestricted without a scope.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
