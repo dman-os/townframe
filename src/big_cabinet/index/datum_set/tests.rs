@@ -64,10 +64,8 @@ fn edge(origin: &DatumRoute, target: &DatumRoute) -> DatumRefEdge {
     DatumRefEdge {
         origin: origin.clone(),
         path: "/link".to_owned(),
-        target: DatumRefTarget::Route {
-            route: target.clone(),
-            heads: vec![ChangeHash([7; 32])],
-        },
+        target: target.clone(),
+        ref_heads: vec![ChangeHash([7; 32])],
     }
 }
 
@@ -75,50 +73,27 @@ fn edge(origin: &DatumRoute, target: &DatumRoute) -> DatumRefEdge {
 /// edges a previous projection wrote, however they got there.
 async fn seed_edges(sql: &Database, edges: &[DatumRefEdge]) {
     for edge in edges {
-        match &edge.target {
-            DatumRefTarget::Route { route, heads } => {
-                Sql::new(
-                    r#"INSERT INTO big_cabinet_datum_ref_edges (
-                           origin_doc
-                         , origin_datum
-                         , origin_path
-                         , target_doc
-                         , target_datum
-                         , ref_heads
-                       ) VALUES "#,
-                )
-                .bind_list([
-                    edge.origin.doc_id.to_string().into_value(),
-                    edge.origin.datum_key.to_string().into_value(),
-                    edge.path.clone().into_value(),
-                    route.doc_id.to_string().into_value(),
-                    route.datum_key.to_string().into_value(),
-                    serde_json::to_vec(heads).unwrap().into_value(),
-                ])
-                .execute(sql)
-                .await
-                .unwrap();
-            }
-            DatumRefTarget::Key(key) => {
-                Sql::new(
-                    r#"INSERT INTO big_cabinet_datum_ref_key_edges (
-                           origin_doc
-                         , origin_datum
-                         , origin_path
-                         , target_key
-                       ) VALUES "#,
-                )
-                .bind_list([
-                    edge.origin.doc_id.to_string().into_value(),
-                    edge.origin.datum_key.to_string().into_value(),
-                    edge.path.clone().into_value(),
-                    key.to_string().into_value(),
-                ])
-                .execute(sql)
-                .await
-                .unwrap();
-            }
-        }
+        Sql::new(
+            r#"INSERT INTO big_cabinet_datum_ref_edges (
+                   origin_doc
+                 , origin_datum
+                 , origin_path
+                 , target_doc
+                 , target_datum
+                 , ref_heads
+               ) VALUES "#,
+        )
+        .bind_list([
+            edge.origin.doc_id.to_string().into_value(),
+            edge.origin.datum_key.to_string().into_value(),
+            edge.path.clone().into_value(),
+            edge.target.doc_id.to_string().into_value(),
+            edge.target.datum_key.to_string().into_value(),
+            serde_json::to_vec(&edge.ref_heads).unwrap().into_value(),
+        ])
+        .execute(sql)
+        .await
+        .unwrap();
     }
 }
 
