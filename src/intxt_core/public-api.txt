@@ -25,7 +25,7 @@ pub enum intxt_core::edit::Refusal { # [doc = " The intxt changed since the docu
 pub enum intxt_core::edit::Summary { # [doc = " A range of commits: `base..tip`, in short shas."] Commits (String), # [doc = " A jj change, by its change id."] Change (String), # [doc = " A ref tracked on a clone."] Ref (String), # [doc = " An agent session."] Session (String), # [doc = " A GitHub pull request."] GithubPull (String), # [doc = " An entry of a kind this version does not know, by its datum key."] Other (String) }
 pub enum intxt_core::generic::PrBlockError { # [doc = " The block is there but is not the shape: bad JSON, a missing `ref`, a `ref` that is not a"] # [doc = " `dtxt:doc:` URL."] # [error ("the intxt block in the PR description is malformed: {0}")] Malformed (# [from] serde_json :: Error), # [doc = " A `<details>` holding the block never closes, so there is no span to read or replace."] # [error ("the `<details>` holding the intxt block in the PR description is never closed")] Unterminated }
 pub enum intxt_core::methods::IntxtError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [doc = " A call the handler made was refused or failed; `reason` is what the callee answered."] # [error ("{operation} failed: {reason}")] Upstream { operation : String , reason : String }, # [doc = " The request named something an intxt cannot include or a document that is not what it"] # [doc = " was said to be."] # [error ("invalid request: {0}")] Invalid (String), # [doc = " The caller reaches the part through no drawer at Read or above, so there is nothing to"] # [doc = " lend the intxt's drawer."] # [error ("the part's document {0} is reached through no drawer at Read or above")] NotReachable (DocId) }
-pub enum intxt_core::methods::SummaryStatus { # [doc = " The drawer is an intxt the caller can read."] Found, # [doc = " The caller reads the drawer's descriptor and it holds no intxt marker."] NotFound, # [doc = " A read failed (the caller may not read it, or the node does not hold it) or the intxt's"] # [doc = " descriptor is malformed; `reason` says which."] Unreadable }
+pub enum intxt_core::methods::SummaryStatus { # [doc = " The drawer is an intxt the caller can read."] Found, # [doc = " The caller reads the drawer's own document and it holds no intxt marker."] NotFound, # [doc = " A read failed (the caller may not read it, or the node does not hold it) or the intxt's"] # [doc = " drawer document or index document is malformed; `reason` says which."] Unreadable }
 pub impl intxt_core::annotation::Participant::fn is (& self , other : & Participant) -> bool
 pub impl intxt_core::annotation::Participant::fn person () -> Self
 pub impl intxt_core::annotation::Participant::fn seen_scope (& self) -> Option < String >
@@ -40,14 +40,20 @@ pub impl intxt_core::client::Caller < H >::async fn add_part (& self , intxt : &
 pub impl intxt_core::client::Caller < H >::async fn call < M : Unary > (& self , input : M) -> Result < M :: Output , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn call_with_bytes < M : Unary > (& self , input : M , body : ByteBody ,) -> Result < M :: Output , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn commit_holders (& self , drawer : & DrawerId , sha : & str ,) -> Result < BTreeSet < DocId > , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn create_doc (& self , drawer : & DrawerId , command : CommandId , datums : BTreeMap < DatumKey , Value > ,) -> Result < DocId , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn datum_keys (& self , doc : & DocId) -> Result < BTreeSet < DatumKey > , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn doc_capability (& self , scope : DocScope) -> Result < CapId , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn holders (& self , drawer : & DrawerId , commit : DatumKey ,) -> Result < BTreeSet < DocId > , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn include (& self , intxt : & DrawerId , mut set : BTreeMap < DatumKey , Value > , entries : & [DatumKey] ,) -> Result < Vec < Included > , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn index (& self , intxt : & DrawerId) -> Result < DocId , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn own_doc (& self , drawer : & DrawerId , tag : & str) -> Result < DocId , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn read (& self , doc : & DocId , key : & DatumKey ,) -> Result < (Vec < ChangeHash > , Value) , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn read_datums (& self , doc : & DocId , keys : Option < BTreeSet < DatumKey > > ,) -> Result < (Vec < ChangeHash > , BTreeMap < DatumKey , DatumRead >) , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn record_observations (& self , drawer : & DrawerId , machine : & ActorUrl , batch : & Batch ,) -> Result < RecordedIds , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn remove_entries (& self , intxt : & DrawerId , entries : & BTreeSet < DatumKey > ,) -> Result < () , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn share (& self , intxt : & DrawerId , doc : & DocId , access : DrawerAccess ,) -> Result < () , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn tagged_docs (& self , drawer : & DrawerId , tag : & str ,) -> Result < BTreeMap < DocId , String > , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn try_index (& self , intxt : & DrawerId) -> Result < Option < DocId > , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn try_read (& self , doc : & DocId , key : & DatumKey ,) -> Result < (Vec < ChangeHash > , Option < Value >) , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn write_capability < 'k > (& self , doc : & DocId , keys : impl IntoIterator < Item = & 'k DatumKey > ,) -> Result < CapId , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn write_datums (& self , doc : & DocId , set : BTreeMap < DatumKey , Value > , remove : BTreeSet < DatumKey > ,) -> Result < () , IntxtError >
@@ -89,12 +95,12 @@ pub mod intxt_core::install
 pub mod intxt_core::methods
 pub mod intxt_core::work
 pub static intxt_core::UNIVERSE: LazyLock < Universe >
-pub struct intxt_core::annotation::AnnotationsEntry  { empty: Option < bool >, extra: Extra }
 pub struct intxt_core::annotation::Comment  { targets: Vec < Target >, body: Content, motivation: Motivation, reply_to: Option < DatumReference >, creator: Participant, generator: Option < Participant >, extra: Extra }
 pub struct intxt_core::annotation::Content  { mime: String, content: String, extra: Extra }
 pub struct intxt_core::annotation::LineRange  { start: u32, end: u32, extra: Extra }
+pub struct intxt_core::annotation::Notes  { writer: String, extra: Extra }
 pub struct intxt_core::annotation::Participant  { kind: ParticipantKind, id: Option < DatumReference >, name: Option < String >, version: Option < String >, extra: Extra }
-pub struct intxt_core::annotation::Posted  { key: DatumKey, comment: Comment, heads: Vec < String >, authors: Vec < Uuid7 > }
+pub struct intxt_core::annotation::Posted  { doc: DocId, key: DatumKey, comment: Comment, heads: Vec < String >, authors: Vec < Uuid7 > }
 pub struct intxt_core::annotation::Seen  { datums: BTreeMap < String , Vec < String > >, reviewed: BTreeMap < String , String >, extra: Extra }
 pub struct intxt_core::annotation::Structure  { kind: StructureKind, title: String, body: Option < Content >, status: Option < Progress >, targets: Vec < Target >, parent: Option < DatumReference >, order: Option < String >, extra: Extra }
 pub struct intxt_core::annotation::Target  { source: DatumPin, path: Option < String >, lines: Option < LineRange >, quote: Option < TextQuote >, to: Option < Location >, extra: Extra }
@@ -125,6 +131,7 @@ pub struct intxt_core::edit::ExistingEntry  { id: String, summary: Summary }
 pub struct intxt_core::edit::Failed  { errors: Vec < PlanError >, current: Option < EditDocument > }
 pub struct intxt_core::edit::PlanError  { path: String, message: String }
 pub struct intxt_core::generic::Body  { order: Vec < DatumReference >, extra: Extra }
+pub struct intxt_core::generic::Index  { doc: String, extra: Extra }
 pub struct intxt_core::generic::Intxt  { empty: Option < bool >, extra: Extra }
 pub struct intxt_core::generic::Note  { mime: String, content: String, extra: Extra }
 pub struct intxt_core::generic::PathName  { path: String, extra: Extra }
@@ -139,7 +146,7 @@ pub struct intxt_core::methods::IntxtCreated  { drawer_id: DrawerId }
 pub struct intxt_core::methods::IntxtSummary  { drawer: DrawerId, status: SummaryStatus, title: Option < String >, description: Option < String >, entries: Option < u32 >, updated: Option < u64 >, link: Option < String >, reason: Option < String > }
 pub struct intxt_core::methods::IntxtsSummarized  { results: Vec < IntxtSummary > }
 pub struct intxt_core::methods::SummarizeIntxts  { drawers: Vec < DrawerId > }
-pub use intxt_core::work::entry :: CommitsDoc
+pub use intxt_core::work::entry :: Commits
 pub use intxt_core::work::entry :: GitCommitEntry
 pub use intxt_core::work::entry :: GitRefEntry
 pub use intxt_core::work::entry :: GithubPullEntry
