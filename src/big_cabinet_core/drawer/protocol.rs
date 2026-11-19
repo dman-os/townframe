@@ -198,6 +198,9 @@ pub struct AddDoc {
 #[serde(rename_all = "camelCase")]
 pub struct CreateMetaDoc {
     pub capability: CapId,
+    /// Deduplicates retries of this create on this node only; the ledger is not replicated, so
+    /// another node given the same id runs its own create. What makes creators on different
+    /// nodes converge is `name`, not this id.
     pub command: CommandId,
     pub drawer_id: DrawerId,
     pub kind: String,
