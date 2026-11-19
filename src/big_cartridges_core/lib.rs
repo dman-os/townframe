@@ -519,6 +519,16 @@ macro_rules! example_cartridge {
 pub mod test_support {
     use super::Cartridge;
     use super::CartridgeId;
+    use super::Component;
+    use super::Digest;
+    use super::ResolvedCartridge;
+    use super::WasmComponent;
+    use super::protocol;
+    use big_cabinet_core::datum::Nsid;
+    use big_cabinet_core::reference::DatumPin;
+    use big_cabinet_core::reference::Location;
+    use indexmap::IndexMap;
+    use std::collections::BTreeMap;
 
     pub const EXAMPLE_NAMESPACE: &str = example_namespace!();
 
@@ -543,6 +553,140 @@ pub mod test_support {
     /// `cartridge` signed by the owner of [`EXAMPLE_NAMESPACE`].
     pub fn sign_as_example(cartridge: Cartridge) -> Cartridge {
         sign_with_seed(cartridge, &EXAMPLE_SEED)
+    }
+
+    /// A cartridge version as a test builds it before publishing: the envelope, the payloads its
+    /// pins name, and the bytes of its wasm components. The envelope's pins are placeholders until
+    /// [`Self::publishable`] swaps in the ones the registry staged the payloads under, so the
+    /// fixture is a [`ResolvedCartridge`] a test can admit directly and also publish for real.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct FixtureCartridge {
+        pub resolved: ResolvedCartridge,
+        /// The bytes of each wasm component by digest. Staging reads the component's blob, so a
+        /// test puts these in the node's blob store first.
+        pub blobs: BTreeMap<Digest, Vec<u8>>,
+    }
+
+    impl FixtureCartridge {
+        pub fn new(cartridge: Cartridge) -> Self {
+            Self {
+                resolved: ResolvedCartridge::new(
+                    cartridge,
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                ),
+                blobs: BTreeMap::new(),
+            }
+        }
+
+        fn placeholder(name: &str) -> DatumPin {
+            DatumPin::new(
+                Location::parse(&format!("dtxt:datum:self/{name}/main"))
+                    .expect("a fixture pin location"),
+            )
+        }
+
+        /// Pins the Lexicon file `file` under its own `id`.
+        pub fn with_lexicon(&mut self, file: IndexMap<String, serde_json::Value>) -> &mut Self {
+            let nsid: Nsid = file["id"]
+                .as_str()
+                .expect("a fixture Lexicon states its id")
+                .parse()
+                .expect("a fixture Lexicon id is an NSID");
+            self.resolved
+                .cartridge
+                .lexicons
+                .insert(nsid.clone(), Self::placeholder(nsid.as_str()));
+            self.resolved.lexicons.insert(nsid, file);
+            self
+        }
+
+        /// Pins `document` as the sidecar of the datum `nsid`.
+        pub fn with_sidecar(
+            &mut self,
+            nsid: &str,
+            document: IndexMap<String, serde_json::Value>,
+        ) -> &mut Self {
+            let nsid: Nsid = nsid.parse().expect("a fixture sidecar NSID");
+            self.resolved
+                .cartridge
+                .sidecars
+                .insert(nsid.clone(), Self::placeholder(nsid.as_str()));
+            self.resolved.sidecars.insert(nsid, document);
+            self
+        }
+
+        /// Pins `bytes` as the wasm component `key`.
+        pub fn with_wasm(&mut self, key: &str, bytes: &[u8]) -> &mut Self {
+            let digest = Digest::of(bytes);
+            self.with_wasm_digest(key, digest, bytes.len() as u64);
+            self.blobs.insert(digest, bytes.to_vec());
+            self
+        }
+
+        /// The request that stages this version's payloads in the registry.
+        pub fn stage_request(&self) -> protocol::StageCartridgeVersion {
+            protocol::StageCartridgeVersion {
+                id: self.resolved.cartridge.id.clone(),
+                version: self.resolved.cartridge.version.clone(),
+                lexicons: self.resolved.lexicons.clone(),
+                sidecars: self.resolved.sidecars.clone(),
+                components: self.resolved.components.clone(),
+            }
+        }
+
+        /// This envelope with the pins of `staged` (the registry's answer to
+        /// [`Self::stage_request`], or any published version of the same payloads), unsigned: the
+        /// pins are part of what a signature covers, so it is signed after.
+        pub fn staged(&self, staged: Cartridge) -> Cartridge {
+            let mut envelope = self.resolved.cartridge.clone();
+            envelope.lexicons = staged.lexicons;
+            envelope.sidecars = staged.sidecars;
+            envelope.components = staged.components;
+            envelope.signature = None;
+            envelope
+        }
+
+        /// The envelope to publish once `staged` has stored the payloads: [`Self::staged`], signed
+        /// as the example namespace.
+        pub fn publishable(&self, staged: Cartridge) -> Cartridge {
+            sign_as_example(self.staged(staged))
+        }
+
+        /// Pins a blob the node already holds, by `digest` and `size`, as the wasm
+        /// component `key`; the bytes themselves are not recorded here.
+        pub fn with_wasm_digest(&mut self, key: &str, digest: Digest, size: u64) -> &mut Self {
+            self.resolved
+                .cartridge
+                .components
+                .insert(key.to_owned(), Self::placeholder(key));
+            self.resolved.components.insert(
+                key.to_owned(),
+                Component::Wasm(WasmComponent {
+                    bytes: Self::placeholder(key),
+                    digest,
+                    size,
+                    media_type: "application/wasm".to_owned(),
+                    extra: Default::default(),
+                }),
+            );
+            self
+        }
+    }
+
+    impl std::ops::Deref for FixtureCartridge {
+        type Target = Cartridge;
+
+        fn deref(&self) -> &Cartridge {
+            &self.resolved.cartridge
+        }
+    }
+
+    impl std::ops::DerefMut for FixtureCartridge {
+        fn deref_mut(&mut self) -> &mut Cartridge {
+            &mut self.resolved.cartridge
+        }
     }
 }
 

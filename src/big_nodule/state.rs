@@ -13,6 +13,7 @@ use crate::executor::HandlerSpec;
 use crate::executor::Hosted;
 use crate::executor::NoduleExecutor;
 use crate::executor::ReensureQueue;
+use crate::executor::RoutineSpec;
 use crate::store;
 use big_cabinet::DatumStore;
 use big_cabinet::DatumStoreHandle;
@@ -48,10 +49,12 @@ use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Revision;
+use big_cartridges_core::RunMode;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
 use big_cartridges_core::protocol::CartridgeInstallRecord;
+use big_cartridges_core::protocol::CartridgesProtocol;
 use big_dispatch::Caller;
 use big_dispatch::LexiconSource;
 use big_dispatch::Operation;
@@ -67,7 +70,7 @@ use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
 use big_dispatch_core::MintDispatchCapability;
 use big_dispatch_core::Readiness;
-use big_nodule_core::RunMode;
+use big_nodule_core::NoduleAdmission;
 use big_nodule_core::config::AdmissionCache;
 use big_nodule_core::config::CartridgeConfig;
 use big_nodule_core::config::NoduleConfig;
@@ -117,6 +120,10 @@ pub(crate) struct Stores {
     /// creates cartridge config documents in the shared config drawer with.
     pub(crate) docs: Client<DocsProtocol>,
     pub(crate) docs_capability: CapId,
+    /// The cartridges service a pinned version is resolved through, and the read handle the
+    /// service presents to it.
+    pub(crate) cartridges: Client<CartridgesProtocol>,
+    pub(crate) cartridges_authorization: Authorization,
     pub(crate) shared_config_drawer: DrawerId,
     pub(crate) parent: OpenedActor,
     pub(crate) parent_path: String,
@@ -673,6 +680,8 @@ impl State {
         let docs = CartridgeDocs::new(
             stores.docs.clone(),
             stores.docs_capability,
+            stores.cartridges.clone(),
+            stores.cartridges_authorization,
             stores.shared_config_drawer.clone(),
             stores.sql.clone(),
             Arc::clone(&docs_changed),
@@ -962,8 +971,8 @@ impl State {
         scope: Option<NoduleScope>,
         pin: DatumPin,
     ) -> Res<CartridgeInstallRecord> {
-        let cartridge = match self.docs.read_pin(&pin).await {
-            Ok(cartridge) => cartridge,
+        let resolved = match self.docs.read_pin(&pin).await {
+            Ok(resolved) => resolved,
             Err(PinError::Unavailable(reason)) => {
                 return Err(NodulesError::Rejected(format!(
                     "the pinned version is not available on this node: {reason}"
@@ -973,11 +982,11 @@ impl State {
             Err(PinError::Fatal(error)) => return Err(error),
         };
         if let Some(scope) = &scope
-            && !(scope.admit && scope.cartridges.contains(&cartridge.id))
+            && !(scope.admit && scope.cartridges.contains(&resolved.cartridge.id))
         {
             return Err(NodulesError::Denied);
         }
-        let cartridge_id = cartridge.id.clone();
+        let cartridge_id = resolved.cartridge.id.clone();
         let doc = match self.config_doc(&cartridge_id).await? {
             Some(doc) => doc,
             None => self.docs.create(&cartridge_id).await?,
@@ -990,7 +999,7 @@ impl State {
             .map_err(crate::store_error)?;
         let cache = Arc::clone(&self.admission_cache);
         self.mutate_config(context, move |config| {
-            config.install(&cache, &cartridge, pin, doc)
+            config.install(&cache, &resolved, pin, doc)
         })
         .await?;
         self.install_record(&cartridge_id)
@@ -1166,10 +1175,11 @@ impl State {
         let Some(NoduleResolution::Admitted { installed, .. }) = resolved.get(cartridge_id) else {
             unreachable!("a request awaiting confirmation belongs to an admitted nodule")
         };
+
         let request = installed
-            .nodule
-            .requires
-            .iter()
+            .resolved
+            .provider_requests()
+            .into_iter()
             .find(|request| request.binding == binding)
             .expect("the record reports a status for each request of its nodule");
         let offers = index.offers(
@@ -1495,7 +1505,7 @@ impl State {
                 unreachable!("selected as admitted above");
             };
             let split = installed
-                .nodule
+                .resolved
                 .registrable_datums(installed.admitted.authority.as_deref());
             let object = |file: &IndexMap<String, Value>| {
                 Value::Object(file.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -1505,7 +1515,7 @@ impl State {
                 split.held.iter().map(|(nsid, file, sidecar)| {
                     let registration = SchemaRegistration::new(*nsid, object(file));
                     match sidecar {
-                        Some(document) => registration.with_supplement((*document).clone()),
+                        Some(document) => registration.with_supplement(object(document)),
                         None => registration,
                     }
                 }),
@@ -1652,12 +1662,10 @@ impl State {
         {
             self.inits.remove(&cartridge_id);
         }
-        let hosting = match (&self.stores.executor, &installed.nodule.handler) {
-            (Some(executor), Some(handler)) if installed.enabled => {
-                Some((Arc::clone(executor), handler.artifact.clone()))
-            }
-            _ => None,
-        };
+        // A nodule with routines is hosted by an executor; one without implements nothing.
+        let hosting = (installed.enabled && !installed.nodule.routines.is_empty())
+            .then(|| self.stores.executor.as_ref().map(Arc::clone))
+            .flatten();
         if !installed.enabled {
             self.withdraw(&cartridge_id).await;
             return Readiness::Disabled;
@@ -1665,7 +1673,7 @@ impl State {
         // A required operation with no covering grant is configuration the nodule is waiting
         // for, not a fault (Clay's "needs configuration"): nothing is hosted or initialized
         // until it is granted, and callers get the retryable not-ready.
-        if installed.nodule.unmet_requests(granted).next().is_some() {
+        if !installed.resolved.unmet_requests(granted).is_empty() {
             self.retire(&cartridge_id).await;
             self.register_not_ready(&provider_id, installed, Readiness::NeedsConfiguration);
             return Readiness::NeedsConfiguration;
@@ -1675,17 +1683,12 @@ impl State {
         // waiter needs waking when a provider turns up: resolution is recomputed for every
         // nodule on each reconcile, and a provider can only appear through one (a config
         // change, since every nodule's enablement lives in the config document).
-        if installed
-            .nodule
-            .missing_providers(requests)
-            .next()
-            .is_some()
-        {
+        if !installed.resolved.missing_providers(requests).is_empty() {
             self.retire(&cartridge_id).await;
             self.register_not_ready(&provider_id, installed, Readiness::ProviderMissing);
             return Readiness::ProviderMissing;
         }
-        let Some((executor, artifact_key)) = hosting else {
+        let Some(executor) = hosting else {
             self.retire(&cartridge_id).await;
             let readiness = installed.readiness();
             if readiness.is_ready() {
@@ -1715,19 +1718,45 @@ impl State {
             self.register_not_ready(&provider_id, installed, Readiness::Initializing);
             self.retire(&cartridge_id).await;
         }
-        let (handler, _) = installed
+        let components = installed
             .artifacts
-            .get(&artifact_key)
-            .expect("admission resolved the handler artifact");
+            .keys()
+            .map(|key| {
+                let component = installed
+                    .resolved
+                    .components
+                    .get(key)
+                    .expect("admission resolved every routine component");
+                (key.clone(), component.clone())
+            })
+            .collect();
+        let routines = installed
+            .nodule
+            .routines
+            .values()
+            .map(|routine| {
+                let big_cartridges_core::RoutineImpl::ComponentExport(export) = &routine.r#impl
+                else {
+                    unreachable!("admission accepted an unknown routine implementation")
+                };
+                (
+                    routine.implements.to_string(),
+                    RoutineSpec {
+                        component: export.component.clone(),
+                        export: export.export.clone(),
+                    },
+                )
+            })
+            .collect();
         let spec = HandlerSpec {
             cartridge_id: cartridge_id.clone(),
             revision: installed.revision,
-            handler: handler.clone(),
+            components,
+            routines,
             actor: actor.clone(),
             capability,
             config_doc: installed.config_doc.clone(),
             config_capability: settings_capability,
-            operations: installed.admitted.operations.clone(),
             reensure: self.reensure.handle(cartridge_id.clone()),
         };
         self.hosted.insert(cartridge_id.clone(), installed.revision);
@@ -1759,11 +1788,12 @@ impl State {
                 ProviderState::NotReady(readiness)
             }
         };
-        if state.readiness() != Readiness::ArtifactsUnavailable
-            && let Some((_, artifact_state)) = installed.artifacts.get_mut(&artifact_key)
-        {
-            *artifact_state = ArtifactState::Available;
+        if state.readiness() != Readiness::ArtifactsUnavailable {
+            for (_, artifact_state) in installed.artifacts.values_mut() {
+                *artifact_state = ArtifactState::Available;
+            }
         }
+
         let state = self.register_claims(&provider_id, installed, state);
         // The one place a hosted nodule's registration turns ready, whichever way it got
         // there (its inits finished, its bytes arrived, it was enabled or installed late).
@@ -1820,15 +1850,15 @@ impl State {
         if !self.inits.contains_key(cartridge_id) {
             let done = inits
                 .iter()
-                .filter(|init| {
+                .filter(|(key, init)| {
                     init.mode == RunMode::Once
                         && self
                             .init_done
                             .get(cartridge_id)
-                            .and_then(|keys| keys.get(&init.key))
+                            .and_then(|keys| keys.get(*key))
                             == Some(&installed.revision)
                 })
-                .map(|init| init.key.clone())
+                .map(|(key, _)| key.clone())
                 .collect();
             self.next_epoch += 1;
             self.inits.insert(
@@ -1850,7 +1880,7 @@ impl State {
             .inits
             .get_mut(cartridge_id)
             .expect("run inserted above");
-        let init = inits.iter().find(|init| !run.done.contains(&init.key))?;
+        let (init_key, init) = inits.iter().find(|(key, _)| !run.done.contains(*key))?;
         if run.running.is_some() {
             return Some(Readiness::Initializing);
         }
@@ -1858,7 +1888,11 @@ impl State {
             return Some(Readiness::InitFailed);
         }
 
-        let route = if installed.admitted.operations.contains_key(&init.target) {
+        let route = if installed
+            .admitted
+            .operations
+            .contains_key(init.target.as_str())
+        {
             InitRoute::Local {
                 provider: provider.expect(
                     "a local initializer target means the nodule has a handler, and its \
@@ -1874,7 +1908,7 @@ impl State {
             // A foreign operation. Wait for its provider rather than fail the first call: it
             // may be a nodule that is itself still initializing, or not installed yet. Only a
             // provider that is ready is invoked, so a denial or a failure is the call's own.
-            let waiting_on = match self.stores.dispatch.resolve(&init.target) {
+            let waiting_on = match self.stores.dispatch.resolve(init.target.as_str()) {
                 Ok(entry) if matches!(entry.state, ProviderState::Ready(_)) => None,
                 Ok(entry) => Some(Some(entry.provider_id.clone())),
                 Err(_) => Some(None),
@@ -1883,14 +1917,14 @@ impl State {
                 let run = self.inits.get_mut(cartridge_id).expect("run present");
                 run.failed = false;
                 run.blocked_on = provider_id;
-                run.waiting_on = Some(init.target.clone());
+                run.waiting_on = Some(init.target.to_string());
                 if self.in_dependency_cycle(cartridge_id) {
                     let run = self.inits.get_mut(cartridge_id).expect("run present");
                     run.failed = true;
                     run.error = Some(format!(
                         "initializer `{}` waits for `{}`, whose provider waits for this nodule \
                          (dependency cycle)",
-                        init.key, init.target
+                        init_key, init.target
                     ));
                     return Some(Readiness::InitFailed);
                 }
@@ -1911,22 +1945,22 @@ impl State {
         run.failed = false;
         run.blocked_on = None;
         run.waiting_on = None;
-        run.running = Some(init.key.clone());
+        run.running = Some(init_key.clone());
         let context = InvocationContext {
             idempotency_key: Some(format!(
                 "nodule/{cartridge_id}/{}/{}",
-                installed.revision, init.key
+                installed.revision, init_key
             )),
             ..Default::default()
         };
         let finished = InitFinished {
             cartridge_id: cartridge_id.clone(),
             epoch: run.epoch,
-            key: init.key.clone(),
+            key: init_key.clone(),
             once: init.mode == RunMode::Once,
             outcome: Ok(()),
         };
-        let target = init.target.clone();
+        let target = init.target.to_string();
         let dispatch_client = self.stores.dispatch_client.clone();
         let invocation = async move {
             InitFinished {
@@ -2064,7 +2098,7 @@ impl State {
             return Ok(BTreeMap::new());
         }
         let mut statuses = BTreeMap::new();
-        for request in &installed.nodule.requires {
+        for request in installed.resolved.provider_requests() {
             let pinned = self
                 .locks
                 .get(cartridge_id)
@@ -2093,7 +2127,7 @@ impl State {
             );
             statuses.insert(
                 request.binding.clone(),
-                RequestStatus::evaluate(request, &offers, pinned),
+                RequestStatus::evaluate(&request, &offers, pinned),
             );
         }
         let locks = statuses
@@ -2153,7 +2187,7 @@ impl State {
         // request is reported on the record rather than applied, which is what keeps "can X
         // ever reach Y" answerable from the manifest alone.
         let (bound_operations, unrequested_operations) =
-            installed.nodule.bind_operations(&desired_operations);
+            installed.resolved.bind_operations(&desired_operations);
         let effective_operations = if installed.enabled {
             bound_operations.clone()
         } else {
@@ -2600,9 +2634,9 @@ fn claims(installed: &InstalledNodule, state: &ProviderState) -> Vec<(String, Op
         return unchecked_claims(&installed.admitted.operations);
     }
     let files: Vec<Value> = installed
-        .nodule
+        .resolved
         .lexicons
-        .iter()
+        .values()
         .map(|file| Value::Object(file.clone().into_iter().collect()))
         .collect();
     installed

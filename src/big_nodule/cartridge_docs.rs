@@ -11,6 +11,7 @@ use crate::store;
 use big_cabinet::DatumStoreHandle;
 use big_cabinet_core::DatumPin;
 use big_cabinet_core::DatumTag;
+use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::DocId;
@@ -33,8 +34,12 @@ use big_cabinet_core::query::Predicate;
 use big_cabinet_core::reference::ReferenceDocId;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::ResolvedCartridge;
 use big_cartridges_core::config::CartridgeConfigIdentity;
 use big_cartridges_core::config::config_identity_key;
+use big_cartridges_core::protocol::CartridgesError;
+use big_cartridges_core::protocol::CartridgesProtocol;
+use big_cartridges_core::protocol::ResolveCartridgeVersion;
 use big_nodule_core::config::Admission;
 use big_nodule_core::config::AdmissionCache;
 use big_nodule_core::config::CartridgeConfig;
@@ -76,6 +81,10 @@ pub(crate) struct CartridgeDocs {
     /// Reads the registry's documents and reads, writes and creates documents in the shared config
     /// drawer.
     capability: CapId,
+    /// The cartridges service that resolves a verified version's pinned payloads, and the read
+    /// handle presented to it.
+    cartridges: Client<CartridgesProtocol>,
+    cartridges_authorization: Authorization,
     shared_drawer: DrawerId,
     loaded: BTreeMap<CartridgeId, LoadedDoc>,
     /// The document this node made or found for each cartridge, persisted (see
@@ -88,9 +97,15 @@ pub(crate) struct CartridgeDocs {
 }
 
 impl CartridgeDocs {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the state actor hands over the service handles it already holds, one for one"
+    )]
     pub(crate) async fn new(
         docs: Client<DocsProtocol>,
         capability: CapId,
+        cartridges: Client<CartridgesProtocol>,
+        cartridges_authorization: Authorization,
         shared_drawer: DrawerId,
         sql: Database,
         wake: Arc<Notify>,
@@ -99,6 +114,8 @@ impl CartridgeDocs {
         Ok(Self {
             docs,
             capability,
+            cartridges,
+            cartridges_authorization,
             shared_drawer,
             loaded: BTreeMap::new(),
             known: store::config_docs(&sql).await?,
@@ -112,7 +129,7 @@ impl CartridgeDocs {
     /// checks what the registry checks before it serves a version: the envelope is well formed,
     /// signed by its namespace, and sits at the slot of its own version. The registry document
     /// may have synced in from a peer, so none of it is trusted unread.
-    pub(crate) async fn read_pin(&self, pin: &DatumPin) -> Result<Cartridge, PinError> {
+    async fn read_envelope(&self, pin: &DatumPin) -> Result<Cartridge, PinError> {
         let reference = pin.location().reference();
         let ReferenceDocId::Concrete(doc_id) = reference.document() else {
             return Err(PinError::Invalid(
@@ -189,6 +206,47 @@ impl CartridgeDocs {
             )));
         }
         Ok(cartridge)
+    }
+
+    /// The version `pin` names, with the payloads its envelope pins, as the cartridges service
+    /// resolves them. The envelope is read and verified at the pin first: the pin selects an exact
+    /// revision, which the service's own view of the version must agree with. The service does not
+    /// run nodule admission; the caller does, on this result.
+    pub(crate) async fn read_pin(&self, pin: &DatumPin) -> Result<ResolvedCartridge, PinError> {
+        let cartridge = self.read_envelope(pin).await?;
+        let resolved = self
+            .cartridges
+            .call_with(
+                RequestContext::root(),
+                self.cartridges_authorization.metadata(),
+                ResolveCartridgeVersion {
+                    id: cartridge.id.clone(),
+                    version: cartridge.version.clone(),
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                // The registry has not projected the version yet, or the payloads its pins name
+                // have not reached this node: both clear once sync catches up.
+                ClientError::Method(
+                    error @ (CartridgesError::UnknownCartridge(_)
+                    | CartridgesError::UnknownVersion { .. }
+                    | CartridgesError::PinnedDatumUnreadable { .. }),
+                ) => PinError::Unavailable(error.to_string()),
+                ClientError::Method(
+                    error @ (CartridgesError::Rejected(_)
+                    | CartridgesError::PinnedDatumInvalid { .. }
+                    | CartridgesError::PinnedDocumentMismatch { .. }),
+                ) => PinError::Invalid(error.to_string()),
+                error => PinError::Fatal(crate::cartridges_error(error)),
+            })?;
+        if resolved.cartridge.revision() != cartridge.revision() {
+            return Err(PinError::Invalid(format!(
+                "the registry resolves version {} of `{}` to another revision than the pinned one",
+                cartridge.version, cartridge.id
+            )));
+        }
+        Ok(resolved)
     }
 
     /// The config document an earlier install of `cartridge_id` left: the one this node made or
@@ -327,18 +385,18 @@ impl CartridgeDocs {
                 continue;
             }
             let (admission, settled) = match self.read_pin(&install.cartridge).await {
-                Ok(cartridge) if &cartridge.id != cartridge_id => (
+                Ok(resolved) if &resolved.cartridge.id != cartridge_id => (
                     Admission::Refused {
-                        version: Some(cartridge.version),
+                        version: Some(resolved.cartridge.version),
                         revision: None,
                         reason: format!(
                             "install datum key `{cartridge_id}` does not match the pinned envelope's id `{}`",
-                            cartridge.id
+                            resolved.cartridge.id
                         ),
                     },
                     true,
                 ),
-                Ok(cartridge) => (Admission::of(&cartridge), true),
+                Ok(resolved) => (Admission::of(&resolved), true),
                 Err(PinError::Unavailable(reason)) => (
                     Admission::Refused {
                         version: None,
