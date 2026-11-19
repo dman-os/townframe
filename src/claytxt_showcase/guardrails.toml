@@ -12,6 +12,9 @@ allow_external_api_types = false
 features = ["desktop"]
 required_features = ["desktop"]
 
+# `default` is `desktop`, whose Wry stack links native-tls (openssl-sys): the browser build
+# never takes the defaults.
 [builds.wasm32-unknown-unknown]
 features = ["web"]
 required_features = ["web"]
+default_features = false
