@@ -1633,3 +1633,76 @@ async fn a_drawer_reach_admits_only_its_datum_kinds_for_reads_and_writes() {
 
     fx.node.stop().await;
 }
+
+/// A drawer's own document is its public root (ADR 019), and not a member of its own drawer: a
+/// reach that reads the drawer reads that document too, and a handle reaching only another
+/// drawer does not. Writing it is not reached through the drawer, even with Write.
+#[tokio::test]
+async fn a_drawer_reach_reads_the_drawers_own_document_but_does_not_write_it() {
+    use big_cabinet_core::doc::DatumKinds;
+    let fx = Containment::boot().await;
+    let read = async |capability: CapId, doc: &DocId| {
+        fx.node
+            .docs()
+            .call(
+                RequestContext::root(),
+                ReadDatums {
+                    capability,
+                    doc_id: doc.clone(),
+                    at: At::Current,
+                    datums: None,
+                    optimistic: false,
+                },
+            )
+            .await
+    };
+    let reader = fx
+        .capability(
+            &fx.alice,
+            parent_reach(&fx, Access::Read, DatumKinds::All, DatumKinds::All),
+        )
+        .await;
+    read(reader, &fx.parent).await.unwrap();
+    let elsewhere = fx
+        .capability(
+            &fx.alice,
+            DocScope {
+                drawers: BTreeMap::from([(
+                    fx.other.clone(),
+                    big_cabinet_core::doc::DrawerReach::all_kinds(Access::Read),
+                )]),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(
+        read(elsewhere, &fx.parent).await.unwrap_err(),
+        ClientError::Method(DocsError::Denied),
+    );
+    let writer = fx
+        .capability(
+            &fx.alice,
+            parent_reach(&fx, Access::Write, DatumKinds::All, DatumKinds::All),
+        )
+        .await;
+    let (key, value) = note("into the drawer document");
+    assert_eq!(
+        fx.node
+            .docs()
+            .call(
+                RequestContext::root(),
+                WriteDatums {
+                    capability: writer,
+                    command: None,
+                    doc_id: fx.parent.clone(),
+                    mode: WriteMode::AtCurrent,
+                    set: BTreeMap::from([(key, value)]),
+                    remove: BTreeSet::new(),
+                },
+            )
+            .await
+            .unwrap_err(),
+        ClientError::Method(DocsError::Denied),
+    );
+    fx.node.stop().await;
+}
