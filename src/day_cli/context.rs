@@ -4,7 +4,7 @@
 //! where it is):
 //!
 //! ```text
-//! <node>/node.json        identity seed, operator policy and peers, created by `day node init` (0600)
+//! <node>/node.json        node id, operator policy and peers, created by `day node init` (0600)
 //! <node>/node.lock        flock held for as long as a process has the node booted; holds its pid
 //! <node>/run/daemon.log   the background daemon's stderr
 //! <node>/node.sqlite, repo/, blobs/   the node's own storage, opened by `big_node::Bindings`
@@ -77,14 +77,14 @@ pub struct NodeDir {
     socket_dir: PathBuf,
 }
 
-/// What `day node init` records. The identity seed is the node's keyhive identity and, through it, its
-/// node id (ADR 033 section 6: one node key).
+/// What `day node init` records. The node id is the public half of the identity seed, which remains
+/// in the OS keyring (ADR 033 section 6: one node key).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeSettings {
     version: u32,
-    /// 32 bytes, lowercase hex.
-    identity_seed: String,
+    /// The public half of the identity seed, in lowercase hex.
+    node_id: String,
     /// The node's network attachment. Absent: the daemon attaches none, so the node neither
     /// dials nor can be dialed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,18 +207,15 @@ impl PeerSettings {
 }
 
 impl NodeSettings {
-    const VERSION: u32 = 1;
+    const VERSION: u32 = 2;
 
-    pub fn seed(&self) -> [u8; 32] {
-        let bytes = data_encoding::HEXLOWER
-            .decode(self.identity_seed.as_bytes())
-            .expect("node.json holds a hex identity seed");
-        <[u8; 32]>::try_from(bytes.as_slice()).expect("node.json holds a 32 byte identity seed")
+    pub async fn seed(&self, secrets: &SecretStore) -> Res<[u8; 32]> {
+        big_node::IdentityKeyring(secrets).load(&self.node_id).await
     }
 
     /// The node's id: the public half of the identity seed, as the repo derives its own peer id.
     pub fn node_id(&self) -> String {
-        big_node::node_id(&self.seed())
+        self.node_id.clone()
     }
 }
 
@@ -307,7 +304,7 @@ impl NodeDir {
     /// Creates the directory and `node.json` with a fresh identity. The settings file is created
     /// exclusively, so an existing node is refused here and never overwritten, whoever else is
     /// initializing the same directory at the same time.
-    pub fn init(&self) -> Res<NodeSettings> {
+    pub async fn init(&self) -> Res<NodeSettings> {
         use rand::RngCore;
         std::fs::create_dir_all(&self.root)
             .wrap_err_with(|| format!("creating {}", self.root.display()))?;
@@ -315,20 +312,118 @@ impl NodeDir {
         rand::rng().fill_bytes(&mut seed);
         let settings = NodeSettings {
             version: NodeSettings::VERSION,
-            identity_seed: data_encoding::HEXLOWER.encode(&seed),
+            node_id: big_node::node_id(&seed),
             peers: None,
             relay: false,
             dev: DevSettings::default(),
             net: NetSettings::default(),
         };
+        let bytes = serde_json::to_vec_pretty(&settings)?;
+        let secrets = SecretStore::boot().await?;
+        big_node::IdentityKeyring(&secrets).store(&seed).await?;
+        let result = (|| -> Res<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(self.settings_path())
+                .wrap_err_with(|| format!("creating {}", self.settings_path().display()))?;
+            std::io::Write::write_all(&mut file, &bytes)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            // The node never came to be, so its keyring entries go with the failed init.
+            if let Err(cleanup) = big_node::delete_secrets(&secrets, &seed).await {
+                return Err(error.wrap_err(cleanup));
+            }
+            secrets.stop().await?;
+            return Err(error);
+        }
+        secrets.stop().await?;
+        Ok(settings)
+    }
+
+    /// Writes `settings` beside `node.json` and renames it over, so a reader sees the old file
+    /// or the new, never half, and a crash leaves the old one. The file is `0600` and synced
+    /// before the rename.
+    fn write_settings(&self, settings: &NodeSettings) -> Res<()> {
+        let staging = self.root.join("node.json.new");
         let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(true)
             .mode(0o600)
-            .open(self.settings_path())
-            .wrap_err_with(|| format!("creating {}", self.settings_path().display()))?;
-        std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&settings)?)?;
-        Ok(settings)
+            .open(&staging)
+            .wrap_err_with(|| format!("creating {}", staging.display()))?;
+        std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(settings)?)?;
+        file.sync_all()?;
+        std::fs::rename(&staging, self.settings_path())
+            .wrap_err_with(|| format!("replacing {}", self.settings_path().display()))?;
+        Ok(())
+    }
+
+    /// Rewrites a version 1 `node.json` value (identity seed in the file) into the version 2
+    /// shape (its node id) and returns the seed it held; any other value is left alone.
+    fn upgrade_v1(value: &mut serde_json::Value) -> Res<Option<[u8; 32]>> {
+        if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+            return Ok(None);
+        }
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| eyre::eyre!("node.json is not a JSON object"))?;
+        let Some(hex) = object.remove("identity_seed") else {
+            return Ok(None);
+        };
+        let hex = hex
+            .as_str()
+            .ok_or_else(|| eyre::eyre!("node.json identity_seed is not a string"))?;
+        let seed = <[u8; 32]>::try_from(
+            data_encoding::HEXLOWER
+                .decode(hex.as_bytes())
+                .wrap_err("node.json holds a hex identity seed")?
+                .as_slice(),
+        )
+        .map_err(|_| eyre::eyre!("node.json holds a 32 byte identity seed"))?;
+        object.insert("version".into(), NodeSettings::VERSION.into());
+        object.insert("node_id".into(), big_node::node_id(&seed).into());
+        Ok(Some(seed))
+    }
+
+    /// Moves a version 1 node's identity seed out of `node.json` into the keyring, then rewrites
+    /// `node.json` as version 2 (the node id only). Run by whoever opens the node, on the node
+    /// lock they hold (the proof is the `lock` argument), so no two processes migrate at once.
+    /// The seed is stored and read back equal before the rewrite, and the plaintext is gone only
+    /// once the rename lands: a crash in between leaves the version 1 file, which migrates again
+    /// (storing the equal seed twice changes nothing). Any other node is left alone.
+    pub async fn migrate(&self, _lock: &NodeLock) -> Res<()> {
+        let path = self.settings_path();
+        let bytes = std::fs::read(&path).wrap_err_with(|| {
+            format!(
+                "reading {}; is there a node here? (`day node init`)",
+                path.display()
+            )
+        })?;
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes)
+            .wrap_err_with(|| format!("parsing {}", path.display()))?;
+        let Some(seed) = Self::upgrade_v1(&mut value)? else {
+            return Ok(());
+        };
+        let settings: NodeSettings = serde_json::from_value(value)
+            .wrap_err_with(|| format!("parsing {} as a version 2 node", path.display()))?;
+        let secrets = SecretStore::boot().await?;
+        let migrated = async {
+            let identity = big_node::IdentityKeyring(&secrets);
+            identity.store(&seed).await?;
+            eyre::ensure!(
+                identity.load(&settings.node_id).await? == seed,
+                "the keyring did not return the identity seed just stored for node {}",
+                settings.node_id
+            );
+            self.write_settings(&settings)
+        }
+        .await;
+        secrets.stop().await?;
+        migrated.wrap_err_with(|| format!("migrating {}", path.display()))
     }
 
     pub fn settings(&self) -> Res<NodeSettings> {
@@ -339,7 +434,12 @@ impl NodeDir {
                 path.display()
             )
         })?;
-        let settings: NodeSettings = serde_json::from_slice(&bytes)
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes)
+            .wrap_err_with(|| format!("parsing {}", path.display()))?;
+        // A version 1 node reads as the version 2 it becomes: the seed in the file names the node
+        // id. Only booting the node moves the seed into the keyring ([`Self::migrate`]).
+        Self::upgrade_v1(&mut value)?;
+        let settings: NodeSettings = serde_json::from_value(value)
             .wrap_err_with(|| format!("parsing {}", path.display()))?;
         eyre::ensure!(
             settings.version == NodeSettings::VERSION,
@@ -365,22 +465,29 @@ impl NodeDir {
 
     /// Rewrites `node.json` with `change` applied. The new file is written beside it and renamed
     /// over it, so a reader (a daemon booting) sees the old settings or the new, never half.
-    /// Whether the node is serving does not matter: settings are read once, at boot.
-    pub fn update_settings<T>(&self, change: impl FnOnce(&mut NodeSettings) -> Res<T>) -> Res<T> {
+    /// Whether the node is serving does not matter: settings are read once, at boot. A version 1
+    /// node is migrated first, under the node lock taken for that alone, as a version 2 file
+    /// written without the seed in the keyring would lose the node's identity.
+    pub async fn update_settings<T>(
+        &self,
+        change: impl FnOnce(&mut NodeSettings) -> Res<T>,
+    ) -> Res<T> {
+        let on_disk: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(self.settings_path())
+                .wrap_err_with(|| format!("reading {}", self.settings_path().display()))?,
+        )?;
+        if on_disk.get("identity_seed").is_some() {
+            match self.try_lock(LockRole::Command)? {
+                Ok(lock) => self.migrate(&lock).await?,
+                Err(held) => eyre::bail!(
+                    "{} is version 1 and {held} has the node open; its seed moves to the keyring once the node is booted again",
+                    self.settings_path().display()
+                ),
+            }
+        }
         let mut settings = self.settings()?;
         let out = change(&mut settings)?;
-        let staging = self.root.join("node.json.new");
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&staging)
-            .wrap_err_with(|| format!("creating {}", staging.display()))?;
-        std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&settings)?)?;
-        file.sync_all()?;
-        std::fs::rename(&staging, self.settings_path())
-            .wrap_err_with(|| format!("replacing {}", self.settings_path().display()))?;
+        self.write_settings(&settings)?;
         Ok(out)
     }
 
@@ -614,12 +721,14 @@ pub struct Booted {
 }
 
 impl Booted {
-    /// Boots the node in `dir` on the lock the caller holds, serving its socket. `role` is how
+    /// Boots the node in `dir` on the lock the caller holds, serving its socket, after moving a
+    /// version 1 node's seed into the keyring (the one place a node is opened). `role` is how
     /// it attaches to the network: a daemon attaches the peers service when `node.json` has a
     /// `peers` section; a command's own node attaches none, since it lives for one command and
     /// must not dial or hold the node's endpoint. The lock announces it is serving once the
     /// socket accepts connections.
     pub async fn boot(dir: &NodeDir, mut lock: NodeLock, role: LockRole) -> Res<Self> {
+        dir.migrate(&lock).await?;
         let settings = dir.settings()?;
         let listeners = Listeners {
             unix_socket: Some(dir.socket_path()?),
@@ -636,9 +745,10 @@ impl Booted {
         let runtime = Arc::new(SqliteRuntime::new(default()));
         let bindings = big_node::Bindings::in_directory(&runtime, dir.root(), None).await?;
         let secrets = Arc::new(SecretStore::boot().await?);
+        let seed = settings.seed(&secrets).await?;
         let config = big_node::Config {
             repo: big_repo::Config {
-                node_identity_seed: settings.seed(),
+                node_identity_seed: seed,
                 storage: bindings.repo,
                 scope_key: "day".into(),
                 hidden_parts: default(),
@@ -680,5 +790,131 @@ impl Booted {
             .unwrap_or_else(|_| panic!("the stopped node still holds the secret store"))
             .stop()
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn init_round_trips_identity_seed_through_keyring_without_putting_it_in_node_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = NodeDir::new(tmp.path().join("node"));
+        let settings = dir.init().await.unwrap();
+        let secrets = SecretStore::boot().await.unwrap();
+
+        let seed = settings.seed(&secrets).await.unwrap();
+        assert_eq!(big_node::node_id(&seed), settings.node_id());
+        let node_json = std::fs::read_to_string(dir.settings_path()).unwrap();
+        assert!(!node_json.contains("identity_seed"));
+        assert!(node_json.contains("node_id"));
+
+        assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 1);
+        secrets.stop().await.unwrap();
+    }
+
+    /// Under `/tmp` rather than `$TMPDIR`: a socket named by a 64 character node id has little
+    /// room in `sun_path`, and `$TMPDIR` can be long.
+    fn short_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("d")
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
+    fn write_v1(dir: &NodeDir, seed: &[u8; 32]) -> String {
+        std::fs::create_dir_all(dir.root()).unwrap();
+        let seed_hex = data_encoding::HEXLOWER.encode(seed);
+        std::fs::write(
+            dir.settings_path(),
+            format!(
+                r#"{{"version": 1, "identity_seed": "{seed_hex}", "relay": false, "dev": {{}}}}"#
+            ),
+        )
+        .unwrap();
+        seed_hex
+    }
+
+    #[tokio::test]
+    async fn a_version_one_node_migrates_its_seed_into_the_keyring() {
+        let tmp = short_tempdir();
+        let dir = NodeDir::with_socket_dir(tmp.path().join("node"), tmp.path().join("run"));
+        let seed = [9_u8; 32];
+        let seed_hex = write_v1(&dir, &seed);
+        // Before the migration the file reads as the node it becomes.
+        assert_eq!(dir.settings().unwrap().node_id(), big_node::node_id(&seed));
+
+        let lock = dir.try_lock(LockRole::Command).unwrap().unwrap();
+        dir.migrate(&lock).await.unwrap();
+
+        let node_json = std::fs::read_to_string(dir.settings_path()).unwrap();
+        assert!(!node_json.contains(&seed_hex));
+        assert!(!node_json.contains("identity_seed"));
+        let mode = std::fs::metadata(dir.settings_path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let settings = dir.settings().unwrap();
+        let secrets = SecretStore::boot().await.unwrap();
+        assert_eq!(settings.seed(&secrets).await.unwrap(), seed);
+
+        // Opening again is a no-op, and the node still opens.
+        dir.migrate(&lock).await.unwrap();
+        assert_eq!(settings.seed(&secrets).await.unwrap(), seed);
+        assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 1);
+        secrets.stop().await.unwrap();
+    }
+
+    /// A crash after the keyring store and before the rename leaves the version 1 file with the
+    /// entry already present; migrating again completes it.
+    #[tokio::test]
+    async fn a_migration_interrupted_after_the_store_completes_on_the_next_open() {
+        let tmp = short_tempdir();
+        let dir = NodeDir::with_socket_dir(tmp.path().join("node"), tmp.path().join("run"));
+        let seed = [11_u8; 32];
+        let seed_hex = write_v1(&dir, &seed);
+        let secrets = SecretStore::boot().await.unwrap();
+        big_node::IdentityKeyring(&secrets)
+            .store(&seed)
+            .await
+            .unwrap();
+
+        let lock = dir.try_lock(LockRole::Command).unwrap().unwrap();
+        dir.migrate(&lock).await.unwrap();
+
+        assert!(
+            !std::fs::read_to_string(dir.settings_path())
+                .unwrap()
+                .contains(&seed_hex)
+        );
+        assert_eq!(dir.settings().unwrap().seed(&secrets).await.unwrap(), seed);
+        big_node::delete_secrets(&secrets, &seed).await.unwrap();
+        secrets.stop().await.unwrap();
+    }
+
+    /// Updating the settings of a version 1 node moves its seed first, so the rewritten file
+    /// does not strand the identity.
+    #[tokio::test]
+    async fn updating_a_version_one_node_keeps_its_seed() {
+        let tmp = short_tempdir();
+        let dir = NodeDir::with_socket_dir(tmp.path().join("node"), tmp.path().join("run"));
+        let seed = [13_u8; 32];
+        write_v1(&dir, &seed);
+
+        dir.update_settings(|settings| {
+            settings.peers = Some(default());
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let secrets = SecretStore::boot().await.unwrap();
+        let settings = dir.settings().unwrap();
+        assert!(settings.peers.is_some());
+        assert_eq!(settings.seed(&secrets).await.unwrap(), seed);
+        big_node::delete_secrets(&secrets, &seed).await.unwrap();
+        secrets.stop().await.unwrap();
     }
 }

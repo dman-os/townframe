@@ -26,12 +26,14 @@ pub async fn run(command: PeersCommands) -> Res<ExitCode> {
 async fn add(ticket: &str) -> Res<ExitCode> {
     let conf = lazy::config().await?;
     let dir = &conf.node_dir;
-    let changed = dir.update_settings(|settings| {
-        settings
-            .peers
-            .get_or_insert_with(default)
-            .add_bootstrap(ticket)
-    })?;
+    let changed = dir
+        .update_settings(|settings| {
+            settings
+                .peers
+                .get_or_insert_with(default)
+                .add_bootstrap(ticket)
+        })
+        .await?;
     println!(
         "{}",
         if changed {
