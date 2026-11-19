@@ -12,6 +12,7 @@ use clay_mdk::Capability;
 use clay_mdk::Collection;
 use clay_mdk::Context;
 use clay_mdk::Error;
+use clay_mdk::hooks::Stylesheet;
 use clay_mdk::hooks::use_ref_status;
 use clay_mdk::hooks::use_rows;
 use contract::Button;
@@ -38,7 +39,7 @@ fn view(buttons: &Collection<String, Button>) -> Element {
     let failure = use_signal(|| None::<String>);
     rsx! {
         div { class: "ct-toolbar", role: "toolbar", "aria-label": "Toolbar",
-            document::Style { "{STYLES}" }
+            Stylesheet { css: STYLES }
             div { "data-part": "buttons",
                 for row in rows.iter() {
                     ToolbarButton {

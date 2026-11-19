@@ -15,6 +15,7 @@ use clay_mdk::Operation;
 use clay_mdk::OperationReceipt;
 use clay_mdk::Row;
 use clay_mdk::hooks::PresentationSlot;
+use clay_mdk::hooks::Stylesheet;
 use clay_mdk::hooks::use_facet;
 use clay_mdk::hooks::use_rows;
 use dioxus::prelude::*;
@@ -80,7 +81,7 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
                 }
             },
         div { class: "ct-settings", "data-state": "list",
-            document::Style { "{STYLES}" }
+            Stylesheet { css: STYLES }
             div { "data-part": "preferences",
               Card { variant: CardVariant::Outline,
                 CardContent {
@@ -170,7 +171,7 @@ pub fn SettingsSection(props: SettingsSectionProps) -> Element {
     };
     rsx! {
         section { class: "ct-settings", "data-state": "section", "aria-label": "{row.value.title}",
-            document::Style { "{STYLES}" }
+            Stylesheet { css: STYLES }
             PanelPage {
                 app_bar: rsx! {
                     AppBar {

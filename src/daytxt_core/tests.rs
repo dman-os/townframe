@@ -3,14 +3,14 @@ use clay_collection::Stamped;
 use clay_dioxus::NativeComponents;
 use clay_guest_session::capabilities::RowAttachment;
 use clay_host::StartError;
-use clay_mdk::host::factory;
 use clay_mdk::Capability;
 use clay_mdk::CollectionDecl;
 use clay_mdk::ComponentDecl;
 use clay_mdk::Endpoint;
 use clay_mdk::Error;
-use micro_settings_manifest::Section;
+use clay_mdk::host::factory;
 use micro_settings_manifest::SECTIONS;
+use micro_settings_manifest::Section;
 use std::cell::RefCell;
 use std::future::Future;
 
@@ -359,11 +359,13 @@ async fn manifest_rows_are_installed_before_anything_runs() {
         [RowAttachment::Endpoint(endpoint)] if endpoint.micro == supervised(COUNTER) && endpoint.publication == "view"
     ));
     // The sample writes its row at runtime, so nothing exists for it yet.
-    assert!(runtime
-        .collection(&sections())
-        .unwrap()
-        .get(&cbor_key(micro_sample::ID))
-        .is_none());
+    assert!(
+        runtime
+            .collection(&sections())
+            .unwrap()
+            .get(&cbor_key(micro_sample::ID))
+            .is_none()
+    );
     runtime.host.close();
 }
 
@@ -1789,6 +1791,9 @@ struct FrameApp {
 /// serving the composition (the scenario serves it).
 fn frame_app(props: FrameApp) -> Element {
     use_context_provider(|| props.components.clone());
+    // Blitz's way of carrying a mount's stylesheet: a light-DOM `<style>` the recording tree
+    // exposes as text, where a browser mount keeps it in an attribute.
+    use_context_provider(|| clay_mdk::host::LightDomStylesheets);
     let width = use_signal(|| props.width).into();
     let height = use_signal(|| 800.0).into();
     let insets = use_signal(Insets::default).into();

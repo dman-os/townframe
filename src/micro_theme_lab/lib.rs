@@ -5,7 +5,7 @@
 //! the shell and every micro live and keeps it across restarts. Revert returns the draft to what
 //! is applied.
 //!
-//! The preview is the draft as this micro's own stylesheet (`document::Style`), which is the
+//! The preview is the draft as this micro's own stylesheet (`Stylesheet`), which is the
 //! cascade every micro has: the host's applied theme sits in `@layer user`, beneath a micro's own
 //! rules, so the draft (not the applied sheet) decides what the lab shows. The host refuses an
 //! applied theme that could make it fetch anything (`url(`, `@import`, `image-set(`, ...); the
@@ -32,6 +32,7 @@ use clay_mdk::Capability;
 use clay_mdk::Context;
 use clay_mdk::Error;
 use clay_mdk::hooks::PresentationSlot;
+use clay_mdk::hooks::Stylesheet;
 use dioxus::prelude::*;
 use micro_shell_manifest::ThemeSheet;
 use micro_theme_lab_manifest::SHELL_GET_THEME;
@@ -68,8 +69,8 @@ clay_mdk::export_micro!(activate, micro_theme_lab_manifest::manifest);
 
 /// The lab's own stylesheet: the layout of its parts, the monospace field and the text roles, which
 /// the kit has no component for. It names no colour that is not a kit token. While the draft
-/// previews, the draft follows it in the same `document::Style` (a micro has one stylesheet, the
-/// latest `document::Style`), so a draft rule beats a rule here.
+/// previews, the draft follows it in the same `Stylesheet` (a micro has one stylesheet, the
+/// latest `Stylesheet`), so a draft rule beats a rule here.
 const STYLES: &str = include_str!("styles.css");
 
 /// The outcome the status line shows after the last Apply.
@@ -98,9 +99,6 @@ fn view(host: Host) -> Element {
     let mut preview = use_signal(|| true);
     let mut status = use_signal(|| Status::Idle);
     let mut applying = use_signal(|| false);
-    // `document::Style` creates its element once per mount, so each edit remounts it through its
-    // key; a counter, because the text itself is long.
-    let mut revision = use_signal(|| 0_u64);
 
     let leading = rsx! { PresentationSlot { reference: host.nav_button.clone() } };
     let applied_css = match &*applied.read() {
@@ -150,7 +148,7 @@ fn view(host: Host) -> Element {
         rsx! {
             // The draft is this micro's stylesheet while it previews, which the host adopts for
             // this mount alone. It follows the lab's own rules in the one stylesheet a micro has.
-            document::Style { key: "{revision}", "{STYLES}\n{preview_css}" }
+            Stylesheet { css: format!("{STYLES}\n{preview_css}") }
             div { class: "ct-theme-lab",
                 section { "data-part": "editor", "aria-label": "Theme CSS",
                     label { "data-part": "heading", r#for: "theme-css", "Theme CSS" }
@@ -163,7 +161,6 @@ fn view(host: Host) -> Element {
                         oninput: move |event| {
                             draft.set(Some(event.value()));
                             status.set(Status::Idle);
-                            revision += 1;
                         },
                     }
                     div { "data-part": "actions",
@@ -181,7 +178,6 @@ fn view(host: Host) -> Element {
                             onclick: move |()| {
                                 draft.set(None);
                                 status.set(Status::Idle);
-                                revision += 1;
                             },
                             "Revert"
                         }
@@ -191,7 +187,6 @@ fn view(host: Host) -> Element {
                                 checked: preview(),
                                 onchange: move |event| {
                                     preview.set(event.checked());
-                                    revision += 1;
                                 },
                             }
                             "Preview the draft here"
