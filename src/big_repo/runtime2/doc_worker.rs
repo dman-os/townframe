@@ -764,6 +764,18 @@ impl<F: FutureForm> DocWorker2<F> {
             checkpoint_count,
             "load_doc_snapshot: tree composition"
         );
+        // Each topologically ordered item as the (kind, head) pair both passes below key on.
+        let refs: Vec<(BigRepoCiphertextKind, CommitId)> = order
+            .iter()
+            .map(|item| match item {
+                SedimentreeItem::Fragment(index) => {
+                    (BigRepoCiphertextKind::Fragment, fragments[*index].head())
+                }
+                SedimentreeItem::LooseCommit(index) => {
+                    (BigRepoCiphertextKind::LooseCommit, commits[*index].head())
+                }
+            })
+            .collect();
         let mut plaintexts = HashMap::<Vec<u8>, Vec<u8>>::new();
         let mut blockers = Vec::new();
 
@@ -777,15 +789,7 @@ impl<F: FutureForm> DocWorker2<F> {
         // Blockers lose nothing: a descendant's closure is a superset of any
         // ancestor's, so its walk already reported every blocker the ancestor's
         // own walk would.
-        for item in order.iter().rev() {
-            let (kind, head) = match item {
-                SedimentreeItem::Fragment(index) => {
-                    (BigRepoCiphertextKind::Fragment, fragments[*index].head())
-                }
-                SedimentreeItem::LooseCommit(index) => {
-                    (BigRepoCiphertextKind::LooseCommit, commits[*index].head())
-                }
-            };
+        for &(kind, head) in refs.iter().rev() {
             let locator = BigRepoCiphertextLocator::new(kind, self.sed_id, head);
 
             // ARK-style recovered-key fast path: a cached application secret
@@ -835,33 +839,11 @@ impl<F: FutureForm> DocWorker2<F> {
             blockers.extend(result.blockers);
         }
 
-        let mut partially_decrypted = false;
-        let mut pending: Vec<(BigRepoCiphertextKind, CommitId, Vec<u8>)> = Vec::new();
-        let mut blocked_refs = Vec::new();
-        for item in &order {
-            let (kind, head) = match item {
-                SedimentreeItem::Fragment(index) => {
-                    (BigRepoCiphertextKind::Fragment, fragments[*index].head())
-                }
-                SedimentreeItem::LooseCommit(index) => {
-                    (BigRepoCiphertextKind::LooseCommit, commits[*index].head())
-                }
-            };
-            let content_ref = match item {
-                SedimentreeItem::Fragment(index) => fragments[*index].head().as_bytes().to_vec(),
-                SedimentreeItem::LooseCommit(index) => commits[*index].head().as_bytes().to_vec(),
-            };
-            match plaintexts.remove(&content_ref) {
-                Some(plaintext) => pending.push((kind, head, plaintext)),
-                None => {
-                    if kind == BigRepoCiphertextKind::LooseCommit && is_causal_checkpoint_id(head) {
-                        continue;
-                    }
-                    partially_decrypted = true;
-                    blocked_refs.push((kind, head));
-                }
-            }
-        }
+        let ClaimedPlaintexts {
+            mut pending,
+            blocked_refs,
+        } = Self::claim_ordered_plaintexts(&refs, &mut plaintexts);
+        let partially_decrypted = !blocked_refs.is_empty();
 
         // Minimized fragments can hide loose ancestors that causal decryption
         // still returns. Include those dependencies in the same fixed-point
@@ -897,6 +879,32 @@ impl<F: FutureForm> DocWorker2<F> {
         );
         tracing::info!(doc_id = %self.doc_id, order_len = order.len(), instr_cached, instr_covered, instr_causal, instr_causal_complete, instr_bytes, ?instr_walk, wall = ?instr_start.elapsed(), "INSTR load_doc_snapshot"); // INSTR
         instr_result
+    }
+
+    /// Takes each ordered item's plaintext out of `plaintexts`, leaving only the dependencies the
+    /// causal walk returned beyond the ordered items. Items with no plaintext are blocked, except
+    /// causal checkpoints, which carry only a key and so are never expected to decrypt.
+    fn claim_ordered_plaintexts(
+        refs: &[(BigRepoCiphertextKind, CommitId)],
+        plaintexts: &mut HashMap<Vec<u8>, Vec<u8>>,
+    ) -> ClaimedPlaintexts {
+        let mut pending = Vec::new();
+        let mut blocked_refs = Vec::new();
+        for &(kind, head) in refs {
+            match plaintexts.remove(head.as_bytes().as_slice()) {
+                Some(plaintext) => pending.push((kind, head, plaintext)),
+                None => {
+                    if kind == BigRepoCiphertextKind::LooseCommit && is_causal_checkpoint_id(head) {
+                        continue;
+                    }
+                    blocked_refs.push((kind, head));
+                }
+            }
+        }
+        ClaimedPlaintexts {
+            pending,
+            blocked_refs,
+        }
     }
 
     /// Open one blob with its cached application secret, if the recovered-key cache holds one.
@@ -2312,3 +2320,10 @@ impl<F: FutureForm> DocWorker2<F> {
 
 #[cfg(test)]
 mod tests;
+
+/// What [`DocWorker2::claim_ordered_plaintexts`] took from the decrypted set: the ordered items
+/// ready to apply, and those whose plaintext is missing.
+struct ClaimedPlaintexts {
+    pending: Vec<(BigRepoCiphertextKind, CommitId, Vec<u8>)>,
+    blocked_refs: Vec<(BigRepoCiphertextKind, CommitId)>,
+}

@@ -158,7 +158,7 @@ fn reaches_reference(document: &Value) -> bool {
     let mut reached = std::collections::HashSet::new();
     let mut pending = vec![document];
     while let Some(entry) = pending.pop() {
-        for schema in schema_positions(entry, false) {
+        for (_, schema) in schema_positions(entry, false) {
             if super::references::ReferenceForm::of(schema).is_some() {
                 return true;
             }
@@ -202,10 +202,22 @@ fn enforce_value_resource_bound(value: &Value) -> Result<(), CodecError> {
     Ok(())
 }
 
+/// One validator per `anyOf`/`oneOf` branch, so the codec can ask which branch a candidate fits.
+///
+/// The root document is registered once, in a registry every branch validator shares, and each
+/// branch is compiled as a `$ref` to its JSON Pointer in it. A branch therefore resolves its
+/// `#/$defs/..` references against the registered root, and the root's definitions are neither
+/// copied into every branch nor re-processed by every build, which is what made compiling a large
+/// Lexicon's branches cost a full registry build per branch.
 fn compile_branch_validators(document: &Value) -> Result<BranchValidators, CodecError> {
-    let definitions = document.get("$defs").cloned();
+    /// The registered root's URI; the document carries no `$id` of its own to take its place.
+    const ROOT: &str = "urn:carried-schema:root";
+    let invalid = |error: &dyn std::fmt::Display| CodecError::InvalidSchema {
+        message: error.to_string(),
+    };
     let mut validators = HashMap::new();
-    for schema in schema_positions(document, true) {
+    let mut registry = None;
+    for (pointer, schema) in schema_positions(document, true) {
         let Some(object) = schema.as_object() else {
             continue;
         };
@@ -213,31 +225,29 @@ fn compile_branch_validators(document: &Value) -> Result<BranchValidators, Codec
             let Some(branches) = object.get(keyword).and_then(Value::as_array) else {
                 continue;
             };
-            for branch in branches {
-                // A branch is validated on its own, so the definitions it may reference have to
-                // travel with it: the root's `$defs`, without overwriting one the branch carries.
-                let mut branch_document = branch.clone();
-                if let (Some(Value::Object(root_definitions)), Value::Object(branch_object)) =
-                    (definitions.as_ref(), &mut branch_document)
-                {
-                    let branch_definitions = branch_object
-                        .entry("$defs")
-                        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-                    if let Value::Object(branch_definitions) = branch_definitions {
-                        for (name, definition) in root_definitions {
-                            branch_definitions
-                                .entry(name.clone())
-                                .or_insert_with(|| definition.clone());
-                        }
-                    }
+            for (index, branch) in branches.iter().enumerate() {
+                let key = serde_json::to_string(branch).expect("a schema branch serializes");
+                // A branch repeated verbatim resolves the same wherever it sits.
+                if validators.contains_key(&key) {
+                    continue;
                 }
+                if registry.is_none() {
+                    registry = Some(
+                        jsonschema::Registry::try_new(
+                            ROOT,
+                            jsonschema::Resource::from_contents(document.clone()),
+                        )
+                        .map_err(|error| invalid(&error))?,
+                    );
+                }
+                let reference = serde_json::json!({
+                    "$ref": format!("{ROOT}#{}", fragment(&format!("{pointer}/{keyword}/{index}"))),
+                });
                 let validator = crate::datum::input::options()
                     .with_retriever(CarriedSchemaRetriever)
-                    .build(&branch_document)
-                    .map_err(|error| CodecError::InvalidSchema {
-                        message: error.to_string(),
-                    })?;
-                let key = serde_json::to_string(branch).expect("a schema branch serializes");
+                    .with_registry(registry.clone().expect("registered above"))
+                    .build(&reference)
+                    .map_err(|error| invalid(&error))?;
                 validators.insert(key, Arc::new(validator));
             }
         }
@@ -245,9 +255,22 @@ fn compile_branch_validators(document: &Value) -> Result<BranchValidators, Codec
     Ok(validators)
 }
 
+/// A JSON Pointer as a URI fragment: every byte a fragment does not allow is percent-encoded.
+fn fragment(pointer: &str) -> String {
+    let mut encoded = String::with_capacity(pointer.len());
+    for byte in pointer.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
 impl CompiledSchema {
     pub(in crate::datum) fn check_storage_declarations(document: &Value) -> Result<(), CodecError> {
-        for schema in schema_positions(document, true) {
+        for (_, schema) in schema_positions(document, true) {
             let Some(object) = schema.as_object() else {
                 continue;
             };
@@ -322,7 +345,7 @@ impl CompiledSchema {
 ///
 /// `follow_defs` says whether the schemas in `$defs` are positions of this document, or only
 /// definitions it may refer to.
-fn schema_positions(document: &Value, follow_defs: bool) -> Vec<&Value> {
+fn schema_positions(document: &Value, follow_defs: bool) -> Vec<(String, &Value)> {
     /// One schema, whatever it applies to.
     const SINGLE: [&str; 10] = [
         "items",
@@ -347,10 +370,18 @@ fn schema_positions(document: &Value, follow_defs: bool) -> Vec<&Value> {
         "dependentSchemas",
     ];
 
+    /// Appends one JSON Pointer segment, escaped per RFC 6901.
+    fn child(pointer: &str, segment: &str) -> String {
+        format!(
+            "{pointer}/{}",
+            segment.replace('~', "~0").replace('/', "~1")
+        )
+    }
+
     let mut found = Vec::new();
-    let mut pending = vec![document];
-    while let Some(schema) = pending.pop() {
-        found.push(schema);
+    let mut pending = vec![(String::new(), document)];
+    while let Some((pointer, schema)) = pending.pop() {
+        found.push((pointer.clone(), schema));
         let Some(object) = schema.as_object() else {
             // A boolean schema has no positions inside it, and any other value got here as one.
             continue;
@@ -358,16 +389,27 @@ fn schema_positions(document: &Value, follow_defs: bool) -> Vec<&Value> {
         for (keyword, value) in object {
             let keyword = keyword.as_str();
             if SINGLE.contains(&keyword) {
-                pending.push(value);
+                pending.push((child(&pointer, keyword), value));
             } else if LIST.contains(&keyword) {
                 if let Some(schemas) = value.as_array() {
-                    pending.extend(schemas);
+                    let list = child(&pointer, keyword);
+                    pending.extend(
+                        schemas
+                            .iter()
+                            .enumerate()
+                            .map(|(index, schema)| (format!("{list}/{index}"), schema)),
+                    );
                 }
             } else if MAP.contains(&keyword)
                 && (follow_defs || keyword != "$defs")
                 && let Some(schemas) = value.as_object()
             {
-                pending.extend(schemas.values());
+                let map = child(&pointer, keyword);
+                pending.extend(
+                    schemas
+                        .iter()
+                        .map(|(name, schema)| (child(&map, name), schema)),
+                );
             }
         }
     }
@@ -816,6 +858,34 @@ fn authoring_matches(schema: &Value, value: &Value) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn branch_validators_resolve_definitions_from_the_shared_root_at_any_pointer() {
+        // Member names that need JSON Pointer escaping and URI percent-encoding both.
+        let name = "a b/c~%#";
+        let document = json!({
+            "type": "object",
+            "properties": {
+                name: {
+                    "anyOf": [
+                        {"$ref": "#/$defs/Text"},
+                        {"type": "object", "properties": {"n": {"$ref": "#/$defs/Count"}}, "required": ["n"]}
+                    ]
+                }
+            },
+            "$defs": {"Text": {"type": "string"}, "Count": {"type": "integer"}}
+        });
+        let compiled = CompiledSchema::compile(document.clone()).expect("compiles");
+        let branches = document["properties"][name]["anyOf"].as_array().unwrap();
+        let accepts = |branch: &Value, candidate: Value| {
+            let key = serde_json::to_string(branch).unwrap();
+            compiled.branch_validators[&key].is_valid(&candidate)
+        };
+        assert!(accepts(&branches[0], json!("text")));
+        assert!(!accepts(&branches[0], json!(1)));
+        assert!(accepts(&branches[1], json!({"n": 1})));
+        assert!(!accepts(&branches[1], json!({"n": "x"})));
+    }
 
     #[test]
     fn compilation_rejects_contradictory_storage_declarations_at_nested_positions() {

@@ -418,8 +418,21 @@ pub(crate) fn docs_error(error: ClientError<DocsError>) -> DrawersError {
     }
 }
 
+/// A Keyhive operation failing is storage or the engine, never the caller's doing: the
+/// caller-input conditions (`InvalidKey`, `UnknownPrincipal`, `UnknownPeer`) are checked and typed
+/// before the operation runs.
 pub(crate) fn keyhive_error(error: impl std::fmt::Display) -> DrawersError {
     DrawersError::Keyhive(error.to_string())
+}
+
+/// A doc id as the Keyhive identifier it is: 32 bytes naming an Ed25519 point. The id is caller
+/// input (or content synced from a peer), so another width or a point off the curve is refused
+/// as `InvalidKey` here rather than asserted deeper in Keyhive.
+pub(crate) fn keyhive_key(doc: &DocId) -> Result<ed25519_dalek::VerifyingKey, DrawersError> {
+    doc.to_bytes32()
+        .ok()
+        .and_then(|bytes| ed25519_dalek::VerifyingKey::from_bytes(&bytes).ok())
+        .ok_or_else(|| DrawersError::InvalidKey(doc.to_string()))
 }
 
 impl Projection {
@@ -1025,7 +1038,7 @@ impl Core {
         self.big_repo
             .get_group_by_id(key.0)
             .await
-            .ok_or_else(|| DrawersError::Keyhive(format!("group {key} is not in keyhive")))
+            .ok_or(DrawersError::UnknownGroup(key))
     }
 
     /// A known single-group drawer's three groups — public metadata, docs, sensitive metadata,

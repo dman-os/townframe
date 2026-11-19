@@ -76,7 +76,20 @@ expression: "lexicon_of::<big_cabinet_core::drawer::protocol::AddChild>()"
           "name": "DocsUnavailable"
         },
         {
+          "description": "Keyhive storage or the engine failed; nothing the caller named is at fault.",
           "name": "Keyhive"
+        },
+        {
+          "description": "A named group or doc id that is not a 32-byte Ed25519 point.",
+          "name": "InvalidKey"
+        },
+        {
+          "description": "A Keyhive group this node does not hold, perhaps not yet synced.",
+          "name": "UnknownGroup"
+        },
+        {
+          "description": "A principal group the caller named that this node does not hold.",
+          "name": "UnknownPrincipal"
         },
         {
           "name": "Storage"

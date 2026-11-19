@@ -27,7 +27,6 @@ use big_cabinet_core::query::Predicate;
 use futures::FutureExt;
 use futures::StreamExt;
 use method_core::ContextError;
-use method_core::EventStream;
 use service_client_core_rs::ClientStream;
 use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
@@ -45,16 +44,15 @@ use tokio::sync::watch;
 const POLL_HOLD_MS: u32 = 5_000;
 
 type EditFn<S> = Box<dyn FnOnce(&mut S) -> Result<(), StoreError> + Send + 'static>;
-type SnapshotReply<S> = oneshot::Sender<(u64, Result<StoreSnapshot<S>, StoreError>)>;
-type WatchReply<S> =
-    oneshot::Sender<Result<(u64, StoreSnapshot<S>, watch::Receiver<u64>), StoreError>>;
+type SnapshotReply<S> = oneshot::Sender<Result<StoreSnapshot<S>, StoreError>>;
+type WatchReply = oneshot::Sender<Result<watch::Receiver<u64>, StoreError>>;
 
 enum StoreRequest<S> {
     Snapshot {
         reply: SnapshotReply<S>,
     },
     Watch {
-        reply: WatchReply<S>,
+        reply: WatchReply,
     },
     Mutate {
         context: Box<RequestContext>,
@@ -175,13 +173,6 @@ impl<S: DatumStore> DatumStoreHandle<S> {
     }
 
     pub async fn snapshot(&self) -> Result<StoreSnapshot<S>, StoreError> {
-        let (_, snapshot) = self.fetch_snapshot().await?;
-        snapshot
-    }
-
-    async fn fetch_snapshot(
-        &self,
-    ) -> Result<(u64, Result<StoreSnapshot<S>, StoreError>), StoreError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender
             .send(StoreRequest::Snapshot { reply: reply_tx })
@@ -189,7 +180,7 @@ impl<S: DatumStore> DatumStoreHandle<S> {
             .map_err(|_| StoreError::DocsUnavailable("datum store task has stopped".into()))?;
         reply_rx
             .await
-            .map_err(|_| StoreError::DocsUnavailable("datum store task has stopped".into()))
+            .map_err(|_| StoreError::DocsUnavailable("datum store task has stopped".into()))?
     }
 
     pub async fn at(&self, heads: Vec<ChangeHash>) -> Result<StoreSnapshot<S>, StoreError> {
@@ -244,38 +235,22 @@ impl<S: DatumStore> DatumStoreHandle<S> {
         Ok((output, receipt))
     }
 
-    pub async fn watch(&self) -> Result<EventStream<StoreSnapshot<S>, StoreError>, StoreError> {
+    /// A wake-up for changes to the store: the receiver is marked seen at the version the store is
+    /// at now, so `changed()` resolves once something newer lands (a local mutation, a synced
+    /// edit, or the store failing terminally). It carries no snapshot on purpose: a snapshot
+    /// delivered with the wake-up is whatever was current when the store task answered, and a
+    /// consumer that was busy in between would act on stale state. After `changed()` resolves,
+    /// read `snapshot()`, which is current and reports a terminal error. `changed()` errs when
+    /// the store task has stopped.
+    pub async fn watch(&self) -> Result<watch::Receiver<u64>, StoreError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender
             .send(StoreRequest::Watch { reply: reply_tx })
             .await
             .map_err(|_| StoreError::DocsUnavailable("datum store task has stopped".into()))?;
-        let (initial_version, initial, rx) = reply_rx
+        reply_rx
             .await
-            .map_err(|_| StoreError::DocsUnavailable("datum store task has stopped".into()))??;
-        let handle = self.clone();
-        let stream = futures::stream::unfold(
-            (handle, rx, initial_version, Some(initial), false),
-            |(handle, mut rx, mut seen_version, pending, terminated)| async move {
-                if terminated {
-                    return None;
-                }
-                if let Some(first) = pending {
-                    return Some((Ok(first), (handle, rx, seen_version, None, false)));
-                }
-                loop {
-                    rx.changed().await.ok()?;
-                    let (version, item) = handle.fetch_snapshot().await.ok()?;
-                    if version == seen_version && item.is_ok() {
-                        continue;
-                    }
-                    seen_version = version;
-                    let is_err = item.is_err();
-                    return Some((item, (handle, rx, seen_version, None, is_err)));
-                }
-            },
-        );
-        Ok(Box::pin(stream))
+            .map_err(|_| StoreError::DocsUnavailable("datum store task has stopped".into()))?
     }
 }
 
@@ -346,15 +321,15 @@ impl<S: DatumStore> StoreOwner<S> {
                     Some(error) => Err(error.clone()),
                     None => Ok(self.current.clone()),
                 };
-                drop(reply.send((self.version, snapshot)));
+                drop(reply.send(snapshot));
             }
             StoreRequest::Watch { reply } => {
                 let response = match &self.terminal_error {
                     Some(error) => Err(error.clone()),
                     None => {
                         let mut rx = self.version_tx.subscribe();
-                        let version = *rx.borrow_and_update();
-                        Ok((version, self.current.clone(), rx))
+                        rx.borrow_and_update();
+                        Ok(rx)
                     }
                 };
                 drop(reply.send(response));
