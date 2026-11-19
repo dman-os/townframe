@@ -22,6 +22,12 @@ use std::sync::Arc;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+tokio::task_local! {
+    /// Set while a host's handler runs: a call made on such a task is a nested hop of a request
+    /// already being served, not a fresh one.
+    static SERVING: ();
+}
+
 #[derive(Clone)]
 pub enum Dispatch {
     Inline,
@@ -59,8 +65,17 @@ impl<H: Send + Sync + 'static> Host<H> {
         span
     }
 
+    /// Serves `request` where it entered: the XRPC router's and the direct transport's entry.
+    ///
+    /// A request made from inside a handler of any host is a nested hop of a request already
+    /// being served, and runs inline on that handler's task. Any other request (from the wire, a
+    /// test, or an in-process library such as the CLI's client) is fresh, and runs on a task of
+    /// this host's own, so its chain of in-process hops starts at the base of a fresh stack
+    /// rather than on whatever stack the caller was polled on. One incoming request is thus one
+    /// spawn however many services it passes through. Dropping the caller aborts that task, as
+    /// it would drop an inline handler.
     pub async fn invoke<P>(
-        &self,
+        self: &Arc<Self>,
         request: Envelope<P>,
     ) -> Result<crate::ResponseEnvelope<P::Output>, P::Error>
     where
@@ -68,7 +83,37 @@ impl<H: Send + Sync + 'static> Host<H> {
         H: Handler<P>,
     {
         let span = Self::request_span(&request);
-        self.invoke_inner(request).instrument(span).await
+        self.serve(request, span).await
+    }
+
+    /// [`Host::invoke`] under a span the caller keeps (a subscription pumps under it too).
+    async fn serve<P>(
+        self: &Arc<Self>,
+        request: Envelope<P>,
+        span: tracing::Span,
+    ) -> Result<crate::ResponseEnvelope<P::Output>, P::Error>
+    where
+        P: Method,
+        H: Handler<P>,
+    {
+        if SERVING.try_with(|()| ()).is_ok() {
+            return self.invoke_inner(request).instrument(span).await;
+        }
+        let host = Arc::clone(self);
+        let Some(task) = self
+            .spawner
+            .spawn(async move { host.invoke_inner(request).await }.instrument(span))
+        else {
+            return Err(ContextError::Cancelled.into());
+        };
+        match tokio_util::task::AbortOnDropHandle::new(task).await {
+            Ok(result) => result,
+            Err(error) => match error.try_into_panic() {
+                Ok(panic) => std::panic::resume_unwind(panic),
+                // The runtime is shutting down and cancelled the task.
+                Err(_) => Err(ContextError::Cancelled.into()),
+            },
+        }
     }
 
     async fn invoke_inner<P>(
@@ -88,12 +133,18 @@ impl<H: Send + Sync + 'static> Host<H> {
         // full size while constructing it. A handler that calls another service through a direct
         // client nests that chain once per hop, and in a debug build three in-process hops were
         // enough to overflow a 2 MiB test thread.
+        //
+        // It is boxed as a `dyn Future + Send`, not its concrete type, so proving this call
+        // `Send` (which spawning a fresh request requires) stops here instead of looking through
+        // every hop the handler makes: through dispatch, that proof overflowed the trait solver.
+        let call: BoxFuture<'_, Result<crate::ResponseEnvelope<P::Output>, P::Error>> =
+            Box::pin(self.handler.call(request));
         tokio::select! {
             biased;
             _ = self.spawner.cancelled() => Err(ContextError::Cancelled.into()),
             _ = context.cancellation.cancelled() => Err(ContextError::Cancelled.into()),
             _ = context.expired() => Err(ContextError::DeadlineExceeded.into()),
-            result = Box::pin(self.handler.call(request)) => result,
+            result = SERVING.scope((), call) => result,
         }
     }
 
@@ -195,7 +246,7 @@ impl<H: Send + Sync + 'static> Host<H> {
                 Dispatch::Inline => {
                     let context = request.context.clone();
                     let span = Self::request_span(&request);
-                    let response = match self.invoke_inner(request).instrument(span.clone()).await {
+                    let response = match self.serve(request, span.clone()).await {
                         Ok(response) => response,
                         Err(error) => {
                             drop(tx.try_send(Err(error)).await);
