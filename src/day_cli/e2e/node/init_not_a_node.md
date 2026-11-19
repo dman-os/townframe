@@ -8,8 +8,7 @@ $ sh -c 'mkdir -p "$DAY_NODE" && echo nope > "$DAY_NODE/node.json"'
 
 $ day node init
 ? 1
-Error:[..]
-   0: [..]/node exists but is not a valid node; refusing to touch it
+Error: [..]/node exists but is not a valid node; refusing to touch it[..]
 ...
 
 $ sh -c 'cat "$DAY_NODE/node.json"'
