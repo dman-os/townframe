@@ -386,7 +386,7 @@ async fn two_writers_first_documents_are_both_found_and_nothing_is_orphaned() {
                     drawers: [(drawer.clone(), DrawerAccess::Admin)].into(),
                     create: false,
                 },
-                rights: Rights::USE,
+                rights: Rights::USE | Rights::DELEGATE,
                 subject: None,
             },
         )
