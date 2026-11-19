@@ -952,6 +952,39 @@ mod blackbox {
         }
     }
 
+    /// Tracing is the server's log: a command other than `node start` narrates nothing at the
+    /// default level, and an explicit `RUST_LOG` brings the narration back.
+    #[test]
+    fn commands_log_only_warnings_unless_rust_log_says_otherwise() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        let status = |rust_log: Option<&str>| {
+            let mut command = Command::new(day_bin());
+            command
+                .env("NO_COLOR", "1")
+                .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+                .arg("--node")
+                .arg(sandbox.node())
+                .args(["node", "status", "--json"]);
+            match rust_log {
+                Some(filter) => command.env("RUST_LOG", filter),
+                None => command.env_remove("RUST_LOG"),
+            };
+            command.output().unwrap()
+        };
+        let quiet = status(None);
+        assert_eq!(
+            String::from_utf8_lossy(&quiet.stderr),
+            "",
+            "the default level shows nothing for a command that works"
+        );
+        let loud = status(Some("debug"));
+        assert!(
+            !loud.stderr.is_empty(),
+            "RUST_LOG=debug is honoured over the command's default"
+        );
+    }
+
     /// A server killed without cleaning up leaves a socket and no lock: every command still
     /// works, and `node stop` and `node start` clean up after it.
     #[test]

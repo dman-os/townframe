@@ -18,7 +18,6 @@ mod interlude {
     pub use utils_rs::prelude::WrapErr;
     pub use utils_rs::prelude::debug;
     pub use utils_rs::prelude::default;
-    pub use utils_rs::prelude::error;
     pub use utils_rs::prelude::eyre;
     pub use utils_rs::prelude::json;
     pub use utils_rs::prelude::warn;
@@ -60,13 +59,26 @@ fn main() -> ExitCode {
 
 fn run() -> Res<ExitCode> {
     // dotenv_flow::dotenv_flow().ok();
-    utils_rs::setup_tracing()?;
+    let parsed = Cli::try_parse();
+    // Tracing is the server's log: only the foreground server, which `node start --bg` runs and
+    // whose stderr is its log file, narrates at `info`. Every other command prints its results
+    // through `out` and shows only warnings on stderr; an explicit `RUST_LOG` overrides both.
+    let serves = matches!(
+        &parsed,
+        Ok(Cli {
+            command: StaticCommands::Node {
+                command: cmds::node::NodeCommands::Start { bg: false }
+            },
+            ..
+        })
+    );
+    utils_rs::setup_tracing_at(if serves { "info" } else { "warn" })?;
 
     // the static cli is for commands that
     // can be executed without having to
     // build up the dynamic sections of
     // the CLI into clap reprs
-    let static_res = match try_static_cli() {
+    let static_res = match try_static_cli(parsed) {
         Ok(StaticCliResult::Exit(code)) => {
             let shutdown_res = lazy::rt().block_on(lazy::shutdown());
             if code == ExitCode::SUCCESS {
@@ -116,8 +128,8 @@ fn run() -> Res<ExitCode> {
     }
 }
 
-fn try_static_cli() -> Res<StaticCliResult> {
-    let cli = match Cli::try_parse() {
+fn try_static_cli(parsed: Result<Cli, clap::Error>) -> Res<StaticCliResult> {
+    let cli = match parsed {
         Err(err) => {
             let kind = err.kind();
             use clap::error::ErrorKind;
@@ -180,11 +192,10 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
 
     let conf = lazy::config().await?;
     if !conf.node_dir.is_initialized() {
-        error!(
-            path = ?conf.cli_config.node_path,
-            "node not initialized at resolved path; run `day node init`",
+        eyre::bail!(
+            "node not initialized at {}; run `day node init`",
+            conf.cli_config.node_path.display()
         );
-        return Ok(ExitCode::FAILURE);
     }
 
     match cli.command {

@@ -172,7 +172,13 @@ pub(crate) fn eyre_hook_builder() -> color_eyre::config::HookBuilder {
 }
 
 pub fn setup_tracing() -> Res<()> {
-    let default_filter = "info,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn";
+    setup_tracing_at("info")
+}
+
+/// [`setup_tracing`] with `default_level` as the level of everything the dependency overrides
+/// below do not name. An explicit `RUST_LOG` still replaces the whole default.
+pub fn setup_tracing_at(default_level: &str) -> Res<()> {
+    let default_filter = &format!("{default_level},ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn");
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
         if std::env::var("RUST_BACKTRACE").is_err() {

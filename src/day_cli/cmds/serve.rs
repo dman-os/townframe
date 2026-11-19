@@ -185,7 +185,10 @@ pub async fn stop() -> Res<ExitCode> {
         Err(held) => held,
     };
     if held.role != Some(LockRole::Serve) {
-        writeln!(out, "no server running; {held} has the node open for a command")?;
+        writeln!(
+            out,
+            "no server running; {held} has the node open for a command"
+        )?;
         return Ok(ExitCode::SUCCESS);
     }
     let pid = held
