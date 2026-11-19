@@ -40,7 +40,22 @@ mod context;
 mod e2e;
 mod lazy;
 
-fn main() -> Res<ExitCode> {
+/// Report an escaped error ourselves instead of returning it from `main`. The standard library
+/// prints a returned error as `Error: {err:?}`, and color-eyre's `Debug` begins every chain entry
+/// with a newline (it expects its own header line above it), so the message would land on the
+/// second line under a bare `Error:`. The alternate `Display` puts the message and its causes on
+/// the first line.
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("Error: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Res<ExitCode> {
     // dotenv_flow::dotenv_flow().ok();
     utils_rs::setup_tracing()?;
 
