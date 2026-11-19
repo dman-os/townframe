@@ -1217,7 +1217,9 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
         let reply =
             async |who: &Packaging<'_>, to: &str, text: Option<&str>, resolved: Option<bool>| {
                 let mut out = Vec::new();
-                who.reply(&mut out, to, text, resolved).await.unwrap();
+                who.reply(&mut out, Some(&intxt), to, text, resolved)
+                    .await
+                    .unwrap();
                 String::from_utf8(out).unwrap()
             };
 
@@ -1382,7 +1384,9 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
             .unwrap_or_else(|| panic!("{resolved}"));
         assert!(thread.starts_with(&root), "{thread} is not {root}");
         assert!(
-            resolved.contains(&format!("undo: day x intxt reply {thread} --reopen")),
+            resolved.contains(&format!(
+                "undo: day x intxt reply {thread} --intxt {intxt} --reopen"
+            )),
             "{resolved}"
         );
         assert!(inbox(&operator).await.contains("nothing waiting"));

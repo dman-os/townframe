@@ -207,6 +207,23 @@ impl View {
     pub(super) fn has(&self, entry: &DatumKey) -> bool {
         self.entries.iter().any(|(key, _)| key == entry)
     }
+
+    /// The names the intxt's entries and `comments` go by: the id set that `comment`, `inbox`
+    /// and `reply` print short ids from and that `reply` and `rm` resolve them against. It is
+    /// scoped to one intxt, so a printed prefix means the same thing when it is typed back.
+    pub(super) fn names<'a>(
+        &'a self,
+        comments: impl IntoIterator<Item = &'a DatumKey>,
+    ) -> ShortIds<String> {
+        ShortIds::new(
+            self.entries
+                .iter()
+                .map(|(key, _)| key)
+                .chain(comments)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        )
+    }
 }
 
 /// The key an entry names a commit by. Entries hold it as a plain string that intxt resolves
@@ -858,14 +875,7 @@ impl<'a> Packaging<'a> {
         let (drawer, intxts) = self.resolve(Some(intxt)).await?;
         let view = self.load(&drawer).await?;
         let comments = self.comment_keys(&drawer).await?;
-        let ids = ShortIds::new(
-            view.entries
-                .iter()
-                .map(|(key, _)| key)
-                .chain(&comments)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-        );
+        let ids = view.names(&comments);
         let mut removed = BTreeSet::new();
         let mut removed_comments = BTreeSet::new();
         for item in items {
@@ -1740,6 +1750,47 @@ fn full_drawer_id(name: &str) -> Option<DrawerId> {
 mod tests {
     use super::*;
     use big_cabinet_core::reference::Location;
+
+    fn view_of(entries: &[&str]) -> View {
+        View {
+            title: generic::Title {
+                title: "t".to_owned(),
+                description: None,
+                extra: Default::default(),
+            },
+            entries: entries
+                .iter()
+                .map(|slot| (key(work::GitCommitEntry::ID, slot).unwrap(), Value::Null))
+                .collect(),
+            heads: Vec::new(),
+        }
+    }
+
+    /// Short ids are hashes of the full key, so a collision cannot be written down: another
+    /// intxt's comment is searched for whose id starts with the prefix printed for ours. The
+    /// prefix is short because only our intxt's names are compared, and it resolves back to our
+    /// comment there; the names of every intxt together make it ambiguous, which is what
+    /// resolving across all live intxts used to do.
+    #[test]
+    fn a_printed_comment_prefix_resolves_within_its_intxt_though_another_intxt_collides() {
+        let comment = |slot: &str| key(intxt_core::annotation::Comment::ID, slot).unwrap();
+        let ours = comment("ours");
+        let view = view_of(&["entry-one"]);
+
+        let ours_names = view.names([&ours]);
+        let printed = ours_names.render(&ours.to_string()).unique;
+        assert_eq!(ours_names.resolve(&printed).unwrap(), &ours.to_string());
+
+        let theirs = (0..100_000)
+            .map(|n| comment(&format!("theirs-{n}")))
+            .find(|theirs| view.names([&ours, theirs]).resolve(&printed).is_err())
+            .expect("a comment that collides at the printed prefix");
+        assert_eq!(
+            view.names([&ours]).resolve(&printed).unwrap(),
+            &ours.to_string(),
+            "{printed} still names our comment among our intxt's names, beside {theirs}"
+        );
+    }
 
     #[test]
     fn short_ids_starting_with_z_are_not_drawer_ids() {

@@ -273,14 +273,19 @@ pub enum IntxtCommands {
     },
     /// Reply to a comment, and resolve or reopen its thread
     ///
-    /// Names the comment by the short id `comment` and `inbox` print. With `--resolve` or
-    /// `--reopen` and no message, only the thread's state changes.
+    /// Names the comment by the short id `comment` and `inbox` print, which is unique among one
+    /// intxt's entries and comments: name that intxt with `--intxt` or run in the worktree that
+    /// is on it. With `--resolve` or `--reopen` and no message, only the thread's state changes.
     #[command(
-        after_long_help = "Examples:\n  day x intxt reply kz -m \"Done in 77b2\" --resolve\n  day x intxt reply kz --reopen"
+        after_long_help = "Examples:\n  day x intxt reply kz -m \"Done in 77b2\" --resolve\n  day x intxt reply kz --intxt qx --reopen"
     )]
     Reply {
-        /// The comment to answer
+        /// The comment to answer, by the short id printed for it
         comment: String,
+        /// The intxt the comment is in: its short id, or its full drawer id. Default: the one this
+        /// worktree is on (`day x intxt use`)
+        #[arg(long)]
+        intxt: Option<String>,
         /// The reply, in Markdown
         #[arg(short, long, required_unless_present_any = ["resolve", "reopen"])]
         message: Option<String>,
@@ -491,19 +496,18 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
         }
         IntxtCommands::Reply {
             comment,
+            intxt,
             message,
             resolve,
             reopen,
         } => {
-            let resolved = match (resolve, reopen) {
-                (true, _) => Some(true),
-                (_, true) => Some(false),
-                _ => None,
-            };
+            // clap makes the flags exclusive: `--resolve` is true, `--reopen` is false.
+            let resolved = (resolve || reopen).then_some(resolve);
             with_packaging(async |packaging| {
                 packaging
                     .reply(
                         &mut std::io::stdout(),
+                        intxt.as_deref(),
                         &comment,
                         message.as_deref(),
                         resolved,
