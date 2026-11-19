@@ -1,6 +1,9 @@
 # ADR 036 restructure: proposal
 
 Status: Superseded 2026-11-10 by ADR 036 (intxt core), ADR 040 (work capture) and ADR 041 (annotations), after operator review (ledger D31). Kept for the reasoning; §1's "discovery by tag instead of descriptor pointers" became layers. Decisions it builds on: ledger D27–D30.
+Owner: intxt lane
+Updated: 2026-11-17 (header only; the content is the 2026-11-10 proposal)
+Scope: How ADR 036 was split into the intxt core, work capture and annotation ADRs; superseded, kept for the reasoning.
 
 ## 1. Split
 

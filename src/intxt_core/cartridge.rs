@@ -1,5 +1,5 @@
 //! intxt as a cartridge (ledger D38, D41): what admits intxt's vocabularies (`intxt_core`) to a
-//! node.
+//! node, as an ADR 047 manifest.
 //!
 //! The cartridge holds every intxt record under its authority, `org.example.intxt`. Each record
 //! ships its Lexicon, which states what a value is, and its sidecar, which states only how the
@@ -8,18 +8,30 @@
 //! writer replacing the value. Without the sidecar every position would keep the plain JSON kind
 //! its Lexicon states.
 //!
-//! It also serves operations through a handler (`intxt_nodule::Intxt`): `createIntxt` and
-//! `addToIntxt`. The handler's Lexicons are projected from the Rust types of its methods.
+//! It also serves two operations, `createIntxt` and `addToIntxt`, as routines of its one nodule
+//! (ADR 047 §3): each is an export of the handler component (`intxt_nodule::Intxt`) and `uses`
+//! the operations of other authorities its handler calls, which are the cartridge's method
+//! permbinds (§5) and what an operator grants. The operations' Lexicons are projected from the
+//! Rust types of its methods.
 
 use big_cabinet_core::datum::Bundle;
-use big_cabinet_core::datum::DatumMember;
-use big_cartridges_core::Artifact;
+use big_cabinet_core::doc::MintDocCapability;
+use big_cabinet_core::doc::ReadDatums;
+use big_cabinet_core::doc::WriteDatums;
+use big_cabinet_core::drawer::protocol::AddDoc;
+use big_cabinet_core::drawer::protocol::CreateDrawer;
+use big_cabinet_core::drawer::protocol::ListDocDrawers;
+use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cartridges_core::Cartridge;
-use big_cartridges_core::Contribution;
-use big_cartridges_core::Digest;
-use big_cartridges_core::NoduleContribution;
-use big_cartridges_core::request::Request;
-use big_nodule_core::Nodule;
+use big_cartridges_core::ComponentExport;
+use big_cartridges_core::Necessity;
+use big_cartridges_core::Nodule;
+use big_cartridges_core::Permbind;
+use big_cartridges_core::PermbindMethod;
+use big_cartridges_core::Routine;
+use big_cartridges_core::RoutineImpl;
+use big_cartridges_core::RoutineUse;
+use big_cartridges_core::test_support::FixtureCartridge;
 use indexmap::IndexMap;
 use method_core::Method;
 use serde_json::Value;
@@ -32,93 +44,120 @@ use crate::methods::REQUIRED_OPERATIONS;
 /// generic datums intxt holds until they migrate out before the beta (ledger D39) are under it too.
 pub const AUTHORITY: &str = "org.example.intxt";
 
-/// The key of the handler artifact in the cartridge.
-pub const HANDLER_ARTIFACT: &str = "handler";
+/// The key of the handler component in the cartridge.
+pub const HANDLER_COMPONENT: &str = "handler";
 
-/// The envelope of the handler component `wasm`: the cartridge's artifact for it. The digest is
-/// the component's BLAKE3, which is also the id of the blob a node stores it under, so putting
-/// the bytes in the node's blob store is what makes the artifact available.
-pub fn handler_artifact(wasm: &[u8]) -> Artifact {
-    Artifact {
-        key: HANDLER_ARTIFACT.into(),
-        digest: Digest::of(wasm),
-        size: Some(wasm.len() as u64),
-        media_type: Some("application/wasm".into()),
-        extra: Default::default(),
-    }
+/// The export of the handler component that serves every routine: the component dispatches on
+/// the operation's NSID itself (`big_ndk::Nodule::route`).
+const HANDLER_EXPORT: &str = "handle";
+
+/// The operations of other authorities each routine's handler calls, a subset of
+/// [`REQUIRED_OPERATIONS`]: a routine reaches nothing it does not list (ADR 047 §3).
+const CREATE_INTXT_USES: [&str; 4] = [
+    MintDrawerCapability::XRPC.nsid,
+    CreateDrawer::XRPC.nsid,
+    MintDocCapability::XRPC.nsid,
+    WriteDatums::XRPC.nsid,
+];
+const ADD_TO_INTXT_USES: [&str; 6] = [
+    ReadDatums::XRPC.nsid,
+    WriteDatums::XRPC.nsid,
+    MintDocCapability::XRPC.nsid,
+    MintDrawerCapability::XRPC.nsid,
+    ListDocDrawers::XRPC.nsid,
+    AddDoc::XRPC.nsid,
+];
+
+/// The permbind key of the operation `nsid`: its last segment, which is unique among
+/// [`REQUIRED_OPERATIONS`].
+fn permbind_key(nsid: &str) -> &str {
+    nsid.rsplit('.')
+        .next()
+        .expect("a split always yields a segment")
 }
 
-/// intxt's cartridge, whose handler is `handler` (see [`handler_artifact`]). It requests
-/// [`REQUIRED_OPERATIONS`], which an operator must grant the nodule.
-pub fn cartridge(handler: Artifact) -> Cartridge {
-    assert_eq!(
-        handler.key, HANDLER_ARTIFACT,
-        "the nodule's handler names the artifact `{HANDLER_ARTIFACT}`"
-    );
+/// intxt's cartridge version, with `wasm` as its handler component: the envelope, the payloads
+/// its pins name, and the component's bytes, as a publisher stages and publishes them. Its
+/// method permbinds request [`REQUIRED_OPERATIONS`], which an operator must grant the nodule.
+pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
     let bundle = Bundle::new(&crate::UNIVERSE, Vec::new());
-    let lexicons = bundle
-        .lexicons()
-        .expect("intxt's declarations publish lexicons");
-    let sidecar = crate::UNIVERSE
-        .datums
-        .iter()
-        .filter_map(|datum| {
-            let document = bundle
-                .document(&datum.name)
-                .expect("every declared datum renders its document");
-            let document = Value::from(document);
-            declares_storage(&document).then(|| (datum.id.clone(), document))
-        })
-        .collect();
-    let nodule = Nodule {
-        lexicons: lexicons
-            .into_iter()
-            .map(|lexicon| as_map(lexicon.file))
-            .chain([
-                as_map(
-                    method_lexicon::lexicon::<CreateIntxt>()
-                        .expect("createIntxt's types project a Lexicon"),
-                ),
-                as_map(
-                    method_lexicon::lexicon::<AddToIntxt>()
-                        .expect("addToIntxt's types project a Lexicon"),
-                ),
-            ])
-            .collect(),
-        sidecar,
-        requires: REQUIRED_OPERATIONS
-            .iter()
-            .map(|nsid| Request::new(*nsid, *nsid))
-            .collect(),
-        handler: Some(big_nodule_core::Handler {
-            artifact: HANDLER_ARTIFACT.into(),
-            extra: Default::default(),
-        }),
-        implements: vec![
-            CreateIntxt::XRPC.nsid.to_owned(),
-            AddToIntxt::XRPC.nsid.to_owned(),
-        ],
-        ..Default::default()
-    };
-    // intxt has no namespace of its own yet, so its id sits under the fixture namespace
-    // (`test-support`, enabled by the `cartridge` feature for this alone).
-    let mut cartridge = Cartridge::new(
+    let mut cartridge = FixtureCartridge::new(Cartridge::new(
+        // intxt has no namespace of its own yet, so its id sits under the fixture namespace
+        // (`test-support`, enabled by the `cartridge` feature for this alone).
         big_cartridges_core::example_cartridge!("intxt")
             .parse()
             .expect("intxt's cartridge id is valid"),
         "0.1.0".parse().expect("intxt's version is valid"),
-    );
+    ));
     cartridge.authority = Some(AUTHORITY.to_owned());
-    cartridge.artifacts.push(handler);
+    cartridge.name = Some("intxt".to_owned());
+    for lexicon in bundle
+        .lexicons()
+        .expect("intxt's declarations publish lexicons")
+    {
+        cartridge.with_lexicon(as_map(lexicon.file));
+    }
+    for datum in &crate::UNIVERSE.datums {
+        let document = Value::from(
+            bundle
+                .document(&datum.name)
+                .expect("every declared datum renders its document"),
+        );
+        if declares_storage(&document) {
+            cartridge.with_sidecar(&datum.id, as_map(document));
+        }
+    }
     cartridge
-        .contributions
-        .push(Contribution::Nodule(NoduleContribution {
-            schema: Nodule::ID.into(),
-            description: as_map(
-                serde_json::to_value(nodule).expect("a nodule description serializes"),
-            ),
-            extra: Default::default(),
-        }));
+        .with_lexicon(as_map(
+            method_lexicon::lexicon::<CreateIntxt>()
+                .expect("createIntxt's types project a Lexicon"),
+        ))
+        .with_lexicon(as_map(
+            method_lexicon::lexicon::<AddToIntxt>().expect("addToIntxt's types project a Lexicon"),
+        ))
+        .with_wasm(HANDLER_COMPONENT, wasm);
+
+    cartridge.permbinds = REQUIRED_OPERATIONS
+        .iter()
+        .map(|nsid| {
+            (
+                permbind_key(nsid).to_owned(),
+                Permbind::Method(PermbindMethod {
+                    nsid: nsid.parse().expect("a required operation is an NSID"),
+                    description: format!("intxt calls {nsid} on its caller's behalf"),
+                    necessity: Necessity::Required,
+                    min_revision: None,
+                    extra: Default::default(),
+                }),
+            )
+        })
+        .collect();
+    let routine = |operation: &str, uses: &[&str]| {
+        (
+            permbind_key(operation).to_owned(),
+            Routine {
+                r#impl: RoutineImpl::ComponentExport(ComponentExport {
+                    component: HANDLER_COMPONENT.to_owned(),
+                    export: HANDLER_EXPORT.to_owned(),
+                    extra: Default::default(),
+                }),
+                implements: operation.parse().expect("an operation is an NSID"),
+                uses: uses
+                    .iter()
+                    .map(|nsid| (permbind_key(nsid).to_owned(), RoutineUse::default()))
+                    .collect(),
+                extra: Default::default(),
+            },
+        )
+    };
+    cartridge.nodule = Some(Nodule {
+        routines: [
+            routine(CreateIntxt::XRPC.nsid, &CREATE_INTXT_USES),
+            routine(AddToIntxt::XRPC.nsid, &ADD_TO_INTXT_USES),
+        ]
+        .into(),
+        ..Default::default()
+    });
     cartridge
 }
 
@@ -140,37 +179,68 @@ fn as_map(value: Value) -> IndexMap<String, Value> {
 mod tests {
     use super::*;
     use crate::generic;
+    use big_cabinet_core::datum::DatumMember;
+    use big_cartridges_core::test_support::cartridge_id;
+    use big_nodule_core::NoduleAdmission;
 
-    /// The cartridge holds every record intxt declares, so none is left for another holder, and
-    /// ships the sidecar of each record that declares storage forms.
+    /// The cartridge is admitted as a manifest, holds every record intxt declares so none is left
+    /// for another holder, ships the sidecar of each record that declares storage forms, and
+    /// serves both operations.
     #[test]
     fn the_cartridge_holds_every_intxt_record() {
-        let cartridge = cartridge(handler_artifact(b"a handler"));
-        let Contribution::Nodule(contribution) = &cartridge.contributions[0] else {
-            panic!("intxt contributes a nodule");
-        };
-        let nodule: Nodule = serde_json::from_value(Value::Object(
-            contribution.description.clone().into_iter().collect(),
-        ))
-        .unwrap();
-        let held: Vec<&str> = nodule
-            .registrable_datums(cartridge.authority.as_deref())
+        let fixture = cartridge(b"a handler");
+        assert_eq!(fixture.id, cartridge_id("intxt"));
+        let admitted = fixture
+            .resolved
+            .admit(fixture.authority.as_deref())
+            .expect("intxt's manifest is admitted");
+        assert_eq!(
+            admitted
+                .operations
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [AddToIntxt::XRPC.nsid, CreateIntxt::XRPC.nsid],
+        );
+        // Every operation the cartridge requests is one some routine uses, so nothing is
+        // requested (and granted) that no handler calls.
+        let nodule = fixture.nodule.as_ref().unwrap();
+        for permbind in fixture.permbinds.keys() {
+            assert!(
+                nodule
+                    .routines
+                    .values()
+                    .any(|routine| routine.uses.contains_key(permbind)),
+                "no routine uses {permbind}"
+            );
+        }
+        // The manifest's Lexicons are a map, so they come back in NSID order, not declaration order.
+        let mut held: Vec<&str> = fixture
+            .resolved
+            .registrable_datums(fixture.authority.as_deref())
             .held
             .iter()
             .map(|(id, _, _)| *id)
             .collect();
+        held.sort_unstable();
         for record in [generic::Note::ID, generic::Body::ID] {
             assert!(
-                nodule.sidecar.contains_key(record),
+                fixture
+                    .resolved
+                    .sidecars
+                    .keys()
+                    .any(|nsid| nsid.as_str() == record),
                 "{record} has no sidecar"
             );
         }
-        let declared: Vec<&str> = crate::UNIVERSE
+        let mut declared: Vec<&str> = crate::UNIVERSE
             .datums
             .iter()
             .map(|datum| datum.id.as_str())
             .collect();
-        let unheld: Vec<_> = nodule
+        declared.sort_unstable();
+        let unheld: Vec<_> = fixture
+            .resolved
             .datum_lexicons()
             .filter(|file| !held.contains(&file["id"].as_str().unwrap()))
             .map(|file| serde_json::to_string(&file["defs"]["main"]).unwrap())
