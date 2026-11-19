@@ -8,7 +8,9 @@ mod listeners;
 pub mod peers;
 
 pub use info::GET_NODE_INFO;
+pub use info::GetNodeInfo;
 pub use info::NodeInfo;
+pub use info::NodeInfoError;
 #[cfg(unix)]
 pub use listeners::FdClients;
 use listeners::Listener;
