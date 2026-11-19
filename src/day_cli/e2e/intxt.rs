@@ -5,6 +5,7 @@ use super::library::connect;
 use super::library::new_node;
 use crate::client::NodeClient;
 use crate::interlude::*;
+use big_cabinet_core::datum::DatumMember as _;
 
 mod patch;
 
@@ -539,22 +540,40 @@ async fn assert_commit_membership(
             .unwrap()
             .is_empty()
     );
-    let held: Vec<_> = caller
+    // Besides the commits, the document holds the entry's two blob datums (its pack and its
+    // patch), each with the cipherBlob and JWK that a blob in a content document is stored as,
+    // at the blob's own slot (ADR 026 §3).
+    let (blobs, held): (Vec<_>, Vec<_>) = caller
         .datum_keys(&commits_doc)
         .await
         .unwrap()
         .into_iter()
-        .map(|key| key.to_string())
-        .collect();
+        .partition(|key| key.tag().as_str() == big_blobs_core::Blob::ID);
+    assert_eq!(blobs.len(), 2, "{blobs:?}");
+    let mut held: Vec<_> = held.into_iter().map(|key| key.to_string()).collect();
+    held.sort();
     assert_eq!(
         held,
         {
-            let mut expected = [first.clone(), second.clone()]
-                .map(|sha| format!("org.example.intxt.work.gitCommit/{sha}"));
+            let mut expected: Vec<_> = blobs
+                .iter()
+                .flat_map(|blob| {
+                    let blob = blob.to_string();
+                    let (_, slot) = blob.split_once('/').expect("a datum key is tag/slot");
+                    [
+                        format!("org.example.daybook.cipherBlob/{slot}"),
+                        format!("org.example.daybook.jwk/{slot}"),
+                    ]
+                })
+                .chain(
+                    [first.clone(), second.clone()]
+                        .map(|sha| format!("org.example.intxt.work.gitCommit/{sha}")),
+                )
+                .collect();
             expected.sort();
-            expected.to_vec()
+            expected
         },
-        "the commits document holds the range's commits and nothing else"
+        "the commits document holds the range's commits and the entry's blobs, nothing else"
     );
     let (_, datum) = caller
         .read(
@@ -753,7 +772,8 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
         assert!(shown.contains("sessions (1):"), "{shown}");
         assert!(shown.contains("s1  claude-code"), "{shown}");
 
-        // The entry's pack is a blob datum in the intxt's own document.
+        // The entry's pack is a blob datum in the intxt's commits document, not in its
+        // descriptor, which holds no blob datums at all.
         let (_, entry) = read_at(
             client,
             &drawer,
@@ -771,13 +791,33 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
             entry["base"],
             format!("org.example.intxt.work.gitCommit/{merge_base}")
         );
-        let pack = entry["pack"].as_str().unwrap();
-        let blob_key = pack
-            .strip_prefix("dtxt:datum:self/")
-            .unwrap_or_else(|| panic!("{pack} names the intxt's own document"));
-        let (_, blob) = read_at(client, &drawer, &blob_key.parse().unwrap())
+        let pack = big_cabinet_core::DatumReference::parse(entry["pack"].as_str().unwrap()).unwrap();
+        let big_cabinet_core::ReferenceDocId::Concrete(pack_doc) = pack.document() else {
+            panic!("{pack} names a document, not the entry's own");
+        };
+        let caller = intxt_core::client::Caller::new(
+            client,
+            service_utils_rs::RequestContext::root(),
+            None,
+            "test-blobs".to_owned(),
+        );
+        assert_eq!(
+            caller.commit_holders(&drawer, &tip).await.unwrap(),
+            [pack_doc.clone()].into(),
+            "the pack is in the commits document"
+        );
+        let in_descriptor: Vec<_> = caller
+            .datum_keys(&drawer)
             .await
-            .unwrap();
+            .unwrap()
+            .into_iter()
+            .filter(|key| key.tag().as_str() == big_blobs_core::Blob::ID)
+            .collect();
+        assert!(
+            in_descriptor.is_empty(),
+            "the descriptor holds no blob datums: {in_descriptor:?}"
+        );
+        let (_, blob) = read_at(client, pack_doc, pack.key()).await.unwrap();
         assert_eq!(blob["mime"], "application/x-git-pack");
         assert!(blob["lengthOctets"].as_u64().unwrap() > 0, "{blob}");
 
