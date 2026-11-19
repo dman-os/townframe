@@ -508,7 +508,7 @@ impl Cluster {
         {
             Ok(read) => Some(Note(read)),
             Err(ClientError::Method(
-                big_cabinet_core::doc::DocsError::DocNotFound
+                big_cabinet_core::doc::DocsError::DocNotFound { .. }
                 | big_cabinet_core::doc::DocsError::Pending { .. },
             )) => None,
             Err(error) => panic!(

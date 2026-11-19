@@ -78,9 +78,6 @@
           "name": "Denied"
         },
         {
-          "name": "DocNotFound"
-        },
-        {
           "name": "InvalidCommand"
         },
         {
@@ -97,6 +94,9 @@
         },
         {
           "name": "Repository"
+        },
+        {
+          "name": "DocNotFound"
         },
         {
           "name": "UnknownHeads"

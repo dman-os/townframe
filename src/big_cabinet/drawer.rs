@@ -990,7 +990,7 @@ impl Core {
                             {
                                 Ok(read) => Ok(Some(read)),
                                 Err(ClientError::Method(
-                                    DocsError::DocNotFound | DocsError::Pending { .. },
+                                    DocsError::DocNotFound { .. } | DocsError::Pending { .. },
                                 )) => Ok(None),
                                 Err(error) => Err(docs_error(error)),
                             }

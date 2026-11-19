@@ -215,7 +215,7 @@ fn unavailable(error: &DrawersError) -> bool {
             | DrawersError::Docs(
                 DocsError::Denied
                     | DocsError::Access(_)
-                    | DocsError::DocNotFound
+                    | DocsError::DocNotFound { .. }
                     | DocsError::Pending { .. }
                     | DocsError::UnknownHeads { .. }
                     | DocsError::AuthorityUnavailable(_)

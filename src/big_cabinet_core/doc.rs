@@ -246,10 +246,11 @@ pub enum DocsError {
     Access(String),
     #[error("document repository failed: {0}")]
     Repository(String),
-    #[error("document is not locally available")]
-    DocNotFound,
-    #[error("requested heads are unknown: {heads:?}")]
+    #[error("document {doc_id} is not locally available")]
+    DocNotFound { doc_id: DocId },
+    #[error("requested heads are unknown in document {doc_id}: {heads:?}")]
     UnknownHeads {
+        doc_id: DocId,
         #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
         heads: Vec<ChangeHash>,
     },
@@ -696,6 +697,25 @@ declare_service_protocol! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_errors_name_their_document() {
+        let doc_id = DocId::new([7; 32]);
+        for error in [
+            DocsError::DocNotFound {
+                doc_id: doc_id.clone(),
+            },
+            DocsError::UnknownHeads {
+                doc_id: doc_id.clone(),
+                heads: vec![],
+            },
+        ] {
+            assert!(
+                error.to_string().contains(&doc_id.to_string()),
+                "{error} does not name {doc_id}"
+            );
+        }
+    }
 
     fn only(tags: &[&str]) -> DatumKinds {
         DatumKinds::Only(

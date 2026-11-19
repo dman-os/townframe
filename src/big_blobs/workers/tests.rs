@@ -409,7 +409,9 @@ async fn uncertain_document_polls_retry_without_advancing_or_losing_work() -> Re
     let mut call = polls.next().await;
     for error in [
         DocsError::Denied,
-        DocsError::DocNotFound,
+        DocsError::DocNotFound {
+            doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+        },
         DocsError::Pending {
             reason: "awaiting signatures".into(),
         },

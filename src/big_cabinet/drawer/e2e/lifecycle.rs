@@ -1291,10 +1291,10 @@ async fn successor_absence_after_removal_is_not_an_unavailable_target() {
         .drawer_capability(&alice, &[&old, &missing])
         .await
         .unwrap();
-    assert_eq!(
+    assert!(matches!(
         node.resolve_successor(authorized, &old).await.unwrap_err(),
-        DrawersError::Docs(DocsError::DocNotFound),
-    );
+        DrawersError::Docs(DocsError::DocNotFound { .. }),
+    ));
     node.core()
         .write_roster(
             &RequestContext::root(),

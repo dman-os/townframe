@@ -410,13 +410,14 @@ impl DocsService {
     /// from. Run once when the write is staged and again, under the same lock as the commit, when
     /// it is committed.
     pub(super) fn condition(
+        doc_id: &DocId,
         doc: &Automerge,
         mode: &WriteMode,
     ) -> Result<Vec<ChangeHash>, DocsError> {
         let current = sorted(doc.get_heads());
         match mode {
             WriteMode::IfDocUnchanged { heads } => {
-                check_heads(doc, heads)?;
+                check_heads(doc_id, doc, heads)?;
                 if sorted(heads.clone()) != current {
                     return Err(DocsError::Conflict {
                         heads: current,
@@ -443,7 +444,7 @@ impl DocsService {
                 Ok(current)
             }
             WriteMode::AtHeads { heads } => {
-                check_heads(doc, heads)?;
+                check_heads(doc_id, doc, heads)?;
                 Ok(sorted(heads.clone()))
             }
             WriteMode::AtCurrent => Ok(current),
@@ -628,7 +629,7 @@ impl DocsService {
     ) -> Result<Option<BigDocHandle>, DocsError> {
         match self.handle(document).await {
             Ok(handle) => Ok(Some(handle)),
-            Err(DocsError::DocNotFound) => {
+            Err(DocsError::DocNotFound { .. }) => {
                 self.commands.discard(command).await?;
                 Ok(None)
             }
@@ -648,7 +649,7 @@ impl DocsService {
         match self.settle_branch(context, row).await {
             Err(
                 DocsError::BaseNotAccepted { .. }
-                | DocsError::DocNotFound
+                | DocsError::DocNotFound { .. }
                 | DocsError::Pending { .. },
             ) => Ok(()),
             result => result,
