@@ -73,6 +73,9 @@ pub(super) struct Probe {
     /// Gates for the next calls, consumed in order: a call that finds one waits for its permit.
     holds: Mutex<VecDeque<Arc<Notify>>>,
     failing: Mutex<BTreeSet<String>>,
+    /// Operations that answer with this provider failure, as a handler's own XRPC error is
+    /// passed through dispatch.
+    refusing: Mutex<std::collections::BTreeMap<String, (u16, Value)>>,
 }
 
 impl Probe {
@@ -82,6 +85,7 @@ impl Probe {
             entered: watch::channel(0).0,
             holds: Mutex::default(),
             failing: Mutex::default(),
+            refusing: Mutex::default(),
         })
     }
 
@@ -99,6 +103,14 @@ impl Probe {
         } else {
             set.remove(operation);
         }
+    }
+
+    /// Calls of `operation` fail with the provider error `status` and `body`.
+    pub(super) fn refuse_with(&self, operation: &str, status: u16, body: Value) {
+        self.refusing
+            .lock()
+            .unwrap()
+            .insert(operation.to_owned(), (status, body));
     }
 
     fn calls(&self) -> Vec<Call> {
@@ -141,6 +153,9 @@ impl Provider for Probe {
         let hold = self.holds.lock().unwrap().pop_front();
         if let Some(gate) = hold {
             gate.notified().await;
+        }
+        if let Some((status, body)) = self.refusing.lock().unwrap().get(operation).cloned() {
+            return Err(ProviderError::Failed { status, body });
         }
         if self.failing.lock().unwrap().contains(operation) {
             return Err(ProviderError::Failed {

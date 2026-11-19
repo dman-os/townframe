@@ -306,3 +306,52 @@ fn a_nested_call_without_a_capability_of_its_own_is_unauthenticated() {
     ));
     assert!(transport.0.borrow().is_empty());
 }
+
+/// Answers every request with one fixed response.
+struct Answering(StatusCode, Value);
+
+impl HttpTransport for Answering {
+    async fn send(&self, _request: XrpcRequest) -> Result<XrpcResponse, HttpTransportError> {
+        Ok(XrpcResponse {
+            status: self.0,
+            headers: HeaderMap::new(),
+            body: XrpcBody::json(serde_json::to_vec(&self.1).unwrap()),
+        })
+    }
+}
+
+/// The refusal the host's egress writes for a call a declared permbind covers but nobody has
+/// granted (ADR 049 §4.3) is the typed error a routine matches, with the pending request in hand.
+#[test]
+fn a_routine_matches_missing_authority_and_reads_the_request() {
+    let envelope = json!({
+        "error": "MissingAuthority",
+        "message": "cartridge `alpha/app` is not granted what its permbind `sync` declares",
+        "operationError": {
+            "Context": {
+                "MissingAuthority": {
+                    "cartridge": "alpha/app",
+                    "permbind": "sync",
+                    "request": "018f0000-0000-7000-8000-000000000001",
+                }
+            }
+        },
+    });
+    let mut cx = cx_with(&Recording::default(), Some("own-cap"), None);
+    cx.transport = HttpHandle::new(Answering(StatusCode::FORBIDDEN, envelope));
+    let result = futures::executor::block_on(cx.call(Whoami {}));
+    let Err(ClientError::Method(TestError::Context(ContextError::MissingAuthority {
+        cartridge,
+        permbind,
+        request,
+    }))) = result
+    else {
+        panic!("expected the missing-authority error, got {result:?}");
+    };
+    assert_eq!(cartridge, "alpha/app");
+    assert_eq!(permbind, "sync");
+    assert_eq!(
+        request.as_deref(),
+        Some("018f0000-0000-7000-8000-000000000001")
+    );
+}
