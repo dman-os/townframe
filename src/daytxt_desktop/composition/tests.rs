@@ -5,7 +5,7 @@ use clay_mdk::Collection;
 use clay_mdk::MicroId;
 use micro_settings_manifest::Section;
 
-// The package directory must install the Wasmtime counter (and the lab and layout packages)
+// The package directory must install the Wasmtime counter (and the lab, layout, review and theme-lab packages)
 // beside the shell's native built-ins, and its manifest-declared section must be there before the
 // guest ever runs.
 #[tokio::test(flavor = "current_thread")]
@@ -29,7 +29,9 @@ async fn desktop_runtime_installs_the_counter_section_from_its_package_manifest(
             "did:example:clay-local/dayframe.lifecycle",
             "did:example:clay-local/dayframe.counter",
             "did:example:clay-local/dayframe.lab",
-            "did:example:clay-local/dayframe.layout"
+            "did:example:clay-local/dayframe.layout",
+            "did:example:clay-local/dayframe.review",
+            "did:example:clay-local/dayframe.theme-lab"
         ]
     );
     let mut key = Vec::new();
