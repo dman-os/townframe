@@ -56,6 +56,10 @@ _: {
         CARGO_BUILD_JOBS = "8";
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "${pkgs.clang}/bin/clang";
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=${pkgs.mold}/bin/mold --cfg tokio_unstable";
+        # The aarch64 build machine (mothership) links with mold too; without these it falls
+        # back to GNU ld, which is several times slower and holds gigabytes per link.
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "${pkgs.clang}/bin/clang";
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=${pkgs.mold}/bin/mold --cfg tokio_unstable";
       };
 
       ghjkDevEnv = {
