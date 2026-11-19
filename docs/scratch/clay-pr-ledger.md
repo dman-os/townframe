@@ -691,3 +691,21 @@ Gap detail.
   - Lint job died without logs (cache throttling); rerun.
 - To do after restart: run `cargo x guardrails check-matrix --package <p> --target <t>` for clay_mdk, micro_* manifests, micro_counter, micro_layout on native / wasm32-unknown-unknown / wasm32-wasip3; then the full check; push; watch CI.
 - Dev-script agent (D1, `x/dayframe.ts`) may still have uncommitted work; check `git status`.
+
+## Guest view wakes are opt-in: design debt (2026-11-19, operator: "put it in the ledger")
+
+- **Symptom.** A view reading a `call_bytes` body never completed, at any size (intxt #213, pin
+  `clay_node` `e2e::egress::a_view_reads_a_multi_chunk_byte_body_in_order`). Fixed on `fix/view-call-bytes-hang`
+  (`34ada7f0`, clay_mdk/context.rs; `85427e66` is droppable INSTR).
+- **Mechanism.** A guest has two schedulers. A view's Dioxus `use_resource` task is polled only inside
+  `render_immediate`, which the host drives through the sync exports. Network work runs on the guest executor
+  (component-model tasks). A delivery from the executor wakes the Dioxus task, but a Dioxus wake schedules nothing:
+  no render follows unless the delivering code calls `views.notify_views()` itself. Unary `call` does that once at the
+  end, which suffices. `call_bytes` copied it, notifying once after the head, so every later chunk and the
+  end-of-stream woke a task nobody polled. The fix notifies after the head, after every chunk and at end-of-stream.
+- **Why it's design debt.** Liveness depends on every cross-executor delivery path remembering a manual
+  `notify_views()` per delivery; a forgotten one is a silent hang. `Cx::blobs()` and `fetch` will hit it next.
+- **Direction (open).** Put the render request in the waker: a wake of a view task asks the host for a render pass,
+  as Dioxus's own runtime does via `wait_for_work`, and `notify_views()` goes away. Open: whether the host↔guest
+  wire can carry a "render requested" signal today (the guest is driven by sync exports). Coordinate with intxt,
+  who builds on the guest view API. Candidate for the design session or a small draft PR.
