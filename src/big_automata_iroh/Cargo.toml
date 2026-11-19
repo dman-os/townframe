@@ -1,5 +1,5 @@
 [package]
-name = "big_automata_service"
+name = "big_automata_iroh"
 version.workspace = true
 edition.workspace = true
 

@@ -1451,7 +1451,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "big_automata_service"
+name = "big_automata_iroh"
 version = "0.1.0"
 dependencies = [
  "big_automata",

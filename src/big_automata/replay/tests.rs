@@ -139,6 +139,8 @@ struct Sim {
     last_round_drained: bool,
     /// The ids the last drained round named.
     drained_ids: BTreeSet<TargetId>,
+    /// The targets of the round being applied whose cursor is still the round's.
+    fresh: BTreeSet<TargetId>,
 }
 
 impl Sim {
@@ -159,6 +161,7 @@ impl Sim {
             outcomes: Vec::new(),
             last_round_drained: false,
             drained_ids: BTreeSet::new(),
+            fresh: BTreeSet::new(),
         }
     }
 
@@ -372,10 +375,25 @@ impl Sim {
             .round_answered(request, answer, &mut self.outcomes)
             .expect("a correct server's page");
         let head = self.oracle.latest_rev();
+        // Law 11: a round's omissions are judged against the cursor it was asked from, so its
+        // answer for a target is applied only while the client's cursor for that target is
+        // still that cursor. An answer to an older round, overtaken in the network, is dropped:
+        // applying its rows next to a newer round's could keep a member the newer one removed.
+        self.fresh.clear();
+        for (id, cursor) in &request.targets {
+            let current = self
+                .client
+                .route_of(*id)
+                .map(|route| self.cursors.get(route).copied().unwrap_or(0));
+            if current == Some(*cursor) {
+                self.fresh.insert(*id);
+            }
+        }
         // Quiet is confirmed by a round that drained every target it named; whether it named
         // every target the client holds is judged when quiet is decided (`drained_ids`), since
         // an update acknowledged later in the same drain can add one.
         self.last_round_drained = outcome == RoundOutcome::Answered
+            && self.fresh.len() == request.targets.len()
             && self.outcomes.len() == request.targets.len()
             && self.outcomes.iter().all(|(_, _, outcome)| {
                 // `drained` is as of the round's snapshot; a page that waited in the network
@@ -392,7 +410,10 @@ impl Sim {
         for event in &page.events {
             self.receive(request, page, event);
         }
-        for (_, route, outcome) in &self.outcomes {
+        for (id, route, outcome) in &self.outcomes {
+            if !self.fresh.contains(id) {
+                continue;
+            }
             if let TargetOutcome::Advance { resume, .. } = outcome {
                 let cursor = self.cursors.entry(route.clone()).or_default();
                 *cursor = (*cursor).max(*resume);
@@ -418,6 +439,9 @@ impl Sim {
             } => (*rev, obj_key, std::slice::from_ref(target), None),
         };
         for target in targets {
+            if !self.fresh.contains(target) {
+                continue;
+            }
             let cursor = request
                 .targets
                 .iter()
@@ -643,6 +667,47 @@ proptest! {
         }
         sim.quiesce();
     }
+}
+
+/// Shrunk by the stack simulation: the client's view of a part kept a member the store removed.
+#[test]
+fn a_removed_member_leaves_the_clients_view() {
+    use Step::*;
+    let mut sim = Sim::new();
+    for step in [
+        Write(15, 61, 0),
+        Want(165),
+        Want(52),
+        Want(15),
+        Want(34),
+        Want(0),
+        Write(91, 181, 143),
+        Access(43),
+        SendUpdate,
+        Want(4),
+        Want(64),
+        Access(11),
+        Want(201),
+        Want(4),
+        RetryBlocked,
+        Write(0, 0, 0),
+        Deliver(0),
+        Deliver(0),
+        Access(191),
+        SendUpdate,
+        Deliver(0),
+        Duplicate(0),
+        Want(0),
+        Deliver(0),
+        Write(0, 0, 0),
+        SendRound,
+        Write(0, 0, 0),
+        Deliver(215),
+        Write(65, 1, 123),
+    ] {
+        sim.step(step);
+    }
+    sim.quiesce();
 }
 
 /// Shrunk by the stack simulation: a readable part wanted while an update was in flight.

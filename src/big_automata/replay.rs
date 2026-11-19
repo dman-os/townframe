@@ -87,7 +87,11 @@
 //!     round's snapshot. It is a hint for pacing, never "the replay is over".
 //! 11. *Removals the client never saw.* The server may omit a removal for a membership that
 //!     first went live after the target's cursor, since the client cannot hold it. Omitting it
-//!     is allowed, never required.
+//!     is allowed, never required. The omission is judged against the cursor the round was
+//!     asked from, so a client applies a round's answer for a target only while its cursor for
+//!     that target is still the round's cursor; an answer to an older round, overtaken by a
+//!     newer one, is dropped. Otherwise rows a newer round delivered could survive a removal
+//!     the older round's omission hid (found by the stack simulation).
 //! 12. *Object targets carry content.* An object target delivers the object's changes in the
 //!     parts the client may read, not its membership removals; those travel on part targets.
 //!     An object target is refused while the object is live in no part the client may read.
