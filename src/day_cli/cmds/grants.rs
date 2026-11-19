@@ -2,6 +2,7 @@ use crate::client::CallError;
 use crate::client::Mode;
 use crate::client::NodeClient;
 use crate::interlude::*;
+use crate::out::out;
 
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::drawer::DrawerAccess;
@@ -121,21 +122,22 @@ async fn pending_requests(client: &NodeClient) -> Res<GrantRequests> {
 }
 
 async fn pending(client: &NodeClient, as_json: bool) -> Res<ExitCode> {
+    let mut out = out();
     let requests = pending_requests(client).await?;
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&requests)?);
+        writeln!(out, "{}", serde_json::to_string_pretty(&requests)?)?;
         return Ok(ExitCode::SUCCESS);
     }
     let now = now_ms();
     for request in requests.requests {
-        println!(
+        writeln!(out, 
             "{}  {}  {}  {}",
             request.id,
             request.cartridge_id,
             question(&request.access),
             age(now.saturating_sub(request.filed_at_ms)),
-        );
-        println!("    {}", request.description);
+        )?;
+        writeln!(out, "    {}", request.description)?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -188,6 +190,7 @@ async fn answer_request(
     answer: GrantAnswer,
     drawer: Option<String>,
 ) -> Res<ExitCode> {
+    let mut out = out();
     let id: Uuid7 = serde_json::from_value(request.into())
         .map_err(|error| eyre::eyre!("`{request}` is not a request id: {error}"))?;
     let drawer = drawer
@@ -234,14 +237,14 @@ async fn answer_request(
     };
     let question = question(&access);
     match answer {
-        GrantAnswer::Allow => println!("Allowed: {cartridge_id} {question}."),
-        GrantAnswer::OnlyThisBoot => println!(
+        GrantAnswer::Allow => writeln!(out, "Allowed: {cartridge_id} {question}.")?,
+        GrantAnswer::OnlyThisBoot => writeln!(out, 
             "Allowed only this time: {cartridge_id} {question}, until the node is next started."
-        ),
-        GrantAnswer::Decline => println!(
+        )?,
+        GrantAnswer::Decline => writeln!(out, 
             "Declined: {cartridge_id} will not be asked about this again until the node is next \
              started."
-        ),
+        )?,
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -268,6 +271,7 @@ fn grant_sentence(grant: &GrantKey, body: &GrantBody) -> String {
 }
 
 async fn list(client: &NodeClient, cartridge: Option<String>, as_json: bool) -> Res<ExitCode> {
+    let mut out = out();
     let cartridge_id: Option<CartridgeId> = cartridge
         .map(|cartridge| {
             cartridge
@@ -280,7 +284,7 @@ async fn list(client: &NodeClient, cartridge: Option<String>, as_json: bool) -> 
         .await
         .wrap_err("listing the grants failed")?;
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&listed)?);
+        writeln!(out, "{}", serde_json::to_string_pretty(&listed)?)?;
         return Ok(ExitCode::SUCCESS);
     }
     let CartridgeGrants { grants } = listed;
@@ -291,16 +295,17 @@ async fn list(client: &NodeClient, cartridge: Option<String>, as_json: bool) -> 
         this_boot,
     } in grants
     {
-        println!(
+        writeln!(out, 
             "{cartridge_id}  {grant}  {}{}",
             grant_sentence(&grant, &value),
             if this_boot { " (only this time)" } else { "" },
-        );
+        )?;
     }
     Ok(ExitCode::SUCCESS)
 }
 
 async fn revoke(client: &NodeClient, cartridge: &str, grant: &str) -> Res<ExitCode> {
+    let mut out = out();
     let cartridge_id: CartridgeId = cartridge
         .parse()
         .map_err(|error| eyre::eyre!("`{cartridge}` is not a cartridge id: {error}"))?;
@@ -323,6 +328,6 @@ async fn revoke(client: &NodeClient, cartridge: &str, grant: &str) -> Res<ExitCo
             return Ok(ExitCode::FAILURE);
         }
     }
-    println!("Took back `{grant}` from {cartridge}. It takes effect on its next action.");
+    writeln!(out, "Took back `{grant}` from {cartridge}. It takes effect on its next action.")?;
     Ok(ExitCode::SUCCESS)
 }

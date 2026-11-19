@@ -1,5 +1,6 @@
 use crate::client::CallError;
 use crate::interlude::*;
+use crate::out::out;
 
 use big_cartridges_core::CartridgeId;
 use big_nodule_core::protocol::SetNoduleDevTakeover;
@@ -42,6 +43,7 @@ pub async fn run(command: CartsCommands) -> Res<ExitCode> {
 }
 
 async fn dev_takeover(slot: &str, by: Option<String>) -> Res<ExitCode> {
+    let mut out = out();
     let taken = lazy::node()
         .await?
         .call(SetNoduleDevTakeover {
@@ -61,11 +63,11 @@ async fn dev_takeover(slot: &str, by: Option<String>) -> Res<ExitCode> {
         }
     }
     match by {
-        Some(by) => println!(
+        Some(by) => writeln!(out, 
             "`{by}` now runs as `{slot}`, with its actor, its data, every drawer grant and the \
              method grants both asked for. `day carts dev-takeover {slot} --clear` ends it."
-        ),
-        None => println!("`{slot}` runs its own install again"),
+        )?,
+        None => writeln!(out, "`{slot}` runs its own install again")?,
     }
     Ok(ExitCode::SUCCESS)
 }

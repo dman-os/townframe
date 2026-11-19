@@ -1,4 +1,5 @@
 use crate::interlude::*;
+use crate::out::out;
 
 /// Sets up a new node directory: the directory itself and `node.json` with a fresh identity.
 /// Nothing is booted; the node's databases are created by its first boot.
@@ -8,6 +9,7 @@ use crate::interlude::*;
 /// that is not a node (an unreadable or unparsable `node.json`, a version this `day` does not
 /// understand) is an error, and is not touched either.
 pub async fn run(dir: Option<PathBuf>, relay: bool) -> Res<ExitCode> {
+    let mut out = out();
     let node_dir = match dir {
         Some(dir) => {
             crate::context::NodeDir::new(crate::config::CliConfig::source(Some(&dir))?.node_path)
@@ -22,11 +24,11 @@ pub async fn run(dir: Option<PathBuf>, relay: bool) -> Res<ExitCode> {
                 node_dir.root().display()
             )
         })?;
-        println!(
+        writeln!(out, 
             "node {} already initialized at {}",
             settings.node_id(),
             node_dir.root().display()
-        );
+        )?;
         return Ok(ExitCode::SUCCESS);
     }
     node_dir.init().await?;
@@ -40,10 +42,10 @@ pub async fn run(dir: Option<PathBuf>, relay: bool) -> Res<ExitCode> {
             .await?;
     }
     let settings = node_dir.settings()?;
-    println!(
+    writeln!(out, 
         "initialized node {} at {}",
         settings.node_id(),
         node_dir.root().display()
-    );
+    )?;
     Ok(ExitCode::SUCCESS)
 }

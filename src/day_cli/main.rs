@@ -23,6 +23,7 @@ mod interlude {
     pub use utils_rs::prelude::json;
     pub use utils_rs::prelude::warn;
 
+    pub use std::io::Write;
     pub use std::process::ExitCode;
 
     pub(crate) use crate::lazy;
@@ -39,6 +40,7 @@ mod config;
 mod context;
 mod e2e;
 mod lazy;
+mod out;
 
 /// Report an escaped error ourselves instead of returning it from `main`. The standard library
 /// prints a returned error as `Error: {err:?}`, and color-eyre's `Debug` begins every chain entry
@@ -48,6 +50,7 @@ mod lazy;
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
+        Err(err) if out::is_stdout_closed(&err) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("Error: {err:#}");
             ExitCode::FAILURE
@@ -209,7 +212,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
 /// `root_cmd` here, after the node is known to be initialized, as daybook's `exec` did for plugs.
 async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
     let mut root_cmd = Cli::command();
-    Ok(static_res.exit(Some(&mut root_cmd)))
+    static_res.exit(Some(&mut root_cmd))
 }
 
 const CLAP_STYLE: clap::builder::Styles = clap::builder::Styles::styled()
@@ -306,20 +309,23 @@ enum StaticCliResult {
 
 impl StaticCliResult {
     /// Used for deferred exit after we've built the full cli
-    fn exit(self, cmd: Option<&mut clap::Command>) -> ExitCode {
+    fn exit(self, cmd: Option<&mut clap::Command>) -> Res<ExitCode> {
         use clap::CommandFactory;
         use clap_complete::aot::generate;
         match self {
             StaticCliResult::ClapErr(err) => err.exit(),
             StaticCliResult::Completions(shell) => {
-                let mut stdout = std::io::stdout();
+                // `generate` panics when its writer fails, so it fills a buffer that `out` then
+                // writes, where a closed stdout is an error like any other.
+                let mut script = Vec::new();
                 generate(
                     shell,
                     cmd.unwrap_or(&mut Cli::command()),
                     "day".to_string(),
-                    &mut stdout,
+                    &mut script,
                 );
-                ExitCode::SUCCESS
+                out::out().write_all(&script)?;
+                Ok(ExitCode::SUCCESS)
             }
             StaticCliResult::Exit(_) => unreachable!("can't happen"),
         }
