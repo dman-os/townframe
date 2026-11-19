@@ -75,7 +75,7 @@ impl Polls {
             Arc::new(move |scope| {
                 let document = scope
                     .read
-                    .iter()
+                    .keys()
                     .next()
                     .expect("metadata poll names one document")
                     .clone();
