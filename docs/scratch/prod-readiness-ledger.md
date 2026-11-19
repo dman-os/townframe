@@ -967,3 +967,30 @@ add a key-log for decrypting captures in a test harness.
   dmeta and certificates, leaking creation time and order (big_cabinet; ties into the
   metadata audit). `command_id` primary keys take unvalidated caller text.
 
+## Browser story (operator decisions, 2026-11-19)
+
+Research: `docs/scratch/browser-async-research.md` (subduction, keyhive, iroh, n0-future,
+sqlite_rs).
+- **Send everywhere.** Shared async code and traits are `Send`, using native `async fn` in
+  traits (or `-> impl Future + Send`) with static dispatch, boxing only where `dyn` is needed.
+  JS handles (the browser SQLite client, WebCrypto, MessagePort) are wrapped once, at the
+  adapter edge, with `SendWrapper`; this is sound because the browser runs single-threaded
+  (wasm threads are opt-in and not planned).
+- **FutureForm only at the subduction/keyhive boundary,** where their traits require it. It
+  is stripped from big_automata now, and from big_repo when we get there.
+- **Runtime surface:** `n0_future` directly (spawn = `spawn_local` in the browser, JoinSet,
+  abort-on-drop, time via web-time, timeouts), `tokio::sync` for channels and watch, std or
+  surelock locks that are never held across an await. No `tokio::spawn`, `tokio::time` or
+  `tokio::net` in shared code.
+- **Drivers** are runtime-agnostic and live in their domain crate (big_automata's driver goes
+  into big_automata). A separate crate only where compilation units force it.
+- **Hosting:** the node runs in a leader-elected dedicated worker. Tabs' workers contend for a
+  Web Lock; the leader runs the node and holds the database, and the others talk to it over
+  BroadcastChannel or MessagePort. The service worker is optional (offline assets, push), and
+  service vs UI stays the embedder's choice; lower layers don't care.
+- **Storage:** SQLite on OPFS (opfs-sahpool-style synchronous access handles, dedicated
+  workers only; shipped in Chromium, Firefox 111+, Safari 16.4+). IndexedDB (async VFS via
+  Asyncify/JSPI) is a slower fallback. `sqlite_rs` gets renamed `sqlite_utils_rs` and gains a
+  wasm32-unknown-unknown backend when we reach it.
+- **Testing:** a wasm-bindgen-test lane in the Playwright browser farm for drivers.
+
