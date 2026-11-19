@@ -187,6 +187,7 @@ pub struct BlobService {
     pub roots: PairRoots,
     pub(crate) ownership: ByteOwnership,
     capabilities: DomainCapabilities,
+    sql: Database,
     operator: Uuid7,
     availability: SqliteKeyedFrontier<AvailabilityCodec>,
     _owner: Option<std::fs::File>,
@@ -289,7 +290,7 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
         )
         .await?;
         let (ownership, ownership_stop) =
-            ByteOwnership::boot(config.sql, store.clone(), Arc::clone(&provider)).await?;
+            ByteOwnership::boot(config.sql.clone(), store.clone(), Arc::clone(&provider)).await?;
         Ok::<_, utils_rs::prelude::eyre::Report>((roots, ownership, availability, ownership_stop))
     }
     .await;
@@ -306,6 +307,7 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
         roots,
         ownership,
         capabilities: DomainCapabilities::new(config.authority, config.namespace, SCOPE_PREFIX),
+        sql: config.sql,
         operator: config.operator,
         availability,
         _owner: owner,
@@ -341,14 +343,14 @@ impl BlobService {
     }
 
     /// Resolves `capability` to the scope its handle was minted with and requires `permits` to
-    /// hold of it. Only a handle this domain minted resolves: an identity, or a capability from
-    /// any other namespace, is `Denied`.
+    /// hold of it, answering that scope. Only a handle this domain minted resolves: an identity,
+    /// or a capability from any other namespace, is `Denied`.
     async fn authorize(
         &self,
         context: &RequestContext,
         capability: CapId,
         permits: impl FnOnce(&BlobsScope) -> bool,
-    ) -> Result<(), BlobsError> {
+    ) -> Result<BlobsScope, BlobsError> {
         let invocation = self
             .capabilities
             .resolve::<BlobsScope>(context, capability)
@@ -358,10 +360,35 @@ impl BlobService {
             unreachable!("resolving a bare handle yields its scope, never an identity")
         };
         if permits(&scope) {
-            Ok(())
+            Ok(scope)
         } else {
             Err(BlobsError::Denied)
         }
+    }
+
+    /// Requires that `scope` reaches `blob_id` for reading: it is named in `scope.read`, or it
+    /// is pinned in a blob inventory of a drawer `scope` reaches at `Read` or more. The drawer
+    /// check is exact: the digest must be pinned in a meta doc of kind `blobInventory` on that
+    /// drawer's public or sensitive root, whatever the inventory is named (a drawer holds
+    /// several), so a handle never reads a blob some other drawer, or no drawer, holds.
+    async fn authorize_read(&self, scope: &BlobsScope, blob_id: &BlobId) -> Result<(), BlobsError> {
+        if scope.read.contains(blob_id) {
+            return Ok(());
+        }
+        for drawer in scope.reading_drawers() {
+            let held = crate::admission::sqlite::queries::drawer_holds_blob(
+                &self.sql,
+                drawer.to_string(),
+                crate::workers::INVENTORY_KIND.to_owned(),
+                blob_id.to_string(),
+            )
+            .await
+            .map_err(storage_error)?;
+            if !held.is_empty() {
+                return Ok(());
+            }
+        }
+        Err(BlobsError::Denied)
     }
 
     pub async fn stat(&self, blob_id: &BlobId) -> Res<Option<BlobInfo>> {
@@ -699,10 +726,10 @@ impl Handler<ReadBlob> for BlobService {
         request: Envelope<ReadBlob>,
     ) -> Result<ResponseEnvelope<ByteBody>, BlobsError> {
         let params = request.params;
-        self.authorize(&request.context, params.capability, |scope| {
-            scope.read.contains(&params.blob_id)
-        })
-        .await?;
+        let scope = self
+            .authorize(&request.context, params.capability, |_| true)
+            .await?;
+        self.authorize_read(&scope, &params.blob_id).await?;
         let info = self
             .stat(&params.blob_id)
             .await
@@ -764,10 +791,10 @@ impl Handler<StatBlob> for BlobService {
         &self,
         request: Envelope<StatBlob>,
     ) -> Result<ResponseEnvelope<BlobStat>, BlobsError> {
-        self.authorize(&request.context, request.params.capability, |scope| {
-            scope.read.contains(&request.params.blob_id)
-        })
-        .await?;
+        let scope = self
+            .authorize(&request.context, request.params.capability, |_| true)
+            .await?;
+        self.authorize_read(&scope, &request.params.blob_id).await?;
         Ok(BlobStat {
             info: self
                 .stat(&request.params.blob_id)
