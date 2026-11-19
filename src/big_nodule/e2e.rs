@@ -306,7 +306,6 @@ struct Node {
     drawers_stop: StopToken,
     drawers_actor: OpenedActor,
     nodules_actor: OpenedActor,
-    drawer_access: Arc<PolicyAccess>,
     /// Where the pinned versions live (a registry drawer, as `big_node` creates it) and where
     /// the cartridge config documents live (the shared config drawer the service creates).
     registry_drawer: DrawerId,
@@ -485,7 +484,6 @@ async fn node_with_takeover(
         drawers_stop,
         drawers_actor,
         nodules_actor,
-        drawer_access,
         registry_drawer,
         shared_config_drawer,
         blobs,

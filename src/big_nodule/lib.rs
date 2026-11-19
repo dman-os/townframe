@@ -735,6 +735,12 @@ pub struct SharedConfigDrawerConfig<'a> {
 /// local until sister nodes exist; its sync policy is theirs to decide, and nothing here depends
 /// on it. The nodules actor creates it, so it holds Admin on it.
 ///
+/// The nodules actor holds the right to create drawers on every boot, not only while it makes this
+/// one: it is the delegator every routine's drawer handle is minted under, so a routine whose
+/// `uses` takes `create` can be minted it only while the actor holds it (permission model §6.1).
+/// Least privilege applies to the routines' handles, which are `uses` ∩ grants, not to the actor
+/// that mints them. Granting is idempotent, so a later boot re-asserts it at no cost.
+///
 /// A crash between the drawer's creation and the stored id replays the creation under its fixed
 /// command, which the drawer ledger answers with the same drawer while its row is retained; past
 /// that, the first drawer is leaked as an unreferenced empty drawer and a second one made.
@@ -742,9 +748,6 @@ pub async fn ensure_shared_config_drawer(
     config: SharedConfigDrawerConfig<'_>,
 ) -> Result<DrawerId, NodulesError> {
     store::migrate(&config.sql).await?;
-    if let Some(drawer) = store::shared_config_drawer(&config.sql).await? {
-        return Ok(drawer);
-    }
     let storage = |error: &dyn std::fmt::Display| NodulesError::Storage(error.to_string());
     let context = RequestContext::root();
     config
@@ -759,6 +762,9 @@ pub async fn ensure_shared_config_drawer(
         )
         .await
         .map_err(|error| storage(&error))?;
+    if let Some(drawer) = store::shared_config_drawer(&config.sql).await? {
+        return Ok(drawer);
+    }
     let create = config
         .drawers
         .client
@@ -792,18 +798,5 @@ pub async fn ensure_shared_config_drawer(
         .map_err(|error| storage(&error))?
         .drawer_id;
     store::set_shared_config_drawer(&config.sql, &drawer).await?;
-    // Creating the one shared config drawer is the only use of this right, so it is revoked once
-    // the drawer is recorded rather than left standing (least privilege). Admin on the drawer
-    // comes from being its creator and is unaffected.
-    config
-        .access
-        .grants()
-        .revoke(
-            &context,
-            config.actor.actor.actor_id,
-            &[CREATE_DRAWER_OBJECT.into()],
-        )
-        .await
-        .map_err(|error| storage(&error))?;
     Ok(drawer)
 }

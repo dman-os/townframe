@@ -19,14 +19,12 @@ use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::OpenedActor;
-use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::MetaRoot;
-use big_cabinet_core::drawer::protocol::CREATE_DRAWER_OBJECT;
 use big_cabinet_core::drawer::protocol::CreateDrawer;
 use big_cabinet_core::drawer::protocol::CreateLayout;
 use big_cabinet_core::drawer::protocol::CreateMetaDoc;
@@ -446,19 +444,6 @@ async fn a_create_only_drawers_use_makes_drawers_but_writes_no_existing_one() {
     );
     uses(&mut cartridge, SETUP, "drawers", writes());
     let (node, executor, _) = hosted(cartridge, &[]).await;
-    // The service revokes its right to create drawers once it has made the shared config
-    // drawer, so a create use can only be minted while the right is held again.
-    node.drawer_access
-        .grants()
-        .grant(
-            &RequestContext::root(),
-            node.nodules_actor.actor.actor_id,
-            CREATE_DRAWER_OBJECT.into(),
-            Rights::USE,
-            None,
-        )
-        .await
-        .unwrap();
     let present = node.drawers.local().present_id.clone();
     crate::e2e::grant_drawer(
         &node.drawers,
