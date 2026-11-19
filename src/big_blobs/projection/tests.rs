@@ -727,6 +727,7 @@ async fn a_later_source_revision_retries_parked_current_signed_state() -> Res<()
             (
                 At::Heads(vec![ChangeHash([9; 32])]),
                 Err(DocsError::UnknownHeads {
+                    doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
                     heads: vec![ChangeHash([9; 32])],
                 }),
             ),
@@ -1216,6 +1217,7 @@ async fn unavailable_and_pending_reads_park_without_replacing_prior_rows() -> Re
             doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
         }),
         Err(DocsError::UnknownHeads {
+            doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
             heads: vec![ChangeHash([9; 32])],
         }),
         Err(DocsError::Repository("unavailable".into())),
