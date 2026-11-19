@@ -17,7 +17,9 @@ import { $ } from "./utils.ts";
 // `intxtGuest` also builds intxt's nodule handler component (the `wasm_utils_rs` workspace's
 // `intxt_nodule_guest`, always release) and stages it as `intxt.guest.wasm` in the package
 // directory, where the desktop host and the Android staging read it. It is not a micro, so the
-// shell's package scan skips it; the node installs it as a cartridge at boot.
+// shell's package scan skips it; the node installs it as a cartridge at boot. `testFixtures`
+// builds the same component for the tests that install intxt and exports its path as
+// `INTXT_GUEST_WASM` (nothing is staged into the package directory).
 //
 // `guestProfile` is the cargo profile the guests build with. `wasm-release` (the default) is the
 // workspace's optimized guest profile, the one `daytxt_web` also builds with. `dev` is opt-in, for
@@ -180,16 +182,23 @@ export async function prepareDaytxtPackages(
       packagesDirectory.join("trapper.manifest.json")
     }`;
   }
-  if (intxtGuest) {
+  if (intxtGuest || testFixtures) {
     await $`cargo build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest --target wasm32-wasip3 --release`;
     const guestWorkspace =
       await $`cargo metadata --locked --no-deps --format-version 1 --manifest-path src/wasm_utils_rs/Cargo.toml`
         .json<{ target_directory: string }>();
-    await $`cp ${
-      $.path(guestWorkspace.target_directory).join(
-        "wasm32-wasip3/release/intxt_nodule_guest.wasm",
-      )
-    } ${packagesDirectory.join("intxt.guest.wasm")}`;
+    const built = $.path(guestWorkspace.target_directory).join(
+      "wasm32-wasip3/release/intxt_nodule_guest.wasm",
+    );
+    if (intxtGuest) {
+      await $`cp ${built} ${packagesDirectory.join("intxt.guest.wasm")}`;
+    }
+    if (testFixtures) {
+      // `daytxt_native`'s interim e2e installs intxt from this component; without the variable it
+      // looks in the guest workspace's own `target/`, which a CI runner never populated.
+      componentEnv["INTXT_GUEST_WASM"] = built.toString();
+      console.log(`INTXT_GUEST_WASM=${built}`);
+    }
   }
   componentEnv["DAYTXT_PACKAGE_DIR"] = packagesDirectory.toString();
   console.log(`DAYTXT_PACKAGE_DIR=${packagesDirectory}`);
