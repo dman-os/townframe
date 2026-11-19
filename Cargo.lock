@@ -1712,6 +1712,7 @@ dependencies = [
  "sqlite_rs",
  "subduction_iroh",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "utils_rs",

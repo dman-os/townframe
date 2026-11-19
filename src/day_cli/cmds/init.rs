@@ -24,7 +24,8 @@ pub async fn run(dir: Option<PathBuf>, relay: bool) -> Res<ExitCode> {
                 node_dir.root().display()
             )
         })?;
-        writeln!(out, 
+        writeln!(
+            out,
             "node {} already initialized at {}",
             settings.node_id(),
             node_dir.root().display()
@@ -40,7 +41,8 @@ pub async fn run(dir: Option<PathBuf>, relay: bool) -> Res<ExitCode> {
         })?;
     }
     let settings = node_dir.settings()?;
-    writeln!(out, 
+    writeln!(
+        out,
         "initialized node {} at {}",
         settings.node_id(),
         node_dir.root().display()
