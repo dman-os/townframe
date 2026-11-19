@@ -1,6 +1,5 @@
 use crate::client::NodeClient;
 use crate::interlude::*;
-use method_core::HttpMethod;
 
 use big_nodule_core::protocol::ListNodules;
 use big_nodule_core::protocol::NoduleRecord;
@@ -24,7 +23,7 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
         .nodules;
 
     let socket_path = conf.node_dir.socket_path()?;
-    // Any exit but 0 means "no daemon serving", the convention `systemctl status` follows.
+    // Any exit but 0 means "no server serving", the convention `systemctl status` follows.
     let exit = if client.mode() == crate::client::Mode::Serving {
         ExitCode::SUCCESS
     } else {
@@ -78,16 +77,10 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
 
 /// Asks the node who it is and what it is connected to.
 pub async fn node_info(client: &NodeClient) -> Res<big_node::NodeInfo> {
-    let reply = client
-        .call_untyped(big_node::GET_NODE_INFO, HttpMethod::Get, &json!({}))
-        .await?;
-    eyre::ensure!(
-        reply.is_success(),
-        "getNodeInfo failed with {}: {}",
-        reply.status,
-        reply.body
-    );
-    Ok(serde_json::from_value(reply.body)?)
+    client
+        .call(big_node::GetNodeInfo {})
+        .await
+        .wrap_err("getNodeInfo failed")
 }
 
 /// One nodule's line in the text status: its cartridge as `<did>/<name>`, whether it is enabled,

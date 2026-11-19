@@ -20,6 +20,9 @@ use big_dispatch::Router;
 use big_dispatch_core::Body;
 use big_dispatch_core::InvocationContext;
 
+use method_core::ContextError;
+use method_core::Method;
+use method_core::XrpcMethod;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -29,6 +32,28 @@ use std::sync::Arc;
 
 /// The NSID of the node info query. It takes no input.
 pub const GET_NODE_INFO: &str = "org.example.daybook.node.getNodeInfo";
+
+/// The node info query ([`GET_NODE_INFO`]). It takes no input. The node's facts publish no
+/// Lexicon (there is no service behind them), so unlike the hosted services' methods there is no
+/// schema projection here; the type exists so a client calls it as any other method.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetNodeInfo {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum NodeInfoError {
+    #[error("request context failed: {0}")]
+    Context(#[from] ContextError),
+    /// The peers service answered that it is stopped: the node is coming down under this call.
+    #[error("the node is unavailable: {0}")]
+    Unavailable(String),
+}
+
+impl Method for GetNodeInfo {
+    type Output = NodeInfo;
+    type Error = NodeInfoError;
+    const XRPC: XrpcMethod = XrpcMethod::query(GET_NODE_INFO);
+}
 
 /// What the node says about itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,7 +93,8 @@ pub(crate) fn register(
     known_drawers_id: DrawerId,
     peers: Option<Peers>,
 ) {
-    // The node's facts are not a `Method` and publish no Lexicon, so calls are unchecked.
+    // The node's facts publish no Lexicon (`GetNodeInfo` is a `Method` only for typed clients), so
+    // calls are unchecked.
     router
         .register(
             provider_id,
