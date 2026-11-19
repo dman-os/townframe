@@ -27,20 +27,12 @@ members = [
   "./src/day_cli",
   "./src/day_node",
   "./src/clay_node",
-  "./src/daybook_cli",
-  "./src/daybook_core",
-  "./src/daybook_ffi",
-  "./src/daybook_pdk",
-  "./src/daybook_types",
   "./src/macros",
   "./src/pierre_diffs",
   "./src/pierre_diffs_dioxus",
   "./src/mltools/",
   "./src/pauperfuse/",
   "./src/native_utils_rs",
-  "./src/plug_test_manifest",
-  "./src/plug_plabels_manifest",
-  "./src/plug_dayledger_manifest",
   "./src/secrets_rs",
   "./src/method_core/",
   "./src/short_ids",
@@ -101,9 +93,6 @@ members = [
 exclude = [
   "src/wasm_utils_rs",
   "src/clay_rt_wcmp_web",
-  "src/plug_test_routines",
-  "src/plug_plabels_routines",
-  "src/plug_dayledger_routines",
   "src/test_wflows",
   "src/btress_sysadmin",
 ]
@@ -128,7 +117,6 @@ sqlite_rs = { path = "./src/sqlite_rs", default-features = false }
 wasm_utils_rs = { path = "./src/wasm_utils_rs", default-features = false }
 am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
-daybook_core = { path = "./src/daybook_core", default-features = false }
 secrets_rs = { path = "./src/secrets_rs" }
 method_core = { path = "./src/method_core", default-features = false }
 short_ids = { path = "./src/short_ids" }
@@ -136,15 +124,8 @@ service_core_rs = { path = "./src/service_core_rs", default-features = false }
 service_client_core_rs = { path = "./src/service_client_core_rs", default-features = false }
 service_client_native_rs = { path = "./src/service_client_native_rs", default-features = false }
 service_utils_rs = { path = "./src/service_utils_rs", default-features = false }
-# daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
-daybook_types = { path = "./src/daybook_types", default-features = false }
-daybook_pdk = { path = "./src/daybook_pdk", default-features = false }
-mltools = { path = "./src/mltools", default-features = false }
-wflow = { path = "./src/wflow", default-features = false }
 wflow_core = { path = "./src/wflow_core", default-features = false }
 wflow_tokio = { path = "./src/wflow_tokio", default-features = false }
-wflow_sdk = { path = "./src/wflow_sdk", default-features = false }
-wash_plugin_sqlite = { path = "./src/wash_plugin_sqlite", default-features = false }
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
 big_sync_core = { path = "./src/big_sync_core/", default-features = false }
 datum_core = { path = "./src/datum_core", default-features = false }
@@ -231,7 +212,6 @@ once_cell = "1"
 parking_lot = "0.12"
 bytes = "1"
 url = { version = "2.5.7", features = ["serde"] }
-addr = "0.15.6"
 # scopeguard = "1.2.0"
 semver = { version = "1", features = ["serde"] }
 surelock = "0.1"
@@ -245,13 +225,10 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 ciborium = "0.2.2"
 postcard = { version = "1.1.3", features = ["alloc"] }
-serde_with = "3.16"
 multihash = "0.19.3"
 data-encoding = "2.10"
 bs58 = "0.5.1"
 blake3 = "1.8"
-zstd = "0.13"
-camino = { version = "1.2.2", features = ["serde1"] }
 atproto-dasl = "0.14.5"
 
 #
@@ -260,14 +237,12 @@ pastey = "0.1"
 cssparser = "0.38"
 displaydoc = "0.2"
 educe = "0.6"
-struct-patch = "0.10.4"
 structstruck = "0.5.1"
 
 #
 # errors
 thiserror = "2"
 anyhow = "1"
-garde = { version = "0.22", features = ["derive", "regex", "url", "email"] }
 
 #
 # logging
@@ -333,7 +308,6 @@ beekem = { version = "0.4.0", git = "https://github.com/dman-os/keyhive", rev = 
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
 nonempty = "0.12.0"
-qrcode = { version = "0.14.1", default-features = false }
 
 #
 # testing
@@ -345,11 +319,6 @@ loom = "0.7.2"
 #
 # db
 sqlite-vec = "0.1.6" # "0.2.4-alpha"
-
-#
-# ffi
-uniffi = { version = "0.31.0" }
-# uniffi = { path = "../uniffi-rs/uniffi/" }
 
 #
 # wasm
