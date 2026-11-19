@@ -152,7 +152,11 @@ async fn read_blob(cx: Context) -> String {
         Err(error) => return format!("err({error})"),
     };
     let (mut octets, mut chunks) = (0, 0);
-    while let Some(chunk) = body.next().await {
+    while let Some(chunk) = {
+        eprintln!("INSTR view: awaiting chunk");
+        body.next().await
+    } {
+        eprintln!("INSTR view: got chunk");
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(error) => return format!("err(stream failed after {octets} octets: {error})"),

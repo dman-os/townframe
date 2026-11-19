@@ -44,7 +44,9 @@ async fn forward_body(
     sender: &mut futures::channel::mpsc::Sender<io::Result<Bytes>>,
 ) -> bool {
     loop {
+        eprintln!("INSTR pump: read begins");
         let (result, chunk) = reader.read(Vec::with_capacity(BODY_CHUNK_SIZE)).await;
+        eprintln!("INSTR pump: read returned {} octets", chunk.len());
         match result {
             StreamResult::Complete(_) => {
                 if sender.send(Ok(Bytes::from(chunk))).await.is_err() {
@@ -216,7 +218,9 @@ impl HttpTransport for WasiHttp {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.parse().ok());
             let (mut sender, receiver) = futures::channel::mpsc::channel(1);
+            eprintln!("INSTR pump: spawned");
             wit_bindgen::spawn_local(async move {
+                eprintln!("INSTR pump: first polled");
                 if !forward_body(body, &mut sender).await {
                     return;
                 }

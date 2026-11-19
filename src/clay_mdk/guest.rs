@@ -645,6 +645,7 @@ impl Runtime {
     /// components re-render. Nothing polls Dioxus tasks in a guest, so a view task reports
     /// through the same dirty flag the mirrors do.
     pub(crate) fn notify_views(&self) {
+        eprintln!("INSTR notify_views");
         self.mutate(|| self.dirty.set(true));
     }
 }
