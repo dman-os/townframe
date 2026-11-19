@@ -296,6 +296,27 @@ module session {
     cl' = cl, net' = net,
   }
 
+  // The TTL sweep of a revived session (law 5, amended). A late opening update revived it, and
+  // it holds ids no live session of the client carries: all of them in a session the client
+  // has left, the removed ones (orphans) in the client's own. Nothing refreshes such a
+  // session, so the sweep takes it; unlike `forget` it is not an environment choice and
+  // spends no budget, and `fairness` makes it happen.
+  action sweepRevived: bool = {
+    nondet sid = srv.keys().oneOf()
+    all {
+      ghost.forgotten.contains(sid),
+      or {
+        sid != cl.sid,
+        not(srv.get(sid).targets.keys().subseteq(
+          tids(cl.believed).union(tids(cl.pendingAdd)).union(cl.pendingRem).union(cl.inflightRem)
+        )),
+      },
+      srv' = srv.without(sid),
+      ghost' = ghost,
+      env' = env, cl' = cl, net' = net,
+    }
+  }
+
   // The client restarts, or abandons its session for its own reasons.
   action clientRestart: bool = all {
     env.budget > 0,
@@ -495,10 +516,15 @@ module session {
     // it holds at that generation or newer, or one whose session it has forgotten (a session
     // exists only once its generation 0 applied). Re-delivering it must change nothing.
     val stale = ghost.forgotten.contains(u.sid) or (held and u.gen <= s.gen)
+    // A late duplicate that revives a forgotten session is spent: the network holds finitely
+    // many copies of an opening update, so it cannot revive the session again after every
+    // sweep for ever. (A set network would otherwise let it, and no fairness rules that out.)
+    val spent = if (applies and not(held) and ghost.forgotten.contains(u.sid)) Set(Update(u)) else Set()
     all {
       srv' = srvNext,
       ghost' = { ...ghost, staleChanged: ghost.staleChanged or (stale and srvNext != srv) },
-      reply(answer),
+      net' = (if (received(cl, ghost, answer) != (cl, ghost)) net.union(Set(answer)) else net).exclude(spent),
+      env' = env, cl' = cl,
     }
   }
 
@@ -592,6 +618,7 @@ module session {
     sendPageStep,
     serverStep,
     clientRecvStep,
+    sweepRevived,
   }
 
   // ---------------------------------------------------------------------------------------
@@ -699,6 +726,7 @@ module session {
     weakFair(retryUpdate, vars),
     weakFair(unblockStep, vars),
     weakFair(sendPageStep, vars),
+    weakFair(sweepRevived, vars),
   }
 
   val serverRoutes = if (srv.keys().contains(cl.sid)) heldRoutes(srv.get(cl.sid).targets) else Set()

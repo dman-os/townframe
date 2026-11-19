@@ -459,4 +459,5 @@ fn law_14_limit_and_hold_are_capped_silently() {
     assert_eq!(round_buf.hold(), Duration::from_millis(250));
 }
 
+mod conformance;
 mod rounds;
