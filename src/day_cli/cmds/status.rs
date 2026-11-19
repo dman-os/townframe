@@ -48,7 +48,8 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
     writeln!(out, "node      {}", info.node_id)?;
     writeln!(out, "path      {}", conf.node_dir.root().display())?;
     writeln!(out, "mode      {}", client.mode().as_str())?;
-    writeln!(out, 
+    writeln!(
+        out,
         "socket    {} ({})",
         socket_path.display(),
         serde_json::to_value(client.socket_state())?
@@ -65,7 +66,11 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
     }
     writeln!(out, "services  not exposed by the node")?;
     match &info.peers {
-        None => writeln!(out, "peers     none attached ({})", client.mode().peers_note())?,
+        None => writeln!(
+            out,
+            "peers     none attached ({})",
+            client.mode().peers_note()
+        )?,
         Some(peers) => {
             writeln!(out, "peers     {} connected", peers.connected.len())?;
             writeln!(out, "  address {}", peers.address)?;

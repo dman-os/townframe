@@ -249,17 +249,15 @@ async fn add_member(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitC
             error: DrawersError::UnknownPeer(_),
             ..
         }) => {
-            error!(
+            eyre::bail!(
                 "this node has not met {peer}: connect to it first (`day peers add <ticket>` and a server restart), then retry"
-            );
-            Ok(ExitCode::FAILURE)
+            )
         }
         Err(refused) => {
-            error!(
-                status = refused.status(),
-                "the node refused the member: {refused}"
-            );
-            Ok(ExitCode::FAILURE)
+            eyre::bail!(
+                "the node refused the member: {refused} (status {status})",
+                status = refused.status().expect("a transport error returned above")
+            )
         }
     }
 }
@@ -283,11 +281,10 @@ async fn revoke_member(drawer: &str, peer: &str) -> Res<ExitCode> {
         }
         Err(CallError::Transport(error)) => Err(error),
         Err(refused) => {
-            error!(
-                status = refused.status(),
-                "the node refused the revocation: {refused}"
-            );
-            Ok(ExitCode::FAILURE)
+            eyre::bail!(
+                "the node refused the revocation: {refused} (status {status})",
+                status = refused.status().expect("a transport error returned above")
+            )
         }
     }
 }

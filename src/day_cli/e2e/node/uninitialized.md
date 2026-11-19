@@ -6,14 +6,14 @@
 ```console
 $ day node status
 ? 1
-[..]node not initialized at resolved path; run `day node init`[..]
+Error: node not initialized at [..]/node; run `day node init`
 
 $ day exec org.example.nothing.here
 ? 1
-[..]node not initialized at resolved path; run `day node init`[..]
+Error: node not initialized at [..]/node; run `day node init`
 
 $ day node start --bg
 ? 1
-[..]node not initialized at resolved path; run `day node init`[..]
+Error: node not initialized at [..]/node; run `day node init`
 
 ```

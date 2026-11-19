@@ -130,7 +130,8 @@ async fn pending(client: &NodeClient, as_json: bool) -> Res<ExitCode> {
     }
     let now = now_ms();
     for request in requests.requests {
-        writeln!(out, 
+        writeln!(
+            out,
             "{}  {}  {}  {}",
             request.id,
             request.cartridge_id,
@@ -202,8 +203,7 @@ async fn answer_request(
         .transpose()?;
     let requests = pending_requests(client).await?;
     let Some(asked) = requests.requests.iter().find(|asked| asked.id == id) else {
-        error!("there is no waiting request {id}: `day grants pending` lists them");
-        return Ok(ExitCode::FAILURE);
+        eyre::bail!("there is no waiting request {id}: `day grants pending` lists them");
     };
     let answered = client
         .call(AnswerCartridgeGrantRequest {
@@ -216,11 +216,10 @@ async fn answer_request(
         Ok(_) => {}
         Err(CallError::Transport(error)) => return Err(error),
         Err(refused) => {
-            error!(
-                status = refused.status(),
-                "the node refused the answer: {refused}"
+            eyre::bail!(
+                "the node refused the answer: {refused} (status {status})",
+                status = refused.status().expect("a transport error returned above")
             );
-            return Ok(ExitCode::FAILURE);
         }
     }
     let GrantRequestRecord {
@@ -238,10 +237,12 @@ async fn answer_request(
     let question = question(&access);
     match answer {
         GrantAnswer::Allow => writeln!(out, "Allowed: {cartridge_id} {question}.")?,
-        GrantAnswer::OnlyThisBoot => writeln!(out, 
+        GrantAnswer::OnlyThisBoot => writeln!(
+            out,
             "Allowed only this time: {cartridge_id} {question}, until the node is next started."
         )?,
-        GrantAnswer::Decline => writeln!(out, 
+        GrantAnswer::Decline => writeln!(
+            out,
             "Declined: {cartridge_id} will not be asked about this again until the node is next \
              started."
         )?,
@@ -295,7 +296,8 @@ async fn list(client: &NodeClient, cartridge: Option<String>, as_json: bool) -> 
         this_boot,
     } in grants
     {
-        writeln!(out, 
+        writeln!(
+            out,
             "{cartridge_id}  {grant}  {}{}",
             grant_sentence(&grant, &value),
             if this_boot { " (only this time)" } else { "" },
@@ -321,13 +323,15 @@ async fn revoke(client: &NodeClient, cartridge: &str, grant: &str) -> Res<ExitCo
         Ok(()) => {}
         Err(CallError::Transport(error)) => return Err(error),
         Err(refused) => {
-            error!(
-                status = refused.status(),
-                "the node refused to take the answer back: {refused}"
+            eyre::bail!(
+                "the node refused to take the answer back: {refused} (status {status})",
+                status = refused.status().expect("a transport error returned above")
             );
-            return Ok(ExitCode::FAILURE);
         }
     }
-    writeln!(out, "Took back `{grant}` from {cartridge}. It takes effect on its next action.")?;
+    writeln!(
+        out,
+        "Took back `{grant}` from {cartridge}. It takes effect on its next action."
+    )?;
     Ok(ExitCode::SUCCESS)
 }

@@ -55,15 +55,15 @@ async fn dev_takeover(slot: &str, by: Option<String>) -> Res<ExitCode> {
         Ok(_) => {}
         Err(CallError::Transport(error)) => return Err(error),
         Err(refused) => {
-            error!(
-                status = refused.status(),
-                "the node refused the takeover: {refused}"
+            eyre::bail!(
+                "the node refused the takeover: {refused} (status {status})",
+                status = refused.status().expect("a transport error returned above")
             );
-            return Ok(ExitCode::FAILURE);
         }
     }
     match by {
-        Some(by) => writeln!(out, 
+        Some(by) => writeln!(
+            out,
             "`{by}` now runs as `{slot}`, with its actor, its data, every drawer grant and the \
              method grants both asked for. `day carts dev-takeover {slot} --clear` ends it."
         )?,

@@ -46,8 +46,10 @@ pub async fn run(
     };
     writeln!(out, "{}", serde_json::to_string_pretty(&reply.body)?)?;
     if !reply.is_success() {
-        error!(status = reply.status, %nsid, "the node refused the call");
-        return Ok(ExitCode::FAILURE);
+        eyre::bail!(
+            "the node refused the call to {nsid} (status {})",
+            reply.status
+        );
     }
     Ok(ExitCode::SUCCESS)
 }

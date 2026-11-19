@@ -45,7 +45,10 @@ async fn add(ticket: &str) -> Res<ExitCode> {
         }
     )?;
     if changed && dir.probe_socket().await? == SocketState::Live {
-        writeln!(out, "the running server dials it after `day node stop` and `day node start --bg`")?;
+        writeln!(
+            out,
+            "the running server dials it after `day node stop` and `day node start --bg`"
+        )?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -64,7 +67,11 @@ async fn ls() -> Res<ExitCode> {
     }
     let client = lazy::node().await?;
     match crate::cmds::status::node_info(&client).await?.peers {
-        None => writeln!(out, "connected none attached ({})", client.mode().peers_note())?,
+        None => writeln!(
+            out,
+            "connected none attached ({})",
+            client.mode().peers_note()
+        )?,
         Some(peers) => {
             writeln!(out, "connected {}", peers.connected.len())?;
             for peer in &peers.connected {
