@@ -8,11 +8,12 @@
 
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumReference;
+use big_cabinet_core::DocId;
 use big_cabinet_core::Location;
 use big_cabinet_core::datum::Extra;
 use big_cabinet_core::dmeta::Uuid7;
-use big_cabinet_core::reference::ReferenceDocId;
 use big_cabinet_core::reference::DatumPin;
+use big_cabinet_core::reference::ReferenceDocId;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -219,8 +220,9 @@ pub enum Motivation {
     Unknown(String),
 }
 
-/// A thread's shared state (`org.example.intxt.threadState/<root comment uuid>`). One slot written by
-/// anyone; concurrent resolve and reopen leave one of the two (ADR 041 §3).
+/// A thread's shared state (`org.example.intxt.threadState/<root comment uuid>`), in the notes
+/// document that holds the root comment. One slot written by anyone; concurrent resolve and
+/// reopen leave one of the two (ADR 041 §3).
 #[macros::datum(authority = "org.example.intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -281,8 +283,8 @@ pub enum Progress {
     Unknown(String),
 }
 
-/// What one reader has seen (`org.example.intxt.seen/<actor uuid>/<range>`). Only that reader writes
-/// it. Split into ranges because one map hits the native read budget at about 5,400 entries.
+/// What one reader has seen (`org.example.intxt.seen/<actor uuid>/<range>`), in the reader's own
+/// notes document. Only that reader writes it. Split into ranges because one map hits the native read budget at about 5,400 entries.
 ///
 /// A reader is a participant, not an actor: on one node an agent and the operator are one actor, and
 /// the agent marking a thread seen must not hide it from the operator. The operator's `Person`
@@ -300,23 +302,29 @@ pub struct Seen {
     pub extra: Extra,
 }
 
-/// The intxt's entry for its annotations (`org.example.intxt.annotationsEntry/main`): they are found by
-/// tag across the drawer's documents, so the entry names no document.
+/// Marks a content document of an intxt's drawer as one writer's notes
+/// (`org.example.intxt.notes/main`): where that writer's comments, replies, structure and seen
+/// records are. A writer is an attested actor, which today is a node's operator; agent sessions
+/// on a node share its notes document and a comment still carries its own `creator`. Readers
+/// find every writer's notes by this tag across the drawer's documents, so no slot names "the"
+/// notes document and two nodes' first comments cannot race for one (ADR 041 §6).
 #[macros::datum(authority = "org.example.intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct AnnotationsEntry {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub empty: Option<bool>,
+pub struct Notes {
+    /// The actor that created the document, as its uuid text.
+    pub writer: String,
     #[serde(flatten)]
     pub extra: Extra,
 }
 
-/// A comment as read from a notes document: its key, its value, the heads of the version read and
-/// the actors the cabinet attests wrote that version, which a reader sets against the comment's
-/// claimed `creator` (ADR 041 §2).
+/// A comment as read from a notes document: the document it is in, its key, its value, the heads
+/// of the version read and the actors the cabinet attests wrote that version, which a reader sets
+/// against the comment's claimed `creator` (ADR 041 §2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Posted {
+    /// The notes document that holds it: a thread can span several, one per writer.
+    pub doc: DocId,
     pub key: DatumKey,
     pub comment: Comment,
     /// The version's heads, sorted, as hex: what a [`Seen`] records for the key.
@@ -385,8 +393,7 @@ impl Thread {
     /// one `seen` records for it (`Seen.datums`, ADR 041 §5).
     pub fn unseen_by(&self, reader: &Participant, seen: &BTreeMap<String, Vec<String>>) -> bool {
         self.comments.iter().any(|post| {
-            !post.comment.creator.is(reader)
-                && seen.get(&post.key.to_string()) != Some(&post.heads)
+            !post.comment.creator.is(reader) && seen.get(&post.key.to_string()) != Some(&post.heads)
         })
     }
 }

@@ -32,6 +32,7 @@ use std::sync::LazyLock;
 pub fn declarations() -> Universe {
     Universe::collect([
         Declaration::of::<generic::Intxt>().expect("Intxt declares a valid datum"),
+        Declaration::of::<generic::Index>().expect("Index declares a valid datum"),
         Declaration::of::<generic::Title>().expect("Title declares a valid datum"),
         Declaration::of::<generic::PathName>().expect("PathName declares a valid datum"),
         Declaration::of::<generic::Note>().expect("Note declares a valid datum"),
@@ -40,8 +41,7 @@ pub fn declarations() -> Universe {
         Declaration::of::<annotation::ThreadState>().expect("ThreadState declares a valid datum"),
         Declaration::of::<annotation::Structure>().expect("Structure declares a valid datum"),
         Declaration::of::<annotation::Seen>().expect("Seen declares a valid datum"),
-        Declaration::of::<annotation::AnnotationsEntry>()
-            .expect("AnnotationsEntry declares a valid datum"),
+        Declaration::of::<annotation::Notes>().expect("Notes declares a valid datum"),
         Declaration::of::<work::GitRepo>().expect("GitRepo declares a valid datum"),
         Declaration::of::<work::GitClone>().expect("GitClone declares a valid datum"),
         Declaration::of::<work::Worktree>().expect("Worktree declares a valid datum"),
@@ -58,7 +58,7 @@ pub fn declarations() -> Universe {
         Declaration::of::<work::PromptTurn>().expect("PromptTurn declares a valid datum"),
         Declaration::of::<work::Plan>().expect("Plan declares a valid datum"),
         Declaration::of::<work::RepoEntry>().expect("RepoEntry declares a valid datum"),
-        Declaration::of::<work::CommitsDoc>().expect("CommitsDoc declares a valid datum"),
+        Declaration::of::<work::Commits>().expect("Commits declares a valid datum"),
         Declaration::of::<work::WorktreeEntry>().expect("WorktreeEntry declares a valid datum"),
         Declaration::of::<work::SessionEntry>().expect("SessionEntry declares a valid datum"),
         Declaration::of::<work::GithubPullEntry>().expect("GithubPullEntry declares a valid datum"),

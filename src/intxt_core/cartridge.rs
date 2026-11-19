@@ -19,6 +19,7 @@
 use big_blobs_core::Blob;
 use big_cabinet_core::datum::Bundle;
 use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
@@ -83,8 +84,9 @@ pub fn requested_methods(cartridge: &FixtureCartridge) -> impl Iterator<Item = &
 /// The datum permbinds, one per kind (ADR 047 §5: `#datum` names exactly one NSID). The access is
 /// the union of what the routines below take.
 #[rustfmt::skip]
-const DATUMS: [(&str, &str, bool, bool, bool, bool); 12] = [
+const DATUMS: [(&str, &str, bool, bool, bool, bool); 13] = [
     (generic::Intxt::ID, "intxt markers", true, true, true, true),
+    (generic::Index::ID, "intxt index pointers", true, true, true, true),
     (generic::Title::ID, "intxt titles", true, true, true, true),
     (generic::Body::ID, "intxt bodies", true, true, true, true),
     (
@@ -293,6 +295,7 @@ fn permbinds() -> BTreeMap<String, Permbind> {
     for nsid in [
         ReadDatums::XRPC.nsid,
         WriteDatums::XRPC.nsid,
+        CreateDoc::XRPC.nsid,
         CreateDrawer::XRPC.nsid,
         AddDoc::XRPC.nsid,
         ListDocDrawers::XRPC.nsid,
@@ -349,9 +352,11 @@ fn nodule() -> Nodule {
                 &[
                     ("intxts", access(false, false, true)),
                     (generic::Intxt::ID, access(false, true, true)),
+                    (generic::Index::ID, access(false, true, true)),
                     (generic::Title::ID, access(false, true, true)),
                     (generic::Body::ID, access(false, true, true)),
                     (CreateDrawer::XRPC.nsid, call.clone()),
+                    (CreateDoc::XRPC.nsid, call.clone()),
                     (WriteDatums::XRPC.nsid, call.clone()),
                     (MintDrawerCapability::XRPC.nsid, call.clone()),
                     (MintDocCapability::XRPC.nsid, call.clone()),
@@ -361,6 +366,7 @@ fn nodule() -> Nodule {
                 AddToIntxt::XRPC.nsid,
                 &[
                     ("intxts", access(true, true, false)),
+                    (generic::Index::ID, access(true, false, false)),
                     (generic::Body::ID, access(true, true, false)),
                     (work::WorktreeEntry::ID, access(true, true, false)),
                     (work::RepoEntry::ID, access(true, true, false)),
@@ -384,6 +390,7 @@ fn nodule() -> Nodule {
                 &[
                     ("intxts", access(true, false, false)),
                     (generic::Intxt::ID, access(true, false, false)),
+                    (generic::Index::ID, access(true, false, false)),
                     (generic::Title::ID, access(true, false, false)),
                     (generic::Body::ID, access(true, false, false)),
                     (ReadDatums::XRPC.nsid, call.clone()),
@@ -528,9 +535,11 @@ mod tests {
             table(&[
                 ("intxts", "c"),
                 ("intxt", "wc"),
+                ("index", "wc"),
                 ("title", "wc"),
                 ("body", "wc"),
                 ("createDrawer", ""),
+                ("createDoc", ""),
                 ("writeDatums", ""),
                 // Interim, until the routines hold the handles the runtime mints.
                 ("mintDrawerCapability", ""),
@@ -541,6 +550,7 @@ mod tests {
             uses("addToIntxt"),
             table(&[
                 ("intxts", "rw"),
+                ("index", "r"),
                 ("body", "rw"),
                 ("worktreeEntry", "rw"),
                 ("repoEntry", "rw"),
@@ -564,6 +574,7 @@ mod tests {
             table(&[
                 ("intxts", "r"),
                 ("intxt", "r"),
+                ("index", "r"),
                 ("title", "r"),
                 ("body", "r"),
                 ("readDatums", ""),

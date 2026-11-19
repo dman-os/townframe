@@ -29,6 +29,7 @@ use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::CommandId;
+use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumEvent;
 use big_cabinet_core::doc::DatumKinds;
 use big_cabinet_core::doc::DatumRead;
@@ -47,6 +48,7 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::ListDocDrawers;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cabinet_core::drawer::protocol::drawer_placement;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
 use big_cabinet_core::reference::DatumReference;
@@ -253,8 +255,8 @@ impl<H: HttpTransport> Caller<H> {
     }
 
     /// The documents in `drawer`, and in the drawers it reaches, that hold the commit `sha` or
-    /// any commit it rewrote: an intxt's commits document holds `gitCommit/<sha>` for every
-    /// commit the intxt holds, so a hit is membership. `add` also writes
+    /// any commit it rewrote: a commits document of the intxt holds `gitCommit/<sha>` for every
+    /// commit its writer added, so a hit is membership. `add` also writes
     /// `rewrittenFrom/<new sha>` beside a matched predecessor, and the lookup follows those back
     /// whether or not `sha` itself is held (each hop is the same query on the new slot), so the
     /// answer holds both the intxt of the new commit and the intxt whose work sits on a
@@ -275,12 +277,9 @@ impl<H: HttpTransport> Caller<H> {
         for _ in 0..=MAX_REWRITE_HOPS {
             let mut predecessors = Vec::new();
             for sha in &wanted {
-                holders.extend(
-                    self.key_holders(drawer, key(work::GitCommit::ID, sha)?)
-                        .await?,
-                );
+                holders.extend(self.holders(drawer, key(work::GitCommit::ID, sha)?).await?);
                 let from_key = key(work::RewrittenFrom::ID, sha)?;
-                for doc in self.key_holders(drawer, from_key.clone()).await? {
+                for doc in self.holders(drawer, from_key.clone()).await? {
                     // The poll just said the document holds it.
                     let (_, value) = self.try_read(&doc, &from_key).await?;
                     let value = value.ok_or_else(|| {
@@ -308,7 +307,7 @@ impl<H: HttpTransport> Caller<H> {
     /// The documents in `drawer`, and in the drawers it reaches, that hold the datum `commit`:
     /// a poll from the start with no hold, paged until caught up, asking only for the one key,
     /// so a page carries no values.
-    async fn key_holders(
+    pub async fn holders(
         &self,
         drawer: &DrawerId,
         commit: DatumKey,
@@ -380,6 +379,120 @@ impl<H: HttpTransport> Caller<H> {
             }
             after = page.through;
         }
+    }
+
+    /// The index document of `intxt`, where its title, entries and body order are: the document
+    /// the drawer document's `index/main` names. None when the drawer has no such pointer, which
+    /// is what a drawer that is not an intxt (or an intxt `createIntxt` did not finish) looks like.
+    pub async fn try_index(&self, intxt: &DrawerId) -> Result<Option<DocId>, IntxtError> {
+        let (_, pointer) = self
+            .try_read(intxt, &key(generic::Index::ID, "main")?)
+            .await?;
+        pointer
+            .map(|pointer| {
+                let index: generic::Index = serde_json::from_value(pointer).map_err(|error| {
+                    IntxtError::Invalid(format!("{intxt} has an invalid index pointer: {error}"))
+                })?;
+                index.doc.parse().map_err(|error| {
+                    IntxtError::Invalid(format!(
+                        "{intxt}'s index pointer {:?} is no document id: {error}",
+                        index.doc
+                    ))
+                })
+            })
+            .transpose()
+    }
+
+    /// [`Self::try_index`] for an intxt that must have one.
+    pub async fn index(&self, intxt: &DrawerId) -> Result<DocId, IntxtError> {
+        self.try_index(intxt)
+            .await?
+            .ok_or_else(|| IntxtError::Invalid(format!("{intxt} has no index document")))
+    }
+
+    /// Creates a content document in `drawer` holding `datums`, under `command`: the same
+    /// command answers the document it first created.
+    pub async fn create_doc(
+        &self,
+        drawer: &DrawerId,
+        command: CommandId,
+        datums: BTreeMap<DatumKey, Value>,
+    ) -> Result<DocId, IntxtError> {
+        let placement = drawer_placement(drawer);
+        let capability = self
+            .doc_capability(DocScope {
+                create: [placement.clone()].into(),
+                ..DocScope::default()
+            })
+            .await?;
+        Ok(self
+            .call(CreateDoc {
+                capability,
+                command,
+                placement,
+                datums,
+            })
+            .await?
+            .doc_id)
+    }
+
+    /// The content documents of `drawer` (and of the drawers it reaches) that carry the marker
+    /// `tag/main`, with the writer each marker names: how a reader finds every writer's notes
+    /// (`annotation::Notes`) or commits (`work::Commits`) of an intxt. No slot names "the" such
+    /// document, so there is nothing for two nodes' first writes to race for: each makes its
+    /// own and both are found here once they have synced. The markers' value is `{ writer }`,
+    /// the actor ([`Self::actor`]) that created the document.
+    pub async fn tagged_docs(
+        &self,
+        drawer: &DrawerId,
+        tag: &str,
+    ) -> Result<BTreeMap<DocId, String>, IntxtError> {
+        #[derive(serde::Deserialize)]
+        struct Marker {
+            writer: String,
+        }
+        let marker = key(tag, "main")?;
+        let mut docs = BTreeMap::new();
+        for doc in self.holders(drawer, marker.clone()).await? {
+            // The poll just said the document holds it.
+            let (_, value) = self.try_read(&doc, &marker).await?;
+            let value = value.ok_or_else(|| {
+                IntxtError::Invalid(format!("{doc} was found holding {marker} and does not"))
+            })?;
+            let named: Marker = serde_json::from_value(value)
+                .map_err(|error| IntxtError::Invalid(format!("{marker} in {doc}: {error}")))?;
+            docs.insert(doc, named.writer);
+        }
+        Ok(docs)
+    }
+
+    /// The caller's own document of kind `tag` (`annotation::Notes::ID` or `work::Commits::ID`)
+    /// in `drawer`: the one whose marker names the caller's actor, made if the actor has none
+    /// yet. The marker is written with the document, so a document is never found without
+    /// one. The command id is fixed per drawer, kind and actor, so two runs of one actor that
+    /// both find none create one document; two actors on two nodes create two, which is what
+    /// keeps either from being orphaned.
+    ///
+    /// TODO: rotation. At ~500 datums (ADR 041 §6) a writer starts a document of the kind, as op
+    /// logs rotate (ADR 040 §7); this answers the first of the actor's documents.
+    pub async fn own_doc(&self, drawer: &DrawerId, tag: &str) -> Result<DocId, IntxtError> {
+        let writer = self.actor().await?.to_string();
+        if let Some(own) = self
+            .tagged_docs(drawer, tag)
+            .await?
+            .into_iter()
+            .find_map(|(doc, marked)| (marked == writer).then_some(doc))
+        {
+            return Ok(own);
+        }
+        let command = CommandId::try_from(format!("intxt-{tag}-{drawer}-{writer}"))
+            .map_err(|error| IntxtError::Invalid(format!("{tag} makes no command id: {error}")))?;
+        self.create_doc(
+            drawer,
+            command,
+            [(key(tag, "main")?, serde_json::json!({ "writer": writer }))].into(),
+        )
+        .await
     }
 
     /// The keys of every datum `doc` holds at its current heads, without their values.
@@ -458,7 +571,7 @@ impl<H: HttpTransport> Caller<H> {
         Ok(())
     }
 
-    /// Writes `set` into the intxt's descriptor document and appends `entries`, which `set`
+    /// Writes `set` into the intxt's index document and appends `entries`, which `set`
     /// holds, to its body in the same write, based on the heads the body was read at, so two
     /// writers adding different entries both land in the body's list. Each answer says whether
     /// its entry was new to the body; an entry already listed is written again with the value
@@ -469,10 +582,11 @@ impl<H: HttpTransport> Caller<H> {
         mut set: BTreeMap<DatumKey, Value>,
         entries: &[DatumKey],
     ) -> Result<Vec<Included>, IntxtError> {
+        let index = self.index(intxt).await?;
         let body_key = key(generic::Body::ID, "main")?;
-        let (body_heads, body_value) = self.read(intxt, &body_key).await?;
+        let (body_heads, body_value) = self.read(&index, &body_key).await?;
         let mut body: generic::Body = serde_json::from_value(body_value)
-            .map_err(|error| IntxtError::Invalid(format!("{intxt} has no valid body: {error}")))?;
+            .map_err(|error| IntxtError::Invalid(format!("{index} has no valid body: {error}")))?;
         let mut included = Vec::with_capacity(entries.len());
         for entry in entries {
             let entry_ref = DatumReference::new(ReferenceDocId::SelfDoc, entry.clone());
@@ -481,16 +595,16 @@ impl<H: HttpTransport> Caller<H> {
                 body.order.push(entry_ref);
             }
             included.push(Included {
-                entry: DatumReference::new(ReferenceDocId::Concrete(intxt.clone()), entry.clone()),
+                entry: DatumReference::new(ReferenceDocId::Concrete(index.clone()), entry.clone()),
                 added,
             });
         }
         set.insert(body_key, to_value(&body));
-        let descriptor = self.write_capability(intxt, set.keys()).await?;
+        let capability = self.write_capability(&index, set.keys()).await?;
         self.call(WriteDatums {
-            capability: descriptor,
+            capability,
             command: Some(self.command("write-entry", &(&set, &body_heads))?),
-            doc_id: intxt.clone(),
+            doc_id: index,
             mode: WriteMode::AtHeads { heads: body_heads },
             set,
             remove: Default::default(),
@@ -499,22 +613,23 @@ impl<H: HttpTransport> Caller<H> {
         Ok(included)
     }
 
-    /// Writes the intxt's title and description (`title/main` in its descriptor), based on the
-    /// heads the descriptor was read at. The heads are in the command's content, so setting a
+    /// Writes the intxt's title and description (`title/main` in its index document), based on
+    /// the heads the index was read at. The heads are in the command's content, so setting a
     /// title back to an earlier value is a new command and not a retry of the first.
     pub async fn write_title(
         &self,
         intxt: &DrawerId,
         title: &generic::Title,
     ) -> Result<(), IntxtError> {
+        let index = self.index(intxt).await?;
         let title_key = key(generic::Title::ID, "main")?;
-        let (heads, _) = self.read(intxt, &title_key).await?;
+        let (heads, _) = self.read(&index, &title_key).await?;
         let set: BTreeMap<DatumKey, Value> = [(title_key, to_value(title))].into();
-        let descriptor = self.write_capability(intxt, set.keys()).await?;
+        let capability = self.write_capability(&index, set.keys()).await?;
         self.call(WriteDatums {
-            capability: descriptor,
+            capability,
             command: Some(self.command("write-title", &(&set, &heads))?),
-            doc_id: intxt.clone(),
+            doc_id: index,
             mode: WriteMode::AtHeads { heads },
             set,
             remove: Default::default(),
@@ -525,27 +640,28 @@ impl<H: HttpTransport> Caller<H> {
 
     /// Removes `entries` from the intxt's body and deletes their datums, in one write based on
     /// the heads the body was read at. Documents lent to the intxt stay lent, and so do the
-    /// blob datums the entries referenced in the commits document.
+    /// blob datums the entries referenced in the commits documents.
     pub async fn remove_entries(
         &self,
         intxt: &DrawerId,
         entries: &BTreeSet<DatumKey>,
     ) -> Result<(), IntxtError> {
+        let index = self.index(intxt).await?;
         let body_key = key(generic::Body::ID, "main")?;
-        let (body_heads, body_value) = self.read(intxt, &body_key).await?;
+        let (body_heads, body_value) = self.read(&index, &body_key).await?;
         let mut body: generic::Body = serde_json::from_value(body_value)
-            .map_err(|error| IntxtError::Invalid(format!("{intxt} has no valid body: {error}")))?;
+            .map_err(|error| IntxtError::Invalid(format!("{index} has no valid body: {error}")))?;
         body.order
             .retain(|reference| !entries.contains(reference.key()));
         let set: BTreeMap<DatumKey, Value> = [(body_key, to_value(&body))].into();
         let remove = entries.clone();
-        let descriptor = self
-            .write_capability(intxt, set.keys().chain(&remove))
+        let capability = self
+            .write_capability(&index, set.keys().chain(&remove))
             .await?;
         self.call(WriteDatums {
-            capability: descriptor,
+            capability,
             command: Some(self.command("remove-entries", &(&set, &remove, &body_heads))?),
-            doc_id: intxt.clone(),
+            doc_id: index,
             mode: WriteMode::AtHeads { heads: body_heads },
             set,
             remove,
@@ -556,7 +672,7 @@ impl<H: HttpTransport> Caller<H> {
 
     /// Enters `doc` in the intxt's drawer at `access`: Read for a document the intxt only shows
     /// (everyone the intxt is shared with can read it), Write for one its writers add to as well
-    /// (a commits document shared between related intxts). The drawer it is lent from is the
+    /// (a commits document of a related intxt, which `new --with` lends). The drawer it is lent from is the
     /// first, ordered by drawer id, that the caller reaches it through at `access` or above,
     /// other than the intxt's own: the drawers protocol does not say which of them are the
     /// node's local ones, so none is preferred. `AddDoc` admits the entry when the caller holds
@@ -685,7 +801,7 @@ impl<H: HttpTransport> Caller<H> {
 /// What [`Caller::include`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Included {
-    /// The entry, in the intxt's descriptor document.
+    /// The entry, in the intxt's index document.
     pub entry: DatumReference,
     /// The entry was new to the intxt's body.
     pub added: bool,
