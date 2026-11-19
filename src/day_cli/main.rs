@@ -184,10 +184,10 @@ fn try_static_cli(parsed: Result<Cli, clap::Error>) -> Res<StaticCliResult> {
 
 async fn static_cli(cli: Cli) -> Res<ExitCode> {
     if let StaticCommands::Node {
-        command: cmds::node::NodeCommands::Init { dir, relay },
+        command: cmds::node::NodeCommands::Init { dir, relay, json },
     } = &cli.command
     {
-        return cmds::init::run(dir.clone(), *relay).await;
+        return cmds::init::run(dir.clone(), *relay, *json).await;
     }
 
     let conf = lazy::config().await?;
