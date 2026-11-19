@@ -41,6 +41,8 @@ mod e2e;
 mod lazy;
 mod out;
 
+shadow_rs::shadow!(build);
+
 /// Report an escaped error ourselves instead of returning it from `main`. The standard library
 /// prints a returned error as `Error: {err:?}`, and color-eyre's `Debug` begins every chain entry
 /// with a newline (it expects its own header line above it), so the message would land on the
@@ -248,6 +250,7 @@ terminal unless NO_COLOR is set.";
 #[clap(
     name = "day",
     version,
+    long_version = build::CLAP_LONG_VERSION,
     about,
     after_long_help = EXIT_CODES,
     styles = CLAP_STYLE
