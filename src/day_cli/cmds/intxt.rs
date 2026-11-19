@@ -63,28 +63,9 @@ mod record;
 pub(crate) mod review;
 
 use crate::client::NodeClient;
-use crate::client::Raw;
-use crate::client::Upload;
 use crate::interlude::*;
 
-use big_blobs_core::BlobInfo;
-use big_blobs_core::BlobsScope;
-use big_blobs_core::MintBlobsCapability;
-use big_blobs_core::PutBlob;
-use big_cabinet_core::authority::Rights;
-use big_cartridges_core::config::Component;
-use big_cartridges_core::config::GrantBody;
-use big_cartridges_core::config::GrantKey;
-use big_cartridges_core::protocol::GetCartridge;
-use big_cartridges_core::protocol::InstallCartridge;
-use big_cartridges_core::protocol::PublishCartridgeVersion;
-use big_cartridges_core::protocol::SetCartridgeEnabled;
-use big_cartridges_core::protocol::SetCartridgeGrant;
-use big_cartridges_core::registry::version_key;
-use big_cartridges_core::registry::version_pin;
 use big_dispatch_core::Readiness;
-use big_nodule_core::protocol::GetNodule;
-use big_nodule_core::protocol::NoduleRecord;
 use intxt_core::client::Caller;
 use method_core::Method;
 use service_utils_rs::RequestContext;
@@ -501,23 +482,40 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
         IntxtCommands::Status => {
             with_packaging(async |packaging| packaging.status(&mut std::io::stdout()).await).await
         }
-        IntxtCommands::Install { handler } => {
-            let client = lazy::node().await?;
-            let wasm = std::fs::read(&handler)
-                .wrap_err_with(|| format!("reading the handler {}", handler.display()))?;
-            let record = install(&client, &wasm).await?;
-            eyre::ensure!(
-                record.readiness == Readiness::Ready,
-                "intxt is installed but not ready: {:?}",
-                record.readiness
-            );
-            println!("intxt is installed");
-            Ok(ExitCode::SUCCESS)
-        }
+        IntxtCommands::Install { handler } => install(&handler).await,
         IntxtCommands::Capture { verbose, command } => {
             capture::CaptureCommands::run(command, verbose).await
         }
     }
+}
+
+/// `day x intxt install`: reads the handler component at `handler` and installs it on the node
+/// through [`intxt_core::install::install`], then reports whether the executor loaded it.
+async fn install(handler: &std::path::Path) -> Res<ExitCode> {
+    let client = lazy::node().await?;
+    let wasm = std::fs::read(handler)
+        .wrap_err_with(|| format!("reading the handler {}", handler.display()))?;
+    let caller = Caller::new(
+        &*client,
+        RequestContext::root(),
+        None,
+        "intxt-install".to_owned(),
+    );
+    let installed = intxt_core::install::install(&caller, &wasm).await?;
+    eyre::ensure!(
+        installed.record.readiness == Readiness::Ready,
+        "intxt is installed but not ready: {:?}",
+        installed.record.readiness
+    );
+    println!(
+        "{}",
+        if installed.already_installed {
+            "intxt is already installed"
+        } else {
+            "intxt is installed"
+        }
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Runs a packaging verb against the node, in the current directory.
@@ -547,142 +545,6 @@ pub(crate) async fn require_daemon(dir: &crate::context::NodeDir) -> Res<()> {
         dir.root().display()
     );
     Ok(())
-}
-
-/// Installs intxt with the handler component `wasm` through ADR 044's and ADR 047's cartridge flow, the way a
-/// node hosts any nodule's handler (`big_node`'s `nodule_wasm` e2e): the bytes go into the blob
-/// store first, because the registry refuses a version whose components it cannot find and the
-/// executor loads them from there when the nodule is enabled; the cartridge's component names them
-/// by their BLAKE3. The version's payloads are then staged and the envelope published to the node's registry, installed by the pin of
-/// the version just published, granted the methods its handler calls, and enabled.
-///
-/// The envelope is signed as the fixture namespace's owner, the namespace intxt's cartridge sits
-/// under until it has its own (see [`intxt_core::cartridge::cartridge`]).
-///
-/// Returns the nodule's record. Its readiness says whether the executor loaded the handler: a
-/// component the host cannot run is `ExecutorUnavailable`, which is the record's to report, not
-/// an error here.
-pub(crate) async fn install(client: &NodeClient, wasm: &[u8]) -> Res<NoduleRecord> {
-    put_blob(client, wasm).await?;
-
-    let fixture = intxt_core::cartridge::cartridge(wasm);
-    let (cartridge_id, version) = (fixture.id.clone(), fixture.version.clone());
-    // The payloads (Lexicons, sidecars, components) are datums of the registry document the
-    // envelope pins (ADR 047 §1), so they are staged first and the envelope that carries their
-    // pins is published, signed as the fixture namespace's owner.
-    let staged = call(client, fixture.stage_request()).await?;
-    call(
-        client,
-        PublishCartridgeVersion {
-            envelope: fixture.publishable(staged),
-        },
-    )
-    .await?;
-    // The pin names the version at the heads of the registry document it was published to.
-    let doc_id = call(
-        client,
-        GetCartridge {
-            id: cartridge_id.clone(),
-        },
-    )
-    .await?
-    .doc_id;
-    let key = version_key(&version);
-    let (heads, _) = Caller::new(
-        client,
-        RequestContext::root(),
-        None,
-        format!("intxt-install-{cartridge_id}"),
-    )
-    .read(&doc_id, &key)
-    .await?;
-    call(
-        client,
-        InstallCartridge {
-            cartridge: version_pin(doc_id, &version, heads),
-        },
-    )
-    .await?;
-    for operation in intxt_core::methods::REQUIRED_OPERATIONS {
-        call(
-            client,
-            SetCartridgeGrant {
-                cartridge_id: cartridge_id.clone(),
-                component: Component::Nodule,
-                grant: GrantKey::Method(operation.to_owned()),
-                value: Some(GrantBody::method(false)),
-            },
-        )
-        .await?;
-    }
-    call(
-        client,
-        SetCartridgeEnabled {
-            cartridge_id: cartridge_id.clone(),
-            component: Component::Nodule,
-            enabled: true,
-        },
-    )
-    .await?;
-    let enabled = call(client, GetNodule { cartridge_id }).await?;
-    // A nodule holds its dispatch capability only while enabled, so whether the grant took is
-    // known from the enabled record. Every method intxt's handler calls is grantable, so a refusal
-    // means the node and this build disagree about them.
-    let grants = enabled
-        .methods
-        .as_ref()
-        .ok_or_else(|| eyre::eyre!("the node reports no method grants for intxt"))?;
-    eyre::ensure!(
-        grants.granted,
-        "the node did not grant intxt the methods its handler calls: {}",
-        grants.error.as_deref().unwrap_or("no reason given")
-    );
-    Ok(enabled)
-}
-
-/// Puts `bytes` in the node's blob store as the operator and answers what the node stored. The
-/// bytes are the request body (ADR 042), so the node reads them as a stream and refuses
-/// (`BlobsError::TooLarge`) past [`big_blobs_core::MAX_PUT_OCTETS`]; the check here only gives
-/// that refusal a message that names the way out.
-pub(crate) async fn put_blob(client: &NodeClient, bytes: &[u8]) -> Res<BlobInfo> {
-    eyre::ensure!(
-        bytes.len() as u64 <= big_blobs_core::MAX_PUT_OCTETS,
-        "{} bytes is over the {} octets one blob put carries",
-        bytes.len(),
-        big_blobs_core::MAX_PUT_OCTETS
-    );
-    let capability = call(
-        client,
-        MintBlobsCapability {
-            scope: BlobsScope {
-                put: true,
-                ..BlobsScope::default()
-            },
-            rights: Rights::USE,
-            subject: None,
-        },
-    )
-    .await?
-    .capability_id;
-    let reply = client
-        .call_raw(
-            PutBlob::XRPC.nsid,
-            PutBlob::XRPC.method,
-            &serde_json::to_value(PutBlob { capability })?,
-            Raw {
-                upload: Some(Upload::Bytes(bytes)),
-                ..Raw::default()
-            },
-        )
-        .await?;
-    eyre::ensure!(
-        reply.is_success(),
-        "{} failed with {}: {}",
-        PutBlob::XRPC.nsid,
-        reply.status,
-        reply.body
-    );
-    Ok(serde_json::from_value(reply.body)?)
 }
 
 /// Calls `input`'s operation and decodes its answer; a non-success answer is the operation's own

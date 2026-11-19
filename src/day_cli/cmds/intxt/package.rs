@@ -1049,7 +1049,7 @@ impl<'a> Packaging<'a> {
 
     /// Puts `bytes` in the blob store and answers the blob datum that names them: its key and value.
     async fn put_content(&self, bytes: Vec<u8>, mime: &str) -> Res<(DatumKey, Value)> {
-        let info = super::put_blob(self.client, &bytes).await?;
+        let info = intxt_core::install::put_blob(&self.caller, &bytes).await?;
         let digest = info.blob_id.digest_str();
         Ok((
             key(big_blobs_core::Blob::ID, &digest)?,
