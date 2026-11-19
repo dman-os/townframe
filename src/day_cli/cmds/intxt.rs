@@ -57,6 +57,7 @@
 //! of each.
 
 pub(crate) mod capture;
+mod edit;
 mod github;
 pub(crate) mod package;
 mod record;
@@ -67,6 +68,7 @@ use crate::interlude::*;
 
 use big_dispatch_core::Readiness;
 use intxt_core::client::Caller;
+use intxt_core::edit::Named;
 use method_core::Method;
 use service_utils_rs::RequestContext;
 
@@ -120,6 +122,59 @@ pub enum IntxtCommands {
         /// commit. A full pack stands alone and is several times larger.
         #[arg(long)]
         full: bool,
+    },
+    /// Change an intxt through one document: its title, description and entries
+    ///
+    /// The document is JSON (`org.example.intxt.edit`, with a JSON Schema: `--schema`). With no
+    /// flag, `edit` writes it to a temporary file, runs `$VISUAL`, `$EDITOR` or `vi` on it (as git
+    /// does, so `EDITOR="code --wait"` works) and applies the difference when the editor exits:
+    /// an entry that is gone is removed (as `rm` does), an `{"add": {...}}` entry is resolved in
+    /// this worktree and added (as `add` does), and a changed title or description is written.
+    /// If it cannot be applied the file reopens with an `errors` member until it applies, or is
+    /// saved unchanged or emptied. Without a terminal this form refuses at once.
+    ///
+    /// The non-interactive form never opens an editor. `--print` writes the document; `--apply`
+    /// reads one from a file or `-` for stdin. An applied document may be partial: `base` (the
+    /// heads it was printed at, required) and only the members to change. An omitted member is
+    /// unchanged and `"description": null` clears the description. `entries` is the whole list,
+    /// as printed: the existing entries it leaves out are removed. `entryChanges` is a delta that
+    /// leaves the other entries alone: `{"remove": "<id>"}` and `{"add": {...}}`. A document has
+    /// one of the two, never both. Entries are named by their full id (32 characters); any prefix that is unambiguous when the
+    /// document is applied (every short id `show` prints) is accepted. Entries are added or
+    /// removed, never edited in place. Applying prints each change and the commands that undo
+    /// them, in the order to run them. `--dry-run` prints the plan and writes nothing.
+    ///
+    /// `--json` prints the result as `{"changes": [{"op", "text"}], "undo": [...]}`, or on
+    /// failure `{"errors": [{"path": "<JSON pointer into the document>", "message"}]}`.
+    ///
+    /// Exit status: 0 applied (or nothing to change); 1 the document is wrong; 2 bad command
+    /// line; 3 the intxt changed since the document was printed (stale `base`) and the document
+    /// still has something to change: the current document is printed (with `--json`, as
+    /// `"current"` beside the errors) to edit again. A stale document that asks for nothing the
+    /// intxt does not already have (a retry of one that applied) is "nothing to change", exit 0.
+    #[command(
+        group = clap::ArgGroup::new("mode").args(["print", "apply", "schema"]),
+        after_long_help = "Example, for an agent or a script:\n  day x intxt edit qx --print > qx.json    # the document, with its base heads\n  # edit qx.json: remove an entry by deleting its line, or add one with\n  #   { \"add\": { \"branch\": \"feat/x\" } }\n  day x intxt edit qx --apply qx.json --dry-run\n  day x intxt edit qx --apply qx.json      # prints the changes and their undo commands\n\nA partial document works as well:\n  echo '{\"base\": [\"z..\"], \"title\": \"New title\", \"entryChanges\": [{\"remove\": \"zkq\"}]}' | day x intxt edit qx --apply -\n\nInteractively:\n  day x intxt edit qx\n"
+    )]
+    Edit {
+        /// The intxt: its short id, or its full drawer id. Default: the one this worktree is on
+        /// (`day x intxt use`), or with `--apply` the one the document names
+        intxt: Option<String>,
+        /// Write the document to stdout
+        #[arg(long)]
+        print: bool,
+        /// Apply the document in FILE (`-` for stdin)
+        #[arg(long, value_name = "FILE")]
+        apply: Option<String>,
+        /// Write the document's JSON Schema to stdout
+        #[arg(long)]
+        schema: bool,
+        /// Print what would change and write nothing
+        #[arg(long, conflicts_with_all = ["print", "schema"])]
+        dry_run: bool,
+        /// Print the result of `--apply` as JSON
+        #[arg(long, requires = "apply")]
+        json: bool,
     },
     /// Create an intxt and remember it, so it has a short id
     ///
@@ -372,7 +427,7 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
             change,
             full,
         } => {
-            let named = package::Named::from_flags(commits, branch, change);
+            let named = Named::from_flags(commits, branch, change);
             with_packaging(async |packaging| {
                 packaging
                     .add(&mut std::io::stdout(), intxt.as_deref(), named, full)
@@ -380,6 +435,14 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
             })
             .await
         }
+        IntxtCommands::Edit {
+            intxt,
+            print,
+            apply,
+            schema,
+            dry_run,
+            json,
+        } => edit(intxt, print, apply, schema, dry_run, json).await,
         IntxtCommands::New {
             title,
             description,
@@ -500,6 +563,58 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
     }
 }
 
+/// `day x intxt edit`: the document printed, applied from a file, or edited in `$EDITOR`.
+async fn edit(
+    intxt: Option<String>,
+    print: bool,
+    apply: Option<String>,
+    schema: bool,
+    dry_run: bool,
+    json: bool,
+) -> Res<ExitCode> {
+    use std::io::IsTerminal;
+
+    if schema {
+        println!("{}", intxt_core::edit::EditDocument::json_schema());
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(source) = apply {
+        return with_packaging_exit(async |packaging| {
+            packaging
+                .edit_apply(
+                    &mut std::io::stdout(),
+                    &mut std::io::stderr(),
+                    intxt.as_deref(),
+                    &source,
+                    json,
+                    dry_run,
+                )
+                .await
+        })
+        .await;
+    }
+    if print {
+        return with_packaging(async |packaging| {
+            packaging
+                .edit_print(&mut std::io::stdout(), intxt.as_deref())
+                .await
+        })
+        .await;
+    }
+    edit::ensure_interactive(std::io::stdin().is_terminal() && std::io::stdout().is_terminal())?;
+    with_packaging_exit(async |packaging| {
+        packaging
+            .edit_interactive(
+                &mut std::io::stdout(),
+                intxt.as_deref(),
+                &edit::editor_command(),
+                dry_run,
+            )
+            .await
+    })
+    .await
+}
+
 /// `day x intxt install`: reads the handler component at `handler` and installs it on the node
 /// through [`intxt_core::install::install`], then reports whether the executor loaded it.
 async fn install(handler: &std::path::Path) -> Res<ExitCode> {
@@ -533,6 +648,13 @@ async fn install(handler: &std::path::Path) -> Res<ExitCode> {
 async fn with_packaging(
     verb: impl AsyncFnOnce(&package::Packaging<'_>) -> Res<()>,
 ) -> Res<ExitCode> {
+    with_packaging_exit(async |packaging| verb(packaging).await.map(|()| ExitCode::SUCCESS)).await
+}
+
+/// [`with_packaging`] for a verb that chooses its exit code.
+async fn with_packaging_exit(
+    verb: impl AsyncFnOnce(&package::Packaging<'_>) -> Res<ExitCode>,
+) -> Res<ExitCode> {
     let client = lazy::node().await?;
     let cwd = std::env::current_dir()?;
     let config = lazy::config().await?;
@@ -541,8 +663,7 @@ async fn with_packaging(
         &cwd,
         config.node_dir.root(),
     ))
-    .await?;
-    Ok(ExitCode::SUCCESS)
+    .await
 }
 
 /// Capture runs against the node's daemon only. Booting the node in the hook's own process costs
