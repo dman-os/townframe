@@ -617,7 +617,7 @@ fn a_scope_covers_drawer_reaches_only_at_equal_or_lower_access() {
     }));
     // On the wire it is a map from drawer id to access, absent when empty.
     assert_eq!(
-        serde_json::to_value(&reach(&[(&drawer, DrawerAccess::Read)])).unwrap(),
+        serde_json::to_value(reach(&[(&drawer, DrawerAccess::Read)])).unwrap(),
         json!({"put": false, "drawers": {drawer.to_string(): "Read"}})
     );
     assert_eq!(
