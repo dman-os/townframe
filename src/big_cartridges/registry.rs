@@ -786,7 +786,7 @@ impl Registry {
             .map_err(|error| match error {
                 // The document or the pinned heads have not reached this node yet.
                 ClientError::Method(
-                    error @ (DocsError::DocNotFound
+                    error @ (DocsError::DocNotFound { .. }
                     | DocsError::UnknownHeads { .. }
                     | DocsError::Pending { .. }),
                 ) => unreadable(error.to_string()),

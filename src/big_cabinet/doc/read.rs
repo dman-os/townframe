@@ -33,7 +33,7 @@ impl DocsService {
         document
             .with_document(|doc| -> Result<DatumsRead, DocsError> {
                 context.validate()?;
-                let heads = resolve(doc, &params.at)?;
+                let heads = resolve(&params.doc_id, doc, &params.at)?;
                 let keys = match &params.datums {
                     Some(keys) => {
                         if keys.iter().any(|key| !kinds.allows(key)) {

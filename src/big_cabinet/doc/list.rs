@@ -16,7 +16,7 @@ impl DocsService {
         document
             .with_document_read(|doc| {
                 context.validate()?;
-                list_datums(doc, &params.at, params.with_authors, &kinds)
+                list_datums(&params.doc_id, doc, &params.at, params.with_authors, &kinds)
             })
             .await
     }
@@ -32,12 +32,13 @@ impl DocsService {
 /// version. That reconstructs claims per slot, which a plain listing never does, so the default
 /// path is unchanged; slots the gate does not accept report no authors.
 pub(super) fn list_datums(
+    doc_id: &DocId,
     doc: &Automerge,
     at: &At,
     with_authors: bool,
     kinds: &DatumKinds,
 ) -> Result<DatumListing, DocsError> {
-    let heads = resolve(doc, at)?;
+    let heads = resolve(doc_id, doc, at)?;
     let historical = match at {
         At::Current => None,
         At::Heads(_) => Some(doc.fork_at(&heads).map_err(repository)?),

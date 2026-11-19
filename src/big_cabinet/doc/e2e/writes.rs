@@ -453,6 +453,7 @@ async fn unknown_heads_and_unauthorized_actors_are_refused() {
             .await
             .unwrap_err(),
         DocsError::UnknownHeads {
+            doc_id: document.clone(),
             heads: vec![unknown]
         }
     );
@@ -469,6 +470,7 @@ async fn unknown_heads_and_unauthorized_actors_are_refused() {
         .await
         .unwrap_err(),
         DocsError::UnknownHeads {
+            doc_id: document.clone(),
             heads: vec![unknown]
         }
     );

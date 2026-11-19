@@ -1064,14 +1064,18 @@ async fn signed_unaccepted_datums_and_unavailable_documents_never_supply_values(
         DeferralReason::DatumUnavailable { .. }
     ));
     assert!(harness.docs.state.lock().unwrap().writes.is_empty());
-    harness.docs.state.lock().unwrap().read_error = Some(DocsError::DocNotFound);
+    harness.docs.state.lock().unwrap().read_error = Some(DocsError::DocNotFound {
+        doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+    });
     let report = harness.reconcile().await?;
     assert!(report.retained.is_empty());
     assert!(report.deferred[0].datum_key.is_none());
     assert!(matches!(
         report.deferred[0].reason,
         DeferralReason::Document {
-            error: DocsError::DocNotFound,
+            error: DocsError::DocNotFound {
+                doc_id: big_cabinet_core::dmeta::DocId::new([0; 32])
+            },
             ..
         }
     ));
@@ -1260,7 +1264,9 @@ async fn unavailable_claim_documents_preserve_roots_and_defer_absence() -> Res<(
     let previous = BTreeSet::from([retained.ciphertext]);
     for error in [
         DocsError::Denied,
-        DocsError::DocNotFound,
+        DocsError::DocNotFound {
+            doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+        },
         DocsError::UnknownHeads {
             heads: vec![ChangeHash([99; 32])],
         },
@@ -1421,7 +1427,9 @@ fn every_owner_document_failure_stops_stale_work_and_defers_release() -> Res<()>
     let absent = BlobId::new([23; 32]);
     for error in [
         DocsError::Denied,
-        DocsError::DocNotFound,
+        DocsError::DocNotFound {
+            doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+        },
         DocsError::UnknownHeads {
             heads: vec![ChangeHash([99; 32])],
         },

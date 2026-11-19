@@ -142,7 +142,7 @@ impl Handler<UnsafeInspectDatum> for DocsService {
         let output = document
             .with_document_read(|doc| {
                 request.context.validate()?;
-                check_heads(doc, &params.heads)?;
+                check_heads(&params.doc_id, doc, &params.heads)?;
                 let native_value = match doc
                     .get_at(automerge::ROOT, "datums", &params.heads)
                     .map_err(ClaimHistoryError::from)?
@@ -192,7 +192,7 @@ impl Handler<InspectDatumClaims> for DocsService {
         let output = document
             .with_document_read(|doc| {
                 request.context.validate()?;
-                check_heads(doc, &params.heads)?;
+                check_heads(&params.doc_id, doc, &params.heads)?;
                 Self::claims(doc, params.doc_id, params.datum_key, params.heads)
             })
             .await?;

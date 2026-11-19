@@ -785,7 +785,7 @@ fn document_error<T>(doc_id: &DocId, error: ClientError<DocsError>) -> Attempt<T
     match error {
         ClientError::Method(
             error @ (DocsError::Denied
-            | DocsError::DocNotFound
+            | DocsError::DocNotFound { .. }
             | DocsError::UnknownHeads { .. }
             | DocsError::Conflict { .. }
             | DocsError::CommandInFlight { .. }
