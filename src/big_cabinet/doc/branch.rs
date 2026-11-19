@@ -24,13 +24,12 @@ impl DocsService {
             .signing_invocation(context, metadata, params.capability)
             .await?;
         let actor = &caller.signer;
-        self.authorize(
-            context,
-            &caller.authority,
-            AccessRequest::Read(&params.doc_id),
-        )
-        .await?;
-        Self::require_wholesale_source(&caller.authority, &params.doc_id)?;
+        // A branch carries the whole source into the new document, so it needs the source at
+        // every kind: a source reached for fewer would leak the rest into the copy.
+        let source_kinds = self
+            .authorize_read(context, &caller.authority, &params.doc_id)
+            .await?;
+        Self::require_all(source_kinds)?;
         if !params.stealth {
             let kinds = self
                 .authorize_write(context, &caller.authority, &params.doc_id)
@@ -45,6 +44,9 @@ impl DocsService {
             },
         )
         .await?;
+        // The copy lands whole in the new document, so a placement that admits fewer kinds
+        // than the source holds cannot take it.
+        Self::require_all(Self::create_kinds(&caller.authority, &params.placement))?;
         let owner_id = caller.originating_actor;
         let request_digest = digest(&(
             "branch",

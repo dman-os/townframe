@@ -368,27 +368,32 @@ impl DocsService {
             .map_err(authority_error)
     }
 
-    fn read_kinds(authority: &DomainAuthority<DocScope>, document: &DocId) -> DatumKinds {
-        match authority {
-            DomainAuthority::Identity(_) => DatumKinds::All,
-            DomainAuthority::Scoped(scope) => scope
-                .read
-                .get(document)
-                .or_else(|| scope.write.get(document))
-                .cloned()
-                .unwrap_or(DatumKinds::All),
-        }
-    }
-
+    /// The datum kinds `authority` reads of `document`, which it must already reach: a document
+    /// named in `read`/`write` is held at those kinds and any other is reached through a
+    /// drawer, at that drawer's kinds (see [`Self::reach`]).
     async fn authorize_read(
         &self,
         context: &RequestContext,
         authority: &DomainAuthority<DocScope>,
         document: &DocId,
     ) -> Result<DatumKinds, DocsError> {
-        self.authorize(context, authority, AccessRequest::Read(document))
-            .await?;
-        Ok(Self::read_kinds(authority, document))
+        match authority {
+            DomainAuthority::Identity(_) => {
+                self.authorize(context, authority, AccessRequest::Read(document))
+                    .await?;
+                Ok(DatumKinds::All)
+            }
+            DomainAuthority::Scoped(_) => Self::reach(
+                self.access.as_ref(),
+                context,
+                authority,
+                &BTreeSet::from([document.clone()]),
+                big_cabinet_core::drawer::DrawerAccess::Read,
+            )
+            .await?
+            .remove(document)
+            .ok_or(DocsError::Denied),
+        }
     }
 
     async fn allowed(
@@ -414,78 +419,144 @@ impl DocsService {
                 .check(context, *actor, request)
                 .await
                 .map_err(access_error),
-            DomainAuthority::Scoped(scope) => {
-                let (document, needed) = match request {
-                    AccessRequest::Read(doc)
-                        if scope.read.contains_key(doc) || scope.write.contains_key(doc) =>
-                    {
-                        return Ok(true);
-                    }
-                    AccessRequest::Write(_) => unreachable!(
-                        "writes go through authorize_write so datum kinds are enforced there"
-                    ),
-                    AccessRequest::Create { placement } => {
-                        return Ok(scope.create.contains(placement)
-                            || crate::drawer::parse_placement(placement).is_some_and(|drawer| {
-                                scope.drawers.get(&drawer).is_some_and(|access| {
-                                    *access >= big_cabinet_core::drawer::DrawerAccess::Write
-                                })
-                            }));
-                    }
-                    AccessRequest::Read(doc) => (doc, big_cabinet_core::drawer::DrawerAccess::Read),
-                };
-                let documents = BTreeSet::from([document.clone()]);
-                Ok(
-                    Self::allowed_docs(access_policy, context, authority, &documents, needed)
-                        .await?
-                        .contains(document),
+            DomainAuthority::Scoped(scope) => match request {
+                AccessRequest::Write(_) => unreachable!(
+                    "writes go through authorize_write so datum kinds are enforced there"
+                ),
+                AccessRequest::Create { placement } => Ok(scope.create.contains(placement)
+                    || crate::drawer::parse_placement(placement).is_some_and(|drawer| {
+                        scope.drawers.get(&drawer).is_some_and(|reach| {
+                            reach.access >= big_cabinet_core::drawer::DrawerAccess::Write
+                                && !reach.write.admits_nothing()
+                        })
+                    })),
+                AccessRequest::Read(doc) => Ok(Self::reach(
+                    access_policy,
+                    context,
+                    authority,
+                    &BTreeSet::from([doc.clone()]),
+                    big_cabinet_core::drawer::DrawerAccess::Read,
                 )
-            }
+                .await?
+                .contains_key(doc)),
+            },
         }
     }
 
-    async fn allowed_docs(
+    /// The datum kinds `authority` may write into a document it creates at `placement`, which
+    /// it must already be allowed to create at: a bare `create` placement is unnarrowed and a
+    /// drawer placement carries that drawer's kinds.
+    fn create_kinds(authority: &DomainAuthority<DocScope>, placement: &str) -> DatumKinds {
+        let DomainAuthority::Scoped(scope) = authority else {
+            return DatumKinds::All;
+        };
+        if scope.create.contains(placement) {
+            return DatumKinds::All;
+        }
+        crate::drawer::parse_placement(placement)
+            .and_then(|drawer| scope.drawers.get(&drawer))
+            .map_or(DatumKinds::All, |reach| reach.write.clone())
+    }
+
+    /// The documents of `documents` that `authority` reaches for `needed`, each with the datum
+    /// kinds it reaches it at. A document named in `write` (or, for a read, `read`) is held at
+    /// that entry's kinds and is not looked up in drawers; any other is reached through the
+    /// granted drawers that hold it, at the union of those drawers' kinds. This is the one place
+    /// datum kinds are resolved for every read and write.
+    async fn reach(
         access_policy: &dyn DocAccess,
         context: &RequestContext,
         authority: &DomainAuthority<DocScope>,
         documents: &BTreeSet<DocId>,
         needed: big_cabinet_core::drawer::DrawerAccess,
-    ) -> Result<BTreeSet<DocId>, DocsError> {
+    ) -> Result<BTreeMap<DocId, DatumKinds>, DocsError> {
         use big_cabinet_core::drawer::DrawerAccess;
         documents.iter().try_for_each(DocsError::ensure_doc_id)?;
         let DomainAuthority::Scoped(scope) = authority else {
             return Err(DocsError::Denied);
         };
-        let mut allowed: BTreeSet<_> = documents
-            .iter()
-            .filter(|doc| {
-                scope.write.contains_key(*doc)
-                    || (needed == DrawerAccess::Read && scope.read.contains_key(*doc))
-            })
-            .cloned()
-            .collect();
-        let candidates: BTreeSet<_> = documents.difference(&allowed).cloned().collect();
-        if candidates.is_empty() {
-            return Ok(allowed);
+        let mut reached = BTreeMap::new();
+        let mut candidates = BTreeSet::new();
+        for doc in documents {
+            let direct = scope.write.get(doc).or_else(|| {
+                (needed == DrawerAccess::Read)
+                    .then(|| scope.read.get(doc))
+                    .flatten()
+            });
+            match direct {
+                Some(kinds) => {
+                    reached.insert(doc.clone(), kinds.clone());
+                }
+                None => {
+                    candidates.insert(doc.clone());
+                }
+            }
         }
-        let drawers: BTreeMap<_, _> = scope
-            .drawers
-            .iter()
-            .filter(|(_, held)| **held >= needed)
-            .map(|(drawer, held)| (drawer.clone(), *held))
-            .collect();
-        if !drawers.is_empty() {
-            allowed.extend(
-                access_policy
-                    .scoped_docs(context, &drawers, Some(&candidates))
-                    .await
-                    .map_err(access_error)?
-                    .into_iter()
-                    .filter_map(|(doc, held)| (held >= needed).then_some(doc)),
+        if !candidates.is_empty() {
+            reached.extend(
+                Self::reach_drawers(access_policy, context, &scope.drawers, &candidates, needed)
+                    .await?,
             );
         }
-        Ok(allowed)
+        Ok(reached)
     }
+
+    /// [`Self::reach`] through `drawers` alone. Drawers granting equal kinds share one query.
+    async fn reach_drawers(
+        access_policy: &dyn DocAccess,
+        context: &RequestContext,
+        drawers: &BTreeMap<DocId, big_cabinet_core::doc::DrawerReach>,
+        candidates: &BTreeSet<DocId>,
+        needed: big_cabinet_core::drawer::DrawerAccess,
+    ) -> Result<BTreeMap<DocId, DatumKinds>, DocsError> {
+        let mut groups: Vec<(
+            &DatumKinds,
+            BTreeMap<DocId, big_cabinet_core::drawer::DrawerAccess>,
+        )> = Vec::new();
+        // The kinds a drawer reaches documents at depend on the need: a write reaches only its
+        // write kinds, a read the kinds it reads. A drawer that admits no kind for the need
+        // reaches nothing.
+        let is_read = needed == big_cabinet_core::drawer::DrawerAccess::Read;
+        for (drawer, reach) in drawers {
+            let kinds = if is_read {
+                reach.readable()
+            } else {
+                &reach.write
+            };
+            if reach.access < needed || kinds.admits_nothing() {
+                continue;
+            }
+            match groups.iter_mut().find(|(group, _)| **group == *kinds) {
+                Some((_, group)) => {
+                    group.insert(drawer.clone(), reach.access);
+                }
+                None => groups.push((kinds, BTreeMap::from([(drawer.clone(), reach.access)]))),
+            }
+        }
+        let mut reached: BTreeMap<DocId, DatumKinds> = BTreeMap::new();
+        for (kinds, group) in groups {
+            for (doc, held) in access_policy
+                .scoped_docs(context, &group, Some(candidates))
+                .await
+                .map_err(access_error)?
+            {
+                if held < needed {
+                    continue;
+                }
+                match reached.entry(doc) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(kinds.clone());
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut slot) => {
+                        let merged = slot.get().clone().union(kinds.clone());
+                        *slot.get_mut() = merged;
+                    }
+                }
+            }
+        }
+        Ok(reached)
+    }
+
     async fn authorize_write(
         &self,
         context: &RequestContext,
@@ -506,26 +577,16 @@ impl DocsService {
                     Err(DocsError::Denied)
                 }
             }
-            DomainAuthority::Scoped(scope) => {
-                if let Some(kinds) = scope.write.get(document) {
-                    return Ok(kinds.clone());
-                }
-                let documents = BTreeSet::from([document.clone()]);
-                if Self::allowed_docs(
-                    self.access.as_ref(),
-                    context,
-                    authority,
-                    &documents,
-                    big_cabinet_core::drawer::DrawerAccess::Write,
-                )
-                .await?
-                .contains(document)
-                {
-                    Ok(DatumKinds::All)
-                } else {
-                    Err(DocsError::Denied)
-                }
-            }
+            DomainAuthority::Scoped(_) => Self::reach(
+                self.access.as_ref(),
+                context,
+                authority,
+                &BTreeSet::from([document.clone()]),
+                big_cabinet_core::drawer::DrawerAccess::Write,
+            )
+            .await?
+            .remove(document)
+            .ok_or(DocsError::Denied),
         }
     }
 
@@ -535,21 +596,6 @@ impl DocsService {
         } else {
             Err(DocsError::Denied)
         }
-    }
-
-    fn require_wholesale_source(
-        authority: &DomainAuthority<DocScope>,
-        document: &DocId,
-    ) -> Result<(), DocsError> {
-        if let DomainAuthority::Scoped(scope) = authority
-            && scope
-                .write
-                .get(document)
-                .is_some_and(|kinds| !matches!(kinds, DatumKinds::All))
-        {
-            return Err(DocsError::Denied);
-        }
-        Ok(())
     }
 
     async fn authorize(

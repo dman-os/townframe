@@ -302,7 +302,11 @@ impl BigNode {
         // Boxed: booting every service inline makes this future large enough (in debug builds); a caller awaiting it, such as a test that reboots a node, overflows its stack.
 
         let boot: Res<Self> = Box::pin(async {
-            let schemas = Arc::new(config.schemas.with_groups(schema_groups().into_iter().map(|(_, group)| group))?);
+            let schemas = Arc::new(
+                config
+                    .schemas
+                    .with_groups(schema_groups().into_iter().map(|(_, group)| group))?,
+            );
             let node_id = node_id(&config.repo.node_identity_seed);
             let authority = boot_authority(&config, &node_id, &mut stop).await?;
             let (docs_actor, docs_namespace) = open_actor(&authority, "documents").await?;

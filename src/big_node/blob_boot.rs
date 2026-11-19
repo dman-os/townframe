@@ -45,16 +45,28 @@ pub(super) async fn boot(
             MintDocCapability {
                 scope: DocScope {
                     drawers: BTreeMap::from([
-                        (local.present_id.clone(), Access::Read),
-                        (local.originated_id.clone(), Access::Write),
+                        (
+                            local.present_id.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Read),
+                        ),
+                        (
+                            local.originated_id.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+                        ),
                         // The config drawer is a self-doc drawer: the nodule service keeps its
                         // handler artifacts as `Blob` datums in the drawer's own document, so
                         // the workers retain them and write their cipherBlob/jwk representation
                         // there like in any other document they maintain.
-                        (local.config_id.clone(), Access::Write),
+                        (
+                            local.config_id.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+                        ),
                         // The cartridge registry's grouped drawer: its documents carry the `Blob`
                         // datums for cartridge artifacts.
-                        (registry_drawer.clone(), Access::Write),
+                        (
+                            registry_drawer.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+                        ),
                     ]),
                     ..Default::default()
                 },

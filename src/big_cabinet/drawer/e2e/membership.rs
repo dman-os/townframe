@@ -72,7 +72,10 @@ async fn a_doc_created_in_a_drawer_belongs_to_it_and_to_the_local_drawers() {
         .mint_doc(
             &bob,
             DocScope {
-                drawers: BTreeMap::from([(drawer.clone(), Access::Write)]),
+                drawers: BTreeMap::from([(
+                    drawer.clone(),
+                    big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+                )]),
                 ..Default::default()
             },
         )
@@ -1390,7 +1393,10 @@ async fn metadata_protocol_respects_root_and_child_audiences() {
             .mint_doc(
                 &alice,
                 DocScope {
-                    drawers: BTreeMap::from([(drawers[0].clone(), held)]),
+                    drawers: BTreeMap::from([(
+                        drawers[0].clone(),
+                        big_cabinet_core::doc::DrawerReach::all_kinds(held),
+                    )]),
                     ..Default::default()
                 },
             )
@@ -1638,7 +1644,10 @@ async fn metadata_only_capability_does_not_grant_drawer_or_content() {
         }
         for scope in [
             DocScope {
-                drawers: BTreeMap::from([(home.clone(), Access::Read)]),
+                drawers: BTreeMap::from([(
+                    home.clone(),
+                    big_cabinet_core::doc::DrawerReach::all_kinds(Access::Read),
+                )]),
                 ..Default::default()
             },
             DocScope {
