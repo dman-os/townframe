@@ -205,7 +205,7 @@ Every keyring secret is named by node id (`wrapping.<node-id>`), and `big_node::
 
 ### The `day` CLI
 
-`day_cli` is the node's first client. It drives a node in-process or over the daemon's socket, through the same router. `day init` is idempotent: on an existing node it prints `node <id> already initialized` and exits 0, and a `node.json` that is not a valid node is an error. `day status` and `day peers ls` read `getNodeInfo`.
+`day_cli` is the node's first client. It drives a node in-process or over the daemon's socket, through the same router. `day node init` is idempotent: on an existing node it prints `node <id> already initialized` and exits 0, and a `node.json` that is not a valid node is an error. `day node status` and `day peers ls` read `getNodeInfo`.
 
 ### Bootstrap peers
 

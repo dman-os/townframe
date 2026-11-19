@@ -315,7 +315,8 @@ This is an illustrative JSON shape, not a signed test vector; angle-bracketed by
   "org.example.daybook.dmeta/main": {
     // creation time of the doc too
     "createdAt": "2026-10-13T14:30:15Z",
-    "updatedAt": ["2026-10-13T14:30:15Z"],
+    // there is no document-level updatedAt: when the document last changed is
+    // the latest of its datums' updatedAt
     "actors": {
       // doc local uuidv7 of the actor
       "019e5d38-0000-7000-8000-000000000001": {
@@ -330,36 +331,41 @@ This is an illustrative JSON shape, not a signed test vector; angle-bracketed by
         "delegation": { "$bytes": "<base64 certificate>" }
       }
     },
-    // concurrent creations could produce the same datum
-    // so we assign UUIDv7s to identify them
-    "datumUuids": {
-      // if there are multiple uuids for the same datum key
-      // the lowest one lexicographically wins
-      "019e5d38-0000-7000-8000-000000000002": "org.example.daybook.branch/main",
-      "019e5d38-0000-7000-8000-000000000003": "org.example.daybook.branch/main"
-    },
     "docUuids": {
       "019e5d38-0000-7000-8000-000000000004": "zDoc1",
     },
     "datums": {
       // every field in this is a competing set to resolve concurrent writes
       "org.example.daybook.branch/main": {
+        // concurrent creations could produce the same datum
+        // so each creator assigns a UUIDv7 to identify its copy.
+        // readers union these across every concurrent copy of the entry;
+        // if there are multiple uuids the lowest one lexicographically wins
+        "uuids": {
+          "019e5d38-0000-7000-8000-000000000002": true,
+          "019e5d38-0000-7000-8000-000000000003": true
+        },
         "updatedAt": ["2026-10-13T14:30:15Z"],
         // tombstone for removed facets, empty by default
         "deletedAt": [],
         "signatures": [
+          // an ordinary entry is one bytes value, 97 bytes:
+          // 0x01 || actorUuid (16 bytes) || docUuid (16 bytes) || signature (64 bytes)
+          // - actorUuid is the author of the signature
+          // - docUuid is the doc-local uuid bound in docUuids to the document the entry was
+          //   introduced on; a branch's writes bind their own
+          // - signature is over the conceptual value:
+          //   UTF8("daybook.datum-claim.v1") || 0x00 || CBOR([originDocument, datumKey, chosenUuidBytes, actorUuidBytes, (set|remove), valueCIDOrNull, sortedPredecessorSignatures])
+          //   - set|remove is physically represented as 0|1
+          //   - valueCIDOrNull is null on removal
+          //   Note that the valueCID is not the incoming datum write value
+          //   but the value that ended up in the CRDT after reconciliation
+          //   with the existing value
+          { "$bytes": "<base64 of the 97 bytes>" },
+          // an entry that has to carry a message or an inherited witness (export, compaction)
+          // is a map around the same packed value; ordinary writes never produce one
           {
-            // actor uuid of the author of the signature
-            "actorUuid": "019e5d38-0000-7000-8000-000000000001",
-            "docUuid": "019e5d38-0000-7000-8000-000000000001",
-            // signature of the conceptual value
-            // UTF8("daybook.datum-claim.v1") || 0x00 || CBOR([originDocument, datumKey, chosenUuidBytes, actorUuidBytes, (set|remove), valueCIDOrNull, sortedPredecessorSignatures])
-            // - set|remove is physically represented as 0|1
-            // - valueCIDOrNull is null on removal
-            // Note that the valueCID is not the incoming datum write value
-            // but the value that ended up in the CRDT after reconciliation
-            // with the existing value
-            "signature": { "$bytes": "<base64 signature>" }
+            "signature": { "$bytes": "<base64 of the 97 bytes>" },
             //  when a document is branched into
             // a fresh CRDT that doesn't share the history for compaction
             "inherited": {

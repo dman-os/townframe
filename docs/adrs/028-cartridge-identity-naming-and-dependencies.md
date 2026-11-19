@@ -72,7 +72,7 @@ it is.
 - **Key rotation depends on the DID method.** `did:key` cannot rotate, so it suits development
   and node-local publishers. Long-lived publishers should use a rotatable method.
 
-### 3. Upgrades, forks and substitution
+### 3. Upgrades, forks, routing and the dev takeover
 
 - **Upgrade rule, as Android and Sandstorm do it.** A node accepts a version as an upgrade only
   within the same cartridge id (so the same publisher), only with a valid signature, and only in
@@ -83,19 +83,20 @@ it is.
   may be a branch document of the upstream cartridge document, as [docs branches](../wiki/docs.md)
   define them: a separate document whose branch datums pin the parent and the heads it
   branched from.
-- **Drop-in replacement is an explicit node-local substitution,** as Cargo's `[patch]` does it:
-  "references to `did:up/photos` are satisfied by `did:me/photos`". The fork's code is
-  installed *as* the upstream id. Slot state stays keyed by the upstream id: durable rows,
-  endpoints `(micro, publication, contract)`, registration scopes, enablement and bindings. The
-  install datum records `filledBy: did:me/photos@<version>`. Rows the fork writes into the slot
-  continue upstream's rows: writer identity is (replica, installed-as id), not the code's cartridge
-  id. Removing the substitution is a reinstall of upstream into the same slot. The
-  installation-scope rows are rewritten transactionally, endpoints to publications upstream
-  lacks report `Unavailable`, and nothing is orphaned.
-- **Coexistence costs a rename.** A fork enabled on its own, not substituting, is its own slot
+- **Drop-in replacement is routing, and running as another cartridge is a dev hook** (superseded
+  by [ADR 045](045-method-routes-and-dev-takeover.md)). A fork that replaces an abandoned cartridge
+  ships the same NSIDs and is the only enabled claimant once the original is disabled or
+  uninstalled; dependents see `ProviderChanged` and the operator confirms. Where providers coexist,
+  the operator routes an NSID or authority prefix to one of them (`setMethodRoute`), which also
+  moves every dependent's lock, as Cargo's `[patch]` does. Running a dev build *as* an installed
+  cartridge, with its actor, data and grants, exists only as an explicit dev takeover
+  (`setNoduleDevTakeover`, gated by `dev.allow_slot_takeover` in `node.json`) and is never a side
+  effect of routing or install. The mechanism the former substitution described (slot state keyed
+  by the upstream id, `filledBy`) is the takeover's, described in ADR 045 §5.
+- **Coexistence costs a rename.** A fork enabled on its own, not taking over a slot, is its own slot
   under its own id. It must rename every NSID it changes, and dependents must be explicitly
   rebound to it.
-- **Grants never widen silently.** A substitution or an upgrade is re-checked against the set of
+- **Grants never widen silently.** A dev takeover or an upgrade is re-checked against the set of
   granted *requests*, not against binding names. Any request not covered by existing grants
   (a new binding, read widened to write, a changed contract) comes up unresolved and needs
   configuration. Enablement is the user's choice and survives both. A widened *required*
@@ -118,8 +119,8 @@ Prior art: OSGi's `Import-Package` over `Require-Bundle`, and Debian's virtual p
   - `resolution` is `configured` (configuration binds it, with manifest-derived defaults) or
     `at-runtime` (bound later by user consent through a picker, issuing the same handle).
 
-  Whichever enabled provider offers the NSID satisfies the request: upstream, a substituting
-  fork, or an independent reimplementation. The concrete provider, collection or document is
+  Whichever enabled provider offers the NSID satisfies the request: upstream, a fork, or an
+  independent reimplementation, with an operator's route (ADR 045) choosing among several. The concrete provider, collection or document is
   configuration.
 - **Compatibility lives in the NSID, following AT Protocol.** A breaking change means a new NSID.
   Within one NSID a schema only grows compatibly. A dependency on a newer feature is
@@ -165,10 +166,10 @@ Prior art: OSGi's `Import-Package` over `Require-Bundle`, and Debian's virtual p
 ### 5. NSIDs and authority
 
 NSIDs stay valid AT Protocol names (reverse DNS), so we can build on AT Protocol Lexicon
-resolution. On a node, the "authority" over a prefix is the enabled cartridge holding it, and only a
-substitution may hold another cartridge's prefix. Two holders without a substitution are refused at
-enablement. A fork may implement upstream's NSIDs unchanged, but a changed schema needs a new
-NSID under the fork's own prefix: implementing an NSID is not owning it.
+resolution. On a node, the "authority" over a prefix is the enabled cartridge holding it, and only one
+cartridge may hold a prefix at a time: two enabled holders are refused at enablement, and the dev
+takeover (ADR 045 §5) is the one exception, since the original it replaces is not running. A fork
+may implement upstream's NSIDs unchanged, but a changed schema needs a new NSID under the fork's own prefix: implementing an NSID is not owning it.
 
 An NSID whose domain the author does not control is unverifiable but legal. It works on the
 author's node and their friends' nodes, and vendored Lexicons catch conflicts. Publishing a
