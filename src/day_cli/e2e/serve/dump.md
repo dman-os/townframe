@@ -23,7 +23,7 @@ $ sh -c 'drawer=$(cat "$DAY_NODE/drawer-id"); "$DAY" dump drawer "$drawer" | gre
 $ sh -c 'drawer=$(cat "$DAY_NODE/drawer-id"); "$DAY" dump doc "$drawer" | grep -o "\"status\": \"accepted\"" | head -1'
 "status": "accepted"
 
-$ sh -c 'drawer=$(cat "$DAY_NODE/drawer-id"); "$DAY" dump node | grep -c "\"$drawer\": {"'
+$ sh -c '"$DAY" dump node | grep -c "\"mirror\": true"'
 1
 
 $ day dump carts
