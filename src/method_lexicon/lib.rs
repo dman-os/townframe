@@ -540,8 +540,21 @@ pub fn lexicon<M: MethodSchema>() -> Result<Value, MethodLexiconError> {
     let mut defs = Map::new();
     defs.insert("main".to_owned(), Value::Object(main));
     defs.extend(carried);
-    let file = json!({ "lexicon": 1, "id": nsid, "defs": Value::Object(defs) });
+    let mut file = json!({ "lexicon": 1, "id": nsid, "defs": Value::Object(defs) });
     admit(nsid, kind, &file)?;
+    // The method's own stability (ADR 021): the file's `revision` is the highest revision the
+    // method names, and an unstable or deprecated method says so beside it, which is where the
+    // wire-surface check reads it from (a method has no sidecar to carry the keywords).
+    let stability = M::XRPC.stability;
+    if let Some(revision) = stability.revision() {
+        file["revision"] = json!(revision);
+    }
+    if let Some(feature) = stability.unstable {
+        file["x-unstable"] = json!(feature);
+    }
+    if let Some(deprecated) = stability.deprecated {
+        file["x-deprecated"] = json!({ "since": deprecated.since, "note": deprecated.note });
+    }
     Ok(file)
 }
 

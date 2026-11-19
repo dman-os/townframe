@@ -6,9 +6,19 @@
 //! NSID instead of editing this one (operator rule, 2026-11-06). The classifier fails closed: a
 //! keyword it has no compatible rule for counts as breaking when it differs. Only `description`,
 //! prose a reader never validates against, is ignored.
+//!
+//! Stability is declared per item (ADR 021): a field, definition, method or union member is under
+//! the rules only when it states `since` (or `deprecated`). A stable item is never removed or
+//! changed incompatibly, and a new one carries `since` equal to the file's new `revision`. Every
+//! other item is unstable, the pre-release default, and is outside the rules until it is
+//! stabilized.
 
+use crate::items;
+use crate::sidecar;
+use big_cabinet_core::datum::lexicon::stability::Declared;
 use serde_json::Map;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,11 +42,81 @@ pub fn classify(old: &Value, new: &Value) -> Vec<Difference> {
     found
 }
 
-/// What stops `new` from replacing `old` under the same NSID: a breaking difference, or
-/// compatible differences without a bumped `revision`. An absent `revision` counts as 0.
-pub fn violations(nsid: &str, old: &Value, new: &Value) -> Vec<String> {
-    let differences = classify(old, new);
-    let breaking: Vec<_> = differences
+/// A published Lexicon and the sidecar it ships with, if it has one.
+#[derive(Debug, Clone, Copy)]
+pub struct Surface<'a> {
+    pub lexicon: &'a Value,
+    pub sidecar: Option<&'a Value>,
+}
+
+impl<'a> Surface<'a> {
+    pub fn of(lexicon: &'a Value) -> Self {
+        Self {
+            lexicon,
+            sidecar: None,
+        }
+    }
+
+    fn revision(&self) -> u64 {
+        self.lexicon["revision"].as_u64().unwrap_or(0)
+    }
+}
+
+/// Whether the evolution rules reach a difference at `path` of the Lexicon: the nearest item
+/// around it decides, and only a stable one (in the old copy, or for a new item in the new one)
+/// is under them. A `required` or `nullable` entry belongs to the property it names.
+fn governed(
+    path: &str,
+    to_path: fn(&str) -> String,
+    old: &BTreeMap<String, Declared>,
+    new: &BTreeMap<String, Declared>,
+) -> bool {
+    let segments: Vec<&str> = path.split('/').collect();
+    let owner = segments
+        .iter()
+        .position(|segment| matches!(*segment, "required" | "nullable"))
+        .filter(|at| at + 1 < segments.len())
+        .map(|at| {
+            format!(
+                "{}/properties/{}",
+                segments[..at].join("/"),
+                segments[at + 1]
+            )
+        });
+    let path = owner.as_deref().unwrap_or(path);
+    old.keys()
+        .chain(new.keys())
+        .map(|item| (to_path(item), item))
+        .filter(|(at, _)| {
+            path.strip_prefix(at.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+        .max_by_key(|(at, _)| at.len())
+        .is_some_and(|(_, item)| {
+            old.get(item)
+                .or_else(|| new.get(item))
+                .is_some_and(Declared::is_stable)
+        })
+}
+
+/// What stops `new` from replacing `old` under the same NSID: a breaking difference, a stable item
+/// that was removed or changed, a new item that does not carry the file's new revision as its
+/// `since`, or compatible differences without a bumped `revision`. An absent `revision` counts as
+/// 0. Differences that sit in an unstable item are outside the rules.
+pub fn violations(nsid: &str, old: Surface, new: Surface) -> Vec<String> {
+    let (old_items, new_items) = (items::items(&old), items::items(&new));
+    let differences: Vec<Difference> = classify(old.lexicon, new.lexicon)
+        .into_iter()
+        .filter(|difference| {
+            governed(
+                &difference.path,
+                items::lexicon_path,
+                &old_items,
+                &new_items,
+            )
+        })
+        .collect();
+    let mut found: Vec<String> = differences
         .iter()
         .filter(|difference| difference.severity == Severity::Breaking)
         .map(|difference| {
@@ -46,11 +126,48 @@ pub fn violations(nsid: &str, old: &Value, new: &Value) -> Vec<String> {
             )
         })
         .collect();
-    if !breaking.is_empty() {
-        return breaking;
+    // The sidecar's rules govern stable items only, like the Lexicon's. Its compatible changes
+    // (a loosened constraint, a new field) need no bump: a revision comes from `since` alone.
+    let sidecar_breaking = match (old.sidecar, new.sidecar) {
+        (Some(old), Some(new)) => sidecar::classify(old, new),
+        (None, None) => Vec::new(),
+        (before, _) => vec![Difference {
+            path: String::new(),
+            severity: Severity::Breaking,
+            what: format!(
+                "the sidecar {}",
+                if before.is_some() {
+                    "disappeared"
+                } else {
+                    "appeared"
+                }
+            ),
+        }],
+    };
+    found.extend(
+        sidecar_breaking
+            .into_iter()
+            .filter(|difference| difference.severity == Severity::Breaking)
+            .filter(|difference| {
+                governed(&difference.path, str::to_owned, &old_items, &new_items)
+            })
+            .map(|difference| {
+                format!(
+                    "{nsid}: breaking sidecar change at `{}`: {}; a breaking change mints a new NSID",
+                    difference.path, difference.what
+                )
+            }),
+    );
+    found.extend(item_violations(
+        nsid,
+        &old_items,
+        &new_items,
+        (old.revision(), new.revision()),
+    ));
+    if !found.is_empty() {
+        return found;
     }
-    let revision = |lexicon: &Value| lexicon["revision"].as_u64().unwrap_or(0);
-    if differences.is_empty() || revision(new) > revision(old) {
+    if differences.is_empty() || new.revision() > old.revision() {
         return Vec::new();
     }
     let listed: Vec<_> = differences
@@ -60,8 +177,93 @@ pub fn violations(nsid: &str, old: &Value, new: &Value) -> Vec<String> {
     vec![format!(
         "{nsid}: compatible changes ({}) need a bumped `revision`, still {}",
         listed.join("; "),
-        revision(old)
+        old.revision()
     )]
+}
+
+/// The rules about items themselves, which the shape of the Lexicon cannot show: nothing stable is
+/// removed or made unstable, a stable item keeps its `since`, and a new stable item carries the
+/// new revision.
+fn item_violations(
+    nsid: &str,
+    old: &BTreeMap<String, Declared>,
+    new: &BTreeMap<String, Declared>,
+    (old_revision, revision): (u64, u64),
+) -> Vec<String> {
+    let mut found = Vec::new();
+    let named = |path: &str| {
+        if path.is_empty() {
+            "the file".to_owned()
+        } else {
+            format!("`{path}`")
+        }
+    };
+    // An item inside an item that is itself removed (or new) is covered by the outer one.
+    let inside = |path: &str, outer: &dyn Fn(&str) -> bool| {
+        (0..path.len())
+            .filter(|at| path.as_bytes()[*at] == b'/')
+            .any(|at| at > 0 && outer(&path[..at]))
+    };
+    for (path, before) in old {
+        if !before.is_stable() {
+            continue;
+        }
+        match new.get(path) {
+            None if inside(path, &|outer| {
+                old.contains_key(outer) && !new.contains_key(outer)
+            }) => {}
+            None => found.push(format!(
+                "{nsid}: {} was stable and was removed; deprecate it instead",
+                named(path)
+            )),
+            Some(after) if !after.is_stable() => found.push(format!(
+                "{nsid}: {} was stable and became unstable",
+                named(path)
+            )),
+            Some(after) => {
+                // The file's own `since` is its `revision` when it has no sidecar, which moves.
+                if !path.is_empty() && before.since != after.since {
+                    found.push(format!(
+                        "{nsid}: {} is stable and changed its `since` from {:?} to {:?}",
+                        named(path),
+                        before.since,
+                        after.since
+                    ));
+                }
+                if let Some((since, _)) = &after.deprecated
+                    && before.deprecated.is_none()
+                    && *since != revision
+                {
+                    found.push(format!(
+                        "{nsid}: {} is newly deprecated since {since}, and the file's revision \
+                         is {revision}",
+                        named(path)
+                    ));
+                }
+            }
+        }
+    }
+    let is_new = |path: &str| old.get(path).is_none_or(|before| !before.is_stable());
+    for (path, after) in new {
+        if path.is_empty()
+            || !after.is_stable()
+            || !is_new(path)
+            || inside(path, &|outer| {
+                new.contains_key(outer) && is_new(outer) && new[outer].is_stable()
+            })
+        {
+            continue;
+        }
+        if after.since != Some(revision) {
+            found.push(format!(
+                "{nsid}: new stable item {} must carry `since = {revision}`, the file's new \
+                 revision (it was {old_revision}), and carries {:?}",
+                named(path),
+                after.since
+            ));
+        }
+    }
+    found
 }
 
 fn push(found: &mut Vec<Difference>, path: &str, severity: Severity, what: String) {
@@ -96,10 +298,20 @@ fn set_diff(
 ) {
     let (before, after) = sets;
     for name in after.difference(&before) {
-        push(found, path, severity.0, format!("{} `{name}`", what.0));
+        push(
+            found,
+            &child(path, name),
+            severity.0,
+            format!("{} `{name}`", what.0),
+        );
     }
     for name in before.difference(&after) {
-        push(found, path, severity.1, format!("{} `{name}`", what.1));
+        push(
+            found,
+            &child(path, name),
+            severity.1,
+            format!("{} `{name}`", what.1),
+        );
     }
 }
 
@@ -203,7 +415,7 @@ fn walk(path: &str, old: &Value, new: &Value, found: &mut Vec<Difference>) {
             // either way: values of it may be stored.
             "refs" => set_diff(
                 found,
-                &at,
+                &child(path, "$union"),
                 names(),
                 ("union gained member", "union lost member"),
                 (
@@ -254,238 +466,4 @@ fn walk(path: &str, old: &Value, new: &Value, found: &mut Vec<Difference>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    /// A record Lexicon whose one object has `object`'s keywords, `revision` and a `defs` entry.
-    fn record(object: Value) -> Value {
-        json!({
-            "lexicon": 1, "id": "x.y.z",
-            "defs": { "main": { "type": "record", "key": "any", "record": object } },
-        })
-    }
-
-    /// The Lexicon with `revision` stated.
-    fn at_revision(mut lexicon: Value, revision: u64) -> Value {
-        lexicon["revision"] = json!(revision);
-        lexicon
-    }
-
-    fn object(properties: Value, required: Value) -> Value {
-        json!({ "type": "object", "required": required, "properties": properties })
-    }
-
-    fn overall(old: &Value, new: &Value) -> &'static str {
-        let differences = classify(old, new);
-        if differences.is_empty() {
-            "same"
-        } else if differences
-            .iter()
-            .any(|difference| difference.severity == Severity::Breaking)
-        {
-            "breaking"
-        } else {
-            "compatible"
-        }
-    }
-
-    utils_rs::table_tests! {
-        classifies,
-        (old, new, expected),
-        {
-            assert_eq!(overall(&old, &new), expected, "{:?}", classify(&old, &new));
-        }
-    }
-
-    classifies! {
-        identical: (
-            record(object(json!({"a": {"type": "string"}}), json!(["a"]))),
-            record(object(json!({"a": {"type": "string"}}), json!(["a"]))),
-            "same"
-        ),
-        description_is_ignored: (
-            record(object(json!({"a": {"type": "string", "description": "one"}}), json!([]))),
-            record(object(json!({"a": {"type": "string", "description": "two"}}), json!([]))),
-            "same"
-        ),
-        new_optional_property_is_compatible: (
-            record(object(json!({"a": {"type": "string"}}), json!(["a"]))),
-            record(object(json!({"a": {"type": "string"}, "b": {"type": "integer"}}), json!(["a"]))),
-            "compatible"
-        ),
-        new_required_property_is_breaking: (
-            record(object(json!({"a": {"type": "string"}}), json!(["a"]))),
-            record(object(json!({"a": {"type": "string"}, "b": {"type": "integer"}}), json!(["a", "b"]))),
-            "breaking"
-        ),
-        optional_property_becoming_required_is_breaking: (
-            record(object(json!({"a": {"type": "string"}}), json!([]))),
-            record(object(json!({"a": {"type": "string"}}), json!(["a"]))),
-            "breaking"
-        ),
-        removed_property_is_breaking: (
-            record(object(json!({"a": {"type": "string"}, "b": {"type": "string"}}), json!([]))),
-            record(object(json!({"a": {"type": "string"}}), json!([]))),
-            "breaking"
-        ),
-        renamed_property_is_breaking: (
-            record(object(json!({"a": {"type": "string"}}), json!([]))),
-            record(object(json!({"b": {"type": "string"}}), json!([]))),
-            "breaking"
-        ),
-        changed_type_is_breaking: (
-            record(object(json!({"a": {"type": "string"}}), json!([]))),
-            record(object(json!({"a": {"type": "integer"}}), json!([]))),
-            "breaking"
-        ),
-        changed_bound_is_breaking: (
-            record(object(json!({"a": {"type": "string", "maxLength": 8}}), json!([]))),
-            record(object(json!({"a": {"type": "string", "maxLength": 4}}), json!([]))),
-            "breaking"
-        ),
-        changed_ref_is_breaking: (
-            record(object(json!({"a": {"type": "ref", "ref": "#one"}}), json!([]))),
-            record(object(json!({"a": {"type": "ref", "ref": "#two"}}), json!([]))),
-            "breaking"
-        ),
-        nested_new_optional_property_is_compatible: (
-            record(object(json!({"a": object(json!({"x": {"type": "string"}}), json!([]))}), json!([]))),
-            record(object(json!({"a": object(json!({"x": {"type": "string"}, "y": {"type": "string"}}), json!([]))}), json!([]))),
-            "compatible"
-        ),
-        nested_changed_type_is_breaking: (
-            record(object(json!({"a": {"type": "array", "items": {"type": "string"}}}), json!([]))),
-            record(object(json!({"a": {"type": "array", "items": {"type": "integer"}}}), json!([]))),
-            "breaking"
-        ),
-        new_known_value_is_compatible: (
-            record(object(json!({"a": {"type": "string", "knownValues": ["x"]}}), json!([]))),
-            record(object(json!({"a": {"type": "string", "knownValues": ["x", "y"]}}), json!([]))),
-            "compatible"
-        ),
-        lost_known_value_is_breaking: (
-            record(object(json!({"a": {"type": "string", "knownValues": ["x", "y"]}}), json!([]))),
-            record(object(json!({"a": {"type": "string", "knownValues": ["x"]}}), json!([]))),
-            "breaking"
-        ),
-        closed_enum_losing_a_value_is_breaking: (
-            record(object(json!({"a": {"type": "string", "enum": ["x", "y"]}}), json!([]))),
-            record(object(json!({"a": {"type": "string", "enum": ["x"]}}), json!([]))),
-            "breaking"
-        ),
-        closed_enum_gaining_a_value_is_breaking: (
-            record(object(json!({"a": {"type": "string", "enum": ["x"]}}), json!([]))),
-            record(object(json!({"a": {"type": "string", "enum": ["x", "y"]}}), json!([]))),
-            "breaking"
-        ),
-        open_union_gaining_a_member_is_compatible: (
-            record(object(json!({"a": {"type": "union", "refs": ["#one"]}}), json!([]))),
-            record(object(json!({"a": {"type": "union", "refs": ["#one", "#two"]}}), json!([]))),
-            "compatible"
-        ),
-        open_union_losing_a_member_is_breaking: (
-            record(object(json!({"a": {"type": "union", "refs": ["#one", "#two"]}}), json!([]))),
-            record(object(json!({"a": {"type": "union", "refs": ["#one"]}}), json!([]))),
-            "breaking"
-        ),
-        closed_union_losing_a_member_is_breaking: (
-            record(object(json!({"a": {"type": "union", "closed": true, "refs": ["#one", "#two"]}}), json!([]))),
-            record(object(json!({"a": {"type": "union", "closed": true, "refs": ["#one"]}}), json!([]))),
-            "breaking"
-        ),
-        closed_union_gaining_a_member_is_breaking: (
-            record(object(json!({"a": {"type": "union", "closed": true, "refs": ["#one"]}}), json!([]))),
-            record(object(json!({"a": {"type": "union", "closed": true, "refs": ["#one", "#two"]}}), json!([]))),
-            "breaking"
-        ),
-        union_becoming_closed_is_breaking: (
-            record(object(json!({"a": {"type": "union", "refs": ["#one"]}}), json!([]))),
-            record(object(json!({"a": {"type": "union", "closed": true, "refs": ["#one"]}}), json!([]))),
-            "breaking"
-        ),
-        union_becoming_open_is_compatible: (
-            record(object(json!({"a": {"type": "union", "closed": true, "refs": ["#one"]}}), json!([]))),
-            record(object(json!({"a": {"type": "union", "closed": false, "refs": ["#one"]}}), json!([]))),
-            "compatible"
-        ),
-        removed_def_is_breaking: (
-            json!({"defs": {"main": {"type": "object", "properties": {}}, "one": {"type": "string"}}}),
-            json!({"defs": {"main": {"type": "object", "properties": {}}}}),
-            "breaking"
-        ),
-        new_def_is_compatible: (
-            json!({"defs": {"main": {"type": "object", "properties": {}}}}),
-            json!({"defs": {"main": {"type": "object", "properties": {}}, "one": {"type": "string"}}}),
-            "compatible"
-        ),
-        new_method_error_is_compatible: (
-            json!({"defs": {"main": {"type": "query", "errors": [{"name": "A"}]}}}),
-            json!({"defs": {"main": {"type": "query", "errors": [{"name": "A"}, {"name": "B"}]}}}),
-            "compatible"
-        ),
-        removed_method_error_is_breaking: (
-            json!({"defs": {"main": {"type": "query", "errors": [{"name": "A"}, {"name": "B"}]}}}),
-            json!({"defs": {"main": {"type": "query", "errors": [{"name": "A"}]}}}),
-            "breaking"
-        ),
-        a_property_named_revision_is_not_the_revision: (
-            record(object(json!({"revision": {"type": "integer"}}), json!([]))),
-            record(object(json!({"revision": {"type": "string"}}), json!([]))),
-            "breaking"
-        ),
-    }
-
-    utils_rs::table_tests! {
-        judges,
-        (old, new, verdict),
-        {
-            let found = violations("x.y.z", &old, &new);
-            match verdict {
-                "ok" => assert!(found.is_empty(), "{found:?}"),
-                needle => assert!(
-                    found.iter().any(|line| line.contains(needle)),
-                    "no `{needle}` in {found:?}",
-                ),
-            }
-        }
-    }
-
-    judges! {
-        no_change_needs_no_bump: (
-            record(object(json!({}), json!([]))),
-            record(object(json!({}), json!([]))),
-            "ok"
-        ),
-        compatible_change_with_bump_passes: (
-            at_revision(record(object(json!({}), json!([]))), 1),
-            at_revision(record(object(json!({"a": {"type": "string"}}), json!([]))), 2),
-            "ok"
-        ),
-        compatible_change_first_bump_from_no_revision_passes: (
-            record(object(json!({}), json!([]))),
-            at_revision(record(object(json!({"a": {"type": "string"}}), json!([]))), 1),
-            "ok"
-        ),
-        compatible_change_without_bump_fails: (
-            at_revision(record(object(json!({}), json!([]))), 1),
-            at_revision(record(object(json!({"a": {"type": "string"}}), json!([]))), 1),
-            "need a bumped `revision`"
-        ),
-        compatible_change_with_no_revision_at_all_fails: (
-            record(object(json!({}), json!([]))),
-            record(object(json!({"a": {"type": "string"}}), json!([]))),
-            "need a bumped `revision`"
-        ),
-        breaking_change_fails_even_with_a_bump: (
-            at_revision(record(object(json!({"a": {"type": "string"}}), json!([]))), 1),
-            at_revision(record(object(json!({"a": {"type": "integer"}}), json!([]))), 2),
-            "mints a new NSID"
-        ),
-        breaking_change_beside_a_compatible_one_fails: (
-            record(object(json!({"a": {"type": "string"}}), json!([]))),
-            at_revision(record(object(json!({"b": {"type": "string"}}), json!([]))), 3),
-            "removed or renamed"
-        ),
-    }
-}
+mod tests;

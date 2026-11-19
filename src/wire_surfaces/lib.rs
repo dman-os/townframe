@@ -6,4 +6,6 @@
 //! [`evolution`] judges a change to a Lexicon against the checked-in copy.
 
 pub mod evolution;
+mod items;
+mod sidecar;
 pub mod snapshot;

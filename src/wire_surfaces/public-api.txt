@@ -4,16 +4,19 @@
 # exposed_external_crates: []
 
 pub enum wire_surfaces::evolution::Severity { Compatible, Breaking }
+pub impl wire_surfaces::evolution::Surface < 'a >::fn of (lexicon : & 'a Value) -> Self
 pub impl wire_surfaces::snapshot::Problems::fn is_empty (& self) -> bool
 pub impl wire_surfaces::snapshot::Problems::fn render (& self) -> Vec < String >
 pub impl wire_surfaces::snapshot::Snapshot::fn bless (& self , dir : & Path) -> Res < () >
 pub impl wire_surfaces::snapshot::Snapshot::fn generate () -> Res < Self >
 pub impl wire_surfaces::snapshot::Snapshot::fn problems (& self , dir : & Path) -> Res < Problems >
+pub impl wire_surfaces::snapshot::Snapshot::fn stabilized (& self , dir : & Path) -> Res < Vec < String > >
 pub impl wire_surfaces::snapshot::Snapshot::fn summary (& self) -> String
 pub mod wire_surfaces::evolution
 pub mod wire_surfaces::snapshot
 pub struct wire_surfaces::evolution::Difference  { path: String, severity: Severity, what: String }
+pub struct wire_surfaces::evolution::Surface< 'a >  { lexicon: & 'a Value, sidecar: Option < & 'a Value > }
 pub struct wire_surfaces::snapshot::Problems  { stale: Vec < String >, evolution: Vec < String > }
 pub struct wire_surfaces::snapshot::Snapshot  {  }
 pub wire_surfaces::evolution::fn classify (old : & Value , new : & Value) -> Vec < Difference >
-pub wire_surfaces::evolution::fn violations (nsid : & str , old : & Value , new : & Value) -> Vec < String >
+pub wire_surfaces::evolution::fn violations (nsid : & str , old : Surface , new : Surface) -> Vec < String >
