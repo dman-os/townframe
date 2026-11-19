@@ -96,6 +96,11 @@ repos:
         language: system
         entry: cargo x guardrails wire
         pass_filenames: false
+      - id: cli-docs
+        name: check the day CLI's Markdown reference against its clap definitions
+        language: system
+        entry: cargo x cli docs
+        pass_filenames: false
       - id: guardrails-doctor
         name: check build flags and toolchain configuration
         language: system

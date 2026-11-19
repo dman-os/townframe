@@ -1,4 +1,6 @@
 pub mod carts;
+#[cfg(feature = "docs")]
+pub mod docs;
 pub mod drawers;
 pub mod dump;
 pub mod exec;

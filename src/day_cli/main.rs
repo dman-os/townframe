@@ -192,6 +192,11 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         return cmds::init::run(dir.clone(), *relay, *json).await;
     }
 
+    #[cfg(feature = "docs")]
+    if let StaticCommands::Docs { command } = cli.command {
+        return cmds::docs::run(command);
+    }
+
     let conf = lazy::config().await?;
     if !conf.node_dir.is_initialized() {
         eyre::bail!(
@@ -202,6 +207,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
 
     match cli.command {
         StaticCommands::Completions { .. } => unreachable!(),
+        #[cfg(feature = "docs")]
+        StaticCommands::Docs { .. } => unreachable!("handled before the node is looked up"),
         StaticCommands::Node { command } => cmds::node::run(command).await,
         StaticCommands::Carts { command } => cmds::carts::run(command).await,
         StaticCommands::Peers { command } => cmds::peers::run(command).await,
@@ -237,10 +244,10 @@ const CLAP_STYLE: clap::builder::Styles = clap::builder::Styles::styled()
 /// What a `day` command exits with. Every command follows it; the table is in `--help`.
 const EXIT_CODES: &str = "\
 Exit codes:
-  0  success
-  1  failure: the command could not do what was asked (the error is on stderr)
-  2  usage error: the arguments were not understood
-  3  no server running (`day node status`, which still reports what it found)
+- 0: success
+- 1: failure, the command could not do what was asked (the error is on stderr)
+- 2: usage error, the arguments were not understood
+- 3: no server running (`day node status`, which still reports what it found)
 
 Output goes to stdout and diagnostics to stderr. Only `day node start` logs as it serves;
 the other commands show warnings, and RUST_LOG overrides the level. Colour is used on a
@@ -320,6 +327,13 @@ enum StaticCommands {
         /// Write an answer that is bytes, such as org.example.daybook.blobs.read, to this file
         #[arg(long, value_name = "FILE")]
         output: Option<std::path::PathBuf>,
+    },
+    /// Render the man pages and the Markdown reference (build tooling: `cargo x cli`)
+    #[cfg(feature = "docs")]
+    #[clap(hide = true)]
+    Docs {
+        #[clap(subcommand)]
+        command: cmds::docs::DocsCommands,
     },
     /// Generate shell completions
     Completions {
