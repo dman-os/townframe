@@ -1,5 +1,7 @@
 # ADR 036: intxt core
 
+**Changed 2026-11-19 (operator, ledger D70):** §2's descriptor is split. The drawer's own document holds only the cabinet's descriptor, the intxt marker and a pointer to the intxt's index document (`org.example.intxt.index/main`, `{ "doc": … }`); the title, the description, the entry datums and the `body` order are in that index document, a content document `createIntxt` makes in the same routine as the drawer. A relay reads a single-group drawer's own document (it is the public metadata root, ADR 019, "Meta docs"), so the work's index no longer sits there. The annotations entry is gone: notes are found by their marker (ADR 041 §6). Entry references into the index are concrete (`dtxt:datum:<index doc>/…`), not `self` of the drawer.
+
 **Changed 2026-11-12:** recorded worktrees have no file documents (ledger D59, ADR 040 §4); the file document of §5 is now only a collaborative worktree's.
 
 **Status:** Proposed.
@@ -21,36 +23,40 @@ Every vocabulary inside an intxt follows four rules:
 
 And every reader is robust to gaps: an intxt spans many documents, some in other drawers, and no reader is guaranteed to hold all of them, or all of their history. A missing document, an unreadable part or a pin naming heads not yet synced is rendered as unresolved, never as an error, as a browser renders a page with a missing image.
 
-## 2. Descriptor, entries and body
+## 2. Descriptor, index, entries and body
 
-The intxt's descriptor follows the drawer's own design (ADR 019): one datum identifies the intxt, and sibling datums on the same document each describe one part of it. There is no generic "layer" datum. Each vocabulary describes its own parts with its own **entry datums**, and the generic **`body`** datum lists them in order, as daybook documents already order their facets.
+The drawer's own document (its descriptor, the `DrawerId`) holds the cabinet's descriptor and the datum that identifies the intxt, and points at the intxt's **index document**, a content document in the drawer; sibling datums on the index each describe one part of the intxt. There is no generic "layer" datum. Each vocabulary describes its own parts with its own **entry datums**, and the generic **`body`** datum lists them in order, as daybook documents already order their facets.
 
 ```jsonc
-// The drawer's descriptor doc (the DrawerId)
+// The drawer's own doc (the DrawerId): what describes the drawer, and nothing about the work
 {
   "org.example.daybook.drawer/main": { "layout": { "$type": "org.example.daybook.drawer.singleGroup", … } },
 
   "org.example.intxt/main": { "empty": true },                   // this drawer is an intxt
+  "org.example.intxt.index/main": { "doc": "zIndex…" }           // the index document, below
+}
+
+// The index doc (a content document in the drawer, made by createIntxt, only ever by its creator)
+{
   "org.example.intxt.title/main": { "title": "Datum references move to dtxt:", "description": "markdown, optional" },
 
   // entry datums: one per part, each owned by its vocabulary (ADR 040, ADR 041)
   "org.example.intxt.work.worktreeEntry/0193a…":   { "worktree": "dtxt:datum:zWt/org.example.intxt.work.worktree/main" },
   "org.example.intxt.work.repoEntry/0193b…":       { "repo": "dtxt:datum:zRepo/org.example.intxt.work.gitRepo/0193b…" },
   "org.example.intxt.work.sessionEntry/eb26ecaa…": { "session": "dtxt:datum:zSess/org.example.intxt.work.agentSession/main" },
-  "org.example.intxt.annotationsEntry/main":       { "empty": true },  // annotations are found by tag across the drawer (ADR 041 §6)
 
   // the ordered index of the entries
   "org.example.intxt.body/main": { "order": [
     "dtxt:datum:self/org.example.intxt.work.sessionEntry/eb26ecaa…",
     "dtxt:datum:self/org.example.intxt.work.worktreeEntry/0193a…",
-    "dtxt:datum:self/org.example.intxt.work.repoEntry/0193b…",
-    "dtxt:datum:self/org.example.intxt.annotationsEntry/main"
+    "dtxt:datum:self/org.example.intxt.work.repoEntry/0193b…"
   ] }
 }
 ```
 
-- **`intxt/main`** marks the drawer as an intxt. It says nothing else today (`empty: true`, the empty-member convention). Title and description are the generic `title` datum (§5).
-- **An entry datum** names one part of the intxt (a worktree's capture, a repo, an agent session, the discussion) and points at where that part starts with plain datum references. Its tag is the vocabulary's own, so a reader that understands a vocabulary finds its parts by tag, and its schema says what it references. How the vocabulary splits its part into documents, or into other drawers, is its own design; the core only fixes the boundary rules below. Entries are slots keyed by instance, so writers adding different parts never conflict, and two writers adding the same part write equivalent values to one slot.
+- **`intxt/main`** marks the drawer as an intxt. It says nothing else today (`empty: true`, the empty-member convention). **`index/main`** names the index document, as a document id in text (a datum reference names a datum, this names a whole document). Title and description are the generic `title` datum (§5), in the index document.
+- **Why not on the drawer's own document.** A relay holds Read on a single-group drawer's own document, as its public metadata root, so an index kept there is an index a relay reads: every title, description and entry. The drawer's own document keeps the marker and the pointer, so a relay learns that the drawer is an intxt and the id of one document, and the work stays in documents a relay has no grant on. Only the creator creates the index document (in the same routine as the drawer), so nothing races for it; concurrent changes to its datums follow the CRDT rules they already have.
+- **An entry datum** names one part of the intxt (a worktree's capture, a repo, an agent session, the discussion) and points at where that part starts with plain datum references. Its tag is the vocabulary's own, so a reader that understands a vocabulary finds its parts by tag, and its schema says what it references. How the vocabulary splits its part into documents, or into other drawers, is its own design; the core only fixes the boundary rules below. Entries are slots keyed by instance in the index document, so writers adding different parts never conflict, and two writers adding the same part write equivalent values to one slot.
 - **`body`** (daybook's `Body { order }`, generic) lists the entries in the order readers show them: tab order, section order. It makes discovery one read instead of a tag scan, and it is where a part's position is chosen. Its `order` is an Automerge list (`x-automerge: list`, ADR 021), so concurrent appends by two writers both land; two writers adding the same entry concurrently leave it listed twice, and readers show it once. An entry missing from `body` still exists and is shown after the ordered ones; a `body` reference to a missing entry is skipped.
 
 **Boundary rules** between vocabularies:
