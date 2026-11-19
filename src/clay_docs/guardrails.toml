@@ -5,7 +5,6 @@ allowed_dependencies = [
     "clay_collection",
     "clay_host",
     "clay_store",
-    "daybook_types",
 ]
 allow_external_api_types = false
 
