@@ -370,7 +370,7 @@ impl BlobProjection {
                             | DocsError::AuthorityUnavailable(_)
                             | DocsError::Access(_)
                             | DocsError::Repository(_)
-                            | DocsError::DocNotFound
+                            | DocsError::DocNotFound { .. }
                             | DocsError::UnknownHeads { .. }
                             | DocsError::Pending { .. }
                             | DocsError::ResourceRefused { .. },

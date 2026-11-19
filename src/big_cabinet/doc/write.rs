@@ -112,7 +112,7 @@ impl DocsService {
         let staged = document
             .with_document(|doc| -> Result<_, DocsError> {
                 let instr_inner = std::time::Instant::now(); // INSTR
-                let base = Self::condition(doc, mode)?;
+                let base = Self::condition(plan.document, doc, mode)?;
                 let gate = Gate::new(doc, &base);
                 for key in plan.keys() {
                     unaccepted(gate.verify(key)).map_err(|verdict| DocsError::BaseNotAccepted {
@@ -148,7 +148,7 @@ impl DocsService {
         let instr_signed = instr_start.elapsed(); // INSTR
         let committed = document
             .with_document(|doc| -> Result<_, DocsError> {
-                Self::condition(doc, mode)?;
+                Self::condition(plan.document, doc, mode)?;
                 doc.set_actor(doc_actor(&self.node_issuer, plan.document));
                 let tx = Self::begin(doc, &base);
                 let (tx, _) = self.stage(tx, plan, Some((&claims, &signatures)))?;

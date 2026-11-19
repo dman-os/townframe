@@ -291,7 +291,12 @@ async fn removed_route_without_a_document_preserves_other_references() -> Res<()
             )
             .await?;
     }
-    let (docs, capability) = docs(&first, Err(DocsError::DocNotFound));
+    let (docs, capability) = docs(
+        &first,
+        Err(DocsError::DocNotFound {
+            doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+        }),
+    );
     for (index, value) in [
         Some(DatumMembership::Removed {
             doc_heads: None,
@@ -422,7 +427,12 @@ async fn restart_replays_partial_source_revision_without_losing_routes() -> Res<
     assert_eq!(projection.source_revision().await?, 0);
     drop(projection);
     let restarted = BlobProjection::new(sql.clone()).await?;
-    let (docs, capability) = docs(&first, Err(DocsError::DocNotFound));
+    let (docs, capability) = docs(
+        &first,
+        Err(DocsError::DocNotFound {
+            doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+        }),
+    );
     let replayed = restarted
         .prepare(&docs, &capability, &entry(&first, 7), ReadSource::Frontier)
         .await?;
@@ -514,10 +524,22 @@ async fn consumer_parks_unavailable_work_and_retries_it_after_restart() -> Res<(
         [
             (
                 At::Heads(vec![ChangeHash([9; 32])]),
-                Err(DocsError::DocNotFound),
+                Err(DocsError::DocNotFound {
+                    doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+                }),
             ),
-            (At::Current, Err(DocsError::DocNotFound)),
-            (At::Current, Err(DocsError::DocNotFound)),
+            (
+                At::Current,
+                Err(DocsError::DocNotFound {
+                    doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+                }),
+            ),
+            (
+                At::Current,
+                Err(DocsError::DocNotFound {
+                    doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+                }),
+            ),
         ],
     );
     let capability = CapId::from_bytes([7; 16]);
@@ -599,7 +621,9 @@ async fn rearm_retries_unavailable_work_without_stopping_or_blocking_other_route
     let previous = BlobId::new([17; 32]);
     let replacement = BlobId::new([18; 32]);
     for unavailable in [
-        Err(DocsError::DocNotFound),
+        Err(DocsError::DocNotFound {
+            doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+        }),
         Err(DocsError::Denied),
         Ok(DatumRead::Pending {
             reason: "awaiting eligibility".into(),
@@ -1188,7 +1212,9 @@ async fn unavailable_and_pending_reads_park_without_replacing_prior_rows() -> Re
         )
         .await?;
     for response in [
-        Err(DocsError::DocNotFound),
+        Err(DocsError::DocNotFound {
+            doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+        }),
         Err(DocsError::UnknownHeads {
             heads: vec![ChangeHash([9; 32])],
         }),

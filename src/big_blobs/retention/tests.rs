@@ -132,11 +132,14 @@ impl DocsStub {
         if let Some(error) = state.read_errors.get(&request.doc_id) {
             return Err(error.clone());
         }
-        let mut read = state
-            .documents
-            .get(&request.doc_id)
-            .cloned()
-            .ok_or(DocsError::DocNotFound)?;
+        let mut read =
+            state
+                .documents
+                .get(&request.doc_id)
+                .cloned()
+                .ok_or(DocsError::DocNotFound {
+                    doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+                })?;
         if let Some(keys) = request.datums {
             read.datums.retain(|key, _| keys.contains(key));
             for key in keys {
@@ -158,7 +161,9 @@ impl DocsStub {
         let document = state
             .documents
             .get_mut(&request.doc_id)
-            .ok_or(DocsError::DocNotFound)?;
+            .ok_or(DocsError::DocNotFound {
+                doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+            })?;
         let WriteMode::IfDocUnchanged { heads } = request.mode else {
             panic!("writer pins require CAS");
         };
@@ -1125,7 +1130,9 @@ async fn missing_pending_denied_and_unadmitted_references_preserve_previous_clai
     h.docs.datum(&sensitive, reference("node"), original);
     for error in [
         DocsError::Denied,
-        DocsError::DocNotFound,
+        DocsError::DocNotFound {
+            doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+        },
         DocsError::AuthorityUnavailable("offline".into()),
     ] {
         h.docs
