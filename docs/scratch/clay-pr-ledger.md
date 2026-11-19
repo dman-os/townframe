@@ -709,3 +709,19 @@ Gap detail.
   as Dioxus's own runtime does via `wait_for_work`, and `notify_views()` goes away. Open: whether the host↔guest
   wire can carry a "render requested" signal today (the guest is driven by sync exports). Coordinate with intxt,
   who builds on the guest view API. Candidate for the design session or a small draft PR.
+
+## Web components: embrace fully, soon (2026-11-19, operator)
+
+- **Decision.** We end up fully on web components (custom elements, shadow DOM, `part`/`::part`, slots), with our own
+  enhancements on top, "sooner than later". The micro embed contract stops being merely web-component-*isomorphic*.
+- **Today.** Wasm guest mounts are `div[data-dioxus-shadow]`: the Dioxus fork attaches a shadow root and adopts the
+  layered sheet (`@layer host` kit → micro sheet → `@layer user` theme). Built-in (natively linked) micros render into
+  the host document with `document::Style` (CSP failure in the web e2e; no isolation). No custom elements anywhere;
+  kit components are light DOM inside a root.
+- **Step 1 (in flight, lane S, branch `fix/builtin-micros-shadow-mount` → feat/daytxt):** built-ins through the same
+  shadow mount; the wrapper's inline `display: contents` becomes a host-layer rule.
+- **Next (design session):** mounts as registered `<ct-…>` custom elements (attributes/properties as the props
+  contract, lifecycle, slots for nested surfaces) so Solid/React/plain HTML can host micros; `data-part` → real `part`
+  attributes, and how `::part` + custom properties relate to our injected `@layer user` theming (keep it as the
+  enhancement, or narrow it); kit components as web components or light DOM inside roots. Blitz has neither shadow
+  roots nor custom elements: it stays a fallback and never shapes the contract.
