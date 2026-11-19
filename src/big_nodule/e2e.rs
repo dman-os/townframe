@@ -408,7 +408,6 @@ async fn node_with_takeover(
         authority.client.clone(),
         drawers_actor.capability,
         drawers_namespace,
-        authority.service.operator_uuid(),
         (*sql).clone(),
         Arc::clone(&indexes.datum_set),
     )
@@ -647,7 +646,6 @@ async fn boot_nodules(
         actor: nodules_actor.clone(),
         actor_path: NODULES_PATH.into(),
         namespace,
-        operator: authority.service.operator_uuid(),
         dispatch: Arc::clone(&dispatch.router),
         dispatch_client: dispatch.client.clone(),
         dispatch_authority,
@@ -677,7 +675,6 @@ impl Node {
         big_dispatch::boot(DispatchConfig {
             authority: authority.client.clone(),
             namespace,
-            operator: authority.service.operator_uuid(),
         })
     }
 
@@ -732,7 +729,6 @@ impl Node {
             sql: (*sql).clone(),
             authority: authority.client.clone(),
             namespace: blobs_namespace,
-            operator: authority.service.operator_uuid(),
         })
         .await
         .expect("blobs boot");
@@ -757,7 +753,6 @@ impl Node {
                 registry_drawer: registry_drawer.clone(),
                 actor: cartridges_actor,
                 namespace: cartridges_namespace,
-                operator: authority.service.operator_uuid(),
                 blobs: Arc::clone(&blobs.service),
                 node_key: big_cartridges::NodeKey {
                     public_key: authority.service.node_public_key(),

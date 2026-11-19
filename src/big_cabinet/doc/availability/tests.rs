@@ -1,5 +1,6 @@
 use super::*;
 use crate::authority::Authority;
+use crate::authority::Holder;
 use big_cabinet_core::authority::RetractCapability;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
@@ -23,7 +24,7 @@ impl DocAccess for ScopeAccess {
     fn prove<'a>(
         &'a self,
         context: &'a RequestContext,
-        _actor: Uuid7,
+        _holder: Holder,
         _scope: &'a DocScope,
     ) -> AccessFuture<'a, Vec<CapId>> {
         Box::pin(async move {
@@ -35,7 +36,7 @@ impl DocAccess for ScopeAccess {
     fn check<'a>(
         &'a self,
         _context: &'a RequestContext,
-        _actor: Uuid7,
+        _holder: Holder,
         _request: AccessRequest<'a>,
     ) -> AccessFuture<'a, bool> {
         panic!("availability must not fall back to identity authorization")

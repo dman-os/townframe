@@ -369,7 +369,11 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
         drawer_caps.push(node.drawer_capability(actor, &[&drawer]).await.unwrap());
         doc_caps.push(node.mint_doc(actor, doc_scope.clone()).await.unwrap());
         let (_, dependencies) = old_core
-            .effective(&RequestContext::root(), actor.actor.actor_id, &drawer)
+            .effective(
+                &RequestContext::root(),
+                Holder::Actor(actor.actor.actor_id),
+                &drawer,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1227,7 +1231,7 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     let context = RequestContext::root();
     assert_eq!(
         node.core()
-            .effective(&context, bob.actor.actor_id, &alternative)
+            .effective(&context, Holder::Actor(bob.actor.actor_id), &alternative)
             .await
             .unwrap()
             .unwrap()
@@ -1236,7 +1240,7 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     );
     let selected_proof = node
         .core()
-        .effective(&context, bob.actor.actor_id, &selected)
+        .effective(&context, Holder::Actor(bob.actor.actor_id), &selected)
         .await
         .unwrap()
         .unwrap();
@@ -1244,14 +1248,14 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     assert!(!selected_proof.1.is_empty());
     assert_eq!(
         node.core()
-            .effective(&context, bob.actor.actor_id, &drawer)
+            .effective(&context, Holder::Actor(bob.actor.actor_id), &drawer)
             .await
             .unwrap(),
         Some(selected_proof.clone())
     );
     assert_eq!(
         node.core()
-            .reach(&context, bob.actor.actor_id, &doc)
+            .reach(&context, Holder::Actor(bob.actor.actor_id), &doc)
             .await
             .unwrap(),
         Some(selected_proof)
@@ -1317,7 +1321,7 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     revoke(&alternative).await.unwrap();
     assert_eq!(
         node.core()
-            .effective(&context, bob.actor.actor_id, &alternative)
+            .effective(&context, Holder::Actor(bob.actor.actor_id), &alternative)
             .await
             .unwrap(),
         None

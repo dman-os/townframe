@@ -92,11 +92,38 @@ pub async fn delete_wrapping_key(
         .await?)
 }
 
-/// Who a domain operation acts as: an actor presenting its own identity capability, or a
-/// handle the domain minted that carries a scope of its own.
+/// Who a domain operation acts as: the node operator presenting its root capability, an actor
+/// presenting its own identity capability, or a handle the domain minted that carries a scope
+/// of its own.
 pub enum DomainAuthority<S> {
+    /// The operator's root capability, the one the authority created at init
+    /// ([`OPERATOR_OBJECT`]). Domains derive it from what the presented capability says, not from
+    /// any identity they were configured with, so holding that capability is the only way to be
+    /// the operator.
+    Operator,
     Identity(Uuid7),
     Scoped(S),
+}
+
+impl<S> DomainAuthority<S> {
+    /// The holder an access policy decides for, or `None` for a scoped handle, which the
+    /// policy never sees.
+    pub fn holder(&self) -> Option<Holder> {
+        match self {
+            Self::Operator => Some(Holder::Operator),
+            Self::Identity(actor) => Some(Holder::Actor(*actor)),
+            Self::Scoped(_) => None,
+        }
+    }
+}
+
+/// Who holds the capability an access policy decides for. The operator holds Admin on every drawer this node
+/// projects without a standing grant, so it is a holder of its own: no actor id stands for
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holder {
+    Operator,
+    Actor(Uuid7),
 }
 
 /// Every way an authority operation or boot fails. Operations report the wire

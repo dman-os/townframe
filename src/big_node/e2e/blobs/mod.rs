@@ -1196,7 +1196,7 @@ async fn blobs_handles_are_minted_by_the_operator_and_a_handle_only_narrows() {
         .await,
     );
 
-    // Only the operator's identity mints from nothing: another actor's identity is refused, and
+    // Only the operator's root capability mints from nothing: another actor's identity is refused, and
     // a request with no credential is unauthenticated.
     denied(
         mint(

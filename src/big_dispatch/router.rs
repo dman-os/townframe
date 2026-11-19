@@ -44,7 +44,7 @@ pub struct Caller {
     pub authorization: Authorization,
     /// The actor that signed the call.
     pub actor: Uuid7,
-    /// The scope of the minted handle presented, `None` for the operator's identity.
+    /// The scope of the minted handle presented, `None` for the operator's root capability.
     pub scope: Option<DispatchScope>,
 }
 

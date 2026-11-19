@@ -378,7 +378,7 @@ impl DocsService {
         document: &DocId,
     ) -> Result<DatumKinds, DocsError> {
         match authority {
-            DomainAuthority::Identity(_) => {
+            DomainAuthority::Operator | DomainAuthority::Identity(_) => {
                 self.authorize(context, authority, AccessRequest::Read(document))
                     .await?;
                 Ok(DatumKinds::All)
@@ -415,8 +415,12 @@ impl DocsService {
             }
         }
         match authority {
-            DomainAuthority::Identity(actor) => access_policy
-                .check(context, *actor, request)
+            DomainAuthority::Operator | DomainAuthority::Identity(_) => access_policy
+                .check(
+                    context,
+                    authority.holder().expect("not a scoped authority"),
+                    request,
+                )
                 .await
                 .map_err(access_error),
             DomainAuthority::Scoped(scope) => match request {
@@ -583,10 +587,14 @@ impl DocsService {
     ) -> Result<DatumKinds, DocsError> {
         DocsError::ensure_doc_id(document)?;
         match authority {
-            DomainAuthority::Identity(actor) => {
+            DomainAuthority::Operator | DomainAuthority::Identity(_) => {
                 if self
                     .access
-                    .check(context, *actor, AccessRequest::Write(document))
+                    .check(
+                        context,
+                        authority.holder().expect("not a scoped authority"),
+                        AccessRequest::Write(document),
+                    )
                     .await
                     .map_err(access_error)?
                 {
