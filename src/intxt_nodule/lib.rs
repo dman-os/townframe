@@ -17,6 +17,7 @@
 //! the key: it only forwards it to the provider.
 
 use big_cabinet_core::DatumKey;
+use big_cabinet_core::DocId;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::DatumRead;
@@ -97,10 +98,12 @@ fn datum(value: Value, tag: &str, slot: &str) -> (DatumKey, Value) {
 }
 
 impl big_ndk::Handler<CreateIntxt> for Intxt {
-    /// Four calls: a capability to create drawers, the drawer, a capability to write its
-    /// descriptor document (the drawer's id is the descriptor's `DocId`), and the three
-    /// descriptor datums in one write. A failure between the calls leaves a plain drawer, which a
-    /// reader does not show as an intxt.
+    /// Five calls: a capability to create drawers, the drawer, a capability to create a document
+    /// in it and the index document (the title and the empty body, written with it), then the
+    /// drawer document's two datums, the marker and the pointer to the index, in one write. The
+    /// drawer's own document is a relay-readable metadata root (ADR 019), so it holds nothing
+    /// about the work. The marker is last: a failure between the calls leaves a plain drawer,
+    /// which a reader does not show as an intxt.
     async fn call(&self, cx: &big_ndk::Cx, input: CreateIntxt) -> Result<IntxtCreated, IntxtError> {
         let caller = caller(cx)?;
         let drawers = caller
@@ -122,12 +125,7 @@ impl big_ndk::Handler<CreateIntxt> for Intxt {
             })
             .await?
             .drawer_id;
-        let set: BTreeMap<DatumKey, Value> = [
-            datum(
-                to_value(&generic::Intxt::default()),
-                generic::Intxt::ID,
-                "main",
-            ),
+        let index: BTreeMap<DatumKey, Value> = [
             datum(
                 to_value(&generic::Title {
                     title: input.title,
@@ -143,6 +141,24 @@ impl big_ndk::Handler<CreateIntxt> for Intxt {
                     extra: Default::default(),
                 }),
                 generic::Body::ID,
+                "main",
+            ),
+        ]
+        .into();
+        let command = caller.command("create-index", &index)?;
+        let index = caller.create_doc(&drawer_id, command, index).await?;
+        let set: BTreeMap<DatumKey, Value> = [
+            datum(
+                to_value(&generic::Intxt::default()),
+                generic::Intxt::ID,
+                "main",
+            ),
+            datum(
+                to_value(&generic::Index {
+                    doc: index.to_string(),
+                    extra: Default::default(),
+                }),
+                generic::Index::ID,
                 "main",
             ),
         ]
@@ -163,8 +179,8 @@ impl big_ndk::Handler<CreateIntxt> for Intxt {
 }
 
 impl big_ndk::Handler<AddToIntxt> for Intxt {
-    /// `Caller::add_part`: writes the entry for the part and appends it to the body in one write,
-    /// then enters the part's document in the intxt's drawer at Read.
+    /// `Caller::add_part`: writes the entry for the part into the intxt's index document and appends
+    /// it to the body in one write, then enters the part's document in the intxt's drawer at Read.
     async fn call(&self, cx: &big_ndk::Cx, input: AddToIntxt) -> Result<AddedToIntxt, IntxtError> {
         let AddToIntxt { intxt, part } = input;
         Ok(caller(cx)?.add_part(&intxt, &part).await?.into())
@@ -172,8 +188,8 @@ impl big_ndk::Handler<AddToIntxt> for Intxt {
 }
 
 impl big_ndk::Handler<SummarizeIntxts> for Intxt {
-    /// One read of each drawer's descriptor document (the drawer's id), sequentially and in
-    /// order. A drawer's failure is its own `unreadable` result, with the reason, and never the
+    /// One read of each drawer's own document (the marker and the index pointer) and one of its
+    /// index document, sequentially and in order. A drawer's failure is its own `unreadable` result, with the reason, and never the
     /// call's.
     async fn call(
         &self,
@@ -195,9 +211,9 @@ impl big_ndk::Handler<SummarizeIntxts> for Intxt {
     }
 }
 
-/// The summary of `drawer`: found when its descriptor carries the intxt marker, not found when
-/// it does not, unreadable when a read fails or the descriptor of an intxt is not what
-/// `createIntxt` writes.
+/// The summary of `drawer`: found when its drawer document carries the intxt marker, not found
+/// when it does not, unreadable when a read fails or the drawer document or index document of an
+/// intxt is not what `createIntxt` writes.
 async fn summarize(
     caller: &Caller<big_ndk::HttpHandle>,
     drawer: big_cabinet_core::drawer::protocol::DrawerId,
@@ -217,31 +233,51 @@ async fn summarize(
         ..summary(SummaryStatus::Unreadable)
     };
     let key = |tag: &str| DatumKey::new(tag, b"main").expect("`main` is a valid slot");
-    let keys = [
-        key(generic::Intxt::ID),
-        key(generic::Title::ID),
-        key(generic::Body::ID),
-    ];
+    let drawer_keys = [key(generic::Intxt::ID), key(generic::Index::ID)];
     let mut read = match caller
-        .read_datums(&drawer, Some(keys.iter().cloned().collect()))
+        .read_datums(&drawer, Some(drawer_keys.iter().cloned().collect()))
         .await
     {
         Ok((_, read)) => read,
         Err(error) => return unreadable(error.to_string()),
     };
-    // The marker decides what the drawer is; the rest of the descriptor is then required.
-    match read.remove(&keys[0]) {
+    // The marker decides what the drawer is; the rest is then required.
+    match read.remove(&drawer_keys[0]) {
         Some(DatumRead::Accepted { .. }) => {}
         Some(DatumRead::Absent { .. }) | None => return summary(SummaryStatus::NotFound),
         Some(other) => return unreadable(format!("the intxt marker is not readable: {other:?}")),
     }
+    let index = match read.remove(&drawer_keys[1]) {
+        Some(DatumRead::Accepted { value, .. }) => {
+            match serde_json::from_value::<generic::Index>(value)
+                .map_err(|error| error.to_string())
+                .and_then(|index| {
+                    index
+                        .doc
+                        .parse::<DocId>()
+                        .map_err(|error| error.to_string())
+                }) {
+                Ok(index) => index,
+                Err(error) => return unreadable(format!("the index pointer is invalid: {error}")),
+            }
+        }
+        other => return unreadable(format!("the index pointer is not readable: {other:?}")),
+    };
+    let index_keys = [key(generic::Title::ID), key(generic::Body::ID)];
+    let mut read = match caller
+        .read_datums(&index, Some(index_keys.iter().cloned().collect()))
+        .await
+    {
+        Ok((_, read)) => read,
+        Err(error) => return unreadable(error.to_string()),
+    };
     let mut accepted = |key: &DatumKey| match read.remove(key) {
         Some(DatumRead::Accepted { value, version, .. }) => Ok((value, version.clock)),
         other => Err(format!("{key} is not readable: {other:?}")),
     };
     let described = (|| {
-        let (title, title_clock) = accepted(&keys[1])?;
-        let (body, body_clock) = accepted(&keys[2])?;
+        let (title, title_clock) = accepted(&index_keys[0])?;
+        let (body, body_clock) = accepted(&index_keys[1])?;
         let title: generic::Title = serde_json::from_value(title).map_err(|e| e.to_string())?;
         let body: generic::Body = serde_json::from_value(body).map_err(|e| e.to_string())?;
         Ok::<_, String>((title, body, title_clock.max(body_clock)))
