@@ -70,7 +70,9 @@ struct RequestOptions;
 /// The identity this module registers for the resource `name` of `wasi:http/types`.
 fn identity(name: &str) -> ResourceType {
     match name {
-        "fields" => ResourceType::host::<Fields>(),
+        // `headers` and `trailers` are `type` aliases of `fields` in the WIT, but a component
+        // built against it (rustc's wasm32-wasip3 std) lists each alias among its type items.
+        "fields" | "headers" | "trailers" => ResourceType::host::<Fields>(),
         "request" => ResourceType::host::<Request>(),
         "response" => ResourceType::host::<Response>(),
         "request-options" => ResourceType::host::<RequestOptions>(),
