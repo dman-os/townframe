@@ -93,9 +93,16 @@ clay_rt_wasmtime = { workspace = true, optional = true }
 ciborium.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+#
+# internal
 # The engine-conformance scenarios, which the in-process run (`native::conformance_tests`) joins.
 clay_guest_session = { workspace = true, features = ["test-utils"] }
 clay_surface = { workspace = true }
+# The counter fixture renders the kit's `Button`; the wire test renders the same one natively.
+clay_dioxus_kit = { workspace = true }
+
+#
+# misc
 insta.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 # Mirrors `clay_rt_wasmtime`: wasmtime reached only through wash-runtime's

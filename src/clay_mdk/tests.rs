@@ -92,7 +92,9 @@ fn replay(batch: &[presentation::Mutation], to: &mut impl WriteMutations) {
             Mutation::CreateElement((tag, ns)) => to.create_element(tag, ns.as_deref()),
             Mutation::CreateText(value) => to.create_text(value),
             Mutation::MountComponent(_) => unreachable!("counter fixture has no component grants"),
-            Mutation::SetStyleSheet(_) => unreachable!("counter fixture sets no stylesheet"),
+            // The counter's own stylesheet (`document::Style`) is a mount-level sheet, not a node
+            // of the tree: these replays assert tree structure, which it does not touch.
+            Mutation::SetStyleSheet(_) => {}
             Mutation::CloneNode => to.clone(),
             Mutation::AppendChildren(m) => to.append_children(*m as usize),
             Mutation::ReplaceWith(m) => to.replace_with(*m as usize),
@@ -1205,12 +1207,15 @@ fn expected_counter_batches(event_count: u64) -> Vec<Vec<Mutation>> {
         let mut count = use_signal(|| Some(0_u64));
         let current = count();
         rsx! {
-            div { class: "flex flex-col gap-4",
-                button {
-                    class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                    "aria-label": "Increment Wasm counter",
+            div { class: "ct-counter",
+                // The guest sets its stylesheet through `document::Style`; here there is no
+                // document, so it renders nothing, as it does in the guest's tree.
+                document::Style { "" }
+                clay_dioxus_kit::Button {
+                    variant: clay_dioxus_kit::ButtonVariant::Outline,
+                    label: "Increment Wasm counter".to_owned(),
                     disabled: current.is_none(),
-                    onclick: move |_| count.set(Some(count().unwrap() + 1)),
+                    onclick: move |()| count.set(Some(count().unwrap() + 1)),
                     if let Some(count) = current { "{count}" } else { "Loading counter" }
                 }
                 {Option::<VNode>::None}

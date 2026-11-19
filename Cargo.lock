@@ -2854,6 +2854,7 @@ dependencies = [
  "ciborium",
  "clay_collection",
  "clay_dioxus",
+ "clay_dioxus_kit",
  "clay_docs",
  "clay_guest_session",
  "clay_host",
