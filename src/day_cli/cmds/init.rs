@@ -29,13 +29,15 @@ pub async fn run(dir: Option<PathBuf>, relay: bool) -> Res<ExitCode> {
         );
         return Ok(ExitCode::SUCCESS);
     }
-    node_dir.init()?;
+    node_dir.init().await?;
     if relay {
-        node_dir.update_settings(|settings| {
-            settings.relay = true;
-            settings.peers.get_or_insert_with(default);
-            Ok(())
-        })?;
+        node_dir
+            .update_settings(|settings| {
+                settings.relay = true;
+                settings.peers.get_or_insert_with(default);
+                Ok(())
+            })
+            .await?;
     }
     let settings = node_dir.settings()?;
     println!(
