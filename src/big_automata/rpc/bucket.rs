@@ -11,7 +11,7 @@ use crate::store::bucket::BucketSummary;
 /// If a level is exhausted, the next depth is started from the first bucket of that level.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetChangedBucketsRequest {
-    pub part_id: PartKey,
+    pub part_key: PartKey,
     pub offset: BuckId,
     /// The deepest level the response may contain.
     pub to_level: BuckLevel,
@@ -38,7 +38,7 @@ pub enum GetChangedBucketsError {
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub struct LeafBucketsRequest {
-        pub part_id: PartKey,
+        pub part_key: PartKey,
         pub since: CursorIndex,
         pub buckets: Vec<pub struct LeafBucketRequest {
             pub buck_id: BuckId,
@@ -61,7 +61,7 @@ structstruck::strike! {
             BuckId,
             pub struct LeafBucketPage {
                 pub entries: Vec<pub struct BucketObjPageEntry {
-                    pub obj_id: ObjKey,
+                    pub obj_key: ObjKey,
                     pub dead: bool,
                     pub fp: Fingerprint<(&'static str, ObjKey, ObjPayload)>,
                 }>,
