@@ -6,8 +6,10 @@ mod interlude {
     pub use crate::ids::*;
     pub use structstruck::strike;
 
-    pub use crate::store::{CursorIndex, ObjPayload};
-    pub use std::collections::{HashMap as Map, HashSet as Set};
+    pub use crate::store::CursorIndex;
+    pub use crate::store::ObjPayload;
+    pub use std::collections::HashMap as Map;
+    pub use std::collections::HashSet as Set;
 }
 
 mod bucket;
@@ -37,9 +39,13 @@ use crate::interlude::*;
 
 // FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
 #[cfg(any())]
-use scheduler::{TaskId, TaskSeed};
+use scheduler::TaskId;
 #[cfg(any())]
-use tasks::{MachineTask, SyncTask};
+use scheduler::TaskSeed;
+#[cfg(any())]
+use tasks::MachineTask;
+#[cfg(any())]
+use tasks::SyncTask;
 
 #[derive(Default, Debug, Clone, Copy)]
 pub enum AllowedStrat {

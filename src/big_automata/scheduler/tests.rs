@@ -31,7 +31,11 @@ fn queued_tasks_drain_in_queue_order() {
     let a = s.queue(t(0), Seed::Sync(1));
     let b = s.queue(t(0), Seed::Sync(2));
     assert_eq!(drained(&mut s), vec![a, b]);
-    assert_eq!(s.counts().live, 2, "drained tasks are still owned until retired");
+    assert_eq!(
+        s.counts().live,
+        2,
+        "drained tasks are still owned until retired"
+    );
 }
 
 #[test]
@@ -50,7 +54,15 @@ fn stopping_a_queued_task_never_reaches_the_driver() {
     let mut s = Scheduler::default();
     let id = s.queue(t(0), Seed::Diff);
     assert!(s.stop(id).is_some());
-    assert_eq!(s.counts(), SchedulerCounts { live: 0, delayed: 0, spawn_queue: 0, stop_queue: 0 });
+    assert_eq!(
+        s.counts(),
+        SchedulerCounts {
+            live: 0,
+            delayed: 0,
+            spawn_queue: 0,
+            stop_queue: 0
+        }
+    );
 }
 
 #[test]
@@ -60,7 +72,15 @@ fn stopping_a_delayed_task_vanishes() {
     drained(&mut s);
     let retried = s.retry(id, Seed::Diff, secs(5), t(0)).expect("live");
     assert!(s.stop(retried).is_some());
-    assert_eq!(s.counts(), SchedulerCounts { live: 0, delayed: 0, spawn_queue: 0, stop_queue: 0 });
+    assert_eq!(
+        s.counts(),
+        SchedulerCounts {
+            live: 0,
+            delayed: 0,
+            spawn_queue: 0,
+            stop_queue: 0
+        }
+    );
     assert_eq!(s.next_due(), None);
 }
 
@@ -71,7 +91,11 @@ fn completing_retires_the_task() {
     drained(&mut s);
     assert!(s.complete(id).is_some());
     assert_eq!(s.counts().live, 0);
-    assert_eq!(s.counts().stop_queue, 0, "a completed task has nothing to abort");
+    assert_eq!(
+        s.counts().stop_queue,
+        0,
+        "a completed task has nothing to abort"
+    );
 }
 
 /// A completion or failure can race a stop: the stop wins and the late report is stale.
@@ -123,7 +147,10 @@ fn backoff_doubles_with_floor_and_cap() {
         backoffs.push(s.retry_of(id).unwrap().backoff);
         s.tick(t(1000));
     }
-    assert_eq!(backoffs, vec![secs(3), secs(6), secs(12), secs(24), secs(30)]);
+    assert_eq!(
+        backoffs,
+        vec![secs(3), secs(6), secs(12), secs(24), secs(30)]
+    );
 }
 
 #[test]

@@ -34,7 +34,11 @@ fn add_job_skips_re_deliveries_and_emitted_cursors() {
         "p already holds a slot at 5"
     );
     m.settle_on_cursor(&Job::Sync(1), &5);
-    assert_eq!(m.add_job(Job::Sync(2), 5, ["p"]), set(&[]), "at the watermark");
+    assert_eq!(
+        m.add_job(Job::Sync(2), 5, ["p"]),
+        set(&[]),
+        "at the watermark"
+    );
     assert_eq!(m.add_job(Job::Sync(2), 3, ["p"]), set(&[]), "below it");
     assert_eq!(m.add_job(Job::Sync(2), 6, ["p"]), set(&["p"]));
 }
@@ -69,7 +73,10 @@ fn settle_on_cursor_advances_only_over_the_contiguous_prefix() {
         vec![("p", None)],
         "10 is still owed"
     );
-    assert_eq!(m.settle_on_cursor(&Job::Sync(1), &10), vec![("p", Some(11))]);
+    assert_eq!(
+        m.settle_on_cursor(&Job::Sync(1), &10),
+        vec![("p", Some(11))]
+    );
     assert!(m.is_settled(&"p"));
 }
 
@@ -110,7 +117,10 @@ fn release_stream_frees_only_that_stream_before_the_cursor() {
 
     assert_eq!(m.release_stream(&Job::Sync(1), &"alpha", &31), Some(30));
     assert!(!m.is_settled(&"alpha"), "32 is not before the cursor");
-    assert!(!m.is_settled(&"beta"), "beta still owes the job's work at 30");
+    assert!(
+        !m.is_settled(&"beta"),
+        "beta still owes the job's work at 30"
+    );
     assert_eq!(
         m.settle_on_cursor(&Job::Sync(1), &30),
         vec![("beta", Some(30))]
@@ -152,7 +162,10 @@ fn retire_stream_drops_only_that_stream() {
     m.add_job(Job::Sync(2), 2, ["gone"]);
     m.retire_stream(&"gone");
     assert_eq!(m.watermark(&"gone"), None);
-    assert!(!m.owes(&Job::Sync(2), &2), "a waiter that only held the stream is gone");
+    assert!(
+        !m.owes(&Job::Sync(2), &2),
+        "a waiter that only held the stream is gone"
+    );
     assert_eq!(
         m.settle_on_cursor(&Job::Sync(1), &1),
         vec![("kept", Some(1))]
@@ -165,14 +178,30 @@ static STREAMS: [&str; 3] = ["a", "b", "c"];
 
 #[derive(Debug, Clone)]
 enum Op {
-    AddJob { key: Job, cursor: u64, sids: Vec<&'static str> },
-    Settle { key: Job, cursor: u64 },
-    Release { key: Job, sid: &'static str, before: u64 },
-    Retire { sid: &'static str },
+    AddJob {
+        key: Job,
+        cursor: u64,
+        sids: Vec<&'static str>,
+    },
+    Settle {
+        key: Job,
+        cursor: u64,
+    },
+    Release {
+        key: Job,
+        sid: &'static str,
+        before: u64,
+    },
+    Retire {
+        sid: &'static str,
+    },
 }
 
 fn any_job() -> impl Strategy<Value = Job> {
-    prop_oneof![(0u8..3).prop_map(Job::Sync), (0u8..3).prop_map(Job::RemoveFromPart)]
+    prop_oneof![
+        (0u8..3).prop_map(Job::Sync),
+        (0u8..3).prop_map(Job::RemoveFromPart)
+    ]
 }
 
 fn any_sid() -> impl Strategy<Value = &'static str> {
