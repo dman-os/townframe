@@ -67,7 +67,7 @@ pub struct HandlerSpec {
     /// Ask the state actor to call `ensure` again for this cartridge.
     pub reensure: Reensure,
     /// What [`egress::call`](crate::egress::call) refines a routine's refused call with: an
-    /// operation its `uses` declare that no grant covers yet is the cartridge's missing
+    /// method its `uses` declare that no grant covers yet is the cartridge's missing
     /// authority, not a denial. Kept current by the state actor; hold it for the workload's life.
     pub missing_authority: MissingAuthorityLookup,
 }

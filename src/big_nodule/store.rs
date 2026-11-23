@@ -5,7 +5,7 @@
 //! document, and the settings and grants in each cartridge's config document) lives in the
 //! documents; SQLite stores only the id of the shared config drawer this node created, the host's `(cartridge_id, actor_uuid)`
 //! identity binding, the `(cartridge_id, drawer_id) -> access` grants this service has applied, the `(drawer_id, cartridge_id)` holds of the service's own actor on drawers it was granted or created for a cartridge, and the
-//! `cartridge_id -> (scope, capability)` dispatch capability minted from each nodule's operation grants,
+//! `cartridge_id -> (scope, capability)` dispatch capability minted from each nodule's method grants,
 //! the `(cartridge_id, init key) -> revision` a [`Once`](big_nodule_core::RunMode::Once)
 //! initializer last succeeded at on this node, and the `(cartridge_id, binding) -> provider` each
 //! operation request resolved to (the resolution lockfile). The lockfile is host-local, not a

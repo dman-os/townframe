@@ -78,8 +78,8 @@ pub(crate) struct Declared {
 /// What one routine's `uses` leave to be refused for want of a grant someone may still give.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RoutineUses {
-    /// The operations its method permbinds declare that the cartridge's grants do not cover,
-    /// and the permbind of each. An operation absent here was never declared (or is granted,
+    /// The methods its method permbinds declare that the cartridge's grants do not cover,
+    /// and the permbind of each. A method absent here was never declared (or is granted,
     /// in which case dispatch did not refuse it for want of the handle).
     pub(crate) ungranted: BTreeMap<String, String>,
     /// Every `#net` permbind it takes.
@@ -101,7 +101,7 @@ pub(crate) struct NetUse {
 }
 
 /// How the nodule host tells a refusal of "nobody has said yes yet" from one of "the rules forbid
-/// it" (ADR 049 §4.3), for one cartridge. Dispatch alone cannot: it sees an operation outside the
+/// it" (ADR 049 §4.3), for one cartridge. Dispatch alone cannot: it sees a method outside the
 /// handle, and only the runtime knows the routine's `uses` and the grants.
 ///
 /// The state actor rewrites [`Self::set`] at each reconcile, so every clone, which an executor
@@ -223,7 +223,7 @@ impl MissingAuthorityLookup {
     }
 
     /// `error`, as the routine holding the dispatch handle `capability` should see it for a call
-    /// of `operation`: a [`DispatchError::Denied`] for a declared but ungranted operation becomes
+    /// of `operation`: a [`DispatchError::Denied`] for a declared but ungranted method becomes
     /// the cartridge's `MissingAuthority`, carrying the request already filed for its permbind
     /// (nothing files one here: only the routine decides to ask). Any other refusal is returned
     /// as it was.

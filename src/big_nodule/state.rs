@@ -735,7 +735,7 @@ fn desired_routine_scopes(
 }
 
 /// Per routine, what its `uses` leave refused for want of a grant someone may still give (ADR 049
-/// §4.3): the operations its method permbinds declare that `effective_operations` (the
+/// §4.3): the methods its method permbinds declare that `effective_operations` (the
 /// cartridge's grants) do not cover, with the permbind of each, and every `#net` permbind it
 /// takes with whether `desired_nets` covers it, and the access a drawer the routine creates is
 /// granted it at (`RoutineUses::create_access`). Drawer and docs calls are not here: they pass the

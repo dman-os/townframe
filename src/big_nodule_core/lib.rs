@@ -187,7 +187,7 @@ impl NoduleAdmission for ResolvedCartridge {
         )
     }
 
-    /// The requests that call an operation (no `access`): the ones a dispatch grant can satisfy.
+    /// The requests that call a method (no `access`): the ones a dispatch grant can satisfy.
     fn operation_requests(&self) -> Vec<Request> {
         self.cartridge
             .permbinds
@@ -238,11 +238,11 @@ impl NoduleAdmission for ResolvedCartridge {
         requests
     }
 
-    /// Splits operation `grants` into what may take effect and what may not. The manifest bounds
-    /// what configuration can confer: a grant is applied only as the exact requested operations
+    /// Splits method `grants` into what may take effect and what may not. The manifest bounds
+    /// what configuration can confer: a grant is applied only as the exact requested methods
     /// it covers, so an authority-prefix grant never widens beyond what the nodule asked for, and
     /// "can X ever reach Y" is answerable from the manifest alone. The second scope is the
-    /// entries that cover no requested operation, which the record reports instead of applying.
+    /// entries that cover no requested method, which the record reports instead of applying.
     fn bind_operations(&self, grants: &DispatchScope) -> (DispatchScope, DispatchScope) {
         let requested: BTreeSet<String> = self
             .operation_requests()
@@ -283,7 +283,7 @@ impl NoduleAdmission for ResolvedCartridge {
         (applied, unrequested)
     }
 
-    /// The required operation requests that `granted` does not permit: while any exists the
+    /// The required method requests that `granted` does not permit: while any exists the
     /// nodule needs configuration. An optional request never appears.
     fn unmet_requests(&self, granted: &DispatchScope) -> Vec<Request> {
         self.operation_requests()
