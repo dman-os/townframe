@@ -28,6 +28,7 @@ async fn reopen(
 ) -> Res<(Blobs, StopToken, Database)> {
     let sql = runtime.database(directory.join("local.sqlite"), &[], "test_migrations");
     let (blobs, stop) = boot(Config {
+        upload_hold_grace: None,
         storage: Storage::filesystem(directory.join("store")).await?,
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
@@ -66,6 +67,7 @@ async fn ciphertext(store: &Store, hash: Hash) -> Res<Vec<u8>> {
 async fn a_put_is_authoritative_idempotent_and_refuses_an_item_over_the_limit() -> Res<()> {
     let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
     let (blobs, stop) = boot(Config {
+        upload_hold_grace: None,
         storage: Storage::memory().unwrap(),
         sql: runtime.ephemeral(&[])?,
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
@@ -150,6 +152,7 @@ async fn shutdown_recovers_pending_effects_after_service_handles_drop() -> Res<(
     ] {
         let sql = runtime.ephemeral(&[])?;
         let (blobs, stop) = boot(Config {
+            upload_hold_grace: None,
             storage,
             sql: sql.clone(),
             authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
@@ -212,6 +215,7 @@ async fn shutdown_drains_cancelled_publication_before_closing_store() -> Res<()>
     let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
     let sql = runtime.ephemeral(&[])?;
     let (blobs, stop) = boot(Config {
+        upload_hold_grace: None,
         storage: Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
@@ -273,6 +277,7 @@ async fn complete_virtual_outboard_is_unavailable_after_final_owner_release() ->
     let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
     let sql = runtime.ephemeral(&[])?;
     let (blobs, stop) = boot(Config {
+        upload_hold_grace: None,
         storage: Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
@@ -626,6 +631,7 @@ async fn a_drawer_reach_reads_exactly_the_blobs_its_inventories_pin() -> Res<()>
     .await?;
     let (admission, admission_stop) = crate::admission::Admission::boot(sql.clone()).await?;
     let (blobs, stop) = boot(Config {
+        upload_hold_grace: None,
         storage: Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),

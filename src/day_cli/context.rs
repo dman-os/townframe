@@ -101,6 +101,29 @@ pub struct NodeSettings {
     /// What a nodule's `#net` permbinds may reach beyond the public internet.
     #[serde(default, skip_serializing_if = "NetSettings::is_default")]
     pub net: NetSettings,
+    /// The blob store's tuning.
+    #[serde(default, skip_serializing_if = "BlobSettings::is_default")]
+    pub blobs: BlobSettings,
+}
+
+/// The `blobs` section of `node.json`. Keys are snake_case, as the file's other top-level keys are.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlobSettings {
+    /// How long an upload nothing references keeps its bytes (ADR 042 §6). Absent: 24 hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_hold_grace_secs: Option<u64>,
+}
+
+impl BlobSettings {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn upload_hold_grace(&self) -> Option<std::time::Duration> {
+        self.upload_hold_grace_secs
+            .map(std::time::Duration::from_secs)
+    }
 }
 
 /// The `net` section of `node.json`. Keys are snake_case, as the file's other top-level keys are.
@@ -317,6 +340,7 @@ impl NodeDir {
             relay: false,
             dev: DevSettings::default(),
             net: NetSettings::default(),
+            blobs: BlobSettings::default(),
         };
         let bytes = serde_json::to_vec_pretty(&settings)?;
         let secrets = SecretStore::boot().await?;
@@ -765,6 +789,7 @@ impl Booted {
             peers,
             allow_slot_takeover: settings.dev.allow_slot_takeover,
             allow_host_loopback: settings.net.allow_host_loopback,
+            upload_hold_grace: settings.blobs.upload_hold_grace(),
         };
         let (node, stop) = BigNode::boot(config).await?;
         lock.serving()?;

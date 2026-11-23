@@ -95,6 +95,7 @@ fn config(secrets: Arc<SecretStore>, sql: Database, storage: big_repo::Storage) 
         peers: None,
         allow_slot_takeover: false,
         allow_host_loopback: false,
+        upload_hold_grace: None,
     }
 }
 

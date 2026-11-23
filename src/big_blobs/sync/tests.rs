@@ -73,6 +73,7 @@ impl Harness {
             None => Arc::new(big_sync::MemoryPartStore::new()),
         };
         let (blobs, blob_stop) = crate::boot(crate::Config {
+            upload_hold_grace: None,
             storage: match path {
                 Some(path) => crate::Storage::filesystem(path.join("blobs")).await?,
                 None => crate::Storage::memory()?,
