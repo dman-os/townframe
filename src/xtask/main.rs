@@ -10,7 +10,6 @@ mod interlude {
 
 mod cli;
 mod guardrails;
-mod plug;
 mod sql;
 
 use clap::builder::styling::AnsiColor;
@@ -31,7 +30,6 @@ async fn main_main() -> Res<()> {
     match Args::parse().command {
         Commands::Sql { command } => sql::dispatch(&workspace_root().await?, command).await,
         Commands::Cli { command } => cli::dispatch(&workspace_root().await?, command),
-        Commands::Plug { command } => plug::dispatch(command).await,
         Commands::Guardrails { command } => guardrails::dispatch(&workspace_root().await?, command),
     }
 }
@@ -83,11 +81,6 @@ enum Commands {
     Cli {
         #[command(subcommand)]
         command: cli::CliCmd,
-    },
-    /// Plug packaging.
-    Plug {
-        #[command(subcommand)]
-        command: plug::PlugCmd,
     },
     /// Source guardrails: lint, API snapshots, build contracts, and validation receipts.
     Guardrails {
