@@ -1,7 +1,3 @@
-/// FIXME: this machine is per part which is not great if we have
-/// large overlapping parts from a peer? They'll share buckets anyways.
-/// It should be per peer like CursorSyncMachine
-/// - Use batched Leafing to minimize RPC
 use crate::interlude::*;
 
 use crate::fingerprint::FingerprintSeed;

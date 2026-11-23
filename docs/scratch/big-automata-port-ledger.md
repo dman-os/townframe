@@ -952,6 +952,56 @@ simulation proptest over a faulty network.
 binding; the bucket and summary RPCs on the same binding; the tasks (batched, coalesced
 cursor persistence).
 
+### `BigSyncMachine`: critique and decomposition (operator approved 2026-11-24)
+
+**One peer per machine.** The old machine is N per-peer machines in one struct. The only
+cross-peer state is the stat machine's aggregates, `all_seen_peer` (14 `"fishy"` asserts
+against late events from removed peers), and a shared task table with no global concurrency
+cap. Nobody consumes the cross-peer aggregates (`PartFullySynced`, `PartStale` and
+`PeerFullySynced` are ignored at `daybook_core/sync.rs:1040–1043`). A multi-peer
+`wait_for_full_sync` is the conjunction of per-(peer, part) facts, so it moves to a layer
+above (driver or embedder). Late events are rejected by task identity (the new `Scheduler`
+returns `None` for stale reports), not by asserts. Deferred: deduplicating one object's
+fetch across peers (today it is fetched once per peer; the backend absorbs the repeat).
+
+**Kept from the old design:** sans-IO with tasks as data; commands versus retried tasks;
+per-object coalescing that reports every cursor a job covered; zombie-removal deferral;
+stats as facts emitted once per transition; the cursor/bucket split.
+
+**Fixed by the decomposition:** the stat machine mirrored other machines' state through 26
+`mark_*` call sites; handlers juggled `peer_state`, `self.tasks` and `self.stat_machine`
+mid-borrow; sub-machines talked through command buffers drained in four impl sections; the
+replay subscription was inlined (now `ReplayClient`); cursor persistence was a blocking
+command (now batched by the driver); `Instant`, `eyre::Report` and `Uuid` in machine events.
+
+**Rule:** a sub-machine owns its state outright and talks only through typed inputs and
+outputs. No sub-machine calls another or mirrors another's state; the parent routes.
+
+| Sub-machine | Owns | From |
+| --- | --- | --- |
+| Routes | the wanted set; diffs into part add/remove and replay targets | `peer_routes.rs`, `handle_peer_route_change` |
+| PartLifecycle (per part) | `Pending(strategy task)` → `Cursor` / `Bucket` → `Cursor`; `Unanswered`; strategy retries | `PeerPartStrategy`, `handle_set_peer_strat` |
+| ReplayClient | session, rounds, targets, verdicts | done |
+| CursorSyncMachine | replay events → object jobs, part cursor watermark | `cursor.rs` |
+| BucketMachine (per part) | the bucket walk; leafing uses the batched `bucket_leaves` | `bucket.rs` |
+| ObjectJobs | per-object sync/remove coalescing, cursor sets, zombie-removal deferral | `sync_workers`, `remove_workers`, `pending_removals`, "sync support" |
+| SyncStats | last emitted fact per (peer, part); see below | `SyncStatMachine` |
+
+**Stats are derived, not told.** `synced(part)` is a pure function of queries the owning
+sub-machines answer (lifecycle phase, the replay verdict for the current cursor, outstanding
+object jobs for the part, the bucket walk). SyncStats keeps only the last emitted value per
+part and, after each step, recomputes the parts the step touched and emits edges. A missed
+"touched" mark can only delay an edge, never corrupt state, and test builds recompute every
+part and assert they agree. Waiters register as "query now, then subscribe" (the old
+`full_sync_waiter_does_not_strand_on_peer_removal` class). Verification: the whole-machine
+simulation knows ground truth, so it checks soundness (an emitted `synced` means the local
+store holds the server's readable view of the part as of that verdict) and liveness (quiet
+implies `synced`); a small Quint model covers the edge protocol if the simulation leaves
+doubt.
+
+**Order:** ObjectJobs (laws, oracle, conformance) → PartLifecycle → the per-peer parent and
+SyncStats → whole-machine simulation → driver, with full-sync waiters as the layer above.
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a
