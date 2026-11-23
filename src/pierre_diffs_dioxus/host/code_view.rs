@@ -33,6 +33,9 @@ use pierre_diffs::document::Document;
 use pierre_diffs::document::NodeKey;
 use pierre_diffs::utils::dom::platform::PlatformInfo;
 
+use crate::code_view::ScrollMode;
+use crate::scroll_root::ScrollRoot;
+
 use super::DioxusHost;
 use super::Scroller;
 use super::SleepFuture;
@@ -121,6 +124,8 @@ pub(crate) struct CodeViewHostState {
     shell_listeners: Cell<Option<NodeKey>>,
     /// The shell that holds focus (see the module docs).
     focused: Cell<Option<NodeKey>>,
+    /// The embedder's scroller, when the viewer lays out in it instead of a scroller of its own.
+    page: Option<ScrollRoot>,
 }
 
 impl CodeViewHostState {
@@ -143,6 +148,16 @@ impl CodeViewHostState {
         ]
         .into_iter()
         .find_map(|(wrapper, role)| (wrapper == node).then_some(role))
+    }
+
+    /// The embedder's scroller, in `ScrollMode::Embedder`.
+    pub(crate) fn page(&self) -> Option<&ScrollRoot> {
+        self.page.as_ref()
+    }
+
+    /// Whether `page` is the scroller this viewer was mounted with.
+    pub(crate) fn is_page(&self, page: &ScrollRoot) -> bool {
+        self.page.as_ref() == Some(page)
     }
 
     /// Whether the viewer's resize observer watches `node`.
@@ -204,10 +219,13 @@ impl CodeViewHostState {
 }
 
 impl DioxusHost {
-    /// A code view host: `root` is a scroll container of the given CSS `height` that the viewer
-    /// sets up (the viewer builds `container > [spacer, slab]` in it).
+    /// A code view host: `root` is what the viewer sets up (the viewer builds
+    /// `container > [spacer, slab]` in it). In `ScrollMode::Own` it is a scroll container of the
+    /// given CSS height. In `ScrollMode::Embedder` it is a plain block in the embedder's scroller:
+    /// its geometry is the scroller's (see `scroll_root.rs`), so it is no scroll container and
+    /// no tab stop, and the root's own `onscroll` and `onmounted` are not the viewer's.
     pub(crate) fn new_code_view(
-        height: &str,
+        scroll: &ScrollMode,
         sleep: Rc<dyn Fn(Duration) -> SleepFuture>,
         now: Rc<dyn Fn() -> f64>,
         environment: Environment,
@@ -216,10 +234,26 @@ impl DioxusHost {
     ) -> Rc<Self> {
         let document = Document::new();
         let root = document.create_element("div");
-        document.set_attribute(root, "style", &format!("overflow-y:auto;height:{height};"));
-        // A scroll container the keyboard can reach (the viewer would make it a script-only
-        // tab stop): without one its arrow and page keys do nothing.
-        document.set_attribute(root, "tabindex", "0");
+        match scroll {
+            ScrollMode::Own { height } => {
+                document.set_attribute(
+                    root,
+                    "style",
+                    &format!("overflow-y:auto;height:{height};"),
+                );
+                // A scroll container the keyboard can reach (the viewer would make it a
+                // script-only tab stop): without one its arrow and page keys do nothing.
+                document.set_attribute(root, "tabindex", "0");
+            }
+            // A root that scrolls (`overflow-y:auto`) also clips its inline axis; this one does
+            // not scroll, so wide rows would widen the embedder's scroller, the document
+            // included. `clip` crops at the root's edge without making a scroll container, which
+            // the sticky slab would otherwise stick to instead of the embedder's scroller. The
+            // rows scroll inside their own columns (`[data-code]` is `overflow: scroll clip`).
+            ScrollMode::Embedder(_) => {
+                document.set_attribute(root, "style", "overflow-x:clip;");
+            }
+        }
         Self::build(
             document,
             None,
@@ -239,6 +273,10 @@ impl DioxusHost {
                 shell_observed: RefCell::default(),
                 shell_listeners: Cell::new(None),
                 focused: Cell::new(None),
+                page: match scroll {
+                    ScrollMode::Own { .. } => None,
+                    ScrollMode::Embedder(page) => Some(page.clone()),
+                },
             }),
         )
     }
@@ -257,6 +295,25 @@ impl DioxusHost {
     /// The root the viewer scrolls.
     pub(crate) fn root(&self) -> NodeKey {
         self.scroller_root()
+    }
+
+    /// Whether `node` is the viewer's root in the embedder's scroller: it is not what scrolls,
+    /// so the scroll and size events of the node are not the viewer's (the handle forwards the
+    /// scroller's).
+    pub(crate) fn is_page_root(&self, node: NodeKey) -> bool {
+        self.code_view
+            .as_ref()
+            .is_some_and(|code_view| code_view.page().is_some())
+            && node == self.scroller_root()
+    }
+
+    /// How far the viewer's top is below the top of the scroller's content: scroll writes
+    /// addressed to the viewer's root go to the scroller shifted by it. 0 in an own scroller.
+    pub(crate) fn page_offset(&self) -> f64 {
+        self.code_view
+            .as_ref()
+            .and_then(|code_view| code_view.page())
+            .map_or(0.0, ScrollRoot::offset)
     }
 }
 

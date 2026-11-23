@@ -261,7 +261,9 @@ impl DioxusHost {
     }
 
     pub(crate) fn wants_scroll(&self, node: NodeKey) -> bool {
-        self.registrations.borrow().scroll.contains_key(&node)
+        // The root in the embedder's scroller is registered (its scroll is the viewer's scroll)
+        // but never scrolls: the handle forwards the scroller's `onscroll`.
+        self.registrations.borrow().scroll.contains_key(&node) && !self.is_page_root(node)
     }
 
     /// The nodes whose heights the port reads without registering them (`reconcileHeights`
@@ -460,7 +462,13 @@ impl DioxusHost {
                 .scroll(PixelsVector2D::new(left.unwrap_or(offset.x), top), behavior)
                 .await
                 .expect("the platform scrolls a mounted element");
-            host.geometry.borrow_mut().set_scroll_top(node, top);
+            // The cache holds the viewer's own position, which is the scroller's less the offset.
+            let shift = if host.is_page_root(node) {
+                host.page_offset()
+            } else {
+                0.0
+            };
+            host.geometry.borrow_mut().set_scroll_top(node, top - shift);
         });
     }
 }
@@ -685,9 +693,11 @@ impl VirtualizerHost for DioxusHost {
     fn element_scroll_to(&self, element: &NodeKey, top: f64, behavior: PierreScrollBehavior) {
         let left = self.geometry.borrow().scroll(*element).left;
         self.geometry.borrow_mut().set_scroll_top(*element, top);
+        // `top` is the viewer's own position; in the embedder's scroller the write is shifted by
+        // where the viewer sits in it.
         self.spawn_scroll(
             *element,
-            Vertical::To(top),
+            Vertical::To(top + self.page_offset()),
             Some(left),
             dioxus_behavior(behavior),
         );

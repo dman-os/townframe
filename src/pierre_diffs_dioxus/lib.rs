@@ -13,14 +13,18 @@
 //!
 //! [`CodeViewView`] is Pierre's `CodeView`: many files in one virtualized scroller, each from a
 //! patch or from two versions of the file, with the same annotation slots, and a
-//! [`ScrollRequest`] that reveals a line of a file. Its host and the slab's per-frame signal path
-//! are in `host/code_view.rs` and `render.rs`; it is view-only for now (see `code_view.rs`).
+//! [`ScrollRequest`] that reveals a line or a file, and `on_top_file`, which reports the file at the
+//! top of the viewport. It scrolls in a scroller of its own or, with [`ScrollMode::Embedder`], in
+//! one the embedder owns and forwards to a [`ScrollRoot`] (`scroll_root.rs`). Its host and the
+//! slab's per-frame signal path are in `host/code_view.rs` and `render.rs`; it is view-only for
+//! now (see `code_view.rs`).
 
 mod code_view;
 mod events;
 mod geometry;
 mod host;
 mod render;
+mod scroll_root;
 mod slot;
 mod view;
 
@@ -29,6 +33,7 @@ pub use code_view::CodeViewView;
 pub use code_view::CodeViewViewProps;
 pub use code_view::FileAnnotation;
 pub use code_view::Runtime;
+pub use code_view::ScrollMode;
 pub use code_view::ScrollRequest;
 pub use host::Environment;
 pub use host::SleepFuture;
@@ -45,6 +50,8 @@ pub use pierre_diffs::types::view::DiffLineAnnotation;
 pub use pierre_diffs::types::view::SelectedLineRange;
 pub use pierre_diffs::types::view::SelectionSide;
 pub use pierre_diffs::utils::dom::platform::PlatformInfo;
+pub use scroll_root::ScrollRoot;
+pub use scroll_root::use_scroll_root;
 pub use slot::SlotContent;
 pub use view::DiffInput;
 pub use view::FileDiffView;

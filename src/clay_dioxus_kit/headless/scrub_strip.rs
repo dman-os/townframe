@@ -394,6 +394,9 @@ struct StripState {
     announced: Option<usize>,
     /// The breakpoint under a hovering pointer, when not pressed.
     hovered: Option<usize>,
+    /// Where the owner said the list currently is while a gesture held the strip (a scroll
+    /// the gesture itself set off reports back mid-drag): the strip goes there once it rests.
+    follow: Option<usize>,
 }
 
 impl StripState {
@@ -431,6 +434,10 @@ enum StripEvent {
     },
     /// A keyboard step of `by` breakpoints.
     Nudge(f64),
+    /// The owner's list is at this breakpoint (it scrolled there): a strip at rest moves its
+    /// focus without announcing it, since the owner is not waiting for a selection; a strip
+    /// under a thumb keeps it for when the thumb is gone.
+    Follow(usize),
 }
 
 impl StripState {
@@ -477,6 +484,9 @@ impl StripState {
                 if state.engaged() {
                     state.thumb_x = None;
                     state.pull = 0.0;
+                    if let Some(index) = state.follow.take() {
+                        state.focus = index.min(count - 1) as f64;
+                    }
                 }
             }
             StripEvent::Hover { y } => {
@@ -494,6 +504,14 @@ impl StripState {
             }
             StripEvent::Nudge(by) => {
                 selected = state.commit((state.focus + by).round(), count);
+            }
+            StripEvent::Follow(index) => {
+                let index = index.min(count - 1);
+                if state.engaged() {
+                    state.follow = Some(index);
+                } else {
+                    state.focus = index as f64;
+                }
             }
         }
         (state, selected)
@@ -539,6 +557,11 @@ pub fn ScrubStrip(
     #[props(default = "Index".to_string())]
     label: String,
     #[props(default = Renderer::Blitz)] renderer: Renderer,
+    /// The item the owner's content is at, when it can say (a list that scrolls reports the item
+    /// at its top). The strip's focus follows it while at rest and does not call `on_select`;
+    /// while a thumb holds the strip, the last value waits for the release.
+    #[props(default)]
+    current: Option<usize>,
 ) -> Element {
     assert!(!items.is_empty(), "ScrubStrip requires at least one item");
     let count = items.len();
@@ -559,6 +582,12 @@ pub fn ScrubStrip(
             on_select.call(index);
         }
     });
+
+    use_effect(use_reactive!(|(current,)| {
+        if let Some(index) = current {
+            send.call(StripEvent::Follow(index));
+        }
+    }));
 
     let view = state();
     let pressed = view.engaged();
