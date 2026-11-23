@@ -18,16 +18,25 @@ Set by the operator, 2026-11-24 (D76, D77). These outrank the older week goals (
 
 **The principle under both** (D74): record and structure always; work out use and delivery later.
 
-**This week (D77), product goals:**
+**This week (D77, D78–D80), product goals.** Both are a matter of code, not invention, so they go first:
 
-- **Review on mobile.** A web app for viewing public intxts, in Dioxus web, SSR first with server functions, so a phone reviews through its browser and needs no day node of its own. `src/btress_sysadmin` (Leptos SSR) is the precedent for the shape.
-- **Forge integrations,** designed generally (C5). forges.link is the reference vocabulary. It is `forges`, Daniel Roe's MIT TypeScript client for 14 forges, not a protocol. Its parts that matter here:
-  - refs (`RepoRef`, `ThreadRef`, `CommitRef`) with `forge` and `instance`;
-  - stable keys built from the forge's own repo id;
-  - `parseUrl`/`urlFor`, `parseReferences`;
-  - normalised kinds and states with the raw values kept;
-  - per-operation capability levels.
-- **Every one of the operator's Claude Code sessions is recorded,** and the operator plays with collection. The layers over it come after that play.
+- **The web app** (D79): a neutral viewer of intxts across any number of relays, run by a relay provider, so review works from a phone's browser. MVP grade.
+  - It's built in Dioxus, SSR first, as a wasm `wasi:http` component, after the `src/btress_sysadmin` precedent (Leptos SSR).
+  - Given an intxt's drawer or doc id and a node that hosts it, it resolves the rest, through its own relay node.
+  - Don't over-depend on that model: intxts should be viewable without a node, and webnodes are coming. So the rendering and resolving components are built to be reused by a webnode, and the relay-backed server is one host of them.
+  - What "public" means is still developing; progress doesn't wait on it.
+  - This is the web app, not the phone app.
+- **Forge integration** (D80), designed generally (C5). Authentication and identity come first, including linking a PR and an intxt; how to start is to be discussed with the operator (`intxt-forge-identity.md`).
+  - TypeScript is usable: `src/btress_auth` runs Better Auth as a `jco componentize` wasm component.
+  - No Rust port of forges.link was found (11-24); the closest is `vcs-forge`, which covers the PR lifecycle on GitHub, GitLab and Gitea and is CLI-oriented.
+  - forges.link is the reference vocabulary. It is `forges`, Daniel Roe's MIT TypeScript client for 14 forges, not a protocol. Its parts that matter here:
+    - refs (`RepoRef`, `ThreadRef`, `CommitRef`) with `forge` and `instance`;
+    - stable keys built from the forge's own repo id;
+    - `parseUrl`/`urlFor`, `parseReferences`;
+    - normalised kinds and states with the raw values kept;
+    - per-operation capability levels.
+- **Deferred (D78):** FDR 010 and everything downstream of it waits until both goals above are done: intents, turn-id injection, fences, inline tags, the stage step, the task fence over Claude Code's newer task tools. Those are invention.
+- **Plain recording of the operator's Claude Code sessions** (`record install`) is small and stays, after the two goals.
 - Carried from D66: every surface is signed off by the operator using it.
 
 ## Citizenship register
@@ -170,6 +179,13 @@ Round 1 as given (2026-11-19, CLI dogfood; proposals mine where marked):
   - all of the operator's Claude Code sessions recorded, then play with collection before the layers over it.
   
   This narrows D68: mobile review is the web app in a phone's browser; the Android app stays claytxt's.
+- **D78 (2026-11-24, operator) FDR 010 and everything downstream waits until the forge integration and the web app are done.** That covers intents, interpretations, tasks, decisions and guides; turn-id injection; fences, inline tags and the stage step (D75); and the task fence over Claude Code's newer task tools. Those are invention; the forge integration and the web app are a matter of code.
+- **D79 (2026-11-24, operator) The web app is a neutral viewer of intxts across N relays,** run by a relay provider, in wasm, SSR first, MVP grade.
+  - It learns of an intxt from its drawer or doc id and a node that hosts it (drawers are built to be discovered and mirrored), and reaches it through its own relay node.
+  - It must not over-depend on that model: intxts should be viewable without a node, and webnodes are coming, so the components are built for reuse by both.
+  - "Public" is still being defined and doesn't block progress.
+  - It is the web app, not the phone app.
+- **D80 (2026-11-24, operator) Forge integration starts with authentication and identity, including linking a PR and an intxt.** TypeScript is usable (Better Auth in `src/btress_auth`, componentized with jco). No Rust port of forges.link was found. How to start is to be discussed first.
 
 ## For the ADRs
 
@@ -387,6 +403,9 @@ Keep this section short: what's moving now and what's next. Move finished entrie
   - The dogfood walkthrough and capture's "needs the daemon" messages follow these changes.
   - Datum inspection becomes `day dump doc <id> [<key>]` / `day dump drawer <id>` (node-69).
 - **Next:**
-  - the web app for public intxts and the forge vocabulary (product, D77);
-  - `record install` and the gaps above, so every session is recorded;
+  - the forge-identity discussion with the operator (`intxt-forge-identity.md`, D80);
+  - the web app's skeleton (D79): one intxt rendered by SSR from a doc id and a node;
+  - `record install`;
   - raising C4, C5 and C8 with nodules, and C1 and C2 with claytxt (citizenship).
+  
+  FDR 010's work is deferred (D78).
