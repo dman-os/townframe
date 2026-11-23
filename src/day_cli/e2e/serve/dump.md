@@ -43,9 +43,7 @@ $ day dump grants
 
 $ day dump doc nonsense
 ? 1
-Error:[..]
-   0: `nonsense` is not a document or drawer id[..]
-...
+Error: `nonsense` is not a document or drawer id[..]
 
 $ day node stop
 server stopped (pid [..])
