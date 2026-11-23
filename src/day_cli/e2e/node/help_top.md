@@ -12,6 +12,7 @@ Commands:
   peers        Manage the peers the node's server dials at start [alias: peer]
   drawers      Share drawers with other nodes [alias: drawer]
   grants       What cartridges may reach, and the requests they make for more [alias: grant]
+  dump         Raw debug view of what the node holds, as JSON
   exec         Execute an operation through the node's dispatch router and print the JSON answer [alias: x]
   completions  Generate shell completions
   help         Print this message or the help of the given subcommand(s)
