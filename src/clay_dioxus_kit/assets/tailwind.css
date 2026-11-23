@@ -293,6 +293,9 @@
   .flex {
     display: flex;
   }
+  .flow-root {
+    display: flow-root;
+  }
   .grid {
     display: grid;
   }
@@ -336,9 +339,6 @@
   }
   .min-h-18 {
     min-height: calc(var(--ct-spacing) * 18);
-  }
-  .min-h-screen {
-    min-height: 100vh;
   }
   .w-28 {
     width: calc(var(--ct-spacing) * 28);
@@ -600,6 +600,9 @@
   }
   .text-left {
     text-align: left;
+  }
+  .font-mono {
+    font-family: var(--ct-font-family-mono);
   }
   .font-sans {
     font-family: var(--ct-font-family-sans);
