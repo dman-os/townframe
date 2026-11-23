@@ -22,7 +22,7 @@ use std::sync::Arc;
 /// mounts it. Sample is eager so its section is written at boot. The lifecycle controls are the
 /// composition's own Settings section. Collection access is resolved
 /// by the composition from each manifest's requests and configuration, not hand-written here.
-fn native_micros() -> Vec<InstalledMicro> {
+pub(crate) fn native_micros() -> Vec<InstalledMicro> {
     let shell = clay_mdk::MicroId::local(micro_shell_manifest::ID);
     vec![
         InstalledMicro {

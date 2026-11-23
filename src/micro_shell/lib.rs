@@ -272,6 +272,8 @@ impl Shell {
     }
 }
 
+clay_mdk::export_micro!(activate, micro_shell_manifest::manifest);
+
 /// The shell reads its panels and its arrangement, and publishes its frame, home panel, button
 /// and navigation calls. The home panel and the frame's root row are declared in the manifest,
 /// so they exist before this runs.

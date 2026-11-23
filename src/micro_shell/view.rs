@@ -208,6 +208,33 @@ fn open_panel(
     });
 }
 
+/// SPIKE (C1 step 0): in-process the host's inputs are a Dioxus context; a guest VirtualDom has
+/// none, so the guest build gets a fixed 1200 px window with no back gesture and no seed. The
+/// signals are local to each component that asks, which still exercises `use_effect` and the
+/// shell's `can_back` write.
+#[cfg(not(target_os = "wasi"))]
+fn use_host() -> HostInputs {
+    use_context::<HostInputs>()
+}
+
+#[cfg(target_os = "wasi")]
+fn use_host() -> HostInputs {
+    let width = use_signal(|| 1200.0_f64);
+    let height = use_signal(|| 800.0_f64);
+    let insets = use_signal(crate::Insets::default);
+    let platform_back = use_signal(|| 0_u64);
+    let can_back = use_signal(|| false);
+    HostInputs {
+        width: width.into(),
+        height: height.into(),
+        insets: insets.into(),
+        platform_back,
+        can_back,
+        keyboard: false,
+        start: None,
+    }
+}
+
 /// Wire the frame to the host (ADR 032 §3): the platform back gesture lands on the stack, and the
 /// host is told whether back has somewhere to go.
 fn use_host_wiring(shell: &Shell, host: &HostInputs, can_go_back: bool) {
@@ -273,7 +300,7 @@ fn sheet_element(
 
 #[component]
 fn Frame(shell: Shell) -> Element {
-    let host = use_context::<HostInputs>();
+    let host = use_host();
     let width_px = *host.width.read();
     let width = WidthClass::from_px(width_px);
     let state = use_state(&shell);
@@ -435,7 +462,7 @@ fn Frame(shell: Shell) -> Element {
 /// panels that fill the sidebar socket.
 #[component]
 fn Sidebar(shell: Shell) -> Element {
-    let host = use_context::<HostInputs>();
+    let host = use_host();
     let wide = WidthClass::from_px(*host.width.read()).fits_side_by_side();
     let state = use_state(&shell);
     let panels = use_rows(&shell.panels);
@@ -538,7 +565,7 @@ fn Home(shell: Shell) -> Element {
 /// offering a no-op, and a details panel beside its list leaves the button to the list.
 #[component]
 fn NavigationButton(shell: Shell) -> Element {
-    let host = use_context::<HostInputs>();
+    let host = use_host();
     let state = use_state(&shell);
     let wide = WidthClass::from_px(*host.width.read()).fits_side_by_side();
     // Outside a frame's mount (a button mounted somewhere the shell did not place) the button
