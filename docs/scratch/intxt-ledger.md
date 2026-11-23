@@ -44,12 +44,30 @@ Set by the operator, 2026-11-24 (D76, D77). These outrank the older week goals (
 Ways intxt is special-cased or ahead of the general mechanism. Each entry gives the owner of the fix and what fixes it. Keep it current: add an entry when a shortcut is taken, and close it, with its date, when it's fixed.
 
 - **C1, `Context::call_bytes` is INTERIM** (#213, clay_mdk). Byte-answering node methods have no `Unary` wire form, so the review micro reads blobs through a side door. Fix: a byte body in `method_core` that any method can declare. Owners: nodules and claytxt.
+  - claytxt (11-24): agreed.
+    - The method declares its output as `method_core::ByteBody`, which is nodules' to settle, and `Context::call` delivers it as a stream.
+    - The guest view's wake moves into the waker.
+    - claytxt drives the Clay half once nodules settles the declaration, and deletes `call_bytes` then.
 - **C2, the review micro's configuration is INTERIM.** The composition mints `doc_cap`/`blob_cap` for the micro's actor and writes a configuration entry at install. Fix: `#drawers` permbinds and the 6.2 domain handle, as for any micro. Owner: claytxt.
+  - claytxt (11-24):
+    - What exists: ADR 049 grants with `resolveCartridgePin`/`awaitCartridgeGrants` (#182, #184, #195), and the daytxt host mints cartridge micros from their uses and grants (claytxt layer 29).
+    - What's missing: a micro reaching its granted `#drawers` through the 6.2 domain handle on `Cx`.
+    - To drop `ReviewConfig`, the review micro declares its uses in its manifest (`#drawers` read for intxt kinds, and blobs) and reads the drawer and blob handles from `Cx`. The host part goes on claytxt's stack after its NSID layer; the micro side is intxt's.
+- **C12, the web app can't show diffs yet.** Pierre's diff view mounts in a shadow root, so server-side rendering without a browser needs declarative shadow DOM (`<template shadowrootmode>`). Owner: claytxt (this week's web-components work). The kit itself renders under dioxus-ssr: it has no host or `clay_mdk` dependency, and serves `assets/tailwind.css` as a plain link without the `host` feature. Interactive pieces render static without hydration.
 - **C3, the cartridge is published with the fixture key** (`sign_as_example`). Fix: the publisher signing namespace / DID, which the operator deferred on 11-18. Owner: nodules.
 - **C4, intxt's CLI is compiled into `day`** (`src/day_cli/cmds/intxt*`). A cartridge can't contribute commands, so intxt is a special case in the node's own binary. Fix: cartridge-contributed CLI verbs, or a generic `day x <cartridge> …` dispatch over the cartridge's methods. Owner: nodules.
   - Nodules' leaning (11-24), with a written proposal to follow: `day x <cartridge> <verb>` resolves a command binding (consumer-owned metadata naming a method NSID, their D2b) and derives its flags from the method's Lexicon `parameters`/`input`, so the manifest carries only the verb name and help text. A host-side CLI component comes later, for verbs that need local files or a TTY.
   - **Rule meanwhile: every new intxt verb is a thin layer over a method,** so it ports mechanically.
 - **C5, forge data is intxt's.** `day x intxt github` runs `gh` on the CLI's host and writes intxt's GitHub document. Fix: a forge vocabulary and cartridge that any cartridge reads (forges.link's ref, key and kind model), fetched on the node through egress (#198 `#net` permbind) with node secret storage for tokens. Owner: intxt designs it, nodules supply egress and secrets.
+  - Spike (11-24, `spike/forge-probe` 7e06f6cc): forges 0.4.1 componentizes with jco and runs under wasmtime, with no WASI-hostile code.
+    - It fetched GitHub anonymously and with a token, and Codeberg anonymously, all normalised, e.g. key `github:github.com/octocat/hello-world#pull_request/1`.
+    - Costs:
+      - the component is 16 MB, nearly all of it the StarlingMonkey runtime;
+      - StarlingMonkey imports `wasi:sockets` and the filesystem whether or not they're used, so denying them is a host policy, not an import check;
+      - env must be read inside `run()`, not at module top level (Wizer init).
+    - Import only subpaths (`forges/github`, `forges/forgejo`, `forges/web`). The root entry breaks rolldown, through a dynamic-import cycle in the webhook translators.
+    - `threadKey` is exported only from the root, so reimplement it (`${repoKey(repo)}#${kind}/${number}`) or ask upstream to export it from `forges/helpers`.
+    - `auth.token` accepts a function, which fits a lazily read secret.
 - **C6, comments and recording are intxt vocabularies** (`org.example.intxt.*`, `day x intxt record`), though the operator wants comments across daytxt and recording for end users' vibe-coded micros (D39, D71 follow-ups). Fix: generic families before beta. Owner: intxt.
 - **C7, who wrote something is claimed, not attested.** The marker `writer` (#228) and a comment's `creator`/`generator` (D69) are claims, because the operator and an agent on one node are one attested actor. Fix: ADR 043 per-agent actors (and D49, the Claude Code plugin as a subsystem actor under intxt's). Owner: nodules.
 - **C8, intxt's content documents are found by a `<kind>/main` marker over `PollDatums`** (D70). This is a convention local to intxt for "the documents of kind K in drawer D, per writer". Question for nodules: is it a cabinet-level pattern other cartridges should use, or a gap in drawer layout?
