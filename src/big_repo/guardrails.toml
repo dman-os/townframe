@@ -515,3 +515,48 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 "src/big_repo/sqlite/migrations/002_big_repo_init.sql" = "fe1670884088ff0551b1006d412f841b6b9e0ab07a4d0f6afd528ef30db108f5"
 "src/big_repo/sqlite/migrations/003_secret_blobs.sql" = "fc3be9c97e370e15241d21eef604a6ec59e26c8bab23e3a560303e84ac5331d2"
 "src/big_repo/sqlite/migrations/004_single_consumer_watermark.sql" = "036383fda79a7d730181be21ce7081cf866a99a7a0dfd7dd172740ed33ad1538"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/big_repo/store/sqlite/events.rs"
+symbol = "module::SqliteBigRepoStore::append_admitted_events"
+ceiling = 3
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/big_repo/store/sqlite/parts_cursors.rs"
+symbol = "module::SqliteBigRepoStore as HostPartStore::get_changed_buckets"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/big_repo/store/sqlite/parts_cursors.rs"
+symbol = "module::SqliteBigRepoStore as HostPartStore::leaf_buckets"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/big_repo/store/sqlite/parts_cursors.rs"
+symbol = "module::SqliteBigRepoStore as HostPartStore::summarize_parts"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/big_repo/store/sqlite/tests.rs"
+symbol = "module::sqlite_migrations_are_scope_independent_and_preserve_data"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
