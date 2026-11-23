@@ -8,6 +8,8 @@ use big_blobs_core::BlobInfo;
 use iroh_blobs::store::virtual_blob::Provider as _;
 use std::collections::BTreeMap;
 
+const UPLOAD_HOLD_GRACE_SECS: i64 = crate::service::DEFAULT_UPLOAD_HOLD_GRACE.as_secs() as i64;
+
 struct Harness {
     sql: Database,
     store: Store,

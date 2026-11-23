@@ -689,7 +689,10 @@ impl Retention {
     /// them (ADR 042 §6). It rides on the retention pass rather than a timer of its own: the pass
     /// runs at boot and whenever retention changes, which is when a hold's expiry matters.
     async fn expire_uploads(&self) -> Res<()> {
-        let before = crate::ownership::unix_now() - crate::ownership::UPLOAD_HOLD_GRACE_SECS;
+        let grace = i64::try_from(self.service.upload_hold_grace.as_secs()).map_err(|error| {
+            eyre::eyre!("the upload hold grace does not fit unix seconds: {error}")
+        })?;
+        let before = crate::ownership::unix_now() - grace;
         self.service.ownership.expire_uploads(before).await?;
         Ok(())
     }

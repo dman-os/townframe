@@ -213,6 +213,7 @@ impl Fixture {
         let sql = SqliteRuntime::new(Default::default()).ephemeral(&[])?;
         let parts: big_repo::SharedPartStore = Arc::new(big_sync::MemoryPartStore::new());
         let (blobs, blob_stop) = crate::boot(crate::Config {
+            upload_hold_grace: None,
             storage: crate::Storage::memory().unwrap(),
             sql: sql.clone(),
             authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),

@@ -20,12 +20,6 @@ use utils_rs::prelude::eyre;
 
 type Operation = Box<dyn for<'a> FnOnce(&'a mut State) -> BoxFuture<'a, ()> + Send>;
 
-/// How long an upload nothing references keeps its bytes (ADR 042 §6): a client that goes offline
-/// between putting and recording what it put (a laptop closed mid-capture) still finds its
-/// uploads the next working day, and one that needs longer puts again, which is cheap because a
-/// put is idempotent.
-pub(crate) const UPLOAD_HOLD_GRACE_SECS: i64 = 24 * 60 * 60;
-
 /// Unix seconds now.
 pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()

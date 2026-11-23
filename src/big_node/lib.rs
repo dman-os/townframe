@@ -130,6 +130,9 @@ pub struct Config {
     /// machine's own loopback. A guest's own `127.0.0.1` and `localhost` never do. Fixed at
     /// boot, so no nodule or runtime call can turn it on.
     pub allow_host_loopback: bool,
+    /// How long an upload nothing references keeps its bytes (`blobs.upload_hold_grace_secs` in
+    /// `node.json`); `None` is [`big_blobs::service::DEFAULT_UPLOAD_HOLD_GRACE`].
+    pub upload_hold_grace: Option<std::time::Duration>,
 }
 
 /// A node's id: the public half of its identity seed in lowercase hex, which is its keyhive
@@ -373,6 +376,7 @@ impl BigNode {
             let (blobs_actor, blobs_namespace) = open_actor(&authority, "blobs").await?;
             let repo = boot_repo(config.repo, &mut stop).await?;
             let (blobs, blobs_stop) = big_blobs::boot(big_blobs::Config {
+                upload_hold_grace: config.upload_hold_grace,
                 storage: config.blob_storage,
                 sql: config.sql.clone(),
                 authority: authority.client.clone(),

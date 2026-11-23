@@ -42,6 +42,7 @@ impl Harness {
         })
         .await?;
         let (blobs, blobs_stop) = crate::boot(crate::Config {
+            upload_hold_grace: None,
             storage: crate::Storage::memory().unwrap(),
             sql: runtime.ephemeral(&[])?,
             authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),

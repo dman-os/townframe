@@ -649,6 +649,7 @@ async fn a_member_parked_before_its_content_arrives_is_read_again_when_it_materi
     )
     .await?;
     let (blobs, blobs_stop) = crate::boot(crate::Config {
+        upload_hold_grace: None,
         storage: crate::Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),

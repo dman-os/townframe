@@ -725,6 +725,7 @@ impl Node {
             .await
             .expect("blobs namespace");
         let (blobs, blobs_stop) = big_blobs::boot(big_blobs::Config {
+            upload_hold_grace: None,
             storage: big_blobs::Storage::memory().expect("blob storage"),
             sql: (*sql).clone(),
             authority: authority.client.clone(),
