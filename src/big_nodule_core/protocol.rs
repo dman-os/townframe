@@ -151,14 +151,14 @@ pub struct NoduleGrantStatus {
 }
 
 /// Desired and effective state of the dispatch capability a nodule's method grants mint.
-/// `desired` is the configured grants bounded by the manifest: only operations the nodule
+/// `desired` is the configured grants bounded by the manifest: only methods the nodule
 /// requests (see [`crate::Nodule::bind_operations`]).
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoduleMethodGrantStatus {
     pub desired: DispatchScope,
-    /// Configured grant entries that cover no requested operation. They are not applied: the
+    /// Configured grant entries that cover no requested method. They are not applied: the
     /// manifest bounds what configuration can confer.
     #[serde(default, skip_serializing_if = "DispatchScope::is_empty")]
     pub unrequested: DispatchScope,

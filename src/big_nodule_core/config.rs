@@ -73,7 +73,7 @@ use std::sync::Mutex;
 /// `org.example.daybook.nodule.devTakeover/<cartridgeId>`: the dev hook that runs the installed
 /// cartridge `by` *as* this cartridge, to test a dev build against real data (ADR 045 §5). `by`'s
 /// code and manifest take the slot over, and every other slot state (actor, drawer grants, method
-/// grants narrowed by `substituted_grants`, operation caps, initializer done-ness, the resolution
+/// grants narrowed by `substituted_grants`, method caps, initializer done-ness, the resolution
 /// lockfile, dispatch registrations) stays keyed by this cartridge id, so the dev build holds the
 /// original's data and actor. Only `setNoduleDevTakeover` writes it, and that is refused unless
 /// the node's `node.json` sets `dev.allow_slot_takeover`. Absence means the slot runs its own
@@ -741,7 +741,7 @@ pub struct ResolvedGrants {
     /// Hosts the cartridge may use the network to reach: what a routine's `#net` permbind is
     /// checked against at egress (ADR 049 §2).
     pub nets: BTreeSet<NetTarget>,
-    /// The operations and authorities the cartridge may invoke through dispatch.
+    /// The methods and authorities the cartridge may invoke through dispatch.
     pub operations: DispatchScope,
 }
 
@@ -1101,7 +1101,7 @@ impl NoduleConfig {
     /// the hook's purpose. Method grants never widen silently (ADR 028 §3): a different
     /// publisher's manifest asks for a different set of things, and a granted authority prefix
     /// would otherwise cover whatever it newly asks for. So what reaches the filler is narrowed
-    /// when the slot is resolved (`substituted_grants`) to exactly the operations it requests
+    /// when the slot is resolved (`substituted_grants`) to exactly the methods it requests
     /// *identically* (binding, contract and access) to a request of the slot's own install, and
     /// every other request it makes is ungranted (a required one holds the nodule at
     /// `NeedsConfiguration`) until the operator grants it. The stored grants are untouched, so
@@ -1545,7 +1545,7 @@ fn filler<'a>(
 /// The method grants that reach the code filling a slot under a dev takeover. The slot's grants were
 /// given for its own code's requests: a request the filler shares with that code (same binding,
 /// contract and access) keeps whatever grant covered it, while one the filler adds or widens is
-/// covered only by a grant naming that exact operation. A prefix grant is broad consent given for
+/// covered only by a grant naming that exact method. A prefix grant is broad consent given for
 /// the slot's own code and never silently stretches to the filler's additions (ADR 028 §3), so
 /// granting one means naming it. This is computed, never written back: the stored grants are
 /// untouched, and clearing the takeover restores exactly what was granted.
