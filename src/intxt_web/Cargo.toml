@@ -14,7 +14,10 @@ wit-bindgen = { version = "0.62.0", features = ["async-spawn", "futures-stream",
 # `devtools`, `document`, `asset` (those pull tokio/axum/wasm-bindgen/manganis).
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "html", "hooks", "signals"] }
 dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-router = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-history = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+clay_dioxus_kit = { path = "../clay_dioxus_kit" }
 
 # Single-crate workspace, like btress_sysadmin: keeps the root lockfile untouched.
 [workspace]

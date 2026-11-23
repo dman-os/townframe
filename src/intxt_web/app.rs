@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use dioxus_router::{Routable, Router};
 
 #[derive(PartialEq)]
 struct Intxt {
@@ -162,6 +163,12 @@ fn not_found_page(path: String) -> Element {
 
 /// Hand-rolled routing: `/` renders the fixture, `/i/<drawer id>` renders it under that id.
 pub fn route(path_with_query: &str) -> Option<String> {
+    if path_with_query == "/k" {
+        return Some(kit_page());
+    }
+    if let Some(rest) = path_with_query.strip_prefix("/r") {
+        return Some(route_with_router(rest));
+    }
     let path = path_with_query.split('?').next().unwrap_or("/");
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     match segments[..] {
@@ -173,4 +180,74 @@ pub fn route(path_with_query: &str) -> Option<String> {
 
 pub fn not_found(path: &str) -> String {
     render(not_found_page, path.to_owned())
+}
+
+#[derive(Clone, Routable, PartialEq)]
+enum Route {
+    #[route("/")]
+    Index {},
+    #[route("/i/:drawer_id")]
+    Drawer { drawer_id: String },
+}
+
+#[component]
+fn Index() -> Element {
+    rsx! { IntxtView { drawer_id: "fixture", intxt: &FIXTURE } }
+}
+
+#[component]
+fn Drawer(drawer_id: String) -> Element {
+    rsx! { IntxtView { drawer_id, intxt: &FIXTURE } }
+}
+
+/// Same fixture through `clay_dioxus_kit`: entries as `ListRow`s inside a `ListDetails`.
+pub fn kit_page() -> String {
+    use clay_dioxus_kit::{ListDetails, ListRow, Split, WidthClass};
+    fn root(_: ()) -> Element {
+        rsx! {
+            Shell { title: FIXTURE.title,
+                ListDetails {
+                    width: WidthClass::Expanded,
+                    list_name: "Entries",
+                    list: rsx! {
+                        for (i , entry) in FIXTURE.entries.iter().enumerate() {
+                            ListRow { id: "{i}", name: "entry {i}",
+                                EntryRow { entry }
+                            }
+                        }
+                    },
+                    details_name: "Comments",
+                    details: Some(rsx! {
+                        for comment in FIXTURE.comments {
+                            p {
+                                strong { "{comment.author}: " }
+                                "{comment.body}"
+                            }
+                        }
+                    }),
+                    current: Some("0".to_owned()),
+                    split: Split::new(vec![1.0, 2.0], 900.0),
+                    on_resize: |_| {},
+                    on_open: |_| {},
+                    on_back: |_| {},
+                }
+            }
+        }
+    }
+    let mut dom = VirtualDom::new_with_props(root, ());
+    dom.rebuild_in_place();
+    dioxus_ssr::render(&dom)
+}
+
+pub fn route_with_router(path: &str) -> String {
+    fn root(path: String) -> Element {
+        use std::rc::Rc;
+        dioxus_history::provide_history_context(Rc::new(
+            dioxus_history::MemoryHistory::with_initial_path(path),
+        ));
+        rsx! { Router::<Route> {} }
+    }
+    let mut dom = VirtualDom::new_with_props(root, path.to_owned());
+    dom.rebuild_in_place();
+    dioxus_ssr::render(&dom)
 }
