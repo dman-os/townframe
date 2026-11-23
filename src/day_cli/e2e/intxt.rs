@@ -636,7 +636,9 @@ async fn assert_commit_membership(
             .unwrap()
             .is_empty()
     );
-    // Besides the commits, the document holds the entry's two blob datums: its pack and its patch.
+    // Besides the commits, the document holds the entry's two blob datums (its pack and its
+    // patch), each with the cipherBlob and JWK that a blob in a content document is stored as,
+    // at the blob's own slot (ADR 026 §3).
     let (blobs, held): (Vec<_>, Vec<_>) = caller
         .datum_keys(&commits_doc)
         .await
@@ -644,14 +646,28 @@ async fn assert_commit_membership(
         .into_iter()
         .partition(|key| key.tag().as_str() == big_blobs_core::Blob::ID);
     assert_eq!(blobs.len(), 2, "{blobs:?}");
-    let held: Vec<_> = held.into_iter().map(|key| key.to_string()).collect();
+    let mut held: Vec<_> = held.into_iter().map(|key| key.to_string()).collect();
+    held.sort();
     assert_eq!(
         held,
         {
-            let mut expected = [first.clone(), second.clone()]
-                .map(|sha| format!("org.example.intxt.work.gitCommit/{sha}"));
+            let mut expected: Vec<_> = blobs
+                .iter()
+                .flat_map(|blob| {
+                    let blob = blob.to_string();
+                    let (_, slot) = blob.split_once('/').expect("a datum key is tag/slot");
+                    [
+                        format!("org.example.daybook.cipherBlob/{slot}"),
+                        format!("org.example.daybook.jwk/{slot}"),
+                    ]
+                })
+                .chain(
+                    [first.clone(), second.clone()]
+                        .map(|sha| format!("org.example.intxt.work.gitCommit/{sha}")),
+                )
+                .collect();
             expected.sort();
-            expected.to_vec()
+            expected
         },
         "the commits document holds the range's commits and the entry's blobs, nothing else"
     );
