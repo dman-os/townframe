@@ -99,21 +99,19 @@ impl TaskCounts {
     }
 }
 
-pub struct TaskCtx<K, PStore, Rpc, Rng> {
+pub struct TaskCtx<PStore, Rpc, Rng> {
     pub task_id: TaskId,
     pub main_tx: mpsc::Sender<MachineTaskMsg>,
     pub rpc_clients: Map<PeerKey, Rpc>,
     pub part_store: PStore,
     pub rng: Rng,
-    pub _phantom: std::marker::PhantomData<K>,
 }
 
 impl MachineTask {
-    pub async fn run<K, PStore, Rpc, Rng>(self, mut cx: TaskCtx<K, PStore, Rpc, Rng>)
+    pub async fn run<PStore, Rpc, Rng>(self, mut cx: TaskCtx<PStore, Rpc, Rng>)
     where
-        K: FutureForm,
-        PStore: PartStoreRead<K>,
-        Rpc: BigSyncRpcClient<K>,
+        PStore: PartStoreRead,
+        Rpc: BigSyncRpcClient,
         Rng: rand::Rng,
     {
         let res = match self.deets {

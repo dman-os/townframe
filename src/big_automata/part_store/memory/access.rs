@@ -7,6 +7,7 @@ use crate::part_store::AuthorizedPage;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
+use crate::part_store::ObjPayload;
 use crate::part_store::PartDirtyCount;
 use crate::part_store::PartSummary;
 use crate::part_store::ReadVerdict;
@@ -100,6 +101,7 @@ impl State {
             parts,
             objects,
             rows,
+            payloads,
         } = page;
         parts.clear();
         parts.extend(
@@ -122,22 +124,74 @@ impl State {
             .filter(|(_, verdict)| **verdict == ReadVerdict::Permitted)
             .map(|(obj, _)| obj)
             .collect::<BTreeSet<_>>();
-        self.log.read_into(
-            |key, rev, value| match key {
-                LogKey::Member { obj, part } => {
-                    let (on_part, on_object) =
-                        routes.carriers(obj, part, rev, after, self.removed_added_at(key, value));
-                    (on_part || (on_object && readable_objects.contains(obj)))
-                        && self.permits(principal, part)
-                }
-                LogKey::Access { .. } => false,
-            },
-            log_row_bytes,
-            after,
-            until,
-            limits,
-            rows,
+        assert!(
+            after <= until,
+            "read window ({after}, {until}] runs backwards"
         );
+        if after == until {
+            // The empty window: verdicts only. The okv read asserts a non-empty window, and
+            // there is nothing for it to read anyway.
+            assert!(
+                until <= self.log.rev(),
+                "read until {until} past the committed rev"
+            );
+            rows.entries.clear();
+            rows.through = until;
+        } else {
+            self.log.read_into(
+                |key, rev, value| match key {
+                    LogKey::Member { obj, part } => {
+                        let (on_part, on_object) = routes.carriers(
+                            obj,
+                            part,
+                            rev,
+                            after,
+                            self.removed_added_at(key, value),
+                        );
+                        (on_part || (on_object && readable_objects.contains(obj)))
+                            && self.permits(principal, part)
+                    }
+                    LogKey::Access { .. } => false,
+                },
+                log_row_bytes,
+                after,
+                until,
+                limits,
+                rows,
+            );
+        }
+        self.page_payloads(&rows.entries, payloads);
+    }
+
+    /// The payload of every object with a live row in `entries`, into `payloads` sorted by
+    /// object. The keys are gathered and deduplicated first, so each payload is cloned once
+    /// however many of the page's rows name its object.
+    fn page_payloads(
+        &self,
+        entries: &[crate::rev::Entry<LogKey, LogEntry>],
+        payloads: &mut Vec<(ObjKey, ObjPayload)>,
+    ) {
+        payloads.clear();
+        payloads.extend(
+            entries
+                .iter()
+                .filter(|entry| entry.value.is_some())
+                .map(|entry| match &entry.key {
+                    LogKey::Member { obj, .. } => (obj.clone(), ObjPayload::Null),
+                    LogKey::Access { .. } => {
+                        unreachable!("an authorized read carries no access row")
+                    }
+                }),
+        );
+        payloads.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        payloads.dedup_by(|(left, _), (right, _)| left == right);
+        for (obj, payload) in payloads.iter_mut() {
+            let row = self
+                .objs
+                .get(obj)
+                .expect("a live membership always has a payload");
+            payload.clone_from(&row.payload);
+        }
     }
 
     /// Counts the part's member rows through the member index (every member with a row, live

@@ -303,6 +303,13 @@ impl ReplayClient {
                 self.unwind_in_flight();
                 Ok(UpdateOutcome::Limit)
             }
+            // A deadline or cancellation is the transport's, not the server's verdict: the
+            // update may or may not have applied, so it is resent unchanged, as a lost one is
+            // (law 2 makes the repeat safe).
+            Err(SessionError::Context(_)) => {
+                self.update_lost(request);
+                Ok(UpdateOutcome::Stale)
+            }
             Err(err @ (SessionError::UnknownTarget { .. } | SessionError::Invalid(_))) => Err(
                 ferr!("the server rejected update {}: {err}", request.generation),
             ),
@@ -440,6 +447,9 @@ impl ReplayClient {
                 self.reset();
                 return Ok(RoundOutcome::Reset);
             }
+            // A round cut short by a deadline or cancellation changed nothing on either side
+            // (law 9): the caller repeats it from the same cursors.
+            Err(SessionError::Context(_)) => return Ok(RoundOutcome::Stale),
             Err(err @ (SessionError::Limit | SessionError::Invalid(_))) => {
                 return Err(ferr!("the server rejected a round: {err}"));
             }

@@ -1,7 +1,3 @@
-/// FIXME: this machine is per part which is not great if we have
-/// large overlapping parts from a peer? They'll share buckets anyways.
-/// It should be per peer like CursorSyncMachine
-/// - Use batched Leafing to minimize RPC
 use crate::interlude::*;
 
 use crate::fingerprint::FingerprintSeed;
@@ -442,7 +438,7 @@ fn summaries_agree(local: &BucketSummary, remote: &BucketSummary) -> bool {
 ///
 /// The local summaries of every bucket the scan can reach (the prefix at or above the working
 /// level) are read in one batch.
-pub async fn filter_buckets<K: FutureForm, S: PartStoreRead<K>>(
+pub async fn filter_buckets<S: PartStoreRead>(
     part_key: PartKey,
     working_lvl: BuckLevel,
     buckets: Vec<BucketSummary>,
@@ -531,7 +527,7 @@ pub struct BucketObjLeafPage {
 /// bucket entry, so an empty local bucket can still hold one, and a peer's removal must cancel
 /// it: the dead entry becomes a removal whenever the local object is a member of the part, live
 /// or pending.
-pub async fn filter_objects<K: FutureForm, S: PartStoreRead<K>>(
+pub async fn filter_objects<S: PartStoreRead>(
     part_key: PartKey,
     bucks: Map<BuckId, RawLeafBucketPage>,
     seed: FingerprintSeed,

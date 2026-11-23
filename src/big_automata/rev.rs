@@ -11,12 +11,7 @@
 //! reuses. Projections are built with [`RevSourceExt::map`] and [`RevSourceExt::filter_map`]
 //! instead of hand-written plumbing.
 
-use std::marker::PhantomData;
 use std::num::NonZeroUsize;
-
-use future_form::Local;
-use future_form::Sendable;
-use future_form::future_form;
 
 use tokio::sync::watch;
 
@@ -89,15 +84,16 @@ pub struct Limits {
 /// - `watch`: a [`RevWatch`] the source moves to each new rev from its commit path, after the
 ///   commit is visible to `read` and never for a batch that rolled back.
 ///
-/// Generic over the [`FutureForm`]: `Sendable` for multi-threaded runtimes, `Local` for the
-/// single-threaded web node. Implementations write one body for both with `#[future_form]`.
-pub trait RevSource<Async: FutureForm> {
-    type Key;
-    type Value;
+/// The futures it returns are `Send`, so a source drives on a multi-threaded runtime and in the
+/// single-threaded web node alike (browser handles are wrapped with `SendWrapper` at the
+/// adapter edge). Dispatch is static: a source is a generic parameter, never a trait object.
+pub trait RevSource {
+    type Key: Send;
+    type Value: Send;
     /// Which keys a read is about. Sources pick their own shape.
-    type Selector;
+    type Selector: Send + Sync;
 
-    fn latest_rev(&self) -> Async::Future<'_, Res<Rev>>;
+    fn latest_rev(&self) -> impl Future<Output = Res<Rev>> + Send;
 
     /// Clear `page` and fill it with the current rows of the selected keys whose rev is in
     /// `(after, until]`, bounded by `limits` (see [`Page`] and [`Limits`] for the shape).
@@ -108,14 +104,14 @@ pub trait RevSource<Async: FutureForm> {
     ///
     /// The caller guarantees `after < until` and that `until` is a rev it saw committed (from
     /// `latest_rev` or the watch); a source may assert both.
-    fn read<'a>(
-        &'a self,
-        selector: &'a Self::Selector,
+    fn read(
+        &self,
+        selector: &Self::Selector,
         after: Rev,
         until: Rev,
         limits: Limits,
-        page: &'a mut Page<Self::Key, Self::Value>,
-    ) -> Async::Future<'a, Res<()>>;
+        page: &mut Page<Self::Key, Self::Value>,
+    ) -> impl Future<Output = Res<()>> + Send;
 
     fn watch(&self) -> RevWatch;
 }
@@ -167,17 +163,16 @@ impl RevWatch {
 ///
 /// `next_into` is cancel safe: progress moves only when a read completes, so dropping the future
 /// part way re-reads the same window next time.
-pub struct RevStream<Async: FutureForm, S: RevSource<Async>> {
+pub struct RevStream<S: RevSource> {
     source: S,
     selector: S::Selector,
     /// Progress: everything selected at or below this has been handed out.
     after: Rev,
     snapshot_rev: Option<Rev>,
     watch: RevWatch,
-    _form: PhantomData<Async>,
 }
 
-impl<Async: FutureForm, S: RevSource<Async>> RevStream<Async, S> {
+impl<S: RevSource> RevStream<S> {
     pub fn new(source: S, selector: S::Selector, after: Rev) -> Self {
         let watch = source.watch();
         Self {
@@ -186,7 +181,6 @@ impl<Async: FutureForm, S: RevSource<Async>> RevStream<Async, S> {
             after,
             snapshot_rev: None,
             watch,
-            _form: PhantomData,
         }
     }
 
@@ -242,13 +236,9 @@ impl<Async: FutureForm, S: RevSource<Async>> RevStream<Async, S> {
 
 /// Projections over a [`RevSource`] that keep its revs, selector and watch.
 ///
-/// Generic over the form only so that it extends sources and nothing else; a store that
-/// implements both forms names one, `RevSourceExt::<Sendable>::map(store, ..)`.
-///
 /// Each returns a named type, as `Iterator`'s adapters do, so a projection is `Send` and `Sync`
-/// exactly when its source and closure are: an opaque return type would hide that, and the
-/// `Local` form must not demand it of a `!Send` source.
-pub trait RevSourceExt<Async: FutureForm>: RevSource<Async> + Sized {
+/// exactly when its source and closure are: an opaque return type would hide that.
+pub trait RevSourceExt: RevSource + Sized {
     /// Turn each value into another. Tombstones stay tombstones.
     fn map<F>(self, map: F) -> RevMap<Self, F> {
         RevMap(Projection::new(self, map))
@@ -277,7 +267,7 @@ pub trait RevSourceExt<Async: FutureForm>: RevSource<Async> + Sized {
     }
 }
 
-impl<Async: FutureForm, S: RevSource<Async>> RevSourceExt<Async> for S {}
+impl<S: RevSource> RevSourceExt for S {}
 
 /// [`RevSourceExt::map`].
 pub struct RevMap<S, F>(Projection<S, F>);
@@ -309,7 +299,7 @@ impl<S, F> Projection<S, F> {
     }
 
     /// Read the inner window into the scratch page and project it into `page` with `step`.
-    async fn read<Async, W>(
+    async fn read<W>(
         &self,
         selector: &S::Selector,
         after: Rev,
@@ -319,8 +309,7 @@ impl<S, F> Projection<S, F> {
         step: impl FnMut(Entry<S::Key, S::Value>) -> Option<Entry<S::Key, W>>,
     ) -> Res<()>
     where
-        Async: FutureForm,
-        S: RevSource<Async>,
+        S: RevSource,
         S::Key: Send + 'static,
         S::Value: Send + 'static,
     {
@@ -348,38 +337,31 @@ impl<S, F> Projection<S, F> {
     }
 }
 
-#[future_form(
-    Sendable where
-        S: RevSource<Sendable> + Sync,
-        S::Key: Send + 'static,
-        S::Value: Send + 'static,
-        S::Selector: Sync,
-        W: Send,
-        F: Fn(&S::Key, S::Value) -> W + Sync,
-    Local where
-        S: RevSource<Local>,
-        S::Key: Send + 'static,
-        S::Value: Send + 'static,
-        F: Fn(&S::Key, S::Value) -> W
-)]
-impl<Async: FutureForm, S, F, W> RevSource<Async> for RevMap<S, F> {
+impl<S, F, W> RevSource for RevMap<S, F>
+where
+    S: RevSource + Sync,
+    S::Key: 'static,
+    S::Value: 'static,
+    W: Send,
+    F: Fn(&S::Key, S::Value) -> W + Sync,
+{
     type Key = S::Key;
     type Value = W;
     type Selector = S::Selector;
 
-    fn latest_rev(&self) -> Async::Future<'_, Res<Rev>> {
+    fn latest_rev(&self) -> impl Future<Output = Res<Rev>> + Send {
         self.0.source.latest_rev()
     }
 
-    fn read<'a>(
-        &'a self,
-        selector: &'a Self::Selector,
+    fn read(
+        &self,
+        selector: &Self::Selector,
         after: Rev,
         until: Rev,
         limits: Limits,
-        page: &'a mut Page<Self::Key, Self::Value>,
-    ) -> Async::Future<'a, Res<()>> {
-        Async::from_future(self.0.read::<Async, W>(
+        page: &mut Page<Self::Key, Self::Value>,
+    ) -> impl Future<Output = Res<()>> + Send {
+        self.0.read(
             selector,
             after,
             until,
@@ -389,7 +371,7 @@ impl<Async: FutureForm, S, F, W> RevSource<Async> for RevMap<S, F> {
                 let value = value.map(|value| (self.0.project)(&key, value));
                 Some(Entry { key, rev, value })
             },
-        ))
+        )
     }
 
     fn watch(&self) -> RevWatch {
@@ -397,38 +379,31 @@ impl<Async: FutureForm, S, F, W> RevSource<Async> for RevMap<S, F> {
     }
 }
 
-#[future_form(
-    Sendable where
-        S: RevSource<Sendable> + Sync,
-        S::Key: Send + 'static,
-        S::Value: Send + 'static,
-        S::Selector: Sync,
-        W: Send,
-        F: Fn(&S::Key, S::Value) -> Option<W> + Sync,
-    Local where
-        S: RevSource<Local>,
-        S::Key: Send + 'static,
-        S::Value: Send + 'static,
-        F: Fn(&S::Key, S::Value) -> Option<W>
-)]
-impl<Async: FutureForm, S, F, W> RevSource<Async> for RevFilterMap<S, F> {
+impl<S, F, W> RevSource for RevFilterMap<S, F>
+where
+    S: RevSource + Sync,
+    S::Key: 'static,
+    S::Value: 'static,
+    W: Send,
+    F: Fn(&S::Key, S::Value) -> Option<W> + Sync,
+{
     type Key = S::Key;
     type Value = W;
     type Selector = S::Selector;
 
-    fn latest_rev(&self) -> Async::Future<'_, Res<Rev>> {
+    fn latest_rev(&self) -> impl Future<Output = Res<Rev>> + Send {
         self.0.source.latest_rev()
     }
 
-    fn read<'a>(
-        &'a self,
-        selector: &'a Self::Selector,
+    fn read(
+        &self,
+        selector: &Self::Selector,
         after: Rev,
         until: Rev,
         limits: Limits,
-        page: &'a mut Page<Self::Key, Self::Value>,
-    ) -> Async::Future<'a, Res<()>> {
-        Async::from_future(self.0.read::<Async, W>(
+        page: &mut Page<Self::Key, Self::Value>,
+    ) -> impl Future<Output = Res<()>> + Send {
+        self.0.read(
             selector,
             after,
             until,
@@ -438,7 +413,7 @@ impl<Async: FutureForm, S, F, W> RevSource<Async> for RevFilterMap<S, F> {
                 let value = value.and_then(|value| (self.0.project)(&key, value));
                 Some(Entry { key, rev, value })
             },
-        ))
+        )
     }
 
     fn watch(&self) -> RevWatch {
@@ -446,44 +421,32 @@ impl<Async: FutureForm, S, F, W> RevSource<Async> for RevFilterMap<S, F> {
     }
 }
 
-#[future_form(
-    Sendable where
-        S: RevSource<Sendable> + Sync,
-        S::Key: Send + 'static,
-        S::Value: Send + 'static,
-        S::Selector: Sync,
-        F: Fn(&S::Key) -> bool + Sync,
-    Local where
-        S: RevSource<Local>,
-        S::Key: Send + 'static,
-        S::Value: Send + 'static,
-        F: Fn(&S::Key) -> bool
-)]
-impl<Async: FutureForm, S, F> RevSource<Async> for RevFilterKeys<S, F> {
+impl<S, F> RevSource for RevFilterKeys<S, F>
+where
+    S: RevSource + Sync,
+    S::Key: 'static,
+    S::Value: 'static,
+    F: Fn(&S::Key) -> bool + Sync,
+{
     type Key = S::Key;
     type Value = S::Value;
     type Selector = S::Selector;
 
-    fn latest_rev(&self) -> Async::Future<'_, Res<Rev>> {
+    fn latest_rev(&self) -> impl Future<Output = Res<Rev>> + Send {
         self.0.source.latest_rev()
     }
 
-    fn read<'a>(
-        &'a self,
-        selector: &'a Self::Selector,
+    fn read(
+        &self,
+        selector: &Self::Selector,
         after: Rev,
         until: Rev,
         limits: Limits,
-        page: &'a mut Page<Self::Key, Self::Value>,
-    ) -> Async::Future<'a, Res<()>> {
-        Async::from_future(self.0.read::<Async, S::Value>(
-            selector,
-            after,
-            until,
-            limits,
-            page,
-            |entry| (self.0.project)(&entry.key).then_some(entry),
-        ))
+        page: &mut Page<Self::Key, Self::Value>,
+    ) -> impl Future<Output = Res<()>> + Send {
+        self.0.read(selector, after, until, limits, page, |entry| {
+            (self.0.project)(&entry.key).then_some(entry)
+        })
     }
 
     fn watch(&self) -> RevWatch {
@@ -491,28 +454,24 @@ impl<Async: FutureForm, S, F> RevSource<Async> for RevFilterKeys<S, F> {
     }
 }
 
-/// A shared source is a source: lets a source be held as `Arc<dyn RevSource<..>>`.
-#[future_form(
-    Sendable where S: RevSource<Sendable> + ?Sized,
-    Local where S: RevSource<Local> + ?Sized
-)]
-impl<Async: FutureForm, S> RevSource<Async> for Arc<S> {
+/// A shared source is a source.
+impl<S: RevSource + Sync> RevSource for Arc<S> {
     type Key = S::Key;
     type Value = S::Value;
     type Selector = S::Selector;
 
-    fn latest_rev(&self) -> Async::Future<'_, Res<Rev>> {
+    fn latest_rev(&self) -> impl Future<Output = Res<Rev>> + Send {
         (**self).latest_rev()
     }
 
-    fn read<'a>(
-        &'a self,
-        selector: &'a Self::Selector,
+    fn read(
+        &self,
+        selector: &Self::Selector,
         after: Rev,
         until: Rev,
         limits: Limits,
-        page: &'a mut Page<Self::Key, Self::Value>,
-    ) -> Async::Future<'a, Res<()>> {
+        page: &mut Page<Self::Key, Self::Value>,
+    ) -> impl Future<Output = Res<()>> + Send {
         (**self).read(selector, after, until, limits, page)
     }
 

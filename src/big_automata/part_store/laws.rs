@@ -16,6 +16,9 @@
 //! | after a revocation commits, no authorized read returns any row of the part, at any rev | [`revocation_hides_every_row_of_the_part`], [`revocation_mid_stream_hides_the_unread_rows`] |
 //! | after a grant, an authorized read from the old cursor returns the backlog | [`grant_returns_the_backlog`] |
 //! | an object route follows the object's readable parts and carries only their rows | [`object_routes_follow_the_readable_parts`] |
+//! | an authorized read of the empty window decides every verdict and reads no row | [`an_empty_window_reads_verdicts_only`], every check, [`differential`] |
+//! | an authorized read carries, from its snapshot, one payload per object with a live row in it, and no other | [`authorized_reads_carry_their_payloads`], every check, [`differential`] |
+//! | the responder's rev and watch follow commits like the log's | every commit and rollback |
 //! | an authorized read equals the oracle's filter of current access | every check, every authorized read in [`differential`] |
 //! | a route skips a removal of a membership added after its cursor | [`removals_skip_routes_that_never_saw_the_member`], every route read in [`differential`] |
 //! | incremental bucket summaries equal a recompute | every check |
@@ -60,21 +63,20 @@ use crate::rev::laws::StreamBackend;
 use crate::rev::laws::WakeCount;
 use crate::rev::laws::any_limits;
 use crate::rev::laws::limits;
-use future_form::Sendable;
 
 mod generators;
 pub use generators::part_ops;
 use generators::*;
 
-type Tx<B> = <<B as Backend>::Store as PartStoreWrite<Sendable>>::Tx;
+type Tx<B> = <<B as Backend>::Store as PartStoreWrite>::Tx;
 
 /// What a backend supplies to run the laws.
 #[async_trait]
 pub trait Backend: Clone + Send + Sync + 'static {
-    type Store: PartStoreWrite<Sendable, Tx: Send>
-        + PartStoreRead<Sendable>
-        + PartStoreServe<Sendable>
-        + RevSource<Sendable, Key = LogKey, Value = LogEntry, Selector = LogSelector>
+    type Store: PartStoreWrite<Tx: Send>
+        + PartStoreRead
+        + PartStoreServe
+        + RevSource<Key = LogKey, Value = LogEntry, Selector = LogSelector>
         + Clone
         + Send
         + Sync
@@ -87,60 +89,48 @@ pub trait Backend: Clone + Send + Sync + 'static {
     async fn rollback(&self, tx: Tx<Self>) -> Res<()>;
 }
 
-/// The small universe every law and generated sequence draws from.
-pub fn obj(index: u8) -> ObjKey {
-    ObjKey::new(&[index])
-}
-pub fn part(index: u8) -> PartKey {
-    PartKey::new(&[100 + index])
-}
-pub fn principal(index: u8) -> PeerKey {
-    PeerKey::new(&[200 + index])
-}
-pub fn payload(value: u8) -> ObjPayload {
-    serde_json::json!(value)
-}
-const OBJS: u8 = 4;
-const PARTS: u8 = 3;
-const PRINCIPALS: u8 = 3;
+mod universe;
+use universe::OBJS;
+use universe::PARTS;
+use universe::PRINCIPALS;
+pub use universe::add;
+pub use universe::grant;
+pub use universe::obj;
+pub use universe::part;
+pub use universe::payload;
+pub use universe::principal;
+pub use universe::remove;
+pub use universe::revoke;
+pub use universe::set;
+pub use universe::stage;
 
-/// Stage one batch through the trait.
-async fn stage<S: PartStoreWrite<Sendable>>(
-    store: &S,
-    tx: &mut S::Tx,
-    write: PartWrite,
-) -> Res<()> {
-    match write {
-        PartWrite::EnsureParts(parts) => store.ensure_parts(tx, &parts).await,
-        PartWrite::SetPayloads(payloads) => store.set_payloads(tx, payloads).await,
-        PartWrite::AddMembers(members) => store.add_members(tx, &members).await,
-        PartWrite::RemoveMembers(members) => store.remove_members(tx, &members).await,
-        PartWrite::GrantAccess(grants) => store.grant_access(tx, &grants).await,
-        PartWrite::RevokeAccess(revokes) => store.revoke_access(tx, &revokes).await,
-    }
-}
-
-/// A store, its watch, and the oracle it must agree with.
+/// A store, its watches, and the oracle it must agree with.
 pub struct Harness<B: Backend> {
     backend: B,
     store: B::Store,
+    /// The log's watch, as its local consumers see it.
     watch: RevWatch,
+    /// The responder's watch ([`PartStoreServe::watch`]).
+    serve_watch: RevWatch,
     oracle: PartOracle,
 }
 
 impl<B: Backend> Harness<B> {
     pub async fn open(backend: &B) -> Res<Self> {
         let store = backend.open().await?;
-        let watch = store.watch();
+        let watch = RevSource::watch(&store);
+        let serve_watch = PartStoreServe::watch(&store);
         assert_eq!(
-            store.latest_rev().await?,
+            RevSource::latest_rev(&store).await?,
             0,
             "a fresh store has stamped nothing"
         );
+        assert_eq!(PartStoreServe::latest_rev(&store).await?, 0);
         Ok(Self {
             backend: backend.clone(),
             store,
             watch,
+            serve_watch,
             oracle: default(),
         })
     }
@@ -154,14 +144,10 @@ impl<B: Backend> Harness<B> {
             stage(&self.store, &mut tx, write).await?;
         }
         assert_eq!(self.watch.latest(), before, "the watch moved before commit");
+        assert_eq!(self.serve_watch.latest(), before);
         self.backend.commit(tx).await?;
         let stamped = self.oracle.commit(writes);
-        assert_eq!(self.store.latest_rev().await?, self.oracle.latest_rev());
-        assert_eq!(
-            self.watch.latest(),
-            self.oracle.latest_rev(),
-            "the watch is not at the stamped rev"
-        );
+        self.check_revs().await?;
         self.check().await?;
         Ok(stamped)
     }
@@ -173,8 +159,26 @@ impl<B: Backend> Harness<B> {
             stage(&self.store, &mut tx, write).await?;
         }
         self.backend.rollback(tx).await?;
-        assert_eq!(self.store.latest_rev().await?, self.oracle.latest_rev());
+        self.check_revs().await?;
         self.check().await
+    }
+
+    /// Both latest revs and both watches are at the oracle's rev.
+    async fn check_revs(&self) -> Res<()> {
+        let latest = self.oracle.latest_rev();
+        assert_eq!(RevSource::latest_rev(&self.store).await?, latest);
+        assert_eq!(PartStoreServe::latest_rev(&self.store).await?, latest);
+        assert_eq!(
+            self.watch.latest(),
+            latest,
+            "the watch is not at the stamped rev"
+        );
+        assert_eq!(
+            self.serve_watch.latest(),
+            latest,
+            "the responder's watch is not at the stamped rev"
+        );
+        Ok(())
     }
 
     pub async fn set_peer_part_cursors(&mut self, cursors: &[(PeerKey, PartKey, Rev)]) -> Res<()> {
@@ -302,19 +306,18 @@ impl<B: Backend> Harness<B> {
                     objects: every_object,
                 },
             ];
+            // From 0, from half way, and the empty window at the head: verdicts only.
             for principal in &principals {
                 for routes in &route_sets {
-                    for after in [0, latest / 2] {
-                        if after < latest {
-                            self.read_authorized(
-                                principal,
-                                routes,
-                                after,
-                                latest,
-                                limits(usize::MAX, None),
-                            )
-                            .await?;
-                        }
+                    for after in [0, latest / 2, latest] {
+                        self.read_authorized(
+                            principal,
+                            routes,
+                            after,
+                            latest,
+                            limits(usize::MAX, None),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -372,37 +375,6 @@ fn row_parts(page: &Page<LogKey, LogEntry>) -> BTreeSet<PartKey> {
         .collect()
 }
 
-fn add(members: &[(u8, u8)]) -> PartWrite {
-    PartWrite::AddMembers(members.iter().map(|&(o, p)| (obj(o), part(p))).collect())
-}
-fn remove(members: &[(u8, u8)]) -> PartWrite {
-    PartWrite::RemoveMembers(members.iter().map(|&(o, p)| (obj(o), part(p))).collect())
-}
-fn set(payloads: &[(u8, u8)]) -> PartWrite {
-    PartWrite::SetPayloads(
-        payloads
-            .iter()
-            .map(|&(o, value)| (obj(o), payload(value)))
-            .collect(),
-    )
-}
-fn grant(grants: &[(u8, u8)]) -> PartWrite {
-    PartWrite::GrantAccess(
-        grants
-            .iter()
-            .map(|&(p, u)| (part(p), principal(u), AccessLevel::Read))
-            .collect(),
-    )
-}
-fn revoke(revokes: &[(u8, u8)]) -> PartWrite {
-    PartWrite::RevokeAccess(
-        revokes
-            .iter()
-            .map(|&(p, u)| (part(p), principal(u)))
-            .collect(),
-    )
-}
-
 /// Folding a full replay of the log (live members and grants) gives back exactly the current
 /// membership and access.
 pub async fn replay_reconstructs_membership_and_access<B: Backend>(backend: &B) -> Res<()> {
@@ -418,7 +390,7 @@ pub async fn replay_reconstructs_membership_and_access<B: Backend>(backend: &B) 
         .commit(vec![set(&[(2, 0), (0, 2)]), grant(&[(2, 0)])])
         .await?;
 
-    let mut stream = RevStream::<Sendable, _>::new(harness.store.clone(), LogSelector::All, 0);
+    let mut stream = RevStream::new(harness.store.clone(), LogSelector::All, 0);
     let mut page = Page::default();
     let mut members = BTreeSet::new();
     let mut access = BTreeMap::new();
@@ -873,6 +845,117 @@ pub async fn object_routes_follow_the_readable_parts<B: Backend>(backend: &B) ->
     Ok(())
 }
 
+/// A read of the empty window `(rev, rev]` answers every route's verdict exactly as a read
+/// ending at `rev` would, and reads no row: no rows, no payloads, and progress at `rev`. A fresh
+/// store answers it too, at rev 0.
+pub async fn an_empty_window_reads_verdicts_only<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    let routes = LogRoutes {
+        parts: [(part(0), 0), (part(1), 0), (part(2), 0)].into(),
+        objects: [(obj(0), 0), (obj(1), 0)].into(),
+    };
+    let all = limits(usize::MAX, None);
+    let fresh = harness
+        .read_authorized(&principal(0), &routes, 0, 0, all)
+        .await?;
+    assert_eq!(
+        fresh.parts,
+        vec![ReadVerdict::UnknownPart; 3],
+        "a fresh store knows no part"
+    );
+    assert_eq!(fresh.objects, vec![ReadVerdict::Denied; 2]);
+
+    harness
+        .commit(vec![
+            set(&[(0, 1), (1, 1)]),
+            add(&[(0, 0), (1, 1)]),
+            grant(&[(0, 0)]),
+        ])
+        .await?;
+    let latest = harness.oracle.latest_rev();
+    for principal in [principal(0), principal(1)] {
+        let full = harness
+            .read_authorized(&principal, &routes, 0, latest, all)
+            .await?;
+        let empty = harness
+            .read_authorized(&principal, &routes, latest, latest, all)
+            .await?;
+        assert_eq!((&empty.parts, &empty.objects), (&full.parts, &full.objects));
+        assert!(empty.rows.entries.is_empty() && empty.payloads.is_empty());
+        assert_eq!(empty.rows.through, latest);
+    }
+    let page = harness
+        .read_authorized(&principal(0), &routes, latest, latest, all)
+        .await?;
+    assert_eq!(
+        page.parts,
+        vec![
+            ReadVerdict::Permitted,
+            ReadVerdict::Denied,
+            ReadVerdict::UnknownPart
+        ]
+    );
+    assert_eq!(
+        page.objects,
+        vec![ReadVerdict::Permitted, ReadVerdict::Denied]
+    );
+    Ok(())
+}
+
+/// An authorized read carries the payload of each object with a live row in the page, once per
+/// object however many rows name it, and nothing for an object whose rows in the page are all
+/// removals. The payload is the one the snapshot holds, and it is the content the rows stand
+/// for: a payload change re-stamps the object's rows, so a read ending before the change no
+/// longer finds them.
+pub async fn authorized_reads_carry_their_payloads<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    harness
+        .commit(vec![
+            set(&[(0, 1), (1, 1)]),
+            add(&[(0, 0), (1, 0)]),
+            grant(&[(0, 0), (1, 0)]),
+        ])
+        .await?;
+    // Object 0 joins part 1 at a later rev: two live rows at two revs, one payload.
+    harness.commit(vec![add(&[(0, 1)])]).await?;
+    harness.commit(vec![remove(&[(1, 0)])]).await?;
+    let routes = LogRoutes {
+        parts: [(part(0), 0), (part(1), 0)].into(),
+        objects: default(),
+    };
+    let all = limits(usize::MAX, None);
+    let latest = harness.oracle.latest_rev();
+    let page = harness
+        .read_authorized(&principal(0), &routes, 0, latest, all)
+        .await?;
+    assert_eq!(page.rows.entries.len(), 2, "{page:?}");
+    assert_eq!(page.payloads, vec![(obj(0), payload(1))]);
+    // From rev 1 the page also carries object 1's removal, which carries no payload.
+    let page = harness
+        .read_authorized(&principal(0), &routes, 1, latest, all)
+        .await?;
+    assert_eq!(page.rows.entries.len(), 2, "{page:?}");
+    assert!(page.rows.entries.iter().any(|entry| entry.value.is_none()));
+    assert_eq!(page.payloads, vec![(obj(0), payload(1))]);
+
+    let edited_at = harness
+        .commit(vec![set(&[(0, 2)])])
+        .await?
+        .expect("the edit stamps");
+    let before_edit = harness
+        .read_authorized(&principal(0), &routes, 0, edited_at - 1, all)
+        .await?;
+    assert!(
+        before_edit.payloads.is_empty(),
+        "the edit moved object 0's rows past the window: {before_edit:?}"
+    );
+    let page = harness
+        .read_authorized(&principal(0), &routes, 0, edited_at, all)
+        .await?;
+    assert_eq!(page.payloads, vec![(obj(0), payload(2))]);
+    Ok(())
+}
+
 /// A denied route reads nothing, so its reader's cursor stays put; once access is granted,
 /// reading from that cursor returns the whole backlog past it: every row the unauthorized read
 /// of the same route returns, removals included, and nothing at or below the cursor.
@@ -1125,7 +1208,7 @@ pub async fn writes_are_atomic<B: Backend>(backend: &B) -> Res<()> {
         grant(&[(1, 0)]),
     ];
     let wakes = WakeCount::default();
-    let mut watch = harness.store.watch();
+    let mut watch = RevSource::watch(&harness.store);
     let mut wait = pin!(watch.wait_past(0));
     assert!(wakes.poll(wait.as_mut()).is_pending());
 
@@ -1167,7 +1250,7 @@ pub async fn unchanged_writes_stamp_nothing<B: Backend>(backend: &B) -> Res<()> 
             .await?,
         None
     );
-    assert_eq!(harness.store.latest_rev().await?, 1);
+    assert_eq!(RevSource::latest_rev(&harness.store).await?, 1);
     Ok(())
 }
 
@@ -1230,15 +1313,19 @@ pub async fn differential<B: Backend>(backend: &B, ops: Vec<PartOp>) -> Res<()> 
             PartOp::ReadAuthorized {
                 principal,
                 routes,
-                after,
-                until,
+                after: after_at,
+                until: until_at,
                 limits,
             } => {
-                if let Some((after, until)) = window(harness.oracle.latest_rev(), after, until) {
-                    harness
-                        .read_authorized(&principal, &routes, after, until, limits)
-                        .await?;
-                }
+                // A zero `until` fraction reads the empty window at `after`: verdicts only.
+                let (after, until) = match window(harness.oracle.latest_rev(), after_at, until_at) {
+                    Some((after, _)) if until_at == 0 => (after, after),
+                    Some(window) => window,
+                    None => (0, 0),
+                };
+                harness
+                    .read_authorized(&principal, &routes, after, until, limits)
+                    .await?;
             }
         }
     }

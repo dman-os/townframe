@@ -10,7 +10,6 @@
 
 use std::collections::VecDeque;
 
-use future_form::Sendable;
 use proptest::prelude::*;
 
 use crate::bucket::BucketMachine;
@@ -43,12 +42,9 @@ use crate::rpc::bucket::LeafBucketsError;
 use crate::rpc::bucket::LeafBucketsRequest;
 use crate::rpc::bucket::LeafBucketsResponse;
 
-/// Each side's store as the harness reaches it: through the part store traits, in the
-/// `Sendable` form (the memory store implements both forms, so a concrete call would have to
-/// name one every time), plus the memory store's own `begin`.
-pub trait Store:
-    PartStoreWrite<Sendable, Tx = MemoryPartTx> + PartStoreRead<Sendable> + PartStoreServe<Sendable>
-{
+/// Each side's store as the harness reaches it: through the part store traits, plus the memory
+/// store's own `begin`.
+pub trait Store: PartStoreWrite<Tx = MemoryPartTx> + PartStoreRead + PartStoreServe {
     fn begin_tx(&self) -> MemoryPartTx;
 }
 
@@ -398,14 +394,7 @@ impl<S: Store> Driver<S> {
             let Ok(listed) = listed else {
                 return Ok(None);
             };
-            match filter_buckets::<Sendable, _>(
-                part.clone(),
-                working_level,
-                listed,
-                &self.requester,
-            )
-            .await?
-            {
+            match filter_buckets(part.clone(), working_level, listed, &self.requester).await? {
                 FilteredBuckets::Relist(next) => offset = next,
                 FilteredBuckets::Done => return Ok(Some(default())),
                 FilteredBuckets::Handoff(dirty) => return Ok(Some(dirty)),
@@ -483,9 +472,7 @@ impl<S: Store> Driver<S> {
                         })
                         .await?
                         .expect("the part stays readable");
-                    let pages =
-                        filter_objects::<Sendable, _>(part.clone(), pages, seed, &self.requester)
-                            .await?;
+                    let pages = filter_objects(part.clone(), pages, seed, &self.requester).await?;
                     machine.on_obj_page(pages, &mut out);
                 }
                 BucketMachineCommand::SyncObj {

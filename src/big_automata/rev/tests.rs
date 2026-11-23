@@ -1,7 +1,6 @@
 use std::pin::pin;
 use std::task::Poll;
 
-use future_form::Sendable;
 use futures::executor::block_on;
 
 use super::*;
@@ -38,7 +37,7 @@ fn entry(key: u8, rev: Rev, value: Option<&[u8]>) -> Entry<Bytes, Bytes> {
 fn commit(db: &MemoryDb, store: &Store, batches: Vec<Vec<Mutation<Bytes, Bytes>>>) {
     for batch in batches {
         let mut tx = db.begin();
-        block_on(OkvStore::<Sendable>::apply(store, &mut tx, batch)).expect("a batch applies");
+        block_on(OkvStore::apply(store, &mut tx, batch)).expect("a batch applies");
         tx.commit().expect("nothing races the commit");
     }
 }
@@ -72,7 +71,7 @@ fn the_snapshot_is_captured_on_the_first_read() -> Res<()> {
     let db = MemoryDb::default();
     let store: Store = db.table();
     commit(&db, &store, vec![vec![put(1, b"a")]]);
-    let mut stream = RevStream::<Sendable, _>::new(store.clone(), Selector::All, 0);
+    let mut stream = RevStream::new(store.clone(), Selector::All, 0);
     commit(&db, &store, vec![vec![put(2, b"b")]]);
     assert_eq!(stream.snapshot_rev(), None);
     assert!(!stream.caught_up());
@@ -106,8 +105,7 @@ fn skipped_revisions_come_back_as_progress_only_pages() -> Res<()> {
     let db = MemoryDb::default();
     let store: Store = db.table();
     commit(&db, &store, vec![vec![put(1, b"a")], vec![put(2, b"b")]]);
-    let mut stream =
-        RevStream::<Sendable, _>::new(store.clone(), Selector::Keys([vec![9]].into()), 0);
+    let mut stream = RevStream::new(store.clone(), Selector::Keys([vec![9]].into()), 0);
     let mut page = Page::default();
 
     block_on(stream.next_into(&mut page, limits(1, None)))?;
@@ -138,7 +136,7 @@ fn a_caught_up_stream_waits_for_the_next_commit() -> Res<()> {
     let db = MemoryDb::default();
     let store: Store = db.table();
     commit(&db, &store, vec![vec![put(1, b"a")]]);
-    let mut stream = RevStream::<Sendable, _>::new(store.clone(), Selector::All, 0);
+    let mut stream = RevStream::new(store.clone(), Selector::All, 0);
     let mut page = Page::default();
     block_on(stream.next_into(&mut page, limits(10, None)))?;
     assert!(stream.caught_up());
@@ -178,9 +176,9 @@ fn map_projects_values_and_keeps_tombstones() -> Res<()> {
             vec![Mutation::Delete { key: vec![2] }],
         ],
     );
-    let lengths = RevSourceExt::<Sendable>::map(store, |_key: &Bytes, value: Bytes| value.len());
+    let lengths = RevSourceExt::map(store, |_key: &Bytes, value: Bytes| value.len());
     let mut page = Page::default();
-    block_on(RevSource::<Sendable>::read(
+    block_on(RevSource::read(
         &lengths,
         &Selector::All,
         0,
@@ -216,10 +214,10 @@ fn filter_map_turns_a_refused_value_into_a_tombstone() -> Res<()> {
     let db = MemoryDb::default();
     let store: Store = db.table();
     commit(&db, &store, vec![vec![put(1, b"keep")]]);
-    let kept = RevSourceExt::<Sendable>::filter_map(store.clone(), |_key: &Bytes, value: Bytes| {
+    let kept = RevSourceExt::filter_map(store.clone(), |_key: &Bytes, value: Bytes| {
         (value != b"drop").then_some(value)
     });
-    let mut stream = RevStream::<Sendable, _>::new(kept, Selector::All, 0);
+    let mut stream = RevStream::new(kept, Selector::All, 0);
     let mut page = Page::default();
     block_on(stream.next_into(&mut page, limits(10, None)))?;
     assert_eq!(
@@ -269,8 +267,8 @@ fn filter_keys_drops_entries_and_keeps_progress() -> Res<()> {
             vec![Mutation::Delete { key: vec![2] }],
         ],
     );
-    let odd = RevSourceExt::<Sendable>::filter_keys(store.clone(), |key: &Bytes| key[0] % 2 == 1);
-    let mut stream = RevStream::<Sendable, _>::new(odd, Selector::All, 0);
+    let odd = RevSourceExt::filter_keys(store.clone(), |key: &Bytes| key[0] % 2 == 1);
+    let mut stream = RevStream::new(odd, Selector::All, 0);
     let mut page = Page::default();
 
     // Key 2's delete moved its row to rev 4, so nothing is left at revs 1 and 2.
@@ -295,9 +293,51 @@ fn filter_keys_drops_entries_and_keeps_progress() -> Res<()> {
     Ok(())
 }
 
-type Projected = Arc<
-    dyn RevSource<Sendable, Key = Bytes, Value = Bytes, Selector = Selector<Bytes>> + Send + Sync,
->;
+/// The projections under test behind one source type: dispatch is static, so a trait object is
+/// not available to stand in for either.
+enum ProjectedSource {
+    FilterMap(RevFilterMap<Store, ValueFilter>),
+    FilterKeys(RevFilterKeys<Store, KeyFilter>),
+}
+
+type ValueFilter = fn(&Bytes, Bytes) -> Option<Bytes>;
+type KeyFilter = fn(&Bytes) -> bool;
+
+impl RevSource for ProjectedSource {
+    type Key = Bytes;
+    type Value = Bytes;
+    type Selector = Selector<Bytes>;
+
+    async fn latest_rev(&self) -> Res<Rev> {
+        match self {
+            Self::FilterMap(source) => source.latest_rev().await,
+            Self::FilterKeys(source) => source.latest_rev().await,
+        }
+    }
+
+    async fn read(
+        &self,
+        selector: &Selector<Bytes>,
+        after: Rev,
+        until: Rev,
+        limits: Limits,
+        page: &mut Page<Bytes, Bytes>,
+    ) -> Res<()> {
+        match self {
+            Self::FilterMap(source) => source.read(selector, after, until, limits, page).await,
+            Self::FilterKeys(source) => source.read(selector, after, until, limits, page).await,
+        }
+    }
+
+    fn watch(&self) -> RevWatch {
+        match self {
+            Self::FilterMap(source) => source.watch(),
+            Self::FilterKeys(source) => source.watch(),
+        }
+    }
+}
+
+type Projected = Arc<ProjectedSource>;
 
 /// The stream laws over projections of a memory table: the oracle's read, projected the same
 /// way, is what each projection must return.
@@ -347,13 +387,13 @@ impl StreamBackend for Projection {
         let db = MemoryDb::default();
         let store: Store = db.table();
         let projected: Projected = match self {
-            Self::FilterMap => Arc::new(RevSourceExt::<Sendable>::filter_map(
-                store.clone(),
-                |_key: &Bytes, value: Bytes| keep_value(value),
-            )),
-            Self::FilterKeys => Arc::new(RevSourceExt::<Sendable>::filter_keys(
-                store.clone(),
-                keep_key,
+            Self::FilterMap => {
+                Arc::new(ProjectedSource::FilterMap(store.clone().filter_map(
+                    (|_key: &Bytes, value: Bytes| keep_value(value)) as ValueFilter,
+                )))
+            }
+            Self::FilterKeys => Arc::new(ProjectedSource::FilterKeys(
+                store.clone().filter_keys(keep_key as KeyFilter),
             )),
         };
         Ok((projected, (db, store)))
@@ -366,7 +406,7 @@ impl StreamBackend for Projection {
     ) -> Res<()> {
         let mut tx = db.begin();
         for batch in batches {
-            OkvStore::<Sendable>::apply(store, &mut tx, batch).await?;
+            OkvStore::apply(store, &mut tx, batch).await?;
         }
         Ok(tx.commit()?)
     }
@@ -378,7 +418,7 @@ impl StreamBackend for Projection {
     ) -> Res<()> {
         let mut tx = db.begin();
         for batch in batches {
-            OkvStore::<Sendable>::apply(store, &mut tx, batch).await?;
+            OkvStore::apply(store, &mut tx, batch).await?;
         }
         drop(tx);
         Ok(())

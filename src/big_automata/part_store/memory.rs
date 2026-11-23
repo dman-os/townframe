@@ -9,9 +9,6 @@
 //! conflict. Its commit applies the batches in the order they were staged, to the state as it is
 //! at commit, and then (after releasing the lock) moves the log's watch if any row was stamped.
 
-use future_form::Local;
-use future_form::Sendable;
-use future_form::future_form;
 use tokio::sync::watch;
 
 use crate::interlude::*;
@@ -223,24 +220,23 @@ impl State {
 
 // Every operation is one synchronous critical section, so the memory store does its work when
 // called and hands back a ready future. Staging only records the batch.
-#[future_form(Sendable, Local)]
-impl<Async: FutureForm> PartStoreWrite<Async> for MemoryPartStore {
+impl PartStoreWrite for MemoryPartStore {
     type Tx = MemoryPartTx;
 
-    fn ensure_parts<'a>(
-        &'a self,
-        tx: &'a mut MemoryPartTx,
-        parts: &'a [PartKey],
-    ) -> Async::Future<'a, Res<()>> {
+    fn ensure_parts(
+        &self,
+        tx: &mut MemoryPartTx,
+        parts: &[PartKey],
+    ) -> impl Future<Output = Res<()>> + Send {
         self.stage(tx, Staged::EnsureParts(parts.to_vec()));
-        Async::ready(Ok(()))
+        std::future::ready(Ok(()))
     }
 
-    fn set_payloads<'a>(
-        &'a self,
-        tx: &'a mut MemoryPartTx,
+    fn set_payloads(
+        &self,
+        tx: &mut MemoryPartTx,
         payloads: Vec<(ObjKey, ObjPayload)>,
-    ) -> Async::Future<'a, Res<()>> {
+    ) -> impl Future<Output = Res<()>> + Send {
         let digested = payloads
             .into_iter()
             .map(|(obj, payload)| {
@@ -248,77 +244,76 @@ impl<Async: FutureForm> PartStoreWrite<Async> for MemoryPartStore {
                 Ok((obj, payload, digest))
             })
             .collect::<Res<Vec<_>>>();
-        Async::ready(digested.map(|payloads| self.stage(tx, Staged::SetPayloads(payloads))))
+        std::future::ready(digested.map(|payloads| self.stage(tx, Staged::SetPayloads(payloads))))
     }
 
-    fn add_members<'a>(
-        &'a self,
-        tx: &'a mut MemoryPartTx,
-        members: &'a [(ObjKey, PartKey)],
-    ) -> Async::Future<'a, Res<()>> {
+    fn add_members(
+        &self,
+        tx: &mut MemoryPartTx,
+        members: &[(ObjKey, PartKey)],
+    ) -> impl Future<Output = Res<()>> + Send {
         self.stage(tx, Staged::AddMembers(members.to_vec()));
-        Async::ready(Ok(()))
+        std::future::ready(Ok(()))
     }
 
-    fn remove_members<'a>(
-        &'a self,
-        tx: &'a mut MemoryPartTx,
-        members: &'a [(ObjKey, PartKey)],
-    ) -> Async::Future<'a, Res<()>> {
+    fn remove_members(
+        &self,
+        tx: &mut MemoryPartTx,
+        members: &[(ObjKey, PartKey)],
+    ) -> impl Future<Output = Res<()>> + Send {
         self.stage(tx, Staged::RemoveMembers(members.to_vec()));
-        Async::ready(Ok(()))
+        std::future::ready(Ok(()))
     }
 
-    fn grant_access<'a>(
-        &'a self,
-        tx: &'a mut MemoryPartTx,
-        grants: &'a [(PartKey, PeerKey, AccessLevel)],
-    ) -> Async::Future<'a, Res<()>> {
+    fn grant_access(
+        &self,
+        tx: &mut MemoryPartTx,
+        grants: &[(PartKey, PeerKey, AccessLevel)],
+    ) -> impl Future<Output = Res<()>> + Send {
         self.stage(tx, Staged::GrantAccess(grants.to_vec()));
-        Async::ready(Ok(()))
+        std::future::ready(Ok(()))
     }
 
-    fn revoke_access<'a>(
-        &'a self,
-        tx: &'a mut MemoryPartTx,
-        revokes: &'a [(PartKey, PeerKey)],
-    ) -> Async::Future<'a, Res<()>> {
+    fn revoke_access(
+        &self,
+        tx: &mut MemoryPartTx,
+        revokes: &[(PartKey, PeerKey)],
+    ) -> impl Future<Output = Res<()>> + Send {
         self.stage(tx, Staged::RevokeAccess(revokes.to_vec()));
-        Async::ready(Ok(()))
+        std::future::ready(Ok(()))
     }
 }
 
-#[future_form(Sendable, Local)]
-impl<Async: FutureForm> PartStoreRead<Async> for MemoryPartStore {
-    fn obj_states<'a>(
-        &'a self,
-        objs: &'a [ObjKey],
-    ) -> Async::Future<'a, Res<Vec<Option<ObjState>>>> {
-        Async::ready(Ok(self.with_state(|state| {
-            objs.iter().map(|obj| state.obj_state(obj)).collect()
-        })))
+impl PartStoreRead for MemoryPartStore {
+    fn obj_states(
+        &self,
+        objs: &[ObjKey],
+    ) -> impl Future<Output = Res<Vec<Option<ObjState>>>> + Send {
+        std::future::ready(Ok(
+            self.with_state(|state| objs.iter().map(|obj| state.obj_state(obj)).collect())
+        ))
     }
 
-    fn bucket_summaries<'a>(
-        &'a self,
-        part: &'a PartKey,
-        ids: &'a [BuckId],
-    ) -> Async::Future<'a, Res<Vec<BucketSummary>>> {
-        Async::ready(Ok(
+    fn bucket_summaries(
+        &self,
+        part: &PartKey,
+        ids: &[BuckId],
+    ) -> impl Future<Output = Res<Vec<BucketSummary>>> + Send {
+        std::future::ready(Ok(
             self.with_state(|state| state.bucket_summaries(part, ids))
         ))
     }
 
-    fn member_count<'a>(&'a self, part: &'a PartKey) -> Async::Future<'a, Res<u64>> {
-        Async::ready(Ok(self.with_state(|state| state.member_count(part))))
+    fn member_count(&self, part: &PartKey) -> impl Future<Output = Res<u64>> + Send {
+        std::future::ready(Ok(self.with_state(|state| state.member_count(part))))
     }
 
-    fn peer_part_cursors<'a>(
-        &'a self,
-        peer: &'a PeerKey,
-        parts: &'a [PartKey],
-    ) -> Async::Future<'a, Res<Vec<Option<Rev>>>> {
-        Async::ready(Ok(self.with_state(|state| {
+    fn peer_part_cursors(
+        &self,
+        peer: &PeerKey,
+        parts: &[PartKey],
+    ) -> impl Future<Output = Res<Vec<Option<Rev>>>> + Send {
+        std::future::ready(Ok(self.with_state(|state| {
             parts
                 .iter()
                 .map(|part| {
@@ -331,10 +326,10 @@ impl<Async: FutureForm> PartStoreRead<Async> for MemoryPartStore {
         })))
     }
 
-    fn set_peer_part_cursors<'a>(
-        &'a self,
-        cursors: &'a [(PeerKey, PartKey, Rev)],
-    ) -> Async::Future<'a, Res<()>> {
+    fn set_peer_part_cursors(
+        &self,
+        cursors: &[(PeerKey, PartKey, Rev)],
+    ) -> impl Future<Output = Res<()>> + Send {
         surelock::key::lock_scope(|key| {
             let (mut state, _key) = key.lock(&self.state);
             for (peer, part, cursor) in cursors {
@@ -345,18 +340,17 @@ impl<Async: FutureForm> PartStoreRead<Async> for MemoryPartStore {
                 *stored = (*stored).max(*cursor);
             }
         });
-        Async::ready(Ok(()))
+        std::future::ready(Ok(()))
     }
 }
 
-#[future_form(Sendable, Local)]
-impl<Async: FutureForm> RevSource<Async> for MemoryPartStore {
+impl RevSource for MemoryPartStore {
     type Key = LogKey;
     type Value = LogEntry;
     type Selector = LogSelector;
 
-    fn latest_rev(&self) -> Async::Future<'_, Res<Rev>> {
-        Async::ready(Ok(self.with_state(|state| state.log.rev())))
+    fn latest_rev(&self) -> impl Future<Output = Res<Rev>> + Send {
+        std::future::ready(Ok(self.with_state(|state| state.log.rev())))
     }
 
     /// Copies one bounded page of the log out under the lock, applying the route rule for
@@ -364,14 +358,14 @@ impl<Async: FutureForm> RevSource<Async> for MemoryPartStore {
     ///
     /// Unauthorized: every selected row, whoever asks. For the store's local consumers; a
     /// responder serves a peer through [`PartStoreServe::read_authorized`].
-    fn read<'a>(
-        &'a self,
-        selector: &'a LogSelector,
+    fn read(
+        &self,
+        selector: &LogSelector,
         after: Rev,
         until: Rev,
         limits: Limits,
-        page: &'a mut Page<LogKey, LogEntry>,
-    ) -> Async::Future<'a, Res<()>> {
+        page: &mut Page<LogKey, LogEntry>,
+    ) -> impl Future<Output = Res<()>> + Send {
         self.with_state(|state| {
             state.log.read_into(
                 |key, rev, value| match selector {
@@ -387,7 +381,7 @@ impl<Async: FutureForm> RevSource<Async> for MemoryPartStore {
                 page,
             );
         });
-        Async::ready(Ok(()))
+        std::future::ready(Ok(()))
     }
 
     fn watch(&self) -> RevWatch {
@@ -395,31 +389,40 @@ impl<Async: FutureForm> RevSource<Async> for MemoryPartStore {
     }
 }
 
-#[future_form(Sendable, Local)]
-impl<Async: FutureForm> PartStoreServe<Async> for MemoryPartStore {
-    /// Decides every route and copies the rows out in one critical section, so a commit
-    /// (a revocation included) lands either wholly before the read or wholly after it.
-    fn read_authorized<'a>(
-        &'a self,
-        principal: &'a PeerKey,
-        routes: &'a LogRoutes,
+impl PartStoreServe for MemoryPartStore {
+    fn latest_rev(&self) -> impl Future<Output = Res<Rev>> + Send {
+        std::future::ready(Ok(self.with_state(|state| state.log.rev())))
+    }
+
+    /// The log's own watch: the one [`RevSource::watch`] hands out.
+    fn watch(&self) -> RevWatch {
+        RevWatch::new(self.wakeups.subscribe())
+    }
+
+    /// Decides every route and copies the rows and their payloads out in one critical section,
+    /// so a commit (a revocation included) lands either wholly before the read or wholly after
+    /// it.
+    fn read_authorized(
+        &self,
+        principal: &PeerKey,
+        routes: &LogRoutes,
         after: Rev,
         until: Rev,
         limits: Limits,
-        page: &'a mut AuthorizedPage,
-    ) -> Async::Future<'a, Res<()>> {
+        page: &mut AuthorizedPage,
+    ) -> impl Future<Output = Res<()>> + Send {
         self.with_state(|state| {
             state.read_authorized(principal, routes, after, until, limits, page);
         });
-        Async::ready(Ok(()))
+        std::future::ready(Ok(()))
     }
 
-    fn part_summaries<'a>(
-        &'a self,
-        principal: &'a PeerKey,
-        parts: &'a [(PartKey, Rev)],
-    ) -> Async::Future<'a, Res<Vec<Option<PartSummary>>>> {
-        Async::ready(Ok(self.with_state(|state| {
+    fn part_summaries(
+        &self,
+        principal: &PeerKey,
+        parts: &[(PartKey, Rev)],
+    ) -> impl Future<Output = Res<Vec<Option<PartSummary>>>> + Send {
+        std::future::ready(Ok(self.with_state(|state| {
             parts
                 .iter()
                 .map(|(part, since)| {
@@ -431,43 +434,43 @@ impl<Async: FutureForm> PartStoreServe<Async> for MemoryPartStore {
         })))
     }
 
-    fn readable_obj_states<'a>(
-        &'a self,
-        principal: &'a PeerKey,
-        objs: &'a [ObjKey],
-    ) -> Async::Future<'a, Res<Vec<Option<ObjState>>>> {
-        Async::ready(Ok(self.with_state(|state| {
+    fn readable_obj_states(
+        &self,
+        principal: &PeerKey,
+        objs: &[ObjKey],
+    ) -> impl Future<Output = Res<Vec<Option<ObjState>>>> + Send {
+        std::future::ready(Ok(self.with_state(|state| {
             objs.iter()
                 .map(|obj| state.readable_obj_state(principal, obj))
                 .collect()
         })))
     }
 
-    fn bucket_list<'a>(
-        &'a self,
-        principal: &'a PeerKey,
-        part: &'a PartKey,
+    fn bucket_list(
+        &self,
+        principal: &PeerKey,
+        part: &PartKey,
         from: BuckId,
         to_level: BuckLevel,
         since: Rev,
         limit: usize,
-    ) -> Async::Future<'a, Res<Option<Vec<BucketSummary>>>> {
-        Async::ready(Ok(self.with_state(|state| {
+    ) -> impl Future<Output = Res<Option<Vec<BucketSummary>>>> + Send {
+        std::future::ready(Ok(self.with_state(|state| {
             state
                 .permits(principal, part)
                 .then(|| state.bucket_list(part, from, to_level, since, limit))
         })))
     }
 
-    fn bucket_leaves<'a>(
-        &'a self,
-        principal: &'a PeerKey,
-        part: &'a PartKey,
-        bucks: &'a [(BuckId, Option<ObjKey>)],
+    fn bucket_leaves(
+        &self,
+        principal: &PeerKey,
+        part: &PartKey,
+        bucks: &[(BuckId, Option<ObjKey>)],
         since: Rev,
         limit: usize,
-    ) -> Async::Future<'a, Res<Option<Vec<Vec<LeafEntry>>>>> {
-        Async::ready(Ok(self.with_state(|state| {
+    ) -> impl Future<Output = Res<Option<Vec<Vec<LeafEntry>>>>> + Send {
+        std::future::ready(Ok(self.with_state(|state| {
             state.permits(principal, part).then(|| {
                 bucks
                     .iter()

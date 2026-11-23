@@ -68,14 +68,13 @@ structstruck::strike! {
 
 impl DecidePeerStrategyTask {
     #[tracing::instrument(skip(self, cx), fields(peer_key = %self.peer_key, part_count = self.parts.len()))]
-    pub async fn run<K, PStore, Rpc, Rng>(
+    pub async fn run<PStore, Rpc, Rng>(
         self,
-        cx: &mut TaskCtx<K, PStore, Rpc, Rng>,
+        cx: &mut TaskCtx<PStore, Rpc, Rng>,
     ) -> Result<TaskResultDeets, DecidePeerStrategyTaskError>
     where
-        K: FutureForm,
-        PStore: PartStoreRead<K>,
-        Rpc: BigSyncRpcClient<K>,
+        PStore: PartStoreRead,
+        Rpc: BigSyncRpcClient,
         Rng: rand::Rng,
     {
         let peer_key = self.peer_key.clone();
@@ -83,14 +82,13 @@ impl DecidePeerStrategyTask {
             .await
             .map_err(|deets| DecidePeerStrategyTaskError { peer_key, deets })
     }
-    async fn run_run<K, PStore, Rpc, Rng>(
+    async fn run_run<PStore, Rpc, Rng>(
         self,
-        cx: &mut TaskCtx<K, PStore, Rpc, Rng>,
+        cx: &mut TaskCtx<PStore, Rpc, Rng>,
     ) -> Result<TaskResultDeets, DecidePeerStrategyErrorDeets>
     where
-        K: FutureForm,
-        PStore: PartStoreRead<K>,
-        Rpc: BigSyncRpcClient<K>,
+        PStore: PartStoreRead,
+        Rpc: BigSyncRpcClient,
         Rng: rand::Rng,
     {
         let Some(peer_rpc) = cx.rpc_clients.get(&self.peer_key) else {

@@ -1,14 +1,16 @@
 mod interlude {
     pub use utils_rs::prelude::*;
 
-    pub use future_form::FutureForm;
-
     pub use crate::ids::*;
     pub use structstruck::strike;
 
     pub use std::collections::HashMap as Map;
     pub use std::collections::HashSet as Set;
 }
+
+pub use ids::ObjKey;
+pub use ids::PartKey;
+pub use ids::PeerKey;
 
 mod bucket;
 mod cursor;
@@ -25,6 +27,7 @@ pub mod replay;
 pub mod rev;
 mod rpc;
 mod scheduler;
+pub mod strategy;
 // FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
 #[cfg(any())]
 mod stat;

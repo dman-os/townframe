@@ -45,19 +45,15 @@ use crate::rev::Rev;
 use crate::rev::RevSource;
 use crate::rev::RevStream;
 use crate::rev::RevWatch;
-use future_form::FutureForm;
-use future_form::Sendable;
-use futures::future::BoxFuture;
 
 type Batches = Vec<Vec<Mutation<Bytes, Bytes>>>;
-type Key<B> = <<B as StreamBackend>::Source as RevSource<Sendable>>::Key;
-type Value<B> = <<B as StreamBackend>::Source as RevSource<Sendable>>::Value;
+type Key<B> = <<B as StreamBackend>::Source as RevSource>::Key;
+type Value<B> = <<B as StreamBackend>::Source as RevSource>::Value;
 
 /// What a source supplies to run the stream laws.
 #[async_trait]
 pub trait StreamBackend: Clone + Send + Sync + 'static {
     type Source: RevSource<
-            Sendable,
             Key: Ord + Clone + Debug + Send,
             Value: Clone + PartialEq + Debug + Send,
             Selector: Sync,
@@ -75,10 +71,7 @@ pub trait StreamBackend: Clone + Send + Sync + 'static {
     /// Stage `batches` in one transaction and roll it back.
     async fn rollback(&self, writer: &Self::Writer, batches: Batches) -> Res<()>;
     /// The source's selector for an okv selector over the written keys.
-    fn selector(
-        &self,
-        selector: &Selector<Bytes>,
-    ) -> <Self::Source as RevSource<Sendable>>::Selector;
+    fn selector(&self, selector: &Selector<Bytes>) -> <Self::Source as RevSource>::Selector;
     /// The page the source must return for a read of `(after, until]`, given the log.
     fn expected(
         &self,
@@ -157,7 +150,7 @@ impl<B: StreamBackend> StreamHarness<B> {
         Ok(())
     }
 
-    fn stream(&self, selector: &Selector<Bytes>, after: Rev) -> RevStream<Sendable, B::Source> {
+    fn stream(&self, selector: &Selector<Bytes>, after: Rev) -> RevStream<B::Source> {
         RevStream::new(self.source.clone(), self.backend.selector(selector), after)
     }
 
@@ -225,14 +218,14 @@ impl<B: StreamBackend> Consumer<B> {
     /// (see [`Racing`]); it is mirrored into the oracle once the read returns.
     async fn next<S>(
         &mut self,
-        stream: &mut RevStream<Sendable, S>,
+        stream: &mut RevStream<S>,
         harness: &mut StreamHarness<B>,
         selector: &Selector<Bytes>,
         limits: Limits,
         race: Option<Vec<Mutation<Bytes, Bytes>>>,
     ) -> Res<()>
     where
-        S: RevSource<Sendable, Key = Key<B>, Value = Value<B>>,
+        S: RevSource<Key = Key<B>, Value = Value<B>>,
     {
         let latest = harness.oracle.latest_rev();
         let snapshot_before = stream.snapshot_rev();
@@ -505,7 +498,7 @@ struct Racing<S> {
     race: surelock::mutex::Mutex<Option<RaceCommit>>,
 }
 
-impl<S: RevSource<Sendable> + Clone> Racing<S> {
+impl<S: RevSource + Clone> Racing<S> {
     fn new<B: StreamBackend<Source = S>>(
         harness: &StreamHarness<B>,
         batch: Vec<Mutation<Bytes, Bytes>>,
@@ -520,30 +513,27 @@ impl<S: RevSource<Sendable> + Clone> Racing<S> {
     }
 }
 
-impl<S> RevSource<Sendable> for Racing<S>
+impl<S> RevSource for Racing<S>
 where
-    S: RevSource<Sendable> + Sync,
-    S::Key: Send,
-    S::Value: Send,
-    S::Selector: Sync,
+    S: RevSource + Sync,
 {
     type Key = S::Key;
     type Value = S::Value;
     type Selector = S::Selector;
 
-    fn latest_rev(&self) -> BoxFuture<'_, Res<Rev>> {
+    fn latest_rev(&self) -> impl Future<Output = Res<Rev>> + Send {
         self.inner.latest_rev()
     }
 
-    fn read<'a>(
-        &'a self,
-        selector: &'a Self::Selector,
+    fn read(
+        &self,
+        selector: &Self::Selector,
         after: Rev,
         until: Rev,
         limits: Limits,
-        page: &'a mut Page<Self::Key, Self::Value>,
-    ) -> BoxFuture<'a, Res<()>> {
-        Sendable::from_future(async move {
+        page: &mut Page<Self::Key, Self::Value>,
+    ) -> impl Future<Output = Res<()>> + Send {
+        async move {
             let race = surelock::key::lock_scope(|key| {
                 let (mut race, _key) = key.lock(&self.race);
                 race.take()
@@ -552,7 +542,7 @@ where
                 race.await?;
             }
             self.inner.read(selector, after, until, limits, page).await
-        })
+        }
     }
 
     fn watch(&self) -> RevWatch {

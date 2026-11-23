@@ -1,15 +1,13 @@
 //! A round's resolution and mapping over the memory store, run the way the responder runs it.
 
 use super::*;
-
-/// One write of a test transaction; objects and parts by index, access for `principal(0)`.
-enum Write {
-    Payload(u8, u8),
-    Add(u8, u8),
-    Remove(u8, u8),
-    Grant(u8),
-    Revoke(u8),
-}
+use crate::part_store::laws;
+use crate::part_store::laws::add;
+use crate::part_store::laws::grant;
+use crate::part_store::laws::remove;
+use crate::part_store::laws::revoke;
+use crate::part_store::laws::set;
+use crate::part_store::oracle::PartWrite;
 
 struct Fixture {
     store: MemoryPartStore,
@@ -39,86 +37,34 @@ impl Fixture {
         }
     }
 
-    fn commit(&self, writes: &[Write]) -> Rev {
-        let store = &self.store;
-        let mut tx = store.begin();
+    /// One transaction of the laws' writes; it must change a row.
+    fn commit(&self, writes: Vec<PartWrite>) -> Rev {
+        let mut tx = self.store.begin();
         for write in writes {
-            let staged = match *write {
-                Write::Payload(index, value) => block_on(PartStoreWrite::<Sendable>::set_payloads(
-                    store,
-                    &mut tx,
-                    vec![(obj(index), payload(value))],
-                )),
-                Write::Add(index, part_index) => block_on(PartStoreWrite::<Sendable>::add_members(
-                    store,
-                    &mut tx,
-                    &[(obj(index), part(part_index))],
-                )),
-                Write::Remove(index, part_index) => {
-                    block_on(PartStoreWrite::<Sendable>::remove_members(
-                        store,
-                        &mut tx,
-                        &[(obj(index), part(part_index))],
-                    ))
-                }
-                Write::Grant(part_index) => block_on(PartStoreWrite::<Sendable>::grant_access(
-                    store,
-                    &mut tx,
-                    &[(part(part_index), principal(0), AccessLevel::Read)],
-                )),
-                Write::Revoke(part_index) => block_on(PartStoreWrite::<Sendable>::revoke_access(
-                    store,
-                    &mut tx,
-                    &[(part(part_index), principal(0))],
-                )),
-            };
-            staged.unwrap();
+            block_on(laws::stage(&self.store, &mut tx, write)).unwrap();
         }
         tx.commit().expect("the writes change a row")
     }
 
-    /// The responder's sequence for one round, as [`Round`] documents it.
+    /// The responder's sequence for one round, as [`Round`] documents it, without a hold.
     fn serve(&mut self, targets: &[(TargetId, Rev)], limit: u32) -> &SessionPage {
-        self.serve_with(targets, limit, |_| {})
-    }
-
-    /// [`Fixture::serve`] with the content answers edited before the mapping, to stand in for a
-    /// store that changed between the read and the content read.
-    fn serve_with(
-        &mut self,
-        targets: &[(TargetId, Rev)],
-        limit: u32,
-        edit: impl FnOnce(&mut Vec<Option<ObjState>>),
-    ) -> &SessionPage {
         let mut request = round(session(1), targets);
         request.limit = limit;
         self.server
             .resolve_round(&principal(0), &request, at(1), &mut self.round)
             .unwrap();
-        let until = block_on(RevSource::<Sendable>::latest_rev(&self.store)).unwrap();
-        assert!(
-            self.round.after() < until,
-            "the test reads a non-empty window"
-        );
-        block_on(PartStoreServe::<Sendable>::read_authorized(
+        let until = block_on(PartStoreServe::latest_rev(&self.store)).unwrap();
+        block_on(PartStoreServe::read_authorized(
             &self.store,
             &principal(0),
             self.round.routes(),
-            self.round.after(),
+            self.round.after().min(until),
             until,
             self.round.limits(),
             &mut self.read,
         ))
         .unwrap();
-        let mut contents = block_on(PartStoreServe::<Sendable>::readable_obj_states(
-            &self.store,
-            &principal(0),
-            self.round.content_keys(&self.read),
-        ))
-        .unwrap();
-        edit(&mut contents);
-        self.round
-            .answer(&self.read, until, &contents, &mut self.page);
+        self.round.answer(&mut self.read, until, &mut self.page);
         &self.page
     }
 }
@@ -147,12 +93,12 @@ fn events(resume: Rev, drained: bool) -> Verdict {
 #[test]
 fn law_7_verdicts_follow_current_access_and_refusals_carry_no_rows() {
     let mut fixture = Fixture::new(&[(1, part_route(1)), (2, part_route(2)), (3, obj_route(2))]);
-    let rev = fixture.commit(&[
-        Write::Grant(1),
-        Write::Payload(1, 10),
-        Write::Add(1, 1),
-        Write::Payload(2, 20),
-        Write::Add(2, 2),
+    let rev = fixture.commit(vec![
+        grant(&[(1, 0)]),
+        set(&[(1, 10)]),
+        add(&[(1, 1)]),
+        set(&[(2, 20)]),
+        add(&[(2, 2)]),
     ]);
     let page = fixture.serve(&[(1, 0), (2, 0), (3, 0)], 100);
     assert_eq!(page.events, [changed(rev, 1, &[1], 10)]);
@@ -167,7 +113,7 @@ fn law_7_verdicts_follow_current_access_and_refusals_carry_no_rows() {
 
     // Access taken away is gone for the backlog too: the rows the client never read stay
     // unread, and its cursor stays put.
-    let revoked = fixture.commit(&[Write::Revoke(1), Write::Grant(2)]);
+    let revoked = fixture.commit(vec![revoke(&[(1, 0)]), grant(&[(2, 0)])]);
     let page = fixture.serve(&[(1, 0), (2, 0), (3, 0)], 100);
     assert_eq!(page.events, [changed(rev, 2, &[2, 3], 20)]);
     assert_eq!(
@@ -183,18 +129,18 @@ fn law_7_verdicts_follow_current_access_and_refusals_carry_no_rows() {
 #[test]
 fn law_12_object_targets_carry_content_and_part_targets_carry_removals() {
     let mut fixture = Fixture::new(&[(1, part_route(1)), (2, obj_route(1))]);
-    let rev = fixture.commit(&[
-        Write::Grant(1),
-        Write::Grant(2),
-        Write::Payload(1, 10),
-        Write::Add(1, 1),
-        Write::Add(1, 2),
+    let rev = fixture.commit(vec![
+        grant(&[(1, 0)]),
+        grant(&[(2, 0)]),
+        set(&[(1, 10)]),
+        add(&[(1, 1)]),
+        add(&[(1, 2)]),
     ]);
     // One object's rows of one revision are one event, naming every target they reach.
     let page = fixture.serve(&[(1, 0), (2, 0)], 100);
     assert_eq!(page.events, [changed(rev, 1, &[1, 2], 10)]);
 
-    let gone = fixture.commit(&[Write::Remove(1, 1)]);
+    let gone = fixture.commit(vec![remove(&[(1, 1)])]);
     let page = fixture.serve(&[(1, rev), (2, rev)], 100);
     assert_eq!(page.events, [removed(gone, 1, 1)]);
     assert_eq!(
@@ -202,7 +148,7 @@ fn law_12_object_targets_carry_content_and_part_targets_carry_removals() {
         [(1, events(gone, true)), (2, events(gone, true))]
     );
 
-    let edited = fixture.commit(&[Write::Payload(1, 11)]);
+    let edited = fixture.commit(vec![set(&[(1, 11)])]);
     let page = fixture.serve(&[(1, gone), (2, gone)], 100);
     assert_eq!(page.events, [changed(edited, 1, &[2], 11)]);
 }
@@ -210,9 +156,9 @@ fn law_12_object_targets_carry_content_and_part_targets_carry_removals() {
 #[test]
 fn law_8_and_10_resume_is_progress_never_below_the_cursor() {
     let mut fixture = Fixture::new(&[(1, part_route(1)), (2, part_route(2))]);
-    let first = fixture.commit(&[Write::Grant(1), Write::Payload(1, 10), Write::Add(1, 1)]);
-    let second = fixture.commit(&[Write::Payload(2, 20), Write::Add(2, 1)]);
-    let last = fixture.commit(&[Write::Grant(2), Write::Payload(3, 30), Write::Add(3, 2)]);
+    let first = fixture.commit(vec![grant(&[(1, 0)]), set(&[(1, 10)]), add(&[(1, 1)])]);
+    let second = fixture.commit(vec![set(&[(2, 20)]), add(&[(2, 1)])]);
+    let last = fixture.commit(vec![grant(&[(2, 0)]), set(&[(3, 30)]), add(&[(3, 2)])]);
 
     // A page of one row stops after the first revision. The second target's cursor is past
     // that, so it resumes from its own cursor, not the page's progress.
@@ -241,9 +187,9 @@ fn law_8_and_10_resume_is_progress_never_below_the_cursor() {
 #[test]
 fn law_11_a_removal_of_a_membership_the_target_never_saw_may_be_omitted() {
     let mut fixture = Fixture::new(&[(1, part_route(1))]);
-    let before = fixture.commit(&[Write::Grant(1)]);
-    let live = fixture.commit(&[Write::Payload(1, 10), Write::Add(1, 1)]);
-    let gone = fixture.commit(&[Write::Remove(1, 1)]);
+    let before = fixture.commit(vec![grant(&[(1, 0)])]);
+    let live = fixture.commit(vec![set(&[(1, 10)]), add(&[(1, 1)])]);
+    let gone = fixture.commit(vec![remove(&[(1, 1)])]);
     let page = fixture.serve(&[(1, before)], 100);
     assert_eq!(page.events, []);
     assert_eq!(page.verdicts, [(1, events(gone, true))]);
@@ -251,24 +197,12 @@ fn law_11_a_removal_of_a_membership_the_target_never_saw_may_be_omitted() {
     assert_eq!(page.events, [removed(gone, 1, 1)]);
 }
 
-#[test]
-fn content_gone_between_the_reads_ends_the_page_before_its_revision() {
-    let mut fixture = Fixture::new(&[(1, part_route(1))]);
-    let first = fixture.commit(&[Write::Grant(1), Write::Payload(1, 10), Write::Add(1, 1)]);
-    let second = fixture.commit(&[Write::Payload(2, 20), Write::Add(2, 1)]);
-    fixture.commit(&[Write::Payload(3, 30), Write::Add(3, 1)]);
-    // Object 2 (the second of the sorted content keys) lost its readable content.
-    let page = fixture.serve_with(&[(1, 0)], 100, |contents| contents[1] = None);
-    assert_eq!(page.events, [changed(first, 1, &[1], 10)]);
-    assert_eq!(page.verdicts, [(1, events(second - 1, false))]);
-}
-
 /// The read starts at the round's lowest cursor, so it hands out rows a target with a higher
 /// cursor already has; the mapping keeps them from that target.
 #[test]
 fn a_row_reaches_only_the_targets_whose_cursor_is_below_it() {
     let mut fixture = Fixture::new(&[(1, part_route(1)), (2, obj_route(1))]);
-    let rev = fixture.commit(&[Write::Grant(1), Write::Payload(1, 10), Write::Add(1, 1)]);
+    let rev = fixture.commit(vec![grant(&[(1, 0)]), set(&[(1, 10)]), add(&[(1, 1)])]);
     let page = fixture.serve(&[(1, 0), (2, rev)], 100);
     assert_eq!(page.events, [changed(rev, 1, &[1], 10)]);
     assert_eq!(

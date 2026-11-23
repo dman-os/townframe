@@ -472,7 +472,8 @@ impl PartOracle {
 
     /// What an authorized read must return, by brute force: the verdicts from current access,
     /// then the plain read of only the routes those verdicts permit, with every row of a part
-    /// the principal cannot read now filtered out.
+    /// the principal cannot read now filtered out, and the current payload of each object with
+    /// a live row. An empty window (`after == until`) reads the verdicts and no row.
     pub fn read_authorized(
         &self,
         principal: &PeerKey,
@@ -496,6 +497,25 @@ impl PartOracle {
                 .map(|(obj, bound)| (obj.clone(), *bound))
                 .collect(),
         });
+        let rows = self.read_where(after, until, limits, |key, rev, removed_added_at| {
+            let readable_part = match key {
+                LogKey::Member { part, .. } | LogKey::Access { part, .. } => {
+                    self.permits(principal, part)
+                }
+            };
+            readable_part && permitted.selects(key, rev, after, removed_added_at)
+        });
+        let payloads = rows
+            .entries
+            .iter()
+            .filter(|entry| entry.value.is_some())
+            .map(|entry| match &entry.key {
+                LogKey::Member { obj, .. } => (obj.clone(), self.payloads[obj].clone()),
+                LogKey::Access { .. } => unreachable!("an authorized read carries no access row"),
+            })
+            .collect::<BTreeMap<_, _>>()
+            .into_iter()
+            .collect();
         AuthorizedPage {
             parts: routes
                 .parts
@@ -513,14 +533,8 @@ impl PartOracle {
                     }
                 })
                 .collect(),
-            rows: self.read_where(after, until, limits, |key, rev, removed_added_at| {
-                let readable_part = match key {
-                    LogKey::Member { part, .. } | LogKey::Access { part, .. } => {
-                        self.permits(principal, part)
-                    }
-                };
-                readable_part && permitted.selects(key, rev, after, removed_added_at)
-            }),
+            rows,
+            payloads,
         }
     }
 
