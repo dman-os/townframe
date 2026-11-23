@@ -74,7 +74,7 @@ fn run() -> Res<ExitCode> {
             ..
         })
     );
-    utils_rs::setup_tracing_at(if serves { "info" } else { "warn" })?;
+    utils_rs::tracing::setup_tracing_at(if serves { "info" } else { "warn" })?;
 
     // the static cli is for commands that
     // can be executed without having to

@@ -19,7 +19,7 @@ use crate::interlude::*;
 
 fn main() -> Res<()> {
     dotenv_flow::dotenv_flow().ok();
-    utils_rs::setup_tracing()?;
+    utils_rs::tracing::setup_tracing()?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
