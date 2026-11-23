@@ -188,7 +188,7 @@ mod library {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_same_calls_answer_the_same_in_process_and_over_the_daemon() {
+    async fn the_same_calls_answer_the_same_in_process_and_over_the_server() {
         let (_tmp, dir) = new_node().await;
         let in_process = connect(&dir).await.unwrap();
         assert_eq!(in_process.mode(), Mode::InProcess);
@@ -323,7 +323,7 @@ mod library {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_stale_socket_is_detected_then_replaced_by_the_next_daemon() {
+    async fn a_stale_socket_is_detected_then_replaced_by_the_next_server() {
         let (_tmp, dir) = new_node().await;
         dir.ensure_run_dir().unwrap();
         // A socket file nothing listens on: bind, then close without unlinking.
@@ -437,7 +437,7 @@ mod library {
 
     /// `node start` against a node a command has open waits for the command, instead of refusing.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_daemon_waits_for_a_command_that_has_the_node_open() {
+    async fn a_server_waits_for_a_command_that_has_the_node_open() {
         let (_tmp, dir) = new_node().await;
         let holder = connect(&dir).await.unwrap();
         let (ready, serving) = oneshot::channel();
@@ -598,7 +598,7 @@ mod library {
     /// dialed node's address from its `getNodeInfo`, and both ends then report each other as
     /// connected. Waiting is on the peers service's events.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_daemon_dials_its_bootstrap_peer_and_both_report_the_connection() {
+    async fn a_server_dials_its_bootstrap_peer_and_both_report_the_connection() {
         let loopback = async |dir: &NodeDir| {
             dir.update_settings(|settings| {
                 settings.peers = Some(crate::context::PeerSettings {
