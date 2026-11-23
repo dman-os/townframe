@@ -573,11 +573,18 @@ async fn a_fresh_call_gets_its_own_task_and_its_nested_hops_run_inline_on_it() {
     TEST_TASK_MARKER
         .scope(
             41,
-            runtime.service.dependency.call(RequestContext::root(), GetValue {}),
+            runtime
+                .service
+                .dependency
+                .call(RequestContext::root(), GetValue {}),
         )
         .await
         .unwrap();
-    assert_eq!(runtime.sample.last_handler_task(), None, "a fresh call is spawned");
+    assert_eq!(
+        runtime.sample.last_handler_task(),
+        None,
+        "a fresh call is spawned"
+    );
     runtime
         .direct
         .call(RequestContext::root(), Probe { nested: true })
