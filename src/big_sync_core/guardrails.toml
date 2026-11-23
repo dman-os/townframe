@@ -10,7 +10,7 @@ default_features = true
 features = []
 
 [builds.native]
-features = ["schemars", "automerge", "test-support", "uniffi"]
+features = ["schemars", "automerge", "test-support"]
 
 [builds.wasm32-wasip3]
 default_features = false

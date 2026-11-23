@@ -1,3 +1,2 @@
-src/daybook_compose/composeApp/src/commonMain/kotlin/org/example/daybook/uniffi/**  linguist-generated
 src/**/sqlite/gen.rs  linguist-generated
 src/**/public-api.txt  linguist-generated

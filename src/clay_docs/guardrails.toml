@@ -5,7 +5,6 @@ allowed_dependencies = [
     "clay_collection",
     "clay_host",
     "clay_store",
-    "daybook_types",
 ]
 allow_external_api_types = false
 
@@ -20,7 +19,7 @@ allow_external_api_types = false
 code = "ERROR_DEPENDENCY_GROUP"
 path = "src/clay_docs/Cargo.toml"
 symbol = "dependency-groups"
-ceiling = 4
+ceiling = 3
 class = "LEGACY_DEBT"
 reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
 reference = "docs/scratch/nodule-runtime-ledger.md"

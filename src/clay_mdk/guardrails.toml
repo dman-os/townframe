@@ -12,7 +12,6 @@ allowed_dependencies = [
     "clay_rt_wasmtime",
     "clay_rt_wcmp",
     "clay_surface",
-    "daybook_types",
     "method_core",
     "service_client_core_rs",
     "service_core_rs",

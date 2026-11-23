@@ -7,5 +7,4 @@ reviews:
   path_filters:
     - "**/*"
     - "!**/*/wit/deps/**"
-    - "!src/daybook_compose/composeApp/src/commonMain/kotlin/org/example/daybook/uniffi/**"
     - "!docs/DEVDOC/**"
