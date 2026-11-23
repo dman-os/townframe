@@ -72,6 +72,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+mod egress;
+
 const ECHO: &str = "org.example.clay.test.dispatch.echo";
 const REVEAL: &str = "org.example.clay.test.dispatch.reveal";
 const FIXTURE: &str = "did:example:clay-local/dispatch-fixture";

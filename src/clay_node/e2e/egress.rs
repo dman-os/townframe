@@ -23,6 +23,7 @@ use big_dispatch::ProviderState;
 use big_dispatch_core::Body;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
+use bytes::Bytes;
 use clay_guest_session::InitialContext;
 use clay_guest_session::capabilities::DeclaredPublication;
 use clay_guest_session::capabilities::PublicationKind;
@@ -36,6 +37,8 @@ use clay_rt_wasmtime::WasmRuntime;
 use clay_surface::Mutation;
 use clay_surface::PresentationError;
 use clay_surface::SurfaceSink;
+use method_core::ByteBody;
+use method_core::Encoding;
 use secrets_rs::SecretStore;
 use serde_json::Value;
 use serde_json::json;
@@ -46,6 +49,16 @@ use std::sync::Mutex;
 
 const ECHO: &str = "org.example.clay.test.dispatch.echo";
 const REVEAL: &str = "org.example.clay.test.dispatch.reveal";
+const BLOB: &str = "org.example.clay.test.dispatch.blob";
+
+/// The blob's length and octets, as the `dispatch` fixture reads them: well over the guest's
+/// 64 KiB body chunk, served in chunks of another size so no boundary lines up.
+const BLOB_OCTETS: usize = 1 << 20;
+const BLOB_HOST_CHUNK: usize = 100_000;
+
+fn blob_pattern(offset: usize) -> u8 {
+    (offset % 251) as u8
+}
 
 /// Answers `echo` with its input and the actor dispatch verified the call was signed by, and
 /// `reveal` with a marker that must never be reached by a micro not granted it.
@@ -62,6 +75,18 @@ impl Provider for TestMethods {
         input: Value,
         _body: Option<Body>,
     ) -> Result<Body, ProviderError> {
+        if operation == BLOB {
+            let chunks = (0..BLOB_OCTETS.div_ceil(BLOB_HOST_CHUNK)).map(|index| {
+                let start = index * BLOB_HOST_CHUNK;
+                let end = (start + BLOB_HOST_CHUNK).min(BLOB_OCTETS);
+                Ok::<_, std::io::Error>(Bytes::from(
+                    (start..end).map(blob_pattern).collect::<Vec<_>>(),
+                ))
+            });
+            return Ok(Body::Bytes(
+                ByteBody::new(futures::stream::iter(chunks)).with_length(BLOB_OCTETS as u64),
+            ));
+        }
         Ok(Body::Json(json!({
             "operation": operation,
             "echo": input["text"],
@@ -113,10 +138,17 @@ async fn node() -> Node {
         .router
         .register(
             "clay-test",
-            [ECHO, REVEAL].map(|nsid| {
+            [ECHO, REVEAL, BLOB].map(|nsid| {
                 (
                     nsid.to_owned(),
-                    Operation::unchecked(Some(OperationKind::Procedure)),
+                    Operation {
+                        output: if nsid == BLOB {
+                            Encoding::Bytes { mime: None }
+                        } else {
+                            Encoding::Json
+                        },
+                        ..Operation::unchecked(Some(OperationKind::Procedure))
+                    },
                 )
             }),
             ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(TestMethods))),
@@ -215,14 +247,17 @@ async fn run_fixture(
                 host.fault(&instance)
             )
         });
-    // The `resource` line renders once the view's call answers, which takes the driver: it runs
+    // The `resource` and `bytes` lines render once the view's calls answer, which takes the driver: it runs
     // the incarnation's spawned work after `initialize` returned.
     let mut driver = Box::pin(driver);
     let rendered = async {
         loop {
             let notified = sink.1.notified();
             let texts = sink.0.lock().unwrap().clone();
-            if texts.iter().any(|text| text.starts_with("resource=")) {
+            if ["resource=", "bytes="]
+                .iter()
+                .all(|name| texts.iter().any(|text| text.starts_with(name)))
+            {
                 return texts;
             }
             notified.await;
@@ -309,6 +344,39 @@ async fn a_micro_calls_granted_node_methods_as_its_own_actor() {
     assert!(
         refused.starts_with("err(") && refused.contains("HttpRequestDenied"),
         "an origin other than dispatch.local is refused: {refused}"
+    );
+    node.stop().await;
+}
+
+/// A view reads a multi-chunk byte body through `Context::call_bytes`, outside any
+/// component-model task and after the task that sent the request has ended, and every octet
+/// arrives in order: the response body pump is spawned in the sending task, and this pins that
+/// it outlives the head.
+#[tokio::test]
+async fn a_view_reads_a_multi_chunk_byte_body_in_order() {
+    let node = node().await;
+    let actor = node.open_micro_actor("dispatch-fixture").await;
+    let egress = MicroEgress::install(
+        node.dispatch.client.clone(),
+        Authorization::identity(node.authority.root),
+        &actor,
+        methods(&[BLOB]),
+    )
+    .await
+    .expect("minting the micro's capability");
+
+    let attempts = run_fixture(Some(Arc::new(egress))).await;
+
+    let bytes = &attempts["bytes"];
+    let chunks: usize = bytes
+        .strip_prefix(&format!("ok(octets={BLOB_OCTETS},chunks="))
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("the whole blob should arrive in order: {bytes}"))
+        .parse()
+        .expect("a chunk count");
+    assert!(
+        chunks >= BLOB_OCTETS / (64 * 1024),
+        "the body is several chunks, not one buffer: {bytes}"
     );
     node.stop().await;
 }

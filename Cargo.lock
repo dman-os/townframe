@@ -2877,6 +2877,7 @@ dependencies = [
  "big_ndk",
  "blake3",
  "blitz-dom",
+ "bytes",
  "ciborium",
  "clay_collection",
  "clay_dioxus",
