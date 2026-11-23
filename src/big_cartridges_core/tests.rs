@@ -289,7 +289,7 @@ fn colliding_manifest_names_are_refused() {
         local_state: BTreeMap::from([(
             "state".into(),
             LocalState {
-                kind: StateKind::Kv,
+                kind: StateKind::Sqlite,
                 extra: Default::default(),
             },
         )]),
