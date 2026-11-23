@@ -70,15 +70,20 @@ impl ScrollSyncHost for FakeDom {
         self.emit(json!(["scrollTo", self.name_of(element), left]));
     }
 
-    // Timers never fire here; the trace records their registration.
-    fn set_timeout(&self, _callback: Box<dyn FnOnce()>, milliseconds: u32) -> TimeoutId {
+    // Timers run only when a test advances the fake clock (`advance_clock`);
+    // the trace records their registration.
+    fn set_timeout(&self, callback: Box<dyn FnOnce()>, milliseconds: u32) -> TimeoutId {
         let id = self.next_timer.get() + 1;
         self.next_timer.set(id);
+        self.timers
+            .borrow_mut()
+            .insert(id, (self.clock.get() + f64::from(milliseconds), callback));
         self.emit(json!(["setTimeout", id, milliseconds]));
         id
     }
 
     fn clear_timeout(&self, timeout_id: TimeoutId) {
+        self.timers.borrow_mut().remove(&timeout_id);
         self.emit(json!(["clearTimeout", timeout_id]));
     }
 }

@@ -28,15 +28,16 @@
 //   `deferredEditorActiveLine` and `errorWrapper` are dropped with the edit
 //   session, the worker pool and the error wrapper. `recycle` is ported (the
 //   `VirtualizedFileDiff` override passes it through).
-// * `cleanUp` and ownership. Upstream leaves the sprite and the theme and
-//   unsafe CSS `style` elements in the shadow root (a later instance on the
-//   same container adopts them, `adoptReusableShellElements`); the Rust
-//   instance created them in its `Document`, so it removes and discards them
-//   too: after `clean_up` the container's shadow root is empty and every node
-//   the instance created is freed. `fileContainer` is detached (when the
-//   instance is not owner-managed) but never discarded: the caller owns it. A
-//   container the instance created itself (`created_container`) is discarded
-//   last, with its shadow root.
+// * `cleanUp` and ownership. As upstream, the sprite and the theme and unsafe
+//   CSS `style` elements stay in the container's shadow root (a later
+//   instance on the same container adopts them, `adoptReusableShellElements`;
+//   CodeView's element pool keeps them in its shells). The instance only
+//   forgets their keys: the container owns them, and `discard` of the
+//   container frees them. Every other node the instance created is removed and
+//   discarded. `fileContainer` is detached (when the instance is not
+//   owner-managed) but never discarded: the caller owns it. A container the
+//   instance created itself (`created_container`) is discarded last, with its
+//   shadow root.
 // * `requestRender` is inlined in `rerender`; `rerender` is on `FileDiff` itself
 //   (it is public API).
 
@@ -724,21 +725,23 @@ where
         if !recycle {
             self.clear_reusable_header();
         }
-        let (sprite_svg, theme_css_style, unsafe_css_style) = {
+        {
+            // The sprite and the theme and unsafe CSS `style` elements stay in
+            // the container's shadow root, as upstream leaves them: they are
+            // shared shell assets (`isPooledShadowChild`) that CodeView's
+            // element pool keeps for the next item, and the next instance on
+            // the container adopts them (`adopt_reusable_shell_elements`). The
+            // instance only forgets its keys; the container owns the nodes now
+            // and `discard` of the container (or the pool) frees them.
             let mut state = self.state.borrow_mut();
             state.last_row_count = None;
             state.applied_theme_css = None;
             state.has_adopted_theme_css = false;
             state.applied_unsafe_css = None;
-            (
-                state.sprite_svg.take(),
-                state.theme_css_style.take(),
-                state.unsafe_css_style.take(),
-            )
-        };
-        nodes.drop_optional(sprite_svg);
-        nodes.drop_optional(theme_css_style);
-        nodes.drop_optional(unsafe_css_style);
+            state.sprite_svg = None;
+            state.theme_css_style = None;
+            state.unsafe_css_style = None;
+        }
 
         if recycle {
             self.hunks_renderer.borrow_mut().recycle();

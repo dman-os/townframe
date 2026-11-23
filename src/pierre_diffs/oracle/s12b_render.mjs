@@ -27,12 +27,11 @@
 // scenarios (`components/file_diff_render_oracle_tests.rs`).
 //
 // `cleanUp` (S12a-2c), `isLineRenderable`, `getNearestRenderableLine`,
-// `revealLine` and `expandHunk` are steps too. One deliberate difference: the
-// published `cleanUp` leaves the sprite and the theme and unsafe CSS `style`
-// elements in the shadow root (a later instance on the container adopts them);
-// the Rust instance owns the nodes it creates and frees them, so this oracle
-// removes those three elements after the published `cleanUp` (see `cleanUp`
-// in `runScenario`) and the trees compare equal. A cleaned-up instance takes no
+// `revealLine` and `expandHunk` are steps too. The published `cleanUp` leaves
+// the sprite and the theme and unsafe CSS `style` elements in the shadow root
+// and a later instance on the container adopts them; the Rust instance does the
+// same (C4: they are the shell assets CodeView's element pool keeps), so the
+// trees compare as they are. A cleaned-up instance takes no
 // further renders (they throw), so scenarios end an instance with `cleanUp`
 // and may let another instance render over the same container.
 //
@@ -648,11 +647,7 @@ function runScenario(JSDOM, oracleModules, templates, scenario) {
             ret = instance.revealLine(step.line);
             break;
           case "cleanUp": {
-            // The nodes the Rust instance frees and the published one leaves
-            // behind (see the file header).
-            const left = [instance.spriteSVG, instance.themeCSSStyle, instance.unsafeCSSStyle];
             instance.cleanUp(step.recycle === true);
-            for (const node of left) node?.remove();
             break;
           }
           default:

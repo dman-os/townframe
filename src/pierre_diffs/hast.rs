@@ -118,6 +118,14 @@ impl Properties {
         self.write_style_declarations(declarations);
     }
 
+    /// `el.style.getPropertyValue(name)`: `""` when unset.
+    pub fn get_style_property(&self, name: &str) -> String {
+        self.style_declarations()
+            .into_iter()
+            .find(|(existing, _)| existing == name)
+            .map_or_else(String::new, |(_, value)| value)
+    }
+
     fn style_declarations(&self) -> Vec<(String, String)> {
         match self.get("style") {
             Some(PropValue::Str(style)) => style

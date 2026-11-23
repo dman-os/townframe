@@ -13,6 +13,8 @@ pub struct PlatformInfo {
     pub user_agent: String,
     /// `'safari' in window && 'pushNotification' in window.safari`
     pub has_safari_push_notification: bool,
+    /// `navigator.maxTouchPoints` (CodeView's mobile Safari check)
+    pub max_touch_points: u32,
 }
 
 impl PlatformInfo {

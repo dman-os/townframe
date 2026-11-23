@@ -255,7 +255,7 @@ fn render_everything(instance: &Instance, container: Option<NodeKey>, round: usi
 }
 
 #[test]
-fn clean_up_frees_every_node_the_instance_created_but_the_file_container() {
+fn clean_up_frees_every_node_the_instance_created_but_the_file_container_and_its_shell_assets() {
     for recycle in [false, true] {
         let dom = Rc::new(FakeDom::default());
         let wrapper = dom.doc.create_element("div");
@@ -277,6 +277,24 @@ fn clean_up_frees_every_node_the_instance_created_but_the_file_container() {
         assert!(dom.doc.child_nodes(container).len() >= 5);
         assert!(created.len() > 100);
 
+        // The shell assets (the sprite and the theme and unsafe CSS styles)
+        // stay in the shadow root for the pool and the next instance, as
+        // upstream leaves them.
+        let shell_assets: Vec<NodeKey> = dom
+            .doc
+            .child_nodes(shadow_root)
+            .into_iter()
+            .filter(|node| {
+                let tag = dom.doc.tag_name(*node);
+                tag == "SVG"
+                    || (tag == "STYLE"
+                        && ["data-theme-css", "data-unsafe-css", "data-core-css"]
+                            .iter()
+                            .any(|attribute| dom.doc.has_attribute(*node, attribute)))
+            })
+            .collect();
+        assert!(!shell_assets.is_empty());
+
         instance.lifecycle().clean_up(recycle);
 
         assert!(instance.state().retired.is_empty());
@@ -286,13 +304,18 @@ fn clean_up_frees_every_node_the_instance_created_but_the_file_container() {
             "the shadow root is the container's"
         );
         assert!(dom.doc.child_nodes(container).is_empty());
-        assert!(dom.doc.child_nodes(shadow_root).is_empty());
+        assert_eq!(dom.doc.child_nodes(shadow_root), shell_assets);
         assert_eq!(
             dom.doc.parent(container),
             None,
             "an unmanaged instance detaches it"
         );
-        for node in created.into_iter().filter(|node| *node != shadow_root) {
+        let mut kept = vec![shadow_root];
+        for asset in &shell_assets {
+            kept.push(*asset);
+            subtree(&dom, *asset, &mut kept);
+        }
+        for node in created.into_iter().filter(|node| !kept.contains(node)) {
             assert!(
                 !dom.doc.exists(node),
                 "{node:?} outlived cleanUp (recycle {recycle})"

@@ -429,16 +429,6 @@ where
         }))
     }
 
-    /// `releaseRenderedItem(item)`, for an item with no element (see the
-    /// header).
-    pub(crate) fn release_rendered_item(&self, item: &ItemRef<Host, Rendered, LAnnotation>) {
-        if item.borrow().element.is_some() {
-            todo!("C4: releaseRenderedItem's element pool and focus fix");
-        }
-        let instance = Rc::clone(item.borrow().instance());
-        instance.clean_up(true);
-    }
-
     /// `renamePendingScrollTarget(oldId, newId)`
     fn rename_pending_scroll_target(&self, old_id: &str, new_id: &str) {
         let mut state = self.state.borrow_mut();
