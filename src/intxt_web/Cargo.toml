@@ -1,0 +1,26 @@
+[package]
+name = "intxt_web"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+
+[lib]
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.62.0", features = ["async-spawn", "futures-stream", "inter-task-wakeup"] }
+# Only the renderer-agnostic core: rsx! + html elements + hooks. No `launch`, `web`, `fullstack`,
+# `devtools`, `document`, `asset` (those pull tokio/axum/wasm-bindgen/manganis).
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "html", "hooks", "signals"] }
+dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+
+# Single-crate workspace, like btress_sysadmin: keeps the root lockfile untouched.
+[workspace]
+
+[profile.release]
+opt-level = "s"
+codegen-units = 1
+lto = "thin"
+debug = "line-tables-only"
