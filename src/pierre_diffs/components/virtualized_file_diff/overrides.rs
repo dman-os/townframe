@@ -17,19 +17,20 @@
 //   of the instance that call the `FileDiff` views in upstream's order.
 //   `onRender` and `setVisibility` are the `SubscribedInstance` the virtualizer
 //   drives: they call `render()` and `rerender()` themselves.
-// * Dropped with the advanced (CodeView) mode: every `isAdvancedMode()` arm
-//   (`setOptions` and `setThemeType` throw there, `setVisibility` returns,
-//   `render` sets `isVisible` and skips the connection, `expandHunk` and
-//   `handleFilesLoaded` stage `pendingExpansions` and `pendingHydratedDiff`),
-//   hence also `loadFilesIfNecessary` (it only clears a `pendingHydratedDiff`
-//   that is never set, then calls the base class), `isLineRenderable` (its
-//   extra arm reads the never-set `pendingExpansions` and returns `false`), the
-//   `isComponentManaged` getter (CodeView's, else the base class's),
-//   `shouldDisableVirtualizationBuffers` (`isAdvancedMode() || base`) and
-//   `shouldGuardRebuildScroll` (the WebKit guard is dropped in `columns.rs`):
-//   what remains is the base class's behaviour, so `FileDiffHooks` has no such
-//   methods and `is_line_renderable` forwards. `cleanUp`'s `shouldRecomputeLayout`
-//   and ghost text arms are dropped with CodeView and the editor.
+// * The advanced (CodeView) mode (C1): every `isAdvancedMode()` arm is ported
+//   over `VirtualizerKind` (`advanced.rs`): `setOptions` and `setThemeType`
+//   throw there (a panic), `setVisibility` returns, `render` sets `isVisible` and
+//   skips the connection, `expandHunk` and `handleFilesLoaded` stage
+//   `pendingExpansions` and `pendingHydratedDiff` for `updateCodeViewLayout`,
+//   `cleanUp` recomputes the layout of a recycled item whose rendered diff
+//   lags its working diff, `rerender` and `finalizeRender` leave the simple
+//   virtualizer's bookkeeping alone. The overrides `loadFilesIfNecessary` and
+//   `shouldDisableVirtualizationBuffers` are `FileDiffHooks` (`FileDiff` calls
+//   them from its own methods), `isLineRenderable` is the instance's (its extra
+//   arm reads the staged expansions). Dropped: `isComponentManaged` (the Dioxus
+//   view is not component-managed, dropped.psv) and `shouldGuardRebuildScroll`
+//   (the WebKit guard is dropped in `columns.rs`). `cleanUp`'s ghost text arm is
+//   dropped with the editor.
 // * `handleFilesLoaded` is `FileDiff`'s merge (`Loading::merge_loaded_files`)
 //   followed by this class's resets. The pending render's diffs are swapped for
 //   the hydrated diff as the instance's other `Rc`s are (one object whose
@@ -49,6 +50,9 @@
 use std::rc::Rc;
 use std::rc::Weak;
 
+use super::advanced::VirtualizerKind;
+use super::instance::PendingExpansion;
+use super::instance::PendingLoadedDiff;
 use super::instance::VirtualizedFileDiff;
 use super::layout::ResetLayoutCacheOptions;
 use super::layout::has_diff_estimate_option_changed;
@@ -60,9 +64,12 @@ use crate::components::file_diff::LineAnnotations;
 use crate::components::file_diff::RenderedContent;
 use crate::components::file_diff::VirtualizedFileDiffHost;
 use crate::components::virtualizer::SubscribedInstance;
+use crate::constants::DEFAULT_COLLAPSED_CONTEXT_THRESHOLD;
 use crate::document::NodeKey;
 use crate::types::layout::RenderWindow;
+use crate::types::lines::ExpandedHunks;
 use crate::types::lines::ExpansionDirections;
+use crate::types::lines::HunkExpansionRegion;
 use crate::types::options::ThemeTypes;
 use crate::types::patch::DiffFileInput;
 use crate::types::patch::FileDiffLoadedFiles;
@@ -70,6 +77,8 @@ use crate::types::patch::FileDiffMetadata;
 use crate::utils::options::get_diff_file_input::get_diff_file_input;
 use crate::utils::predicates::are_diff_targets_equal::are_diff_targets_equal;
 use crate::utils::predicates::are_options_equal::are_options_equal;
+use crate::utils::virtual_diff_layout::IsAdditionLineRenderableProps;
+use crate::utils::virtual_diff_layout::is_addition_line_renderable;
 
 /// The `FileDiffHooks` of a `VirtualizedFileDiff`: the methods it overrides
 /// that `FileDiff` calls from inside its own methods.
@@ -136,6 +145,30 @@ where
         self.instance().set_line_annotations(line_annotations);
     }
 
+    fn load_files_if_necessary(
+        &self,
+        _file_diff: &crate::components::file_diff::FileDiff<Host, Rendered, LAnnotation>,
+    ) {
+        self.instance().load_files_if_necessary();
+    }
+
+    fn should_disable_virtualization_buffers(
+        &self,
+        file_diff: &crate::components::file_diff::FileDiff<Host, Rendered, LAnnotation>,
+    ) -> bool {
+        self.instance
+            .upgrade()
+            .expect("the instance outlives the FileDiff it extends")
+            .virtualizer()
+            .is_advanced()
+            || file_diff
+                .options()
+                .base
+                .base
+                .disable_virtualization_buffers
+                .unwrap_or(false)
+    }
+
     fn flush_managers_done(
         &self,
         file_diff: &crate::components::file_diff::FileDiff<Host, Rendered, LAnnotation>,
@@ -171,7 +204,7 @@ where
 
     fn set_visibility(&self, visible: bool) {
         let file_diff = self.file_diff();
-        if file_diff.virtualized().file_container().is_none() {
+        if self.virtualizer().is_advanced() || file_diff.virtualized().file_container().is_none() {
             return;
         }
         file_diff.virtualized().set_render_range(None);
@@ -199,6 +232,10 @@ where
     }
 
     pub fn set_options(&self, options: Option<FileDiffOptions<NodeKey, Rendered, LAnnotation>>) {
+        assert!(
+            !self.virtualizer().is_advanced(),
+            "VirtualizedFileDiff.setOptions cannot be used inside CodeView. Update CodeView options instead."
+        );
         let Some(options) = options else { return };
         let (options_changed, layout_changed, estimate_changed) = {
             let previous_options = self.file_diff().options();
@@ -225,17 +262,104 @@ where
         // the measured height cache above.
         if options_changed {
             self.file_diff().virtualized().force_render_override();
-            self.virtualizer()
-                .instance_changed(&self.instance_ref(), layout_changed);
+            if self.virtualizer().is_simple() {
+                self.virtualizer()
+                    .instance_changed(&self.instance_ref(), layout_changed);
+            }
         }
     }
 
+    /// What CodeView does in place of `setOptions` (which throws in advanced
+    /// mode): upstream hands the instance an options object that reads the
+    /// viewer's live options, so nothing is pushed, and the viewer owns every
+    /// side effect `setOptions` would have had (`pendingLayoutReset` and
+    /// `renderOptionsRevision`, which drive the layout-cache reset and the
+    /// re-render). Here the viewer builds the item's options and pushes them
+    /// when they differ; no layout reset, no `instanceChanged`.
+    pub fn set_options_from_code_view(
+        &self,
+        options: FileDiffOptions<NodeKey, Rendered, LAnnotation>,
+    ) {
+        assert!(
+            self.virtualizer().is_advanced(),
+            "VirtualizedFileDiff.setOptionsFromCodeView is only for instances CodeView owns"
+        );
+        if are_options_equal(Some(&*self.file_diff().options()), Some(&options)) {
+            return;
+        }
+        self.file_diff().set_options(Some(options));
+    }
+
     pub fn set_theme_type(&self, theme_type: ThemeTypes) {
+        assert!(
+            !self.virtualizer().is_advanced(),
+            "VirtualizedFileDiff.setThemeType cannot be used inside CodeView. Update CodeView options instead."
+        );
         self.file_diff().set_theme_type(theme_type);
     }
 
+    // In advanced (CodeView) mode, expansions are staged in pendingExpansions
+    // until the next layout consume, so the renderer's expansion map lags a
+    // just-requested reveal. Account for the staged expansions so callers (the
+    // editor's caret-scroll retry) see the post-consume visibility.
     pub fn is_line_renderable(&self, line_number: usize) -> bool {
-        self.file_diff().lines().is_line_renderable(line_number)
+        if self.file_diff().lines().is_line_renderable(line_number) {
+            return true;
+        }
+        let pending_expansions = self.staged_expansions();
+        let Some(file_diff) = self.file_diff().get_rendered_diff() else {
+            return false;
+        };
+        if pending_expansions.is_empty() {
+            return false;
+        }
+        let (expansion_line_count, collapsed_context_threshold) = {
+            let options = self.file_diff().options();
+            (
+                options.base.expansion_line_count.unwrap_or(100),
+                options
+                    .base
+                    .collapsed_context_threshold
+                    .unwrap_or(DEFAULT_COLLAPSED_CONTEXT_THRESHOLD),
+            )
+        };
+        let mut staged = self
+            .file_diff()
+            .hunks_renderer()
+            .get_expanded_hunks_map()
+            .clone();
+        for expansion in pending_expansions {
+            let mut region =
+                staged
+                    .get(&expansion.hunk_index)
+                    .copied()
+                    .unwrap_or(HunkExpansionRegion {
+                        from_start: 0,
+                        from_end: 0,
+                    });
+            let count = expansion
+                .expansion_line_count_override
+                .unwrap_or(expansion_line_count);
+            if matches!(
+                expansion.direction,
+                ExpansionDirections::Up | ExpansionDirections::Both
+            ) {
+                region.from_start = region.from_start.saturating_add(count);
+            }
+            if matches!(
+                expansion.direction,
+                ExpansionDirections::Down | ExpansionDirections::Both
+            ) {
+                region.from_end = region.from_end.saturating_add(count);
+            }
+            staged.insert(expansion.hunk_index, region);
+        }
+        is_addition_line_renderable(IsAdditionLineRenderableProps {
+            file_diff: &file_diff,
+            line_number,
+            expanded_hunks: Some(&ExpandedHunks::owned(staged)),
+            collapsed_context_threshold,
+        })
     }
 
     pub fn reveal_line(&self, line_number: usize) -> bool {
@@ -253,28 +377,38 @@ where
             return;
         }
         file_diff.loading().load_files_if_necessary();
-        file_diff.virtualized().expand_renderer_hunk(
-            usize::try_from(hunk_index).expect("hunk index is not negative"),
-            direction,
-            expansion_line_count_override.map(|count| {
-                if count.is_infinite() {
-                    usize::MAX
-                } else {
-                    count as usize
-                }
-            }),
-        );
-        self.reset_layout_cache(ResetLayoutCacheOptions {
-            include_estimated_heights: true,
-            ..ResetLayoutCacheOptions::default()
+        let hunk_index = usize::try_from(hunk_index).expect("hunk index is not negative");
+        let expansion_line_count_override = expansion_line_count_override.map(|count| {
+            if count.is_infinite() {
+                usize::MAX
+            } else {
+                count as usize
+            }
         });
-        self.compute_approximate_size(false, None);
+        if self.virtualizer().is_advanced() {
+            self.stage_expansion(PendingExpansion {
+                hunk_index,
+                direction,
+                expansion_line_count_override,
+            });
+        } else {
+            file_diff.virtualized().expand_renderer_hunk(
+                hunk_index,
+                direction,
+                expansion_line_count_override,
+            );
+            self.reset_layout_cache(ResetLayoutCacheOptions {
+                include_estimated_heights: true,
+                ..ResetLayoutCacheOptions::default()
+            });
+            self.compute_approximate_size(false, None);
+        }
         file_diff.virtualized().force_render_override();
         self.virtualizer()
             .instance_changed(&self.instance_ref(), true);
     }
 
-    fn handle_files_loaded(
+    pub(super) fn handle_files_loaded(
         &self,
         expected_diff: &Rc<FileDiffMetadata>,
         files: &FileDiffLoadedFiles,
@@ -287,13 +421,28 @@ where
         {
             return;
         }
-        let hydrated = file_diff.loading().merge_loaded_files(expected_diff, files);
-        self.swap_pending_render_diff(expected_diff, &hydrated);
-        self.reset_layout_cache(ResetLayoutCacheOptions {
-            include_estimated_heights: true,
-            ..ResetLayoutCacheOptions::default()
-        });
-        self.compute_approximate_size(false, None);
+        // CodeView component requires careful control for anchor
+        // fixing on re-renders, and thus we cannot apply the
+        // next diff immediately. Instead we clone and stage it for
+        // CodeView layout to consume at render time.
+        if self.virtualizer().is_advanced() {
+            let next_diff = file_diff
+                .loading()
+                .hydrate_loaded_diff(expected_diff, files);
+            self.stage_hydrated_diff(PendingLoadedDiff {
+                expected_diff: Rc::clone(expected_diff),
+                next_diff,
+                files: files.clone(),
+            });
+        } else {
+            let hydrated = file_diff.loading().merge_loaded_files(expected_diff, files);
+            self.swap_pending_render_diff(expected_diff, &hydrated);
+            self.reset_layout_cache(ResetLayoutCacheOptions {
+                include_estimated_heights: true,
+                ..ResetLayoutCacheOptions::default()
+            });
+            self.compute_approximate_size(false, None);
+        }
         file_diff.virtualized().force_render_override();
         self.virtualizer()
             .instance_changed(&self.instance_ref(), true);
@@ -374,24 +523,28 @@ where
 
         if is_setup {
             self.ensure_top();
-            if self.layout().layout_dirty {
-                self.virtualizer().mark_dom_dirty();
+            if self.layout().layout_dirty
+                && let Some(virtualizer) = self.virtualizer().simple()
+            {
+                virtualizer.mark_dom_dirty();
                 self.compute_approximate_size(false, Some(&pending_render_diff));
             }
         } else {
             self.compute_approximate_size(false, Some(&pending_render_diff));
             self.ensure_top();
-            // Upstream drops the disposer `connect` returns.
-            drop(
-                self.virtualizer()
-                    .connect(file_container, self.instance_ref()),
-            );
-            let (top, height) = (self.top().unwrap_or(0.0), self.get_virtualized_height());
-            self.set_is_visible(self.virtualizer().is_instance_visible(top, height));
+            match self.virtualizer() {
+                VirtualizerKind::Advanced(_) => self.set_is_visible(true),
+                VirtualizerKind::Simple(virtualizer) => {
+                    // Upstream drops the disposer `connect` returns.
+                    drop(virtualizer.connect(file_container, self.instance_ref()));
+                    let (top, height) = (self.top().unwrap_or(0.0), self.get_virtualized_height());
+                    self.set_is_visible(virtualizer.is_instance_visible(top, height));
+                }
+            }
             self.set_is_setup(true);
         }
 
-        if !self.is_visible() && (!data_changed || !is_setup) {
+        if !self.is_visible() && self.virtualizer().is_simple() && (!data_changed || !is_setup) {
             if file_input.is_some() {
                 virtualized.set_files(input_old, input_new);
             }
@@ -448,8 +601,9 @@ where
         // auto-reconciles renders it initiated. Queue a measured-height
         // reconciliation for every applied content render so line deltas
         // (wrapped lines, annotation heights) survive layout resets.
-        self.virtualizer()
-            .request_height_reconcile(&self.instance_ref());
+        if let Some(virtualizer) = self.virtualizer().simple() {
+            virtualizer.request_height_reconcile(&self.instance_ref());
+        }
     }
 
     pub fn rerender(&self) {
@@ -461,10 +615,12 @@ where
         // `getDiffForNextRender(workingDiff)` is the working diff.
         let next_render_diff = file_diff.get_working_diff(None);
         // A completed async highlight can change which diff the next simple
-        // virtualizer render will commit.
-        self.clear_pending_render();
+        // virtualizer render will commit. CodeView refreshes this during layout.
+        if self.virtualizer().is_simple() {
+            self.clear_pending_render();
+        }
         virtualized.force_render_override();
-        if virtualized.request_render() {
+        if self.virtualizer().is_simple() && virtualized.request_render() {
             return;
         }
         self.virtualizer().instance_changed(
@@ -478,17 +634,32 @@ where
 
     pub fn clean_up(&self, recycle: bool) {
         let file_diff = self.file_diff();
-        if let Some(file_container) = file_diff.virtualized().file_container() {
-            self.virtualizer().disconnect(&file_container);
+        let should_recompute_layout = recycle
+            && self.virtualizer().is_advanced()
+            && file_diff.virtualized().file_container().is_some()
+            && !are_diff_targets_equal(
+                file_diff.get_rendered_diff().as_deref(),
+                file_diff.get_working_diff(None).as_deref(),
+            );
+        if let (Some(file_container), Some(virtualizer)) = (
+            file_diff.virtualized().file_container(),
+            self.virtualizer().simple(),
+        ) {
+            virtualizer.disconnect(&file_container);
         }
         if !recycle {
             self.reset_layout_cache(ResetLayoutCacheOptions {
                 include_estimated_heights: true,
                 ..ResetLayoutCacheOptions::default()
             });
+            self.clear_staged();
         }
         self.clear_pending_render();
         self.set_is_setup(false);
         file_diff.lifecycle().clean_up(recycle);
+        if should_recompute_layout {
+            self.virtualizer()
+                .instance_changed(&self.instance_ref(), true);
+        }
     }
 }

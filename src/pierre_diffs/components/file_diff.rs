@@ -115,13 +115,13 @@
 // `render`, `flushManagers` from the render paths). The port has no
 // inheritance, so the instance holds a `FileDiffHooks` (passed to `new`, like
 // the highlighter) and those call sites dispatch through it; the default hooks
-// are the base class's behaviour. The overrides that only reach the base class
-// in the mode that remains are not hooks: `isComponentManaged`,
-// `shouldDisableVirtualizationBuffers`, `loadFilesIfNecessary` and
-// `isLineRenderable` of `VirtualizedFileDiff` return the base class's answer
-// unless CodeView (dropped) or `pendingExpansions`/`pendingHydratedDiff`
-// (written only by CodeView) is involved, and `shouldGuardRebuildScroll` is
-// dropped with the WebKit guard (`columns.rs`).
+// are the base class's behaviour. `loadFilesIfNecessary` and
+// `shouldDisableVirtualizationBuffers` are hooks too (`VirtualizedFileDiff`
+// overrides them for the advanced mode, and `FileDiff` calls them from inside
+// its own methods). The overrides only outside callers reach are not hooks
+// (`isLineRenderable`, the advanced mode's staging of
+// `pendingExpansions`), `isComponentManaged` is not ported (dropped.psv), and
+// `shouldGuardRebuildScroll` is dropped with the WebKit guard (`columns.rs`).
 // S12a-2c, `cleanUp` and the line queries: see the headers of `lifecycle.rs`
 // and `lines.rs`. `DiffHunksRenderer::recycle`/`clean_up` are the renderer's
 // share of `cleanUp` (annotations, expanded hunks).
@@ -763,6 +763,25 @@ pub trait FileDiffHooks<
         line_annotations: LineAnnotations<LAnnotation>,
     ) {
         file_diff.set_line_annotations(line_annotations);
+    }
+
+    /// `loadFilesIfNecessary`, called by `expandHunk` and `render`. The base
+    /// class's body is `Loading::load_files_if_necessary_base`.
+    fn load_files_if_necessary(&self, file_diff: &FileDiff<Host, Rendered, LAnnotation>) {
+        file_diff.loading().load_files_if_necessary_base();
+    }
+
+    /// `shouldDisableVirtualizationBuffers`, read when the buffers are applied.
+    fn should_disable_virtualization_buffers(
+        &self,
+        file_diff: &FileDiff<Host, Rendered, LAnnotation>,
+    ) -> bool {
+        file_diff
+            .options()
+            .base
+            .base
+            .disable_virtualization_buffers
+            .unwrap_or(false)
     }
 
     /// What `flushManagers` does after the base class's body (also when that

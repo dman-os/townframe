@@ -21,6 +21,19 @@
 // `VirtualizedFileDiff` over `FakeDom`
 // (`components/virtualized_file_diff/window_oracle_tests.rs`).
 //
+// C1 adds the advanced (CodeView) mode: scenarios with `advanced: true` run the
+// instance over a stub CodeView (`type: 'advanced'`, a window and a local top the
+// steps set, `instanceChanged` recorded), with the diffs they hydrate cloned into
+// `ownDiffs` (`updateCodeViewLayout` assigns the hydrated diff into the one it is
+// given, so a pool diff would change for every later scenario), a `loadDiffFiles`
+// that never settles (the loaded files arrive through a `filesLoaded` step, as
+// the Rust host calls `handleFilesLoaded`), and a snapshot that also holds
+// `instanceChanged`'s calls, the staged expansions and hydration and
+// `currentCollapsed` (the C1 scenarios say `advanced: true` or `false`; the
+// earlier ones say nothing and are run as they were). The steps new in C1: `layout`'s `reset`, `expandHunkApi`,
+// `filesLoaded`, `isLineRenderable`, `stickySpecs`, `numericAnchor`,
+// `setThemeType`, `rerender`, `cleanUp`, `codeView`.
+//
 // What this establishes: window arithmetic and measurement bookkeeping for the
 // same declared geometry. What it cannot: that a browser reports those
 // geometries (declared here), or the `render` integration (S12b-3).
@@ -32,7 +45,9 @@ import {
   QUERY_DIFFS_LARGE,
   QUERY_DIFFS_SMALL,
   buildDiffPool,
+  file,
   mutateSpec,
+  numbered,
   randomSpec,
 } from "./s12b_layout.mjs";
 
@@ -97,10 +112,10 @@ function buildGroup(spec) {
   return built;
 }
 
-function snapshot(instance, names) {
+function snapshot(instance, names, advanced) {
   const { cache } = instance;
   const { renderRange } = instance;
-  return {
+  const state = {
     height: instance.height,
     top: instance.top ?? null,
     layoutDirty: instance.layoutDirty,
@@ -133,6 +148,19 @@ function snapshot(instance, names) {
     totalLines: cache.totalLines,
     fileAnnotationHeight: cache.fileAnnotationHeight,
   };
+  if (advanced !== undefined) {
+    state.advanced = {
+      instanceChanged: [...advanced.calls],
+      pendingExpansions:
+        instance.pendingExpansions?.map(({ hunkIndex, direction, expansionLineCountOverride }) => [hunkIndex, direction, expansionLineCountOverride ?? null]) ?? null,
+      pendingHydratedDiff: instance.pendingHydratedDiff == null ? null : names.diff(instance.pendingHydratedDiff.expectedDiff),
+      currentCollapsed: instance.currentCollapsed ?? null,
+      pendingFile: instance.pendingFiles == null ? null : names.diff(instance.pendingFiles.fileDiff),
+      isSetup: instance.isSetup,
+      isVisible: instance.isVisible,
+    };
+  }
+  return state;
 }
 
 function rangeOf(range) {
@@ -144,7 +172,7 @@ function rangeOf(range) {
   };
 }
 
-function applyStep(world, step) {
+async function applyStep(world, step) {
   const { instance, diffs, virtualizer, functions, lists, names } = world;
   const diff = (name) => (name == null ? undefined : diffs[name]);
   const list = (name) => (name == null ? undefined : lists[name]);
@@ -176,7 +204,38 @@ function applyStep(world, step) {
       instance.renderRange = step.set ? { ...step.range } : undefined;
       return null;
     case "layout":
-      return instance.updateCodeViewLayout(diffs[step.diff], step.top, undefined, list(step.annotations));
+      return instance.updateCodeViewLayout(diffs[step.diff], step.top, step.reset ?? undefined, list(step.annotations));
+    case "expandHunkApi":
+      instance.expandHunk(step.hunkIndex, step.direction, step.count ?? undefined);
+      return null;
+    case "filesLoaded": {
+      // `loadFilesForDiff`: the files arrive for a diff that is still the input.
+      const expected = diffs[step.diff];
+      if (instance.getInputDiff() === expected) await instance.handleFilesLoaded(expected, clone(world.loaded[step.loaded]));
+      return null;
+    }
+    case "isLineRenderable":
+      return instance.isLineRenderable(step.line);
+    case "stickySpecs": {
+      const specs = instance.getAdvancedStickySpecs(step.window ?? undefined);
+      return specs === undefined ? null : { topOffset: specs.topOffset, height: specs.height };
+    }
+    case "numericAnchor": {
+      const anchor = instance.getNumericScrollAnchor(step.top);
+      return anchor === undefined ? null : { lineNumber: anchor.lineNumber, side: anchor.side, top: anchor.top };
+    }
+    case "setThemeType":
+      instance.setThemeType(step.themeType);
+      return null;
+    case "rerender":
+      instance.rerender();
+      return null;
+    case "cleanUp":
+      instance.cleanUp(step.recycle);
+      return null;
+    case "codeView":
+      Object.assign(world.codeView, step.state);
+      return null;
     case "pendingRender": {
       const update = instance.updatePendingRender(diffs[step.diff], list(step.annotations));
       return {
@@ -230,17 +289,35 @@ function applyStep(world, step) {
   }
 }
 
-function runScenario(api, diffs, scenario) {
+async function runScenario(api, pool, scenario) {
   const { VirtualizedFileDiff, Virtualizer } = api;
+  const isNew = scenario.advanced !== undefined; // a C1 scenario
+  const advanced = scenario.advanced === true;
+  const diffs = { ...pool, ...clone(scenario.ownDiffs ?? {}) };
   const functions = new Map();
   const saved = Object.getOwnPropertyDescriptor(globalThis, "HTMLElement");
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: FakeEl });
   const savedLog = console.log;
   console.log = () => {}; // `resizeDebugging`'s size validation logs
   try {
-    const virtualizer = new Virtualizer({ resizeDebugging: scenario.resizeDebugging === true });
-    virtualizer.instanceChanged = () => {};
-    const instance = new VirtualizedFileDiff(buildOptions(scenario.options, functions), virtualizer, scenario.metrics ?? undefined);
+    const codeView = { windowTop: 0, windowBottom: 1000, localTop: 0, calls: [] };
+    let virtualizer;
+    if (advanced) {
+      virtualizer = {
+        type: "advanced",
+        config: { overscrollSize: 200, intersectionObserverMargin: 0, resizeDebugging: false },
+        getWindowSpecs: () => ({ top: codeView.windowTop, bottom: codeView.windowBottom }),
+        getLocalTopForInstance: () => codeView.localTop,
+        instanceChanged: (_instance, layoutDirty) => codeView.calls.push(layoutDirty),
+      };
+    } else {
+      virtualizer = new Virtualizer({ resizeDebugging: scenario.resizeDebugging === true });
+      virtualizer.instanceChanged = () => {};
+    }
+    const options = buildOptions(scenario.options, functions);
+    // A load that never settles: the loaded files arrive through `filesLoaded`.
+    if (isNew && options.loadDiffFiles !== undefined) options.loadDiffFiles = () => new Promise(() => {});
+    const instance = new VirtualizedFileDiff(options, virtualizer, scenario.metrics ?? undefined);
     const diffNames = new Map(Object.entries(diffs).map(([name, value]) => [value, name]));
     const lists = scenario.lists;
     const listNames = new Map(Object.entries(lists).map(([name, value]) => [value, name]));
@@ -248,18 +325,19 @@ function runScenario(api, diffs, scenario) {
       diff: (value) => (value == null ? null : (diffNames.get(value) ?? "?")),
       list: (value) => listNames.get(value) ?? (value.length === 0 ? "empty" : "?"),
     };
-    const world = { instance, diffs, virtualizer, functions, lists, names, container: undefined, groups: {} };
-    const trace = [snapshot(instance, names)];
+    const world = { instance, diffs, virtualizer, functions, lists, names, container: undefined, groups: {}, codeView, loaded: scenario.loaded ?? {} };
+    const extra = isNew ? codeView : undefined;
+    const trace = [snapshot(instance, names, extra)];
     const results = [];
     for (const step of scenario.steps) {
       let result;
       try {
-        result = { value: applyStep(world, step) };
+        result = { value: await applyStep(world, step) };
       } catch (error) {
         result = { throws: error.message };
       }
       results.push(result);
-      trace.push(snapshot(instance, names));
+      trace.push(snapshot(instance, names, extra));
     }
     return { results, trace };
   } finally {
@@ -540,13 +618,255 @@ function measurementScenarios() {
   return scenarios;
 }
 
+// ---- the advanced (CodeView) mode (C1) -----------------------------------------------
+
+/** The partial diffs of the pool and the full files behind them (the `loadDiffFiles` results). */
+const PARTIALS = {
+  partial0: { oldFile: file("p.txt", numbered(40, [])), newFile: file("p.txt", numbered(40, [5, 25])) },
+  partial1: { oldFile: file("p.txt", numbered(40, [])), newFile: file("p.txt", numbered(40, [5, 25])) },
+  partial2: { oldFile: file("p.txt", numbered(30, [])), newFile: file("p.txt", numbered(30, [2, 3, 4, 28])) },
+  partial3: { oldFile: file("p.txt", numbered(15, [], false)), newFile: file("p.txt", numbered(15, [3], false)) },
+  partialRename: { oldFile: file("old.txt", numbered(40, [])), newFile: file("new.txt", numbered(40, [5, 25])) },
+};
+const KEYED = (name, loaded) => ({
+  oldFile: { ...loaded.oldFile, cacheKey: `${name}:old` },
+  newFile: { ...loaded.newFile, cacheKey: `${name}:new` },
+});
+const RESETS = [
+  null,
+  { resetFileLayoutCache: false, resetDiffLayoutCache: true, includeEstimatedDiffHeights: false },
+  { resetFileLayoutCache: false, resetDiffLayoutCache: true, includeEstimatedDiffHeights: true },
+  { resetFileLayoutCache: false, resetDiffLayoutCache: false, includeEstimatedDiffHeights: true },
+  { metrics: METRICS.fractional, resetFileLayoutCache: false, resetDiffLayoutCache: false, includeEstimatedDiffHeights: false },
+  { metrics: METRICS.codeView, resetFileLayoutCache: false, resetDiffLayoutCache: true, includeEstimatedDiffHeights: false },
+];
+
+/** Scenario pieces shared by the advanced scenarios: owned partial diffs and their loaded files. */
+function advancedWorld(diffs, partialNames) {
+  const ownDiffs = {};
+  const loaded = {};
+  for (const name of partialNames) {
+    ownDiffs[`own:${name}`] = clone(diffs[name]);
+    loaded[`own:${name}`] = KEYED(name, PARTIALS[name]);
+  }
+  return { ownDiffs, loaded };
+}
+
+function advancedRandomStep(random, state) {
+  const diff = () => random.pick(state.layoutPool);
+  switch (random.int(28)) {
+    case 0:
+    case 1:
+    case 2:
+      state.diff = diff();
+      return { op: "layout", diff: state.diff, top: random.pick([0, 0, 100, 750.5]), annotations: random.pick([null, null, "A", "B", "empty"]), reset: random.pick(RESETS) };
+    case 3:
+    case 4:
+    case 5:
+      return { op: "expandHunkApi", hunkIndex: random.int(8), direction: random.pick(["up", "down", "both"]), count: random.pick([null, 1, 2, 5, 100]) };
+    case 6:
+    case 7:
+      return { op: "filesLoaded", diff: random.pick(state.partials), loaded: state.loadedFor ?? random.pick(state.partials) };
+    case 8:
+    case 9:
+      return { op: "isLineRenderable", line: random.pick([0, 1, 2, 5, 6, 12, 17, 26, 40, 100]) };
+    case 10:
+    case 11:
+      return { op: "stickySpecs", window: random.next() < 0.3 ? null : randomWindow(random, state), };
+    case 12:
+    case 13:
+      return { op: "numericAnchor", top: random.pick([-5, 0, 29, 30, 31, 55, 120, 400, 9999]) };
+    case 14:
+      return { op: "window", diff: state.diff, ...randomWindow(random, state) };
+    case 15:
+      return { op: "linePosition", line: random.pick([0, 1, 2, 5, 17, 40, 99]), side: random.pick(["additions", "deletions"]) };
+    case 16:
+      return { op: "options", spec: { diffStyle: random.pick(["split", "unified"]) } };
+    case 17:
+      return { op: "setThemeType", themeType: random.pick(["dark", "light", "system"]) };
+    case 18:
+      return { op: "rerender" };
+    case 19:
+      return { op: "cleanUp", recycle: random.next() < 0.5 };
+    case 20:
+      return { op: "codeView", state: random.pick([{ windowTop: 0, windowBottom: 1000 }, { windowTop: 500, windowBottom: 900 }, { windowTop: 5000, windowBottom: 5600 }, { localTop: 0 }, { localTop: 321.5 }]) };
+    case 21:
+      return { op: "syncTop" };
+    case 22:
+      return { op: "reconcile" };
+    case 23:
+      return { op: "deltas", entries: [[random.int(40), random.pick([-5, 3, 12.5])]] };
+    case 24:
+      return { op: "metrics", metrics: random.pick([null, METRICS.upstreamTest, METRICS.fractional]), force: random.next() < 0.3 };
+    case 25:
+      return { op: "renderRange", set: random.next() < 0.7, range: random.pick([{ startingLine: 0, totalLines: 5, bufferBefore: 0, bufferAfter: 0 }, { startingLine: 3, totalLines: 5, bufferBefore: 10, bufferAfter: 10 }, { startingLine: 0, totalLines: 0, bufferBefore: 0, bufferAfter: 50 }]) };
+    default:
+      return { op: "layout", diff: state.diff, top: 0, annotations: null, reset: null };
+  }
+}
+
+function advancedScenarios(random, diffs) {
+  const scenarios = [];
+  const lists = EMPTY_LISTS();
+  const partialNames = Object.keys(PARTIALS);
+  const poolDiffs = ["twoHunks", "multi3", "gaps1", "uneven", "noeofBoth", "new", "oneLine", "huge8", "long"];
+
+  // Reset arguments, both modes: what clears the cache and what the metrics replace.
+  for (const advanced of [true, false]) {
+    for (const [optionsIndex, spec] of [{}, { collapsed: true }, { diffStyle: "unified", disableFileHeader: true }, { expandUnchanged: true }].entries()) {
+      const steps = [];
+      for (const diff of ["twoHunks", "multi3", "uneven"]) {
+        steps.push({ op: "layout", diff, top: 0, annotations: null });
+        steps.push({ op: "deltas", entries: [[3, 7], [5, -3]] });
+        steps.push({ op: "window", diff, fileTop: 0, top: 0, bottom: 200 });
+        for (const reset of RESETS) {
+          steps.push({ op: "deltas", entries: [[4, 5]] });
+          steps.push({ op: "layout", diff, top: 120, annotations: null, reset });
+          steps.push({ op: "linePosition", line: 20, side: "additions" });
+        }
+      }
+      scenarios.push({ name: `advanced:reset:${advanced}:${optionsIndex}`, advanced, metrics: METRICS.upstreamTest, options: spec, lists, steps });
+    }
+  }
+
+  // The window, the sticky specs and the numeric anchors.
+  for (const diff of poolDiffs.concat(["partial0", "huge10k", "huge1m", "noHunks", "empty"])) {
+    for (const [metricsIndex, metrics] of GEOMETRY_METRICS.entries()) {
+      const spec = [{}, { diffStyle: "unified" }, { expandUnchanged: true }, { collapsed: true }, { hunkSeparators: "metadata" }, { disableFileHeader: true, collapsedContextThreshold: 1 }][(metricsIndex + diff.length) % 6];
+      const top = [0, 1000, 12.5][metricsIndex % 3];
+      const steps = [{ op: "layout", diff, top, annotations: null }];
+      for (const [windowTop, size] of [[-50, 20], [0, 1], [0, 100], [0, 100000], [50, 800], [200, 5000], [1e9, 100]]) {
+        for (const base of [0, top]) {
+          steps.push({ op: "stickySpecs", window: { top: base + windowTop, bottom: base + windowTop + size } });
+        }
+      }
+      // Without a window: the render range, set or not, and the stub's window.
+      steps.push({ op: "stickySpecs", window: null });
+      for (const range of [{ startingLine: 0, totalLines: 5, bufferBefore: 0, bufferAfter: 0 }, { startingLine: 3, totalLines: 5, bufferBefore: 10, bufferAfter: 10 }, { startingLine: 0, totalLines: 0, bufferBefore: 0, bufferAfter: 50 }]) {
+        steps.push({ op: "renderRange", set: true, range });
+        steps.push({ op: "stickySpecs", window: null });
+      }
+      for (const [windowTop, windowBottom] of [[0, 1000], [top + 5000, top + 6000]]) {
+        steps.push({ op: "codeView", state: { windowTop, windowBottom } });
+        steps.push({ op: "renderRange", set: true, range: { startingLine: 0, totalLines: 0, bufferBefore: 0, bufferAfter: 50 } });
+        steps.push({ op: "stickySpecs", window: null });
+      }
+      for (const anchorTop of [-5, 0, 29, 30, 31, 55, 90, 120, 400, 1500, 6000, 9999, 300000, 1e9]) steps.push({ op: "numericAnchor", top: anchorTop });
+      steps.push({ op: "syncTop" });
+      steps.push({ op: "codeView", state: { localTop: 77.5 } });
+      steps.push({ op: "syncTop" });
+      scenarios.push({ name: `advanced:geometry:${diff}:${metricsIndex}`, advanced: true, metrics, options: spec, lists, steps });
+    }
+  }
+
+  // Staged expansions and hydration, with and without a loader, then consumed.
+  for (const partial of partialNames) {
+    for (const loader of [true, false]) {
+      for (const [stage, spec] of [{}, { diffStyle: "unified" }, { expandUnchanged: true }, { collapsedContextThreshold: 1 }].entries()) {
+        const own = `own:${partial}`;
+        const { ownDiffs, loaded } = advancedWorld(diffs, [partial]);
+        const options = loader ? { ...spec, loadDiffFiles: true } : spec;
+        const steps = [
+          { op: "layout", diff: own, top: 0, annotations: null },
+          { op: "isLineRenderable", line: 10 },
+          { op: "expandHunkApi", hunkIndex: 0, direction: "down", count: 1 },
+          { op: "expandHunkApi", hunkIndex: 0, direction: "up", count: 2 },
+          { op: "expandHunkApi", hunkIndex: 1, direction: "both", count: null },
+          { op: "isLineRenderable", line: 10 },
+          { op: "isLineRenderable", line: 30 },
+          { op: "filesLoaded", diff: own, loaded: own },
+          { op: "window", diff: own, fileTop: 0, top: 0, bottom: 300 },
+          { op: "layout", diff: own, top: 40, annotations: null },
+          { op: "isLineRenderable", line: 10 },
+          { op: "window", diff: own, fileTop: 0, top: 0, bottom: 300 },
+          { op: "expandHunkApi", hunkIndex: 0, direction: "down", count: 3 },
+          { op: "stickySpecs", window: { top: 0, bottom: 300 } },
+          { op: "layout", diff: own, top: 0, annotations: null, reset: RESETS[2] },
+        ];
+        if (stage % 2 === 1) steps.splice(8, 0, { op: "layout", diff: own, top: 0, annotations: "A" });
+        scenarios.push({ name: `advanced:stage:${partial}:${loader}:${stage}`, advanced: true, metrics: METRICS.upstreamTest, options, lists, ownDiffs, loaded, steps });
+        // The same flow in the simple mode: hydration applies at once.
+        scenarios.push({
+          name: `advanced:simple:${partial}:${loader}:${stage}`,
+          advanced: false,
+          metrics: METRICS.upstreamTest,
+          options,
+          lists,
+          ownDiffs,
+          loaded,
+          steps,
+        });
+      }
+    }
+  }
+
+  // Staging is dropped by a new diff, a stale layout, a recycle and a clean up.
+  {
+    const { ownDiffs, loaded } = advancedWorld(diffs, ["partial0", "partial2"]);
+    const base = [
+      { op: "layout", diff: "own:partial0", top: 0, annotations: null },
+      { op: "expandHunkApi", hunkIndex: 0, direction: "down", count: 1 },
+    ];
+    const tails = {
+      other: [{ op: "layout", diff: "own:partial2", top: 0, annotations: null }, { op: "filesLoaded", diff: "own:partial0", loaded: "own:partial0" }],
+      stale: [{ op: "filesLoaded", diff: "own:partial0", loaded: "own:partial0" }, { op: "layout", diff: "own:partial2", top: 0, annotations: null }, { op: "layout", diff: "own:partial0", top: 0, annotations: null }],
+      recycle: [{ op: "filesLoaded", diff: "own:partial0", loaded: "own:partial0" }, { op: "cleanUp", recycle: true }, { op: "layout", diff: "own:partial0", top: 0, annotations: null }],
+      cleanUp: [{ op: "filesLoaded", diff: "own:partial0", loaded: "own:partial0" }, { op: "cleanUp", recycle: false }, { op: "layout", diff: "own:partial0", top: 0, annotations: null }],
+      reload: [{ op: "filesLoaded", diff: "own:partial0", loaded: "own:partial0" }, { op: "expandHunkApi", hunkIndex: 1, direction: "up", count: 2 }, { op: "layout", diff: "own:partial0", top: 0, annotations: null }, { op: "expandHunkApi", hunkIndex: 1, direction: "up", count: 2 }],
+    };
+    for (const [name, tail] of Object.entries(tails)) {
+      scenarios.push({
+        name: `advanced:staging:${name}`,
+        advanced: true,
+        metrics: METRICS.upstreamTest,
+        options: { loadDiffFiles: true },
+        lists,
+        ownDiffs,
+        loaded,
+        steps: [...base, ...tail, { op: "isLineRenderable", line: 10 }, { op: "rerender" }],
+      });
+    }
+  }
+
+  // Seeded random mixes of every operation.
+  for (let index = 0; index < 120; index++) {
+    const partials = [random.pick(partialNames)];
+    const { ownDiffs, loaded } = advancedWorld(diffs, partials);
+    const own = `own:${partials[0]}`;
+    const spec = randomSpec(random);
+    delete spec.loadDiffFiles;
+    if (random.next() < 0.7) spec.loadDiffFiles = true;
+    const state = { diff: own, layoutPool: [own, own, random.pick(poolDiffs), random.pick(poolDiffs)], partials: [own], loadedFor: own, height: 600 };
+    const steps = [{ op: "layout", diff: own, top: 0, annotations: null }];
+    const count = 18 + random.int(30);
+    for (let step = 0; step < count; step++) steps.push(advancedRandomStep(random, state));
+    scenarios.push({
+      name: `advanced:random${index}`,
+      advanced: true,
+      metrics: random.pick([METRICS.upstreamTest, METRICS.fractional, METRICS.codeView, null]),
+      options: spec,
+      lists: annotationLists(random),
+      ownDiffs,
+      loaded,
+      steps,
+    });
+  }
+  return scenarios;
+}
+
 export async function buildS12bWindow(oracle, random, corpusMocks) {
   const { VirtualizedFileDiff } = await import(oracle.pierre("components/VirtualizedFileDiff.js"));
   const { Virtualizer } = await import(oracle.pierre("components/Virtualizer.js"));
   const diffs = await buildDiffPool(oracle, random, corpusMocks);
   const scenarios = [...sweeps(diffs), ...measurementScenarios()];
   for (let index = 0; index < 300; index++) scenarios.push(randomScenario(random, diffs, index));
+  // After every earlier draw: the advanced scenarios leave the earlier ones as they were.
+  scenarios.push(...advancedScenarios(random, diffs));
   const api = { VirtualizedFileDiff, Virtualizer };
-  const cases = scenarios.map((scenario) => ({ scenario: clone(scenario), ...runScenario(api, diffs, scenario) }));
+  const cases = [];
+  // One at a time: a run swaps the globals the published class reads.
+  for (const scenario of scenarios) {
+    cases.push({ scenario: clone(scenario), ...(await runScenario(api, diffs, scenario)) });
+  }
   return { diffs, cases };
 }

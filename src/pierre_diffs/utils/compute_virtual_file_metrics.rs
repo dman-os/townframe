@@ -20,6 +20,21 @@ pub struct PartialVirtualFileMetrics {
     pub padding_bottom: Option<f64>,
 }
 
+/// A `VirtualFileMetrics` is assignable to its `Partial`.
+impl From<VirtualFileMetrics> for PartialVirtualFileMetrics {
+    fn from(metrics: VirtualFileMetrics) -> Self {
+        Self {
+            hunk_line_count: Some(metrics.hunk_line_count),
+            line_height: Some(metrics.line_height),
+            diff_header_height: Some(metrics.diff_header_height),
+            hunk_separator_height: metrics.hunk_separator_height,
+            spacing: Some(metrics.spacing),
+            padding_top: metrics.padding_top,
+            padding_bottom: metrics.padding_bottom,
+        }
+    }
+}
+
 pub fn compute_virtual_file_metrics(metrics: PartialVirtualFileMetrics) -> VirtualFileMetrics {
     let defaults = DEFAULT_VIRTUAL_FILE_METRICS;
     VirtualFileMetrics {

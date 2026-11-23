@@ -591,13 +591,7 @@ where
     }
 
     pub(super) fn apply_buffers(&self, pre: NodeKey, render_range: Option<&RenderRange>) {
-        let disabled = self
-            .options
-            .borrow()
-            .base
-            .base
-            .disable_virtualization_buffers
-            .unwrap_or(false);
+        let disabled = self.hooks.should_disable_virtualization_buffers(self.0);
         let Some(render_range) = render_range.filter(|_| !disabled) else {
             let (before, after) = {
                 let mut state = self.state.borrow_mut();
