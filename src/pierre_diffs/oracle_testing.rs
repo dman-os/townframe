@@ -25,24 +25,47 @@ pub fn load_golden<Golden: DeserializeOwned>(file_name: &str) -> Golden {
 
 /// Numbers that differ only in integer-vs-float representation compare equal
 /// (`serde_json` distinguishes `1` from `1.0`; JavaScript does not).
-fn numbers_equal(left: &serde_json::Number, right: &serde_json::Number) -> bool {
-    left == right || left.as_f64() == right.as_f64()
+fn numbers_equal(left: &serde_json::Number, right: &serde_json::Number, relative: f64) -> bool {
+    if left == right || left.as_f64() == right.as_f64() {
+        return true;
+    }
+    match (left.as_f64(), right.as_f64()) {
+        (Some(left), Some(right)) => {
+            (left - right).abs() <= relative * left.abs().max(right.abs()).max(1.0)
+        }
+        _ => false,
+    }
 }
 
 /// Returns the JSON path of the first difference between `expected` and
 /// `actual`, with both values rendered, or `None` when they are equal.
 pub fn first_difference(expected: &Value, actual: &Value) -> Option<String> {
-    first_difference_at("$", expected, actual)
+    first_difference_at("$", expected, actual, 0.0)
 }
 
-fn first_difference_at(path: &str, expected: &Value, actual: &Value) -> Option<String> {
+/// [`first_difference`] with numbers equal when within `relative` of each other
+/// (and 1 absolute, for values near zero): `Math.exp` and the platform's differ
+/// in the last digits, which a spring carries through a render.
+pub fn first_difference_close(expected: &Value, actual: &Value, relative: f64) -> Option<String> {
+    first_difference_at("$", expected, actual, relative)
+}
+
+fn first_difference_at(
+    path: &str,
+    expected: &Value,
+    actual: &Value,
+    relative: f64,
+) -> Option<String> {
     match (expected, actual) {
-        (Value::Number(left), Value::Number(right)) if numbers_equal(left, right) => None,
+        (Value::Number(left), Value::Number(right)) if numbers_equal(left, right, relative) => None,
         (Value::Array(left), Value::Array(right)) => {
             for (index, (left_item, right_item)) in left.iter().zip(right).enumerate() {
-                if let Some(difference) =
-                    first_difference_at(&format!("{path}[{index}]"), left_item, right_item)
-                {
+                if let Some(difference) = first_difference_at(
+                    &format!("{path}[{index}]"),
+                    left_item,
+                    right_item,
+                    relative,
+                ) {
                     return Some(difference);
                 }
             }
@@ -58,9 +81,12 @@ fn first_difference_at(path: &str, expected: &Value, actual: &Value) -> Option<S
             for (key, left_item) in left {
                 match right.get(key) {
                     Some(right_item) => {
-                        if let Some(difference) =
-                            first_difference_at(&format!("{path}.{key}"), left_item, right_item)
-                        {
+                        if let Some(difference) = first_difference_at(
+                            &format!("{path}.{key}"),
+                            left_item,
+                            right_item,
+                            relative,
+                        ) {
                             return Some(difference);
                         }
                     }
@@ -74,6 +100,14 @@ fn first_difference_at(path: &str, expected: &Value, actual: &Value) -> Option<S
         }
         (left, right) if left == right => None,
         (left, right) => Some(format!("{path}: expected {left} actual {right}")),
+    }
+}
+
+/// [`assert_json_eq`] with [`first_difference_close`]'s tolerance.
+#[track_caller]
+pub fn assert_json_close(context: &str, expected: &Value, actual: &Value, relative: f64) {
+    if let Some(difference) = first_difference_close(expected, actual, relative) {
+        panic!("{context}\n  {difference}");
     }
 }
 

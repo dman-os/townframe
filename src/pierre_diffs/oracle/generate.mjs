@@ -27,6 +27,7 @@ import { buildS12bWindow } from "./s12b_window.mjs";
 import { buildS12cCodeView } from "./s12c_code_view.mjs";
 import { buildS12dCodeViewScroll } from "./s12d_code_view_scroll.mjs";
 import { buildS12eCodeViewShell } from "./s12e_code_view_shell.mjs";
+import { buildS12fCodeViewRender } from "./s12f_code_view_render.mjs";
 import { stubHighlighter } from "./stub_highlighter.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -2086,6 +2087,10 @@ const outputs = {
   // After the render oracle and before any oracle that measures the scrollbar
   // gutter: the published module caches the measurement for the process.
   "s12b_virtualized.json": await buildS12bVirtualized(oracle, makeRandom(0x5eed12)),
+  // Renders items through the published `FileDiff` too (its theme styles read
+  // the shared highlighter's registry), so it runs before `buildHighlights`.
+  "s12e_code_view_shell.json": await buildS12eCodeViewShell(oracle, makeRandom(0x5eed15), corpusMocks),
+  "s12f_code_view_render.json": await buildS12fCodeViewRender(oracle, makeRandom(0x5eed16), corpusMocks),
   "jsdiff.json": buildJsdiff(),
   "scanners.json": buildScanners(),
   "types.json": buildTypes(),
@@ -2107,7 +2112,6 @@ const outputs = {
   "s12b_window.json": await buildS12bWindow(oracle, makeRandom(0x5eed11), corpusMocks),
   "s12c_code_view.json": await buildS12cCodeView(oracle, makeRandom(0x5eed13), corpusMocks),
   "s12d_code_view_scroll.json": await buildS12dCodeViewScroll(oracle, makeRandom(0x5eed14), corpusMocks),
-  "s12e_code_view_shell.json": await buildS12eCodeViewShell(oracle, makeRandom(0x5eed15), corpusMocks),
   "../../highlights/data/highlights_data.json": highlightsData(),
 };
 
