@@ -27,6 +27,12 @@ This document contains the help content for the `day` command-line program.
 * [`day grants decline`↴](#day-grants-decline)
 * [`day grants list`↴](#day-grants-list)
 * [`day grants revoke`↴](#day-grants-revoke)
+* [`day dump`↴](#day-dump)
+* [`day dump node`↴](#day-dump-node)
+* [`day dump drawer`↴](#day-dump-drawer)
+* [`day dump doc`↴](#day-dump-doc)
+* [`day dump grants`↴](#day-dump-grants)
+* [`day dump carts`↴](#day-dump-carts)
 * [`day exec`↴](#day-exec)
 * [`day completions`↴](#day-completions)
 
@@ -51,6 +57,7 @@ terminal unless NO_COLOR is set.
 * `peers` — Manage the peers the node's server dials at start
 * `drawers` — Share drawers with other nodes
 * `grants` — What cartridges may reach, and the requests they make for more
+* `dump` — Raw debug view of what the node holds, as JSON
 * `exec` — Execute an operation through the node's dispatch router and print the JSON answer
 * `completions` — Generate shell completions
 
@@ -390,6 +397,71 @@ Takes effect on the cartridge's next action.
 
 * `<CARTRIDGE>` — The cartridge, as `<did>/<name>`
 * `<GRANT>` — The answer to take back, as `day grants list` prints it: `drawer:<id>`, `cartridge:<id>`, `net:<host[:port]>`, `method:<nsid>` or `authority:<prefix>`
+
+
+
+## `day dump`
+
+Raw debug view of what the node holds, as JSON
+
+**Usage:** `day dump <COMMAND>`
+
+###### **Subcommands:**
+
+* `node` — Everything: node info, installed cartridges and their grants, and every known drawer with its documents and their datums
+* `drawer` — One drawer: its descriptor, members, documents and their datums
+* `doc` — One document's datums, or one datum by key
+* `grants` — What cartridges may do: every grant of every cartridge
+* `carts` — Installed cartridges and their nodules
+
+
+
+## `day dump node`
+
+Everything: node info, installed cartridges and their grants, and every known drawer with its documents and their datums
+
+**Usage:** `day dump node`
+
+
+
+## `day dump drawer`
+
+One drawer: its descriptor, members, documents and their datums
+
+**Usage:** `day dump drawer <DRAWER>`
+
+###### **Arguments:**
+
+* `<DRAWER>` — The drawer's id
+
+
+
+## `day dump doc`
+
+One document's datums, or one datum by key
+
+**Usage:** `day dump doc <DOC> [KEY]`
+
+###### **Arguments:**
+
+* `<DOC>` — The document's id
+* `<KEY>` — A datum key, such as `note/main`
+
+
+
+## `day dump grants`
+
+What cartridges may do: every grant of every cartridge
+
+**Usage:** `day dump grants`
+
+
+
+## `day dump carts`
+
+Installed cartridges and their nodules
+
+**Usage:** `day dump carts`
 
 
 
