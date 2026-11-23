@@ -102,6 +102,7 @@ Diagnose the keyhive pull pipeline first; the worker-side retry storm is only th
 - Performance and memory investigations have `.agents/skills/perf-investigation` (costs.rs harness, release wall vs CPU, census by operation, SQLite lease counters, `strace -c`, critical-path waits vs background load; `x/instr-summary.ts` summarizes INSTR samples).
 - claytxt and daytxt UI work has its own playbooks in `.agents/skills/`: `claytxt-design-language` (tokens, components, layout contract), `claytxt-signal-idioms` (runtime-borrow-proof state idioms, `dioxus_storm` event storms), `daytxt-native-dev-loop` (native build, screenshots, AT-SPI inspection), `blitz-dioxus-native-limits` (pinned Blitz capability bounds).
 - Cabinet datum/Lexicon work has its own playbook in `.agents/skills/`: `lexicon-authoring` (open unions, string vocabularies, empty-member convention, unknown-member carrying, admission/codec test chain).
+- Agents looking at or driving the daytxt GUI use `.agents/skills/daytxt-gui-loop` by default (headless WebKit/Chromium on the web build; screenshots, element inspection, Playwright scripts; never the operator's desktop).
 - Browser automation has `.agents/skills/playwright` (flake-pinned browser farm, per-package `@playwright/test` pins, the `daytxt_web` e2e).
 - Every lane runs its work as one stack of small draft PRs: `.agents/skills/pr-stacks` (naming, bases, docs layers, CI on the tip only, backups; restacking optional, the operator merges with their own tooling).
 ## VCS

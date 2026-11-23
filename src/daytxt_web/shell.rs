@@ -48,6 +48,19 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(js_sys::Uint8Array::new(&buffer).to_vec())
 }
 
+/// The page URL's query: the web build's counterpart of the desktop launcher's environment
+/// variables, for development and agent-driven runs (`x/daytxt-gui.ts`). `?open=<spec>` is
+/// `DAYTXT_SHELL_OPEN` (the shell's start stack) and `?enable=all` is `DAYTXT_ENABLE_MICROS=all`
+/// (every indexed package admitted enabled, so nothing needs clicking on a fresh browser store).
+fn page_query() -> web_sys::UrlSearchParams {
+    let search = web_sys::window()
+        .expect("the shell runs in a window")
+        .location()
+        .search()
+        .expect("a location has a search");
+    web_sys::UrlSearchParams::new_with_str(&search).expect("a location's search is a query string")
+}
+
 /// Fetch and compile one indexed package on the browser's `WebAssembly` engine through
 /// the shared `clay_rt_wcmp` seam. The fetched bytes must hash to the indexed digest; a
 /// mismatch is this micro's activation failure, reported in its status row while the rest
@@ -154,6 +167,9 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
         .await
         .map_err(|error| format!("cannot open browser storage: {error}"))?;
     let mut installed = native_micros();
+    let enable_all = page_query()
+        .get("enable")
+        .is_some_and(|value| value == "all");
     let mut errors = Vec::new();
     match fetch_bytes("packages/index.json").await {
         Ok(bytes) => match serde_json::from_slice::<Vec<PackageIndexEntry>>(&bytes) {
@@ -173,19 +189,22 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
                         }
                     };
                     let sidecar = entry.sidecar.clone();
-                    installed.push(InstalledMicro::new(
-                        id,
-                        sidecar.clone(),
-                        move |id, resources, bindings| {
-                            clay_mdk::host::wcmp_factory(
-                                resources,
-                                id,
-                                sidecar.manifest,
-                                bindings,
-                                move || indexed_package(entry.clone()),
-                            )
-                        },
-                    ));
+                    installed.push(InstalledMicro {
+                        enabled_on_admission: enable_all,
+                        ..InstalledMicro::new(
+                            id,
+                            sidecar.clone(),
+                            move |id, resources, bindings| {
+                                clay_mdk::host::wcmp_factory(
+                                    resources,
+                                    id,
+                                    sidecar.manifest,
+                                    bindings,
+                                    move || indexed_package(entry.clone()),
+                                )
+                            },
+                        )
+                    });
                 }
             }
             Err(error) => errors.push(format!("package index is not an index: {error}")),
@@ -224,6 +243,17 @@ fn ReadyApp(runtime: Signal<Option<CompositionRuntime>>) -> Element {
         .expect("ReadyApp mounts only with a built runtime");
     let runtime = use_signal(|| initial);
     let host = use_host_inputs();
+    // The signal `x/daytxt-gui.ts` waits on: the runtime is built and the shell is mounted.
+    use_hook(|| {
+        web_sys::window()
+            .expect("the shell runs in a window")
+            .document()
+            .expect("a window has a document")
+            .document_element()
+            .expect("a document has a root element")
+            .set_attribute("data-daytxt-ready", "")
+            .expect("the root element takes attributes");
+    });
     rsx! { daytxt_core::Application { runtime, host } }
 }
 
@@ -306,7 +336,7 @@ fn use_host_inputs() -> HostInputs {
         platform_back,
         can_back,
         renderer: Renderer::Browser,
-        start: None,
+        start: page_query().get("open"),
     }
 }
 
