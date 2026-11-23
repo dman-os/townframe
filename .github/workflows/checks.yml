@@ -37,27 +37,60 @@ jobs:
   nix-packages:
     # Draft PRs skip CI; marking one ready for review runs it.
     if: github.event.pull_request.draft != true
-    name: Nix CLI package
+    name: Nix package ${{ matrix.attr }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - attr: daybook-cli.tests.round-trip
+            heavy: false
+          # The guest and web builds share one vendored dependency set (dioxus,
+          # wasmtime, blitz, ...) and compile wasmtime-environ for wasm: cold, they
+          # are far heavier than the CLI. Without a push-to-main binary cache every
+          # run pays that cold build, so they run on pushes, tags, manual dispatch
+          # and PRs labelled `nix-heavy` (read on the next push or re-run), not on every PR.
+          - attr: daytxt-packages
+            heavy: true
+          - attr: daytxt-web
+            heavy: true
     env:
       OLLAMA_URL: ""
       OLLAMA_USERNAME: ""
       OLLAMA_PASSWORD: ""
       GEMINI_API_KEY: ""
     steps:
+      - name: Decide whether this attribute runs
+        id: gate
+        env:
+          HEAVY: ${{ matrix.heavy }}
+          EVENT: ${{ github.event_name }}
+          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'nix-heavy') }}
+        run: |
+          if [ "$HEAVY" = "true" ] && [ "$EVENT" = "pull_request" ] && [ "$HAS_LABEL" != "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
       - uses: DeterminateSystems/nix-installer-action@v16
+        if: steps.gate.outputs.run == 'true'
         with:
           extra-conf: |
             sandbox = true
       - uses: DeterminateSystems/flakehub-cache-action@v3
+        if: steps.gate.outputs.run == 'true'
       # Source-only lint is not repeated here: `nix flake check` runs as a
       # pre-commit hook in the lint job. This job owns the package outputs.
-      - name: Build CLI and run its packaged round-trip test
-        run: nix build --print-build-logs --no-link .#daybook-cli.tests.round-trip
+      - name: Build ${{ matrix.attr }}
+        if: steps.gate.outputs.run == 'true'
+        env:
+          ATTR: ${{ matrix.attr }}
+        run: nix build --print-build-logs --no-link ".#$ATTR"
   rust-target-matrix:
     # Draft PRs skip CI; marking one ready for review runs it.
     if: github.event.pull_request.draft != true
