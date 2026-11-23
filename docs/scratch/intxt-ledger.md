@@ -56,6 +56,8 @@ Ways intxt is special-cased or ahead of the general mechanism. Each entry gives 
   - the `DocReference` `via=` hint, general by the 11-17 decision.
   
   `short_ids` is already its own crate. Fix: move each when a second consumer appears, and design it as if one exists. Owner: intxt.
+- **C10, forge credentials have no home on the node.** The CLI passes the operator's `gh` token per call; node secret storage doesn't exist. A webnode doing GitHub's device flow will need a stateless CORS proxy, because GitHub's OAuth endpoints don't send CORS headers (to verify). Fix: node secret storage (nodules), and the proxy as a relay-provider service. Owners: nodules, then whoever runs relays.
+- **C11, "public" is undefined** (D79). The web app's own relay node reads intxts it was told about, but no drawer access level means "anyone may read". Fix: a public read level in drawer access. Owner: nodules.
 
 ## Feedback
 
@@ -186,6 +188,10 @@ Round 1 as given (2026-11-19, CLI dogfood; proposals mine where marked):
   - "Public" is still being defined and doesn't block progress.
   - It is the web app, not the phone app.
 - **D80 (2026-11-24, operator) Forge integration starts with authentication and identity, including linking a PR and an intxt.** TypeScript is usable (Better Auth in `src/btress_auth`, componentized with jco). No Rust port of forges.link was found. How to start is to be discussed first.
+- **D81 (2026-11-24, operator) Credentials live with the user; servers pass through.**
+  - The web app signs the user in to the forge ("sign in to GitHub"), not to itself, and no server keeps identities, sessions or relationships. Better Auth leaves the viewer.
+  - This holds for every service integration, because daytxt is p2p first: the user's node, or later their webnode, holds the credential.
+  - Tokens come first; the GitHub device flow under one daytxt client id after them (`intxt-forge-identity.md`, second draft).
 
 ## For the ADRs
 
