@@ -309,7 +309,6 @@ pub struct LocalState {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StateKind {
     Sqlite,
-    Kv,
     #[datum(other)]
     Unknown(String),
 }

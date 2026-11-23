@@ -5,7 +5,7 @@
 //! serving them:
 //! - **services:** one XRPC [`Handler`] component and the operations it `implements`, plus the
 //!   foreign contracts the nodule `requires`, in the shared [`Request`] shape (ADR 028 §4);
-//! - **facilities:** private state, revisioned stores and the NSIDs of its settings datums;
+//! - **facilities:** local state, revisioned stores and the NSIDs of its settings datums;
 //! - **lifecycle:** initializers.
 //!
 //! Everything else (commands, views, processors, future sections) lives in
@@ -395,7 +395,7 @@ impl NoduleAdmission for ResolvedCartridge {
         admission.lexicon_files()?;
         admission.sidecar()?;
         admission.lexicon_refs()?;
-        admission.private_state()?;
+        admission.local_state()?;
         let (operations, artifacts) = admission.services()?;
         admission.stores()?;
         admission.initializers(&operations)?;
@@ -568,8 +568,8 @@ impl<'a> Admission<'a> {
         Ok(())
     }
 
-    /// Private state: unique keys and a kind this build serves.
-    fn private_state(&self) -> Result<()> {
+    /// Local state: unique keys and a kind this build serves.
+    fn local_state(&self) -> Result<()> {
         for (key, state) in &self.nodule.local_state {
             if key.is_empty() {
                 return Err(NoduleError::invalid(

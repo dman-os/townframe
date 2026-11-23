@@ -18,7 +18,7 @@ struct Nodule {
     implements: Vec<String>,
     revisioned_stores: Vec<RevisionedStore>,
     initialization: Vec<Initializer>,
-    private_state: Vec<PrivateState>,
+    local_state: Vec<LocalState>,
     settings: Vec<String>,
     bindings: IndexMap<String, Value>,
     #[serde(flatten)]
@@ -57,7 +57,7 @@ struct Initializer {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PrivateState {
+struct LocalState {
     key: String,
     kind: StateKind,
     #[serde(flatten)]
@@ -70,7 +70,6 @@ impl Nodule {
         use big_cabinet_core::reference::Location;
         use big_cartridges_core::Component;
         use big_cartridges_core::ComponentExport;
-        use big_cartridges_core::LocalState;
         use big_cartridges_core::PermbindDatum;
         use big_cartridges_core::PermbindMethod;
         use big_cartridges_core::RevisionedStore as ManifestStore;
@@ -207,12 +206,12 @@ impl Nodule {
                 })
                 .collect(),
             local_state: self
-                .private_state
+                .local_state
                 .iter()
                 .map(|state| {
                     (
                         state.key.clone(),
-                        LocalState {
+                        big_cartridges_core::LocalState {
                             kind: state.kind.clone(),
                             extra: Default::default(),
                         },
@@ -436,7 +435,7 @@ fn photos() -> Nodule {
         "id": "org.example.photos.settings",
         "defs": { "main": { "type": "object", "properties": { "thumbnails": { "type": "boolean" } } } },
     })));
-    nodule.private_state.push(PrivateState {
+    nodule.local_state.push(LocalState {
         key: "index".into(),
         kind: StateKind::Sqlite,
         extra: Default::default(),
@@ -533,24 +532,24 @@ fn the_photo_browser_admits_and_round_trips() {
     assert_eq!(value["implements"][0], "org.example.photos.list");
     assert_eq!(value["revisionedStores"][0]["mode"], "frontier");
     assert_eq!(value["initialization"][0]["mode"], "once");
-    assert_eq!(value["privateState"][0]["kind"], "sqlite");
+    assert_eq!(value["localState"][0]["kind"], "sqlite");
     assert_eq!(serde_json::from_value::<Nodule>(value).unwrap(), nodule);
 }
 
 #[test]
 fn unknown_vocabulary_is_carried_on_the_wire_and_refused_at_admission() {
     let value = json!({
-        "privateState": [{ "key": "s", "kind": "graph" }],
+        "localState": [{ "key": "s", "kind": "graph" }],
         "futureField": 1,
     });
     let nodule: Nodule = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(
-        nodule.private_state[0].kind,
+        nodule.local_state[0].kind,
         StateKind::Unknown("graph".into())
     );
     let encoded = serde_json::to_value(&nodule).unwrap();
     assert_eq!(encoded["futureField"], value["futureField"]);
-    assert_eq!(encoded["privateState"], value["privateState"]);
+    assert_eq!(encoded["localState"], value["localState"]);
     refuse(nodule, "no `graph` state");
 }
 
