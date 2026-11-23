@@ -158,8 +158,10 @@ impl Listener {
         ))
     }
 
-    /// Serves descriptor frames for local-only calls.  The connection is strictly one request and
-    /// one response: a new frame arriving before the response is a protocol refusal.
+    /// Serves descriptor frames for local-only calls. One request per connection, and any number
+    /// of concurrent connections: a new frame arriving on a connection before its response is a
+    /// protocol refusal. The client opens a fresh connection per call, because the descriptors it
+    /// passes (`SCM_RIGHTS`) belong to that one request.
     #[cfg(unix)]
     pub(crate) async fn fd(
         path: &Path,
