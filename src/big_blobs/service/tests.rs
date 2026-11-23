@@ -629,7 +629,6 @@ async fn a_drawer_reach_reads_exactly_the_blobs_its_inventories_pin() -> Res<()>
         storage: Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
-        operator: Uuid7::new(),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([7; 16]),
