@@ -34,6 +34,9 @@ pub struct TreeNode {
     pub name: String,
 }
 
+/// A pending `setTimeout`: its due time and callback.
+pub type PendingTimer = (f64, Box<dyn FnOnce()>);
+
 #[derive(Default)]
 pub struct Shared {
     pub labels: RefCell<HashMap<NodeKey, String>>,
@@ -122,6 +125,16 @@ pub struct FakeDom {
     pub prefers_reduced_motion: Cell<bool>,
     /// `navigator` (`CodeViewHost`).
     pub platform_info: RefCell<crate::utils::dom::platform::PlatformInfo>,
+    /// The pending `setTimeout`s by id: `(due time, callback)`. They run when a
+    /// test advances `clock` (`advance_clock`).
+    pub timers: RefCell<std::collections::BTreeMap<TimeoutId, PendingTimer>>,
+    pub clock: Cell<f64>,
+    /// The values `Math.random()` answers, in order (`CodeViewHost::random`).
+    pub random_values: RefCell<std::collections::VecDeque<f64>>,
+    /// `document.activeElement` (`CodeViewHost`).
+    pub active_element: Cell<Option<NodeKey>>,
+    /// `element.shadowRoot.activeElement`, by host element.
+    pub shadow_active_elements: RefCell<HashMap<NodeKey, NodeKey>>,
 }
 
 impl Default for FakeDom {
@@ -180,6 +193,11 @@ impl Default for FakeDom {
             device_pixel_ratio: Cell::new(1.0),
             prefers_reduced_motion: Cell::new(false),
             platform_info: RefCell::default(),
+            timers: RefCell::default(),
+            clock: Cell::new(0.0),
+            random_values: RefCell::default(),
+            active_element: Cell::new(None),
+            shadow_active_elements: RefCell::default(),
         }
     }
 }
@@ -226,6 +244,28 @@ impl FakeDom {
 
     pub fn emit(&self, entry: Value) {
         self.shared.emit(entry);
+    }
+
+    /// Moves the fake clock forward, running the timers that come due in
+    /// order (a timer a callback sets runs too if it is due).
+    pub fn advance_clock(&self, milliseconds: f64) {
+        let target = self.clock.get() + milliseconds;
+        loop {
+            let next = self
+                .timers
+                .borrow()
+                .iter()
+                .filter(|(_, (due, _))| *due <= target)
+                .min_by(|(left_id, (left, _)), (right_id, (right, _))| {
+                    left.total_cmp(right).then(left_id.cmp(right_id))
+                })
+                .map(|(id, _)| *id);
+            let Some(id) = next else { break };
+            let (due, callback) = self.timers.borrow_mut().remove(&id).expect("pending timer");
+            self.clock.set(due);
+            callback();
+        }
+        self.clock.set(target);
     }
 
     pub fn name_of(&self, node: NodeKey) -> String {

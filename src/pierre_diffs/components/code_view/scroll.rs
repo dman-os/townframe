@@ -26,15 +26,17 @@
 // * `getScrollAnchor` clones an item's `Rc` out of the state before it calls
 //   into the instance (`getNumericScrollAnchor` may call back into the viewer),
 //   and `availableItems.get(id) === item` is `Rc::ptr_eq`.
-// * `needsScrollPageUpdate` and `getPagedLayoutTop` have no caller before
-//   C4/C5 (`handleScroll`, `computeRenderRangeAndEmit`); they are exercised by
-//   the oracle; the module expects the dead code outside tests until C4/C5.
+// * What C4's handlers and shell call is live (`needsScrollPageUpdate` has no
+//   caller yet: it is `computeRenderRangeAndEmit`'s). The target resolution,
+//   the spring and `scrollTo`'s helpers are called by C5 only; they are
+//   exercised by the oracle, and the module expects the dead code outside tests
+//   until C5, which deletes the attribute.
 
 #![cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "the scroll model is called by C4's handlers and C5's render pass; the oracle covers it until then"
+        reason = "the target resolution, the spring and needsScrollPageUpdate are called by C5's render pass and scrollTo; the oracle covers them until then"
     )
 )]
 
@@ -156,7 +158,7 @@ where
     LAnnotation: Clone + PartialEq + 'static,
 {
     /// `roundToDevicePixel(value)`
-    fn round_to_device_pixel(&self, value: f64) -> f64 {
+    pub(crate) fn round_to_device_pixel(&self, value: f64) -> f64 {
         round_to_device_pixel(value, self.host.device_pixel_ratio())
     }
 
