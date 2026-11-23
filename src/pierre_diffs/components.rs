@@ -19,6 +19,8 @@ mod file_diff_render_oracle_tests;
 #[cfg(test)]
 mod file_diff_upstream_tests;
 #[cfg(test)]
+mod file_diff_partial_render_upstream_tests;
+#[cfg(test)]
 mod virtualizer_oracle_tests;
 #[cfg(test)]
 mod virtualizer_reconcile_queue_test;

@@ -6,9 +6,9 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 
 | status | files | upstream LOC |
 |---|---:|---:|
-| PORTED | 120 | 32855 |
+| PORTED | 121 | 33062 |
 | REPLACED | 10 | 1817 |
-| PENDING | 84 | 26737 |
+| PENDING | 83 | 26530 |
 | OUT | 248 | 98288 |
 | DEFER | 22 | 10731 |
 
@@ -308,7 +308,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/FileDiff.editSessionOwnership.test.ts` | 1674 | OUT | - |  | edit mode is out of scope for v1 |
 | `pierre/test/FileDiff.headerSlots.test.ts` | 179 | PENDING | S12a |  | PARTIAL. Ported with their names (components/file_diff_upstream_tests.rs): headerSlots 2 of 3 (the third is edit-session), rerenderInputs 2 of 3 (the third is edit-session), partialRender 4 of 4, partialHydration 14 of 23 (components/file_diff_hydration_upstream_tests.rs; a `LoaderHarness` is the host; the 4 edit-session and 4 worker-priming tests are OUT, the rejected-promise test has no counterpart), themeTypeUpdates 2 of 6 (the FileDiff cases; CodeView/VirtualizedFile are OUT/S12b, File is DEFER). Waiting or OUT: editSessionOwnership, unifiedEditSeparators and workerRendering (OUT); see parity/divergences.psv |
 | `pierre/test/FileDiff.partialHydration.test.ts` | 1379 | PENDING | S12a |  | PARTIAL. Ported with their names (components/file_diff_upstream_tests.rs): headerSlots 2 of 3 (the third is edit-session), rerenderInputs 2 of 3 (the third is edit-session), partialRender 4 of 4, partialHydration 14 of 23 (components/file_diff_hydration_upstream_tests.rs; a `LoaderHarness` is the host; the 4 edit-session and 4 worker-priming tests are OUT, the rejected-promise test has no counterpart), themeTypeUpdates 2 of 6 (the FileDiff cases; CodeView/VirtualizedFile are OUT/S12b, File is DEFER). Waiting or OUT: editSessionOwnership, unifiedEditSeparators and workerRendering (OUT); see parity/divergences.psv |
-| `pierre/test/FileDiff.partialRender.test.ts` | 207 | PENDING | S12a |  | PARTIAL. Ported with their names (components/file_diff_upstream_tests.rs): headerSlots 2 of 3 (the third is edit-session), rerenderInputs 2 of 3 (the third is edit-session), partialRender 4 of 4, partialHydration 14 of 23 (components/file_diff_hydration_upstream_tests.rs; a `LoaderHarness` is the host; the 4 edit-session and 4 worker-priming tests are OUT, the rejected-promise test has no counterpart), themeTypeUpdates 2 of 6 (the FileDiff cases; CodeView/VirtualizedFile are OUT/S12b, File is DEFER). Waiting or OUT: editSessionOwnership, unifiedEditSeparators and workerRendering (OUT); see parity/divergences.psv |
+| `pierre/test/FileDiff.partialRender.test.ts` | 207 | PORTED | S12a | `components/file_diff_partial_render_upstream_tests.rs` | all four cases; FakeDom and synchronous plain-text rendering replace jsdom and async highlighting |
 | `pierre/test/FileDiff.rerenderInputs.test.ts` | 233 | PENDING | S12a |  | PARTIAL. Ported with their names (components/file_diff_upstream_tests.rs): headerSlots 2 of 3 (the third is edit-session), rerenderInputs 2 of 3 (the third is edit-session), partialRender 4 of 4, partialHydration 14 of 23 (components/file_diff_hydration_upstream_tests.rs; a `LoaderHarness` is the host; the 4 edit-session and 4 worker-priming tests are OUT, the rejected-promise test has no counterpart), themeTypeUpdates 2 of 6 (the FileDiff cases; CodeView/VirtualizedFile are OUT/S12b, File is DEFER). Waiting or OUT: editSessionOwnership, unifiedEditSeparators and workerRendering (OUT); see parity/divergences.psv |
 | `pierre/test/FileDiff.unifiedEditSeparators.test.ts` | 111 | OUT | - |  | edit mode is out of scope for v1 |
 | `pierre/test/FileDiff.workerRendering.test.ts` | 485 | OUT | - |  | worker pool |
