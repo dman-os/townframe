@@ -55,4 +55,21 @@
     --ct-color-success: var(--ct-color-green-400);
     --ct-color-on-success: var(--ct-color-neutral-900);
   }
+
+  /*
+   * The document is the scroller of an app that lays out in the page, so what shows past its
+   * content (the touchpad's overscroll, a not-yet-rendered gap) is the root element's canvas: it
+   * takes the theme's page background and color scheme, not the browser's white. The roles are on
+   * `:root` already; the scheme's mode class is on the `ThemeRoot` below it, so the root reads it
+   * through `:has`.
+   */
+  :root {
+    background-color: var(--ct-color-canvas);
+  }
+  :root:has(.light) {
+    color-scheme: light;
+  }
+  :root:has(.dark) {
+    color-scheme: dark;
+  }
 }

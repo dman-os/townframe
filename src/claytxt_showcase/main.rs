@@ -32,6 +32,7 @@ use dioxus::prelude::*;
 use dioxus_native::winit::event::WindowEvent as NativeWindowEvent;
 #[cfg(feature = "desktop")]
 use dioxus_native::winit::window::Window;
+use pierre_diffs_dioxus::use_scroll_root;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -188,6 +189,18 @@ fn App() -> Element {
             .unwrap_or(LabTab::Button)
     });
     let available_width = use_available_width();
+    // The page's scroller is the document: it is the one scroller that gets momentum scrolling in
+    // every engine (WebKitGTK gives none to a nested `overflow: auto` element). `main` carries
+    // `data-dioxus-scroll-proxy`, which makes it stand in for the document's scroller in the
+    // Dioxus fork's interpreter (the document's scroll and the viewport's size arrive as `main`'s
+    // `onscroll` and `onresize`, and its mounted scroll commands drive the document). A viewer
+    // that lays out in the page (the PR diff's) is driven by it: the handle takes `main`'s events
+    // and the sections reach it by context.
+    let scroll_root = use_scroll_root();
+    use_context_provider(|| scroll_root.clone());
+    use_context_provider(|| LabViewport(available_width));
+    let diffs_view = use_signal(diffs::DiffsView::initial);
+    use_context_provider(|| diffs_view);
     let photo_preloads = use_memo(|| {
         (0..36)
             .map(|index| {
@@ -207,11 +220,27 @@ fn App() -> Element {
                 href: src.clone(),
             }
         }
+        // `overflow-anchor` off on the document's scroller (the root element's value governs the
+        // viewport) so the engine does not move the position the diff's scroll fix corrects.
+        document::Style { "html {{ overflow-anchor: none; }}" }
         ThemeRoot {
             family: "material".to_string(),
             mode: mode(),
             main {
-                class: "min-h-screen box-border bg-background p-6 font-sans text-foreground lg:p-12",
+                class: "box-border bg-background p-6 font-sans text-foreground lg:p-12",
+                "data-dioxus-scroll-proxy": "document",
+                onmounted: {
+                    let scroll_root = scroll_root.clone();
+                    move |event| scroll_root.onmounted(event)
+                },
+                onscroll: {
+                    let scroll_root = scroll_root.clone();
+                    move |event| scroll_root.onscroll(event)
+                },
+                onresize: {
+                    let scroll_root = scroll_root.clone();
+                    move |event| scroll_root.onresize(event)
+                },
                 h1 {
                     class: "mb-2 text-4xl font-bold leading-tight tracking-tight",
                     "claytxt kit showcase"
@@ -243,7 +272,10 @@ fn App() -> Element {
                     for each in LabTab::ALL {
                         TabPanel { key: "{each.value()}", value: each.value().to_string(),
                             if tab() == each {
-                                ThemeLabNav { viewport: (available_width(), 860.0), tab: each }
+                                // The PR diff lists its own files in its index.
+                                if !(each == LabTab::Diffs && diffs_view() == diffs::DiffsView::Pr84) {
+                                    ThemeLabNav { viewport: (available_width(), 860.0), tab: each }
+                                }
                                 {each.page(theme.clone(), available_width())}
                             }
                         }
@@ -253,6 +285,10 @@ fn App() -> Element {
         }
     }
 }
+
+/// The window size the showcase's overlays (the index) lay out against, from the root.
+#[derive(Clone, Copy)]
+struct LabViewport(Signal<f64>);
 
 /// The showcase's pages, one tab each: a specimen page per kit component, then the foundations
 /// and the diff view.

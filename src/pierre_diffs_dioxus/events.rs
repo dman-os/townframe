@@ -45,6 +45,8 @@ use pierre_diffs::managers::scroll_sync_manager::ScrollSyncManager;
 
 use crate::geometry::ScrollSample;
 use crate::host::DioxusHost;
+use crate::scroll_root::RootNotice;
+use crate::scroll_root::ScrollRoot;
 use crate::slot::SlotContent;
 
 /// Where the events of one view go: its host cache and, on a virtualized view, the managers that
@@ -281,6 +283,66 @@ impl Dispatch {
         self.host.flush_frames();
     }
 
+    /// The embedder's scroller told the handle something (see `scroll_root.rs`): the viewer's
+    /// root takes it as its own, translated to the viewer's place in the scroller's content.
+    pub(crate) fn page_notice(self: &Rc<Self>, page: &ScrollRoot, notice: RootNotice) {
+        let root = self.host.root();
+        match notice {
+            RootNotice::Mounted => {
+                let scroller = page
+                    .scroller()
+                    .expect("the handle has its scroller when it reports it mounted");
+                self.host.record_mounted(root, scroller);
+                self.host.flush_frames();
+            }
+            RootNotice::Scrolled => {
+                let sample = page
+                    .sample()
+                    .expect("the handle has its sample when it reports a scroll");
+                self.scrolled(root, page.viewer_sample(sample));
+            }
+            RootNotice::Resized => {
+                let (height, width) = page
+                    .size()
+                    .expect("the handle has its size when it reports a resize");
+                self.resized(root, height, width);
+            }
+            // Where the viewer sits moved, so its own scroll position did, with no scroll event
+            // behind it: as for a root that resized, the viewer reads it again.
+            RootNotice::Moved => {
+                if let Some(sample) = page.sample() {
+                    self.host.record_scroll(root, page.viewer_sample(sample));
+                }
+                let (height, width) = page.size().unwrap_or_default();
+                let code_view = self
+                    .code_view
+                    .as_ref()
+                    .expect("a page root belongs to a code view");
+                code_view.events.handle_resize(&[ResizeObserverEntry {
+                    target: root,
+                    border_box_block_size: height,
+                    content_box_inline_size: width,
+                }]);
+                self.host.flush_frames();
+            }
+        }
+    }
+
+    /// Puts what the handle already knows into the caches, when a viewer mounts on a scroller
+    /// that has reported before it. Nothing is notified: the viewer's first pass reads them.
+    pub(crate) fn seed_page(&self, page: &ScrollRoot) {
+        let root = self.host.root();
+        if let Some(scroller) = page.scroller() {
+            self.host.record_mounted(root, scroller);
+        }
+        if let Some(sample) = page.sample() {
+            self.host.record_scroll(root, page.viewer_sample(sample));
+        }
+        if let Some((height, _)) = page.size() {
+            self.host.record_size(root, height);
+        }
+    }
+
     pub(crate) fn scrolled(&self, node: NodeKey, sample: ScrollSample) {
         self.host.record_scroll(node, sample);
         match (self.host.scroll_side(node), &self.code_view) {
@@ -326,6 +388,17 @@ impl Dispatch {
         if self.host.wants_resize(node) {
             let dispatch = Rc::clone(self);
             attributes.push(listener("onresize", move |data: ResizeData| {
+                // The viewer's root in the embedder's scroller is as tall as its content, which
+                // is no viewport: its resize only says where it may have moved to.
+                if dispatch.host.is_page_root(node) {
+                    dispatch
+                        .host
+                        .code_view()
+                        .and_then(|code_view| code_view.page())
+                        .expect("a page root has its handle")
+                        .measure();
+                    return;
+                }
                 // Horizontal writing mode: the block size is the height.
                 let border = data
                     .get_border_box_size()
@@ -398,14 +471,26 @@ impl Dispatch {
                     .record_focus(node, false);
             }));
         }
-        // Scroll commands and client rects go through `MountedData`, which exists only from
-        // `onmounted`: a node that is scrolled or measured is a node that gets it.
-        if self.host.wants_scroll(node)
+        if self.host.is_page_root(node) {
+            // The viewer's root in the embedder's scroller is measured, not scrolled: its own
+            // place in the scroller's content is what the handle needs it for.
+            let dispatch = Rc::clone(self);
+            attributes.push(listener("onmounted", move |data: MountedData| {
+                dispatch
+                    .host
+                    .code_view()
+                    .and_then(|code_view| code_view.page())
+                    .expect("a page root has its handle")
+                    .viewer_mounted(Rc::new(data));
+            }));
+        } else if self.host.wants_scroll(node)
             || self
                 .host
                 .pointer
                 .wants_mounted(host_document(&self.host), node)
         {
+            // Scroll commands and client rects go through `MountedData`, which exists only from
+            // `onmounted`: a node that is scrolled or measured is a node that gets it.
             let dispatch = Rc::clone(self);
             attributes.push(listener("onmounted", move |data: MountedData| {
                 dispatch.mounted(node, data);

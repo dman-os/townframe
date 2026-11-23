@@ -20,7 +20,10 @@ use dioxus::html::MountedData;
 use dioxus::html::MountedResult;
 use dioxus::html::RenderedElementBacking;
 use dioxus::html::ScrollBehavior;
+use dioxus::html::geometry::PixelsRect;
 use dioxus::html::geometry::PixelsVector2D;
+use dioxus::html::geometry::euclid::Point2D;
+use dioxus::html::geometry::euclid::Size2D;
 use futures::FutureExt;
 use futures::channel::oneshot;
 use pierre_diffs::components::virtualizer::InstanceRef;
@@ -48,6 +51,8 @@ const VIEWPORT: f64 = 600.0;
 #[derive(Default)]
 pub(crate) struct Scripted {
     pub(crate) offset: Cell<(f64, f64)>,
+    /// The top of the element's client rect, in the viewport's coordinates.
+    pub(crate) client_top: Cell<f64>,
     pub(crate) log: RefCell<Vec<String>>,
 }
 
@@ -56,6 +61,16 @@ pub(crate) struct ScriptedElement(pub(crate) Rc<Scripted>);
 impl RenderedElementBacking for ScriptedElement {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn get_client_rect(&self) -> Pin<Box<dyn Future<Output = MountedResult<PixelsRect>>>> {
+        let top = self.0.client_top.get();
+        Box::pin(async move {
+            Ok(PixelsRect::new(
+                Point2D::new(0.0, top),
+                Size2D::new(100.0, 100.0),
+            ))
+        })
     }
 
     fn get_scroll_offset(&self) -> Pin<Box<dyn Future<Output = MountedResult<PixelsVector2D>>>> {
