@@ -1,0 +1,19 @@
+{
+  "name": "@townframe/forge_probe",
+  "private": true,
+  "type": "module",
+  "main": "dist/component.js",
+  "dependencies": {
+    "forges": "latest"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "^1.27.0",
+    "rolldown": "1.3.3",
+    "typescript": "~5.9.3"
+  },
+  "scripts": {
+    "build": "pnpm run build:ts && pnpm run build:component",
+    "build:ts": "rolldown -c rolldown.config.mjs",
+    "build:component": "jco componentize -w wit -o dist/forge_probe.wasm dist/component.js"
+  }
+}

@@ -1,0 +1,6 @@
+package townframe:forge-probe@0.1.0;
+
+world forge-probe {
+  include wasi:cli/command@0.2.6;
+  import wasi:http/outgoing-handler@0.2.6;
+}

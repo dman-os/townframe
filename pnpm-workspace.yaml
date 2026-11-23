@@ -1,6 +1,7 @@
 packages:
   - ./src/btress_auth/
   - ./src/btress_sysadmin/
+  - ./src/forge_probe/
   - ./src/dayframe_web/
   - .
 patchedDependencies:
