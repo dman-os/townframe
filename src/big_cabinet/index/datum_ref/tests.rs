@@ -1,6 +1,5 @@
 use super::*;
 use big_cabinet_core::DatumKey;
-use sqlite_rs::IntoValue;
 use std::sync::Arc;
 
 fn route(doc: u8, name: &str) -> DatumRoute {
@@ -29,25 +28,15 @@ fn ephemeral() -> Database {
 /// this store is the read surface over what it wrote, so the tests seed the table it reads.
 async fn seed(sql: &Database, edges: &[DatumRefEdge]) {
     for edge in edges {
-        Sql::new(
-            r#"INSERT INTO big_cabinet_datum_ref_edges (
-                   origin_doc
-                 , origin_datum
-                 , origin_path
-                 , target_doc
-                 , target_datum
-                 , ref_heads
-               ) VALUES "#,
+        queries::seed_edge(
+            sql,
+            edge.origin.doc_id.to_string(),
+            edge.origin.datum_key.to_string(),
+            edge.path.clone(),
+            edge.target.doc_id.to_string(),
+            edge.target.datum_key.to_string(),
+            serde_json::to_vec(&edge.ref_heads).unwrap(),
         )
-        .bind_list([
-            edge.origin.doc_id.to_string().into_value(),
-            edge.origin.datum_key.to_string().into_value(),
-            edge.path.clone().into_value(),
-            edge.target.doc_id.to_string().into_value(),
-            edge.target.datum_key.to_string().into_value(),
-            serde_json::to_vec(&edge.ref_heads).unwrap().into_value(),
-        ])
-        .execute(sql)
         .await
         .unwrap();
     }

@@ -81,3 +81,75 @@ ceiling = 1
 class = "LEGACY_DEBT"
 reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
 reference = "docs/scratch/nodule-runtime-ledger.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/wflow/kvstore.rs"
+symbol = "module::SqliteKvWorker::handle_boot"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/wflow/kvstore.rs"
+symbol = "module::SqliteKvWorker::handle_del"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/wflow/kvstore.rs"
+symbol = "module::SqliteKvWorker::handle_get"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/wflow/kvstore.rs"
+symbol = "module::SqliteKvWorker::handle_increment"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/wflow/kvstore.rs"
+symbol = "module::SqliteKvWorker::handle_new_cas"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/wflow/kvstore.rs"
+symbol = "module::SqliteKvWorker::handle_set"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/wflow/kvstore.rs"
+symbol = "module::SqliteKvWorker::handle_swap"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/wflow/kvstore.rs"
+symbol = "module::tests::failed_writes_roll_back_changes_and_release_transaction"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"

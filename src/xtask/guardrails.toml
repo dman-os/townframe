@@ -33,3 +33,75 @@ ceiling = 1
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
 reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/xtask/sql.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/xtask/sql/tests.rs"
+symbol = "module::checker_compares_declared_column_types_by_affinity"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/xtask/sql/tests.rs"
+symbol = "module::discovery_ignores_empty_directories_left_by_removed_units"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/xtask/sql/tests.rs"
+symbol = "module::generated_migrations_are_ordered_and_checked_for_staleness"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/xtask/sql/tests.rs"
+symbol = "module::migration_cli_inspection_does_not_write_and_discovery_is_sorted"
+ceiling = 3
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/xtask/sql/tests.rs"
+symbol = "module::migration_versions_must_start_at_one_and_be_contiguous"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/xtask/sql/tests.rs"
+symbol = "module::nested_units_derive_distinct_history_tables"
+ceiling = 3
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/xtask/sql/tests.rs"
+symbol = "module::schema_dependencies_are_ordered_and_cycles_rejected"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"

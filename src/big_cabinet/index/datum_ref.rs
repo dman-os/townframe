@@ -27,6 +27,13 @@ use utils_rs::prelude::Res;
 
 use super::datum_set::DatumRoute;
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "`seed_edge` is the tests' fixture writer; the datum-set worker writes the edges"
+    )
+)]
 mod queries {
     include!("datum_ref/sqlite/gen.rs");
 }

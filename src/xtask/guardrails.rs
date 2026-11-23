@@ -272,6 +272,33 @@ mod tests {
     }
 
     #[test]
+    fn inline_sql_is_flagged_outside_queries_directories() {
+        let src = r##"
+            fn run() {
+                let _a = "SELECT 1";
+                let _b = r#"
+                    INSERT INTO t VALUES (1)
+                "#;
+                let _c = "Select a file";
+                let _d = "UPDATE";
+            }
+        "##;
+        let (_, findings) = analysis::scan("src/foo/lib.rs", src);
+        let sql: Vec<_> = findings
+            .iter()
+            .filter(|finding| finding.code == "ERROR_INLINE_SQL")
+            .collect();
+        assert_eq!(sql.len(), 1);
+        assert_eq!(sql[0].actual, 2);
+        let (_, queries) = analysis::scan("src/foo/queries/mod.rs", src);
+        assert!(
+            queries
+                .iter()
+                .all(|finding| finding.code != "ERROR_INLINE_SQL")
+        );
+    }
+
+    #[test]
     fn path_attribute_is_rejected_on_modules() {
         let src = "#[cfg(test)]\n#[path = \"foo_tests.rs\"]\nmod tests;\n";
         let (_, findings) = analysis::scan("src/foo/lib.rs", src);

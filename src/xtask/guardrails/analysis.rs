@@ -485,6 +485,13 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                 "use a per-run temporary directory instead of shared process-global state",
             );
         }
+        if is_inline_sql(&value) && !self.path.split('/').any(|part| part == "queries") {
+            self.flag(
+                "ERROR_INLINE_SQL",
+                literal.span(),
+                "move the statement to a `queries/*.sql` file that the crate's query generation compiles",
+            );
+        }
         if self.test
             && literal
                 .value()
@@ -499,6 +506,21 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         }
         syn::visit::visit_lit_str(self, literal);
     }
+}
+
+/// Whether a string literal is a SQL statement: raw or not, its first word is `SELECT`,
+/// `INSERT`, `UPDATE`, `DELETE` or `CREATE` in capitals, followed by whitespace. Leading
+/// whitespace (the newline after an opening quote) does not count, and prose that merely starts
+/// with one of the words as a name (`"SELECT"` alone, `"Select a file"`) does not match.
+fn is_inline_sql(literal: &str) -> bool {
+    let mut words = literal.trim_start().splitn(2, char::is_whitespace);
+    matches!(
+        (words.next(), words.next()),
+        (
+            Some("SELECT" | "INSERT" | "UPDATE" | "DELETE" | "CREATE"),
+            Some(_)
+        )
+    )
 }
 
 pub fn symbol_fingerprints(text: &str) -> BTreeMap<String, String> {
