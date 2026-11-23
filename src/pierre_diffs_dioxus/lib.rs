@@ -10,7 +10,13 @@
 //! `sleep` function the embedder supplies (see `host.rs`). With `FileDiffViewProps::interaction`
 //! the pointer hovers, selects and expands: events reach the port's `InteractionManager` through
 //! handlers on the rendered nodes (see `host.rs`, "Pointers").
+//!
+//! [`CodeViewView`] is Pierre's `CodeView`: many files in one virtualized scroller, each from a
+//! patch or from two versions of the file, with the same annotation slots, and a
+//! [`ScrollRequest`] that reveals a line of a file. Its host and the slab's per-frame signal path
+//! are in `host/code_view.rs` and `render.rs`; it is view-only for now (see `code_view.rs`).
 
+mod code_view;
 mod events;
 mod geometry;
 mod host;
@@ -18,17 +24,27 @@ mod render;
 mod slot;
 mod view;
 
+pub use code_view::CodeViewFile;
+pub use code_view::CodeViewView;
+pub use code_view::CodeViewViewProps;
+pub use code_view::FileAnnotation;
+pub use code_view::Runtime;
+pub use code_view::ScrollRequest;
+pub use host::Environment;
 pub use host::SleepFuture;
 pub use pierre_diffs::highlighter_types::DiffsHighlighter;
 pub use pierre_diffs::highlighter_types::PlainTextHighlighter;
 pub use pierre_diffs::js_collections::PtrEq;
 pub use pierre_diffs::managers::interaction_manager::LineHoverHighlight;
+pub use pierre_diffs::types::layout::CodeViewLayout;
 pub use pierre_diffs::types::options::DiffStyle;
 pub use pierre_diffs::types::patch::FileContents;
 pub use pierre_diffs::types::view::AnnotationSide;
+pub use pierre_diffs::types::view::CodeViewScrollTarget;
 pub use pierre_diffs::types::view::DiffLineAnnotation;
 pub use pierre_diffs::types::view::SelectedLineRange;
 pub use pierre_diffs::types::view::SelectionSide;
+pub use pierre_diffs::utils::dom::platform::PlatformInfo;
 pub use slot::SlotContent;
 pub use view::DiffInput;
 pub use view::FileDiffView;
