@@ -19,6 +19,8 @@ use super::window_upstream_tests::world;
 use crate::components::file_diff::FileDiffHunkSeparators;
 use crate::js_collections::PtrEq;
 use crate::types::patch::FileDiffMetadata;
+use crate::types::view::AnnotationSide;
+use crate::types::view::NumericScrollLineAnchor;
 use crate::utils::compute_virtual_file_metrics::PartialVirtualFileMetrics;
 
 // ---- virtualFileMetricsPadding.test.ts, describe('VirtualizedFileDiff') ----
@@ -300,8 +302,6 @@ fn virtual_file_padding_metrics_virtualized_file_diff_does_not_reserve_metadata_
 #[test]
 fn sparse_layout_checkpoints_virtualized_file_diff_uses_checkpoints_for_deep_expanded_line_positions_and_anchors()
  {
-    // `getNumericScrollAnchor` is dropped (only CodeView reads it): the
-    // `getLinePosition` half.
     let mut options = Options::default();
     options.base.expand_unchanged = Some(true);
     let world = world(
@@ -321,9 +321,15 @@ fn sparse_layout_checkpoints_virtualized_file_diff_uses_checkpoints_for_deep_exp
     );
     world.layout(&file_diff, None);
 
+    let expected_top = DIFF_HEADER_HEIGHT + 9_999.0 * LINE_HEIGHT;
+    assert_eq!(world.position(10_000).map(|p| p.0), Some(expected_top));
     assert_eq!(
-        world.position(10_000).map(|p| p.0),
-        Some(DIFF_HEADER_HEIGHT + 9_999.0 * LINE_HEIGHT)
+        world.instance.get_numeric_scroll_anchor(expected_top),
+        Some(NumericScrollLineAnchor {
+            line_number: 10_000,
+            side: Some(AnnotationSide::Deletions),
+            top: expected_top,
+        })
     );
 }
 

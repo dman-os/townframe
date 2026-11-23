@@ -4,21 +4,27 @@
 //! `getLinePosition`, `computeRenderRangeFromWindow`) and the instance's
 //! measurement and bookkeeping (`instance`: `reconcileHeights`, `onRender`,
 //! `setVisibility`, `updatePendingRender`, `updateCodeViewLayout`). The
-//! integration with `FileDiff` (S12b-3) is not ported yet.
+//! integration with `FileDiff` (S12b-3) is `overrides`, and C1 is the advanced
+//! (CodeView) mode (`advanced`: the `Virtualizer | CodeView` union).
 
+pub mod advanced;
 pub mod instance;
 pub mod layout;
 pub mod overrides;
 pub mod window;
 
 #[cfg(test)]
+mod advanced_tests;
+#[cfg(test)]
+mod advanced_upstream_tests;
+#[cfg(test)]
 mod integration_upstream_tests;
 #[cfg(test)]
-mod layout_oracle_tests;
+pub(crate) mod layout_oracle_tests;
 #[cfg(test)]
 mod layout_test_instance;
 #[cfg(test)]
-mod layout_upstream_tests;
+pub(crate) mod layout_upstream_tests;
 #[cfg(test)]
 mod padding_upstream_tests;
 #[cfg(test)]

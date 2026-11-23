@@ -69,7 +69,7 @@ struct Scenario {
 
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct MetricsSpec {
+pub(crate) struct MetricsSpec {
     hunk_line_count: Option<usize>,
     line_height: Option<f64>,
     diff_header_height: Option<f64>,
@@ -95,7 +95,7 @@ impl From<MetricsSpec> for PartialVirtualFileMetrics {
 
 #[derive(Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct Spec {
+pub(crate) struct Spec {
     diff_style: Option<DiffStyle>,
     collapsed: Option<bool>,
     expand_unchanged: Option<bool>,
@@ -115,7 +115,7 @@ pub(super) struct Spec {
 
 #[derive(Deserialize, Clone)]
 #[serde(untagged)]
-pub(super) enum SeparatorSpec {
+pub(crate) enum SeparatorSpec {
     Name(String),
     Function { r#fn: String },
 }
@@ -391,7 +391,7 @@ impl Replay {
 
 /// A scenario's option spec as options (custom separators are one function
 /// per name, so equal names are equal callbacks).
-pub(super) fn options_from_spec<LAnnotation>(
+pub(crate) fn options_from_spec<LAnnotation>(
     spec: &Spec,
     separator_functions: &mut HashMap<String, SeparatorFn>,
 ) -> FileDiffOptions<NodeKey, u8, LAnnotation> {
@@ -441,7 +441,7 @@ fn checkpoint_json(checkpoint: Option<DiffLayoutCheckpoint>) -> Value {
     })
 }
 
-pub(super) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<String>()
         .cloned()

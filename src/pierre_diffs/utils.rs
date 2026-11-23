@@ -25,6 +25,7 @@ pub mod parse_quoted_diff_file_name;
 pub mod predicates;
 pub mod realign_change_content;
 pub mod render;
+pub mod round_to_device_pixel;
 pub mod split_file_contents;
 pub mod trim_patch_context;
 pub mod virtual_diff_layout;
