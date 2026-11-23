@@ -328,11 +328,7 @@ export async function withWorld(JSDOM, oracleModules, body) {
   }
 }
 
-export function snapshotTree(node) {
-  if (node.nodeType === 3) return node.data;
-  if (node.localName === "svg" && node.hasAttribute("data-icon-sprite")) {
-    return ["SVG", `sprite:${fnv32(signature(node))}`];
-  }
+function snapshotAttributes(node) {
   const attributes = [];
   for (const attribute of node.attributes) {
     if (attribute.name === "style") {
@@ -347,11 +343,41 @@ export function snapshotTree(node) {
     }
   }
   attributes.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return attributes;
+}
+
+export function snapshotTree(node) {
+  if (node.nodeType === 3) return node.data;
+  if (node.localName === "svg" && node.hasAttribute("data-icon-sprite")) {
+    return ["SVG", `sprite:${fnv32(signature(node))}`];
+  }
   return [
     node.localName.toUpperCase(),
-    attributes,
+    snapshotAttributes(node),
     Array.from(node.childNodes).map(snapshotTree),
     node.shadowRoot ? Array.from(node.shadowRoot.childNodes).map(snapshotTree) : null,
+  ];
+}
+
+/**
+ * `snapshotTree` with every shadow child summarised by a hash of its snapshot:
+ * what an oracle that renders many items needs to compare the shells without
+ * storing their content (the `diffs-container` light children stay in full).
+ */
+export function snapshotOutline(node) {
+  if (process.env.S12_FULL) return snapshotTree(node);
+  if (node.nodeType === 3) return node.data;
+  if (node.localName === "svg" && node.hasAttribute("data-icon-sprite")) return snapshotTree(node);
+  return [
+    node.localName.toUpperCase(),
+    snapshotAttributes(node),
+    Array.from(node.childNodes).map(snapshotOutline),
+    node.shadowRoot
+      ? Array.from(node.shadowRoot.childNodes).map((child) => {
+          const snapshot = snapshotTree(child);
+          return Array.isArray(snapshot) && snapshot[0] !== "SVG" ? [snapshot[0], snapshot[1], fnv32(JSON.stringify(snapshot))] : snapshot;
+        })
+      : null,
   ];
 }
 

@@ -176,7 +176,6 @@ where
     /// `flow-root` gives it a block formatting context so the caller's content
     /// margins stay inside it, keeping measurement / ResizeObserver heights
     /// accurate.
-    #[cfg_attr(not(test), expect(dead_code, reason = "called by the render pass, C5"))]
     fn create_header_footer_host_element(&self, kind: HostKind, container: NodeKey) -> NodeKey {
         let document = self.document();
         let element = document.create_element("div");
@@ -202,7 +201,6 @@ where
     /// options. Returns true when a host's content changed (a fresh mount or a
     /// swapped callback) so the render cycle takes a synchronous height
     /// measurement in the following read phase.
-    #[cfg_attr(not(test), expect(dead_code, reason = "called by the render pass, C5"))]
     pub(crate) fn reconcile_header_footer_hosts(&self) -> bool {
         let header_changed = self.reconcile_host(HostKind::Header);
         let footer_changed = self.reconcile_host(HostKind::Footer);
@@ -214,7 +212,6 @@ where
     /// changes, and tear it down when the callback is removed. Otherwise the
     /// mounted host is left untouched (its content is owned by the caller).
     /// Returns whether its content changed.
-    #[cfg_attr(not(test), expect(dead_code, reason = "called by the render pass, C5"))]
     fn reconcile_host(&self, kind: HostKind) -> bool {
         let (root, container, render, element, mounted_render) = {
             let state = self.state.borrow();
@@ -326,7 +323,6 @@ where
 
     /// `measureMountedHosts()`: read the mounted hosts' heights. Called only in
     /// the render cycle's read phase on a change frame.
-    #[cfg_attr(not(test), expect(dead_code, reason = "called by the render pass, C5"))]
     pub(crate) fn measure_mounted_hosts(&self) {
         for kind in [HostKind::Header, HostKind::Footer] {
             let element = {

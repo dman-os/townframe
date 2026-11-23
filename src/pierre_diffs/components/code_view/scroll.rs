@@ -26,19 +26,6 @@
 // * `getScrollAnchor` clones an item's `Rc` out of the state before it calls
 //   into the instance (`getNumericScrollAnchor` may call back into the viewer),
 //   and `availableItems.get(id) === item` is `Rc::ptr_eq`.
-// * What C4's handlers and shell call is live (`needsScrollPageUpdate` has no
-//   caller yet: it is `computeRenderRangeAndEmit`'s). The target resolution,
-//   the spring and `scrollTo`'s helpers are called by C5 only; they are
-//   exercised by the oracle, and the module expects the dead code outside tests
-//   until C5, which deletes the attribute.
-
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the target resolution, the spring and needsScrollPageUpdate are called by C5's render pass and scrollTo; the oracle covers them until then"
-    )
-)]
 
 use std::collections::HashMap;
 use std::rc::Rc;
