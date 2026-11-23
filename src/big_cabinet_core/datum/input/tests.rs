@@ -1194,3 +1194,26 @@ fn a_supplement_from_data_is_checked_not_assumed() {
     });
     assert!(admit_lexicon(TAG, &primary, &[], Some(&widening)).is_err());
 }
+
+/// A sidecar is a JSON Schema stored as a datum value, and the schema of a `Bytes` field has a
+/// property named `$bytes`. The data-model check reads any object with a `$bytes` key as a bytes
+/// value, so a schema that merely describes one is refused, and the cartridge that carries the
+/// sidecar cannot be published. The `$type` property of a tagged union's schema is the same shape.
+#[test]
+fn a_stored_json_schema_naming_a_bytes_or_type_property_is_admitted() {
+    // The registry's payload tags are open objects: the datum schema only has to admit the write.
+    let compiled = compile(&json!({
+        "lexicon": 1, "id": TAG, "defs": {"main": {"type": "object", "properties": {}}}
+    }));
+    let bytes_schema = json!({"type": "object", "properties": {"$bytes": {"type": "string"}}});
+    let tagged_schema = json!({"type": "object", "properties": {"$type": {"const": "x"}}});
+    for schema in [bytes_schema, tagged_schema] {
+        assert!(
+            accepts(
+                &compiled,
+                json!({"$defs": {"GitCommit": {"properties": {"raw": schema.clone()}}}})
+            ),
+            "refused {schema}"
+        );
+    }
+}
