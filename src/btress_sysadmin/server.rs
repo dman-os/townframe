@@ -16,7 +16,7 @@ pub async fn server_main(wasi_req: Request) -> Res<Response> {
     use leptos_axum::generate_route_list;
     use tower_http::ServiceBuilderExt;
 
-    utils_rs::setup_tracing().expect("tracing setup error");
+    utils_rs::tracing::setup_tracing().expect("tracing setup error");
 
     let mut leptos_options = leptos::config::get_config_from_env()?.leptos_options;
     leptos_options.site_root = "/public".into();

@@ -177,7 +177,7 @@ impl FfiCtx {
     #[uniffi::constructor]
     #[tracing::instrument(err, skip(acx))]
     async fn init(repo_root: String, acx: &AppFfiCtx) -> Result<Arc<Self>, FfiError> {
-        utils_rs::setup_tracing_once();
+        utils_rs::tracing::setup_tracing_once();
 
         let rt = Arc::clone(&acx.rt);
         let acx = Arc::clone(&acx.inner);
@@ -243,7 +243,7 @@ impl AppFfiCtx {
     #[uniffi::constructor]
     #[tracing::instrument(err)]
     async fn init() -> Result<Arc<Self>, FfiError> {
-        utils_rs::setup_tracing_once();
+        utils_rs::tracing::setup_tracing_once();
         utils_rs::init_app_startup_clock();
 
         let rt = crate::init_tokio()?;
