@@ -63,6 +63,11 @@ async fn a_review_install_file_configures_the_micro_and_no_file_leaves_it_unconf
         "the review micro's grants come with its install: {:?}",
         installs[0].methods
     );
+    assert!(
+        installs[0].methods.contains("org.example.daybook.blobs.read"),
+        "the review micro reads a commit's patch blob: {:?}",
+        installs[0].methods
+    );
     for install in installs {
         composition.install_micro(install).await.unwrap();
     }
