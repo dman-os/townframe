@@ -77,8 +77,10 @@
 //! **Backpressure**
 //!
 //! 12. **Bounded work.** In-flight backend calls are bounded by ObjectJobs' window and fetch
-//!     cap; rounds go out only while ObjectJobs has room, with row limits at most that room;
-//!     walks hold at most their read-ahead. Nothing in this machine grows with the peer's
+//!     cap; rounds go out only while ObjectJobs has room, with row limits at most that room (at
+//!     most half of it while any walk is pulling, so a backlog cannot hold the window against
+//!     the walks; the walks take what the rounds in flight leave); walks hold at most their
+//!     read-ahead. Nothing in this machine grows with the peer's
 //!     data except per-route state.
 //!
 //! **Sync facts**
