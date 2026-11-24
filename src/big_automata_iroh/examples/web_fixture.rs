@@ -77,11 +77,7 @@ async fn main() {
     commit(&store, vec![grant(&[(1, 0)])]).await;
     for obj in 1..=OBJECTS {
         let part_member = [(obj, 1)];
-        commit(
-            &store,
-            vec![set(&[(obj, obj * 10)]), add(&part_member)],
-        )
-        .await;
+        commit(&store, vec![set(&[(obj, obj * 10)]), add(&part_member)]).await;
     }
 
     let principal_of = |_: &RequestContext, _: &TransportContext| -> Result<PeerKey, ContextError> {

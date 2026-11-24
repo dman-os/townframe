@@ -58,13 +58,16 @@ impl SyncBackend for HintBackend {
                 .collect::<Vec<_>>()
         };
         if !job.remove.is_empty() {
-            stage(&self.0, &mut tx, PartWrite::RemoveMembers(members(&job.remove))).await?;
+            let removes = PartWrite::RemoveMembers(members(&job.remove));
+            stage(&self.0, &mut tx, removes).await?;
         }
         if let Some(payload) = job.payload.clone() {
-            stage(&self.0, &mut tx, PartWrite::SetPayloads(vec![(job.obj.clone(), payload)])).await?;
+            let set = PartWrite::SetPayloads(vec![(job.obj.clone(), payload)]);
+            stage(&self.0, &mut tx, set).await?;
         }
         if !job.add.is_empty() {
-            stage(&self.0, &mut tx, PartWrite::AddMembers(members(&job.add))).await?;
+            let adds = PartWrite::AddMembers(members(&job.add));
+            stage(&self.0, &mut tx, adds).await?;
         }
         tx.commit();
         Ok(Settle::Done)
