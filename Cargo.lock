@@ -1479,6 +1479,7 @@ dependencies = [
  "serde",
  "serde_json",
  "service_client_iroh_rs",
+ "utils_rs",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

@@ -19,7 +19,11 @@ const root = $.relativeDir("../");
 // `resolver.feature-unification`); the native fixture build uses the workspace's.
 const isolated = ["--config", 'resolver.feature-unification="selected"'];
 
-await $`cargo build --locked ${isolated} -p big_automata_web --bin big_automata_web --target wasm32-unknown-unknown --profile wasm-release`;
+// The browser endpoint's rustls provider is `ring`, which compiles C (and assembly) for wasm32.
+// A shell that exports `CC=gcc` (ci-desktop) would hand it a host compiler, whose objects fail at
+// link, so the target-specific variable names a clang, which targets wasm32 itself.
+await $`cargo build --locked ${isolated} -p big_automata_web --bin big_automata_web --target wasm32-unknown-unknown --profile wasm-release`
+  .env({ CC_wasm32_unknown_unknown: "clang" });
 await $`cargo build --locked -p big_automata_iroh --example web_fixture`;
 const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
   .json<{ target_directory: string }>();

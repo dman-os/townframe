@@ -18,13 +18,18 @@ use big_automata::driver::DriverConfig;
 use big_automata::driver::Facts;
 use big_automata::driver::PeerDriver;
 use big_automata::driver::RouteUpdate;
-use big_automata::driver::memory::MemoryBackend;
+use big_automata::driver::ObjJob;
+use big_automata::driver::Settle;
+use big_automata::driver::SyncBackend;
 use big_automata::driver::memory::MemoryPeerCursors;
 use big_automata::part_store::PartStoreRead;
+use big_automata::part_store::laws::stage;
 use big_automata::part_store::memory::MemoryPartStore;
+use big_automata::part_store::oracle::PartWrite;
 use big_automata_iroh::PeerRpcClient;
 use serde::Deserialize;
 use service_client_iroh_rs::IrohHttp;
+use utils_rs::prelude::Res;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
@@ -35,6 +40,39 @@ struct Fixture {
     node_id: iroh::EndpointId,
     part: PartKey,
     objects: u64,
+}
+
+/// Writes each job into a memory store: its removals and adds, and the payload the replay row
+/// carried as the object's content. `MemoryBackend` takes payloads from a second store that
+/// stands in for a download, which a browser page has no peer store to be; the job's own hint is
+/// all the bytes there are here.
+struct HintBackend(MemoryPartStore);
+
+impl SyncBackend for HintBackend {
+    async fn record(&self, job: ObjJob) -> Res<Settle> {
+        let mut tx = self.0.begin();
+        let members = |parts: &[PartKey]| {
+            parts
+                .iter()
+                .map(|part| (job.obj.clone(), part.clone()))
+                .collect::<Vec<_>>()
+        };
+        if !job.remove.is_empty() {
+            stage(&self.0, &mut tx, PartWrite::RemoveMembers(members(&job.remove))).await?;
+        }
+        if let Some(payload) = job.payload.clone() {
+            stage(&self.0, &mut tx, PartWrite::SetPayloads(vec![(job.obj.clone(), payload)])).await?;
+        }
+        if !job.add.is_empty() {
+            stage(&self.0, &mut tx, PartWrite::AddMembers(members(&job.add))).await?;
+        }
+        tx.commit();
+        Ok(Settle::Done)
+    }
+
+    async fn fetch(&self, _job: ObjJob) -> Res<()> {
+        Ok(())
+    }
 }
 
 fn show(id: &str, text: &str) {
@@ -82,9 +120,7 @@ async fn run() {
         DriverConfig::new(peer.clone(), "memory"),
         Arc::new(web_time::Instant::now),
         facts.clone(),
-        // The backend's payload source is empty: the page counts memberships, and a payload
-        // fetch finds nothing to copy.
-        MemoryBackend::new(local.clone(), MemoryPartStore::default()),
+        HintBackend(local.clone()),
         MemoryPeerCursors::default(),
         local.clone(),
     );

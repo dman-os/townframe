@@ -18,6 +18,7 @@ service_client_iroh_rs.workspace = true
 # The crypto provider is the host's choice (`service_client_iroh_rs` takes none): rustls over
 # `ring`, which builds for wasm32-unknown-unknown.
 iroh = { workspace = true, default-features = false, features = ["tls-ring"] }
+utils_rs.workspace = true
 web-time.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

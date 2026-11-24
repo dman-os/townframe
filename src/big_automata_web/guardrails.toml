@@ -5,6 +5,7 @@ allowed_dependencies = [
     "big_automata",
     "big_automata_iroh",
     "service_client_iroh_rs",
+    "utils_rs",
 ]
 allow_external_api_types = false
 
