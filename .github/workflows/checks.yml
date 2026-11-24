@@ -7,7 +7,7 @@ on:
   schedule:
     - cron: "0 3 * * *"
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
     inputs:
       tmate_enabled:
@@ -34,9 +34,50 @@ env:
   GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
 jobs:
-  nix-packages:
+  # Decides what the rest of the run needs; see .github/scripts/ci-scope.sh for the rules.
+  # Pushes to main, the nightly cron, manual dispatch and PRs labelled `full-ci` always get
+  # the full suites. Other PRs run only the affected crates' tests and target matrix, skip
+  # Rust jobs for docs-only changes, and run the heavy jobs (Nix packages, web E2E, CLI E2E)
+  # only when their paths change or a `nix-heavy` / `e2e` label asks for them.
+  changes:
     # Draft PRs skip CI; marking one ready for review runs it.
     if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+      full: ${{ steps.scope.outputs.full }}
+      tests: ${{ steps.scope.outputs.tests }}
+      packages: ${{ steps.scope.outputs.packages }}
+      test_args: ${{ steps.scope.outputs.test_args }}
+      nix: ${{ steps.scope.outputs.nix }}
+      e2e_web: ${{ steps.scope.outputs.e2e_web }}
+      e2e_cli: ${{ steps.scope.outputs.e2e_cli }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The three-dot diff against origin/main needs full history for the merge base.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Compute the CI scope
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PLAN_RUNNER: nix develop .#ci-rust --command
+        run: .github/scripts/ci-scope.sh
+  nix-packages:
+    needs: changes
+    # Draft PRs skip CI; marking one ready for review runs it. On PRs the heavy Nix builds also
+    # need a path trigger or the `nix-heavy` label (see `changes`).
+    if: github.event.pull_request.draft != true && needs.changes.outputs.nix == 'true'
     name: Nix package ${{ matrix.attr }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -48,50 +89,31 @@ jobs:
         include:
           # The guest and web builds share one vendored dependency set (dioxus,
           # wasmtime, blitz, ...) and compile wasmtime-environ for wasm, so a cold build
-          # is very heavy. Without a push-to-main binary cache every
-          # run pays that cold build, so they run on pushes, tags, manual dispatch
-          # and PRs labelled `nix-heavy` (read on the next push or re-run), not on every PR.
+          # is very heavy; the `changes` job keeps them off PRs that cannot affect them.
           - attr: daytxt-packages
-            heavy: true
           - attr: daytxt-web
-            heavy: true
     env:
       OLLAMA_URL: ""
       OLLAMA_USERNAME: ""
       OLLAMA_PASSWORD: ""
       GEMINI_API_KEY: ""
     steps:
-      - name: Decide whether this attribute runs
-        id: gate
-        env:
-          HEAVY: ${{ matrix.heavy }}
-          EVENT: ${{ github.event_name }}
-          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'nix-heavy') }}
-        run: |
-          if [ "$HEAVY" = "true" ] && [ "$EVENT" = "pull_request" ] && [ "$HAS_LABEL" != "true" ]; then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          fi
       - uses: actions/checkout@v4
-        if: steps.gate.outputs.run == 'true'
       - uses: DeterminateSystems/nix-installer-action@v16
-        if: steps.gate.outputs.run == 'true'
         with:
           extra-conf: |
             sandbox = true
       - uses: DeterminateSystems/flakehub-cache-action@v3
-        if: steps.gate.outputs.run == 'true'
       # Source-only lint is not repeated here: `nix flake check` runs as a
       # pre-commit hook in the lint job. This job owns the package outputs.
       - name: Build ${{ matrix.attr }}
-        if: steps.gate.outputs.run == 'true'
         env:
           ATTR: ${{ matrix.attr }}
         run: nix build --print-build-logs --no-link ".#$ATTR"
   rust-target-matrix:
-    # Draft PRs skip CI; marking one ready for review runs it.
-    if: github.event.pull_request.draft != true
+    needs: changes
+    # Draft PRs skip CI; marking one ready for review runs it. Docs-only PRs skip it.
+    if: github.event.pull_request.draft != true && needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -118,9 +140,24 @@ jobs:
       # `ci-rust` carries no pkg-config-visible glib, so the native lane there fails in
       # `glib-sys`' build script. This is the same reason the daytxt test lane below runs
       # in `ci-desktop`.
-      - run: nix develop .#ci-desktop --command cargo x guardrails check-matrix --target "${{ matrix.target }}"
+      # A full run checks every crate's contract; an affected-only PR run checks each affected
+      # crate (a crate with no contract for the target selects zero builds, which is fine when
+      # filtered by package).
+      - name: Check build contracts
+        env:
+          TARGET: ${{ matrix.target }}
+          FULL: ${{ needs.changes.outputs.full }}
+          PACKAGES: ${{ needs.changes.outputs.packages }}
+        run: |
+          if [ "$FULL" = true ]; then
+            nix develop .#ci-desktop --command cargo x guardrails check-matrix --target "$TARGET"
+          else
+            for package in $PACKAGES; do
+              nix develop .#ci-desktop --command cargo x guardrails check-matrix --target "$TARGET" --package "$package"
+            done
+          fi
       - name: Check browser wcmp adapter
-        if: matrix.target == 'wasm32-unknown-unknown'
+        if: matrix.target == 'wasm32-unknown-unknown' && (needs.changes.outputs.full == 'true' || contains(needs.changes.outputs.packages, 'clay_rt_wcmp_web'))
         run: nix develop .#ci-desktop --command cargo x guardrails check-matrix --target wasm32-unknown-unknown --package clay_rt_wcmp_web
   # The single lint job. Hooks that only read sources delegate to the
   # hermetic `nix flake check` hook (cache hits make an unchanged tree free);
@@ -152,8 +189,10 @@ jobs:
           nix develop .#ci-desktop --command prek --color=always run --all-files
   e2e-cli:
     name: E2E (CLI)
-    # Draft PRs skip CI; marking one ready for review runs it.
-    if: github.event.pull_request.draft != true
+    needs: changes
+    # Draft PRs skip CI; marking one ready for review runs it. On PRs it also needs a path
+    # trigger or the `e2e` label (see `changes`).
+    if: github.event.pull_request.draft != true && needs.changes.outputs.e2e_cli == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -203,8 +242,10 @@ jobs:
 
 
   tests:
-    # Draft PRs skip CI; marking one ready for review runs it.
-    if: github.event.pull_request.draft != true
+    needs: changes
+    # Draft PRs skip CI; marking one ready for review runs it. Docs-only PRs skip it; other PRs
+    # test only the affected crates (the full workspace on main, nightly and `full-ci`).
+    if: github.event.pull_request.draft != true && needs.changes.outputs.tests == 'true'
     runs-on: ubuntu-latest
     # Preparing the daytxt Wasm guest fixtures takes about 35 minutes on a cold runner before
     # nextest starts, and the suite itself about 40; 90 cut the run off at the last test.
@@ -274,13 +315,11 @@ jobs:
           # implies `--no-clean`, so the earlier run's data survives) and the final `report`
           # invocation turns the whole lot into a single lcov file.
           nix develop .#ci-desktop --command cargo llvm-cov --no-report nextest \
-            --color=always --workspace --all-targets --profile "$NEXTEST_PROFILE" \
-            --user-config-file .config/nextest-user-ci.toml \
-            --exclude day_cli
+            --color=always $TEST_ARGS --all-targets --profile "$NEXTEST_PROFILE" \
+            --user-config-file .config/nextest-user-ci.toml
           # nextest cannot run doctests, so they go through `cargo test --doc`. `--doc` implies
           # `--doctests`, which persists the doctest binaries the coverage report needs.
-          nix develop .#ci-desktop --command cargo llvm-cov --no-report --doc --workspace \
-            --exclude day_cli
+          nix develop .#ci-desktop --command cargo llvm-cov --no-report --doc $TEST_ARGS
           # `report` only merges the collected profile data and writes lcov; it runs no tests.
           # `--doctests` is what lets the persisted doctest binaries be attributed to their sources.
           nix develop .#ci-rust --command cargo llvm-cov report --doctests --lcov --output-path lcov.info
@@ -288,6 +327,9 @@ jobs:
           # empty when the test runs and the report disagree about `--doctests`.
           grep -q '^SF:' lcov.info || { echo 'lcov.info has no coverage records' >&2; exit 1; }
         env:
+          # `--workspace --exclude day_cli` on a full run, `-p <crate> ...` for the affected
+          # crates on a PR (computed by the `changes` job).
+          TEST_ARGS: ${{ needs.changes.outputs.test_args }}
           UTILS_RS_TIMEOUT_MULTIPLIER: 3
           RUST_BACKTRACE: 1
           # info, not debug: nextest holds every running test's captured output in memory, and the
@@ -341,8 +383,10 @@ jobs:
 
   e2e-daytxt-web-chromium:
     name: E2E (daytxt web / chromium)
-    # Draft PRs skip CI; marking one ready for review runs it.
-    if: github.event.pull_request.draft != true
+    needs: changes
+    # Draft PRs skip CI; marking one ready for review runs it. On PRs it also needs a path
+    # trigger or the `e2e` label (see `changes`).
+    if: github.event.pull_request.draft != true && needs.changes.outputs.e2e_web == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
