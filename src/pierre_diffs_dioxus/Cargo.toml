@@ -20,6 +20,13 @@ pierre_diffs = { workspace = true }
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 
 [dev-dependencies]
+#
+# internal
+# The tests admit every batch the view emits into a Clay surface, as a micro shipping it would.
+clay_surface.workspace = true
+
+#
+# misc
 # The tests deliver events as the serialized payloads a renderer would convert from.
 dioxus-html = { workspace = true, features = ["serialize"] }
 dioxus-ssr.workspace = true

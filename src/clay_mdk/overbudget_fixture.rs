@@ -62,8 +62,8 @@ impl presentation_events::Guest for Overbudget {
 
     fn dispatch(surface: &presentation::Surface, _event: Event) -> EventResponse {
         let mut edits = WireMutations::default();
-        // One past `SurfaceTree::MAX_BATCH_MUTATIONS` (4096), which a guest cannot name.
-        for _ in 0..4097 {
+        // One past `SurfaceTree::MAX_BATCH_MUTATIONS` (16 * 1024), which a guest cannot name.
+        for _ in 0..16 * 1024 + 1 {
             edits.pop();
         }
         match surface.apply(&edits.take()) {

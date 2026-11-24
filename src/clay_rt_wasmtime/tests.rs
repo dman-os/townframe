@@ -1013,16 +1013,20 @@ fn ingress_budget_rejects_oversized_batches_before_conversion() {
         Err("batch byte limit")
     );
 
+    // As many full strings as fit, then one final string that takes the batch exactly one
+    // byte over: each mutation is charged its in-memory size plus its string bytes, and the
+    // final string stays within the per-string limit, so only the batch limit can refuse it.
+    let mutation_bytes = std::mem::size_of::<Mutation<ComponentRef>>();
+    let full_texts = clay_surface::SurfaceTree::<ComponentRef>::MAX_BATCH_BYTES
+        / (clay_surface::SurfaceTree::<ComponentRef>::MAX_STRING_BYTES + mutation_bytes);
     let final_text_bytes = clay_surface::SurfaceTree::<ComponentRef>::MAX_BATCH_BYTES
-        - 3 * clay_surface::SurfaceTree::<ComponentRef>::MAX_STRING_BYTES
-        - 4 * std::mem::size_of::<Mutation<ComponentRef>>()
+        - full_texts * (clay_surface::SurfaceTree::<ComponentRef>::MAX_STRING_BYTES + mutation_bytes)
+        - mutation_bytes
         + 1;
-    let texts = [
-        text.clone(),
-        text.clone(),
-        text,
-        "x".repeat(final_text_bytes),
-    ];
+    assert!(final_text_bytes <= clay_surface::SurfaceTree::<ComponentRef>::MAX_STRING_BYTES);
+    let texts = std::iter::repeat_n(text, full_texts)
+        .chain(["x".repeat(final_text_bytes)])
+        .collect::<Vec<_>>();
     let resolved = texts
         .iter()
         .cloned()

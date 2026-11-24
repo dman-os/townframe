@@ -1,7 +1,8 @@
 version = 1
 role = "interface"
-dependency_reason = "thin Dioxus web layer over the pure pierre_diffs port: DOM event, observer and measurement wiring for the Virtualizer; plain Dioxus, no Clay or micro dependency"
+dependency_reason = "thin Dioxus web layer over the pure pierre_diffs port: DOM event, observer and measurement wiring for the Virtualizer; plain Dioxus, no Clay or micro dependency outside tests: clay_surface is a dev-dependency only, so the tests admit the view's output the way Clay admits a micro's"
 allowed_dependencies = [
+    "clay_surface",
     "pierre_diffs",
 ]
 allow_external_api_types = true

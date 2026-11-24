@@ -358,8 +358,9 @@ fn ingress_limits_reject_sparse_ids_oversized_batches_strings_and_stacks() {
         &vec![Mutation::PushId(0); SurfaceTree::MAX_STACK_DEPTH],
         true,
     );
+    // Strings each within their own limit that together pass the batch's.
     let mut batch = Vec::new();
-    for _ in 0..5 {
+    for _ in 0..=SurfaceTree::MAX_BATCH_BYTES / SurfaceTree::MAX_STRING_BYTES {
         batch.push(Mutation::CreateText(
             "x".repeat(SurfaceTree::MAX_STRING_BYTES),
         ));

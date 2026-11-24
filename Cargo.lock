@@ -10603,6 +10603,7 @@ dependencies = [
 name = "pierre_diffs_dioxus"
 version = "0.1.0"
 dependencies = [
+ "clay_surface",
  "dioxus",
  "dioxus-html",
  "dioxus-ssr",
