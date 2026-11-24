@@ -198,14 +198,16 @@ async fn law_5_cursor_writes_land_in_order_and_never_go_back() {
         .await;
     driver.connect(peer.clone());
     let mut head = 0;
+    // Writes of the part arrive faster than the table lands them (the first take 8s, the next
+    // 7s, and so on), so writes that were not awaited in turn would overlap and be overtaken.
     for value in 2..=6u8 {
-        until(|| !table.written().is_empty()).await;
         head = peer
             .commit(vec![set(&[(1, value)])])
             .await
             .expect("a change");
-        until(|| table.get(&config.peer, "memory", &part(1)) == head).await;
+        n0_future::time::sleep(Duration::from_millis(500)).await;
     }
+    until(|| table.get(&config.peer, "memory", &part(1)) == head).await;
     let written: Vec<u64> = table
         .written()
         .into_iter()
