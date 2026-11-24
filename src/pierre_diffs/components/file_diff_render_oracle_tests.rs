@@ -492,7 +492,7 @@ fn signature(dom: &FakeDom, node: NodeKey) -> String {
     format!("<{tag} {attributes}>{children}</{tag}>")
 }
 
-fn snapshot_tree(dom: &FakeDom, node: NodeKey) -> Value {
+pub(crate) fn snapshot_tree(dom: &FakeDom, node: NodeKey) -> Value {
     let tag = dom.doc.tag_name(node);
     if tag.is_empty() {
         return json!(dom.doc.text_content(node));

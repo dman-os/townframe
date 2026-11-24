@@ -288,14 +288,9 @@ function runScenario(JSDOM, modules, templates, scenario) {
           await instance.pendingFiles?.promise;
           break;
         }
-        case "cleanUp": {
-          // The nodes the Rust instance frees and the published one leaves
-          // behind (see `s12b_render.mjs`).
-          const left = [instance.spriteSVG, instance.themeCSSStyle, instance.unsafeCSSStyle];
+        case "cleanUp":
           instance.cleanUp(step.recycle === true);
-          for (const node of left) node?.remove();
           break;
-        }
         case "scroll":
           geo.scrollTop = Math.min(Math.max(step.top, 0), Math.max(0, geo.scrollHeight - geo.viewportHeight));
           windowListeners.get("scroll")?.();
