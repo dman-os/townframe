@@ -842,8 +842,8 @@ async fn a_node_installs_its_core_cartridge_at_boot_and_a_reboot_keeps_the_insta
         .call(
             RequestContext::root(),
             big_cabinet_core::authority::OpenActor {
-                parent: node.nodules_actor.capability,
-                path: "nodules/micros".into(),
+                parent: node.authority.root,
+                path: "micros".into(),
                 rights: big_cabinet_core::authority::Rights::all(),
             },
         )

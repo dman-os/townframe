@@ -646,6 +646,62 @@ async fn boot_nodules(
         .open_namespace(nodules_actor.actor.actor_id)
         .await
         .expect("nodules namespace");
+    // The micros subsystem actor the core nodule acts as, and the delegators the operator
+    // introduces to it, opened and minted as `big_node` does: the nodule service's own are bound
+    // to `nodules`, of which `micros` is no descendant.
+    let micros = authority
+        .client
+        .call(
+            RequestContext::root(),
+            OpenActor {
+                parent: authority.root,
+                path: "micros".into(),
+                rights: Rights::all(),
+            },
+        )
+        .await
+        .expect("micros actor");
+    let micros_subject = micros.actor.actor_id;
+    let delegators = crate::CoreDelegators {
+        dispatch: grant_nodule_dispatch(authority, dispatch, micros_subject).await,
+        docs: docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(authority.root).metadata(),
+                MintDocCapability {
+                    scope: DocScope {
+                        drawers: BTreeMap::from([(
+                            shared_config_drawer.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(DrawerAccess::Write),
+                        )]),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                    subject: Some(micros_subject),
+                },
+            )
+            .await
+            .expect("the operator mints the micros docs delegator")
+            .capability_id,
+        blobs: blobs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(authority.root).metadata(),
+                MintBlobsCapability {
+                    scope: BlobsScope {
+                        put: true,
+                        ..Default::default()
+                    },
+                    rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                    subject: Some(micros_subject),
+                },
+            )
+            .await
+            .expect("the operator mints the micros blobs delegator")
+            .capability_id,
+    };
     boot(NodulesConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
@@ -666,22 +722,11 @@ async fn boot_nodules(
         executor,
         schemas: Arc::clone(schemas),
         allow_slot_takeover,
-        // The micros subsystem actor the core nodule acts as, opened as `big_node` does.
         core_cartridge: crate::CoreCartridge {
             id: installs::core_cartridge_id(),
             version: installs::CORE_VERSION.parse().unwrap(),
-            actor: authority
-                .client
-                .call(
-                    RequestContext::root(),
-                    OpenActor {
-                        parent: nodules_actor.capability,
-                        path: format!("{NODULES_PATH}/micros"),
-                        rights: Rights::all(),
-                    },
-                )
-                .await
-                .expect("micros actor"),
+            actor: micros,
+            delegators,
             grants: core_grants,
         },
         sql: (**sql).clone(),
@@ -1263,8 +1308,8 @@ impl Node {
             .call(
                 RequestContext::root(),
                 OpenActor {
-                    parent: self.nodules_actor.capability,
-                    path: format!("{NODULES_PATH}/micros"),
+                    parent: self.authority.root,
+                    path: "micros".into(),
                     rights: Rights::all(),
                 },
             )

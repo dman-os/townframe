@@ -95,15 +95,20 @@ fn methods() -> [(XrpcMethod, Necessity, bool); 6] {
 }
 
 /// The id and version the nodule service refuses changes to, `micros`, the subsystem actor the
-/// core nodule acts as, and the grants the node makes it: one for each method [`package`]
+/// core nodule acts as and the handles its routines' handles are minted from, and the grants the node makes it: one for each method [`package`]
 /// declares a permbind on, `privileged` for the reads, which the service holds for the boot and
 /// never writes to the cartridge's config document (a person could not have granted them, and
 /// `setCartridgeGrant` refuses the core cartridge).
-pub(crate) fn pin(publisher: &str, micros: OpenedActor) -> big_nodule::CoreCartridge {
+pub(crate) fn pin(
+    publisher: &str,
+    micros: OpenedActor,
+    delegators: big_nodule::CoreDelegators,
+) -> big_nodule::CoreCartridge {
     big_nodule::CoreCartridge {
         id: id(publisher),
         version: version(),
         actor: micros,
+        delegators,
         grants: methods()
             .into_iter()
             .map(|(method, _, privileged)| {

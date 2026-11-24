@@ -161,6 +161,29 @@ pub(crate) struct Stores {
 }
 
 impl Stores {
+    /// The delegators `actor`'s routines' handles are minted from: the core cartridge's nodule
+    /// (`micros`, a sibling of `nodules`) has its own because an introduction may only name a
+    /// descendant of the delegator's subject; every other nodule's actor is a child of the
+    /// service's own.
+    pub(crate) fn delegators(&self, actor: &OpenedActor) -> Delegators {
+        let core = &self.core_cartridge;
+        if actor.actor.actor_id == core.actor.actor.actor_id {
+            Delegators {
+                dispatch: core.delegators.dispatch,
+                docs: core.delegators.docs,
+                blobs: core.delegators.blobs,
+                signer: core.actor.capability,
+            }
+        } else {
+            Delegators {
+                dispatch: self.dispatch_authority,
+                docs: self.docs_capability,
+                blobs: self.blobs_capability,
+                signer: self.parent.capability,
+            }
+        }
+    }
+
     /// The providers the node itself serves `request`'s contract under: dispatch's routes for an
     /// operation, the boot schemas for a datum. Cartridges' own offers come from the snapshot.
     pub(crate) fn native_offers(&self, request_contract: &str, is_operation: bool) -> Vec<String> {
@@ -172,6 +195,15 @@ impl Stores {
             Vec::new()
         }
     }
+}
+
+/// What a routine's handles are minted with: the delegators they are minted from and the
+/// capability that presents them, which is the actor the delegators are bound to.
+pub(crate) struct Delegators {
+    pub(crate) dispatch: CapId,
+    pub(crate) docs: CapId,
+    pub(crate) blobs: CapId,
+    pub(crate) signer: CapId,
 }
 
 /// The provider name a boot schema is offered under in the lockfile.
@@ -629,6 +661,7 @@ async fn mint_missing_handles(
     routines: &mut BTreeMap<String, AppliedRoutine>,
 ) -> Option<String> {
     let mut error = None;
+    let delegators = state.stores.delegators(actor);
     for (routine_key, scopes) in desired {
         let applied = routines
             .entry(routine_key.clone())
@@ -639,14 +672,17 @@ async fn mint_missing_handles(
         if applied.handles.dispatch.is_none()
             && let Some(scope) = &scopes.dispatch
         {
-            applied.handles.dispatch =
-                match state.stores.mint_operations(context, actor, scope).await {
-                    Ok(capability) => Some(capability),
-                    Err(mint_error) => {
-                        error = Some(mint_error.to_string());
-                        None
-                    }
-                };
+            applied.handles.dispatch = match state
+                .stores
+                .mint_operations(context, actor, &delegators, scope)
+                .await
+            {
+                Ok(capability) => Some(capability),
+                Err(mint_error) => {
+                    error = Some(mint_error.to_string());
+                    None
+                }
+            };
             applied.scopes.dispatch = scopes.dispatch.clone();
         }
         if applied.handles.docs.is_none()
@@ -657,11 +693,11 @@ async fn mint_missing_handles(
             // which holds each drawer it granted (`apply_grant`), as a drawers handle is.
             let authorization = if scope.drawers.is_empty() {
                 Authorization {
-                    authority: state.stores.docs_capability,
-                    signer: state.stores.parent.capability,
+                    authority: delegators.docs,
+                    signer: delegators.signer,
                 }
             } else {
-                Authorization::identity(state.stores.parent.capability)
+                Authorization::identity(delegators.signer)
             };
             applied.handles.docs = match state
                 .stores
@@ -693,7 +729,7 @@ async fn mint_missing_handles(
                 .drawers
                 .call_with(
                     context.child(),
-                    Authorization::identity(state.stores.parent.capability).metadata(),
+                    Authorization::identity(delegators.signer).metadata(),
                     MintDrawerCapability {
                         scope: scope.clone(),
                         rights: Rights::USE,
@@ -721,8 +757,8 @@ async fn mint_missing_handles(
                 .call_with(
                     context.child(),
                     Authorization {
-                        authority: state.stores.blobs_capability,
-                        signer: state.stores.parent.capability,
+                        authority: delegators.blobs,
+                        signer: delegators.signer,
                     }
                     .metadata(),
                     big_blobs_core::MintBlobsCapability {
@@ -2871,8 +2907,8 @@ impl Stores {
     }
 
     /// The actor `cartridge_id`'s nodule acts as. The core cartridge's nodule is the micros
-    /// runtime (ADR 052 §2), so it acts as the `micros` subsystem actor the node opened under
-    /// `nodules`, and the micro actors it opens (`nodules/micros/<cartridge>/<micro>`) are its own
+    /// runtime (ADR 052 §2), so it acts as the `micros` subsystem actor the node opened beside
+    /// `nodules`, and the micro actors it opens (`micros/<cartridge>/<micro>`) are its own
     /// subtree. Every other nodule's actor is `nodules/<cartridge segment>`, opened here (a path
     /// that exists opens to the same actor).
     async fn open_actor(
@@ -2937,14 +2973,15 @@ impl Stores {
         &self,
         context: &RequestContext,
         actor: &OpenedActor,
+        delegators: &Delegators,
         scope: &DispatchScope,
     ) -> Res<CapId> {
         self.dispatch_client
             .call_with(
                 context.child(),
                 Authorization {
-                    authority: self.dispatch_authority,
-                    signer: self.parent.capability,
+                    authority: delegators.dispatch,
+                    signer: delegators.signer,
                 }
                 .metadata(),
                 MintDispatchCapability {
