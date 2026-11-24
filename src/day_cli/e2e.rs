@@ -919,7 +919,11 @@ mod blackbox {
                     .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
                     .arg("--node")
                     .arg(sandbox.node())
-                    .args(["exec", "--get", "org.example.daybook.nodules.listNodules"])
+                    .args([
+                        "exec",
+                        "--get",
+                        "org.example.daybook.cartridges.listCartridgeGrantRequests",
+                    ])
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .spawn()
@@ -934,7 +938,7 @@ mod blackbox {
                 String::from_utf8_lossy(&output.stderr)
             );
             let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(answer, json!({"nodules": []}));
+            assert_eq!(answer, json!({"requests": []}));
         }
         assert!(
             !sandbox.socket().exists(),
