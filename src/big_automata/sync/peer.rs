@@ -90,6 +90,8 @@ use crate::sync::rpc::bucket::LeafBucketRequest;
 use crate::sync::strategy::PeerPartStrat;
 use crate::sync::strategy::decide_peer_strat;
 
+#[cfg(test)]
+mod tests;
 
 /// The one id space of every outward call (law 2).
 pub(crate) type CallId = u64;
