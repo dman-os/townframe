@@ -23,9 +23,11 @@ slow-timeout = { period = "60s", terminate-after = 8 }
 [profile.ci]
 fail-fast = false
 retries = { backoff = "exponential", count = 3, delay = "2s", max-delay = "10s", jitter = true }
-# Test output stays out of the job log (its volume broke the GitHub pipelines); failures carry
-# their output in the JUnit file instead, which each job uploads as an artifact.
-failure-output = "never"
+# Failing tests print their output once, after the run, so the job log carries the failure
+# without a live stream (an earlier setting that streamed all output broke the GitHub pipelines
+# by volume; `final` bounds it to the failures). The JUnit file also keeps failure output and
+# each job uploads it as an artifact.
+failure-output = "final"
  
 [profile.ci.junit]
 path = "target/nextest/ci/results.xml"
