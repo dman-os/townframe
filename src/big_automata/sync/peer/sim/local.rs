@@ -118,16 +118,6 @@ impl Local {
             .collect()
     }
 
-    /// The objects that are members of `part`, live or pending.
-    pub(super) fn holds(&self, part: &PartKey) -> BTreeSet<ObjKey> {
-        let states = block_on(self.store.obj_states(&self.objs)).unwrap();
-        self.objs
-            .iter()
-            .zip(states)
-            .filter_map(|(obj, state)| state?.parts.contains(part).then(|| obj.clone()))
-            .collect()
-    }
-
     pub(super) fn payload(&self, obj: &ObjKey) -> Option<ObjPayload> {
         let state = block_on(self.store.obj_states(std::slice::from_ref(obj))).unwrap();
         state[0]

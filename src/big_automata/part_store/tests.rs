@@ -93,10 +93,8 @@ fn grant_returns_the_backlog() -> Res<()> {
 }
 
 #[test]
-fn removals_skip_routes_that_never_saw_the_member() -> Res<()> {
-    block_on(laws::removals_skip_routes_that_never_saw_the_member(
-        &Memory,
-    ))
+fn removals_reach_every_route_above_its_bound() -> Res<()> {
+    block_on(laws::removals_reach_every_route_above_its_bound(&Memory))
 }
 
 #[test]

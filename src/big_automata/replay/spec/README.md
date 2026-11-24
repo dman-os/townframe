@@ -184,8 +184,8 @@ restated) and its `liveCatchesUp` run are still to do.
 
 * Law 10 (`drained`): a pacing hint with no correctness content; the model has
   no pacing.
-* Law 11 (omitting removals the client never saw): the model's log has no
-  membership, so there are no removals to omit.
+* Law 11 (every removal after the cursor is delivered): the model's log has no
+  membership, so there are no removals to deliver or omit.
 * Law 12 (object targets): every route is a part; an object route's
   readability "live in some readable part" is one more readability bit, which
   the model already varies freely.

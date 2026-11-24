@@ -48,33 +48,7 @@ pub(super) enum Op {
 }
 
 impl Sim {
-    /// A replay of `parts` is about to restart from their persisted cursors (a crash, or a part
-    /// unwanted and wanted again): note the members the local store holds or may soon hold above
-    /// them, the ones the peer's removal never reaches (see [`Sim::ghosts`]).
-    fn note_ghosts(&mut self, parts: &[PartKey]) {
-        for part in parts {
-            let cursor = self.local.persisted.get(part).copied().unwrap_or(0);
-            let covered = &self.remote.view_at(cursor).members[part];
-            let in_flight = self
-                .local
-                .calls
-                .values()
-                .map(|flight| flight.job())
-                .filter(|job| job.add.contains(part))
-                .map(|job| job.obj.clone());
-            let ahead = self
-                .local
-                .holds(part)
-                .into_iter()
-                .chain(in_flight)
-                .filter(|obj| !covered.contains(obj))
-                .collect::<Vec<_>>();
-            self.ghosts.entry(part.clone()).or_default().extend(ahead);
-        }
-    }
-
     fn crash(&mut self, committed: u8, close: bool) {
-        self.note_ghosts(&(0..self.shape.parts).map(part).collect::<Vec<_>>());
         for (at, call) in self
             .local
             .calls
@@ -164,7 +138,6 @@ impl Sim {
                     .collect();
                 let removed_objs: Vec<ObjKey> = picked(rem_objs, obj_routes).map(obj).collect();
                 let added_objs: Vec<ObjKey> = picked(add_objs, obj_routes).map(obj).collect();
-                self.note_ghosts(&removed_parts);
                 for part in &removed_parts {
                     self.wanted_parts.remove(part);
                     self.walked.remove(part);

@@ -89,9 +89,8 @@ impl Sim {
                 *cursor <= self.remote.head(),
                 "{part} persisted at {cursor}, past the peer's head"
             );
-            let local = self.without_ghosts(part, self.local.members(part));
-            let remote =
-                self.without_ghosts(part, self.remote.view_at(*cursor).members[part].clone());
+            let local = self.local.members(part);
+            let remote = self.remote.view_at(*cursor).members[part].clone();
             for obj in (0..self.shape.objs).map(obj) {
                 if self.remote.row_rev(&obj, part) <= *cursor {
                     assert_eq!(
@@ -115,13 +114,13 @@ impl Sim {
     /// matched the cursor's own once.
     pub(super) fn check_synced(&mut self, part: &PartKey) {
         let at = self.sync.drained[part];
-        let local = self.without_ghosts(part, self.local.members(part));
+        let local = self.local.members(part);
         let view = self.remote.view_at(at);
         assert!(
             view.readable.contains(part),
             "Synced({part}) at {at}, where the peer did not let us read it"
         );
-        if local == self.without_ghosts(part, view.members[part].clone()) {
+        if local == view.members[part].clone() {
             self.walked.remove(part);
             return;
         }
@@ -131,19 +130,11 @@ impl Sim {
                     .remote
                     .views_from(at)
                     .any(|later| later.readable.contains(part)
-                        && self.without_ghosts(part, later.members[part].clone()) == local),
+                        && later.members[part].clone() == local),
             "Synced({part}) at {at} with local members {local:?}, the peer's readable members \
              then were {:?}",
             view.members[part]
         );
-    }
-
-    /// `members` without the members a crash may have left behind for good.
-    fn without_ghosts(&self, part: &PartKey, mut members: BTreeSet<ObjKey>) -> BTreeSet<ObjKey> {
-        if let Some(ghosts) = self.ghosts.get(part) {
-            members.retain(|obj| !ghosts.contains(obj));
-        }
-        members
     }
 
     // # The quiet drain
@@ -292,8 +283,8 @@ impl Sim {
         for part in &self.wanted_parts {
             if view.readable.contains(part) {
                 assert_eq!(
-                    self.without_ghosts(part, self.local.members(part)),
-                    self.without_ghosts(part, view.members[part].clone()),
+                    self.local.members(part),
+                    view.members[part].clone(),
                     "{part} is Synced and its local members are not the peer's"
                 );
             }

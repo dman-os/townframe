@@ -112,13 +112,11 @@ strike! {
         /// row's rev: a part route covers the part's member rows, an object route the object's
         /// member rows in every part. Access rows are on no route.
         ///
-        /// A removal carries no news to a reader that never saw the membership: a removed row
-        /// is skipped on a route whose cursor (the larger of its bound and the read's `after`)
-        /// is below the rev at which the membership *first* went live. A reader that saw any
-        /// incarnation live did so at or after that rev, so its cursor is never below it and
-        /// it always gets the removal. The first presence, not the latest: a reader that saw
-        /// the first incarnation must hear the removal of a later one, because the log
-        /// collapsed the removal in between away.
+        /// Removals are never filtered: a removal after a route's bound is delivered whatever
+        /// rev the membership went live at. A reader's persisted cursor only passes settled
+        /// work, so it may already hold a membership that went live above that cursor;
+        /// skipping the removal for want of a cursor that "saw" the membership would strand
+        /// it there.
         Routes(pub struct LogRoutes {
             pub parts: BTreeMap<PartKey, Rev>,
             pub objects: BTreeMap<ObjKey, Rev>,
@@ -127,20 +125,12 @@ strike! {
 }
 
 impl LogSelector {
-    /// Whether a read of `(after, ..]` hands out `key`'s row at `rev`. `removed_added_at` is
-    /// `Some(first_added_at)` when the row is a removed membership: the rev at which that
-    /// membership first went live.
-    pub fn selects(
-        &self,
-        key: &LogKey,
-        rev: Rev,
-        after: Rev,
-        removed_added_at: Option<Rev>,
-    ) -> bool {
+    /// Whether a read hands out `key`'s row at `rev`.
+    pub fn selects(&self, key: &LogKey, rev: Rev) -> bool {
         match (self, key) {
             (Self::All, _) => true,
             (Self::Routes(routes), LogKey::Member { obj, part }) => {
-                let (on_part, on_object) = routes.carriers(obj, part, rev, after, removed_added_at);
+                let (on_part, on_object) = routes.carriers(obj, part, rev);
                 on_part || on_object
             }
             (Self::Routes(_), LogKey::Access { .. }) => false,
@@ -149,25 +139,14 @@ impl LogSelector {
 }
 
 impl LogRoutes {
-    /// Which routes carry the member row `(obj, part)` at `rev` to a read of `(after, ..]`:
-    /// `(part route, object route)`. A route carries the row when its bound is below `rev` and
-    /// the removal rule of [`LogSelector::Routes`] lets it through. The two answers are kept
-    /// apart because an [authorized read](PartStoreServe::read_authorized) admits them on
-    /// different grounds.
-    pub fn carriers(
-        &self,
-        obj: &ObjKey,
-        part: &PartKey,
-        rev: Rev,
-        after: Rev,
-        removed_added_at: Option<Rev>,
-    ) -> (bool, bool) {
-        let on_route = |bound: Rev| {
-            rev > bound && removed_added_at.is_none_or(|added_at| added_at <= bound.max(after))
-        };
+    /// Which routes carry the member row `(obj, part)` at `rev`: `(part route, object route)`.
+    /// A route carries the row when its bound is below `rev`. The two answers are kept apart
+    /// because an [authorized read](PartStoreServe::read_authorized) admits them on different
+    /// grounds.
+    pub fn carriers(&self, obj: &ObjKey, part: &PartKey, rev: Rev) -> (bool, bool) {
         (
-            self.parts.get(part).copied().is_some_and(on_route),
-            self.objects.get(obj).copied().is_some_and(on_route),
+            self.parts.get(part).is_some_and(|bound| rev > *bound),
+            self.objects.get(obj).is_some_and(|bound| rev > *bound),
         )
     }
 }

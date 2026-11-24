@@ -20,7 +20,7 @@
 //! | an authorized read carries, from its snapshot, one payload per object with a live row in it, and no other | [`authorized_reads_carry_their_payloads`], every check, [`differential`] |
 //! | the responder's rev and watch follow commits like the log's | every commit and rollback |
 //! | an authorized read equals the oracle's filter of current access | every check, every authorized read in [`differential`] |
-//! | a route skips a removal of a membership added after its cursor | [`removals_skip_routes_that_never_saw_the_member`], every route read in [`differential`] |
+//! | a route delivers every removal above its bound, whatever the membership's `added_at` | [`removals_reach_every_route_above_its_bound`], every route read in [`differential`] |
 //! | incremental bucket summaries equal a recompute | every check |
 //! | part summaries (member count, dirt) equal a count over the oracle's log | every check, [`dirty_count_counts_log_rows`] |
 //! | bucket reads, summaries and object states follow current access, revocation mid-walk included | [`revocation_hides_the_parts_buckets`], every check |
@@ -928,9 +928,11 @@ pub async fn authorized_reads_carry_their_payloads<B: Backend>(backend: &B) -> R
     let page = harness
         .read_authorized(&principal(0), &routes, 0, latest, all)
         .await?;
-    assert_eq!(page.rows.entries.len(), 2, "{page:?}");
+    // Two live rows and object 1's removal, which carries no payload.
+    assert_eq!(page.rows.entries.len(), 3, "{page:?}");
+    assert!(page.rows.entries.iter().any(|entry| entry.value.is_none()));
     assert_eq!(page.payloads, vec![(obj(0), payload(1))]);
-    // From rev 1 the page also carries object 1's removal, which carries no payload.
+    // From rev 1 the page loses only the first live row.
     let page = harness
         .read_authorized(&principal(0), &routes, 1, latest, all)
         .await?;
@@ -1108,10 +1110,11 @@ pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
     Ok(())
 }
 
-/// A route hands out a removal only to a reader that may have seen the membership: one whose
-/// cursor (the larger of the route's bound and the read's `after`) is at or past the
-/// membership's `added_at`. `All` keeps every removal.
-pub async fn removals_skip_routes_that_never_saw_the_member<B: Backend>(backend: &B) -> Res<()> {
+/// A route hands out every removal above its bound, whatever rev the membership went live at:
+/// a reader's persisted cursor only passes settled work, so it may hold a membership that went
+/// live above that cursor, and skipping the removal would leave it there for good. The route
+/// bound and the read's `after` still cut by rev, and `All` keeps every removal.
+pub async fn removals_reach_every_route_above_its_bound<B: Backend>(backend: &B) -> Res<()> {
     let mut harness = Harness::open(backend).await?;
     // Object 0 goes live at 1 and leaves at 2; object 1 goes live at 3 and leaves at 4.
     harness.commit(vec![set(&[(0, 1)]), add(&[(0, 0)])]).await?;
@@ -1134,14 +1137,17 @@ pub async fn removals_skip_routes_that_never_saw_the_member<B: Backend>(backend:
             .collect::<Vec<_>>()
     };
     let all = limits(usize::MAX, None);
-    // A reader at 0 saw neither membership.
-    assert_eq!(removed(harness.read(&route(0), 0, 4, all).await?), vec![]);
-    // A reader at 1 may have seen object 0, not object 1.
+    // A reader at 0 never saw either membership and still hears both removals.
     assert_eq!(
-        removed(harness.read(&route(0), 1, 4, all).await?),
-        vec![(obj(0), 2)]
+        removed(harness.read(&route(0), 0, 4, all).await?),
+        vec![(obj(0), 2), (obj(1), 4)]
     );
-    // A route bound counts as the reader's cursor too: from 3, object 1's removal is news.
+    // A reader at 2 gets the removal of object 1, which went live above its cursor.
+    assert_eq!(
+        removed(harness.read(&route(0), 2, 4, all).await?),
+        vec![(obj(1), 4)]
+    );
+    // A route bound cuts by rev like the read's `after`.
     assert_eq!(
         removed(harness.read(&route(3), 0, 4, all).await?),
         vec![(obj(1), 4)]
@@ -1153,25 +1159,21 @@ pub async fn removals_skip_routes_that_never_saw_the_member<B: Backend>(backend:
     });
     assert_eq!(
         removed(harness.read(&object_route, 2, 4, all).await?),
-        vec![]
-    );
-    assert_eq!(
-        removed(harness.read(&object_route, 3, 4, all).await?),
         vec![(obj(1), 4)]
     );
-    // Object 2 goes live at 5, leaves at 6, comes back at 7 and leaves at 8. A reader at 5 saw
-    // the first incarnation; the log collapsed its removal at 6 away, so the removal at 8 is the
-    // only way it learns the membership is gone, though the second incarnation is news to it.
+    // Object 2 goes live at 5, leaves at 6, comes back at 7 and leaves at 8; the log keeps only
+    // the removal at 8, which every reader below it gets.
     harness.commit(vec![set(&[(2, 1)]), add(&[(2, 0)])]).await?;
     harness.commit(vec![remove(&[(2, 0)])]).await?;
     harness.commit(vec![add(&[(2, 0)])]).await?;
     harness.commit(vec![remove(&[(2, 0)])]).await?;
-    assert_eq!(
-        removed(harness.read(&route(0), 5, 8, all).await?),
-        vec![(obj(2), 8)]
-    );
-    assert_eq!(removed(harness.read(&route(0), 4, 8, all).await?), vec![]);
-    // A full replay keeps both.
+    for after in [4, 5, 7] {
+        assert_eq!(
+            removed(harness.read(&route(0), after, 8, all).await?),
+            vec![(obj(2), 8)]
+        );
+    }
+    // A full replay keeps every removal too.
     assert_eq!(
         removed(harness.read(&LogSelector::All, 0, 8, all).await?),
         vec![(obj(0), 2), (obj(1), 4), (obj(2), 8)]
