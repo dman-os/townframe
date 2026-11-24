@@ -2,7 +2,6 @@
 //! machine against a `ReplayService` over a `MemoryPartStore`, in process and over iroh.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 use big_automata::PeerKey;
 use big_automata::part_store::laws::add;
@@ -117,7 +116,9 @@ struct Puller {
 impl Puller {
     fn new(session: u128, wanted: &[Route]) -> Self {
         let mut machine = ReplayClient::new(Uuid::from_u128(session));
-        machine.set_wanted(&wanted.iter().cloned().collect::<BTreeSet<_>>());
+        for route in wanted {
+            machine.want(route.clone());
+        }
         Self {
             machine,
             cursors: default_cursors(wanted),

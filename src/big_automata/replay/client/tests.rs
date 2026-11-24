@@ -16,10 +16,6 @@ fn obj_route(index: u8) -> Route {
     }
 }
 
-fn wanted(routes: &[Route]) -> BTreeSet<Route> {
-    routes.iter().cloned().collect()
-}
-
 fn updated(generation: Generation, refused: &[TargetId]) -> Result<SessionUpdated, SessionError> {
     Ok(SessionUpdated {
         generation,
@@ -34,7 +30,9 @@ fn send(client: &mut ReplayClient) -> UpdateSession {
 /// A client whose wanted `routes` are all acknowledged, with the update that opened them.
 fn acked(routes: &[Route]) -> (ReplayClient, UpdateSession) {
     let mut client = ReplayClient::new(Uuid::from_u128(1));
-    client.set_wanted(&wanted(routes));
+    for route in routes {
+        client.want(route.clone());
+    }
     let open = send(&mut client);
     assert_eq!(
         client.update_answered(&open, &updated(0, &[])).unwrap(),
@@ -62,7 +60,8 @@ fn page(verdicts: &[(TargetId, Verdict)]) -> Result<SessionPage, SessionError> {
 fn law_1_the_first_update_opens_with_the_whole_wanted_set() {
     let mut client = ReplayClient::new(Uuid::from_u128(1));
     assert!(client.next_update().is_none());
-    client.set_wanted(&wanted(&[part_route(1), obj_route(1)]));
+    client.want(part_route(1));
+    client.want(obj_route(1));
     let open = send(&mut client);
     assert_eq!(open.session_id, Uuid::from_u128(1));
     assert_eq!(open.generation, 0);
@@ -80,10 +79,10 @@ fn law_1_the_first_update_opens_with_the_whole_wanted_set() {
 #[test]
 fn law_2_one_update_flies_and_a_lost_one_is_resent_unchanged() {
     let mut client = ReplayClient::new(Uuid::from_u128(1));
-    client.set_wanted(&wanted(&[part_route(1)]));
+    client.want(part_route(1));
     let open = send(&mut client);
     // Changes made while it flies wait for its answer.
-    client.set_wanted(&wanted(&[part_route(1), part_route(2)]));
+    client.want(part_route(2));
     assert!(client.next_update().is_none());
     client.update_lost(&open);
     assert_eq!(send(&mut client), open);
@@ -99,7 +98,7 @@ fn law_2_one_update_flies_and_a_lost_one_is_resent_unchanged() {
 #[test]
 fn stale_answers_change_nothing() {
     let (mut client, open) = acked(&[part_route(1)]);
-    client.set_wanted(&wanted(&[part_route(1), part_route(2)]));
+    client.want(part_route(2));
     let next = send(&mut client);
     // A duplicate answer of the opening, and an answer naming the update in flight but for
     // another session, are both stale.
@@ -132,16 +131,18 @@ fn law_3_dropped_routes_are_removed_and_never_acknowledged() {
     let (mut client, _) = acked(&[part_route(1), part_route(2)]);
     let one = id_of(&client, &part_route(1));
     // Drop an acknowledged route, add two, then drop one of those before it is sent.
-    client.set_wanted(&wanted(&[part_route(2), part_route(3), part_route(4)]));
-    client.set_wanted(&wanted(&[part_route(2), part_route(3)]));
+    client.unwant(&part_route(1));
+    client.want(part_route(3));
+    client.want(part_route(4));
+    client.unwant(&part_route(4));
     let next = send(&mut client);
     assert_eq!(next.removals, [one]);
     assert_eq!(next.additions.len(), 1);
     let three = next.additions[0].0;
     // Drop the route in flight, and re-want it at once: it goes back under a fresh id, after
     // the removal of the one in flight.
-    client.set_wanted(&wanted(&[part_route(2)]));
-    client.set_wanted(&wanted(&[part_route(2), part_route(3)]));
+    client.unwant(&part_route(3));
+    client.want(part_route(3));
     client.update_answered(&next, &updated(1, &[])).unwrap();
     assert!(client.route_of(three).is_none());
     let after = send(&mut client);
@@ -154,7 +155,8 @@ fn law_3_dropped_routes_are_removed_and_never_acknowledged() {
 #[test]
 fn law_4_refused_routes_block_stay_wanted_and_return_under_fresh_ids() {
     let mut client = ReplayClient::new(Uuid::from_u128(1));
-    client.set_wanted(&wanted(&[part_route(1), part_route(2)]));
+    client.want(part_route(1));
+    client.want(part_route(2));
     let open = send(&mut client);
     let refused = open
         .additions
@@ -185,9 +187,9 @@ fn law_4_refused_routes_block_stay_wanted_and_return_under_fresh_ids() {
 #[test]
 fn a_dropped_route_refused_in_flight_needs_no_removal() {
     let mut client = ReplayClient::new(Uuid::from_u128(1));
-    client.set_wanted(&wanted(&[part_route(1)]));
+    client.want(part_route(1));
     let open = send(&mut client);
-    client.set_wanted(&wanted(&[]));
+    client.unwant(&part_route(1));
     let id = open.additions[0].0;
     client.update_answered(&open, &updated(0, &[id])).unwrap();
     assert_eq!(client.blocked().count(), 0);
@@ -198,7 +200,7 @@ fn a_dropped_route_refused_in_flight_needs_no_removal() {
 fn law_5_unknown_session_reopens_with_the_whole_wanted_set() {
     let (mut client, open) = acked(&[part_route(1), part_route(2)]);
     let old_ids: BTreeSet<_> = client.acked().map(|(id, _)| id).collect();
-    client.set_wanted(&wanted(&[part_route(1), part_route(2), part_route(3)]));
+    client.want(part_route(3));
     let next = send(&mut client);
     assert_eq!(
         client
@@ -247,7 +249,8 @@ fn law_5_a_round_naming_a_forgotten_session_resets() {
 #[test]
 fn an_answer_ahead_of_the_update_resets_and_one_behind_is_an_error() {
     let (mut client, _) = acked(&[part_route(1)]);
-    client.set_wanted(&wanted(&[part_route(2)]));
+    client.unwant(&part_route(1));
+    client.want(part_route(2));
     let next = send(&mut client);
     assert!(client.update_answered(&next, &updated(0, &[])).is_err());
     assert_eq!(
@@ -255,7 +258,7 @@ fn an_answer_ahead_of_the_update_resets_and_one_behind_is_an_error() {
         UpdateOutcome::Reset
     );
     let mut client = ReplayClient::new(Uuid::from_u128(1));
-    client.set_wanted(&wanted(&[part_route(1)]));
+    client.want(part_route(1));
     let open = send(&mut client);
     assert!(client.update_answered(&open, &updated(0, &[99])).is_err());
     assert!(
@@ -269,7 +272,8 @@ fn an_answer_ahead_of_the_update_resets_and_one_behind_is_an_error() {
 fn law_14_a_limit_unwinds_the_update_as_maybe_applied() {
     let (mut client, _) = acked(&[part_route(1)]);
     let one = id_of(&client, &part_route(1));
-    client.set_wanted(&wanted(&[part_route(2)]));
+    client.unwant(&part_route(1));
+    client.want(part_route(2));
     let next = send(&mut client);
     assert_eq!(next.removals, [one]);
     let two = next.additions[0].0;
@@ -290,7 +294,7 @@ fn law_14_a_limit_unwinds_the_update_as_maybe_applied() {
 #[test]
 fn law_6_rounds_name_acknowledged_targets_with_the_callers_cursors() {
     let (mut client, _) = acked(&[part_route(1), part_route(2)]);
-    client.set_wanted(&wanted(&[part_route(1), part_route(2), part_route(3)]));
+    client.want(part_route(3));
     send(&mut client);
     let one = id_of(&client, &part_route(1));
     let request = client
@@ -360,7 +364,7 @@ fn round_answers_racing_the_clients_own_changes_are_stale() {
         id_of(&client, &part_route(2)),
     );
     let request = client.round(|_| Some(0), 10, 0).unwrap();
-    client.set_wanted(&wanted(&[part_route(1)]));
+    client.unwant(&part_route(2));
     let mut outcomes = Vec::new();
     // The removal overtook the round.
     assert_eq!(
@@ -445,4 +449,120 @@ fn faulty_pages_are_errors() {
         );
     }
     assert_eq!(client.acked().count(), 2, "a faulty page changes nothing");
+}
+
+#[test]
+fn law_4_wanting_a_wanted_route_is_a_no_op_in_every_standing() {
+    let mut client = ReplayClient::new(Uuid::from_u128(1));
+    client.want(part_route(1));
+    client.want(part_route(2));
+    client.want(part_route(3));
+    // Pending: no second id.
+    client.want(part_route(1));
+    let open = send(&mut client);
+    assert_eq!(open.additions.len(), 3);
+    // In flight: the same id stays, and nothing new is queued.
+    client.want(part_route(1));
+    assert!(client.pending.is_empty());
+    let refused = open
+        .additions
+        .iter()
+        .find(|(_, route)| *route == part_route(3))
+        .unwrap()
+        .0;
+    client
+        .update_answered(&open, &updated(0, &[refused]))
+        .unwrap();
+    let before: Vec<_> = client.acked().map(|(id, _)| id).collect();
+    // Acknowledged and blocked: still the same ids, nothing queued, the block stays.
+    client.want(part_route(1));
+    client.want(part_route(2));
+    client.want(part_route(3));
+    assert!(client.is_settled());
+    assert!(client.next_update().is_none());
+    assert_eq!(client.acked().map(|(id, _)| id).collect::<Vec<_>>(), before);
+    assert_eq!(client.blocked().collect::<Vec<_>>(), [&part_route(3)]);
+}
+
+#[test]
+fn law_4_unwanting_an_unwanted_route_is_a_no_op() {
+    let mut client = ReplayClient::new(Uuid::from_u128(1));
+    client.unwant(&part_route(1));
+    assert!(client.is_settled());
+    assert!(client.next_update().is_none());
+    // Also after the route was wanted and dropped: its id is not removed twice.
+    let (mut client, _) = acked(&[part_route(1)]);
+    let one = id_of(&client, &part_route(1));
+    client.unwant(&part_route(1));
+    client.unwant(&part_route(1));
+    assert_eq!(send(&mut client).removals, [one]);
+}
+
+#[test]
+fn law_4_unwanting_a_pending_or_blocked_route_leaves_without_a_removal() {
+    let mut client = ReplayClient::new(Uuid::from_u128(1));
+    client.want(part_route(1));
+    client.unwant(&part_route(1));
+    assert!(
+        client.is_settled(),
+        "a pending route never reached the server"
+    );
+    assert!(client.next_update().is_none());
+
+    client.want(part_route(2));
+    let open = send(&mut client);
+    let refused = open.additions[0].0;
+    client
+        .update_answered(&open, &updated(0, &[refused]))
+        .unwrap();
+    client.unwant(&part_route(2));
+    assert_eq!(client.blocked().count(), 0);
+    assert!(client.wanted().next().is_none());
+    client.retry_blocked();
+    assert!(client.next_update().is_none(), "nothing left to re-add");
+}
+
+#[test]
+fn law_4_unwanting_an_in_flight_route_removes_it_after_the_update_is_answered() {
+    let mut client = ReplayClient::new(Uuid::from_u128(1));
+    client.want(part_route(1));
+    let open = send(&mut client);
+    let id = open.additions[0].0;
+    client.unwant(&part_route(1));
+    // The update is still out, so nothing goes before its answer.
+    assert!(client.next_update().is_none());
+    assert!(!client.is_settled());
+    client.update_answered(&open, &updated(0, &[])).unwrap();
+    assert!(
+        client.route_of(id).is_none(),
+        "a dropped route is not acknowledged"
+    );
+    let removal = send(&mut client);
+    assert_eq!(removal.generation, 1);
+    assert_eq!(removal.removals, [id]);
+    assert!(removal.additions.is_empty());
+}
+
+#[test]
+fn law_4_unwanting_an_acknowledged_route_queues_its_removal() {
+    let (mut client, _) = acked(&[part_route(1), part_route(2)]);
+    let one = id_of(&client, &part_route(1));
+    client.unwant(&part_route(1));
+    assert!(client.route_of(one).is_none());
+    let update = send(&mut client);
+    assert_eq!(update.removals, [one]);
+    assert!(update.additions.is_empty());
+}
+
+#[test]
+fn law_3_unwanting_then_wanting_a_route_gets_a_fresh_id() {
+    let (mut client, _) = acked(&[part_route(1)]);
+    let one = id_of(&client, &part_route(1));
+    client.unwant(&part_route(1));
+    client.want(part_route(1));
+    let update = send(&mut client);
+    assert_eq!(update.removals, [one]);
+    assert_eq!(update.additions.len(), 1);
+    assert_ne!(update.additions[0].0, one);
+    assert_eq!(update.additions[0].1, part_route(1));
 }
