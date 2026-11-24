@@ -428,12 +428,13 @@ async fn a_removal_interrupted_after_its_roster_write_is_finished_at_boot() {
     node.stop().await;
 }
 
-/// ADR 019 Boundaries: the mirror query is the node's own policy, keyed on the `mirror` intent
-/// alone. A mirrored grouped drawer yields its three groups and its descriptor doc; a remembered
-/// drawer that is not mirrored, and a drawer nobody remembered, yield nothing; a mirrored drawer
-/// whose descriptor this node does not carry yields only the doc to fetch it by.
+/// ADR 019 Boundaries and ADR 054 section 5: the mirror query is the node's own policy, in two
+/// tiers. A known drawer yields its descriptor doc and meta group (the roster, never member
+/// content); a mirrored one also yields its docs and sensitive groups. A drawer nobody
+/// remembered yields nothing, and a known drawer whose descriptor this node does not carry yields
+/// only the doc to fetch it by.
 #[tokio::test]
-async fn the_mirror_query_names_what_the_mirror_intent_wants() {
+async fn the_mirror_query_names_what_the_known_list_wants() {
     let node = Node::boot().await;
     let alice = node.creator("alice").await;
     let mirrored = node.collection(&alice, "mirrored").await;
@@ -449,22 +450,30 @@ async fn the_mirror_query_names_what_the_mirror_intent_wants() {
 
     node.remember(&node.drawers_actor, &mirrored, true).await;
     node.remember(&node.drawers_actor, &remembered, false).await;
-    node.remember(&node.drawers_actor, &absent, true).await;
+    node.remember(&node.drawers_actor, &absent, false).await;
     let (meta, docs, sensitive) = groups_of(&node.view(&alice, &mirrored).await.unwrap());
+    let (known_meta, known_docs, known_sensitive) =
+        groups_of(&node.view(&alice, &remembered).await.unwrap());
+    let wanted = drawers.mirrored(&context).await.unwrap();
     assert_eq!(
-        drawers.mirrored(&context).await.unwrap(),
+        wanted,
         Mirrored {
-            groups: [meta, docs, sensitive].into(),
-            docs: [mirrored.clone(), absent].into(),
-        }
+            groups: [meta, docs, sensitive, known_meta].into(),
+            docs: [mirrored.clone(), remembered.clone(), absent.clone()].into(),
+        },
+        "the mirrored drawer adds all three groups, the merely known one only its meta group"
+    );
+    assert!(
+        !wanted.groups.contains(&known_docs) && !wanted.groups.contains(&known_sensitive),
+        "a known drawer's content groups stay mirror-only"
     );
 
     node.forget(&node.drawers_actor, &mirrored).await;
     assert_eq!(
         drawers.mirrored(&context).await.unwrap(),
         Mirrored {
-            groups: Default::default(),
-            docs: [DrawerId::new([7; 32])].into(),
+            groups: [known_meta].into(),
+            docs: [remembered, absent].into(),
         }
     );
     node.stop().await;
