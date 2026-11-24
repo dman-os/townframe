@@ -120,3 +120,19 @@ pub async fn obj_states(
         })
         .collect())
 }
+
+/// Objects that hold a payload and are a live member of no part, in key order after `after`:
+/// a range of the partial index on `part_count = 0`.
+pub async fn partless_objects(
+    x: &impl QueryExecutor,
+    limit: usize,
+    after: Option<&ObjKey>,
+) -> Res<Vec<ObjKey>> {
+    // The empty blob sorts before every key blob.
+    let after = after.map_or_else(Vec::new, BlobKey::blob);
+    Ok(queries::partless_objects(x, after, sql::limit(limit))
+        .await?
+        .iter()
+        .map(|obj| ObjKey::from_blob(obj))
+        .collect())
+}

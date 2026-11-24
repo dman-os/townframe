@@ -133,6 +133,12 @@ pub async fn part_member_changes(db: &impl crate::sqlite_rs_alias::QueryExecutor
     set.one()
 }
 
+pub const PARTLESS_OBJECTS_SQL: &str = include_str!("queries/partless_objects.sql");
+pub async fn partless_objects(db: &impl crate::sqlite_rs_alias::QueryExecutor, after_key: Vec<u8>, limit: i64) -> SqlResult<Vec<Vec<u8>>> {
+    let set = db.query(PARTLESS_OBJECTS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(after_key), crate::sqlite_rs_alias::IntoValue::into_value(limit)]).await?;
+    set.all()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RouteObjectRowsRow {
     pub part_key: Vec<u8>,

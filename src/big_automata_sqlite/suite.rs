@@ -88,7 +88,20 @@ store_laws!(
     dirty_count_counts_log_rows,
     writes_are_atomic,
     unchanged_writes_stamp_nothing,
+    a_dropped_payload_is_gone,
+    removing_then_dropping_in_one_transaction_is_valid,
+    a_partless_object_is_listed_until_its_payload_is_dropped,
+    dropping_is_atomic_with_its_transaction,
 );
+
+#[test]
+#[should_panic(expected = "live member")]
+fn dropping_the_payload_of_a_member_is_a_caller_bug() {
+    block_on(laws::dropping_the_payload_of_a_member_is_a_caller_bug(
+        &Sqlite,
+    ))
+    .unwrap();
+}
 
 #[test]
 fn log_stream_commit_during_replay() -> Res<()> {

@@ -166,6 +166,10 @@ impl<D: PartDb> PartStoreWrite for SqlitePartStore<D> {
         Ok(())
     }
 
+    async fn drop_payloads(&self, tx: &mut SqlitePartTx<D>, objs: &[ObjKey]) -> Res<()> {
+        write::drop_payloads(&tx.tx, objs).await
+    }
+
     async fn grant_access(
         &self,
         tx: &mut SqlitePartTx<D>,
@@ -207,6 +211,10 @@ impl<D: PartDb> PartStoreRead for SqlitePartStore<D> {
 
     async fn member_count(&self, part: &PartKey) -> Res<u64> {
         Ok(snapshot!(self, reader => read::member_count(&reader, part).await?))
+    }
+
+    async fn partless_objects(&self, limit: usize, after: Option<&ObjKey>) -> Res<Vec<ObjKey>> {
+        Ok(snapshot!(self, reader => read::partless_objects(&reader, limit, after).await?))
     }
 }
 

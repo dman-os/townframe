@@ -151,8 +151,12 @@ proptest! {
     ) {
         let result: Res<()> = block_on(async {
             let store = super::fresh().await?;
+            let mut oracle = PartOracle::default();
             for writes in batches {
+                // generated drops of members' payloads are caller bugs: not issued
+                let writes = oracle.without_member_drops(writes);
                 commit(&store, &writes).await?;
+                oracle.commit(writes);
             }
             let wrong = store
                 .db
@@ -218,5 +222,68 @@ fn length_first_keys_page_in_key_order() -> Res<()> {
         sorted.sort();
         assert_eq!(paged, sorted);
         assert_pages(&store, &oracle, 1).await
+    })
+}
+
+/// Two keys in one deepest bucket whose key order and byte order disagree (`[200]` is before
+/// `[1, 7]` as a key, after it as bytes): the bucket's leaves page by `after` in key order, as
+/// the oracle's do. Only here does the order of the stored blobs show, since a page of log rows
+/// is sorted again in Rust.
+#[test]
+fn leaves_page_in_key_order_when_keys_share_a_bucket() -> Res<()> {
+    let short = (0..=255_u8)
+        .map(|byte| {
+            (
+                BuckId::deepest_from_obj_key(&ObjKey::new(&[byte])).index(),
+                byte,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let (first, second) = (0..255_u8)
+        .flat_map(|head| (0..=255_u8).map(move |tail| [head, tail]))
+        .find_map(|long| {
+            let index = BuckId::deepest_from_obj_key(&ObjKey::new(&long)).index();
+            short
+                .get(&index)
+                .filter(|byte| **byte > long[0])
+                .map(|byte| (ObjKey::new(&[*byte]), ObjKey::new(&long)))
+        })
+        .expect("some two byte key shares a bucket with a larger one byte key");
+    assert!(first < second && first.as_bytes() > second.as_bytes());
+
+    block_on(async {
+        let store = super::fresh().await?;
+        let mut oracle = PartOracle::default();
+        let (part, principal) = (PartKey::new(&[9]), PeerKey::new(&[8]));
+        let writes = vec![
+            PartWrite::SetPayloads(vec![
+                (first.clone(), payload(1)),
+                (second.clone(), payload(1)),
+            ]),
+            PartWrite::AddMembers(vec![
+                (first.clone(), part.clone()),
+                (second.clone(), part.clone()),
+            ]),
+            PartWrite::GrantAccess(vec![(part.clone(), principal.clone(), AccessLevel::Read)]),
+        ];
+        commit(&store, &writes).await?;
+        oracle.commit(writes);
+        let mut after = None;
+        let mut paged = Vec::new();
+        loop {
+            let bucks = [(BuckId::ROOT, after.clone())];
+            let leaves = store.bucket_leaves(&principal, &part, &bucks, 0, 1).await?;
+            assert_eq!(
+                leaves,
+                oracle.bucket_leaves(&principal, &part, &bucks, 0, 1)
+            );
+            let Some(leaf) = leaves.expect("readable").remove(0).pop() else {
+                break;
+            };
+            after = Some(leaf.obj.clone());
+            paged.push(leaf.obj);
+        }
+        assert_eq!(paged, vec![first, second]);
+        Ok(())
     })
 }

@@ -598,3 +598,28 @@ pub async fn revoke_access(
     write_access(x, rev, writes).await?;
     Ok(stamped)
 }
+
+/// Drop the payloads of objects that are members of no part. An object with no payload is
+/// skipped. Holding a payload while a live member of a part is a caller bug and panics, before
+/// anything is deleted; the transaction is then dropped, never committed.
+pub async fn drop_payloads(x: &impl Executor, objs: &[ObjKey]) -> Res<()> {
+    let objs = objs.iter().collect::<BTreeSet<_>>();
+    for chunk in sql::chunk_rows(objs.iter().copied().collect(), 1, 0) {
+        let mut query =
+            Sql::new("SELECT obj_key, part_count FROM big_automata_objs WHERE obj_key IN ");
+        query.bind_list(chunk.iter().map(|obj| obj.blob()));
+        for (obj, parts) in query.query(x).await?.all::<(Vec<u8>, i64)>()? {
+            assert!(
+                parts == 0,
+                "dropping the payload of {}, which is a live member of {parts} part(s)",
+                ObjKey::from_blob(&obj)
+            );
+        }
+    }
+    for chunk in sql::chunk_rows(objs.into_iter().collect(), 1, 0) {
+        let mut delete = Sql::new("DELETE FROM big_automata_objs WHERE obj_key IN ");
+        delete.bind_list(chunk.iter().map(|obj| obj.blob()));
+        delete.execute(x).await?;
+    }
+    Ok(())
+}
