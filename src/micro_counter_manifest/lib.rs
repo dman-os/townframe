@@ -1,10 +1,10 @@
 //! Engine-neutral Counter declarations. The manifest is portable MDK vocabulary (ADR 030
 //! §§11–15): identity, the presentations and call it publishes, the configuration it requests, and the
-//! Settings section row it declares into the `settings.sections` collection, whose attachment
+//! Settings section row it declares into the `settings.sections` collection, whose link
 //! is a lazy endpoint to the counter's own presentation, and the Increment button row it
-//! declares into the `toolbar.buttons` collection, whose attachment is a lazy endpoint to the
+//! declares into the `toolbar.buttons` collection, whose link is a lazy endpoint to the
 //! counter's `increment` call, and the panel row it declares into the `layout.panels` collection,
-//! whose attachment is a lazy endpoint to the counter's `view`. The wasm guest reads only the
+//! whose link is a lazy endpoint to the counter's `view`. The wasm guest reads only the
 //! constants; the composition root reads `manifest()`.
 use clay_mdk::ComponentDecl;
 use clay_mdk::ConfigDecl;
@@ -81,10 +81,10 @@ impl ComponentDecl for CounterBadge {
 
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
-        .component::<CounterView>()
-        .component::<CounterBadge>()
-        .call(COUNT, COUNT_CONTRACT)
-        .call(INCREMENT, ACTION_CONTRACT)
+        .view::<CounterView>()
+        .view::<CounterBadge>()
+        .method(COUNT, COUNT_CONTRACT)
+        .callback(INCREMENT, ACTION_CONTRACT)
         .config::<CounterConfig>()
         .writes::<SettingsSections>(SECTIONS_BINDING, Necessity::Optional)
         .writes::<ToolbarButtons>(TOOLBAR_BINDING, Necessity::Optional)
