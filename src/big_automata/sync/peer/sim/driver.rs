@@ -63,7 +63,6 @@ impl Sim {
                 // two entries a page, so a bucket takes several
                 raw: self.remote.leaves(&part, &buckets, since, &seed, 2),
                 part,
-                buckets,
                 seed,
             },
         };
@@ -135,12 +134,7 @@ impl Sim {
                     }
                 }
             }
-            Resp::Leaf {
-                part,
-                buckets,
-                seed,
-                raw,
-            } => {
+            Resp::Leaf { part, seed, raw } => {
                 if !self.sync.calls.contains_key(&call) {
                     return;
                 }
@@ -148,7 +142,7 @@ impl Sim {
                     return self.input(|s| s.leaf_replied(call, Reply::Lost));
                 };
                 let filtered =
-                    block_on(filter_objects(part, buckets, raw, seed, &self.local.store)).unwrap();
+                    block_on(filter_objects(part, raw, seed, &self.local.store)).unwrap();
                 self.input(|s| s.leaf_replied(call, Reply::Answer(filtered)));
             }
         }

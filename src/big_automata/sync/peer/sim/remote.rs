@@ -323,6 +323,7 @@ impl Remote {
                     (
                         req.buck_id,
                         LeafBucketPage {
+                            after: req.after.clone(),
                             entries,
                             next_after,
                         },

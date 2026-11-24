@@ -64,7 +64,6 @@ pub(super) enum Resp {
     },
     Leaf {
         part: PartKey,
-        buckets: Vec<LeafBucketRequest>,
         seed: FingerprintSeed,
         raw: Option<Map<BuckId, LeafBucketPage>>,
     },
