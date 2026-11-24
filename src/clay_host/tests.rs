@@ -909,28 +909,30 @@ fn declared_collections_outlive_grants_and_issue_full_prefix_authority() {
     let registry =
         CollectionRegistry::<Arc<Mutex<Vec<u8>>>>::new(ReplicaId::from_bytes([1; ReplicaId::LEN]));
     let sections = clay_collection::Nsid::literal("org.example.test.sections");
-    let missing = clay_collection::Nsid::literal("org.example.test.missing");
+    let missing = clay_collection::CollectionId::minted_for(&clay_collection::Nsid::literal(
+        "org.example.test.missing",
+    ));
     let contract = CollectionContract {
         id: sections.clone(),
         key_schema: clay_collection::Nsid::literal("org.example.test.sectionKey"),
         value_schema: clay_collection::Nsid::literal("org.example.test.section"),
     };
     let collection = Arc::new(Mutex::new(vec![1]));
-    registry
+    let sections_id = registry
         .declare(contract.clone(), Arc::clone(&collection))
         .unwrap();
     assert_eq!(
         registry.declare(contract.clone(), Arc::default()),
         Err(DeclareError::AlreadyDeclared(sections.clone()))
     );
-    assert_eq!(registry.contract(&sections), Some(contract));
+    assert_eq!(registry.contract(&sections_id), Some(contract));
     let micro = MicroId::new("dayframe.counter");
-    let grant = registry.grant(&sections, &micro).unwrap();
+    let grant = registry.grant(&sections_id, &micro).unwrap();
     assert_eq!(grant.micro, micro);
     assert!(Arc::ptr_eq(&grant.collection, &collection));
     // The registry is shared and independent of any grant holder.
     drop(grant);
-    assert!(registry.clone().collection(&sections).is_some());
+    assert!(registry.clone().collection(&sections_id).is_some());
     assert!(registry.collection(&missing).is_none());
     assert_eq!(
         registry.grant(&missing, &micro).err(),

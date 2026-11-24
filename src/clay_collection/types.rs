@@ -1,3 +1,32 @@
+/// The id of one declared collection *instance*, minted by the host when it declares the
+/// collection and never authored in a manifest. It is a type of its own because an NSID names
+/// a Lexicon (ADR 050 §2) and a runtime object is not a name: manifests name the contract a
+/// collection implements, and a binding resolves to one of the instances implementing it.
+/// Today the host mints exactly one instance per contract and spells its id after the
+/// contract's, which keeps stored binding datums readable.
+#[derive(
+    Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct CollectionId(String);
+
+impl CollectionId {
+    /// Mint the id of the instance the host declares for `contract`.
+    pub fn minted_for(contract: &crate::Nsid) -> Self {
+        Self(contract.as_str().to_owned())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CollectionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Ordering for one row within one source incarnation.
 ///
 /// `incarnation` is the authority's epoch: a rebuilt frontier, a restarted provider, or

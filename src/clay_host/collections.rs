@@ -10,13 +10,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use clay_collection::CollectionId;
 use clay_collection::Nsid;
 use clay_collection::ReplicaId;
 use clay_collection::WriterId;
 
 use crate::supervisor::MicroId;
 
-/// What a collection was declared as: its id, and the schema NSIDs its keys and values follow.
+/// What a collection was declared as: the contract id it implements, and the schema NSIDs its
+/// keys and values follow.
 /// The registry only names the schemas; the collection's own contract interprets them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollectionContract {
@@ -34,7 +36,7 @@ pub enum DeclareError {
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum GrantError {
     #[error("collection {0} is not declared")]
-    Undeclared(Nsid),
+    Undeclared(CollectionId),
 }
 
 /// Write authority over one declared collection for one singleton micro: the collection, the
@@ -58,7 +60,7 @@ struct Declared<C> {
 /// issues includes.
 pub struct CollectionRegistry<C> {
     replica: ReplicaId,
-    declared: Arc<Mutex<BTreeMap<Nsid, Declared<C>>>>,
+    declared: Arc<Mutex<BTreeMap<CollectionId, Declared<C>>>>,
 }
 
 impl<C> Clone for CollectionRegistry<C> {
@@ -83,38 +85,44 @@ impl<C: Clone> CollectionRegistry<C> {
         WriterId::new(&self.replica, micro.as_str())
     }
 
-    /// Declare `collection` under `contract.id`. The id is unique: two manifests naming one
-    /// collection is a conflict the admitting layer reports, not a merge.
-    pub fn declare(&self, contract: CollectionContract, collection: C) -> Result<(), DeclareError> {
+    /// Declare `collection` as the instance of `contract`, minting its id. There is one
+    /// instance per contract: two manifests declaring one contract is a conflict the admitting
+    /// layer reports, not a merge.
+    pub fn declare(
+        &self,
+        contract: CollectionContract,
+        collection: C,
+    ) -> Result<CollectionId, DeclareError> {
+        let id = CollectionId::minted_for(&contract.id);
         let mut declared = self.declared.lock().unwrap();
-        if declared.contains_key(&contract.id) {
+        if declared.contains_key(&id) {
             return Err(DeclareError::AlreadyDeclared(contract.id));
         }
         declared.insert(
-            contract.id.clone(),
+            id.clone(),
             Declared {
                 contract,
                 collection,
             },
         );
-        Ok(())
+        Ok(id)
     }
 
-    pub fn contract(&self, id: &Nsid) -> Option<CollectionContract> {
+    pub fn contract(&self, id: &CollectionId) -> Option<CollectionContract> {
         let declared = self.declared.lock().unwrap();
         Some(declared.get(id)?.contract.clone())
     }
 
     /// The collection itself, for read-side wiring done by the host (projections, readers).
     /// Writing needs a [`Grant`].
-    pub fn collection(&self, id: &Nsid) -> Option<C> {
+    pub fn collection(&self, id: &CollectionId) -> Option<C> {
         let declared = self.declared.lock().unwrap();
         Some(declared.get(id)?.collection.clone())
     }
 
     /// Issue `micro` write authority over every key of collection `id`. Narrower authority
     /// waits for the collection query language: the grant will carry the query.
-    pub fn grant(&self, id: &Nsid, micro: &MicroId) -> Result<Grant<C>, GrantError> {
+    pub fn grant(&self, id: &CollectionId, micro: &MicroId) -> Result<Grant<C>, GrantError> {
         let collection = self
             .collection(id)
             .ok_or_else(|| GrantError::Undeclared(id.clone()))?;

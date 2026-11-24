@@ -175,7 +175,7 @@ fn writes_rows() -> Spec {
         requests: vec![rows_request(Access::Write, Necessity::Required)],
         bindings: CollectionBindings::new([(
             ROWS_BINDING.to_owned(),
-            BoundCollection::write(rows()),
+            BoundCollection::write(clay_collection::CollectionId::minted_for(&rows())),
         )]),
         ..Spec::default()
     }
@@ -186,7 +186,7 @@ fn reads_rows() -> Spec {
         requests: vec![rows_request(Access::Read, Necessity::Required)],
         bindings: CollectionBindings::new([(
             ROWS_BINDING.to_owned(),
-            BoundCollection::read(rows()),
+            BoundCollection::read(clay_collection::CollectionId::minted_for(&rows())),
         )]),
         ..Spec::default()
     }

@@ -55,6 +55,10 @@ impl ComponentDecl for SheetPage {
 
 const COUNTER: &str = micro_counter_manifest::ID;
 
+fn sections_id() -> clay_mdk::CollectionId {
+    clay_mdk::CollectionId::minted_for(&sections())
+}
+
 fn sections() -> Nsid {
     Nsid::literal(SECTIONS)
 }
@@ -334,7 +338,7 @@ fn section_refs(
         &runtime.host,
         runtime.shell(),
         runtime.supervisor.activator(),
-        &runtime.collection(&sections()).unwrap(),
+        &runtime.collection(&sections_id()).unwrap(),
     )
     .unwrap()
 }
@@ -347,7 +351,7 @@ async fn manifest_rows_are_installed_before_anything_runs() {
         assert_eq!(runtime.state(micro), MicroState::Idle, "{micro}");
     }
     let Stamped { value, .. } = runtime
-        .collection(&sections())
+        .collection(&sections_id())
         .unwrap()
         .get(&cbor_key(COUNTER))
         .unwrap();
@@ -361,7 +365,7 @@ async fn manifest_rows_are_installed_before_anything_runs() {
     // The sample writes its row at runtime, so nothing exists for it yet.
     assert!(
         runtime
-            .collection(&sections())
+            .collection(&sections_id())
             .unwrap()
             .get(&cbor_key(micro_sample::ID))
             .is_none()
@@ -433,7 +437,7 @@ async fn the_lifecycle_controls_are_a_locked_settings_section() {
     let lifecycle = id(lifecycle::ID);
     assert!(runtime.is_locked(&lifecycle));
     let row = runtime
-        .collection(&sections())
+        .collection(&sections_id())
         .unwrap()
         .get(&cbor_key(lifecycle::ID))
         .unwrap()
@@ -605,7 +609,7 @@ async fn a_reboot_over_the_same_sqlite_file_keeps_manifest_row_stamps() {
             .unwrap();
             assert!(runtime.installation_errors.is_empty());
             let row = runtime
-                .collection(&sections())
+                .collection(&sections_id())
                 .unwrap()
                 .get(&cbor_key(COUNTER))
                 .expect("the manifest row is installed at boot");
@@ -635,7 +639,7 @@ async fn the_replica_id_is_stable_across_boots_and_stamps_rows_with_the_micro_id
                 .unwrap();
             let replica = *runtime.replica();
             let stamp = runtime
-                .collection(&sections())
+                .collection(&sections_id())
                 .unwrap()
                 .get(&cbor_key(COUNTER))
                 .expect("the manifest row is installed at boot")
@@ -1071,7 +1075,11 @@ async fn a_widened_request_is_unresolved_until_configured_again_and_enablement_i
             if configure {
                 served(&runtime, async {
                     runtime
-                        .set_binding(&micro, BOOK, Some(&Nsid::literal(ROWS)))
+                        .set_binding(
+                            &micro,
+                            BOOK,
+                            Some(&clay_mdk::CollectionId::minted_for(&Nsid::literal(ROWS))),
+                        )
                         .await;
                 })
                 .await;
@@ -1105,7 +1113,11 @@ async fn a_widened_request_is_unresolved_until_configured_again_and_enablement_i
     assert_eq!(runtime.state(&micro), unconfigured);
     served(&runtime, async {
         runtime
-            .set_binding(&micro, BOOK, Some(&Nsid::literal(ROWS)))
+            .set_binding(
+                &micro,
+                BOOK,
+                Some(&clay_mdk::CollectionId::minted_for(&Nsid::literal(ROWS))),
+            )
             .await;
         assert_eq!(activations(&mut seen, 1).await, [true]);
     })
@@ -1369,7 +1381,9 @@ async fn the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press
             runtime.shell(),
             runtime.supervisor.activator(),
             &runtime
-                .collection(&Nsid::literal(micro_shell_manifest::PANELS))
+                .collection(&clay_mdk::CollectionId::minted_for(&Nsid::literal(
+                    micro_shell_manifest::PANELS,
+                )))
                 .unwrap(),
         )
         .unwrap();
@@ -1405,7 +1419,9 @@ async fn the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press
             runtime.shell(),
             runtime.supervisor.activator(),
             &runtime
-                .collection(&Nsid::literal(micro_toolbar_manifest::BUTTONS))
+                .collection(&clay_mdk::CollectionId::minted_for(&Nsid::literal(
+                    micro_toolbar_manifest::BUTTONS,
+                )))
                 .unwrap(),
         )
         .unwrap();
@@ -1761,7 +1777,7 @@ async fn an_untouched_declared_collection_reads_known_empty_without_starting_its
             runtime.shell(),
             runtime.supervisor.activator(),
             &runtime
-                .collection(&Nsid::literal(SOURCES))
+                .collection(&clay_mdk::CollectionId::minted_for(&Nsid::literal(SOURCES)))
                 .expect("the editor's manifest declared the collection"),
         )
         .unwrap();
