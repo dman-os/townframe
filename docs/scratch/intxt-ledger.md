@@ -72,6 +72,7 @@ Ways intxt is special-cased or ahead of the general mechanism. Each entry gives 
 - **C7, who wrote something is claimed, not attested.** The marker `writer` (#228) and a comment's `creator`/`generator` (D69) are claims, because the operator and an agent on one node are one attested actor. Fix: ADR 043 per-agent actors (and D49, the Claude Code plugin as a subsystem actor under intxt's). Owner: nodules.
 - **C8, intxt's content documents are found by a `<kind>/main` marker over `PollDatums`** (D70). This is a convention local to intxt for "the documents of kind K in drawer D, per writer". Question for nodules: is it a cabinet-level pattern other cartridges should use, or a gap in drawer layout?
   - Nodules (11-24): undecided. They lean towards a cabinet-level roster role, because a marker plus `PollDatums` is a scan each cartridge reimplements. It touches automata's drawer rework, so they'll check with automata. Until then the marker is the interim pattern, which nodules will document as interim.
+  - Operator (11-24), an alternative: the intxt's meta document lists its other documents by role, so there's no marker and no scan.
 - **C9, general pieces live in intxt crates:**
   - anchors (`intxt_capture::anchor`: W3C quote and context, carried over hunks), which comments anywhere need;
   - the `DocReference` `via=` hint, general by the 11-17 decision.
@@ -80,6 +81,8 @@ Ways intxt is special-cased or ahead of the general mechanism. Each entry gives 
 - **C10, forge credentials have no home on the node.** The CLI passes the operator's `gh` token per call; node secret storage doesn't exist. A webnode doing GitHub's device flow will need a stateless CORS proxy, because GitHub's OAuth endpoints don't send CORS headers (to verify). Fix: node secret storage (nodules), and the proxy as a relay-provider service. Owners: nodules, then whoever runs relays.
   - Nodules (11-24): secret storage is on their roadmap; `secrets_rs` already holds node keys. The proposed shape follows wasmCloud's secrets: a `#secret/<name>` permbind whose value the guest never reads. Egress injects it into requests to the hosts the binding names, for example as a header, so the token never passes through `day` or the guest.
   - Open for intxt: a forge client (the forges library) sets `Authorization` itself, so under injection it runs with a placeholder credential, or anonymous, and egress adds the header.
+  - Operator (11-24): a secret could be a variant of local state, kept on one node and never synced. To raise with nodules.
+  - For the web viewer, the CORS proxy is moot (D82): server-side loads are same-origin, and the server passes a credential through without keeping it. It returns only for a webnode with no viewer server behind it.
 - **C11, "public" is undefined** (D79). The web app's own relay node reads intxts it was told about, but no drawer access level means "anyone may read". Fix: a public read level in drawer access. Owner: nodules.
   - Nodules (11-24): keyhive has a Public agent, a well-known key. A drawer grant of Read to Public means anyone with the bytes may read them: the content stays sealed, but with a key everyone knows. Nodules will sketch it against ADR 026's public root and relays.
 
@@ -216,6 +219,21 @@ Round 1 as given (2026-11-19, CLI dogfood; proposals mine where marked):
   - The web app signs the user in to the forge ("sign in to GitHub"), not to itself, and no server keeps identities, sessions or relationships. Better Auth leaves the viewer.
   - This holds for every service integration, because daytxt is p2p first: the user's node, or later their webnode, holds the credential.
   - Tokens come first; the GitHub device flow under one daytxt client id after them (`intxt-forge-identity.md`, second draft).
+- **D82 (2026-11-24, operator) The web viewer is read-only and server-rendered, and the app is `view(state)`.**
+  - Read-only, like GitHub's logged-out view.
+  - Server-side async loads run before rendering, as a page loader does.
+  - No server functions and no hydration for now.
+  - One set of components renders a view model. Only where the state comes from differs:
+    - the review micro, from the node;
+    - the web app, from drawers loaded server-side through its relay node;
+    - a webnode later, in the browser.
+- **D83 (2026-11-24, operator) Products are built on daytxt, not inside `day`** (recasts C4).
+  - daytxt ships the node as a shared service, plus an SDK: XRPC clients that find the local node or embed one.
+  - intxt is a product on it. `day` doesn't grow a CLI-extension surface, since what doesn't run in wasm for ordinary users is out of the platform's scope.
+  - **Interim:** intxt stays a `day` subcommand, and `day` invoked as `intxt` (a symlink, by argv[0]) behaves as `day x intxt`. Hooks then call a stable `intxt` command now, which would be hard to change once people use it.
+  - Open: how a platform and a product share one CLI. Prior art:
+    - multicall by argv[0] (busybox, rustup's proxies);
+    - plugins found on PATH (`git-<x>`, `cargo-<x>`, `kubectl-<x>`, `gh` extensions, docker CLI plugins).
 
 ## For the ADRs
 
