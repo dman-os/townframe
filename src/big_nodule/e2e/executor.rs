@@ -502,6 +502,7 @@ async fn a_config_change_reconciles_once_and_a_change_from_elsewhere_reconciles_
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
+ capability: None,
                 scope: DocScope {
                     write: std::collections::BTreeMap::from([(
                         config_doc.clone(),
@@ -562,6 +563,7 @@ async fn config_blobs(node: &Node) -> BTreeMap<DatumKey, DatumRead> {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
+ capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([config_doc.clone()]),
                     ..DocScope::default()
@@ -615,6 +617,7 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
+ capability: None,
                 scope: DocScope {
                     write: std::collections::BTreeMap::from([(
                         config_doc.clone(),

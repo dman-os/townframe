@@ -723,6 +723,7 @@ async fn inspection_scope_is_distinct_and_retracting_the_introduced_actor_revoke
             }
             .metadata(),
             MintDocCapability {
+ capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([document.clone()]),
                     ..DocScope::default()

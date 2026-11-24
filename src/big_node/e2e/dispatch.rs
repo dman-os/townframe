@@ -551,6 +551,7 @@ async fn a_body_capability_presented_by_an_actor_it_is_not_bound_to_is_refused()
             RequestContext::root(),
             Authorization::identity(node.authority.root).metadata(),
             MintDocCapability {
+ capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([stored.doc_id.clone()]),
                     ..DocScope::default()

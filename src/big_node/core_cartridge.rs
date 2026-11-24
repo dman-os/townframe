@@ -258,6 +258,7 @@ impl BigNode {
                         RequestContext::root(),
                         operator.metadata(),
                         MintBlobsCapability {
+ capability: None,
                             scope: BlobsScope {
                                 put: true,
                                 ..Default::default()
@@ -328,6 +329,7 @@ impl BigNode {
                 RequestContext::root(),
                 operator.metadata(),
                 MintDocCapability {
+ capability: None,
                     scope: DocScope {
                         read: DocScope::read_all([doc_id.clone()]),
                         ..Default::default()

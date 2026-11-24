@@ -457,6 +457,14 @@ impl DocScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintDocCapability {
+    /// The handle to mint from, a body capability like every resource method's: it must be live,
+    /// bound to the presenting actor (ADR 037, #348) and carry `Rights::NARROW`, and the new scope
+    /// must be covered by its own. `None` mints from the request's `Authorization` credential
+    /// instead, which is how the operator mints any scope and how a service mints for its own actor.
+    /// Dispatch hands a service its caller's dispatch handle as that credential, which no service's
+    /// domain understands, so a nodule narrows its own handle through this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<CapId>,
     pub scope: DocScope,
     pub rights: Rights,
     /// The actor the new handle is bound to; `None` binds it to the presented handle's own

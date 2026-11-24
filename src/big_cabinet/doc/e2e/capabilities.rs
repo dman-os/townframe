@@ -37,6 +37,7 @@ async fn mint(
             RequestContext::root(),
             authorization.metadata(),
             MintDocCapability {
+ capability: None,
                 scope,
                 rights,
                 subject: None,
@@ -225,6 +226,7 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
                     }
                     .metadata(),
                     MintDocCapability {
+ capability: None,
                         scope: DocScope {
                             read: DocScope::read_all([other.doc_id.clone()]),
                             ..DocScope::default()
@@ -490,6 +492,7 @@ async fn datum_kind_capabilities_can_only_be_narrowed() {
                 }
                 .metadata(),
                 MintDocCapability {
+ capability: None,
                     scope: DocScope {
                         write: BTreeMap::from([(created.doc_id, DatumKinds::All,)]),
                         ..DocScope::default()
@@ -572,6 +575,7 @@ async fn a_delegate_handle_cannot_be_rebound_to_another_actor_nor_sign_as_one() 
                         RequestContext::root(),
                         Authorization::identity(authority).metadata(),
                         MintDocCapability {
+ capability: None,
                             scope: scope.clone(),
                             rights: Rights::USE,
                             subject: Some(named),
@@ -647,6 +651,7 @@ async fn a_delegate_handle_cannot_be_rebound_to_another_actor_nor_sign_as_one() 
             RequestContext::root(),
             Authorization::identity(delegate.capability_id).metadata(),
             MintDocCapability {
+ capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: Some(agent.actor.actor_id),
@@ -1703,6 +1708,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
                         context.child(),
                         authorization.metadata(),
                         MintDocCapability {
+ capability: None,
                             scope: scope.clone(),
                             rights: Rights::USE,
                             subject: None,
@@ -1762,6 +1768,7 @@ async fn a_scoped_handle_presented_by_an_actor_it_is_not_bound_to_cannot_mint() 
                 }
                 .metadata(),
                 MintDocCapability {
+ capability: None,
                     scope: scope.clone(),
                     rights: Rights::USE,
                     subject: None,
@@ -1801,6 +1808,7 @@ async fn mint_requires_narrow_bounded_rights_and_current_source_entitlements() {
                     RequestContext::root(),
                     Authorization::identity(source.capability).metadata(),
                     MintDocCapability {
+ capability: None,
                         scope: scope.clone(),
                         rights,
                         subject: None,
@@ -2215,6 +2223,7 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
                 RequestContext::root(),
                 Authorization::identity(capability.capability_id).metadata(),
                 MintDocCapability {
+ capability: None,
                     scope,
                     rights: Rights::USE | Rights::NARROW,
                     subject: Some(signer.actor.actor_id),

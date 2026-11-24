@@ -47,6 +47,7 @@ pub(super) async fn drawer_cap(node: &BigNode, drawer: &DocId) -> CapId {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope: DrawerScope {
                     create: false,
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
@@ -169,6 +170,7 @@ async fn blob_cap(
             RequestContext::root(),
             operator(node).metadata(),
             MintBlobsCapability {
+ capability: None,
                 scope,
                 rights: Rights::USE,
                 subject,
@@ -444,6 +446,7 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope: DrawerScope {
                     create: true,
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
@@ -476,6 +479,7 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope: DrawerScope {
                     create: false,
                     drawers: BTreeMap::from([
@@ -911,6 +915,7 @@ async fn the_operator_stores_and_reads_a_file_over_the_socket_as_raw_bytes() {
                 RequestContext::root(),
                 operator(&node).metadata(),
                 MintBlobsCapability {
+ capability: None,
                     scope,
                     rights: Rights::USE,
                     subject: None,
@@ -1032,6 +1037,7 @@ async fn a_blobs_handle_presented_by_an_actor_it_is_not_bound_to_cannot_mint() {
             RequestContext::root(),
             operator(&node).metadata(),
             MintBlobsCapability {
+ capability: None,
                 scope: BlobsScope {
                     put: true,
                     ..Default::default()
@@ -1054,6 +1060,7 @@ async fn a_blobs_handle_presented_by_an_actor_it_is_not_bound_to_cannot_mint() {
                 }
                 .metadata(),
                 MintBlobsCapability {
+ capability: None,
                     scope: BlobsScope {
                         put: true,
                         ..Default::default()
@@ -1094,6 +1101,7 @@ async fn blobs_handles_are_minted_by_the_operator_and_a_handle_only_narrows() {
                     RequestContext::root(),
                     authorization.metadata(),
                     MintBlobsCapability {
+ capability: None,
                         scope,
                         rights,
                         subject: None,
@@ -1212,6 +1220,7 @@ async fn blobs_handles_are_minted_by_the_operator_and_a_handle_only_narrows() {
         .call(
             RequestContext::root(),
             MintBlobsCapability {
+ capability: None,
                 scope: put_only,
                 rights: Rights::USE,
                 subject: None,
@@ -1333,6 +1342,7 @@ async fn a_blobs_handle_reaching_a_drawer_reads_what_the_drawer_inventories_pin(
                 RequestContext::root(),
                 authorization.metadata(),
                 MintBlobsCapability {
+ capability: None,
                     scope: BlobsScope {
                         drawers: drawers
                             .iter()

@@ -1049,6 +1049,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
             RequestContext::root(),
             Authorization::identity(config.actor.capability).metadata(),
             MintDocCapability {
+ capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([config_doc.clone()]),
                     write: std::collections::BTreeMap::from([(
@@ -1192,6 +1193,7 @@ pub async fn ensure_shared_config_drawer(
             context.child(),
             Authorization::identity(config.actor.capability).metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::new(),
                     create: true,

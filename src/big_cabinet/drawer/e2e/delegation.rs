@@ -621,6 +621,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
             }
             .metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope: scope.clone(),
                 rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
                 subject: Some(cartridge.actor.actor_id),
@@ -739,6 +740,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
                 }
                 .metadata(),
                 MintDrawerCapability {
+ capability: None,
                     scope: DrawerScope {
                         drawers: [(drawer.clone(), Access::Admin)].into(),
                         create: false
@@ -827,6 +829,7 @@ async fn a_drawer_handle_presented_by_an_actor_it_is_not_bound_to_is_refused() {
                 RequestContext::root(),
                 stolen.clone(),
                 MintDrawerCapability {
+ capability: None,
                     scope,
                     rights: Rights::USE,
                     subject: None,
@@ -1421,6 +1424,7 @@ async fn create_self_doc_signs_the_descriptor_as_the_caller() {
             RequestContext::root(),
             Authorization::identity(own).metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: Some(cartridge.actor.actor_id),
@@ -1481,6 +1485,7 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
             }
             .metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: Some(cartridge.actor.actor_id),
@@ -1623,6 +1628,7 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
             }
             .metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: Some(cartridge.actor.actor_id),

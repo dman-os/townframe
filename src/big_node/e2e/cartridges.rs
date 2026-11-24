@@ -1817,6 +1817,7 @@ pub(super) async fn import_document(
             RequestContext::root(),
             operator(node).metadata(),
             MintDocCapability {
+ capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([doc_id.clone()]),
                     ..DocScope::default()
@@ -1835,6 +1836,7 @@ pub(super) async fn import_document(
             RequestContext::root(),
             operator(node).metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Read)]),
                     create: false,

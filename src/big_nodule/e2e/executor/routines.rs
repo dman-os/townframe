@@ -572,6 +572,7 @@ async fn reaches(node: &Node, holder: CapId, drawer: &DrawerId) -> bool {
             RequestContext::root(),
             Authorization::identity(holder).metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
                     create: false,
@@ -641,6 +642,7 @@ async fn an_operator_made_drawer_granted_through_set_cartridge_grant_reaches_the
             RequestContext::root(),
             operator.metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::new(),
                     create: true,
@@ -1107,6 +1109,7 @@ async fn a_routine_reaches_granted_drawers_only_for_its_datum_kinds() {
             RequestContext::root(),
             Authorization::identity(actor.capability).metadata(),
             MintDocCapability {
+ capability: None,
                 scope: DocScope {
                     create: BTreeSet::from([placement.clone()]),
                     ..DocScope::default()

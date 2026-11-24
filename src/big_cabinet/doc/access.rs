@@ -17,7 +17,6 @@ use crate::doc::DocsService;
 use crate::grants::GrantError;
 use crate::grants::Grants;
 use big_cabinet_core::authority::AuthorityProtocol;
-use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::Rights;
@@ -28,6 +27,7 @@ use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::MintDocCapability;
 use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
+use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
 use sqlite_rs::Database;
 use std::collections::BTreeMap;
@@ -260,12 +260,15 @@ impl DocsService {
     async fn mint_capability(
         &self,
         context: &RequestContext,
-        authorization: Authorization,
+        metadata: &HttpMetadata,
         request: MintDocCapability,
     ) -> Result<big_cabinet_core::authority::Capability, DocsError> {
+        // A body `capability` is a scoped handle, so the `Scoped` arm below is what bounds the
+        // new scope: each drawer's reach (access and kinds) and each document must be covered by
+        // the parent's own, which is the same rule as for a scoped credential.
         let caller = self
             .capabilities
-            .source::<big_cabinet_core::doc::DocScope>(context, authorization)
+            .minter::<big_cabinet_core::doc::DocScope>(context, metadata, request.capability)
             .await
             .map_err(super::authority_error)?;
         if !caller.rights.contains(Rights::NARROW) || !request.rights.is_subset_of(caller.rights) {
@@ -350,9 +353,8 @@ impl service_utils_rs::Handler<MintDocCapability> for DocsService {
         service_utils_rs::ResponseEnvelope<big_cabinet_core::authority::Capability>,
         DocsError,
     > {
-        let authorization = Authorization::from_metadata(&request.metadata)?;
         Ok(self
-            .mint_capability(&request.context, authorization, request.params)
+            .mint_capability(&request.context, &request.metadata, request.params)
             .await?
             .into())
     }

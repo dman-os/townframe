@@ -310,6 +310,25 @@ impl DomainCapabilities {
         }
     }
 
+    /// The caller of a mint: the body `capability` when the request names one (resolved as any
+    /// resource handle is, so only its bound actor may present it), else the request's
+    /// `Authorization` credential.
+    pub async fn minter<S: DeserializeOwned>(
+        &self,
+        context: &RequestContext,
+        metadata: &HttpMetadata,
+        capability: Option<CapId>,
+    ) -> Result<Invocation<S>, Error> {
+        match capability {
+            Some(capability) => self.resolve(context, metadata, capability).await,
+            None => {
+                let authorization = Authorization::from_metadata(metadata)
+                    .map_err(|error| ClientError::Method(AuthorityServiceError::Context(error)))?;
+                self.source(context, authorization).await
+            }
+        }
+    }
+
     /// Mint a handle for `scope` from the handle `caller` presented as its authority. The new
     /// handle is bound to `subject`, or to that handle's own subject when it is `None`. Naming
     /// another actor is an introduction, which the authority permits only for a descendant of

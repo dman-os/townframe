@@ -967,6 +967,7 @@ where
             RequestContext::root(),
             Authorization::identity(authority.root).metadata(),
             big_blobs_core::MintBlobsCapability {
+ capability: None,
                 scope: big_blobs_core::protocol::BlobsScope {
                     put: true,
                     ..Default::default()
@@ -991,6 +992,7 @@ where
             RequestContext::root(),
             Authorization::identity(authority.root).metadata(),
             big_blobs_core::MintBlobsCapability {
+ capability: None,
                 scope: big_blobs_core::protocol::BlobsScope {
                     put: true,
                     ..Default::default()
@@ -1007,6 +1009,7 @@ where
             RequestContext::root(),
             Authorization::identity(authority.root).metadata(),
             big_cabinet_core::doc::MintDocCapability {
+ capability: None,
                 scope: big_cabinet_core::doc::DocScope {
                     drawers: std::collections::BTreeMap::from([(
                         shared_config_drawer.clone(),
@@ -1160,6 +1163,7 @@ async fn grant_drawer(
             RequestContext::root(),
             Authorization::identity(issuer.capability).metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer.clone(), EntryAccess::Admin)]),
                     create: false,

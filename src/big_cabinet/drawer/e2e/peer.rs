@@ -168,6 +168,7 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
             RequestContext::root(),
             operator.metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer.clone(), Access::Read)]),
                     create: false,

@@ -239,6 +239,7 @@ pub async fn ensure_registry_drawer(config: RegistryDrawerConfig<'_>) -> Res<Dra
             context.child(),
             identity.metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::new(),
                     create: true,
@@ -680,6 +681,7 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
             RequestContext::root(),
             Authorization::identity(config.actor.capability).metadata(),
             MintDocCapability {
+ capability: None,
                 scope: DocScope {
                     drawers: BTreeMap::from([(
                         config.registry_drawer.clone(),

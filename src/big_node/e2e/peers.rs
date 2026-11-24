@@ -63,6 +63,7 @@ async fn registry_capability(node: &BigNode) -> CapId {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(
                         node.drawers.local().known_drawers_id,

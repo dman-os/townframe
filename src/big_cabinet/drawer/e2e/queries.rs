@@ -1578,6 +1578,7 @@ async fn a_drawer_reach_admits_only_its_datum_kinds_for_reads_and_writes() {
             RequestContext::root(),
             Authorization::identity(fx.alice.capability).metadata(),
             MintDocCapability {
+ capability: None,
                 scope: parent_reach(&fx, Access::Write, note_only.clone(), note_only.clone()),
                 rights: Rights::USE | Rights::NARROW,
                 subject: None,
@@ -1596,6 +1597,7 @@ async fn a_drawer_reach_admits_only_its_datum_kinds_for_reads_and_writes() {
                 }
                 .metadata(),
                 MintDocCapability {
+ capability: None,
                     scope: parent_reach(&fx, access, read, write),
                     rights: Rights::USE,
                     subject: None,

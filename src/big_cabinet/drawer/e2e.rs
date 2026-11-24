@@ -368,6 +368,7 @@ impl Node {
                 RequestContext::root(),
                 Authorization::identity(actor.capability).metadata(),
                 MintDrawerCapability {
+ capability: None,
                     scope,
                     rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
                     subject: None,
@@ -405,6 +406,7 @@ impl Node {
                 RequestContext::root(),
                 Authorization::identity(actor.capability).metadata(),
                 MintDocCapability {
+ capability: None,
                     scope,
                     rights: Rights::USE,
                     subject: None,
