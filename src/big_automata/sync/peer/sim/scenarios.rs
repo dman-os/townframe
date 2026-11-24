@@ -400,18 +400,14 @@ fn a_bucket_that_grows_during_a_walk_is_read_to_its_end() {
     );
 }
 
-/// Pins a gap between crash recovery and the store's route rule (found by the simulation, not
-/// fixed here). The cursor lags the backend: a fetch holds the watermark while later jobs
-/// settle, so the local store holds members above the persisted cursor. After a crash the replay
-/// starts from that cursor, and the store hands out a removal only to a reader whose cursor is at
-/// or past the member's `added_at` (`removals_skip_routes_that_never_saw_the_member`). The
-/// restarted machine is below it, so the removal never comes and the member stays for good.
-/// Unwanting the part and wanting it again restarts its replay from the persisted cursor the same
-/// way.
-/// Fixing it means changing the rule, the persisted cursor or the recovery; when one does, this
-/// test should assert the removal arrives, and the simulation's `ghosts` allowance goes.
+/// Regression (found by the simulation). The cursor lags the backend: a fetch holds the
+/// watermark while later jobs settle, so the local store holds members above the persisted
+/// cursor. After a crash the replay starts from that cursor, and the peer must still send the
+/// removal of such a member, though it went live after the cursor (replay law 11). Once the
+/// store skipped it, and the member stayed for good. Unwanting the part and wanting it again
+/// restarts its replay from the persisted cursor the same way.
 #[test]
-fn a_removal_of_a_member_applied_above_the_persisted_cursor_is_skipped_after_a_crash() {
+fn a_removal_of_a_member_applied_above_the_persisted_cursor_arrives_after_a_crash() {
     let mut sim = Sim::new(Shape::small(), 5);
     sim.remote.commit(laws::grant(&[(0, 0)]));
     sim.want(&[0]);
@@ -451,16 +447,15 @@ fn a_removal_of_a_member_applied_above_the_persisted_cursor_is_skipped_after_a_c
     assert!(sim.remote.view_at(sim.remote.head()).members[&part(0)].is_empty());
     assert_eq!(
         sim.local_members(0),
-        [obj(3)].into(),
-        "the removal was skipped: the member is a ghost"
+        BTreeSet::new(),
+        "the removal reached the restarted replay"
     );
 }
 
 /// Shrunk by the simulation at 4000 cases: the same gap as above without a crash. The part is
 /// unwanted and wanted again (`rem_parts` and `add_parts` of one `Routes`), the machine starts
 /// the part over from the persisted cursor, which is below the member the local store already
-/// holds, and the peer's removal of that member never comes. Passes through the simulation's
-/// `ghosts` allowance, like the crash case.
+/// holds, and the peer's removal of that member must still come.
 #[test]
 fn a_part_wanted_again_replays_from_its_persisted_cursor() {
     run(

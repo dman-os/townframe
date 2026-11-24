@@ -62,12 +62,7 @@ strike! {
         >,
         /// Every object with a member row in a part, live or removed, keyed by the part and
         /// the object's deepest bucket index so a bucket's members are one range.
-        members: BTreeMap<(PartKey, u16, ObjKey), struct MemberRow {
-            /// When the membership first went live; a re-add does not reset it. Kept when it
-            /// is removed: the log's tombstone carries no value, and a route read needs it to
-            /// skip the removal for a reader that never saw the membership ([`LogSelector`]).
-            first_added_at: Rev,
-        }>,
+        members: BTreeSet<(PartKey, u16, ObjKey)>,
         /// Memberships added before the object had a payload: no log row, no bucket entry.
         pending: BTreeSet<(ObjKey, PartKey)>,
         /// Each part's bucket summaries, every level, maintained per transition.
@@ -198,23 +193,6 @@ impl State {
             row.latest_cursor = rev;
         }
         self.log.write(rev, key, value);
-    }
-}
-
-impl State {
-    /// For a removed membership's row, when it had gone live: what the route rule needs.
-    fn removed_added_at(&self, key: &LogKey, value: Option<&LogEntry>) -> Option<Rev> {
-        match (key, value) {
-            (LogKey::Member { obj, part }, None) => {
-                let index = BuckId::deepest_from_obj_key(obj).index();
-                let row = self
-                    .members
-                    .get(&(part.clone(), index, obj.clone()))
-                    .expect("a removed member row without its member");
-                Some(row.first_added_at)
-            }
-            (LogKey::Member { .. }, Some(_)) | (LogKey::Access { .. }, _) => None,
-        }
     }
 }
 
@@ -368,12 +346,7 @@ impl RevSource for MemoryPartStore {
     ) -> impl Future<Output = Res<()>> + Send {
         self.with_state(|state| {
             state.log.read_into(
-                |key, rev, value| match selector {
-                    LogSelector::All => true,
-                    LogSelector::Routes(_) => {
-                        selector.selects(key, rev, after, state.removed_added_at(key, value))
-                    }
-                },
+                |key, rev, _value| selector.selects(key, rev),
                 log_row_bytes,
                 after,
                 until,

@@ -158,13 +158,6 @@ struct Sim {
     mirror: BTreeMap<PartKey, bool>,
     /// Parts whose walk may have read state newer than their cursor.
     walked: BTreeSet<PartKey>,
-    /// Members the local store applied above a part's persisted cursor before its replay
-    /// restarted from that cursor (a crash, or the part unwanted and wanted again): the peer never
-    /// sends the removal of such a member to a replay from that cursor (the store's route rule
-    /// skips removals for a reader at a cursor below the member's `added_at`), so they may stay
-    /// for good. See `a_removal_of_a_member_applied_above_the_persisted_cursor_is_skipped_after_a_crash`.
-    /// The checks leave them out of both sides of every comparison.
-    ghosts: BTreeMap<PartKey, BTreeSet<ObjKey>>,
     /// The stage each listing call is at.
     relist: BTreeMap<CallId, BuckId>,
     session: u128,
@@ -191,7 +184,6 @@ impl Sim {
             wanted_objs: default(),
             mirror: default(),
             walked: default(),
-            ghosts: default(),
             relist: default(),
             session: 1,
             seeds: 0,

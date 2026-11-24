@@ -185,13 +185,13 @@ fn law_8_and_10_resume_is_progress_never_below_the_cursor() {
 }
 
 #[test]
-fn law_11_a_removal_of_a_membership_the_target_never_saw_may_be_omitted() {
+fn law_11_a_removal_of_a_membership_added_after_the_cursor_is_delivered() {
     let mut fixture = Fixture::new(&[(1, part_route(1))]);
     let before = fixture.commit(vec![grant(&[(1, 0)])]);
     let live = fixture.commit(vec![set(&[(1, 10)]), add(&[(1, 1)])]);
     let gone = fixture.commit(vec![remove(&[(1, 1)])]);
     let page = fixture.serve(&[(1, before)], 100);
-    assert_eq!(page.events, []);
+    assert_eq!(page.events, [removed(gone, 1, 1)]);
     assert_eq!(page.verdicts, [(1, events(gone, true))]);
     let page = fixture.serve(&[(1, live)], 100);
     assert_eq!(page.events, [removed(gone, 1, 1)]);
