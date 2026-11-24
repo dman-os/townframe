@@ -89,6 +89,7 @@ use local::Flight;
 use local::Local;
 use local::Step;
 use net::*;
+use ops::MAX_BATCH;
 use ops::Op;
 #[cfg(test)]
 use ops::run;

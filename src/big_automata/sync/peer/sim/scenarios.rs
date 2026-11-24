@@ -20,8 +20,17 @@ impl Sim {
 
     /// The peer makes `obj` a member of `part` with a payload.
     fn member(&mut self, obj: u8, part: u8) {
-        self.remote.commit(laws::add(&[(obj, part)]));
-        self.remote.commit(laws::set(&[(obj, 1)]));
+        self.remote.commit(vec![laws::add(&[(obj, part)])]);
+        self.remote.commit(vec![laws::set(&[(obj, 1)])]);
+    }
+
+    /// The peer makes every object of `objs` a member of `part` with a payload, in one
+    /// transaction: all of them change at one rev.
+    fn members(&mut self, objs: &[u8], part: u8) {
+        let pairs: Vec<(u8, u8)> = objs.iter().map(|obj| (*obj, part)).collect();
+        let payloads: Vec<(u8, u8)> = objs.iter().map(|obj| (*obj, 1)).collect();
+        self.remote
+            .commit(vec![laws::add(&pairs), laws::set(&payloads)]);
     }
 
     fn local_members(&self, part: u8) -> BTreeSet<ObjKey> {
@@ -42,7 +51,7 @@ impl Sim {
 #[test]
 fn a_removal_found_by_a_walk_survives_a_crash_before_it_settles() {
     let mut sim = Sim::new(Shape::small(), 7);
-    sim.remote.commit(laws::grant(&[(0, 0)]));
+    sim.remote.commit(vec![laws::grant(&[(0, 0)])]);
     sim.member(0, 0);
     sim.member(1, 0);
     sim.want(&[0]);
@@ -51,7 +60,7 @@ fn a_removal_found_by_a_walk_survives_a_crash_before_it_settles() {
     assert_eq!(sim.local_members(0), [obj(0), obj(1)].into());
 
     // the peer removes object 0, and we restart into a summary that says "far behind"
-    sim.remote.commit(laws::remove(&[(0, 0)]));
+    sim.remote.commit(vec![laws::remove(&[(0, 0)])]);
     sim.remote.walk_bias = true;
     sim.step(Op::Crash {
         committed: 0,
@@ -96,7 +105,7 @@ fn a_removal_found_by_a_walk_survives_a_crash_before_it_settles() {
 #[test]
 fn a_fetch_is_cancelled_when_the_peer_removes_the_object() {
     let mut sim = Sim::new(Shape::small(), 3);
-    sim.remote.commit(laws::grant(&[(0, 0)]));
+    sim.remote.commit(vec![laws::grant(&[(0, 0)])]);
     sim.want(&[0]);
     sim.quiesce();
     sim.local.force_settle = Some(Settle::Fetch);
@@ -121,7 +130,7 @@ fn a_fetch_is_cancelled_when_the_peer_removes_the_object() {
     }
     let call = fetch(&sim).expect("the record answered Fetch and the fetch started");
 
-    sim.remote.commit(laws::remove(&[(0, 0)]));
+    sim.remote.commit(vec![laws::remove(&[(0, 0)])]);
     for _ in 0..6 {
         if sim.local.calls[&call].cancelled() {
             break;
@@ -154,7 +163,7 @@ fn lanes_a_live_write_is_applied_within_a_few_live_rounds_of_a_backlog_drain() {
     shape.config.lanes.live_limit = 2;
     let mut sim = Sim::new(shape, 1);
     sim.local.settle_always = Some(Settle::Done);
-    sim.remote.commit(laws::grant(&[(0, 0), (1, 0)]));
+    sim.remote.commit(vec![laws::grant(&[(0, 0), (1, 0)])]);
     sim.want(&[1]);
     sim.quiesce();
     for obj in 0..BACKLOG {
@@ -206,7 +215,7 @@ fn lanes_a_backlog_drains_in_about_n_over_limit_bulk_rounds() {
     shape.config.lanes.live_limit = 2;
     let mut sim = Sim::new(shape, 1);
     sim.local.settle_always = Some(Settle::Done);
-    sim.remote.commit(laws::grant(&[(0, 0)]));
+    sim.remote.commit(vec![laws::grant(&[(0, 0)])]);
     for obj in 0..BACKLOG {
         sim.member(obj, 0);
     }
@@ -409,7 +418,7 @@ fn a_bucket_that_grows_during_a_walk_is_read_to_its_end() {
 #[test]
 fn a_removal_of_a_member_applied_above_the_persisted_cursor_arrives_after_a_crash() {
     let mut sim = Sim::new(Shape::small(), 5);
-    sim.remote.commit(laws::grant(&[(0, 0)]));
+    sim.remote.commit(vec![laws::grant(&[(0, 0)])]);
     sim.want(&[0]);
     sim.quiesce();
     sim.local.force_settle = Some(Settle::Fetch);
@@ -442,7 +451,7 @@ fn a_removal_of_a_member_applied_above_the_persisted_cursor_arrives_after_a_cras
         committed: 1,
         close: true,
     });
-    sim.remote.commit(laws::remove(&[(3, 0)]));
+    sim.remote.commit(vec![laws::remove(&[(3, 0)])]);
     sim.quiesce();
     assert!(sim.remote.view_at(sim.remote.head()).members[&part(0)].is_empty());
     assert_eq!(
@@ -552,4 +561,33 @@ fn a_part_wanted_again_replays_from_its_persisted_cursor() {
         ],
         1419127500411581189,
     );
+}
+
+/// A revision is per transaction: several objects committed together share one rev. A part
+/// following the peer by cursor must report `Synced` only once every one of them is present.
+#[test]
+fn a_multi_object_commit_on_a_cursor_part_syncs_only_with_every_object() {
+    let mut shape = Shape::small();
+    shape.objs = 4;
+    shape.obj_routes = 0;
+    let mut sim = Sim::new(shape, 5);
+    sim.remote.commit(vec![laws::grant(&[(0, 0)])]);
+    sim.want(&[0]);
+    sim.quiesce();
+    assert!(!sim.sync.walking(&part(0)), "the part follows by cursor");
+
+    let rev = sim.remote.head();
+    sim.members(&[0, 1, 2, 3], 0);
+    assert_eq!(sim.remote.head(), rev + 1, "one commit, one rev");
+    let all: BTreeSet<ObjKey> = (0..4).map(obj).collect();
+    for _ in 0..100 {
+        sim.cycle();
+        if sim.sync.synced(&part(0)) == Some(true) && sim.sync.drained[&part(0)] > rev {
+            assert_eq!(sim.local_members(0), all, "Synced with an object missing");
+            break;
+        }
+    }
+    sim.quiesce();
+    assert_eq!(sim.local_members(0), all);
+    assert_eq!(sim.sync.synced(&part(0)), Some(true));
 }

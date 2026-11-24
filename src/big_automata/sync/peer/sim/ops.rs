@@ -2,6 +2,11 @@
 
 use super::*;
 
+use crate::part_store::oracle::PartWrite;
+
+/// The most writes one [`Op::Batch`] commits.
+pub(super) const MAX_BATCH: usize = 3;
+
 #[derive(Debug, Clone)]
 pub(super) enum Op {
     /// The peer commits: a payload (`kind % 3 == 0`), an add or a remove of `obj` in `part`.
@@ -10,6 +15,16 @@ pub(super) enum Op {
         obj: u8,
         part: u8,
         val: u8,
+    },
+    /// The peer commits one transaction of 2 or 3 writes, which therefore share one rev:
+    /// starting at `obj` and moving on to the following objects, with kinds, parts
+    /// and payloads derived from `more`.
+    Batch {
+        kind: u8,
+        obj: u8,
+        part: u8,
+        val: u8,
+        more: u8,
     },
     /// The peer grants us the part, or revokes it.
     Access(u8),
@@ -99,13 +114,34 @@ impl Sim {
                 part,
                 val,
             } => {
-                let (obj, part) = (obj % objs, part % parts);
-                let write = match kind % 3 {
-                    0 => laws::set(&[(obj, val % 3)]),
-                    1 => laws::add(&[(obj, part)]),
-                    _ => laws::remove(&[(obj, part)]),
-                };
-                self.remote.commit(write);
+                self.remote
+                    .commit(vec![write_of(kind, obj % objs, part % parts, val)]);
+            }
+            Op::Batch {
+                kind,
+                obj,
+                part,
+                val,
+                more,
+            } => {
+                // 2 or 3 writes: the later ones land on the following objects
+                let count = 2 + usize::from(more % 2);
+                debug_assert!(count <= MAX_BATCH);
+                let writes = (0..count as u8)
+                    .map(|at| {
+                        write_of(
+                            if at == 0 {
+                                kind
+                            } else {
+                                (more >> 1).wrapping_add(at)
+                            },
+                            obj.wrapping_add(at) % objs,
+                            part.wrapping_add(more >> 4) % parts,
+                            val.wrapping_add(at),
+                        )
+                    })
+                    .collect();
+                self.remote.commit(writes);
             }
             Op::Access(index) => {
                 let index = index % parts;
@@ -117,7 +153,7 @@ impl Sim {
                 } else {
                     laws::grant(&[(index, 0)])
                 };
-                self.remote.commit(write);
+                self.remote.commit(vec![write]);
             }
             Op::Routes {
                 add_parts,
@@ -201,10 +237,21 @@ impl Sim {
     }
 }
 
+/// A payload (`kind % 3 == 0`), an add or a remove of `obj` in `part`; indices already reduced.
+fn write_of(kind: u8, obj: u8, part: u8, val: u8) -> PartWrite {
+    match kind % 3 {
+        0 => laws::set(&[(obj, val % 3)]),
+        1 => laws::add(&[(obj, part)]),
+        _ => laws::remove(&[(obj, part)]),
+    }
+}
+
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         5 => (any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>())
             .prop_map(|(kind, obj, part, val)| Op::Write { kind, obj, part, val }),
+        3 => (any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>())
+            .prop_map(|(kind, obj, part, val, more)| Op::Batch { kind, obj, part, val, more }),
         2 => any::<u8>().prop_map(Op::Access),
         3 => (any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>()).prop_map(
             |(add_parts, rem_parts, add_objs, rem_objs)| Op::Routes {

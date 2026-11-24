@@ -9,14 +9,23 @@ strike! {
     /// Streams are the source of the jobs
     /// Multiple streams can request jobs on the same keys
     /// The cursor monotincally orders versions of jobs
+    /// Several jobs can hold one cursor on one stream (a revision spans a whole
+    /// transaction, so many objects change at the same cursor): the stream's slot at that
+    /// cursor is ready only once every job holding it has settled or been released.
     /// What kind of work a job is belongs in its key: two kinds of work on the same
     /// object are two keys, so settling or releasing one never touches the other.
     pub struct WatermarkMachine<Key, StreamId, Cursor> {
-        streams: Map<StreamId, struct StreamState<Cursor> {
+        streams: Map<StreamId, struct StreamState<Key, Cursor> {
             last_emitted: Option<Cursor>,
-            /// One waiter per slot: `add_job` refuses a cursor a stream has already seen.
-            slots: BTreeMap<Cursor, struct CursorSlotState {
-                ready: bool,
+            /// One slot per cursor, shared by every job that joined it.
+            slots: BTreeMap<Cursor, struct CursorSlotState<Key> {
+                /// Every job that joined the slot, settled or not, until the slot passes:
+                /// `add_job` refuses a (job, cursor) the stream already saw (a re-delivery)
+                /// but lets a different job join.
+                joined: BTreeSet<Key>,
+                /// How many of the joined jobs have neither settled nor been released.
+                /// The slot is ready at zero.
+                owed: usize,
             }>
         }>,
         jobs: BTreeMap<Key, struct JobState<StreamId, Cursor> {
@@ -45,7 +54,7 @@ impl<Key, StreamId, Cursor> Default for WatermarkMachine<Key, StreamId, Cursor> 
         }
     }
 }
-impl<Cursor> Default for StreamState<Cursor> {
+impl<Key, Cursor> Default for StreamState<Key, Cursor> {
     fn default() -> Self {
         Self {
             last_emitted: default(),
@@ -100,9 +109,10 @@ where
             .is_some_and(|job| job.waiters.contains_key(cursor))
     }
 
-    /// Open a slot at `cursor` on each stream and make the job wait on it. Streams that
-    /// already emitted past the cursor, or already hold a slot for it (a re-delivery), are
-    /// skipped. Returns the streams the job now waits on.
+    /// Make the job wait on the slot at `cursor` on each stream, opening it if needed.
+    /// Other jobs may already hold the slot: the stream passes the cursor only after all of
+    /// them settle. Streams that already emitted past the cursor, or whose slot the same job
+    /// already joined (a re-delivery), are skipped. Returns the streams the job now waits on.
     pub fn add_job(
         &mut self,
         key: Key,
@@ -121,13 +131,12 @@ where
             {
                 continue;
             }
-            if stream_state.slots.contains_key(&cursor) {
+            let slot = stream_state.slots.entry(cursor).or_default();
+            if !slot.joined.insert(key.clone()) {
                 continue;
             }
-            // the slot is not ready until the job settles it
-            stream_state
-                .slots
-                .insert(cursor, CursorSlotState { ready: false });
+            // the slot is not ready until this job settles it
+            slot.owed += 1;
             self.stream_buf.insert(sid);
         }
         // if any new slots opened, add waiters
@@ -167,7 +176,7 @@ where
             .map(|sid| {
                 let stream_state = self.streams.get_mut(&sid).expect(ERROR_IMPOSSIBLE);
                 let slot_state = stream_state.slots.get_mut(cursor).expect(ERROR_IMPOSSIBLE);
-                slot_state.ready = true;
+                slot_state.owed -= 1;
                 let reached = stream_state.drain();
                 (sid, reached)
             })
@@ -176,7 +185,7 @@ where
 
     /// Stop the job waiting on `sid` at every cursor before `before_cursor`, leaving its
     /// waiters on other streams alone. Those slots no longer owe this job's work, so they are
-    /// ready. This is the supersede path: a later event made the job's work on that one stream
+    /// ready once no other job holds them. This is the supersede path: a later event made the job's work on that one stream
     /// moot.
     pub fn release_stream(
         &mut self,
@@ -197,7 +206,7 @@ where
                 .slots
                 .get_mut(cursor)
                 .expect(ERROR_IMPOSSIBLE)
-                .ready = true;
+                .owed -= 1;
             released = true;
             if waiter.streams.is_empty() {
                 self.cursor_buf.push(*cursor);
@@ -216,7 +225,16 @@ where
     }
 }
 
-impl<Cursor> StreamState<Cursor>
+impl<Key> Default for CursorSlotState<Key> {
+    fn default() -> Self {
+        Self {
+            joined: default(),
+            owed: 0,
+        }
+    }
+}
+
+impl<Key, Cursor> StreamState<Key, Cursor>
 where
     Cursor: Ord + Copy,
 {
@@ -225,7 +243,7 @@ where
         let latest_ready = {
             let mut latest_ready = None;
             for (cursor, slot) in &self.slots {
-                if slot.ready {
+                if slot.owed == 0 {
                     latest_ready = Some(*cursor);
                 } else {
                     break;

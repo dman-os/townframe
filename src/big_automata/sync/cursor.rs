@@ -18,9 +18,12 @@
 //!    part `p` frees `p`'s slots of the object's syncs below `c`. The same syncs keep gating
 //!    the object's other parts, other objects' syncs keep gating `p`, and the removal's own
 //!    slot gates `p` until its completion is reported.
-//! 4. **A part admits a cursor once.** A part that already emitted past a cursor, or holds a
-//!    slot at it (a re-delivery), skips it: the `SyncObj` names only the parts that admitted
-//!    it, in event order, and an event every part skipped emits nothing.
+//! 4. **A part admits a (job, cursor) once.** A part that already emitted past a cursor, or
+//!    already holds that same job's slot at it (a re-delivery), skips it: the `SyncObj` names
+//!    only the parts that admitted it, in event order, and an event every part skipped emits
+//!    nothing. Other jobs at the same cursor are not re-deliveries: a revision spans a whole
+//!    transaction, so several objects change at one cursor, and each joins the part's slot
+//!    there. The part passes the cursor only after every one of them settled.
 //! 5. **Retiring a part is local.** `remove_part` drops the part's slots and replay cursor
 //!    and reports nothing; completions reported afterwards are silent for it and still settle
 //!    the job's other parts, so no other part stalls on a retired one. A part added again
@@ -42,9 +45,9 @@
 
 use crate::interlude::*;
 
+use crate::kit::watermark::WatermarkMachine;
 use crate::part_store::ObjPayload;
 use crate::rev::Rev;
-use crate::kit::watermark::WatermarkMachine;
 
 strike! {
     pub enum CursorEvent {

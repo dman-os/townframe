@@ -51,9 +51,12 @@ impl Sim {
                 "law 1 of ObjectJobs: {records} records and {fetches} fetches of {obj} in flight"
             );
         }
+        // a page is never split inside a revision, so it can overshoot the window by the
+        // objects of one revision less one: a batch commits at most `MAX_BATCH` objects
+        let bound = jobs.window + MAX_BATCH - 1;
         assert!(
-            per_obj.len() <= jobs.window,
-            "{} objects have calls in flight, the window is {}",
+            per_obj.len() <= bound,
+            "{} objects have calls in flight, the window is {} and a revision brings up to {MAX_BATCH}",
             per_obj.len(),
             jobs.window
         );
