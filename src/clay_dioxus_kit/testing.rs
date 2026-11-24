@@ -17,17 +17,46 @@ use dioxus_core::Event;
 use dioxus_core::RenderTargetId;
 use dioxus_core::VirtualDom;
 use dioxus_core::WriteMutations;
+use dioxus_html::AnimationData;
+use dioxus_html::BeforeInputData;
+use dioxus_html::CancelData;
+use dioxus_html::ClipboardData;
 use dioxus_html::Code;
+use dioxus_html::CompositionData;
+use dioxus_html::DragData;
 use dioxus_html::EventData;
+use dioxus_html::FocusData;
+use dioxus_html::FormData;
+use dioxus_html::HtmlEventConverter;
+use dioxus_html::ImageData;
 use dioxus_html::Key;
+use dioxus_html::KeyboardData;
 use dioxus_html::Location;
+use dioxus_html::MediaData;
 use dioxus_html::Modifiers;
+use dioxus_html::MountedData;
+use dioxus_html::MountedResult;
+use dioxus_html::MouseData;
+use dioxus_html::PlatformEventData;
+use dioxus_html::PointerData;
+use dioxus_html::RenderedElementBacking;
+use dioxus_html::ResizeData;
+use dioxus_html::ScrollData;
+use dioxus_html::SelectionData;
+use dioxus_html::SerializedHtmlEventConverter;
 use dioxus_html::SerializedKeyboardData;
 use dioxus_html::SerializedMouseData;
 use dioxus_html::SerializedPointInteraction;
 use dioxus_html::SerializedPointerData;
+use dioxus_html::ToggleData;
+use dioxus_html::TouchData;
+use dioxus_html::TransitionData;
+use dioxus_html::VisibleData;
+use dioxus_html::WheelData;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 // The vocabulary a Wasm guest's tree may use, mirrored from `clay_surface::render` (the host
 // refuses a mutation batch naming anything else). The kit cannot depend on a `clay_*` crate, so
@@ -109,14 +138,12 @@ const WIRE_SVG_TAGS: &[&str] = &[
 const WIRE_ATTRIBUTES: &[&str] = &[
     "id",
     "class",
-    "style",
     "title",
     "role",
     "tabindex",
     "hidden",
     "lang",
     "dir",
-    "accesskey",
     "contenteditable",
     "draggable",
     "spellcheck",
@@ -132,7 +159,6 @@ const WIRE_ATTRIBUTES: &[&str] = &[
     "type",
     "placeholder",
     "autocomplete",
-    "autofocus",
     "inputmode",
     "pattern",
     "min",
@@ -145,26 +171,14 @@ const WIRE_ATTRIBUTES: &[&str] = &[
     "cols",
     "wrap",
     "for",
-    "form",
-    "action",
-    "method",
-    "enctype",
     "novalidate",
     "accept",
-    "accept-charset",
     "href",
-    "target",
     "rel",
-    "download",
-    "src",
     "alt",
     "width",
     "height",
     "loading",
-    "srcset",
-    "sizes",
-    "crossorigin",
-    "referrerpolicy",
     "open",
     "datetime",
     "start",
@@ -238,82 +252,90 @@ const WIRE_ATTRIBUTES: &[&str] = &[
     "points",
     "xmlns",
     "clip-path",
+    "clip-rule",
+    "slot",
 ];
-const WIRE_STYLE_PROPERTIES: &[&str] = &[
-    "display",
-    "position",
-    "top",
-    "right",
-    "bottom",
-    "left",
-    "inset",
-    "z-index",
-    "width",
-    "height",
-    "min-width",
-    "max-width",
-    "min-height",
-    "max-height",
-    "margin",
-    "margin-top",
-    "margin-right",
-    "margin-bottom",
-    "margin-left",
-    "padding",
-    "padding-top",
-    "padding-right",
-    "padding-bottom",
-    "padding-left",
-    "gap",
-    "row-gap",
-    "column-gap",
-    "flex",
-    "flex-direction",
-    "flex-wrap",
-    "flex-grow",
-    "flex-shrink",
-    "flex-basis",
-    "align-items",
-    "align-self",
-    "justify-content",
-    "grid-template-columns",
-    "grid-template-rows",
-    "grid-column",
-    "grid-row",
-    "overflow",
-    "overflow-x",
-    "overflow-y",
-    "color",
-    "background",
-    "background-color",
-    "border",
-    "border-color",
-    "border-width",
-    "border-style",
-    "border-radius",
-    "font",
-    "font-family",
-    "font-size",
-    "font-weight",
-    "font-style",
-    "line-height",
-    "text-align",
-    "text-decoration",
-    "text-overflow",
-    "white-space",
-    "word-break",
-    "cursor",
-    "pointer-events",
-    "user-select",
-    "opacity",
-    "visibility",
-    "box-sizing",
-    "box-shadow",
-    "transform",
-    "transform-origin",
-    "transition",
-    "object-fit",
-];
+
+/// The serialized converter, except that a mounted event carries the element backing the test
+/// supplies (the serialized one has none), so a test can observe what a handler asks of the
+/// element.
+struct HarnessConverter(SerializedHtmlEventConverter);
+
+/// What a test's `mounted` event carries: taken once, by the converter.
+type MountedPayload = Rc<Cell<Option<MountedData>>>;
+
+impl HtmlEventConverter for HarnessConverter {
+    fn convert_mounted_data(&self, event: &PlatformEventData) -> MountedData {
+        event
+            .downcast::<MountedPayload>()
+            .expect("a mounted event carries a MountedPayload")
+            .take()
+            .expect("a mounted event is converted once")
+    }
+    fn convert_animation_data(&self, event: &PlatformEventData) -> AnimationData {
+        self.0.convert_animation_data(event)
+    }
+    fn convert_before_input_data(&self, event: &PlatformEventData) -> BeforeInputData {
+        self.0.convert_before_input_data(event)
+    }
+    fn convert_cancel_data(&self, event: &PlatformEventData) -> CancelData {
+        self.0.convert_cancel_data(event)
+    }
+    fn convert_clipboard_data(&self, event: &PlatformEventData) -> ClipboardData {
+        self.0.convert_clipboard_data(event)
+    }
+    fn convert_composition_data(&self, event: &PlatformEventData) -> CompositionData {
+        self.0.convert_composition_data(event)
+    }
+    fn convert_drag_data(&self, event: &PlatformEventData) -> DragData {
+        self.0.convert_drag_data(event)
+    }
+    fn convert_focus_data(&self, event: &PlatformEventData) -> FocusData {
+        self.0.convert_focus_data(event)
+    }
+    fn convert_form_data(&self, event: &PlatformEventData) -> FormData {
+        self.0.convert_form_data(event)
+    }
+    fn convert_image_data(&self, event: &PlatformEventData) -> ImageData {
+        self.0.convert_image_data(event)
+    }
+    fn convert_keyboard_data(&self, event: &PlatformEventData) -> KeyboardData {
+        self.0.convert_keyboard_data(event)
+    }
+    fn convert_media_data(&self, event: &PlatformEventData) -> MediaData {
+        self.0.convert_media_data(event)
+    }
+    fn convert_mouse_data(&self, event: &PlatformEventData) -> MouseData {
+        self.0.convert_mouse_data(event)
+    }
+    fn convert_pointer_data(&self, event: &PlatformEventData) -> PointerData {
+        self.0.convert_pointer_data(event)
+    }
+    fn convert_resize_data(&self, event: &PlatformEventData) -> ResizeData {
+        self.0.convert_resize_data(event)
+    }
+    fn convert_scroll_data(&self, event: &PlatformEventData) -> ScrollData {
+        self.0.convert_scroll_data(event)
+    }
+    fn convert_selection_data(&self, event: &PlatformEventData) -> SelectionData {
+        self.0.convert_selection_data(event)
+    }
+    fn convert_toggle_data(&self, event: &PlatformEventData) -> ToggleData {
+        self.0.convert_toggle_data(event)
+    }
+    fn convert_touch_data(&self, event: &PlatformEventData) -> TouchData {
+        self.0.convert_touch_data(event)
+    }
+    fn convert_transition_data(&self, event: &PlatformEventData) -> TransitionData {
+        self.0.convert_transition_data(event)
+    }
+    fn convert_visible_data(&self, event: &PlatformEventData) -> VisibleData {
+        self.0.convert_visible_data(event)
+    }
+    fn convert_wheel_data(&self, event: &PlatformEventData) -> WheelData {
+        self.0.convert_wheel_data(event)
+    }
+}
 
 /// A node of the retained DOM, by index into [`Dom::nodes`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -504,15 +526,40 @@ impl WriteMutations for Dom {
         let Kind::Element { attrs, .. } = &mut self.nodes[top].kind else {
             panic!("set_attribute on a non-element");
         };
+        // The wire admits any well-formed `data-*` name and a raw `style` whose declarations
+        // pass its checks; the contract (`KIT-200`) narrows the raw `style` to custom properties.
         let known = match ns {
-            None => WIRE_ATTRIBUTES.contains(&name),
-            Some("style") => WIRE_STYLE_PROPERTIES.contains(&name),
+            None => {
+                WIRE_ATTRIBUTES.contains(&name)
+                    || name == "style"
+                    || (name.starts_with("data-")
+                        && name.len() > 5
+                        && name[5..]
+                            .bytes()
+                            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_')))
+            }
+            // A per-property `style:` attribute is never admitted: the contract (`KIT-200`) leaves
+            // layout and appearance to the stylesheet, and the only inline style is the raw
+            // `style` of custom properties below.
+            Some("style") => false,
             Some(_) => false,
         };
         assert!(
             known,
             "attribute {name:?} ({ns:?}) is outside the guest wire vocabulary"
         );
+        if let (None, "style", BorrowedAttributeValue::Text(text)) = (ns, name, &value) {
+            for declaration in text
+                .split(';')
+                .filter(|declaration| !declaration.trim().is_empty())
+            {
+                let property = declaration.split(':').next().unwrap_or_default().trim();
+                assert!(
+                    property.starts_with("--ct-"),
+                    "inline style {declaration:?}: only `--ct-*` custom properties may be inline (KIT-200)"
+                );
+            }
+        }
         let key = ns.map_or_else(|| name.to_owned(), |ns| format!("{ns}:{name}"));
         match value {
             BorrowedAttributeValue::None | BorrowedAttributeValue::Bool(false) => {
@@ -584,7 +631,7 @@ impl Page {
 
     fn from_vdom(mut vdom: VirtualDom) -> Self {
         // Event payloads are the serialized forms; without a converter `event.data()` panics.
-        dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
+        dioxus_html::set_event_converter(Box::new(HarnessConverter(SerializedHtmlEventConverter)));
         let mut dom = Dom::new();
         vdom.rebuild(&mut dom);
         Self { vdom, dom }
@@ -645,16 +692,6 @@ impl Page {
             Kind::Element { attrs, .. } => attrs.get(name).cloned(),
             _ => None,
         }
-    }
-
-    /// A property of the inline `style` attribute.
-    pub(crate) fn style(&self, node: Node, property: &str) -> Option<String> {
-        self.attr(node, "style")?
-            .split(';')
-            .find_map(|declaration| {
-                let (name, value) = declaration.split_once(':')?;
-                (name.trim() == property).then(|| value.trim().to_owned())
-            })
     }
 
     fn role_of(&self, node: Node) -> Option<String> {
@@ -760,9 +797,22 @@ impl Page {
     }
 
     fn pointer_holding(&mut self, node: Node, name: &str, page_x: f64, buttons: u16) {
+        self.pointer_at_holding(node, name, (page_x, 0.0), buttons);
+    }
+
+    /// A pointer event at client `(x, y)`, for a component that reads both axes (`ScrubStrip`).
+    /// Held buttons follow [`Self::pointer`].
+    pub(crate) fn pointer_at(&mut self, node: Node, name: &str, at: (f64, f64)) {
+        let held = matches!(name, "pointerdown" | "pointermove");
+        self.pointer_at_holding(node, name, at, u16::from(held));
+    }
+
+    fn pointer_at_holding(&mut self, node: Node, name: &str, at: (f64, f64), buttons: u16) {
         let point = SerializedPointInteraction {
-            page_x,
-            client_x: page_x,
+            page_x: at.0,
+            client_x: at.0,
+            page_y: at.1,
+            client_y: at.1,
             buttons,
             ..Default::default()
         };
@@ -781,6 +831,61 @@ impl Page {
         self.dispatch(node, name, EventData::Pointer(data));
     }
 
+    /// The renderer's `onmounted` for `node`, backed by an element that records the focus it is
+    /// asked for (`Some(true)` once focused). Spawned work is polled once, which finishes any task
+    /// whose futures are already ready, as the recording backing's are.
+    pub(crate) fn mount(&mut self, node: Node) -> Rc<Cell<Option<bool>>> {
+        struct Recorder(Rc<Cell<Option<bool>>>);
+        impl RenderedElementBacking for Recorder {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn set_focus(
+                &self,
+                focus: bool,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = MountedResult<()>>>>
+            {
+                self.0.set(Some(focus));
+                Box::pin(async { Ok(()) })
+            }
+        }
+        let focused = Rc::new(Cell::new(None));
+        let data = MountedData::new(Recorder(Rc::clone(&focused)));
+        let element = self.element_id(node);
+        self.vdom.runtime().handle_event_for_target(
+            RenderTargetId::ROOT,
+            "mounted",
+            Event::new(
+                Rc::new(PlatformEventData::new(Box::new(MountedPayload::new(
+                    Cell::new(Some(data)),
+                )))),
+                false,
+            ),
+            element,
+        );
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        {
+            let mut work = std::pin::pin!(self.vdom.wait_for_work());
+            let _poll: std::task::Poll<()> = std::future::Future::poll(work.as_mut(), &mut context);
+        }
+        self.settle();
+        focused
+    }
+
+    /// A `wheel` of `delta_y` pixels (positive is down).
+    pub(crate) fn wheel(&mut self, node: Node, delta_y: f64) {
+        let data: dioxus_html::SerializedWheelData = serde_json::from_value(serde_json::json!({
+            "delta_mode": 0, "delta_x": 0.0, "delta_y": delta_y, "delta_z": 0.0,
+            "alt_key": false, "button": 0, "buttons": 0,
+            "client_x": 0.0, "client_y": 0.0, "ctrl_key": false,
+            "meta_key": false, "offset_x": 0.0, "offset_y": 0.0,
+            "page_x": 0.0, "page_y": 0.0, "screen_x": 0.0,
+            "screen_y": 0.0, "shift_key": false,
+        }))
+        .expect("wheel data");
+        self.dispatch(node, "wheel", EventData::Wheel(data));
+    }
+
     /// A `keydown` of `key`.
     pub(crate) fn key(&mut self, node: Node, key: Key) {
         let data = SerializedKeyboardData::new(
@@ -796,6 +901,52 @@ impl Page {
 }
 
 impl Page {
+    /// The one element whose `class` names `class`: a contract component's root (`ct-button`),
+    /// which has no role to find it by. Several or none is a failure.
+    pub(crate) fn by_class(&self, class: &str) -> Node {
+        let mut all = vec![];
+        self.walk(0, false, &mut all);
+        let found: Vec<_> = all
+            .into_iter()
+            .filter(|node| {
+                self.attr(*node, "class")
+                    .is_some_and(|classes| classes.split_whitespace().any(|c| c == class))
+            })
+            .collect();
+        match found[..] {
+            [only] => only,
+            _ => panic!(
+                "expected exactly one .{class}, found {} in:\n{}",
+                found.len(),
+                self.outline()
+            ),
+        }
+    }
+
+    /// The `data-part` of each child element of `node`, in order; every child of a contract
+    /// component's root or part must be a part, so a child without one fails.
+    pub(crate) fn parts(&self, node: Node) -> Vec<String> {
+        self.children(node)
+            .into_iter()
+            .filter(|child| matches!(self.dom.nodes[child.0].kind, Kind::Element { .. }))
+            .map(|child| {
+                self.attr(child, "data-part").unwrap_or_else(|| {
+                    panic!("{} is a child without a data-part", self.describe(child))
+                })
+            })
+            .collect()
+    }
+
+    /// An inline custom property (`--ct-*`), the only inline style a contract component may set
+    /// (`KIT-200`).
+    pub(crate) fn custom_property(&self, node: Node, name: &str) -> Option<String> {
+        let style = self.attr(node, "style")?;
+        style.split(';').find_map(|declaration| {
+            let (property, value) = declaration.split_once(':')?;
+            (property.trim() == name).then(|| value.trim().to_owned())
+        })
+    }
+
     /// The child elements of `node`, in order (including ones hidden from assistive technology).
     pub(crate) fn children(&self, node: Node) -> Vec<Node> {
         self.dom.nodes[node.0]
