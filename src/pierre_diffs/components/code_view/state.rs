@@ -244,9 +244,14 @@ where
 }
 
 /// `CodeViewDiffItemContext | CodeViewFileItemContext`
-#[expect(
-    clippy::large_enum_variant,
-    reason = "the file arm is uninhabited, so the size difference is the diff arm's"
+// The diff arm only crosses clippy's size threshold with 64-bit pointers (Rc and Vec
+// fields), so on wasm32 the lint does not fire and a bare `expect` would be unfulfilled.
+#[cfg_attr(
+    target_pointer_width = "64",
+    expect(
+        clippy::large_enum_variant,
+        reason = "the file arm is uninhabited, so the size difference is the diff arm's"
+    )
 )]
 pub enum ItemKind<Host, Rendered, LAnnotation>
 where
