@@ -34,7 +34,10 @@ impl<D: PartDb> PeerCursors for SqlitePeerCursors<D> {
                    FROM big_automata_peer_cursors
                   WHERE peer = ",
             );
-            query.bind(peer.blob()).push(" AND backend = ").bind(backend);
+            query
+                .bind(peer.blob())
+                .push(" AND backend = ")
+                .bind(backend);
             query.push(" AND part_key IN ");
             query.bind_list(chunk.iter().map(|part| part.blob()));
             for (part, cursor) in query.query(&reader).await?.all::<(Vec<u8>, i64)>()? {

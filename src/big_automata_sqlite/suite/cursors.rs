@@ -52,9 +52,19 @@ fn cursors_survive_reopening() -> Res<()> {
         drop(cursors);
 
         let cursors = SqlitePeerCursors::new(RUNTIME.database(&path, MIGRATIONS, MIGRATION_TABLE));
-        assert_eq!(cursors.read(&peer, "main", std::slice::from_ref(&part)).await?, vec![7]);
+        assert_eq!(
+            cursors
+                .read(&peer, "main", std::slice::from_ref(&part))
+                .await?,
+            vec![7]
+        );
         cursors.write(&peer, "main", &[(part.clone(), 3)]).await?;
-        assert_eq!(cursors.read(&peer, "main", std::slice::from_ref(&part)).await?, vec![7]);
+        assert_eq!(
+            cursors
+                .read(&peer, "main", std::slice::from_ref(&part))
+                .await?,
+            vec![7]
+        );
         cursors.write(&peer, "main", &[(part.clone(), 8)]).await?;
         assert_eq!(cursors.read(&peer, "main", &[part]).await?, vec![8]);
         Ok(())

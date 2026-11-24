@@ -144,9 +144,7 @@ fn batch_sized(detail: &str) -> bool {
 #[test]
 fn every_statement_is_served_by_an_index() -> Res<()> {
     block_on(async {
-        let backend = RecordingBackend {
-            log: default(),
-        };
+        let backend = RecordingBackend { log: default() };
         laws::replay_reconstructs_membership_and_access(&backend).await?;
         laws::collapse_and_tombstones(&backend).await?;
         laws::pending_goes_live_once(&backend).await?;
@@ -176,11 +174,18 @@ fn every_statement_is_served_by_an_index() -> Res<()> {
             for row in plan.result_set.rows {
                 let detail = row.get::<String>("detail")?;
                 if detail.starts_with("SCAN") && !batch_sized(&detail) {
-                    scans.push(format!("{detail}\n    in {}", sql.split_whitespace().collect::<Vec<_>>().join(" ")));
+                    scans.push(format!(
+                        "{detail}\n    in {}",
+                        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+                    ));
                 }
             }
         }
-        assert!(scans.is_empty(), "statements that scan:\n{}", scans.join("\n"));
+        assert!(
+            scans.is_empty(),
+            "statements that scan:\n{}",
+            scans.join("\n")
+        );
         Ok(())
     })
 }

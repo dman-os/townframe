@@ -53,7 +53,11 @@ macro_rules! blob_key {
         }
     )+};
 }
-blob_key!(big_automata::ObjKey, big_automata::PartKey, big_automata::PeerKey);
+blob_key!(
+    big_automata::ObjKey,
+    big_automata::PartKey,
+    big_automata::PeerKey
+);
 
 #[cfg(test)]
 mod tests {

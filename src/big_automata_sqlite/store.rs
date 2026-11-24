@@ -1,6 +1,7 @@
 //! The store handle, its write transaction, and the trait impls that delegate to `write.rs`,
 //! `read.rs`, `serve.rs` and `log.rs`.
 
+use big_automata::BuckLevel;
 use big_automata::part_store::AccessLevel;
 use big_automata::part_store::AuthorizedPage;
 use big_automata::part_store::LeafEntry;
@@ -21,14 +22,17 @@ use big_automata::rev::Page;
 use big_automata::rev::Rev;
 use big_automata::rev::RevSource;
 use big_automata::rev::RevWatch;
-use big_automata::BuckLevel;
 use tokio::sync::watch;
 
+use crate::buckets;
 use crate::db::PartDb;
 use crate::interlude::*;
-use crate::sqlite::queries;
+use crate::log;
+use crate::read;
+use crate::serve;
 use crate::sql;
-use crate::{buckets, log, read, serve, write};
+use crate::sqlite::queries;
+use crate::write;
 
 /// The SQLite part store. Clones share the database handle and the watch.
 ///
@@ -197,11 +201,7 @@ impl<D: PartDb> PartStoreRead for SqlitePartStore<D> {
         Ok(snapshot!(self, reader => read::obj_states(&reader, None, objs).await?))
     }
 
-    async fn bucket_summaries(
-        &self,
-        part: &PartKey,
-        ids: &[BuckId],
-    ) -> Res<Vec<BucketSummary>> {
+    async fn bucket_summaries(&self, part: &PartKey, ids: &[BuckId]) -> Res<Vec<BucketSummary>> {
         Ok(snapshot!(self, reader => buckets::summaries(&reader, part, ids).await?))
     }
 

@@ -54,11 +54,15 @@ async fn assert_state(store: &Store, oracle: &PartOracle) -> Res<()> {
     let objs = (0..4).map(obj).collect::<Vec<_>>();
     assert_eq!(
         store.obj_states(&objs).await?,
-        objs.iter().map(|obj| oracle.obj_state(obj)).collect::<Vec<_>>()
+        objs.iter()
+            .map(|obj| oracle.obj_state(obj))
+            .collect::<Vec<_>>()
     );
     for index in 0..3 {
         assert_eq!(
-            store.bucket_summaries(&part(index), &[BuckId::ROOT]).await?,
+            store
+                .bucket_summaries(&part(index), &[BuckId::ROOT])
+                .await?,
             vec![oracle.bucket_summary(&part(index), BuckId::ROOT)]
         );
     }
@@ -87,7 +91,11 @@ fn an_interrupted_write_leaves_nothing_and_reopening_sees_the_committed_state() 
 
         // Staged, applied inside the transaction, never committed.
         let mut tx = store.begin().await?;
-        for write in [set(&[(2, 3), (0, 9)]), add(&[(2, 2), (3, 1)]), grant(&[(2, 1)])] {
+        for write in [
+            set(&[(2, 3), (0, 9)]),
+            add(&[(2, 2), (3, 1)]),
+            grant(&[(2, 1)]),
+        ] {
             stage(&store, &mut tx, write).await?;
         }
         drop(tx);
@@ -141,7 +149,11 @@ fn migrations_apply_from_empty_and_are_idempotent() -> Res<()> {
         db.apply_migrations(MIGRATION_TABLE, MIGRATIONS).await?;
         let status = db.migration_status().await?;
         assert_eq!(status.len(), MIGRATIONS.len());
-        assert!(status.iter().all(|(_, state)| *state == MigrationState::Applied));
+        assert!(
+            status
+                .iter()
+                .all(|(_, state)| *state == MigrationState::Applied)
+        );
 
         // Data survives a second registration of the same file, and its seed row is not
         // inserted again.

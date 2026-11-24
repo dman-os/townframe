@@ -37,9 +37,15 @@ pub enum Arm<'a> {
     AllMembers,
     AllAccess,
     /// A part route: the part's member rows.
-    Part { part: &'a PartKey, lo: Rev },
+    Part {
+        part: &'a PartKey,
+        lo: Rev,
+    },
     /// An object route: the object's member rows in every part.
-    Object { obj: &'a ObjKey, lo: Rev },
+    Object {
+        obj: &'a ObjKey,
+        lo: Rev,
+    },
     /// An object route of a principal: the object's member rows in the parts it may read.
     ReadableObject {
         obj: &'a ObjKey,
@@ -102,7 +108,9 @@ async fn fetch(
                     principal: PeerKey::from_blob(&row.principal),
                 },
                 rev: sql::rev_from_sql(row.rev),
-                value: row.level.map(|level| LogEntry::Access(sql::level_from_sql(level))),
+                value: row
+                    .level
+                    .map(|level| LogEntry::Access(sql::level_from_sql(level))),
             })
             .collect(),
         Arm::Part { part, .. } => queries::route_part_rows(x, part.blob(), lo, hi, limit)

@@ -46,7 +46,13 @@ mod interlude {
 use sqlite_rs as sqlite_rs_alias;
 
 mod sqlite {
-    #[cfg_attr(not(test), expect(dead_code, reason = "generated: the SQL text constants are for the plan tests"))]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "generated: the SQL text constants are for the plan tests"
+        )
+    )]
     pub mod queries {
         include!("sqlite/gen.rs");
     }
@@ -68,7 +74,7 @@ mod suite;
 
 pub use cursors::SqlitePeerCursors;
 pub use db::PartDb;
-pub use sqlite::queries::MIGRATIONS;
 pub use sqlite::queries::MIGRATION_TABLE;
+pub use sqlite::queries::MIGRATIONS;
 pub use store::SqlitePartStore;
 pub use store::SqlitePartTx;

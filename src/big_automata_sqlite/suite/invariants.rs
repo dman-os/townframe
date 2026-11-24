@@ -88,8 +88,12 @@ async fn assert_pages(store: &Store, oracle: &PartOracle, latest: Rev) -> Res<()
         assert_eq!(page, oracle.read(&LogSelector::All, after, latest, limits));
         after = page.through;
     }
-    let objs = (0..6).map(|index| ObjKey::new(&key_bytes(index))).collect::<Vec<_>>();
-    let parts = (0..6).map(|index| PartKey::new(&key_bytes(index))).collect::<Vec<_>>();
+    let objs = (0..6)
+        .map(|index| ObjKey::new(&key_bytes(index)))
+        .collect::<Vec<_>>();
+    let parts = (0..6)
+        .map(|index| PartKey::new(&key_bytes(index)))
+        .collect::<Vec<_>>();
     let routes = LogRoutes {
         parts: parts.iter().map(|part| (part.clone(), 0)).collect(),
         objects: objs.iter().map(|obj| (obj.clone(), 0)).collect(),
@@ -111,7 +115,9 @@ async fn assert_pages(store: &Store, oracle: &PartOracle, latest: Rev) -> Res<()
     }
     assert_eq!(
         store.obj_states(&objs).await?,
-        objs.iter().map(|obj| oracle.obj_state(obj)).collect::<Vec<_>>()
+        objs.iter()
+            .map(|obj| oracle.obj_state(obj))
+            .collect::<Vec<_>>()
     );
     Ok(())
 }

@@ -340,7 +340,9 @@ pub async fn set_payloads(
             flush.stamp(&obj, &part, member, before, BucketMemberKind::Live(digest));
             rows.insert(part, member);
         }
-        let carried = written.get(&obj).map_or(fresh_count, |(_, _, count)| *count);
+        let carried = written
+            .get(&obj)
+            .map_or(fresh_count, |(_, _, count)| *count);
         written.insert(obj, (payload, digest, carried));
     }
 
@@ -371,11 +373,7 @@ pub async fn set_payloads(
     Ok(stamped)
 }
 
-pub async fn add_members(
-    x: &impl Executor,
-    rev: Rev,
-    members: &[(ObjKey, PartKey)],
-) -> Res<bool> {
+pub async fn add_members(x: &impl Executor, rev: Rev, members: &[(ObjKey, PartKey)]) -> Res<bool> {
     // Adding creates the part, live or pending.
     ensure_parts(
         x,
@@ -476,7 +474,8 @@ pub async fn remove_members(
         rows.insert(key, removed);
     }
     for chunk in sql::chunk_rows(dropped_pending, 2, 0) {
-        let mut delete = Sql::new("DELETE FROM big_automata_pending WHERE (obj_key, part_key) IN (");
+        let mut delete =
+            Sql::new("DELETE FROM big_automata_pending WHERE (obj_key, part_key) IN (");
         sql::push_values(&mut delete, chunk);
         delete.push(")");
         delete.execute(x).await?;

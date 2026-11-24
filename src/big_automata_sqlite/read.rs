@@ -47,11 +47,7 @@ pub async fn obj_states(
               WHERE obj_key IN ",
         );
         query.bind_list(keys());
-        for (obj, payload, digest) in query
-            .query(x)
-            .await?
-            .all::<(Vec<u8>, String, Vec<u8>)>()?
-        {
+        for (obj, payload, digest) in query.query(x).await?.all::<(Vec<u8>, String, Vec<u8>)>()? {
             let payload = serde_json::from_str::<ObjPayload>(&payload)
                 .expect("a stored payload is valid JSON");
             let digest = PayloadDigest(digest.try_into().expect("a stored digest is 32 bytes"));

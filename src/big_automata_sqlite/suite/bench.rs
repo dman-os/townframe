@@ -66,14 +66,21 @@ fn bench_commit_and_serve_baseline() -> Res<()> {
     let sizes = std::env::var("AUTOMATA_SQLITE_BENCH_SIZES")
         .unwrap_or_else(|_| "200,2000".to_owned())
         .split(',')
-        .map(|size| size.trim().parse::<usize>().expect("bench sizes are integers"))
+        .map(|size| {
+            size.trim()
+                .parse::<usize>()
+                .expect("bench sizes are integers")
+        })
         .collect::<Vec<_>>();
     block_on(async {
         let store = super::fresh().await?;
         let (part, principal) = (PartKey::new(b"bench-part"), PeerKey::new(b"bench-peer"));
         let mut tx = store.begin().await?;
         store
-            .grant_access(&mut tx, &[(part.clone(), principal.clone(), AccessLevel::Read)])
+            .grant_access(
+                &mut tx,
+                &[(part.clone(), principal.clone(), AccessLevel::Read)],
+            )
             .await?;
         tx.commit().await?;
 
@@ -121,35 +128,57 @@ async fn serve_round(store: &Store, part: &PartKey, principal: &PeerKey, size: u
         let summary = store
             .part_summaries(principal, &[(part.clone(), 0)])
             .await?;
-        samples.entry("part_summaries").or_default().push(started.elapsed());
+        samples
+            .entry("part_summaries")
+            .or_default()
+            .push(started.elapsed());
         assert_eq!(summary[0].expect("readable").member_count, size as u64);
 
         let started = Instant::now();
         store
             .read_authorized(principal, &routes(0), 0, latest, limits, &mut page)
             .await?;
-        samples.entry("read_authorized_from_start").or_default().push(started.elapsed());
+        samples
+            .entry("read_authorized_from_start")
+            .or_default()
+            .push(started.elapsed());
         assert_eq!(page.rows.entries.len(), BATCH.min(size));
 
         let started = Instant::now();
         store
-            .read_authorized(principal, &routes(latest - 1), latest - 1, latest, limits, &mut page)
+            .read_authorized(
+                principal,
+                &routes(latest - 1),
+                latest - 1,
+                latest,
+                limits,
+                &mut page,
+            )
             .await?;
-        samples.entry("read_authorized_at_head").or_default().push(started.elapsed());
+        samples
+            .entry("read_authorized_at_head")
+            .or_default()
+            .push(started.elapsed());
         assert_eq!(page.rows.entries.len(), BATCH);
 
         let started = Instant::now();
         let list = store
             .bucket_list(principal, part, BuckId::ROOT, 1, 0, usize::MAX)
             .await?;
-        samples.entry("bucket_list_to_level_1").or_default().push(started.elapsed());
+        samples
+            .entry("bucket_list_to_level_1")
+            .or_default()
+            .push(started.elapsed());
         assert!(list.expect("readable").len() > 1);
 
         let started = Instant::now();
         let leaves = store
             .bucket_leaves(principal, part, &[(BuckId::new(1, 0), None)], 0, BATCH)
             .await?;
-        samples.entry("bucket_leaves_page").or_default().push(started.elapsed());
+        samples
+            .entry("bucket_leaves_page")
+            .or_default()
+            .push(started.elapsed());
         assert!(leaves.expect("readable")[0].len() <= BATCH);
     }
     for (what, samples) in samples {

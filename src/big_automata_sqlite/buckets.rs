@@ -102,7 +102,13 @@ pub async fn apply(
             states
                 .entry((transition.part.clone(), id))
                 .or_default()
-                .apply_transition(id, transition.obj.clone(), rev, transition.old, transition.new);
+                .apply_transition(
+                    id,
+                    transition.obj.clone(),
+                    rev,
+                    transition.old,
+                    transition.new,
+                );
         }
     }
 

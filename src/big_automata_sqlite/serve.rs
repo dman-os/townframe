@@ -24,10 +24,11 @@ use crate::buckets::deepest_range;
 use crate::buckets::from_raw;
 use crate::interlude::*;
 use crate::keys::BlobKey;
+use crate::log;
 use crate::log::Arm;
+use crate::read;
 use crate::sql;
 use crate::sqlite::queries;
-use crate::{log, read};
 
 async fn permits(x: &impl QueryExecutor, principal: &PeerKey, part: &PartKey) -> Res<bool> {
     Ok(queries::access_permits(x, part.blob(), principal.blob()).await? > 0)
@@ -116,7 +117,10 @@ pub async fn read_authorized(
         "read window ({after}, {until}] runs backwards"
     );
     let latest = read::latest_rev(x).await?;
-    assert!(until <= latest, "read until {until} past the committed rev {latest}");
+    assert!(
+        until <= latest,
+        "read until {until} past the committed rev {latest}"
+    );
 
     let part_keys = routes.parts.keys().collect::<Vec<_>>();
     let obj_keys = routes.objects.keys().collect::<Vec<_>>();
@@ -169,7 +173,8 @@ async fn page_payloads(x: &impl QueryExecutor, page: &mut AuthorizedPage) -> Res
         .collect::<BTreeSet<_>>();
     page.payloads.clear();
     for chunk in sql::chunk_rows(objs.into_iter().collect(), 1, 0) {
-        let mut query = Sql::new("SELECT obj_key, payload FROM big_automata_objs WHERE obj_key IN ");
+        let mut query =
+            Sql::new("SELECT obj_key, payload FROM big_automata_objs WHERE obj_key IN ");
         query.bind_list(chunk.iter().map(|obj| obj.blob()));
         for (obj, payload) in query.query(x).await?.all::<(Vec<u8>, String)>()? {
             page.payloads.push((
@@ -179,7 +184,8 @@ async fn page_payloads(x: &impl QueryExecutor, page: &mut AuthorizedPage) -> Res
             ));
         }
     }
-    page.payloads.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    page.payloads
+        .sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
     Ok(())
 }
 
@@ -199,7 +205,9 @@ pub async fn part_summaries(
         let access_rev = queries::access_rev(x, part.blob(), principal.blob()).await?;
         summaries.push(Some(PartSummary {
             latest_cursor: sql::rev_from_sql(
-                queries::part_latest_cursor(x, part.blob()).await?.unwrap_or(0),
+                queries::part_latest_cursor(x, part.blob())
+                    .await?
+                    .unwrap_or(0),
             ),
             member_count: read::member_count(x, part).await?,
             deepest_bucket_level: BuckId::MAX_LEVEL,
