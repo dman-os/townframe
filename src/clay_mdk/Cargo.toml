@@ -78,7 +78,9 @@ clay_host = { workspace = true, optional = true }
 clay_docs = { workspace = true, optional = true }
 clay_guest_session = { workspace = true, optional = true }
 ciborium = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["sync", "rt", "macros"], optional = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"], optional = true }
+# `Context::now` in-process: `std::time::Instant` on native, `performance.now()` in the browser.
+web-time = { version = "1.1.0", optional = true }
 thiserror = { workspace = true, optional = true }
 clay_dioxus = { workspace = true, optional = true }
 clay_surface = { workspace = true, optional = true }
@@ -87,6 +89,10 @@ blake3 = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clay_rt_wasmtime = { workspace = true, optional = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# `Context::sleep` in-process in the browser, which has no tokio timer driver: `setTimeout`.
+gloo-timers = { version = "0.3.0", features = ["futures"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # The lifecycle fixture decodes its CBOR `initial-context.arguments`.
@@ -124,7 +130,7 @@ wit = []
 # over the host sessions. A context publishes through the `clay_dioxus::NativeComponents`
 # registry its `Resources` carry. Micro crates depend on this, never on the host-side crates
 # directly.
-in_process = ["contract", "dep:clay_host", "dep:clay_docs", "dep:clay_guest_session", "dep:ciborium", "dep:tokio", "dep:dioxus-core", "dep:thiserror", "dep:clay_dioxus"]
+in_process = ["contract", "dep:web-time", "dep:gloo-timers", "dep:clay_host", "dep:clay_docs", "dep:clay_guest_session", "dep:ciborium", "dep:tokio", "dep:dioxus-core", "dep:thiserror", "dep:clay_dioxus"]
 # The Dioxus half of the in-process backend: the view-side slot components and hooks. Micros with a host-linked view need this; contract
 # crates and headless compositions do not.
 view = ["in_process", "dep:dioxus"]

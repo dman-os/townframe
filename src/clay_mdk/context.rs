@@ -35,6 +35,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::time::Duration;
 
 pub use clay_collection::Stamp;
 #[cfg(feature = "in_process")]
@@ -834,6 +835,67 @@ impl Backend {
         }
     }
 
+    /// Resolves after `duration`, on the backend's own timer.
+    async fn sleep(&self, duration: Duration) {
+        match self {
+            #[cfg(feature = "in_process")]
+            Self::InProcess(_) => {
+                // The browser has no tokio timer driver, so there the timer is `setTimeout`.
+                #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+                gloo_timers::future::sleep(duration).await;
+                #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+                tokio::time::sleep(duration).await;
+            }
+            // `wasi:clocks/monotonic-clock.wait-for` is a component-model async import, which
+            // can only be polled inside a component-model task, and a view's Dioxus task is
+            // polled by `render_immediate` from a synchronous export where there is none. So
+            // the wait runs as incarnation-owned work on the guest's executor and the caller
+            // awaits a channel any executor can poll, exactly as `call` does. And as there,
+            // nothing polls a Dioxus task on its own wake in a guest: once the wait is over
+            // the views are marked dirty so the next render pass polls the woken caller.
+            // Without that wake a `use_resource` that awaits a sleep would never resume.
+            #[cfg(feature = "guest")]
+            Self::Guest(runtime) => {
+                let (mut elapsed, waiting) = futures::channel::oneshot::channel();
+                let views = Rc::clone(runtime);
+                runtime.spawn(Box::pin(async move {
+                    // A caller that stopped waiting (its view unmounted) cancels the wait: the
+                    // `Cancellation` resolves when the receiver drops, and dropping the losing
+                    // `wait_for` future cancels the host's timer.
+                    let wait = crate::guest::sleep(duration);
+                    futures::pin_mut!(wait);
+                    if let futures::future::Either::Left(((), _)) =
+                        futures::future::select(wait, elapsed.cancellation()).await
+                    {
+                        // The caller may drop between the wait ending and this send; then there
+                        // is nobody to wake.
+                        if elapsed.send(()).is_ok() {
+                            views.notify_views();
+                        }
+                    }
+                }));
+                // The task lives until the incarnation closes, which takes its callers with it,
+                // so a closed channel here would be a task that died without answering.
+                waiting
+                    .await
+                    .expect("a sleep's task lives until the incarnation closes, with its callers");
+            }
+        }
+    }
+
+    /// The backend's monotonic clock, from an origin the caller cannot name.
+    fn now(&self) -> Duration {
+        match self {
+            #[cfg(feature = "in_process")]
+            Self::InProcess(_) => {
+                static ORIGIN: std::sync::OnceLock<web_time::Instant> = std::sync::OnceLock::new();
+                ORIGIN.get_or_init(web_time::Instant::now).elapsed()
+            }
+            #[cfg(feature = "guest")]
+            Self::Guest(_) => crate::guest::now(),
+        }
+    }
+
     fn spawn(&self, future: LocalFuture<()>) {
         match self {
             #[cfg(feature = "in_process")]
@@ -1018,6 +1080,23 @@ impl Context {
         M: Method<Output = ByteBody>,
     {
         self.0.backend.call_bytes(input).await
+    }
+
+    /// Resolves after `duration` has passed on the monotonic clock: the timer a micro hands to
+    /// code that paces itself (`pierre_diffs_dioxus::Runtime::sleep`). Like [`Self::call`] it
+    /// may be polled by any executor, a view's Dioxus resource included: in a guest the wait
+    /// runs on the incarnation's own task, which marks the views dirty when it ends, so the
+    /// resource resumes without anything else forcing a render. In-process it is tokio's timer
+    /// (`setTimeout` in the browser).
+    pub async fn sleep(&self, duration: Duration) {
+        self.0.backend.sleep(duration).await;
+    }
+
+    /// A monotonic clock: the time elapsed since an origin that is fixed for the process but not
+    /// named, so only differences between two readings mean anything. Never goes backwards and
+    /// is unaffected by wall-clock changes; a guest reads `wasi:clocks/monotonic-clock`.
+    pub fn now(&self) -> Duration {
+        self.0.backend.now()
     }
 
     /// Run `future` as incarnation-owned local work: it is dropped when this instance closes,
