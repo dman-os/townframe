@@ -762,6 +762,86 @@ async fn the_registry_is_rebuilt_from_its_drawer_after_a_restart() {
     shutdown(node, stop).await;
 }
 
+/// A node publishes and installs its core cartridge at boot (ADR 053 §3): the version its build
+/// carries, under its own publisher DID, with the core nodule enabled and acting as the `micros`
+/// subsystem actor. A reboot finds the install already pinning that version and leaves it as it is.
+#[tokio::test]
+async fn a_node_installs_its_core_cartridge_at_boot_and_a_reboot_keeps_the_install() {
+    let directory = tempfile::tempdir().unwrap();
+    let secrets = secrets().await;
+    let sql_path = directory.path().join("cabinet.sqlite");
+    let boot = async || {
+        let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+        let mut config = config(
+            Arc::clone(&secrets),
+            runtime.database(&sql_path, &[], "_sqlite_rs_migrations"),
+            big_repo::Storage::in_directory(&runtime, &directory.path().join("repo"), None)
+                .unwrap(),
+        );
+        config.blob_storage = big_blobs::Storage::filesystem(directory.path().join("blobs"))
+            .await
+            .unwrap();
+        BigNode::boot(config).await.unwrap()
+    };
+    let core_install = async |node: &BigNode| {
+        node.nodules
+            .client
+            .call_with(
+                RequestContext::root(),
+                operator(node).metadata(),
+                big_cartridges_core::protocol::ListCartridgeInstalls {},
+            )
+            .await
+            .unwrap()
+            .installs
+            .into_iter()
+            .find(|record| {
+                record.cartridge_id == crate::core_cartridge::id(&node.cartridges.publisher)
+            })
+            .expect("the core cartridge is installed")
+            .install
+    };
+
+    let (node, stop) = boot().await;
+    let core = crate::core_cartridge::id(&node.cartridges.publisher);
+    let version: Version = crate::core_cartridge::VERSION.parse().unwrap();
+    let installed = core_install(&node).await;
+    assert_eq!(
+        installed.cartridge.location().reference().key(),
+        &version_key(&version)
+    );
+    assert!(
+        installed
+            .nodule
+            .as_ref()
+            .is_some_and(|nodule| nodule.enabled)
+    );
+    let nodule = node
+        .nodules
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            big_nodule_core::protocol::GetNodule {
+                cartridge_id: core.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        nodule.actor.map(|actor| actor.actor_id),
+        Some(node.micros_actor.actor.actor_id)
+    );
+    get_version(&node, &core.to_string(), crate::core_cartridge::VERSION)
+        .await
+        .unwrap();
+    shutdown(node, stop).await;
+
+    let (node, stop) = boot().await;
+    assert_eq!(core_install(&node).await, installed);
+    shutdown(node, stop).await;
+}
+
 #[tokio::test]
 async fn the_watch_observes_publish_and_remove_from_a_cursor() {
     let secrets = secrets().await;
