@@ -1717,6 +1717,7 @@ dependencies = [
  "keyring-core",
  "method_core",
  "method_lexicon",
+ "micros_nodule",
  "rand 0.9.5",
  "rustix 1.1.6",
  "secrets_rs",
