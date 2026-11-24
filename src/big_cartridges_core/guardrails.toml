@@ -11,3 +11,5 @@ features = ["schemars"]
 
 [builds.native]
 features = ["schemars", "test-support"]
+
+[builds.wasm32-wasip3]

@@ -29,7 +29,7 @@ service_core_rs.workspace = true
 #
 # misc
 # `declare_service_protocol!` expands to `irpc` derives that name both crates directly.
-irpc.workspace = true
+irpc = { workspace = true, default-features = false, features = ["derive", "rpc", "spans"] }
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
