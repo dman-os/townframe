@@ -1357,7 +1357,8 @@ impl State {
         // so installing that version again is the node's own idempotent boot step and any other
         // version is refused (ADR 053 §3 item 5).
         let core = &self.stores.core_cartridge;
-        if resolved.cartridge.id == core.id && resolved.cartridge.version != core.version {
+        let is_core = resolved.cartridge.id == core.id;
+        if is_core && resolved.cartridge.version != core.version {
             return Err(NodulesError::CoreCartridge(core.id.clone()));
         }
         let cartridge_id = resolved.cartridge.id.clone();
@@ -1372,8 +1373,16 @@ impl State {
             .await
             .map_err(crate::store_error)?;
         let cache = Arc::clone(&self.admission_cache);
+        let target = cartridge_id.clone();
         self.mutate_config(context, move |config| {
-            config.install(&cache, &resolved, pin, doc)
+            config.install(&cache, &resolved, pin, doc)?;
+            // A new install starts disabled and a person enables it. Nobody can enable the core
+            // cartridge (`setCartridgeEnabled` refuses it), so its nodule is enabled by the
+            // install itself, in the same write.
+            if is_core {
+                config.set_enabled(&cache, &target, Component::Nodule, true)?;
+            }
+            Ok(())
         })
         .await?;
         self.install_record(&cartridge_id)
@@ -2561,7 +2570,15 @@ impl State {
         if let Some(actor) = self.actors.get(cartridge_id) {
             return Ok(actor.clone());
         }
-        let opened = self.stores.open_actor(context, cartridge_id).await?;
+        // The core cartridge's nodule is the micros runtime (ADR 052 §2), so it acts as the
+        // `micros` subsystem actor the node opened beside `nodules`, and the micro actors it
+        // opens (`micros/<cartridge>/<micro>`) are its own subtree. Every other nodule's actor is
+        // `nodules/<cartridge segment>`.
+        let opened = if *cartridge_id == self.stores.core_cartridge.id {
+            self.stores.core_cartridge.actor.clone()
+        } else {
+            self.stores.open_actor(context, cartridge_id).await?
+        };
         if let Some(saved_actor_id) = self.persisted_actors.get(cartridge_id) {
             if opened.actor.actor_id != *saved_actor_id {
                 return Err(NodulesError::Storage(format!(

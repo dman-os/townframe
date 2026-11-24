@@ -29,6 +29,7 @@ use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
@@ -656,7 +657,23 @@ async fn boot_nodules(
         executor,
         schemas: Arc::clone(schemas),
         allow_slot_takeover,
-        core_cartridge: core_cartridge(),
+        // The micros subsystem actor the core nodule acts as, opened as `big_node` does.
+        core_cartridge: crate::CoreCartridge {
+            id: core_cartridge_id(),
+            version: CORE_VERSION.parse().unwrap(),
+            actor: authority
+                .client
+                .call(
+                    RequestContext::root(),
+                    OpenActor {
+                        parent: authority.root,
+                        path: "micros".into(),
+                        rights: Rights::all(),
+                    },
+                )
+                .await
+                .expect("micros actor"),
+        },
         sql: (**sql).clone(),
     })
     .await
@@ -665,12 +682,12 @@ async fn boot_nodules(
 /// The cartridge these nodes treat as their core cartridge: a fixture id, so a test can publish
 /// versions of it as the example namespace. (A real node's is under its own publisher DID and
 /// is installed by `big_node` at boot.)
-fn core_cartridge() -> crate::CoreCartridge {
-    crate::CoreCartridge {
-        id: big_cartridges_core::test_support::cartridge_id("core"),
-        version: "1.0.0".parse().unwrap(),
-    }
+fn core_cartridge_id() -> CartridgeId {
+    big_cartridges_core::test_support::cartridge_id("core")
 }
+
+/// The version these nodes' builds carry of [`core_cartridge_id`].
+const CORE_VERSION: &str = "1.0.0";
 
 impl Node {
     /// Boots dispatch under its own actor's namespace.
@@ -1238,6 +1255,24 @@ impl Node {
         self.get(self.operator(), cartridge_id).await.unwrap()
     }
 
+    /// The `micros` subsystem actor's id: opening a path that exists opens the same actor.
+    async fn micros_actor_id(&self) -> Uuid7 {
+        self.authority
+            .client
+            .call(
+                RequestContext::root(),
+                OpenActor {
+                    parent: self.authority.root,
+                    path: "micros".into(),
+                    rights: Rights::all(),
+                },
+            )
+            .await
+            .expect("micros actor")
+            .actor
+            .actor_id
+    }
+
     async fn get(
         &self,
         authorization: Authorization,
@@ -1424,20 +1459,37 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
 async fn the_core_cartridge_installs_only_at_its_build_version_and_its_install_cannot_change() {
     let node = node().await;
     let operator = node.operator();
-    let core = core_cartridge();
+    let core = core_cartridge_id();
     let version = |label: &str| {
         let mut cartridge =
-            FixtureCartridge::new(Cartridge::new(core.id.clone(), label.parse().unwrap()));
+            FixtureCartridge::new(Cartridge::new(core.clone(), label.parse().unwrap()));
         cartridge.nodule = Some(Default::default());
         cartridge
     };
-    let refused = CartridgesError::CoreCartridge(core.id.clone());
+    let refused = CartridgesError::CoreCartridge(core.clone());
 
-    node.install_cartridge(operator, version("1.0.0"))
+    let installed = node
+        .install_cartridge(operator, version(CORE_VERSION))
         .await
         .unwrap();
+    // Nobody can enable the core cartridge, so its install enables its nodule.
+    assert!(
+        installed
+            .install
+            .nodule
+            .is_some_and(|nodule| nodule.enabled)
+    );
+    // Its nodule acts as the micros subsystem actor, not as `nodules/<cartridge segment>`.
+    assert_eq!(
+        node.get(operator, &core.to_string())
+            .await
+            .unwrap()
+            .actor
+            .map(|actor| actor.actor_id),
+        Some(node.micros_actor_id().await)
+    );
     // Installing the build's version again is the node's idempotent boot step.
-    node.install_cartridge(operator, version("1.0.0"))
+    node.install_cartridge(operator, version(CORE_VERSION))
         .await
         .unwrap();
     assert_eq!(
@@ -1450,7 +1502,7 @@ async fn the_core_cartridge_installs_only_at_its_build_version_and_its_install_c
         node.call(
             operator,
             SetCartridgeEnabled {
-                cartridge_id: core.id.clone(),
+                cartridge_id: core.clone(),
                 component: Component::Nodule,
                 enabled: false,
             },
@@ -1462,7 +1514,7 @@ async fn the_core_cartridge_installs_only_at_its_build_version_and_its_install_c
     assert_eq!(
         node.set_grant(
             operator,
-            &core.id.to_string(),
+            &core.to_string(),
             GrantKey::Drawer(node.drawers.local().present_id.clone()),
             None
         )
@@ -1473,7 +1525,7 @@ async fn the_core_cartridge_installs_only_at_its_build_version_and_its_install_c
         node.call(
             operator,
             ClearCartridgeConfig {
-                cartridge_id: core.id.clone(),
+                cartridge_id: core.clone(),
             }
         )
         .await,
@@ -1483,7 +1535,7 @@ async fn the_core_cartridge_installs_only_at_its_build_version_and_its_install_c
         node.call(
             operator,
             UninstallCartridge {
-                cartridge_id: core.id.clone(),
+                cartridge_id: core.clone(),
             }
         )
         .await,
@@ -1499,7 +1551,7 @@ async fn the_core_cartridge_installs_only_at_its_build_version_and_its_install_c
             .iter()
             .map(|record| &record.cartridge_id)
             .collect::<Vec<_>>(),
-        vec![&core.id]
+        vec![&core]
     );
     node.shutdown().await;
 }
