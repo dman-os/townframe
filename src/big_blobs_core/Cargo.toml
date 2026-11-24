@@ -28,7 +28,10 @@ serde_json.workspace = true
 schemars = "1.2"
 thiserror.workspace = true
 bs58.workspace = true
-irpc.workspace = true
+# Not `irpc.workspace`: the workspace entry keeps irpc's default features (noq, rustls, aws-lc, which
+# links ring), and a wasm guest that sends `ReadBlob` needs this crate's types to build. Feature
+# unification still turns the networking features on in native builds, as in `service_core_rs`.
+irpc = { version = "0.17.0", default-features = false, features = ["derive"] }
 tracing.workspace = true
 
 [dev-dependencies]
