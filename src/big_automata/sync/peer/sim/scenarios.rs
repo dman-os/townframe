@@ -793,3 +793,141 @@ fn persistently_failing_objects_do_not_stop_other_parts_and_hold_only_their_own_
     assert_eq!(sim.local_members(1), healthy);
     assert!(sim.local.persisted[&part(0)].rev > before);
 }
+
+// # Store generations (`PartLifecycle` law 10)
+
+impl Sim {
+    /// The peer's log as a client that synced it holds it: part 0 with objects 0 and 1, the
+    /// client synced and its cursor persisted (rev 5, under the peer's generation).
+    fn synced_with_two_members() -> Self {
+        let mut sim = Sim::new(Shape::small(), 11);
+        sim.remote.commit(vec![laws::grant(&[(0, 0)])]);
+        sim.member(0, 0);
+        sim.member(1, 0);
+        sim.want(&[0]);
+        sim.quiesce();
+        assert_eq!(
+            sim.local.persisted[&part(0)],
+            PeerCursor {
+                generation: sim.remote.generation(),
+                rev: 5
+            }
+        );
+        sim
+    }
+
+    /// Writes that leave object 2's rows in part 0 at rev 3 and push the head to 6, above the
+    /// cursor of `synced_with_two_members`: a client resuming from rev 5 would never see it.
+    fn rewrite_below_the_old_cursor(&mut self) {
+        self.remote.commit(vec![laws::grant(&[(0, 0)])]);
+        self.member(2, 0);
+        self.remote.commit(vec![laws::grant(&[(1, 0)])]);
+        self.remote.commit(vec![laws::grant(&[(2, 0)])]);
+        self.remote.commit(vec![laws::revoke(&[(1, 0)])]);
+        assert_eq!(self.remote.head(), 6);
+    }
+}
+
+/// The peer loses its data: a new store and generation, with the same identity. The client
+/// reconnects, finds another generation in the summary, restarts the part from 0 and takes
+/// what the new log holds, though the new head is above its old cursor and the row sits below
+/// it. The members of the old log stay: a pull-only client has nothing that removes them.
+#[test]
+fn a_peer_that_lost_its_data_is_synced_again_from_zero() {
+    let mut sim = Sim::synced_with_two_members();
+    let old = sim.local.persisted[&part(0)];
+    sim.step(Op::DataLoss);
+    sim.rewrite_below_the_old_cursor();
+    sim.quiesce();
+    assert!(
+        sim.local_members(0).contains(&obj(2)),
+        "the new log's member"
+    );
+    assert_eq!(
+        sim.restarts,
+        [Restart {
+            part: part(0),
+            held: old,
+            peer_generation: sim.remote.generation(),
+            peer_latest: 3,
+        }]
+    );
+    assert_ne!(old.generation, sim.remote.generation());
+    assert_eq!(
+        sim.local.persisted[&part(0)].generation,
+        sim.remote.generation(),
+        "the cursor persisted after the restart carries the new generation"
+    );
+}
+
+/// A restore from an older backup after the operator minted: the files bring back the old
+/// log, whose revs the client's cursor has passed, and the new generation restarts the part.
+#[test]
+fn a_restore_after_a_mint_is_synced_again_from_zero() {
+    let mut sim = Sim::new(Shape::small(), 12);
+    sim.remote.commit(vec![laws::grant(&[(0, 0)])]);
+    sim.member(0, 0);
+    sim.step(Op::Snapshot);
+    let backup_generation = sim.remote.generation();
+    sim.member(1, 0);
+    sim.want(&[0]);
+    sim.quiesce();
+    let old = sim.local.persisted[&part(0)];
+    assert_eq!(old.generation, backup_generation);
+    assert_eq!(old.rev, 5);
+
+    sim.step(Op::RestoreMinted);
+    assert_ne!(sim.remote.generation(), backup_generation, "minted");
+    // the restored log has its own rev 4 and 5
+    sim.member(2, 0);
+    sim.quiesce();
+    assert!(sim.local_members(0).contains(&obj(2)));
+    assert_eq!(sim.restarts.len(), 1, "{:?}", sim.restarts);
+    assert_eq!(sim.restarts[0].held, old);
+    assert_eq!(sim.restarts[0].peer_generation, sim.remote.generation());
+}
+
+/// A restore the operator forgot to mint: the generation is the old one, but the log ends
+/// below the client's cursor, so the part restarts all the same.
+#[test]
+fn a_restore_without_a_mint_restarts_when_the_head_is_below_the_cursor() {
+    let mut sim = Sim::new(Shape::small(), 13);
+    sim.remote.commit(vec![laws::grant(&[(0, 0)])]);
+    sim.member(0, 0);
+    sim.step(Op::Snapshot);
+    sim.member(1, 0);
+    sim.want(&[0]);
+    sim.quiesce();
+    let old = sim.local.persisted[&part(0)];
+    assert_eq!(sim.remote.saved_head(), Some(3));
+
+    sim.step(Op::RestoreUnminted);
+    assert_eq!(sim.remote.generation(), old.generation, "not minted");
+    assert_eq!(sim.remote.head(), 3);
+    assert_eq!(
+        sim.restarts,
+        [Restart {
+            part: part(0),
+            held: old,
+            peer_generation: old.generation,
+            peer_latest: 3,
+        }]
+    );
+    // the log carries on, and the client follows it from the restarted cursor
+    sim.member(2, 0);
+    sim.quiesce();
+    assert!(sim.local_members(0).contains(&obj(2)));
+    assert_eq!(sim.restarts.len(), 1);
+}
+
+/// The same data loss with a bucket walk on offer: the restart lists the whole part.
+#[test]
+fn a_peer_that_lost_its_data_is_walked_from_zero_when_it_offers_a_walk() {
+    let mut sim = Sim::synced_with_two_members();
+    sim.step(Op::DataLoss);
+    sim.remote.walk_bias = true;
+    sim.rewrite_below_the_old_cursor();
+    sim.quiesce();
+    assert!(sim.local_members(0).contains(&obj(2)));
+    assert_eq!(sim.restarts.len(), 1);
+}

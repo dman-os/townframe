@@ -168,6 +168,9 @@ struct Sim {
     pub rounds: Vec<(Lane, u32)>,
     /// Every restart the machine reported (`PartLifecycle` law 10).
     pub restarts: Vec<Restart>,
+    /// Parts restarted since their last persist: that persist may be below the stored cursor,
+    /// even in the same generation.
+    rewound: BTreeSet<PartKey>,
 }
 
 /// A part started over from cursor 0, as `PeerCommand::Restarted` reports it.
@@ -202,6 +205,7 @@ impl Sim {
             seeds: 0,
             rounds: vec![],
             restarts: vec![],
+            rewound: default(),
         }
     }
 
@@ -288,16 +292,18 @@ impl Sim {
                         !self.sync.walking(&part),
                         "law 9: {part} persisted at {cursor:?} while it is walking"
                     );
-                    // the table's rule: a cursor only advances within its generation, and
-                    // another generation replaces the stored one
+                    // the table keeps the last write; the machine only lowers a cursor within
+                    // a generation by restarting the part
                     if let Some(held) = self.local.persisted.get(&part)
                         && held.generation == cursor.generation
+                        && !self.rewound.remove(&part)
                     {
                         assert!(
                             cursor.rev >= held.rev,
                             "{part} persisted at {cursor:?} after {held:?}"
                         );
                     }
+                    self.rewound.remove(&part);
                     self.local.persisted.insert(part, cursor);
                 }
                 PeerCommand::Restarted {
@@ -316,6 +322,7 @@ impl Sim {
                         self.remote.generation(),
                         "{part} restarted on a generation that is not the peer's"
                     );
+                    self.rewound.insert(part.clone());
                     self.restarts.push(Restart {
                         part,
                         held,

@@ -36,7 +36,7 @@
 //!    first, and flushes after every batch of inputs.
 //! 5. **Cursor persistence keeps order and may lag.** `PersistCursor` writes to the peer-cursor
 //!    table may be batched, but a part's writes land in the order issued and a cursor never
-//!    goes back. Losing the latest writes in a crash is safe: the part replays from an older
+//!    goes back, except by a restart of the part (`PartLifecycle` law 10). Losing the latest writes in a crash is safe: the part replays from an older
 //!    cursor, and backends are idempotent.
 //! 6. **Connections.** Losing the connection disconnects the machine: every call in flight is
 //!    cancelled and, the machine being gone, nothing is reported (ObjectJobs law 10); nothing
@@ -140,12 +140,14 @@ pub trait SyncBackend {
 /// is a position in. A small table the driver owns, not the part store: its keys carry the
 /// backend.
 ///
-/// An implementation applies the entries of a write in order. Within one generation a cursor
-/// only advances: a lower rev than stored is ignored. An entry of another generation than the
-/// stored one replaces it whatever its rev, because the peer's log is a different one now and
-/// the driver restarts the part from 0 (`PartLifecycle` law 10). It may coalesce entries of
-/// one write for the same part. A failure is not retried: it crashes the driver.
-/// [`table_laws`] states this as checks any implementation runs.
+/// An implementation applies the entries of a write in order and **the last write wins**: it
+/// does not compare revs. The driver issues a part's writes in order (law 5) and the machine
+/// only lowers a cursor by restarting the part (`PartLifecycle` law 10), when the peer's
+/// generation changed or a restore went unminted and its log ends below the cursor: that
+/// part's next write is a lower rev, maybe in the stored generation, and must replace the
+/// stored one. It may coalesce entries of one write for the same part. A failure is not
+/// retried: it crashes the driver. [`table_laws`] states this as checks any implementation
+/// runs.
 pub trait PeerCursors {
     /// The cursor persisted for each part, in the order asked; `None` for a part never
     /// written.

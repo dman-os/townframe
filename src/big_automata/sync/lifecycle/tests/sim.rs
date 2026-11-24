@@ -94,6 +94,9 @@ pub(in crate::sync::lifecycle::tests) struct Sim {
     open: Option<CallId>,
     /// Parts retired since their last add.
     retired: Set<PartKey>,
+    /// Parts restarted since their last persist: their next persist may be below the stored
+    /// cursor, even in the same generation (law 10).
+    rewound: Set<PartKey>,
 }
 
 impl Sim {
@@ -126,6 +129,7 @@ impl Sim {
             store,
             open: None,
             retired: default(),
+            rewound: default(),
         }
     }
 
@@ -245,9 +249,18 @@ impl Sim {
                         "{op:?}: over the cap"
                     );
                 }
+                LifecycleCommand::Restart { part: p, held, .. } => {
+                    assert!(decidable.contains(p), "{op:?}: decided an undecidable part");
+                    assert_eq!(phase_of(p), Some(Phase::Deciding));
+                    assert_eq!(
+                        store_before.get(p),
+                        Some(held),
+                        "{op:?}: restarted from a cursor not stored"
+                    );
+                    self.rewound.insert(p.clone());
+                }
                 LifecycleCommand::StartCursor { part: p, .. }
-                | LifecycleCommand::StartWalk { part: p, .. }
-                | LifecycleCommand::Restart { part: p, .. } => {
+                | LifecycleCommand::StartWalk { part: p, .. } => {
                     assert!(decidable.contains(p), "{op:?}: decided an undecidable part");
                     assert_eq!(phase_of(p), Some(Phase::Deciding));
                 }
@@ -266,12 +279,14 @@ impl Sim {
                     }
                     if let Some(held) = store_before.get(p)
                         && held.generation == cursor.generation
+                        && !self.rewound.contains(p)
                     {
                         assert!(
                             cursor.rev >= held.rev,
                             "{op:?}: the persisted cursor went back"
                         );
                     }
+                    self.rewound.remove(p);
                     self.store.insert(p.clone(), *cursor);
                 }
                 LifecycleCommand::Retire { part: p } => {
@@ -281,6 +296,7 @@ impl Sim {
                     );
                     assert_eq!(self.lc.phase(p), None);
                     assert!(self.retired.insert(p.clone()), "{op:?}: retired twice");
+                    self.rewound.remove(p);
                 }
             }
         }

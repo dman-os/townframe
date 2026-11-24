@@ -3,13 +3,15 @@
 //!
 //! 1. A part never written reads `None`, and reads answer in the order asked.
 //! 2. A write is read back whole: the generation with the rev.
-//! 3. Within a generation a cursor only advances: a lower rev than stored is ignored, in a later
-//!    write and within one write alike, and an equal one changes nothing.
-//! 4. A write of another generation replaces the stored cursor whatever its rev, lower
-//!    included: the peer's log is a different one, and the part restarts from 0.
-//! 5. Entries apply in order: a write that holds an old generation after a new one leaves the old
-//!    one stored, and one that holds both revs of a generation keeps the higher.
-//! 6. Keys are (peer, backend, part): another peer's or backend's cursors do not meet.
+//! 3. **The last write wins**, whether its rev is higher, equal or lower, and whether its
+//!    generation is the stored one or another. The table does not compare revs: the driver
+//!    issues a part's writes in order and the machine never lowers a cursor, except by
+//!    restarting a part (`PartLifecycle` law 10), whose first persisted cursor is below the one
+//!    stored, in the same generation when a restore went unminted. A table that kept the
+//!    higher rev would store the old cursor again and resume from it after the next
+//!    reconnect, skipping what the peer's new log stamped below it.
+//! 4. The entries of one write apply in order, so the last entry for a part is the one stored.
+//! 5. Keys are (peer, backend, part): another peer's or backend's cursors do not meet.
 
 use super::PeerCursors;
 use crate::interlude::*;
@@ -38,52 +40,37 @@ pub async fn peer_cursor_table_laws<K: PeerCursors>(table: &K) -> Res<()> {
         .await?;
     assert_eq!(read(&peer, "b").await?, vec![None, Some(at(old, 5)), None]);
     // 3
-    table
-        .write(&peer, "b", &[(parts[1].clone(), at(old, 3))])
-        .await?;
-    assert_eq!(read(&peer, "b").await?[1], Some(at(old, 5)), "a lower rev");
-    table
-        .write(&peer, "b", &[(parts[1].clone(), at(old, 5))])
-        .await?;
-    assert_eq!(read(&peer, "b").await?[1], Some(at(old, 5)), "an equal rev");
-    table
-        .write(
-            &peer,
-            "b",
-            &[
-                (parts[1].clone(), at(old, 9)),
-                (parts[1].clone(), at(old, 7)),
-            ],
-        )
-        .await?;
-    assert_eq!(read(&peer, "b").await?[1], Some(at(old, 9)), "one write");
-    // 6
-    assert_eq!(read(&other_peer, "b").await?, vec![None, None, None]);
-    assert_eq!(read(&peer, "c").await?, vec![None, None, None]);
+    for (written, why) in [
+        (at(old, 9), "a higher rev"),
+        (at(old, 9), "an equal rev"),
+        (at(old, 3), "a lower rev"),
+        (at(new, 2), "another generation"),
+        (at(new, 1), "a lower rev of that generation"),
+        (at(old, 8), "a lower rev, back in the first generation"),
+    ] {
+        table
+            .write(&peer, "b", &[(parts[1].clone(), written)])
+            .await?;
+        assert_eq!(read(&peer, "b").await?[1], Some(written), "{why}");
+    }
     // 4
-    table
-        .write(&peer, "b", &[(parts[1].clone(), at(new, 2))])
-        .await?;
-    assert_eq!(
-        read(&peer, "b").await?[1],
-        Some(at(new, 2)),
-        "a new generation"
-    );
-    table
-        .write(&peer, "b", &[(parts[1].clone(), at(new, 1))])
-        .await?;
-    assert_eq!(read(&peer, "b").await?[1], Some(at(new, 2)));
-    // 5
     table
         .write(
             &peer,
             "b",
             &[
                 (parts[0].clone(), at(new, 4)),
-                (parts[0].clone(), at(old, 8)),
+                (parts[0].clone(), at(old, 2)),
+                (parts[2].clone(), at(old, 6)),
+                (parts[2].clone(), at(old, 7)),
             ],
         )
         .await?;
-    assert_eq!(read(&peer, "b").await?[0], Some(at(old, 8)), "in order");
+    let read_back = read(&peer, "b").await?;
+    assert_eq!(read_back[0], Some(at(old, 2)), "in order");
+    assert_eq!(read_back[2], Some(at(old, 7)), "in order");
+    // 5
+    assert_eq!(read(&other_peer, "b").await?, vec![None, None, None]);
+    assert_eq!(read(&peer, "c").await?, vec![None, None, None]);
     Ok(())
 }

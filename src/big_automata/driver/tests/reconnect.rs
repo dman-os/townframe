@@ -5,6 +5,7 @@ use futures::FutureExt;
 use super::rig::*;
 use crate::driver::Fact;
 use crate::driver::FactEvent;
+use crate::driver::Facts;
 use crate::interlude::*;
 use crate::part_store::laws::obj;
 use crate::part_store::laws::part;
@@ -240,4 +241,72 @@ async fn law_6_reconnecting_past_the_session_cap_closes_the_replaced_sessions() 
     }
     rig.connect();
     rig.synced(1).await;
+}
+
+/// Law 6 with a peer that lost its data: it is the same peer by identity, but its log is a new
+/// one (a new generation) with fewer rows, and its head is above the cursor we persisted, so
+/// resuming from that cursor would miss the row the new log stamped below it. The part
+/// restarts from 0, takes everything the new log holds, and persists its cursor under the new
+/// generation.
+#[tokio::test(start_paused = true)]
+async fn law_6_a_peer_that_lost_its_data_is_synced_again_from_zero() {
+    use crate::part_store::PartStoreServe;
+    use crate::part_store::laws::grant;
+    use crate::sync::PeerCursor;
+
+    let first = Rig::new();
+    first.peer.publish(1, &[1, 2], 10).await;
+    first.want(&[1]).await;
+    first.connect();
+    first.synced(1).await;
+    let old_generation = first.peer.store().generation().await.expect("generation");
+    let stored = first
+        .cursors
+        .get(&first.peer_key(), "memory", &part(1))
+        .expect("the part persisted a cursor");
+    assert_eq!(stored.generation, old_generation);
+    first.driver.disconnect();
+
+    // The peer comes back with a new store: object 3 in the part at rev 2, and two grants of
+    // other parts that push its head to 4, above our cursor (2).
+    let reborn = ScriptedPeer::new();
+    reborn.publish(1, &[3], 20).await;
+    reborn.commit(vec![grant(&[(2, 0)])]).await;
+    reborn.commit(vec![grant(&[(3, 0)])]).await;
+    let new_generation = reborn.store().generation().await.expect("generation");
+    assert_ne!(new_generation, old_generation);
+    assert!(
+        reborn.store().latest_rev().await.expect("rev") > stored.rev,
+        "the new head is above the old cursor: only the generation tells the logs apart"
+    );
+
+    // A driver over the same local store and cursor table, as after the process restarts.
+    let second = Rig::start(
+        Facts::new(),
+        reborn.clone(),
+        first.local.clone(),
+        ScriptedBackend::new(first.local.clone(), reborn.store().clone()),
+        first.cursors.clone(),
+        first.config.clone(),
+    );
+    second.connect();
+    second.synced(1).await;
+    let members = Rig::members(&second.local, 1, 3).await;
+    assert!(
+        members.contains_key(&3),
+        "object 3 sits at rev 2, below the old cursor: {members:?}"
+    );
+    until(|| {
+        second
+            .cursors
+            .get(&second.peer_key(), "memory", &part(1))
+            .is_some_and(|cursor| cursor.generation == new_generation)
+    })
+    .await;
+    let PeerCursor { generation, rev } = second
+        .cursors
+        .get(&second.peer_key(), "memory", &part(1))
+        .expect("stored");
+    assert_eq!(generation, new_generation);
+    assert!(rev >= 2, "{rev}");
 }

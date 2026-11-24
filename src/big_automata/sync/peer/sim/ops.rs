@@ -108,6 +108,7 @@ impl Sim {
         self.relist.clear();
         self.mirror.clear();
         self.walked.clear();
+        self.rewound.clear();
         if close {
             self.remote.close(self.sync.client.session_id());
         }
@@ -199,6 +200,7 @@ impl Sim {
                 for part in &removed_parts {
                     self.wanted_parts.remove(part);
                     self.walked.remove(part);
+                    self.rewound.remove(part);
                 }
                 self.wanted_parts
                     .extend(added_parts.iter().map(|(part, _)| part.clone()));

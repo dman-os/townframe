@@ -32,8 +32,7 @@ pub struct MemoryPeerCursors {
 
 impl MemoryPeerCursors {
     /// Every entry written, in the order the driver issued it: what law 5 is judged on. The
-    /// table itself ignores an entry below the stored cursor of its generation, so the stored
-    /// cursors alone would hide a write that went backwards.
+    /// stored cursors alone would hide a write that went backwards and came forward again.
     pub fn written(&self) -> Vec<(PartKey, PeerCursor)> {
         self.table.lock().expect("table lock poisoned").log.clone()
     }
@@ -71,23 +70,9 @@ impl PeerCursors for MemoryPeerCursors {
         let mut table = self.table.lock().expect("table lock poisoned");
         for (part, cursor) in writes {
             table.log.push((part.clone(), *cursor));
-            match table
+            table
                 .cursors
-                .entry((peer.clone(), backend.to_owned(), part.clone()))
-            {
-                std::collections::btree_map::Entry::Occupied(mut stored)
-                    if stored.get().generation == cursor.generation =>
-                {
-                    stored.get_mut().rev = stored.get().rev.max(cursor.rev);
-                }
-                // Another generation than the stored one: the peer's log is a new one.
-                std::collections::btree_map::Entry::Occupied(mut stored) => {
-                    stored.insert(*cursor);
-                }
-                std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(*cursor);
-                }
-            }
+                .insert((peer.clone(), backend.to_owned(), part.clone()), *cursor);
         }
         Ok(())
     }

@@ -306,3 +306,9 @@ async fn law_1_the_loop_runs_locally_over_a_backend_that_is_not_send() {
         })
         .await;
 }
+
+/// The memory table obeys the table laws every [`PeerCursors`] implementation runs.
+#[tokio::test]
+async fn the_memory_cursor_table_obeys_the_table_laws() -> Res<()> {
+    crate::driver::table_laws::peer_cursor_table_laws(&MemoryPeerCursors::default()).await
+}
