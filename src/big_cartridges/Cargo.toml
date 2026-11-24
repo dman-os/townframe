@@ -19,6 +19,7 @@ big_cabinet.workspace = true
 big_cabinet_core = { workspace = true, features = ["manifest", "schemars"] }
 big_cartridges_core = { workspace = true, features = ["schemars"] }
 service_client_native_rs.workspace = true
+method_core.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
 

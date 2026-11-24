@@ -883,7 +883,7 @@ async fn apply_nodule_capabilities(
         for scopes in desired.values_mut() {
             scopes.dispatch = Some(DispatchScope {
                 authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
-                privileged,
+                privileged: privileged.clone(),
                 ..Default::default()
             });
             scopes.blobs = Some(big_blobs_core::protocol::BlobsScope {

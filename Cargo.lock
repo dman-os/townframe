@@ -1561,6 +1561,7 @@ dependencies = [
  "big_cartridges_core",
  "bytes",
  "futures",
+ "method_core",
  "serde",
  "serde_json",
  "service_client_native_rs",
