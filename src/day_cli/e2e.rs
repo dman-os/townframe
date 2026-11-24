@@ -89,6 +89,8 @@ mod library {
         task: tokio::task::JoinHandle<Res<()>>,
         /// The server's peers service, when its `node.json` configures one.
         peers: Option<Peers>,
+        /// The address the server's TCP listener bound, when its `node.json` configures one.
+        tcp: Option<std::net::SocketAddr>,
     }
 
     impl TestServer {
@@ -102,7 +104,7 @@ mod library {
                     &dir,
                     |booted| {
                         ready_tx
-                            .send(booted.node().peers.clone())
+                            .send((booted.node().peers.clone(), booted.node().listeners.tcp))
                             .map_err(|_| eyre::eyre!("test is gone"))
                     },
                     async {
@@ -114,14 +116,15 @@ mod library {
                 )
                 .await
             });
-            let peers = match ready_rx.await {
-                Ok(peers) => peers,
+            let (peers, tcp) = match ready_rx.await {
+                Ok(ready) => ready,
                 Err(_) => panic!("the server failed before it was serving: {:?}", task.await),
             };
             Self {
                 shutdown,
                 task,
                 peers,
+                tcp,
             }
         }
 
@@ -593,6 +596,38 @@ mod library {
             assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 2);
             assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 0);
         }
+        secrets.stop().await.unwrap();
+    }
+
+    /// A server whose `node.json` has `listen.tcp` serves XRPC there. TCP carries no peer
+    /// credential, so a request without a bearer is refused as unauthenticated rather than
+    /// admitted as the operator, as the Unix socket admits its own uid.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_server_listens_on_its_configured_tcp_address_and_refuses_anonymous_calls() {
+        let (_tmp, dir) = new_node().await;
+        dir.update_settings(|settings| {
+            settings.listen.tcp = Some("127.0.0.1:0".parse().unwrap());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let server = TestServer::start(&dir).await;
+        let address = server
+            .tcp
+            .expect("the server binds its configured TCP address");
+        assert_ne!(address.port(), 0, "the bound address names the picked port");
+        let response = reqwest::get(format!("http://{address}/xrpc/{}", big_node::GET_NODE_INFO))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        server.stop().await;
+        let secrets = secrets_rs::SecretStore::boot().await.unwrap();
+        big_node::delete_secrets(
+            &secrets,
+            &dir.settings().unwrap().seed(&secrets).await.unwrap(),
+        )
+        .await
+        .unwrap();
         secrets.stop().await.unwrap();
     }
 

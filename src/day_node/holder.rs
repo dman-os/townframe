@@ -462,13 +462,18 @@ impl Booted {
         schemas: Arc<big_cabinet::SchemaRepo>,
     ) -> Res<Self> {
         dir.migrate(&lock).await?;
+        let settings = dir.settings()?;
         let listeners = Listeners {
             unix_socket: lock.socket.clone(),
+            tcp: match role {
+                LockRole::Serve => settings.listen.tcp,
+                LockRole::Command => None,
+            },
             ..default()
         };
         let held = HeldNode::boot(
             dir.root(),
-            &dir.settings()?,
+            &settings,
             listeners,
             role == LockRole::Serve,
             schemas,
