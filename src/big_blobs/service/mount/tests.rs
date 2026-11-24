@@ -85,7 +85,10 @@ async fn a_stored_file_is_hard_linked_and_an_inline_blob_is_copied() {
         "the shared inode is read-only, so no write reaches the store"
     );
     assert!(
-        std::fs::OpenOptions::new().write(true).open(&linked).is_err(),
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&linked)
+            .is_err(),
         "a guest cannot open its link for writing"
     );
 

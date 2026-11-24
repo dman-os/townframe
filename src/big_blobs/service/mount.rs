@@ -71,7 +71,9 @@ impl WorkingMounts {
 
     /// A new, empty mount for one workload.
     pub async fn create(&self) -> std::io::Result<Arc<WorkingMount>> {
-        let dir = self.root.join(format!("mount-{:032x}", rand::random::<u128>()));
+        let dir = self
+            .root
+            .join(format!("mount-{:032x}", rand::random::<u128>()));
         tokio::fs::create_dir(&dir).await?;
         Ok(Arc::new(WorkingMount {
             dir,
@@ -210,11 +212,12 @@ impl BlobService {
     /// The blob's info once the node holds it whole: now, or when the availability feed announces
     /// it. The feed's position is read before the first look, so an announcement between the two
     /// is replayed.
-    pub(super) async fn local(&self, context: &RequestContext, blob_id: &BlobId) -> Result<BlobInfo, BlobsError> {
-        let head = self
-            .availability_revision()
-            .await
-            .map_err(storage_error)?;
+    pub(super) async fn local(
+        &self,
+        context: &RequestContext,
+        blob_id: &BlobId,
+    ) -> Result<BlobInfo, BlobsError> {
+        let head = self.availability_revision().await.map_err(storage_error)?;
         if let Some(info) = self.stat(blob_id).await.map_err(storage_error)? {
             return Ok(info);
         }
@@ -281,19 +284,20 @@ impl BlobService {
         let capabilities = self.capabilities.clone();
         let mount = Arc::clone(mount);
         let stop = self.tasks.clone();
-        self.tasks.spawn(async move {
-            let context = RequestContext::root();
-            let retracted = tokio::select! {
-                () = stop.cancelled() => return,
-                () = mount.closed.cancelled() => return,
-                retracted = capabilities.retracted(&context, handle) => retracted,
-            };
-            retracted.expect("observing a blobs handle");
-            mount
-                .revoke(handle)
-                .expect("unlinking the files of a retracted blobs handle");
-        })
-        .expect("a live blob service accepts tasks");
+        self.tasks
+            .spawn(async move {
+                let context = RequestContext::root();
+                let retracted = tokio::select! {
+                    () = stop.cancelled() => return,
+                    () = mount.closed.cancelled() => return,
+                    retracted = capabilities.retracted(&context, handle) => retracted,
+                };
+                retracted.expect("observing a blobs handle");
+                mount
+                    .revoke(handle)
+                    .expect("unlinking the files of a retracted blobs handle");
+            })
+            .expect("a live blob service accepts tasks");
     }
 }
 

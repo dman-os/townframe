@@ -68,7 +68,9 @@ impl Egress {
                 return answer(
                     StatusCode::BAD_REQUEST,
                     "InvalidRequest",
-                    &format!("the request is not `{{ capability, blobId }}` or `{{ capability, blob }}`: {error}"),
+                    &format!(
+                        "the request is not `{{ capability, blobId }}` or `{{ capability, blob }}`: {error}"
+                    ),
                 );
             }
         };
@@ -143,14 +145,12 @@ impl Egress {
                 "DeadlineExceeded",
                 "the blob did not arrive before the call's deadline",
             ),
-            Err(BlobsError::Context(error)) => {
-                answer(StatusCode::BAD_REQUEST, "InvalidRequest", &error.to_string())
-            }
-            Err(error) => answer(
-                StatusCode::BAD_GATEWAY,
-                "BadGateway",
+            Err(BlobsError::Context(error)) => answer(
+                StatusCode::BAD_REQUEST,
+                "InvalidRequest",
                 &error.to_string(),
             ),
+            Err(error) => answer(StatusCode::BAD_GATEWAY, "BadGateway", &error.to_string()),
         }
     }
 }
