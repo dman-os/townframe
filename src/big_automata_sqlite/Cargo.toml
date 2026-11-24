@@ -1,0 +1,25 @@
+[package]
+name = "big_automata_sqlite"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+big_automata = { path = "../big_automata", default-features = false }
+utils_rs.workspace = true
+sqlite_rs.workspace = true
+
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+big_automata = { path = "../big_automata", default-features = false, features = ["test-support"] }
+async-trait.workspace = true
+futures.workspace = true
+proptest.workspace = true
+tempfile.workspace = true

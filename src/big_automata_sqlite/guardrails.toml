@@ -1,0 +1,16 @@
+version = 1
+role = "runtime"
+dependency_reason = "The SQLite part store implements big_automata's part store and peer cursor contracts over sqlite_rs; utils_rs supplies the shared prelude."
+allowed_dependencies = ["big_automata", "sqlite_rs", "utils_rs"]
+allow_external_api_types = false
+
+# No `wasm32-unknown-unknown` build: sqlite_rs does not target the browser.
+[builds.native]
+features = []
+required_features = []
+default_features = true
+
+[builds.wasm32-wasip3]
+features = []
+required_features = []
+default_features = true

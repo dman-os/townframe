@@ -1,4 +1,14 @@
 use std::sync::Arc;
+
+/// One embedded migration. Portable: generated query modules name it on every target, though
+/// only the native runtime applies it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Migration<'sql> {
+    pub version: i64,
+    pub name: &'sql str,
+    pub sql: &'sql str,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum SqlValue {
     Null,

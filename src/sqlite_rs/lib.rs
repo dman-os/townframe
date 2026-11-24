@@ -6,6 +6,7 @@
 
 mod portable;
 pub use portable::ExecuteResult;
+pub use portable::Migration;
 pub use portable::FromValue;
 pub use portable::IntoValue;
 pub use portable::ResultSet;
@@ -22,8 +23,6 @@ pub use native::Database;
 pub use native::INSTR_SQL; // INSTR
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::INSTR_SQL_CALLERS; // INSTR
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::Migration;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::MigrationState;
 #[cfg(not(target_arch = "wasm32"))]
