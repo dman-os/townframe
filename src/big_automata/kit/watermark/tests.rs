@@ -53,6 +53,53 @@ fn add_job_skips_re_deliveries_and_emitted_cursors() {
     assert_eq!(m.add_job(Job::Sync(2), 6, ["p"]), set(&["p"]));
 }
 
+/// A revision spans a transaction: several jobs at one cursor on one stream share the slot,
+/// and the stream passes the cursor only when all of them settled.
+#[test]
+fn jobs_at_one_cursor_share_a_slot_and_all_must_settle() {
+    let mut m = Machine::default();
+    assert_eq!(m.add_job(Job::Sync(1), 7, ["p"]), set(&["p"]));
+    assert_eq!(
+        m.add_job(Job::Sync(2), 7, ["p"]),
+        set(&["p"]),
+        "a different job joins the slot"
+    );
+    assert_eq!(m.settle_on_cursor(&Job::Sync(1), &7), vec![("p", None)]);
+    assert!(!m.is_settled(&"p"));
+    assert_eq!(m.watermark(&"p"), None);
+    assert_eq!(m.settle_on_cursor(&Job::Sync(2), &7), vec![("p", Some(7))]);
+    assert!(m.is_settled(&"p"));
+}
+
+/// Re-delivery is per (job, cursor, stream), including after the job settled while the slot
+/// is still held back by an earlier one.
+#[test]
+fn a_job_cannot_rejoin_its_own_slot_but_another_can() {
+    let mut m = Machine::default();
+    m.add_job(Job::Sync(0), 3, ["p"]);
+    m.add_job(Job::Sync(1), 7, ["p"]);
+    m.settle_on_cursor(&Job::Sync(1), &7);
+    assert_eq!(
+        m.add_job(Job::Sync(1), 7, ["p"]),
+        set(&[]),
+        "settled but the slot is queued behind 3"
+    );
+    assert_eq!(m.add_job(Job::Sync(1), 7, ["p", "q"]), set(&["q"]));
+    assert_eq!(m.add_job(Job::Sync(2), 7, ["p"]), set(&["p"]));
+    assert_eq!(m.settle_on_cursor(&Job::Sync(0), &3), vec![("p", Some(3))]);
+    assert_eq!(m.settle_on_cursor(&Job::Sync(2), &7), vec![("p", Some(7))]);
+}
+
+#[test]
+fn releasing_one_of_two_jobs_at_a_cursor_leaves_the_slot_held() {
+    let mut m = Machine::default();
+    m.add_job(Job::Sync(1), 4, ["p"]);
+    m.add_job(Job::Sync(2), 4, ["p"]);
+    assert_eq!(m.release_stream(&Job::Sync(1), &"p", &5), None);
+    assert!(!m.is_settled(&"p"));
+    assert_eq!(m.settle_on_cursor(&Job::Sync(2), &4), vec![("p", Some(4))]);
+}
+
 /// The admission guard compares against the emitted watermark as an `Option`: on a fresh
 /// stream the default cursor is a real cursor, not a replay.
 #[test]
@@ -229,18 +276,28 @@ fn any_op() -> impl Strategy<Value = Op> {
     ]
 }
 
-/// The naive reading of the contract, with no waiter structure: each slot remembers the job
-/// it still owes (`None` once ready), and a stream's watermark is its contiguous ready prefix.
+/// The naive reading of the contract, with no waiter structure: each slot remembers the jobs
+/// that joined it and which of them it still owes, and a stream's watermark is its contiguous
+/// prefix of slots owing nothing.
 #[derive(Default)]
 struct Oracle {
-    slots: BTreeMap<(&'static str, u64), Option<Job>>,
+    slots: BTreeMap<(&'static str, u64), OracleSlot>,
     emitted: BTreeMap<&'static str, u64>,
+}
+
+#[derive(Default)]
+struct OracleSlot {
+    joined: std::collections::BTreeSet<Job>,
+    owed: std::collections::BTreeSet<Job>,
 }
 
 impl Oracle {
     fn drain(&mut self, sid: &'static str) -> Option<u64> {
         let mut reached = None;
-        while let Some((&(_, cursor), None)) = self.slots.range((sid, 0)..=(sid, u64::MAX)).next() {
+        while let Some((&(_, cursor), slot)) = self.slots.range((sid, 0)..=(sid, u64::MAX)).next() {
+            if !slot.owed.is_empty() {
+                break;
+            }
             self.slots.remove(&(sid, cursor));
             reached = Some(cursor);
         }
@@ -253,13 +310,13 @@ impl Oracle {
     fn owes(&self, key: Job, cursor: u64) -> bool {
         self.slots
             .iter()
-            .any(|(&(_, slot_cursor), owed)| slot_cursor == cursor && *owed == Some(key))
+            .any(|(&(_, slot_cursor), slot)| slot_cursor == cursor && slot.owed.contains(&key))
     }
 
     fn pending(&self) -> usize {
         self.slots
             .iter()
-            .filter_map(|(&(_, cursor), owed)| owed.map(|key| (key, cursor)))
+            .flat_map(|(&(_, cursor), slot)| slot.owed.iter().map(move |key| (*key, cursor)))
             .collect::<std::collections::BTreeSet<_>>()
             .len()
     }
@@ -276,10 +333,14 @@ proptest! {
                     let mut expected = Set::new();
                     for sid in &sids {
                         let stale = oracle.emitted.get(sid).is_some_and(|&emitted| cursor <= emitted);
-                        if stale || oracle.slots.contains_key(&(*sid, cursor)) {
+                        if stale {
                             continue;
                         }
-                        oracle.slots.insert((*sid, cursor), Some(key));
+                        let slot = oracle.slots.entry((*sid, cursor)).or_default();
+                        if !slot.joined.insert(key) {
+                            continue;
+                        }
+                        slot.owed.insert(key);
                         expected.insert(*sid);
                     }
                     prop_assert_eq!(m.add_job(key, cursor, sids), expected);
@@ -288,12 +349,12 @@ proptest! {
                     let owed: Vec<_> = oracle
                         .slots
                         .iter()
-                        .filter(|(slot, owed)| slot.1 == cursor && **owed == Some(key))
+                        .filter(|(slot, state)| slot.1 == cursor && state.owed.contains(&key))
                         .map(|(slot, _)| slot.0)
                         .collect();
                     let mut expected = vec![];
                     for sid in owed {
-                        oracle.slots.insert((sid, cursor), None);
+                        oracle.slots.get_mut(&(sid, cursor)).unwrap().owed.remove(&key);
                         expected.push((sid, oracle.drain(sid)));
                     }
                     prop_assert_eq!(m.settle_on_cursor(&key, &cursor), expected);
@@ -302,11 +363,11 @@ proptest! {
                     let owed: Vec<_> = oracle
                         .slots
                         .range((sid, 0)..(sid, before))
-                        .filter(|(_, owed)| **owed == Some(key))
+                        .filter(|(_, state)| state.owed.contains(&key))
                         .map(|(&slot, _)| slot)
                         .collect();
                     for slot in &owed {
-                        oracle.slots.insert(*slot, None);
+                        oracle.slots.get_mut(slot).unwrap().owed.remove(&key);
                     }
                     let expected = if owed.is_empty() { None } else { oracle.drain(sid) };
                     prop_assert_eq!(m.release_stream(&key, &sid, &before), expected);

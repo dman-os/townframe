@@ -141,17 +141,15 @@ impl ScriptedPeer {
         tx.commit()
     }
 
-    /// Part `index` readable by us, with objects `objs` as members at payload `value`, one
-    /// commit per object: the cursor machine admits one row per cursor and part, so rows that
-    /// share a rev would lose all but the first (see the report of this change).
+    /// Part `index` readable by us, with objects `objs` as members at payload `value`,
+    /// all committed in one transaction so they share one rev.
     pub(super) async fn publish(&self, index: u8, objs: &[u8], value: u8) {
         use crate::part_store::laws::add;
         use crate::part_store::laws::grant;
         self.commit(vec![grant(&[(index, 0)])]).await;
-        for obj in objs {
-            self.commit(vec![set(&[(*obj, value)]), add(&[(*obj, index)])])
-                .await;
-        }
+        let sets: Vec<_> = objs.iter().map(|obj| (*obj, value)).collect();
+        let adds: Vec<_> = objs.iter().map(|obj| (*obj, index)).collect();
+        self.commit(vec![set(&sets), add(&adds)]).await;
     }
 
     pub(super) fn set_down(&self, down: bool) {

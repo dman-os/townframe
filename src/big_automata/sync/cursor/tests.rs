@@ -139,6 +139,69 @@ fn law_4_a_readmitted_part_is_not_tracked_twice_and_does_not_strand_its_slot() {
     );
 }
 
+/// A revision is per transaction: two objects changed at one rev on one part both gate the
+/// part's cursor, whichever settles first.
+#[test]
+fn law_4_two_objects_at_one_rev_on_one_part_both_gate_the_cursor() {
+    let (o1, o2, p) = (obj(20), obj(21), part(22));
+    let mut machine = CursorSyncMachine::default();
+
+    assert_eq!(
+        feed(&mut machine, touched(7, &o1, std::slice::from_ref(&p))),
+        vec![sync_obj(&o1, 7, vec![p.clone()])]
+    );
+    assert_eq!(
+        feed(&mut machine, touched(7, &o2, std::slice::from_ref(&p))),
+        vec![sync_obj(&o2, 7, vec![p.clone()])],
+        "the second object is not a re-delivery of the first"
+    );
+    assert_eq!(sync_done(&mut machine, &o1, 7), vec![]);
+    assert!(!machine.is_settled(&p));
+    assert_eq!(sync_done(&mut machine, &o2, 7), vec![set_cursor(&p, 7)]);
+    assert!(machine.is_settled(&p));
+}
+
+/// A removal and a change of different objects at one rev share the part's slot.
+#[test]
+fn law_4_a_removal_and_a_change_of_different_objects_at_one_rev_both_gate() {
+    let (o1, o2, p) = (obj(23), obj(24), part(25));
+    let mut machine = CursorSyncMachine::default();
+
+    assert_eq!(
+        feed(&mut machine, removed(9, &o1, &p)),
+        vec![removal_command(&o1, &p, 9)]
+    );
+    assert_eq!(
+        feed(&mut machine, touched(9, &o2, std::slice::from_ref(&p))),
+        vec![sync_obj(&o2, 9, vec![p.clone()])]
+    );
+    assert_eq!(sync_done(&mut machine, &o2, 9), vec![]);
+    assert_eq!(remove_done(&mut machine, &o1, 9), vec![set_cursor(&p, 9)]);
+}
+
+/// Only the same (job, cursor) is a re-delivery, including after that job settled while an
+/// earlier slot still holds the part back; a different object at the cursor still joins.
+#[test]
+fn law_4_a_re_delivery_of_the_same_job_and_cursor_is_still_skipped() {
+    let (o1, o2, o3, p) = (obj(26), obj(27), obj(28), part(29));
+    let mut machine = CursorSyncMachine::default();
+    feed(&mut machine, touched(3, &o3, std::slice::from_ref(&p)));
+    feed(&mut machine, touched(7, &o1, std::slice::from_ref(&p)));
+    assert_eq!(sync_done(&mut machine, &o1, 7), vec![]);
+
+    assert_eq!(
+        feed(&mut machine, touched(7, &o1, std::slice::from_ref(&p))),
+        vec![],
+        "o1 at 7 was already admitted, settled or not"
+    );
+    assert_eq!(
+        feed(&mut machine, touched(7, &o2, std::slice::from_ref(&p))),
+        vec![sync_obj(&o2, 7, vec![p.clone()])]
+    );
+    assert_eq!(sync_done(&mut machine, &o3, 3), vec![set_cursor(&p, 3)]);
+    assert_eq!(sync_done(&mut machine, &o2, 7), vec![set_cursor(&p, 7)]);
+}
+
 /// A touch whose every part was already admitted is a pure re-delivery and schedules
 /// nothing. (The original machine fell through to an object-only sync here.)
 #[test]

@@ -113,12 +113,15 @@ impl Remote {
         self.oracle.latest_rev()
     }
 
-    /// Commit one write to the store and the oracle alike, and snapshot what we may read.
-    pub(super) fn commit(&mut self, write: PartWrite) -> Option<Rev> {
+    /// Commit `writes` as one transaction to the store and the oracle alike, so they share one
+    /// rev, and snapshot what we may read.
+    pub(super) fn commit(&mut self, writes: Vec<PartWrite>) -> Option<Rev> {
         let mut tx = self.store.begin();
-        block_on(laws::stage(&self.store, &mut tx, write.clone())).unwrap();
+        for write in writes.iter().cloned() {
+            block_on(laws::stage(&self.store, &mut tx, write)).unwrap();
+        }
         let rev = tx.commit();
-        assert_eq!(rev, self.oracle.commit(vec![write]));
+        assert_eq!(rev, self.oracle.commit(writes));
         if let Some(rev) = rev {
             let live = self.oracle.live_members();
             let mut view = View {

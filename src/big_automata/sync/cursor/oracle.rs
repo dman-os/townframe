@@ -98,10 +98,13 @@ impl Oracle {
             .max()
     }
 
-    /// A part skips a cursor it already passed or already holds a slot at.
-    fn saw(&self, part: usize, cursor: Rev) -> bool {
+    /// A part skips a cursor it already passed, or one this very job already joined (a
+    /// re-delivery). Another job at the same cursor joins.
+    fn saw(&self, part: usize, lane: Lane, obj: u8, cursor: Rev) -> bool {
         self.reported[part].is_some_and(|reported| cursor <= reported)
-            || self.parts[part].iter().any(|slot| slot.cursor == cursor)
+            || self.parts[part]
+                .iter()
+                .any(|slot| slot.lane == lane && slot.obj == obj && slot.cursor == cursor)
     }
 
     fn owes(&self, lane: Lane, obj: u8, cursor: Rev) -> bool {
@@ -213,7 +216,7 @@ proptest! {
                     let admitted: Vec<u8> = named
                         .iter()
                         .copied()
-                        .filter(|index| !oracle.saw(*index as usize, cursor))
+                        .filter(|index| !oracle.saw(*index as usize, Lane::Sync, obj_seed, cursor))
                         .collect();
                     for index in &admitted {
                         oracle.parts[*index as usize].push(Slot {
@@ -251,7 +254,7 @@ proptest! {
                 }
                 Step::Remove { cursor, obj: obj_seed, part: part_seed } => {
                     let index = part_seed as usize;
-                    let admitted = !oracle.saw(index, cursor);
+                    let admitted = !oracle.saw(index, Lane::Remove, obj_seed, cursor);
                     if admitted {
                         oracle.parts[index].push(Slot {
                             lane: Lane::Remove,
