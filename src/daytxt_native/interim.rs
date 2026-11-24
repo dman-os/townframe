@@ -36,12 +36,16 @@ struct InterimGrant {
 /// The configuration datum of an [`InterimGrant`]: the file an operator writes for it (a JSON
 /// object, which becomes the datum's value), where the datum goes, and which of the file's
 /// members name drawers. Each member in `drawers` is a drawer id or an array of them; the micro is
-/// granted `Read` over every drawer named.
+/// granted `Read` over every drawer named. The drawers the members in `blob_drawers` name (a
+/// subset of `drawers`) are the ones whose blobs the micro reads: its config gets a `blobCap`
+/// reaching them (an empty reach when the file names none of them), and a spec with no
+/// `blob_drawers` gets no `blobCap`.
 struct InterimConfig {
     file: &'static str,
     tag: &'static str,
     key: &'static str,
     drawers: &'static [&'static str],
+    blob_drawers: &'static [&'static str],
 }
 
 const INTERIM_GRANTS: &[InterimGrant] = &[InterimGrant {
@@ -52,12 +56,15 @@ const INTERIM_GRANTS: &[InterimGrant] = &[InterimGrant {
         "org.example.intxt.summarizeIntxts",
         "org.example.daybook.docs.readDatums",
         "org.example.daybook.docs.pollDatums",
+        // A commit's patch, which intxt keeps as a blob its intxt drawer's inventory pins.
+        "org.example.daybook.blobs.read",
     ],
     config: Some(InterimConfig {
         file: "review.json",
         tag: micro_review_manifest::CONFIG_TAG,
         key: micro_review_manifest::CONFIG_KEY,
         drawers: &["githubDrawer", "intxtDrawers"],
+        blob_drawers: &["intxtDrawers"],
     }),
 }];
 
@@ -134,7 +141,9 @@ fn parse_install_file(
         return Err(ferr!("the file is not a JSON object"));
     };
     let mut drawers = Vec::new();
+    let mut blob_drawers = Vec::new();
     for member in config.drawers {
+        let blobs = config.blob_drawers.contains(member);
         let listed: Vec<&str> = match value.get(*member) {
             None => continue,
             Some(serde_json::Value::String(id)) => vec![id.as_str()],
@@ -151,6 +160,9 @@ fn parse_install_file(
             let drawer = id
                 .parse::<DrawerId>()
                 .map_err(|error| ferr!("{member}: {id:?} is not a drawer id: {error}"))?;
+            if blobs && !blob_drawers.contains(&drawer) {
+                blob_drawers.push(drawer.clone());
+            }
             if !drawers.iter().any(|(held, _)| *held == drawer) {
                 drawers.push((drawer, DrawerAccess::Read));
             }
@@ -162,8 +174,9 @@ fn parse_install_file(
             tag: config.tag.to_owned(),
             key: config.key.to_owned(),
             value,
-            // The review micro's config requires `blobCap` (see `clay_node::install_one`).
-            blob_cap: true,
+            // A micro whose spec names blob members always gets a `blobCap` (the review micro's
+            // config requires one), reaching nothing when the file lists none of those drawers.
+            blob_drawers: (!config.blob_drawers.is_empty()).then_some(blob_drawers),
         },
     ))
 }

@@ -117,9 +117,10 @@ pub struct InstallConfig {
     pub tag: String,
     pub key: String,
     pub value: serde_json::Map<String, serde_json::Value>,
-    /// Whether the micro's config also carries a blobs capability as `blobCap`, minted for its
-    /// actor with the empty scope (see [`install_one`]).
-    pub blob_cap: bool,
+    /// The drawers whose blobs the micro reads, if its config carries a blobs capability as
+    /// `blobCap`: one minted for its actor that reaches every blob these drawers' inventories hold,
+    /// at `Read` (see [`install_one`]). `None`: no `blobCap`.
+    pub blob_drawers: Option<Vec<DrawerId>>,
 }
 
 pub struct NodeConfig {
@@ -512,38 +513,53 @@ async fn install_one(minting: &Minting, install: MicroInstall) -> Res<Installed>
         };
         Some(mint_docs(minting, &actor, scope).await?)
     };
-    // INTERIM: a micro whose config asks for `blobCap` is minted a blobs capability bound to its
-    // actor, with the EMPTY scope: it reads nothing. `BlobsScope` names exact blob ids and has no
-    // read-all or per-drawer form, and the blobs a micro reads (an intxt's patches) arrive after
-    // install, so no scope minted here could name them. The capability exists so the config
-    // decodes (the micro's config requires `blobCap`, and without it the micro stays
-    // Unconfigured); it widens when blob reach for drawers is designed with nodules (ADR 049
-    // §6.2 domain handle). The install file never decides it, as for `docCap`.
-    let blob_capability = match &config {
-        Some(InstallConfig { blob_cap: true, .. }) => Some(
-            minting
-                .blobs
-                .call_with(
-                    RequestContext::root(),
-                    minting.operator().metadata(),
-                    MintBlobsCapability {
-                        scope: BlobsScope::default(),
-                        rights: Rights::USE,
-                        subject: Some(actor.actor.actor_id),
-                    },
-                )
-                .await
-                .wrap_err_with(|| format!("minting the blobs capability of micro {micro}"))?
-                .capability_id,
-        ),
-        _ => None,
+    // INTERIM (until the ADR 049 §6.2 domain handle): a micro whose config names blob drawers is
+    // minted a blobs capability bound to its actor that reaches those drawers at `Read`. The
+    // blobs node checks a drawer reach at read time against the drawer's blob inventory, so the
+    // blobs a micro reads (an intxt's patches) need not exist yet when it is installed. A blob
+    // drawer the micro is not also granted is an install table error: its documents would name
+    // blobs it can read but never the documents that say what they are. The capability is
+    // written into the config as `blobCap`; the install file never decides it, as for `docCap`.
+    let blob_capability = match config.as_ref().and_then(|config| config.blob_drawers.as_ref()) {
+        Some(blob_drawers) => {
+            for drawer in blob_drawers {
+                assert!(
+                    mirrored.contains(drawer),
+                    "micro {micro}'s blob drawer {drawer} is not among its granted drawers"
+                );
+            }
+            let scope = BlobsScope {
+                drawers: blob_drawers
+                    .iter()
+                    .map(|drawer| (drawer.clone(), DrawerAccess::Read))
+                    .collect(),
+                ..BlobsScope::default()
+            };
+            Some(
+                minting
+                    .blobs
+                    .call_with(
+                        RequestContext::root(),
+                        minting.operator().metadata(),
+                        MintBlobsCapability {
+                            scope,
+                            rights: Rights::USE,
+                            subject: Some(actor.actor.actor_id),
+                        },
+                    )
+                    .await
+                    .wrap_err_with(|| format!("minting the blobs capability of micro {micro}"))?
+                    .capability_id,
+            )
+        }
+        None => None,
     };
     let config = config.map(
         |InstallConfig {
              tag,
              key,
              mut value,
-             blob_cap: _,
+             blob_drawers: _,
          }| {
             if let Some(capability) = doc_capability {
                 value.insert(

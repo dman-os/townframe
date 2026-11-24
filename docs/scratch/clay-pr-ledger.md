@@ -4,7 +4,7 @@ Scope: The claytxt lane's stack, decisions and the request accounting.
 
 Status: living ledger of the claytxt lane (Clay, the kit, micros, daytxt apps, Pierre/CodeView, builds/mbx).
 Owner: Claude (claytxt manager); operator reviews and merges.
-Updated: 2026-11-24 (layers 56-62: CI fixed and scoped, NSID clay half, the micro clock; rewritten earlier the same day)
+Updated: 2026-11-24 (rebased onto node-76; layers 56-63: CI fixed and scoped, NSID clay half, the micro clock, blob reach)
 
 Keep this head current. Update it in the same layer as the work it records. The dated sections below
 "History" are the original #79 design-settling ledger, kept for its decisions.
@@ -15,9 +15,11 @@ Keep this head current. Update it in the same layer as the work it records. The 
   #82 (datum_core), #83 (mbx), #120. Nothing since 2026-11-17.
 - **Everything else is the claytxt stack** below. `feat/daytxt` (#216) stays a CI-only integration branch, never a
   PR base; the stack's tip reproduces its tree. #212, #231 and #232 were merged into `feat/daytxt`, not main.
-- **Base:** the stack sits on the intxt stack tip (`stack/intxt-34-prlinks-split`, intxt #221, tip #290), which sits on
-  nodules' node stack (#105..#199, #233..#252, node-55 at 91fb13c0). Our hosts install intxt and need the node
-  APIs, so the stack cannot land before those two.
+- **Base:** the stack sits on the intxt stack tip (`stack/intxt-37-node76-fixups`, intxt #221, tip #321), which sits
+  on nodules' node stack (#105..#199, #233..#252, node-76). Our hosts install intxt and need the node APIs, so the
+  stack cannot land before those two. Rebased from node-55 on 2026-11-24 night: upstream's node-76 changes to the
+  node directory code (keyring-held seed, `node.json` v2, "server" wording, `--bg`) were ported into `day_node`,
+  where layer 29 moved that code.
 - **Superseded PRs** (their content is in the stack; close once the stack is reviewed): #86, #88, #89, #90, #91,
   #121, #132, #145, #153, #162, #169, #171, #174, #176, #206, #207, #208, #209, #210, #213, #214, #217, #218,
   #219, #220, #222, #223, #224, #87, #129.
@@ -92,6 +94,8 @@ of its paths and lists the original commits in its message. They are topical and
 | 60-cx-clock | #317 | feat(clay_mdk): Context::sleep and Context::now for micros |
 | 61-wit-deps-stale-hash | #318 | build(nix): the wit-deps FOD name carries its inputs' digest, so a stale hash fails at once |
 | 62-ledger-docs | #319 | docs(scratch): ledger update and the web components step 2 note |
+| 63-review-blob-reach | #323 | feat(clay_node,daytxt_native): the review micro's blobCap reaches its intxt drawers |
+| 64-review-codeview | #324 | feat(micro_review): Show changes renders the patch in CodeView (intxt's commit, carried) |
 
 ## Accounting of operator requests (2026-11-03..24)
 
@@ -134,10 +138,9 @@ Built from the raw chat on 2026-11-24 (83 requests: 23 on main, 23 done but unme
       render below.
     - `ReviewConfig` (minted doc_cap/blob_cap) goes away once micros reach their granted `#drawers` through the
       ADR 049 §6.2 domain handle on Cx.
-    - Patch blobs: layer 56 mints an empty `blobCap` so the review config decodes. Before that, a config without
-      one left the micro Unconfigured. The real scope is nodules' `BlobsScope { drawers }` (#244, node-67),
-      checked at read time against the drawer's blob inventory. When the stack is based on node-76, mint
-      `{ drawers: intxtDrawers }`, grant `blobs.read`, and intxt wires `read_blob`.
+    - Patch blobs: layer 63 mints the review micro's `blobCap` as `BlobsScope { drawers: {intxtDrawers: Read} }`
+      (nodules #244, checked at read time against the drawer's blob inventory) and grants `blobs.read`. intxt
+      wires `read_blob` to it. The interim install table names which config members are blob drawers.
     - A clock for micros (asked by intxt for CodeView's pacing): layer 60 adds `Context::sleep` and `Context::now`.
       In a guest the wait runs on an incarnation-owned task that calls `notify_views()` when it ends, the same
       manual wake `call_bytes` needs (design debt below). intxt's CodeView switch goes on top of layer 60.
@@ -153,6 +156,12 @@ Built from the raw chat on 2026-11-24 (83 requests: 23 on main, 23 done but unme
     Update (11-24 night): the `micros` service is a nodule in a core cartridge (ADR 053) that opens micro actors
     under its own cartridge actor (node-78); the GUI contract is unchanged. The node SDK builds on our `day_node`
     crate. The node-76 restack conflicts in `day_node` with nodules #239 and #250 (`day_cli/context.rs`).
+
+17. **CodeView for micros (asked by intxt, 11-24 night):** intxt's review micro renders "Show changes" with
+    CodeView (their commit, carried above our tip). Our part, in this order: (1) rows on a first render or under
+    SSR before any measurement pass, so headless tests and a stopped-clock fixture see file rows; (2) a ScrubStrip
+    input with owned labels (the showcase leaks `&'static str` file ids) and an optional or measured viewport;
+    (3) `CodeViewFile::from_patch` over bytes that reports non-UTF-8 itself.
 
 Questions still open for the operator:
 - Is a dev-dependency from `clay_mdk` to `clay_dioxus_kit` acceptable?
