@@ -2466,7 +2466,7 @@ mod core_like {
             .invoke(
                 core_auth,
                 open_actor(),
-                json!({ "parent": actor, "path": "nodules/micros/child", "rights": ["use"] }),
+                json!({ "parent": actor, "path": "micros/child", "rights": ["use"] }),
             )
             .await
             .unwrap();
@@ -2489,7 +2489,7 @@ mod core_like {
             "sibling",
             "nodules/alpha",
             "",
-            "nodules/micros/child/grandchild",
+            "micros/child/grandchild",
         ] {
             let refused = node
                 .invoke(

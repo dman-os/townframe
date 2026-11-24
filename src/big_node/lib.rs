@@ -473,7 +473,7 @@ impl BigNode {
                 &mut stop,
             )
             .await?;
-            let (dispatch, nodule_dispatch_authority) = boot_dispatch(
+            let (dispatch, dispatch_authorities) = boot_dispatch(
                 &authority,
                 nodules_actor.actor.actor_id,
                 dispatch_namespace,
@@ -488,7 +488,7 @@ impl BigNode {
                 &nodules_actor,
                 nodules_namespace,
                 &dispatch,
-                nodule_dispatch_authority,
+                dispatch_authorities,
                 host,
                 &blobs,
                 &cartridges,
@@ -849,6 +849,24 @@ async fn open_actor(authority: &Authority, path: &str) -> Res<(OpenedActor, Name
     Ok((actor, namespace))
 }
 
+/// The micros runtime's subsystem actor, beside `nodules` (one subsystem actor per runtime, each
+/// trusted in its own subtree): the core cartridge's nodule acts as it (ADR 052 §2), so each
+/// micro's actor, `micros/<cartridge>/<micro>`, is in its own subtree. No namespace: the micros
+/// nodule mints through the services' own namespaces, as every nodule does.
+async fn open_micros(authority: &Authority) -> Res<OpenedActor> {
+    Ok(authority
+        .client
+        .call(
+            RequestContext::root(),
+            OpenActor {
+                parent: authority.root,
+                path: "micros".into(),
+                rights: Rights::all(),
+            },
+        )
+        .await?)
+}
+
 /// Boots the nodule service's executor through `host`, then the nodule service on the node's
 /// config drawer after granting the nodules actor admin over it. The executor is called by the
 /// nodule service, so it boots before it and stops after it (its stop stage is pushed first); it
@@ -865,7 +883,7 @@ async fn boot_nodules<Host, Hosting>(
     nodules_actor: &OpenedActor,
     namespace: Namespace,
     dispatch: &Dispatch,
-    dispatch_authority: CapId,
+    (dispatch_authority, micros_actor, micros_dispatch_authority): (CapId, OpenedActor, CapId),
     host: Host,
     blobs: &big_blobs::Blobs,
     cartridges: &Cartridges,
@@ -956,24 +974,49 @@ where
         )
         .await?
         .capability_id;
-    // The micros runtime's subsystem actor, a child of `nodules`: the core cartridge's nodule acts
-    // as it (ADR 052 §2), so each micro's actor, `nodules/micros/<cartridge>/<micro>`, is in its
-    // own subtree. It is under `nodules`, not beside it, because the service mints every
-    // nodule's handles from delegator handles bound to its own actor, and an introduction may
-    // only name a descendant of the delegator's subject: a sibling's handles would be refused as
-    // an `Escalation`. No namespace: the micros nodule mints through the services' own namespaces, as
-    // every nodule does.
-    let micros_actor = authority
+    // The core cartridge's nodule acts as `micros`, a sibling of `nodules`, and an introduction
+    // may only name a descendant of the delegator's subject. So its routine handles are minted
+    // from delegators the operator introduces to `micros`, as it introduces the nodule service's
+    // to `nodules` ([`boot_dispatch`] for dispatch, above for blobs): the blobs one for the
+    // operation-level flags, and a docs one that reaches the cartridge config documents in the
+    // shared config drawer, the most a routine's docs handle can name. (A drawers handle is
+    // minted by the `micros` actor's identity capability, as the nodule service's are by its
+    // own.)
+    let micros_blobs_delegator = blobs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
-            OpenActor {
-                parent: nodules_actor.capability,
-                path: "nodules/micros".into(),
-                rights: Rights::all(),
+            Authorization::identity(authority.root).metadata(),
+            big_blobs_core::MintBlobsCapability {
+                scope: big_blobs_core::protocol::BlobsScope {
+                    put: true,
+                    ..Default::default()
+                },
+                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                subject: Some(micros_actor.actor.actor_id),
             },
         )
-        .await?;
+        .await?
+        .capability_id;
+    let micros_docs_delegator = docs
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(authority.root).metadata(),
+            big_cabinet_core::doc::MintDocCapability {
+                scope: big_cabinet_core::doc::DocScope {
+                    drawers: std::collections::BTreeMap::from([(
+                        shared_config_drawer.clone(),
+                        big_cabinet_core::doc::DrawerReach::all_kinds(EntryAccess::Write),
+                    )]),
+                    ..Default::default()
+                },
+                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                subject: Some(micros_actor.actor.actor_id),
+            },
+        )
+        .await?
+        .capability_id;
     let (nodules, nodules_stop) = big_nodule::boot(NodulesConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
@@ -997,7 +1040,15 @@ where
         executor: Some(Arc::clone(&executor)),
         schemas,
         allow_slot_takeover,
-        core_cartridge: core_cartridge::pin(&cartridges.publisher, micros_actor),
+        core_cartridge: core_cartridge::pin(
+            &cartridges.publisher,
+            micros_actor,
+            big_nodule::CoreDelegators {
+                dispatch: micros_dispatch_authority,
+                docs: micros_docs_delegator,
+                blobs: micros_blobs_delegator,
+            },
+        ),
         sql,
     })
     .await?;
@@ -1011,8 +1062,15 @@ where
 /// Then the operator introduces the nodule service to dispatch: it mints the handle the nodule
 /// service mints every nodule's own handle from, bound to `nodules_actor` (an introduction, so
 /// it carries `Rights::DELEGATE`, which the nodule service needs to bind each nodule's handle
-/// to that nodule). `scope` is the most any nodule can be granted. It is retracted once the nodule
-/// service has stopped, which also kills the handles minted from it.
+/// to that nodule), and a second one, of the same scope, bound to the `micros` actor (opened
+/// here and returned with it) for the core
+/// cartridge's nodule, which acts as `micros`, a sibling of `nodules`: an introduction may only
+/// name a descendant of the delegator's subject, so a `nodules`-bound delegator cannot mint a
+/// handle for the `micros` actor. `scope` is the most any nodule can be granted. Both are
+/// retracted once the nodule service has stopped, which also kills the handles minted from them.
+///
+/// Returns dispatch with the two delegators and the `micros` actor they are bound to: the
+/// `nodules` delegator, the actor, and its delegator.
 ///
 /// The retraction only matters within a live process: the authority's capability ledger is in
 /// memory and starts empty every boot, so after a crash nothing of the previous boot's authority
@@ -1022,55 +1080,64 @@ async fn boot_dispatch(
     nodules_actor: Uuid7,
     namespace: Namespace,
     stop: &mut StopToken,
-) -> Res<(Dispatch, CapId)> {
+) -> Res<(Dispatch, (CapId, OpenedActor, CapId))> {
+    let micros_actor = open_micros(authority).await?;
     let (dispatch, dispatch_stop) = big_dispatch::boot(DispatchConfig {
         authority: authority.client.clone(),
         namespace,
     });
     stop.stages.push(Stage::Service(dispatch_stop));
-    let capability = dispatch
-        .client
-        .call_with(
-            RequestContext::root(),
-            Authorization::identity(authority.root).metadata(),
-            MintDispatchCapability {
-                // Every method: a nodule's method grants are narrowed from this scope. The
-                // privilege bit is the most a handle minted from it can carry, and a handle
-                // carries it only when its cartridge's grants say so (`GrantBody::privileged`),
-                // which only the node writes, for its core cartridge, for the boot. A person's
-                // grant, however it is configured, never reaches a method that manages nodules
-                // or mints authority (`XrpcMethod::privileged`).
-                scope: DispatchScope {
-                    authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
-                    privileged: true,
-                    ..Default::default()
+    let mut delegators = Vec::with_capacity(2);
+    for subject in [nodules_actor, micros_actor.actor.actor_id] {
+        let capability = dispatch
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(authority.root).metadata(),
+                MintDispatchCapability {
+                    // Every method: a nodule's method grants are narrowed from this scope. The
+                    // privilege bit is the most a handle minted from it can carry, and a handle
+                    // carries it only when its cartridge's grants say so
+                    // (`GrantBody::privileged`), which only the node writes, for its core
+                    // cartridge, for the boot. A person's grant, however it is configured, never
+                    // reaches a method that manages nodules or mints authority
+                    // (`XrpcMethod::privileged`).
+                    scope: DispatchScope {
+                        authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
+                        privileged: true,
+                        ..Default::default()
+                    },
+                    rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                    subject: Some(subject),
                 },
-                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
-                subject: Some(nodules_actor),
-            },
-        )
-        .await?
-        .capability_id;
+            )
+            .await?
+            .capability_id;
+        delegators.push(capability);
+    }
     let (retract, tasks) = service_utils_rs::StopToken::new();
     let cancellation = tasks.clone();
     let client = authority.client.clone();
+    let retracting = delegators.clone();
     tasks
         .spawn(async move {
             cancellation.cancelled().await;
-            client
-                .call(
-                    RequestContext::root(),
-                    RetractCapability {
-                        via: capability,
-                        capability,
-                    },
-                )
-                .await
-                .expect("retracting the nodule service's dispatch authority");
+            for capability in retracting {
+                client
+                    .call(
+                        RequestContext::root(),
+                        RetractCapability {
+                            via: capability,
+                            capability,
+                        },
+                    )
+                    .await
+                    .expect("retracting a nodule service dispatch authority");
+            }
         })
         .expect("a fresh stop token accepts tasks");
     stop.stages.push(Stage::Service(retract));
-    Ok((dispatch, capability))
+    Ok((dispatch, (delegators[0], micros_actor, delegators[1])))
 }
 
 /// Mints the drawers actor's admin capability over `drawer` and grants `access` to `subject`, which

@@ -196,8 +196,8 @@ pub struct NodulesConfig {
 }
 
 /// The id of the node's core cartridge, the version the node's build carries (ADR 053), the
-/// actor its nodule acts as (the `micros` subsystem actor, with the rights to open children), and
-/// the grants the node itself makes it. The grants are held for the boot, never written to its
+/// actor its nodule acts as (the `micros` subsystem actor, with the rights to open children), the
+/// handles its routines' handles are minted from, and the grants the node itself makes it. The grants are held for the boot, never written to its
 /// config document, which is what lets one of them be `privileged`
 /// ([`big_cartridges_core::config::GrantBody::privileged`]): a person cannot grant that.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,10 +205,24 @@ pub struct CoreCartridge {
     pub id: CartridgeId,
     pub version: big_cartridges_core::Version,
     pub actor: OpenedActor,
+    pub delegators: CoreDelegators,
     pub grants: std::collections::BTreeMap<
         big_cartridges_core::config::GrantKey,
         big_cartridges_core::config::GrantBody,
     >,
+}
+
+/// The handles the core cartridge's routines' handles are minted from, which the operator
+/// introduces to the `micros` actor. The nodule service mints every other nodule's handles from
+/// ones bound to its own actor (`nodules`), but an introduction may only name a descendant of the
+/// delegator's subject, and `micros` is a sibling of `nodules`, not a descendant: a `nodules`-bound
+/// delegator cannot mint a handle for it. Each has the scope rules of the service's own, `privileged`
+/// included for dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoreDelegators {
+    pub dispatch: CapId,
+    pub docs: CapId,
+    pub blobs: CapId,
 }
 
 /// The hosted surface: it settles who the caller is and what they may touch, then hands the
