@@ -26,21 +26,33 @@ use big_cabinet_core::authority::AttenuateCapability;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::OpenedActor;
+use big_cabinet_core::authority::ResolveAuthority;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::datum::Nsid;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ReadDatums;
+use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cabinet_core::reference::Location;
 use big_cabinet_core::reference::defs_lexicon;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Component;
+use big_cartridges_core::ComponentExport;
 use big_cartridges_core::Digest;
 use big_cartridges_core::Necessity;
+use big_cartridges_core::Nodule;
 use big_cartridges_core::Permbind;
+use big_cartridges_core::PermbindDatum;
 use big_cartridges_core::PermbindMethod;
 use big_cartridges_core::ResolvedCartridge;
+use big_cartridges_core::Routine;
+use big_cartridges_core::RoutineImpl;
+use big_cartridges_core::RoutineUse;
 use big_cartridges_core::Version;
+use big_cartridges_core::WasmComponent;
 use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
 use big_cartridges_core::protocol::AwaitCartridgeGrants;
@@ -53,9 +65,12 @@ use big_cartridges_core::protocol::ResolveCartridgePin;
 use big_cartridges_core::protocol::StageCartridgeVersion;
 use big_cartridges_core::registry::version_key;
 use big_cartridges_core::registry::version_pin;
+use big_dispatch_core::MintDispatchCapability;
 use method_core::ByteBody;
 use method_core::Method;
 use method_core::XrpcMethod;
+use serde_json::Value;
+use serde_json::json;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -85,7 +100,7 @@ pub fn id(publisher: &str) -> CartridgeId {
 /// (`NoduleService::read_scope`). `listCartridgeInstalls` is not a privileged method for dispatch
 /// (a scoped management handle may list the installs it manages), but a nodule's unscoped answer
 /// is the same node bookkeeping the other two read, so it is held to the same rule.
-fn methods() -> [(XrpcMethod, Necessity, bool); 7] {
+fn methods() -> [(XrpcMethod, Necessity, bool); 12] {
     [
         (OpenActor::XRPC, Necessity::Required, false),
         (AttenuateCapability::XRPC, Necessity::Required, false),
@@ -97,6 +112,17 @@ fn methods() -> [(XrpcMethod, Necessity, bool); 7] {
         // there when the core nodule reconciles. It reads the envelope an install pins, which is
         // where a micro's `uses` and the permbinds they name are declared.
         (ResolveCartridgePin::XRPC, Necessity::Required, true),
+        // What the micros nodule mints with. The operator check resolves the caller's
+        // capability, and each service's mint takes the handle to mint from as a body
+        // `capability` (the nodule's dispatch and blobs handles at the `micros` delegators'
+        // scope, and its own actor's identity capability for docs and drawers). All are
+        // registered before the nodule service reconciles, and none is a privileged method:
+        // what bounds them is the handle each names.
+        (ResolveAuthority::XRPC, Necessity::Required, false),
+        (MintDispatchCapability::XRPC, Necessity::Required, false),
+        (MintDocCapability::XRPC, Necessity::Required, false),
+        (MintDrawerCapability::XRPC, Necessity::Required, false),
+        (MintBlobsCapability::XRPC, Necessity::Required, false),
     ]
 }
 
@@ -137,26 +163,125 @@ fn version() -> Version {
         .expect("the core cartridge version is semver")
 }
 
-/// The core cartridge of the node whose publisher DID is `publisher`: today the reference defs
-/// (`org.example.daybook.defs`), the one type library every cartridge's Lexicons may refer to,
-/// and the core nodule. The nodule has no routines yet; the micros routines of ADR 052 are its
-/// first. It is declared now because an install is of a cartridge's nodule or micro (a
-/// cartridge contributing neither is refused), so it is what makes the core cartridge installed.
-/// Its manifest declares a method permbind for each of [`methods`], the runtime permbind of ADR
-/// 052 §2.2 item 2, which [`pin`] grants.
-fn package(publisher: &str) -> ResolvedCartridge {
+/// The micros nodule's component, built from `micros_nodule_guest` for `wasm32-wasip3` by this
+/// crate's build script and embedded, so the core cartridge ships with the node and the GUI works
+/// with no network (the registry is never asked for it).
+const MICROS_COMPONENT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/micros_nodule_guest.wasm"));
+
+/// The key of the micros nodule's component in the core cartridge.
+const MICROS_COMPONENT_KEY: &str = "micros";
+
+/// The authority of the core cartridge's own operations. It is narrower than the node's whole
+/// `org.example.daybook` so it does not collide with the prefixes other cartridges hold.
+const AUTHORITY: &str = "org.example.daybook.micros";
+
+/// The settings datum the micros nodule keeps its minted handles in (`micros_nodule::MINTED_TAG`).
+const MINTED: &str = micros_nodule::MINTED_TAG;
+
+/// The Lexicon of an operation of the micros nodule: a JSON procedure whose members are as typed
+/// as a Lexicon states a map or a nested record (`unknown`, which admits objects only).
+fn procedure(nsid: &str, input: Value, output: Value, errors: &[&str]) -> Value {
+    json!({
+        "lexicon": 1,
+        "id": nsid,
+        "defs": { "main": {
+            "type": "procedure",
+            "input": { "encoding": "application/json", "schema": input },
+            "output": { "encoding": "application/json", "schema": output },
+            "errors": errors.iter().map(|name| json!({ "name": name })).collect::<Vec<_>>(),
+        }}
+    })
+}
+
+/// The core cartridge of the node whose publisher DID is `publisher`: the reference defs
+/// (`org.example.daybook.defs`), the one type library every cartridge's Lexicons may refer to, and
+/// the core nodule, which is the micros nodule of ADR 052 (`micros.handles` and
+/// `micros.awaitHandles`, both privileged to the operator by the nodule itself). Its manifest
+/// declares a method permbind for each of [`methods`], the runtime permbind of ADR 052 §2.2 item
+/// 2, which [`pin`] grants, and the settings datum it keeps its minted handles in.
+///
+/// Also the bytes of its wasm component by digest, which go into the blob store before the
+/// package is staged.
+fn package(publisher: &str) -> (ResolvedCartridge, BTreeMap<Digest, Vec<u8>>) {
     let defs = defs_lexicon();
-    let nsid = defs["id"]
+    let defs_nsid: Nsid = defs["id"]
         .as_str()
         .expect("the defs Lexicon states its id")
         .parse()
         .expect("the defs Lexicon id is an NSID");
-    let file = serde_json::from_value(defs).expect("a Lexicon file is a JSON object");
+    let mut lexicons = BTreeMap::from([(
+        defs_nsid,
+        serde_json::from_value(defs).expect("a Lexicon file is a JSON object"),
+    )]);
+    let handles_nsid = <micros_nodule::Handles as Method>::XRPC.nsid;
+    let await_nsid = <micros_nodule::AwaitHandles as Method>::XRPC.nsid;
+    let micro_handles = json!({ "type": "object", "required": ["micros", "revision"], "properties": {
+        "micros": { "type": "array", "items": { "type": "unknown" } },
+        "revision": { "type": "string" },
+    }});
+    let errors = ["Denied", "UnknownCartridge", "Upstream"];
+    for file in [
+        procedure(
+            handles_nsid,
+            json!({ "type": "object", "required": ["cartridgeId"], "properties": {
+                "cartridgeId": { "type": "string" },
+                "micro": { "type": "string" },
+            }}),
+            micro_handles,
+            &errors,
+        ),
+        procedure(
+            await_nsid,
+            json!({ "type": "object", "required": ["since", "holdMs"], "properties": {
+                "since": { "type": "unknown" },
+                "holdMs": { "type": "integer", "minimum": 0 },
+            }}),
+            json!({ "type": "object", "required": ["cartridges"], "properties": {
+                "cartridges": { "type": "unknown" },
+            }}),
+            &errors,
+        ),
+        json!({
+            "lexicon": 1,
+            "id": MINTED,
+            "defs": { "main": { "type": "object", "properties": {
+                "boot": { "type": "string" },
+                "body": { "type": "unknown" },
+            }}}
+        }),
+    ] {
+        let nsid: Nsid = file["id"]
+            .as_str()
+            .expect("a Lexicon states its id")
+            .parse()
+            .expect("a Lexicon id is an NSID");
+        lexicons.insert(
+            nsid,
+            serde_json::from_value(file).expect("a Lexicon file is a JSON object"),
+        );
+    }
+
+    let digest = Digest::of(MICROS_COMPONENT);
+    let placeholder = |name: &str| {
+        DatumPin::new(
+            Location::parse(&format!("dtxt:datum:self/{name}/main"))
+                .expect("a placeholder pin location"),
+        )
+    };
     let mut cartridge = Cartridge::new(id(publisher), version());
     cartridge.name = Some("Core".to_owned());
-    cartridge.description =
-        Some("The node's own vocabulary: the type libraries every cartridge may refer to.".into());
-    cartridge.nodule = Some(Default::default());
+    cartridge.description = Some(
+        "The node's own vocabulary and its management of micros: the type libraries every \
+         cartridge may refer to, and the nodule that opens each micro's actor and mints its handles."
+            .into(),
+    );
+    cartridge.authority = Some(AUTHORITY.to_owned());
+    cartridge.settings.insert(MINTED.parse().expect("an NSID"));
+    cartridge.components.insert(
+        MICROS_COMPONENT_KEY.to_owned(),
+        placeholder(MICROS_COMPONENT_KEY),
+    );
     cartridge.permbinds = methods()
         .into_iter()
         .map(|(method, necessity, _)| {
@@ -175,11 +300,68 @@ fn package(publisher: &str) -> ResolvedCartridge {
             )
         })
         .collect();
-    ResolvedCartridge::new(
-        cartridge,
-        BTreeMap::from([(nsid, file)]),
-        BTreeMap::new(),
-        BTreeMap::new(),
+    cartridge.permbinds.insert(
+        MINTED.to_owned(),
+        Permbind::Datum(PermbindDatum {
+            nsid: MINTED.parse().expect("an NSID"),
+            description: "The handles the micros nodule minted, kept across its requests.".into(),
+            read: Some(Necessity::Required),
+            write: Some(Necessity::Required),
+            create: None,
+            delete: None,
+            extra: Default::default(),
+        }),
+    );
+    // Every routine of the nodule uses every permbind: the two share one component and one set
+    // of handles, and what bounds each is what the node grants the cartridge.
+    let uses: BTreeMap<String, RoutineUse> = cartridge
+        .permbinds
+        .keys()
+        .map(|key| {
+            (
+                key.clone(),
+                if key == MINTED {
+                    RoutineUse {
+                        read: true,
+                        write: true,
+                        ..Default::default()
+                    }
+                } else {
+                    RoutineUse::default()
+                },
+            )
+        })
+        .collect();
+    let mut nodule = Nodule::default();
+    for (key, nsid) in [("handles", handles_nsid), ("awaitHandles", await_nsid)] {
+        nodule.routines.insert(
+            key.to_owned(),
+            Routine {
+                r#impl: RoutineImpl::ComponentExport(ComponentExport {
+                    component: MICROS_COMPONENT_KEY.to_owned(),
+                    export: "handle".to_owned(),
+                    extra: Default::default(),
+                }),
+                implements: nsid.parse().expect("an operation NSID"),
+                uses: uses.clone(),
+                extra: Default::default(),
+            },
+        );
+    }
+    cartridge.nodule = Some(nodule);
+    let components = BTreeMap::from([(
+        MICROS_COMPONENT_KEY.to_owned(),
+        Component::Wasm(WasmComponent {
+            bytes: placeholder(MICROS_COMPONENT_KEY),
+            digest,
+            size: MICROS_COMPONENT.len() as u64,
+            media_type: "application/wasm".to_owned(),
+            extra: Default::default(),
+        }),
+    )]);
+    (
+        ResolvedCartridge::new(cartridge, lexicons, BTreeMap::new(), components),
+        BTreeMap::from([(digest, MICROS_COMPONENT.to_vec())]),
     )
 }
 
@@ -189,7 +371,7 @@ impl BigNode {
     /// node serves anyone, so a node created before the core cartridge existed takes it at its
     /// next boot and an upgraded binary moves the install to its own version.
     pub(crate) async fn ensure_core_cartridge(&self) -> Res<()> {
-        let package = package(&self.cartridges.publisher);
+        let (package, blobs) = package(&self.cartridges.publisher);
         let operator = Authorization::identity(self.authority.root);
         let installed = self
             .nodules
@@ -210,7 +392,7 @@ impl BigNode {
             return Ok(());
         }
         let pin = self
-            .publish_version(&package, &BTreeMap::new(), |envelope| envelope)
+            .publish_version(&package, &blobs, |envelope| envelope)
             .await?;
         self.nodules
             .client
@@ -373,12 +555,15 @@ mod tests {
     fn the_core_cartridge_content_changes_only_with_its_version() {
         // The envelope is part of the content (its permbinds are what the node grants), and a
         // fixed publisher makes its id one value.
-        let package = super::package("did:web:example.org");
+        let (package, _) = super::package("did:web:example.org");
+        // The component's bytes are not in the digest: a wasm build is not reproducible across
+        // toolchains, so pinning them would fail on every machine but the one that blessed it.
+        // They change with the guest's sources, which is a version bump by the same rule.
         let content = serde_json::to_vec(&(
             &package.cartridge,
             &package.lexicons,
             &package.sidecars,
-            &package.components,
+            package.components.keys().collect::<Vec<_>>(),
         ))
         .expect("a package serializes");
         assert_eq!(
