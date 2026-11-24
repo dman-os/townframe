@@ -285,7 +285,7 @@ and `cgka_ops_reachable_by_agent` (`keyhive.rs:1546-1570`, `1758-1830`), and a r
 receives all three. A device added to the group later is seated by any reader that holds the tree
 (`reconcile_doc_readers`, `keyhive.rs:750-766`), so readers learn it as soon as they sync the group. The operator's
 worry is justified: **a malicious or compromised granter learns every device in the group you hand them**, at the moment
-of the grant, and learns new ones as they join. What they cannot learn is devices outside that group. So the grantee
+of the grant, including devices that never open the drawer, and learns each device added to that group later. What they cannot learn is devices outside that group. So the grantee
 chooses what to expose by choosing which group to present, which is the per-context design of section 3.
 
 **3. Relays.**
@@ -485,8 +485,10 @@ tree and a member's prekey seats it afterwards.
 
 1. **Rewrite the promise.** The earlier recommendation "the grantee chooses what to expose by choosing which group to
    present" stands, but the new fact is that a grantee can also *add devices later* through a device the granter
-   already knows, with no further granter action. State the guarantee as: the granter learns the devices that
-   join the drawer, when they join, never devices that stay out of it.
+   already knows, with no further granter action. **Corrected 2026-11-24 (see "Correction: what a reader of D learns",
+   below):** the guarantee is not "the granter learns the devices that join the drawer". It is that whoever reads D
+   learns every device in the group presented to it, whether or not those devices ever open D, plus any device later
+   given standing over D.
 2. **Prefer one device per context.** The only way for the granter never to learn N2 is for N2 never to be a member
    of D. If the person wants a second device to read D, the second device is exposed to every reader of D. Offer
    the per-context group as the tool for choosing which devices that is.
@@ -497,3 +499,125 @@ tree and a member's prekey seats it afterwards.
    separate decision (pins, `big_repo` surfaces, the `Agent`/`Group` types it uses), and I did not assess its cost.
    I did not read upstream's sync protocol or `subduction_keyhive` against it: the claims about what a peer is sent
    come from `keyhive_core`, not from the wire.
+
+## Correction: what a reader of D learns
+
+An earlier line said the granter learns devices "when they join the drawer". That claims too much hiding. If D is
+granted to a group G, then G's own membership certificates (G to its devices) travel with D, so **whoever reads D learns
+every device in G, including devices that never open D, plus any device later given standing over D.** Nothing else is
+hidden. Checked against code, not only the design doc:
+
+- **Upstream.** `closure(D)` is built from `reaches[D]`, the nodes with standing over D, and takes "edges about" each of
+  them (`keyline_memory/src/state.rs:304-328`, edges keyed by subject at `:93-95`). G has standing over D, so
+  the certificates about G are in it. The design says the same: the closure holds "every node that has ever had standing
+  over S ... every certificate about those nodes" (`design/keyline/README.md:457`, `implementation.md:260`: "what sync
+  sends"). Keyhive sends it: `certificates_for_agent` is the closure of every subject the peer stands over
+  (`keyhive_core/src/keyhive.rs:2420-2440`), and the prekey ops of every agent those certificates name go with it
+  (`prekey_ops_referenced_by`, `:2313`). Since a revoked member keeps its place in the positive graph, a device removed
+  from G stays visible too.
+- **Our fork behaves the same.** `membership_ops_for_agent` walks each delegation head with `bfs_membership_ops`, which
+  for a delegation to a group "also enqueues the group delegate's own delegation and revocation heads"
+  (`../keyhive/keyhive_core/src/principal/group/membership_operation.rs:586-607`, `:631-650`). It then adds the prekey ops
+  of every transitive member (`keyhive.rs:1758-1830`). So the earlier fork-based reading ("a reader receives the group's
+  delegations and each member's prekey ops") was right, and "devices appear when they join the drawer" was the mistake.
+- **CGKA leaves point the same way.** Every reader of D is a leaf, and all of G's devices are readers of D, so a
+  Read-holding replica seats each one whose prekeys it holds (`keyhive.rs:766-840`), whether or not it ever fetches D.
+
+Sections 3 and 5.1 stand as written; the line corrected is in "What this means for the design", item 1 of the upstream
+section. What a party to D learns, in one sentence per role:
+
+| Party | Learns |
+|---|---|
+| Reader of D (granter included) | Every device in each group with standing over D, former members too, and any device given standing over D directly |
+| Relay holding D | The same, plus timing and sizes (`design/threat_model.md:31`) |
+| A device in G that never opens D | Nothing it did not already hold: it learns D's id and closure when it syncs |
+
+## A public front group (G_pub) for invitations
+
+**The design.** A group G_pub whose one member is a "front" agent, published so anyone can invite it. When the owner
+accepts an invitation to D, the front re-delegates D to a private group G_priv or to chosen devices. The aim is that the
+inviter never learns the owner's other devices.
+
+**What works.**
+- *A group has no prekey.* Only an individual publishes a prekey and a contact card (`keyhive_core/src/contact_card.rs:18-20`).
+  So "G_pub's prekey" means the front's card plus G_pub's id.
+- *Creating it.* `generate_group` makes the active individual and any coparents the group's admins, by root edges signed
+  with a fresh key "that is then discarded" (`keyhive.rs:289-317`). The creating device is therefore always a member and always named
+  in the group's certificates. For a relay to be the front, the relay creates G_pub or is a coparent.
+- *The front can re-delegate with no write access.* Issuing needs only standing, clamped to it
+  (`implementation.md:69`; `keyhive.rs:1598-1620`). A member of G_pub with at least `Read` over G_pub holds `Read` over D
+  by the minimum along the route (`README.md:158-160`), so it can sign `front -> G_priv` about D. The group's discarded
+  key is never needed, because authority flows through members.
+
+**What the inviter learns, and when.**
+
+| Moment | Learned by the inviter (and any reader of D) |
+|---|---|
+| Invite: `A -> G_pub` about D | G_pub's id, the front's identity (it is the audience of G_pub's root edge), the front's prekeys (to seat it) |
+| Accept: `front -> G_priv` about D | G_priv's id **and every member of G_priv**, because G_priv now has standing over D and its certificates are in `closure(D)`. The same if the front delegates to individual devices: they are named by the certificate and seated as leaves. |
+
+**Verdict: it does not hide the owner's devices from D's readers.** The re-delegation is a certificate about D, so it
+is in `closure(D)` for A and every other reader (`README.md:457-461`). No keyline pattern changes that: pinning and
+caretakers (`design/keyline/patterns.md:34-70`) change *who can revoke*, not who receives the certificates. What G_pub
+does buy is real but smaller: the inviter needs to know only the front to invite, the owner can replace the front without
+a new invite, and devices the owner never gives standing over D stay unknown. Two costs: a replaced front stays visible for
+good, since the closure keeps every node that ever had standing, and it is an Admin of G_pub.
+
+To keep other devices unknown to D's readers, those devices must not hold D at all. The owner's other devices could reach
+D's content through the front, outside keyhive, or the owner exposes a per-context group on purpose. I did not look
+at how the front would serve content to them and make no claim about it.
+
+**What our older design says about readers not having to act.** Three places, none of them about devices:
+
+- `docs/wiki/drawer.md:50-58`: a collection group holds the documents; participants are delegated over the group and so
+  reach every document added later through one delegation, with no per-participant step. `:62-63`: participants "present
+  their standing with the collection group" to ask any other node for a document. `:60-61`: a principal may sign only
+  at a level it holds.
+- `docs/adrs/019-cabinet-drawers-and-selective-mirroring.md:78-92`: anyone with authority over D may grant D to the
+  docs group without the drawer's writers; the grant makes D a candidate, not an entry. Line 90-92 accepts that a reader
+  of D may see the group's id, and says that grants "neither the group's roster nor its purpose". There "roster" means the
+  list of entries (`:75`). It does not say the group's *members* stay hidden, and under closure they do not (see the
+  correction above).
+- `docs/fdrs/001-drawers-as-document-collections.md:402`: Read holders can subdelegate Read.
+
+**Does keyline keep it?** Authority, yes: a delegation needs no proof field and is late-bound (`README.md:129`), one
+certificate covers every member, and issuing needs no Admin (`implementation.md:69`). Decryption, not entirely: a
+reader's key must be seated in D's tree by some Read-holding replica that holds its prekeys (`keyhive.rs:766-840`), which
+runs automatically when that replica inserts the certificates and again before it writes (`keyhive.rs:660-690`, `:1099-1148`).
+So readers do not have to do anything to be authorised, but some reader has to come online for a new reader to decrypt.
+I could not tell which passage the operator remembers; this is what the three documents say.
+
+## Where our causal checkpoint worker is still needed
+
+`src/big_repo/runtime2/causal_checkpoint_worker.rs` and the doc worker serve several cases. For each, what upstream does
+in the graph or the CGKA, without a document write. Upstream is `fef75a5`; our fork lacks the two upstream changes below
+(`grep PredecessorSecret|InvitationSecret` in `../keyhive` finds nothing).
+
+| Case we serve | Where | Upstream |
+|---|---|---|
+| **Seat readers** after an admitted delegation or prekey expansion | worker `ReconcileReaders` (`causal_checkpoint_worker.rs:1-12`, `:343-379`) | In the graph, at insert (`keyhive.rs:1099-1148`) and before every write (`:660-690`), by any Read-holding replica with the tree and the prekeys. **Gap:** a prekey arriving alone does not seat anyone (`receive_prekey_op`, `:2844-2858`, does no reconciliation), so a late-prekey reader waits for the next insert or write. Eager seating still needs a worker. |
+| **New reader needs old keys** (grant-then-offline, ledger `big-repo-ledger.md:49`) | worker `EnsureCoverage`, `doc_worker.rs:1544-1626` | Handled in the CGKA. Upstream #262 (`1a91c2b`, 2026-10-13) makes a CGKA Add wrap an `Invitation` of the root secrets the inviter can derive, so the invitee "can immediately decrypt" (`beekem/src/operation.rs:134-148`). No checkpoint, no waiting for another writer. **Limit:** only secrets the inviter itself could derive. |
+| **Content under ancestor keys after a partition** | `EnsureCoverage`; write-time `ensure_frontier_checkpointed` (`doc_worker.rs:1630-1670`) | #264 (`f132d2e`, same day) has each update carry `predecessor_secrets`: earlier root secrets "encrypted under a key derived from its own" (`operation.rs:180-194`, `:300-307`), so a holder of a later secret works backward. It is merged. Whether any gap remains after both is not established: a test is named for a secret "neither its path nor the chain reaches" that is rebuilt from the tree (`beekem/src/tests/concurrent_updates.rs:90`), which I did not read through. |
+| **Root underivable after concurrent updates** (the `RootConflicted` election) | `establish_pcs_root`, `native.rs:345-400` | Upstream has no `RootConflicted` (no match in the tree). A writer who cannot derive the root rotates its own leaf, and a graph with several heads counts as "no current root secret" (`beekem/src/cgka.rs:349-366`, `:367`). The resolving update happens on a write, so nothing background-mints, which is the loop our election damps. The election exists only because our worker mints without a write. |
+| **Cold-start sweep** (progress 0) | worker start, `:63-86` | Not a keyhive concern: it covers documents that predate the worker. |
+| **Revocation PCS** | not served by the worker (`Revoked` is only acknowledged, `:371-379`) | In the graph: inserting a revocation issues the implied CGKA remove (`keyhive.rs:788-808`), and a write is refused while a non-reader is still in the tree (`:660-690`, `CgkaMemberLacksRead`). |
+
+I searched merged history (`git log` on `fef75a5`) and the five open upstream PRs (#377, #373, #372, #210, #205): none
+adds further predecessor-chain or checkpoint work. #210 is our own "townframe changes".
+
+**Which cases would still need something like our worker, on upstream:**
+1. Eager seating when only prekeys arrive (a reader seated without waiting for a write).
+2. Anything the invitation and the chain do not reach: a partition where the inviter lacked secrets. Unproven either way.
+3. Content-level coverage in our own blob format: our checkpoint is a document-level object sealed under the PCS root
+   (`native.rs:560-600`), which upstream's CGKA secrets do not replace unless we move to its causal envelopes. That is a
+   design choice, not evidence of a gap.
+
+Cases that fall away on upstream: the election, post-grant checkpointing for a new reader, and any revocation handling.
+
+### What this means for the design
+
+1. **Say the true guarantee in the grant UI:** "whoever reads this drawer sees every device in the group you give them".
+2. **Do not promise a front group hides devices from the drawer's readers.** Offer it for what it does: a stable invite
+   address that the inviter learns, and a place to rotate the front.
+3. **If we move to upstream, plan to delete the election and the post-grant checkpoint** and keep a smaller worker for
+   eager seating. That needs the two upstream changes, which our fork lacks.
