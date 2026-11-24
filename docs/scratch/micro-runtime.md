@@ -1,5 +1,9 @@
 # Micro runtime and language (claytxt lane, ADR draft)
 
+Owner: claytxt lane; operator reviews.
+Updated: 2026-11-17
+Scope: The micro language and runtime choice: TypeScript default, Rust first class, wasm-first placement.
+
 Status: draft for the operator, 2026-11-17. The claytxt lane owns the micro-language decision (operator, 2026-11-17).
 The operator's first review (2026-11-17) is recorded under "Operator review" below. In short, TypeScript is the
 end-user default, Rust is first class, and the Clay-on-the-node API comes before the TS spike.

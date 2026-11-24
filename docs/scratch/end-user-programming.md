@@ -1,5 +1,9 @@
 # End-user programming (claytxt lane, draft)
 
+Owner: claytxt lane; operator reviews.
+Updated: 2026-11-17
+Scope: End-user programming of the app, including core micros; language question open.
+
 Status: draft for discussion, 2026-11-17. Written from the operator's direction in the week of 2026-11-16. Nothing
 here is decided unless it is marked as decided. The cartridge-identity parts are input to the nodules lane's
 cartridge design this week.
