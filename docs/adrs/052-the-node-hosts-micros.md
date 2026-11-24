@@ -51,8 +51,7 @@ enabled micro of each installed cartridge, the service:
 3. **Composes the micro's config datum**, the record the host puts in the micro's configuration slot. It carries what the
    node knows (today: the document capability under `docCap`, which the GUI splices in
    `claytxt: clay_node/lib.rs` `install_one`). The node does not write it anywhere: the collection store is Clay's (§9),
-   so the host writes the datum the service returned. (The brief this ADR was drafted from said the service "writes" it;
-   that is true of what it composes, not of the Clay store.)
+   so the host writes the datum the service returned.
 4. **Re-mints when grants move.** It follows the same feed `awaitCartridgeGrants` is built on
    (`GrantsFeed`, `big_nodule/requests.rs:623`, published at the end of every reconcile) and re-mints in 6.4's order: the
    micro is registered not ready, the old handles are retracted, new ones minted (`big_nodule/state.rs:1028`,
@@ -93,8 +92,7 @@ micros.awaitHandles { since: { <cartridgeId>: revision, ... }, holdMs }
 - **Nothing blocks on the long poll.** The host mounts each micro with the handles `attach` returned and re-renders the
   mounts of a cartridge when `awaitHandles` reports a new revision. A mount never waits for the poll, and a micro that
   loses a handle sees a retryable not-ready answer between retraction and re-mint (ADR 049 §6.4), never a stale handle.
-- **`actor`.** The result names the micro's actor capability too, which departs from the brief (it listed three handles).
-  The code requires it: dispatch admits a call only when the capability's holder is the signer's actor (ADR 037; `big_nodule/egress.rs` states the check dispatch runs), and the GUI is a separate process from the node, so something outside the node has
+- **`actor`.** The result names the micro's actor capability too, because dispatch requires it: dispatch admits a call only when the capability's holder is the signer's actor (ADR 037; `big_nodule/egress.rs` states the check dispatch runs), and the GUI is a separate process from the node, so something outside the node has
   to sign as the micro. That is the signer the in-process composition holds today (`claytxt: clay_node/egress.rs`,
   `MicroEgress::install`). It carries `USE` only, and it is the host's, never the guest's: the guest names an operation,
   the host attaches handle and signer (ADR 049 §3, asymmetry 2).
@@ -115,7 +113,7 @@ capability as the bearer and its actor as the signer. The shared client in §8 i
 transport it uses exists today (`day_cli/client.rs` `Transport::Socket`). The in-process transport is today's
 `big_nodule::egress` path (`claytxt: clay_node/egress.rs`).
 
-**One problem the code shows and the brief did not.** The Unix listener stamps every call `Origin::UnixPeer`
+**The socket's origin.** The Unix listener stamps every call `Origin::UnixPeer`
 (`big_dispatch/xrpc.rs:101`), which is local, while a guest's egress is `Origin::Remote` by rule (ADR 042 §3: "not a call
 relayed through guest egress"). A micro calling over the operator's socket would reach local-only methods that a nodule
 guest never could. A capability is still needed, so this is an exposure rule and not an authority leak, but it undoes the
