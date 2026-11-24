@@ -81,6 +81,12 @@ impl Spec {
         format!("{}.fetch", self.authority)
     }
 
+    /// Served by the guest: opens an actor under the nodule's own actor and narrows its actor
+    /// capability onto it, through dispatch.
+    fn adopt(&self) -> String {
+        format!("{}.adopt", self.authority)
+    }
+
     /// Served by the guest: consumes a byte body and reports the chunks it saw.
     fn ingest(&self) -> String {
         format!("{}.ingest", self.authority)
@@ -229,6 +235,7 @@ fn cartridge_requiring(
         spec.relay(),
         spec.absent(),
         spec.config(),
+        spec.adopt(),
         spec.put(),
         spec.read(),
         spec.ingest(),
@@ -1233,6 +1240,87 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
         record(&node, &a).await.methods.map(|status| status.granted),
         Some(false)
     );
+    shutdown(node, stop).await;
+}
+
+/// Every nodule is told its own actor identity capability (`x-nodule-actor-capability`) and can
+/// present it through dispatch as the `parent` of `openActor` and the `capability` of
+/// `attenuateCapability`, signing as the same actor. What it may then do is bounded by the rights
+/// the actor was opened with: an ordinary nodule's is `use` alone, which opens no child (the
+/// `micros` actor of the core cartridge has `mintChild`, which `big_nodule`'s core-like e2e
+/// opens children with).
+#[tokio::test]
+async fn a_wasm_guest_is_told_its_actor_capability_and_presents_it_through_dispatch() {
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let a = caller();
+    put(&node, &bytes).await;
+    let calls = [
+        big_cabinet_core::authority::OpenActor::XRPC.nsid,
+        big_cabinet_core::authority::AttenuateCapability::XRPC.nsid,
+    ]
+    .map(str::to_owned);
+    admit(&node, cartridge(&a, &bytes, &calls)).await;
+    assert_eq!(
+        set_enabled(&node, &a, true).await.readiness,
+        Readiness::Ready
+    );
+    set_operations(
+        &node,
+        &a,
+        DispatchScope {
+            operations: calls.into_iter().collect(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // The header carries the identity capability of the nodule's own actor.
+    let echoed = invoke(&node, &a.echo(), json!({}), Default::default())
+        .await
+        .unwrap();
+    let actor_capability: big_cabinet_core::authority::CapId =
+        serde_json::from_value(echoed["actorCapability"].clone())
+            .expect("the guest is told its actor capability");
+    let held = node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            big_cabinet_core::authority::InspectCapability {
+                capability: actor_capability,
+            },
+        )
+        .await
+        .unwrap();
+    let actor = record(&node, &a)
+        .await
+        .actor
+        .expect("a nodule has an actor");
+    assert_eq!(held.subject, Some(actor.actor_id));
+    assert_ne!(
+        echoed["actorCapability"], echoed["noduleCapability"],
+        "the actor capability is not the dispatch handle"
+    );
+
+    // The guest presents it as `parent` and the call passes holder binding (ADR 037: the
+    // egress signs as the nodule's own actor), so the refusal is the rights check on the
+    // capability, not a refusal of its presenter. No child is opened, so nothing is narrowed.
+    let adopted = invoke(
+        &node,
+        &a.adopt(),
+        json!({ "path": "nodules/child" }),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        adopted["open"]["status"].as_u64().unwrap() >= 400
+            && adopted["open"]["body"].to_string().contains("Unauthorized"),
+        "{adopted}"
+    );
+    assert_eq!(adopted["attenuate"], Value::Null, "{adopted}");
     shutdown(node, stop).await;
 }
 

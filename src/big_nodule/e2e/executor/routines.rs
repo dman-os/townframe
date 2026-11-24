@@ -2251,3 +2251,44 @@ mod grant_requests {
         node.shutdown().await;
     }
 }
+
+/// Every routine is delivered its nodule's own actor identity capability (the one the egress
+/// signs its calls with), the same for all of them: it is the actor's, not minted per routine,
+/// so a reconcile that re-mints a routine's handles leaves it as it is. Dispatch is not
+/// granted anything here, which shows it does not depend on a handle.
+#[tokio::test]
+async fn every_routine_is_delivered_its_nodules_actor_capability() {
+    let (node, executor, _) = hosted(alpha(&[PING, SETUP], &[], &[]), &[]).await;
+    let actor_of = |routine: &str| {
+        executor.routine_capabilities()[routine]
+            .actor
+            .expect("a routine is delivered its actor capability")
+    };
+    let actor = actor_of(PING);
+    assert_eq!(actor_of(SETUP), actor);
+    let held = node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            InspectCapability { capability: actor },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        held.subject,
+        Some(node.actor_at(&id(ALPHA)).await.actor.actor_id),
+        "it is bound to the nodule's own actor"
+    );
+    // A change of grants re-mints handles and keeps the actor's capability.
+    node.set_methods(
+        ALPHA,
+        DispatchScope {
+            authorities: ["org.example.remote".to_owned()].into(),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(actor_of(PING), actor);
+    node.shutdown().await;
+}

@@ -22,6 +22,11 @@ pub const NODULE_CONFIG_CAPABILITY_HEADER: &str = "x-nodule-config-capability";
 pub const NODULE_DRAWER_CAPABILITY_HEADER: &str = "x-nodule-drawer-capability";
 /// The blobs capability the routine's operations need (ADR 049 §6.2), when one is present.
 pub const NODULE_BLOBS_CAPABILITY_HEADER: &str = "x-nodule-blobs-capability";
+/// The nodule's own actor identity capability (the `OpenedActor.capability` of its durable
+/// actor, with the rights it was opened with), delivered on every request to every nodule. It is
+/// what the guest presents as `OpenActor.parent` to open actors under its own actor, and as the
+/// `capability` of `AttenuateCapability` to narrow a handle it holds to one of those actors.
+pub const NODULE_ACTOR_CAPABILITY_HEADER: &str = "x-nodule-actor-capability";
 pub const DOMAIN_ERROR_FIELD: &str = "operationError";
 pub const DOMAIN_ERROR_STATUS: StatusCode = StatusCode::BAD_REQUEST;
 /// The `Authorization` scheme of every XRPC hop, including its separating space.
