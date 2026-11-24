@@ -45,10 +45,9 @@ use crate::Error;
 use crate::context::Backend;
 use crate::context::RawHandler;
 use crate::context::Shared;
+use crate::manifest::Endpoint;
 use crate::manifest::FacetAccess;
 use crate::manifest::MicroManifest;
-use crate::manifest::PublicationDeclaration;
-use crate::manifest::PublicationKind;
 use crate::manifest::Request;
 use crate::rows::Feed;
 use crate::rows::Minter;
@@ -514,7 +513,7 @@ pub fn factory<Fut: Future<Output = Result<(), Error>> + 'static>(
     bindings: CollectionBindings,
     activate: impl Fn(Context) -> Fut + 'static,
 ) -> Rc<dyn Factory<CapabilityPublication>> {
-    let declared = declared_publications(&manifest);
+    let declared = declared_endpoints(&manifest);
     Rc::new(NativeFactory {
         resources,
         micro: (&micro).into(),
@@ -695,20 +694,17 @@ pub(crate) fn grant_configs(
     Ok(configs)
 }
 
-/// The publications a manifest declares, in the session's terms. A kind this build does not
+/// The endpoints a manifest declares, in the session's terms. A member this build does not
 /// know is not declared here, so an incarnation that returns it fails admission.
-pub(crate) fn declared_publications(
+pub(crate) fn declared_endpoints(
     manifest: &MicroManifest,
 ) -> BTreeMap<String, DeclaredPublication> {
     manifest
-        .publications
+        .endpoints
         .iter()
-        .filter_map(|publication| {
-            let (kind, contract) = admitted_publication(publication)?;
-            Some((
-                publication.name.clone(),
-                DeclaredPublication { kind, contract },
-            ))
+        .filter_map(|(name, endpoint)| {
+            let (kind, contract) = admitted_endpoint(endpoint)?;
+            Some((name.clone(), DeclaredPublication { kind, contract }))
         })
         .collect()
 }
@@ -736,24 +732,22 @@ mod conformance_tests;
 #[cfg(test)]
 mod tests;
 
-/// The kind and contract the capability bank admits `publication` under, or `None` for a kind
-/// this build does not serve. Every Presentation shares the one presentation-component
-/// contract, so a contract alone tells a redeemer which kind to expect. Expects a validated
-/// manifest, which gives every Call a contract.
-pub(crate) fn admitted_publication(
-    publication: &PublicationDeclaration,
+/// The kind and contract the capability bank admits `endpoint` under, or `None` for a member
+/// this build does not serve. Every view shares the one presentation-component contract, so a
+/// contract alone tells a redeemer which kind to expect. A method is a call under its NSID and
+/// a callback a call under the contract it implements.
+pub(crate) fn admitted_endpoint(
+    endpoint: &Endpoint,
 ) -> Option<(clay_guest_session::capabilities::PublicationKind, Nsid)> {
     use clay_guest_session::capabilities::PublicationKind as Kind;
-    match (&publication.kind, &publication.contract) {
-        (PublicationKind::Presentation, _) => Some((
+    match endpoint {
+        Endpoint::View { .. } => Some((
             Kind::Presentation,
             clay_guest_session::capabilities::presentation_component(),
         )),
-        (PublicationKind::Call, Some(contract)) => Some((Kind::Call, contract.clone())),
-        (PublicationKind::Call, None) => {
-            unreachable!("a validated manifest gives every call a contract")
-        }
-        (PublicationKind::Other(_), _) => None,
+        Endpoint::Method { nsid } => Some((Kind::Call, nsid.clone())),
+        Endpoint::Callback { implements } => Some((Kind::Call, implements.clone())),
+        Endpoint::Other(_) => None,
     }
 }
 
