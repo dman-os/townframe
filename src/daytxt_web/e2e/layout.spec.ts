@@ -8,9 +8,7 @@ import { openLifecycle, watchFailures } from "./shell";
 // layout are never on screen together: enabling and disabling happen by leaving the layout, and
 // the desktop e2e (`a_mounted_panel_is_interactive_and_disabling_one_provider_leaves_the_others_mounted`)
 // is where a provider leaving beside a mounted sibling is observed live.
-test("the wcmp layout shows only the arranged panels and a disabled provider leaves a placeholder", async ({
-  page,
-}) => {
+test("the wcmp layout shows only the arranged panels and a disabled provider leaves a placeholder", async ({ page }) => {
   const failures = watchFailures(page);
 
   await page.goto("/");
@@ -115,9 +113,7 @@ test("the wcmp layout shows only the arranged panels and a disabled provider lea
 // a phone width, where the sidebar's own button is not on screen to hide it. Round after round,
 // at both widths, the layout must stay mounted with its toggles and its way out.
 for (const width of [420, 1200]) {
-  test(`hiding a shown panel leaves the layout mounted with its controls at ${width}px`, async ({
-    page,
-  }) => {
+  test(`hiding a shown panel leaves the layout mounted with its controls at ${width}px`, async ({ page }) => {
     const failures = watchFailures(page);
     await page.setViewportSize({ width: 1200, height: 800 });
     await page.goto("/");

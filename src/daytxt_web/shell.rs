@@ -1,19 +1,19 @@
-//! Web composition shell for Dayframe (ADR 018 §7): native built-ins linked by this
-//! shell plus every package in `packages/index.json`, written by `x/dayframe-web.ts` from
+//! Web composition shell for daytxt (ADR 018 §7): native built-ins linked by this
+//! shell plus every package in `packages/index.json`, written by `x/daytxt-web.ts` from
 //! each component's statically-read manifest. A package's bytes are fetched only when an
 //! instance activates, and their digest is verified against the index before the browser
 //! engine (`wcmp`) ever sees them.
+use clay_dioxus_kit::ThemeMode;
+use clay_dioxus_kit::ThemeRoot;
 use clay_mdk::host::factory;
-use dayframe_composition::CompositionRuntime;
-use dayframe_composition::HostInputs;
-use dayframe_composition::Insets;
-use dayframe_composition::Renderer;
-use dayframe_composition::InstalledMicro;
+use daytxt_core::CompositionRuntime;
+use daytxt_core::HostInputs;
+use daytxt_core::Insets;
+use daytxt_core::InstalledMicro;
+use daytxt_core::Renderer;
 use dioxus::prelude::*;
 use serde::Deserialize;
 use std::rc::Rc;
-use ui::ThemeMode;
-use ui::ThemeRoot;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
@@ -107,8 +107,6 @@ fn native_micros() -> Vec<InstalledMicro> {
                     )
                 },
             )
-            .satisfied_by(&shell, &micro_shell_manifest::sidecar())
-            .expect("the shell publishes what Settings requires")
         },
         InstalledMicro {
             enabled_on_admission: true,
@@ -143,7 +141,7 @@ fn native_micros() -> Vec<InstalledMicro> {
                 },
             )
         },
-        dayframe_composition::lifecycle::micro(),
+        daytxt_core::lifecycle::micro(),
     ]
 }
 
@@ -152,7 +150,7 @@ fn native_micros() -> Vec<InstalledMicro> {
 /// error in the lifecycle panel; the native built-ins still run. A store that cannot open or
 /// load (blocked or full browser storage) is an error the caller shows instead of a shell.
 async fn web_runtime() -> Result<CompositionRuntime, String> {
-    let store = clay_store::IndexedDbStore::open("dayframe")
+    let store = clay_store::IndexedDbStore::open("daytxt")
         .await
         .map_err(|error| format!("cannot open browser storage: {error}"))?;
     let mut installed = native_micros();
@@ -175,9 +173,10 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
                         }
                     };
                     let sidecar = entry.sidecar.clone();
-                    let location = entry.location.clone();
-                    let micro =
-                        InstalledMicro::new(id, sidecar.clone(), move |id, resources, bindings| {
+                    installed.push(InstalledMicro::new(
+                        id,
+                        sidecar.clone(),
+                        move |id, resources, bindings| {
                             clay_mdk::host::wcmp_factory(
                                 resources,
                                 id,
@@ -185,17 +184,8 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
                                 bindings,
                                 move || indexed_package(entry.clone()),
                             )
-                        })
-                        // A package may require the shell's publications (the layout's app bar
-                        // button); the shell is the only provider a package can name today.
-                        .satisfied_by(
-                            &clay_mdk::MicroId::local(micro_shell_manifest::ID),
-                            &micro_shell_manifest::sidecar(),
-                        );
-                    match micro {
-                        Ok(micro) => installed.push(micro),
-                        Err(error) => errors.push(format!("{location}: {error}")),
-                    }
+                        },
+                    ));
                 }
             }
             Err(error) => errors.push(format!("package index is not an index: {error}")),
@@ -207,7 +197,7 @@ async fn web_runtime() -> Result<CompositionRuntime, String> {
         .map_err(|error| format!("cannot load browser storage: {error}"))?;
     runtime.installation_errors.extend(errors);
     micro_sample::seed_mock_defaults(runtime.documents());
-    // Demo seed for the counter package `x/dayframe-web.ts` installs: start its config
+    // Demo seed for the counter package `x/daytxt-web.ts` installs: start its config
     // at zero so the guest renders its value instead of the absent-config notice.
     runtime.documents().mock_documents().seed(
         clay_docs::FacetRoute {
@@ -234,7 +224,7 @@ fn ReadyApp(runtime: Signal<Option<CompositionRuntime>>) -> Element {
         .expect("ReadyApp mounts only with a built runtime");
     let runtime = use_signal(|| initial);
     let host = use_host_inputs();
-    rsx! { dayframe_composition::Application { runtime, host } }
+    rsx! { daytxt_core::Application { runtime, host } }
 }
 
 fn inner_size() -> (f64, f64) {
@@ -337,11 +327,11 @@ fn App() -> Element {
             main {
                 class: "bg-background font-sans text-foreground",
                 if let Some(error) = failure() {
-                    p { role: "alert", "Dayframe cannot start: {error}" }
+                    p { role: "alert", "daytxt cannot start: {error}" }
                 } else if runtime.read().is_some() {
                     ReadyApp { runtime }
                 } else {
-                    p { role: "status", "Loading Dayframe packages…" }
+                    p { role: "status", "Loading daytxt packages…" }
                 }
             }
         }
