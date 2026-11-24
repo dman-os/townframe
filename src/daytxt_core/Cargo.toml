@@ -1,5 +1,5 @@
 [package]
-name = "dayframe_composition"
+name = "daytxt_core"
 version = "0.1.0"
 edition = "2021"
 
