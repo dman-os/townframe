@@ -1,0 +1,32 @@
+[package]
+name = "big_automata_web"
+version.workspace = true
+edition.workspace = true
+
+# The browser host of big_automata's sync stack: a wasm32 page that pulls a part from a native
+# peer over iroh (relay-only in the browser). Test-only: its peer is `big_automata_iroh`'s
+# `web_fixture` example, and `x/big-automata-web.ts` builds, serves and wires the two.
+
+[lints]
+workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `test-support` carries the memory backend and cursor table the host syncs into.
+big_automata = { path = "../big_automata", features = ["test-support"] }
+big_automata_iroh = { path = "../big_automata_iroh" }
+service_client_iroh_rs.workspace = true
+# The crypto provider is the host's choice (`service_client_iroh_rs` takes none): rustls over
+# `ring`, which builds for wasm32-unknown-unknown.
+iroh = { workspace = true, default-features = false, features = ["tls-ring"] }
+utils_rs.workspace = true
+web-time.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+web-sys = { workspace = true, features = ["Window", "Document", "Element", "Response"] }
+console_error_panic_hook = "0.1.7"
+
+[[bin]]
+name = "big_automata_web"
+path = "main.rs"
