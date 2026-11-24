@@ -816,15 +816,17 @@ impl Sim {
         sim
     }
 
-    /// Writes that leave object 2's row in part 0 at rev 2 and push the head to 5, above the
-    /// cursor of `synced_with_two_members`: a client resuming from rev 3 would never see it.
+    /// Writes that leave objects 2 and 3 in part 0 at revs 2 and 3 and push the head to 6: the
+    /// part's latest row (3) is not below the cursor of `synced_with_two_members`, so only the
+    /// generation tells a client that resuming from rev 3 would never see them.
     fn rewrite_below_the_old_cursor(&mut self) {
         self.remote.commit(vec![laws::grant(&[(0, 0)])]);
         self.member(2, 0);
+        self.member(3, 0);
         self.remote.commit(vec![laws::grant(&[(1, 0)])]);
         self.remote.commit(vec![laws::grant(&[(2, 0)])]);
         self.remote.commit(vec![laws::revoke(&[(1, 0)])]);
-        assert_eq!(self.remote.head(), 5);
+        assert_eq!(self.remote.head(), 6);
     }
 }
 
@@ -839,9 +841,10 @@ fn a_peer_that_lost_its_data_is_synced_again_from_zero() {
     sim.step(Op::DataLoss);
     sim.rewrite_below_the_old_cursor();
     sim.quiesce();
+    let members = sim.local_members(0);
     assert!(
-        sim.local_members(0).contains(&obj(2)),
-        "the new log's member"
+        members.contains(&obj(2)) && members.contains(&obj(3)),
+        "the new log's members: {members:?}"
     );
     assert_eq!(
         sim.restarts,
@@ -849,7 +852,7 @@ fn a_peer_that_lost_its_data_is_synced_again_from_zero() {
             part: part(0),
             held: old,
             peer_generation: sim.remote.generation(),
-            peer_latest: 2,
+            peer_latest: 3,
         }]
     );
     assert_ne!(old.generation, sim.remote.generation());
@@ -928,6 +931,7 @@ fn a_peer_that_lost_its_data_is_walked_from_zero_when_it_offers_a_walk() {
     sim.remote.walk_bias = true;
     sim.rewrite_below_the_old_cursor();
     sim.quiesce();
-    assert!(sim.local_members(0).contains(&obj(2)));
+    let members = sim.local_members(0);
+    assert!(members.contains(&obj(2)) && members.contains(&obj(3)));
     assert_eq!(sim.restarts.len(), 1);
 }
