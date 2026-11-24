@@ -317,7 +317,7 @@ impl Packaging<'_> {
         motivation: Motivation,
     ) -> Res<()> {
         let (drawer, intxts) = self.resolve(Some(intxt)).await?;
-        let view = self.load(&drawer).await?;
+        let view = self.load(&drawer).await??;
         let identity = self.identity()?;
         let git = Git::new(&identity.root);
         let recorded = host::recorded_worktree(&identity)?;
@@ -502,7 +502,7 @@ impl Packaging<'_> {
         let (drawer, intxts) = self.resolve(Some(intxt)).await?;
         let names = self
             .load(&drawer)
-            .await?
+            .await??
             .names(&self.comment_keys(&drawer).await?);
         let parent_key = names
             .resolve(comment)
@@ -572,7 +572,7 @@ impl Packaging<'_> {
 
         let names = self
             .load(&drawer)
-            .await?
+            .await??
             .names(&self.comment_keys(&drawer).await?);
         let drawer_short = shown(&intxts, &drawer.to_string());
         let thread_short = shown(&names, &thread.root.to_string());
@@ -723,7 +723,7 @@ impl Packaging<'_> {
             return Ok(());
         }
         let seen = notes.seen_heads();
-        let view = self.load(&drawer).await?;
+        let view = self.load(&drawer).await??;
         let actor = self.caller.actor().await?;
         let ids = view.names(notes.posted.iter().map(|post| &post.key));
         let waiting: Vec<Thread> = Thread::group(notes.posted.clone())

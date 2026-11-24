@@ -133,7 +133,7 @@ impl Packaging<'_> {
     /// The current document of `intxt`, with where its schema is, for `--print` and the editor.
     async fn printed(&self, intxt: Option<&str>) -> Res<(EditDocument, DrawerId)> {
         let (drawer, _) = self.resolve(intxt).await?;
-        let view = self.load(&drawer).await?;
+        let view = self.load(&drawer).await??;
         let (mut document, _) =
             self.current_document(&drawer, &view, self.summaries(&view).await?)?;
         document.schema = Some(self.schema_location()?);
@@ -263,7 +263,7 @@ impl Packaging<'_> {
                 .and_then(|reference| reference.strip_prefix("dtxt:doc:"))
         });
         let (drawer, intxts) = self.resolve(named).await?;
-        let view = self.load(&drawer).await?;
+        let view = self.load(&drawer).await??;
         let (current, keys) =
             self.current_document(&drawer, &view, self.summaries(&view).await?)?;
 
@@ -481,7 +481,7 @@ impl Packaging<'_> {
 
         if (set_back.title.is_some() || set_back.description.is_some()) && !applied.dry_run {
             // The base the intxt stands at after the writes above.
-            set_back.base = base_of(&self.load(drawer).await?);
+            set_back.base = base_of(&self.load(drawer).await??);
             let line = serde_json::to_string(&set_back)?.replace('\'', "'\\''");
             undo.push(format!(
                 "echo '{line}' | day x intxt edit {short} --apply -"
