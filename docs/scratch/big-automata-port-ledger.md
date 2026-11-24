@@ -1086,12 +1086,18 @@ moving any embedder or porting the walkers:
 5. Test types across the board, benchmarks included: once the stack is assembled, benchmark it
    and revisit the driver defaults (window 64, fetch cap 4, backoff 1-60 s, Live hold 15 s,
    Bulk batch 16 with 50 ms linger), which are accepted for now.
+**Merge point: "done with big automata"** (operator, 2026-11-25). The stack merges once the
+items above are done; big_repo starts after. Until then CI and `check-matrix` may stay red
+(e.g. dead code in `kit/` that the durable outbox and the big_repo port will use).
 Deferred to the big_repo phase: the backend migrations, the embedder cutover, deleting
 big_sync, and the delta-walker/frontier family with the other big_sync_core workers.
 
-**Store generations (draft for operator redline, 2026-11-25).** A peer's log can be rewound
-(restored from a backup) or reset; a client's cursor from before means nothing on the new log,
-and rows in (new head, old cursor] would be silently missed.
+**Store generations (operator, 2026-11-25).** Generations cover data loss: a node that keeps
+its identity but not its previous data (a lost or recreated store, a restore from an older
+backup). A client's cursor from before means nothing on the new log, and rows in (new head, old
+cursor] would be silently missed. A fresh store mints a new generation by being created, so
+plain data loss needs no operator action. Clearing tombstones is not part of this and is not to
+be implemented now.
 - Each part store carries a `generation` id, minted when the store is created and minted again
   by an explicit reset or a restore from backup (an admin operation; the store cannot tell a
   restored file from a live one by itself).
@@ -1102,8 +1108,7 @@ and rows in (new head, old cursor] would be silently missed.
   cursor is below the stored cursor is treated the same (a restore that forgot to mint).
 - Checked at summary time only: a generation change mid-connection means the peer restarted,
   which loses the replay session and forces a reconnect, hence fresh summaries.
-- Store-level only. Clearing tombstones stays impossible in the p2p design: a backend that
-  wants a clean slate uses a new part key per generation of its data.
+- Store-level only.
 
 ## Cross-cutting items
 
