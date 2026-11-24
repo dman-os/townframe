@@ -86,6 +86,9 @@ pub(super) struct Remote {
     pub summary_cap: usize,
     /// A backup of the peer taken by [`Self::snapshot`]: its files, generation included.
     saved: Option<Saved>,
+    /// An unminted restore happened: a cursor above the head is a stale one of the old log,
+    /// which the part's restart replaces, not a bug.
+    pub unminted: bool,
     /// Members the peer had in a part before it lost its data or went back to a backup, and
     /// that the new log does not mention: a pull-only client keeps them, because nothing
     /// removes a row the peer has no tombstone for.
@@ -117,6 +120,7 @@ impl Remote {
             walk_bias: false,
             summary_cap,
             saved: None,
+            unminted: false,
             ghosts: default(),
         }
     }
@@ -203,6 +207,7 @@ impl Remote {
         self.row_rev = row_rev;
         self.payloads = payloads;
         self.serve(store);
+        self.unminted |= !mint;
         if mint {
             let minted = block_on(self.store.mint_generation()).unwrap();
             self.oracle.set_generation(minted);

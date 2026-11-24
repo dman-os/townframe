@@ -50,6 +50,25 @@
 //!    (a payload set after the drop in the same transaction survives; a membership added after
 //!    the drop is pending).
 //!
+//! # Generation laws
+//!
+//! A store has a [`Generation`], the identity of its log, which a client's cursor is a position
+//! in: a peer that kept its identity but not its data (a recreated store, a restore from an older
+//! backup) would otherwise have its clients resume from cursors that mean nothing on the new
+//! log, silently missing the rows stamped below them.
+//!
+//! 1. **A store has a generation from its creation**, minted then, so plain data loss needs no
+//!    operator action: no two stores share one, and it is never [`Generation::default`].
+//! 2. **It is stable.** Writes, rollbacks and reads do not change it, and neither does a
+//!    restart of the store over the same files.
+//! 3. **Minting changes it and nothing else.** [`PartStoreWrite::mint_generation`] gives a
+//!    generation the store never had, and stamps no rev, wakes no watch and changes no row. A
+//!    restore from a backup brings back the backup's files, generation included, so the
+//!    operator mints after one: the store cannot tell a restored file from a live one.
+//! 4. **Every part summary carries the current generation**, a mint included from the next
+//!    answer on ([`PartSummary::generation`]); a client compares it with the one its cursor was
+//!    stored under (`PartLifecycle` law 10).
+//!
 //! Three traits, one per audience: [`PartStoreWrite`] for the embedder that owns the data,
 //! [`PartStoreRead`] for the sync client, [`PartStoreServe`] for the responder (which assembles
 //! pages, sessions and budgets on top; none of that is here).

@@ -101,7 +101,7 @@ impl Sim {
             }
             let cursor = &persisted.rev;
             assert!(
-                *cursor <= self.remote.head(),
+                *cursor <= self.remote.head() || self.remote.unminted,
                 "{part} persisted at {cursor}, past the peer's head"
             );
             let local = self.local.members(part);

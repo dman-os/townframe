@@ -289,6 +289,7 @@ async fn law_6_a_peer_that_lost_its_data_is_synced_again_from_zero() {
         first.cursors.clone(),
         first.config.clone(),
     );
+    second.want(&[1]).await;
     second.connect();
     second.synced(1).await;
     let members = Rig::members(&second.local, 1, 3).await;

@@ -798,7 +798,7 @@ fn persistently_failing_objects_do_not_stop_other_parts_and_hold_only_their_own_
 
 impl Sim {
     /// The peer's log as a client that synced it holds it: part 0 with objects 0 and 1, the
-    /// client synced and its cursor persisted (rev 5, under the peer's generation).
+    /// client synced and its cursor persisted (rev 3, under the peer's generation).
     fn synced_with_two_members() -> Self {
         let mut sim = Sim::new(Shape::small(), 11);
         sim.remote.commit(vec![laws::grant(&[(0, 0)])]);
@@ -810,21 +810,21 @@ impl Sim {
             sim.local.persisted[&part(0)],
             PeerCursor {
                 generation: sim.remote.generation(),
-                rev: 5
+                rev: 3
             }
         );
         sim
     }
 
-    /// Writes that leave object 2's rows in part 0 at rev 3 and push the head to 6, above the
-    /// cursor of `synced_with_two_members`: a client resuming from rev 5 would never see it.
+    /// Writes that leave object 2's row in part 0 at rev 2 and push the head to 5, above the
+    /// cursor of `synced_with_two_members`: a client resuming from rev 3 would never see it.
     fn rewrite_below_the_old_cursor(&mut self) {
         self.remote.commit(vec![laws::grant(&[(0, 0)])]);
         self.member(2, 0);
         self.remote.commit(vec![laws::grant(&[(1, 0)])]);
         self.remote.commit(vec![laws::grant(&[(2, 0)])]);
         self.remote.commit(vec![laws::revoke(&[(1, 0)])]);
-        assert_eq!(self.remote.head(), 6);
+        assert_eq!(self.remote.head(), 5);
     }
 }
 
@@ -849,7 +849,7 @@ fn a_peer_that_lost_its_data_is_synced_again_from_zero() {
             part: part(0),
             held: old,
             peer_generation: sim.remote.generation(),
-            peer_latest: 3,
+            peer_latest: 2,
         }]
     );
     assert_ne!(old.generation, sim.remote.generation());
@@ -874,11 +874,11 @@ fn a_restore_after_a_mint_is_synced_again_from_zero() {
     sim.quiesce();
     let old = sim.local.persisted[&part(0)];
     assert_eq!(old.generation, backup_generation);
-    assert_eq!(old.rev, 5);
+    assert_eq!(old.rev, 3);
 
     sim.step(Op::RestoreMinted);
     assert_ne!(sim.remote.generation(), backup_generation, "minted");
-    // the restored log has its own rev 4 and 5
+    // the restored log has its own rev 3
     sim.member(2, 0);
     sim.quiesce();
     assert!(sim.local_members(0).contains(&obj(2)));
@@ -899,18 +899,18 @@ fn a_restore_without_a_mint_restarts_when_the_head_is_below_the_cursor() {
     sim.want(&[0]);
     sim.quiesce();
     let old = sim.local.persisted[&part(0)];
-    assert_eq!(sim.remote.saved_head(), Some(3));
+    assert_eq!(sim.remote.saved_head(), Some(2));
 
     sim.step(Op::RestoreUnminted);
     assert_eq!(sim.remote.generation(), old.generation, "not minted");
-    assert_eq!(sim.remote.head(), 3);
+    assert_eq!(sim.remote.head(), 2);
     assert_eq!(
         sim.restarts,
         [Restart {
             part: part(0),
             held: old,
             peer_generation: old.generation,
-            peer_latest: 3,
+            peer_latest: 2,
         }]
     );
     // the log carries on, and the client follows it from the restarted cursor

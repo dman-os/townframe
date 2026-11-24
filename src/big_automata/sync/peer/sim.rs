@@ -24,6 +24,13 @@
 //!   on a sweep or a restart; a sweep and a restart lose what is in flight, as the replay
 //!   simulation does (a message outliving the TTL revives a forgotten session, which replay
 //!   law 5 documents).
+//! - **Store generations**: the peer may lose its data (a new store and generation, empty), go
+//!   back to a backup taken earlier (`Snapshot`, then `RestoreMinted`, which mints), or, in
+//!   the scenarios, go back without a mint (`RestoreUnminted`). Each is a peer restart, so the
+//!   client reconnects with its persisted cursors. A pull-only client keeps the members of the
+//!   old log that the new one has no row for ("ghosts"), so the checks compare the local
+//!   members with the peer's as a superset that holds nothing beyond the ghosts
+//!   ([`remote::Remote::holds`]).
 //! - **Time** is a virtual clock; the machine's backoffs and deadlines run on it.
 //! - **Crashes** keep the local store and the persisted cursors, and start a fresh machine
 //!   with a fresh session; the embedder re-adds its wanted routes with the persisted cursors.

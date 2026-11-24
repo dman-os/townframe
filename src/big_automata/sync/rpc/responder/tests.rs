@@ -45,9 +45,13 @@ pub(super) struct Rig {
 
 impl Rig {
     pub fn new() -> Self {
+        let store = CountingStore::default();
+        let generation = futures::FutureExt::now_or_never(store.inner.generation())
+            .expect("the memory store answers at once")
+            .unwrap();
         Self {
-            store: CountingStore::default(),
-            oracle: default(),
+            store,
+            oracle: PartOracle::with_generation(generation),
         }
     }
 
