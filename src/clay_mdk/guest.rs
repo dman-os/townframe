@@ -80,6 +80,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::Poll;
 use std::task::Waker;
+use std::time::Duration;
 
 mod dom;
 
@@ -960,4 +961,17 @@ pub(crate) async fn call<M: Unary>(input: M) -> Result<M::Output, ClientError<M:
     Client::new(Xrpc(big_ndk::WasiHttp))
         .call(RequestContext::root(), input)
         .await
+}
+
+/// Waits `duration` on the host's monotonic clock. The import is async, so this may only be
+/// polled inside a component-model task: [`Context::sleep`](crate::Context::sleep) runs it on an
+/// owned task.
+pub(crate) async fn sleep(duration: Duration) {
+    let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+    big_ndk::wit::wasi::clocks::monotonic_clock::wait_for(nanos).await;
+}
+
+/// The host's monotonic clock reading, from its own origin.
+pub(crate) fn now() -> Duration {
+    Duration::from_nanos(big_ndk::wit::wasi::clocks::monotonic_clock::now())
 }

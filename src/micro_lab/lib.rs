@@ -42,17 +42,17 @@ const EXPERIMENTS: &[Experiment] = &[
     },
 ];
 
-/// The large diff with the micro's virtualization. A micro has no timer yet, and only the split
-/// view's scroll sync sets one (the unified view only stores the function when it mounts), so the
-/// timer is unimplemented until the MDK gives guests a clock.
+/// The large diff with the micro's virtualization, paced by the micro's own timer.
 #[component]
 fn LargeDiff(close: Callback<()>) -> Element {
+    let context = use_context::<Context>();
     // Built once: the view compares the sleep function by identity, and a new one would remount
     // the diff on every render.
     let virtualized = use_hook(|| Virtualization {
         height: "32rem".to_owned(),
-        sleep: PtrEq::new(Rc::new(|_| {
-            unimplemented!("micros have no timer; only the split view's scroll sync needs one")
+        sleep: PtrEq::new(Rc::new(move |duration| {
+            let context = context.clone();
+            Box::pin(async move { context.sleep(duration).await })
         })),
     });
     rsx! { review_mock::LargeDiff { close, virtualized } }
@@ -60,7 +60,8 @@ fn LargeDiff(close: Callback<()>) -> Element {
 
 /// Publish the lab's one presentation. The lab needs no capability from the composition.
 async fn activate(context: Context) -> Result<(), Error> {
-    context.publish::<LabView>(view)?;
+    let provided = context.clone();
+    context.publish::<LabView>(move || view(&provided))?;
     Ok(())
 }
 
@@ -71,7 +72,9 @@ clay_mdk::export_micro!(activate, micro_lab_manifest::manifest);
 const STYLES: &str = include_str!("styles.css");
 
 /// The lab's model and view in one root-scope render: the list of experiments, or the open one.
-fn view() -> Element {
+fn view(context: &Context) -> Element {
+    // The experiments reach the micro's clock through the context, not through their props.
+    use_context_provider(|| context.clone());
     let mut open = use_signal(|| None::<&'static str>);
     let experiment =
         open().and_then(|id| EXPERIMENTS.iter().find(|experiment| experiment.id == id));

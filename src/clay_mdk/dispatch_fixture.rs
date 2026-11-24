@@ -64,6 +64,9 @@ fn pattern(offset: usize) -> u8 {
     (offset % 251) as u8
 }
 
+/// What the view sleeps for through [`Context::sleep`].
+const SLEEP: std::time::Duration = std::time::Duration::from_millis(5);
+
 /// A method the micro is never granted.
 #[derive(Serialize, Deserialize)]
 struct Reveal {
@@ -213,6 +216,23 @@ async fn activate(cx: Context) -> Result<(), Error> {
         });
         let bytes_cx = view_cx.clone();
         let bytes = use_resource(move || read_blob(bytes_cx.clone()));
+        // A sleep from a view's resource: the wait runs on an owned task, which must mark the
+        // views dirty when it ends, or this resource is never polled again and `slept` never
+        // renders. The clock must also have advanced by at least the sleep.
+        let slept_cx = view_cx.clone();
+        let slept = use_resource(move || {
+            let cx = slept_cx.clone();
+            async move {
+                let started = cx.now();
+                cx.sleep(SLEEP).await;
+                let waited = cx.now() - started;
+                if waited >= SLEEP {
+                    format!("ok(waited={waited:?})")
+                } else {
+                    format!("err(woke after {waited:?}, before the {SLEEP:?} asked)")
+                }
+            }
+        });
         rsx! {
             "{report}"
             if let Some(answer) = resource() {
@@ -220,6 +240,9 @@ async fn activate(cx: Context) -> Result<(), Error> {
             }
             if let Some(answer) = bytes() {
                 "bytes={answer}"
+            }
+            if let Some(answer) = slept() {
+                "slept={answer}"
             }
         }
     })

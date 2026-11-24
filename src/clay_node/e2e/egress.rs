@@ -247,14 +247,14 @@ async fn run_fixture(
                 host.fault(&instance)
             )
         });
-    // The `resource` and `bytes` lines render once the view's calls answer, which takes the driver: it runs
+    // The `resource`, `bytes` and `slept` lines render once the view's calls answer, which takes the driver: it runs
     // the incarnation's spawned work after `initialize` returned.
     let mut driver = Box::pin(driver);
     let rendered = async {
         loop {
             let notified = sink.1.notified();
             let texts = sink.0.lock().unwrap().clone();
-            if ["resource=", "bytes="]
+            if ["resource=", "bytes=", "slept="]
                 .iter()
                 .all(|name| texts.iter().any(|text| text.starts_with(name)))
             {
@@ -379,6 +379,22 @@ async fn a_view_reads_a_multi_chunk_byte_body_in_order() {
         "the body is several chunks, not one buffer: {bytes}"
     );
     node.stop().await;
+}
+
+/// A view awaits `Context::sleep` in a Dioxus resource and the clock `Context::now` has advanced
+/// by at least the sleep when it resumes. The wait runs on an incarnation-owned task (the host's
+/// `monotonic-clock.wait-for` is a component-model async import), and the resource is only
+/// polled by a render pass: this pins that the task marks the views dirty when the wait ends, or
+/// `slept` is never rendered and the fixture's wait for it never finishes.
+#[tokio::test]
+async fn a_view_resumes_after_awaiting_a_sleep() {
+    let attempts = run_fixture(None).await;
+
+    let slept = &attempts["slept"];
+    assert!(
+        slept.starts_with("ok(waited="),
+        "the view sleeps and the monotonic clock advanced: {slept}"
+    );
 }
 
 /// A micro granted no methods is minted no capability and can call nothing: dispatch is not even
