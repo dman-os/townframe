@@ -54,6 +54,7 @@ members = [
   "./src/clay_host",
   "./src/clay_docs",
   "./src/clay_collection",
+  "./src/clay_cabinet",
   "./src/clay_store",
   "./src/clay_dioxus",
   "./src/clay_mdk",
@@ -169,6 +170,7 @@ big_node = { path = "./src/big_node/" }
 day_node = { path = "./src/day_node" }
 clay_node = { path = "./src/clay_node" }
 clay_collection = { path = "./src/clay_collection" }
+clay_cabinet = { path = "./src/clay_cabinet" }
 clay_store = { path = "./src/clay_store" }
 clay_host = { path = "./src/clay_host" }
 clay_docs = { path = "./src/clay_docs" }

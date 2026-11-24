@@ -2593,6 +2593,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "clay_cabinet"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet_core",
+ "clay_collection",
+ "futures",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "clay_collection"
 version = "0.1.0"
 dependencies = [

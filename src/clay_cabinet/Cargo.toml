@@ -1,0 +1,31 @@
+[package]
+name = "clay_cabinet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+autotests = false
+
+[lib]
+path = "lib.rs"
+
+[features]
+# The in-memory cabinet that tests across the Clay crates feed collections from.
+fake = ["tokio/time"]
+
+[dependencies]
+#
+# internal
+big_cabinet_core.workspace = true
+clay_collection.workspace = true
+
+#
+# misc
+futures.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+
+[lints]
+workspace = true

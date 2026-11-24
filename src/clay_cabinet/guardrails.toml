@@ -1,0 +1,14 @@
+version = 1
+role = "foundation"
+dependency_reason = "claytxt microkernel layering: the host's document collections (ADR 054) sit on the collection waist and speak the node cabinet's own request types"
+allowed_dependencies = [
+    "big_cabinet_core",
+    "clay_collection",
+]
+allow_external_api_types = false
+
+# Host-side only for now. The browser host (ADR 018) needs big_cabinet_core on wasm32-unknown-unknown first.
+[builds.native]
+features = ["fake"]
+
+[builds.wasm32-wasip3]
