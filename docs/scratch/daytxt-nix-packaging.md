@@ -1,5 +1,7 @@
 # daytxt apps as Nix flake packages, with CI
 
+Updated: 2026-11-18
+
 Status: Investigation and plan. Read from `origin/feat/desktop-node` (cf3a90bf). Prototype outcome in the last section.
 Owner: claytxt lane; operator decides the items under "Decisions".
 Scope: `daytxt_desktop`, `daytxt_mobile`, `daytxt_web` (renamed), the Wasm micro packages, the intxt guest, `src/nix/`, `.github/workflows/`.

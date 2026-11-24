@@ -1,5 +1,9 @@
 # Clay on the node (claytxt lane, ADR draft)
 
+Owner: claytxt lane; operator reviews.
+Updated: 2026-11-17
+Scope: Clay's node API: how micros and the node host talk, grants, the TypeScript path.
+
 Status: **accepted (operator, 2026-11-17)**, with the nodules lane's sign-off. Draft 2026-11-12; the operator answered both
 rounds on 2026-11-12 (recorded per section). The operator
 reviewed the whole on 2026-11-17 and likes it; §6 is now settled. Two conditions remain before it is accepted: it

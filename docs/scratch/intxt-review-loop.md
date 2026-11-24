@@ -1,5 +1,9 @@
 # intxt review loop, top down (claytxt lane)
 
+Owner: claytxt lane; operator reviews.
+Updated: 2026-11-10
+Scope: The intxt review loop's UI needs from the claytxt lane (CodeView, review micro, boundaries).
+
 Status: draft, 2026-11-10. Decided by the operator: boundary A, virtualization matching Pierre (X5), C1 parked for design. Owner: the claytxt lane (Clay and the
 supporting pieces). The intext lane owns the datums, the intxt micro, MCP and the annotation
 anchor model; this doc only states what the UI needs from them.

@@ -1,5 +1,10 @@
 # intxt: fencing experiments
 
+Status: scratch (see the bold status line below).
+Owner: claytxt lane; operator reviews.
+Updated: 2026-11-19
+Scope: Mechanisms that structure an intxt session without spending the agent's tokens.
+
 **Status:** scratch, 2026-11-19 (ledger D75). Candidate mechanisms for structuring a session without spending the agent's tokens, each with the default it competes with and the measure that decides it. The best one becomes the default; the losers go in the ledger as tried and dropped, with their numbers. Builds on FDR 010 (intents, interpretations, tasks; its second draft's principle: record and structure always, use and delivery later) and FDR 008 (capture, short ids).
 
 ## Two layers, one mechanism

@@ -1,5 +1,9 @@
 # Pierre's hosts over standard Dioxus (claytxt lane, draft)
 
+Owner: claytxt lane; operator reviews.
+Updated: 2026-11-10
+Scope: `pierre_diffs_dioxus`: Pierre's host traits over standard Dioxus.
+
 Status: draft, 2026-11-10. Replaces the web-sys `WebHost` in `pierre_diffs_dioxus` (S10). Inputs:
 W1/W2 (`docs/scratch/pierre-spikes.md` on `spike/pierre-scroll`), the host traits ported in S10
 and S11a, and the operator's rules for the primary (browser/webview) backend: use standard

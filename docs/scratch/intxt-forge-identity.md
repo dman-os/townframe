@@ -1,5 +1,10 @@
 # intxt: forge credentials, sign-in and PR links
 
+Status: scratch for discussion (see the bold status line below).
+Owner: claytxt lane; operator reviews.
+Updated: 2026-11-24
+Scope: Forge credentials, sign-in in the web app, and PR to intxt links.
+
 **Status:** Scratch for discussion, second draft 2026-11-24 (ledger D80, D81). It covers how the forge integration starts:
 - where forge credentials live;
 - what "sign in" means in the web app;
