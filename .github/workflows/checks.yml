@@ -82,10 +82,10 @@ jobs:
       - run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
       # Guardrail lint and formatting (all three workspaces) run once, in the
       # lint job; this matrix only compiles the per-target build contracts.
-      # `ci-desktop`, not `ci-rust`: the native contract includes `dayframe_desktop`, which
+      # `ci-desktop`, not `ci-rust`: the native contract includes `daytxt_desktop`, which
       # links the Linux GUI stack (glib/gtk/wayland) through its `desktop` renderer feature.
       # `ci-rust` carries no pkg-config-visible glib, so the native lane there fails in
-      # `glib-sys`' build script. This is the same reason the dayframe test lane below runs
+      # `glib-sys`' build script. This is the same reason the daytxt test lane below runs
       # in `ci-desktop`.
       - run: nix develop .#ci-desktop --command cargo x guardrails check-matrix --target "${{ matrix.target }}"
       - name: Check browser wcmp adapter
@@ -178,7 +178,7 @@ jobs:
     # Draft PRs skip CI; marking one ready for review runs it.
     if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    # Preparing the Dayframe Wasm guest fixtures takes about 35 minutes on a cold runner before
+    # Preparing the daytxt Wasm guest fixtures takes about 35 minutes on a cold runner before
     # nextest starts, and the suite itself about 40; 90 cut the run off at the last test.
     timeout-minutes: 120
     steps:
@@ -236,16 +236,16 @@ jobs:
         run: |
           # Plug crates are excluded while automatic triage is broken. `daybook_cli` and `day_cli` are excluded
           # because their e2e tests need the built binary (found at target/debug) and run in the dedicated CLI job.
-          # This lane runs in `ci-desktop` because the Dayframe Dioxus crates link the Linux GUI
+          # This lane runs in `ci-desktop` because the daytxt Dioxus crates link the Linux GUI
           # stack (glib/wayland/wgpu) through the workspace, and `ci-rust` does not carry it.
           #
           # Prepare the wasm guest components first: the clay_*/micro_* tests read
-          # DAYFRAME_<NAME>_COMPONENT paths printed by the prepare step.
-          nix develop .#ci-desktop --command deno run --allow-all x/check-dayframe.ts --prepare-only > /tmp/dayframe-components.env
+          # DAYTXT_<NAME>_COMPONENT paths printed by the prepare step.
+          nix develop .#ci-desktop --command deno run --allow-all x/check-daytxt.ts --prepare-only > /tmp/daytxt-components.env
           # `set -a` exports every variable the prepare step prints, so a new fixture needs no
           # edit here (a hand-kept export list silently left new fixtures unset).
           set -a
-          source /tmp/dayframe-components.env
+          source /tmp/daytxt-components.env
           set +a
           #
           # `--no-report` accumulates llvm profile data across the nextest and doctest runs (it
@@ -431,8 +431,8 @@ jobs:
             /tmp/btress-static.log
           retention-days: 14
 
-  e2e-dayframe-web-chromium:
-    name: E2E (dayframe web / chromium)
+  e2e-daytxt-web-chromium:
+    name: E2E (daytxt web / chromium)
     # Draft PRs skip CI; marking one ready for review runs it.
     if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
@@ -461,20 +461,20 @@ jobs:
       - name: fetch WIT dependencies
         run: nix develop .#ci-desktop --command deno run -A ./x/wit-fetch.ts --clean
       - name: Install dependencies
-        run: nix develop .#ci-desktop --command pnpm install --frozen-lockfile --filter @townframe/dayframe_web
-      # ADR 018 migration steps 6–7: the shared composition + counter guest on `dayframe_web`.
-      # `x/dayframe-web.ts` prepares the guest component, builds the wasm32 host, runs
+        run: nix develop .#ci-desktop --command pnpm install --frozen-lockfile --filter @townframe/daytxt_web
+      # ADR 018 migration steps 6–7: the shared composition + counter guest on `daytxt_web`.
+      # `x/daytxt-web.ts` prepares the guest component, builds the wasm32 host, runs
       # wasm-bindgen, copies the guest asset (bundle size is printed there for the §7 budget),
       # and serves the site. Building here first keeps the cold compile, about 20 minutes on an
       # empty cache, out of Playwright's 20-minute webServer timeout: the webServer's own run of
-      # the script then finds every crate built. DAYFRAME_WEB_TRAPPER matches what
+      # the script then finds every crate built. DAYTXT_WEB_TRAPPER matches what
       # `playwright.config.ts` sets, so the build includes the same packages it serves.
-      - name: Build dayframe web
-        run: nix develop .#ci-desktop --command deno run --allow-all ./x/dayframe-web.ts --build
+      - name: Build daytxt web
+        run: nix develop .#ci-desktop --command deno run --allow-all ./x/daytxt-web.ts --build
         env:
-          DAYFRAME_WEB_TRAPPER: "1"
-      - name: Run dayframe web e2e
-        run: nix develop .#ci-desktop --command pnpm -C src/dayframe_web run e2e
+          DAYTXT_WEB_TRAPPER: "1"
+      - name: Run daytxt web e2e
+        run: nix develop .#ci-desktop --command pnpm -C src/daytxt_web run e2e
 
       # Bombadil property-based exploration of the same build (ADR 032 section 9): 60 s at a phone
       # width and 60 s at a desktop width by default (BOMBADIL_TIME_LIMIT), driving the pinned
@@ -484,15 +484,15 @@ jobs:
       # found (hiding a panel withdrew the layout; a synchronous cancel of a host call suspended a
       # sync export in the browser engine) is fixed in `wcmp` and held by a Playwright spec, and
       # ten consecutive 60 s runs at 420 px were green (docs/scratch/dayframe-shell-ledger.md, S8).
-      - name: Explore dayframe web with Bombadil
-        run: nix develop .#ci-desktop --command pnpm -C src/dayframe_web run bombadil
+      - name: Explore daytxt web with Bombadil
+        run: nix develop .#ci-desktop --command pnpm -C src/daytxt_web run bombadil
 
       - name: Upload e2e artifacts
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: dayframe-web-e2e-artifacts
+          name: daytxt-web-e2e-artifacts
           path: |
-            src/dayframe_web/test-results/
-            src/dayframe_web/playwright-report/
+            src/daytxt_web/test-results/
+            src/daytxt_web/playwright-report/
           retention-days: 14

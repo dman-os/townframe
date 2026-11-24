@@ -1,6 +1,6 @@
-# dayframe_dx
+# daytxt and claytxt app crates
 
-Dioxus-native entrypoints and shared design-system work for Dayframe.
+Dioxus-native entrypoints and shared design-system work for daytxt.
 
 ## Packages
 
