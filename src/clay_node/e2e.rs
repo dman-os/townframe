@@ -180,15 +180,17 @@ fn install(micro: &str, methods: &[&str]) -> MicroInstall {
 }
 
 /// A node directory whose peers service binds loopback only, so no test reaches a relay.
-fn loopback_root(root: &std::path::Path) {
-    day_node::NodeSettings::create(root).unwrap();
-    day_node::NodeSettings::update(root, |settings| {
+async fn loopback_root(root: &std::path::Path) {
+    let dir = day_node::NodeDir::new(root.to_owned());
+    dir.init().await.unwrap();
+    dir.update_settings(|settings| {
         settings.peers = Some(day_node::PeerSettings {
             loopback_only: true,
             ..Default::default()
         });
         Ok(())
     })
+    .await
     .unwrap();
 }
 
@@ -324,8 +326,8 @@ async fn a_micro_installed_with_no_methods_calls_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_dials_the_ticket_in_its_bootstrap_file() {
     let (host_dir, phone_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    loopback_root(host_dir.path());
-    loopback_root(phone_dir.path());
+    loopback_root(host_dir.path()).await;
+    loopback_root(phone_dir.path()).await;
     let host = NodeComposition::boot(NodeConfig {
         root: host_dir.path().to_owned(),
         bootstrap: vec![],

@@ -8,13 +8,13 @@
 //! where it is):
 //!
 //! ```text
-//! <node>/node.json        identity seed, operator policy and peers, created by `day node init` (0600)
+//! <node>/node.json        node id, operator policy and peers, created by `day node init` (0600)
 //! <node>/node.lock        flock held for as long as a process has the node booted; holds its pid
-//! <node>/run/daemon.log   the background daemon's stderr
+//! <node>/run/serve.log   the background server's stderr
 //! <node>/node.sqlite, repo/, blobs/   the node's own storage, opened by `big_node::Bindings`
 //! ```
 //!
-//! The daemon's Unix socket is not in the node directory but in the per-user runtime directory,
+//! The server's Unix socket is not in the node directory but in the per-user runtime directory,
 //! named by the node id (see [`NodeDir::socket_path`]), so a node directory can be anywhere,
 //! however long its path, and two nodes on a machine never share a socket. Every other secret a
 //! node keeps is in the platform keyring under entries that carry the node id too.
@@ -38,11 +38,11 @@ use utils_rs::prelude::eyre;
 /// terminator; refuse a socket path that cannot fit instead of failing in `bind`.
 const MAX_SOCKET_PATH_BYTES: usize = 100;
 
-/// The directory the daemon sockets live in: the one place the socket location is decided, so
+/// The directory the server sockets live in: the one place the socket location is decided, so
 /// making it configurable is a change to this function and its caller [`NodeDir::new`].
 ///
 /// - **Normally** `$XDG_RUNTIME_DIR/day`: the per-user runtime directory the login session
-///   creates as `0700` and removes at logout, which is where a local daemon's socket belongs
+///   creates as `0700` and removes at logout, which is where a local server's socket belongs
 ///   (ADR 033 section 5). `directories` yields it only where the platform has one (Linux).
 /// - **Without one** (macOS, a session with no `XDG_RUNTIME_DIR`, a cron job) `/tmp/day-<euid>`:
 ///   a directory of the user's own under `/tmp` rather than `std::env::temp_dir()`, because
@@ -72,13 +72,13 @@ pub struct NodeDir {
     socket_dir: PathBuf,
 }
 
-/// The state of the daemon's socket file, learned by connecting to it.
+/// The state of the server's socket file, learned by connecting to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SocketState {
     /// Something accepted the connection.
     Live,
-    /// The file is there and nothing listens on it: a daemon died without removing it.
+    /// The file is there and nothing listens on it: a server died without removing it.
     Stale,
     Absent,
 }
@@ -118,7 +118,7 @@ impl NodeDir {
         self.root.join("run")
     }
 
-    /// The daemon's socket: `<socket dir>/<node id>.sock`. The node must be initialized, as the
+    /// The server's socket: `<socket dir>/<node id>.sock`. The node must be initialized, as the
     /// id is read from `node.json`. It is refused when it cannot fit in `sun_path`, which a
     /// 64 character id leaves ~35 bytes of directory for on macOS.
     pub fn socket_path(&self) -> Res<PathBuf> {
@@ -151,7 +151,7 @@ impl NodeDir {
     }
 
     pub fn log_path(&self) -> PathBuf {
-        self.run_dir().join("daemon.log")
+        self.run_dir().join("serve.log")
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -159,20 +159,44 @@ impl NodeDir {
     }
 
     /// Creates the directory and `node.json` with a fresh identity; an existing node is refused.
-    pub fn init(&self) -> Res<NodeSettings> {
-        NodeSettings::create(&self.root)
+    pub async fn init(&self) -> Res<NodeSettings> {
+        NodeSettings::create(&self.root).await
+    }
+
+    /// Moves a version 1 node's identity seed into the keyring on the node lock the caller holds
+    /// (see [`NodeSettings::migrate`]).
+    pub async fn migrate(&self, lock: &NodeLock) -> Res<()> {
+        NodeSettings::migrate(&self.root, lock).await
     }
 
     pub fn settings(&self) -> Res<NodeSettings> {
         NodeSettings::load(&self.root)
     }
 
-    /// Rewrites `node.json` with `change` applied (see [`NodeSettings::update`]).
-    pub fn update_settings<T>(&self, change: impl FnOnce(&mut NodeSettings) -> Res<T>) -> Res<T> {
+    /// Rewrites `node.json` with `change` applied (see [`NodeSettings::update`]). A version 1
+    /// node is migrated first, under the node lock taken for that alone, as a version 2 file
+    /// written without the seed in the keyring would lose the node's identity.
+    pub async fn update_settings<T>(
+        &self,
+        change: impl FnOnce(&mut NodeSettings) -> Res<T>,
+    ) -> Res<T> {
+        let on_disk: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(self.root.join("node.json"))
+                .wrap_err_with(|| format!("reading {}", self.root.join("node.json").display()))?,
+        )?;
+        if on_disk.get("identity_seed").is_some() {
+            match self.try_lock(LockRole::Command)? {
+                Ok(lock) => self.migrate(&lock).await?,
+                Err(held) => eyre::bail!(
+                    "{} is version 1 and {held} has the node open; its seed moves to the keyring once the node is booted again",
+                    self.root.join("node.json").display()
+                ),
+            }
+        }
         NodeSettings::update(&self.root, change)
     }
 
-    /// Creates `run/` (the daemon's log) and the socket directory, each owner-only.
+    /// Creates `run/` (the server's log) and the socket directory, each owner-only.
     pub fn ensure_run_dir(&self) -> Res<()> {
         Self::ensure_private_dir(&self.run_dir())?;
         Self::ensure_private_dir(&self.socket_dir)
@@ -207,7 +231,7 @@ impl NodeDir {
         Ok(())
     }
 
-    /// Learns whether a daemon answers on the socket by connecting to it, as the node's own
+    /// Learns whether a server answers on the socket by connecting to it, as the node's own
     /// listener does before it replaces a stale socket.
     pub async fn probe_socket(&self) -> Res<SocketState> {
         use std::os::unix::fs::FileTypeExt;
@@ -334,8 +358,8 @@ impl NodeDir {
 /// What the holder of the node lock is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockRole {
-    /// `day node run`: it serves until stopped, and attaches the peers service.
-    Daemon,
+    /// `day node start`: it serves until stopped, and attaches the peers service.
+    Serve,
     /// A command that opened the node for itself: it serves its socket while it runs and for as
     /// long as clients remain connected after, and attaches no peers service.
     Command,
@@ -344,7 +368,7 @@ pub enum LockRole {
 impl LockRole {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Daemon => "daemon",
+            Self::Serve => "serve",
             Self::Command => "command",
         }
     }
@@ -398,7 +422,7 @@ impl LockHeld {
                 .filter(|line| !line.is_empty())
                 .map(PathBuf::from),
             role: lines.next().and_then(|line| match line {
-                "daemon" => Some(LockRole::Daemon),
+                "serve" => Some(LockRole::Serve),
                 "command" => Some(LockRole::Command),
                 _ => None,
             }),
@@ -423,8 +447,9 @@ pub struct Booted {
 }
 
 impl Booted {
-    /// Boots the node in `dir` on the lock the caller holds, serving its socket. `role` is how
-    /// it attaches to the network: a daemon attaches the peers service when `node.json` has a
+    /// Boots the node in `dir` on the lock the caller holds, serving its socket, after moving a
+    /// version 1 node's seed into the keyring (the one place a node is opened). `role` is how
+    /// it attaches to the network: a server attaches the peers service when `node.json` has a
     /// `peers` section; a command's own node attaches none, since it lives for one command and
     /// must not dial or hold the node's endpoint. `schemas` is the datum vocabulary the node
     /// admits. A lock from [`NodeDir::try_lock`] has the node serve its socket and announces it
@@ -436,6 +461,7 @@ impl Booted {
         role: LockRole,
         schemas: Arc<big_cabinet::SchemaRepo>,
     ) -> Res<Self> {
+        dir.migrate(&lock).await?;
         let listeners = Listeners {
             unix_socket: lock.socket.clone(),
             ..default()
@@ -444,7 +470,7 @@ impl Booted {
             dir.root(),
             &dir.settings()?,
             listeners,
-            role == LockRole::Daemon,
+            role == LockRole::Serve,
             schemas,
         )
         .await?;
@@ -582,20 +608,21 @@ impl NodeDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrets_rs::SecretStore;
 
     /// A holder with no socket takes the lock without a socket path, records no
     /// socket and its role, and leaves no boot lock for another process to wait on.
-    #[test]
-    fn an_unserved_lock_records_its_role_but_no_socket_and_holds_no_boot_lock() {
+    #[tokio::test]
+    async fn an_unserved_lock_records_its_role_but_no_socket_and_holds_no_boot_lock() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = NodeDir::new(tmp.path().to_path_buf());
         // Initialized only so the probing `try_lock` below can name its own socket.
-        dir.init().unwrap();
-        let _lock = dir.try_lock_unserved(LockRole::Daemon).unwrap().unwrap();
+        dir.init().await.unwrap();
+        let _lock = dir.try_lock_unserved(LockRole::Serve).unwrap().unwrap();
         let held = dir.try_lock(LockRole::Command).unwrap().unwrap_err();
         assert_eq!(held.pid, Some(std::process::id()));
         assert_eq!(held.socket, None);
-        assert_eq!(held.role, Some(LockRole::Daemon));
+        assert_eq!(held.role, Some(LockRole::Serve));
         // Returns at once instead of blocking: nothing is booting.
         dir.wait_until_serving().unwrap();
     }
@@ -607,5 +634,126 @@ mod tests {
             Path::new("/run/user/1000/day")
         );
         assert_eq!(socket_dir_in(None, 1000), Path::new("/tmp/day-1000"));
+    }
+
+    #[tokio::test]
+    async fn init_round_trips_identity_seed_through_keyring_without_putting_it_in_node_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = NodeDir::new(tmp.path().join("node"));
+        let settings = dir.init().await.unwrap();
+        let secrets = SecretStore::boot().await.unwrap();
+
+        let seed = settings.seed(&secrets).await.unwrap();
+        assert_eq!(big_node::node_id(&seed), settings.node_id());
+        let node_json = std::fs::read_to_string(dir.root().join("node.json")).unwrap();
+        assert!(!node_json.contains("identity_seed"));
+        assert!(node_json.contains("node_id"));
+
+        assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 1);
+        secrets.stop().await.unwrap();
+    }
+
+    /// Under `/tmp` rather than `$TMPDIR`: a socket named by a 64 character node id has little
+    /// room in `sun_path`, and `$TMPDIR` can be long.
+    fn short_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("d")
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
+    fn write_v1(dir: &NodeDir, seed: &[u8; 32]) -> String {
+        std::fs::create_dir_all(dir.root()).unwrap();
+        let seed_hex = data_encoding::HEXLOWER.encode(seed);
+        std::fs::write(
+            dir.root().join("node.json"),
+            format!(
+                r#"{{"version": 1, "identity_seed": "{seed_hex}", "relay": false, "dev": {{}}}}"#
+            ),
+        )
+        .unwrap();
+        seed_hex
+    }
+
+    #[tokio::test]
+    async fn a_version_one_node_migrates_its_seed_into_the_keyring() {
+        let tmp = short_tempdir();
+        let dir = NodeDir::with_socket_dir(tmp.path().join("node"), tmp.path().join("run"));
+        let seed = [9_u8; 32];
+        let seed_hex = write_v1(&dir, &seed);
+        // Before the migration the file reads as the node it becomes.
+        assert_eq!(dir.settings().unwrap().node_id(), big_node::node_id(&seed));
+
+        let lock = dir.try_lock(LockRole::Command).unwrap().unwrap();
+        dir.migrate(&lock).await.unwrap();
+
+        let node_json = std::fs::read_to_string(dir.root().join("node.json")).unwrap();
+        assert!(!node_json.contains(&seed_hex));
+        assert!(!node_json.contains("identity_seed"));
+        let mode = std::fs::metadata(dir.root().join("node.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let settings = dir.settings().unwrap();
+        let secrets = SecretStore::boot().await.unwrap();
+        assert_eq!(settings.seed(&secrets).await.unwrap(), seed);
+
+        // Opening again is a no-op, and the node still opens.
+        dir.migrate(&lock).await.unwrap();
+        assert_eq!(settings.seed(&secrets).await.unwrap(), seed);
+        assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 1);
+        secrets.stop().await.unwrap();
+    }
+
+    /// A crash after the keyring store and before the rename leaves the version 1 file with the
+    /// entry already present; migrating again completes it.
+    #[tokio::test]
+    async fn a_migration_interrupted_after_the_store_completes_on_the_next_open() {
+        let tmp = short_tempdir();
+        let dir = NodeDir::with_socket_dir(tmp.path().join("node"), tmp.path().join("run"));
+        let seed = [11_u8; 32];
+        let seed_hex = write_v1(&dir, &seed);
+        let secrets = SecretStore::boot().await.unwrap();
+        big_node::IdentityKeyring(&secrets)
+            .store(&seed)
+            .await
+            .unwrap();
+
+        let lock = dir.try_lock(LockRole::Command).unwrap().unwrap();
+        dir.migrate(&lock).await.unwrap();
+
+        assert!(
+            !std::fs::read_to_string(dir.root().join("node.json"))
+                .unwrap()
+                .contains(&seed_hex)
+        );
+        assert_eq!(dir.settings().unwrap().seed(&secrets).await.unwrap(), seed);
+        big_node::delete_secrets(&secrets, &seed).await.unwrap();
+        secrets.stop().await.unwrap();
+    }
+
+    /// Updating the settings of a version 1 node moves its seed first, so the rewritten file
+    /// does not strand the identity.
+    #[tokio::test]
+    async fn updating_a_version_one_node_keeps_its_seed() {
+        let tmp = short_tempdir();
+        let dir = NodeDir::with_socket_dir(tmp.path().join("node"), tmp.path().join("run"));
+        let seed = [13_u8; 32];
+        write_v1(&dir, &seed);
+
+        dir.update_settings(|settings| {
+            settings.peers = Some(default());
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let secrets = SecretStore::boot().await.unwrap();
+        let settings = dir.settings().unwrap();
+        assert!(settings.peers.is_some());
+        assert_eq!(settings.seed(&secrets).await.unwrap(), seed);
+        big_node::delete_secrets(&secrets, &seed).await.unwrap();
+        secrets.stop().await.unwrap();
     }
 }

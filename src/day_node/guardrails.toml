@@ -1,6 +1,6 @@
 version = 1
 role = "application"
-dependency_reason = "The node directory (node.json: identity seed, peers, dev hooks) and the one way a process boots a node from it, shared by the `day` CLI and the app shells that hold their own node."
+dependency_reason = "The node directory (node.json: node id, peers, dev hooks; the identity seed is in the keyring) and the one way a process boots a node from it, shared by the `day` CLI and the app shells that hold their own node."
 allowed_dependencies = [
     "big_cabinet",
     "big_cabinet_core",

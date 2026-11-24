@@ -18,11 +18,13 @@
 //! report, not a branch they take. The untyped calls exist for `day exec`, which takes any NSID
 //! and JSON from its caller, and for tests of the wire itself.
 
-use crate::context::Booted;
-use crate::context::LockRole;
-use crate::context::NodeDir;
-use crate::context::SocketState;
 use crate::interlude::*;
+
+use day_node::Booted;
+use day_node::LockRole;
+use day_node::NodeDir;
+use day_node::Reached;
+use day_node::SocketState;
 
 use big_cabinet_core::authority::Authorization;
 use big_dispatch::Anonymous;
@@ -48,9 +50,11 @@ use tower::ServiceExt;
 /// The bound on one request or response body, the same as the listener's.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-/// How long a client waits for a node another process is booting, or is shutting down, before it
-/// gives up.
-pub const CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+/// The datum vocabulary every node `day` boots is given: an empty repo, as before the holder code
+/// moved to `day_node`, which takes it from the caller.
+pub fn empty_schemas() -> Res<Arc<big_cabinet::SchemaRepo>> {
+    Ok(Arc::new(big_cabinet::SchemaRepo::open(std::iter::empty())?))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -137,11 +141,8 @@ impl<E> CallError<E> {
 }
 
 enum Transport {
-    /// One HTTP/1 connection to the holder's socket, opened in [`NodeClient::acquire`] and never
-    /// idled out. The holder counts it, and a holder that has finished its own command accepts
-    /// no new connection, so every call goes over this one. Commands call one operation at a
-    /// time; a call made while another is in flight would open a second connection, which a
-    /// draining holder refuses (an error, not a hang).
+    /// The one connection to the holder's socket, kept for every call (see
+    /// [`day_node::Attached::http`]). Commands call one operation at a time.
     Socket(reqwest::Client),
     /// The booted node and the router that serves it. They are dropped together on stop: the
     /// router holds the dispatch client, which must not outlive the node it calls.
@@ -157,92 +158,39 @@ pub struct NodeClient {
 }
 
 impl NodeClient {
-    /// Reaches the node in `dir`: through the socket of the process that holds it, or, if none
-    /// does, by booting it here. Finding the node held by a process that is still booting waits
-    /// for its socket, and finding it held by one that is shutting down waits for the lock, both
-    /// bounded by `deadline`.
+    /// Reaches the node in `dir` ([`NodeDir::find_or_hold`]): through the socket of the process
+    /// that holds it, or, if none does, by booting it here and serving its router to ourselves.
     pub async fn connect(dir: &NodeDir, deadline: std::time::Duration) -> Res<Self> {
-        let found = dir.probe_socket().await?;
-        tokio::time::timeout(deadline, Self::acquire(dir, found))
-            .await
-            .map_err(|_| {
-                eyre::eyre!(
-                    "the node at {} stayed held by another process for {deadline:?}",
-                    dir.root().display()
+        match dir
+            .find_or_hold(LockRole::Command, empty_schemas()?, deadline)
+            .await?
+        {
+            Reached::Held { booted, found } => {
+                let router = big_dispatch::xrpc_router(
+                    booted.node().dispatch.client.clone(),
+                    Anonymous::Acts(Authorization::identity(booted.node().authority.root)),
+                    Edge::Embedded,
                 )
-            })?
-    }
-
-    async fn acquire(dir: &NodeDir, found: SocketState) -> Res<Self> {
-        loop {
-            let held = match dir.try_lock(LockRole::Command)? {
-                Ok(lock) => {
-                    let booted = Booted::boot(dir, lock, LockRole::Command).await?;
-                    let router = big_dispatch::xrpc_router(
-                        booted.node.dispatch.client.clone(),
-                        Anonymous::Acts(Authorization::identity(booted.node.authority.root)),
-                        Edge::Embedded,
-                    )
-                    .into_router();
-                    return Ok(Self {
-                        transport: Transport::Holder(Box::new((booted, router))),
-                        mode: Mode::InProcess,
-                        socket: found,
-                        #[cfg(unix)]
-                        fd_socket: None,
-                    });
-                }
-                Err(held) => held,
-            };
-            // The holder's socket is up once its boot lock is released.
-            let waiting = dir.clone();
-            tokio::task::spawn_blocking(move || waiting.wait_until_serving())
-                .await
-                .expect(ERROR_TOKIO)?;
-            let socket = match &held.socket {
-                Some(socket) => socket.clone(),
-                None => dir.socket_path()?,
-            };
-            // A holder that has finished its own command closes its socket and exits once the
-            // connections it accepted have ended. So this client opens one connection before
-            // anything else, proves the holder accepted it by having it answer a request (a
-            // connect alone can sit in the backlog of a listener about to close), and makes
-            // every call over it. A refusal or a reset means the holder is on its way out.
-            let http = reqwest::Client::builder()
-                .unix_socket(socket.as_path())
-                .pool_max_idle_per_host(1)
-                .pool_idle_timeout(None)
-                .build()?;
-            match http
-                .get(format!("http://localhost/xrpc/{}", big_node::GET_NODE_INFO))
-                .send()
-                .await
-            {
-                Ok(_) => {
-                    return Ok(Self {
-                        transport: Transport::Socket(http),
-                        mode: if held.role == Some(LockRole::Serve) {
-                            Mode::Serving
-                        } else {
-                            Mode::InProcess
-                        },
-                        #[cfg(unix)]
-                        fd_socket: Some(dir.fd_socket_path()?),
-                        socket: SocketState::Live,
-                    });
-                }
-                Err(error) if error.is_connect() => {}
-                Err(error) => {
-                    return Err(error)
-                        .wrap_err_with(|| format!("connecting to {}", socket.display()));
-                }
+                .into_router();
+                Ok(Self {
+                    transport: Transport::Holder(Box::new((*booted, router))),
+                    mode: Mode::InProcess,
+                    socket: found,
+                    #[cfg(unix)]
+                    fd_socket: None,
+                })
             }
-            // No socket: the holder is shutting down, or it was only a process probing the lock.
-            // Either way the lock is the signal, so wait for it to be free and try again.
-            let waiting = dir.clone();
-            tokio::task::spawn_blocking(move || waiting.wait_for_lock_release())
-                .await
-                .expect(ERROR_TOKIO)?;
+            Reached::Attached(attached) => Ok(Self {
+                transport: Transport::Socket(attached.http),
+                mode: if attached.role == Some(LockRole::Serve) {
+                    Mode::Serving
+                } else {
+                    Mode::InProcess
+                },
+                #[cfg(unix)]
+                fd_socket: Some(attached.fd_socket),
+                socket: SocketState::Live,
+            }),
         }
     }
 
@@ -325,7 +273,7 @@ impl NodeClient {
         })
     }
 
-    /// Sends one encoded request to the node: over the daemon's socket, or through the router the
+    /// Sends one encoded request to the node: over the server's socket, or through the router the
     /// client serves itself. The one place either transport is spoken, for [`Self::call`] and
     /// for typed clients over [`HttpTransport`].
     async fn exchange(&self, request: XrpcRequest) -> Res<XrpcResponse> {
@@ -544,7 +492,7 @@ impl NodeClient {
         };
         let envelope = service_utils_rs::Envelope::with_metadata(
             service_utils_rs::RequestContext::root(),
-            Authorization::identity(running.0.node.authority.root).metadata(),
+            Authorization::identity(running.0.node().authority.root).metadata(),
             Invoke::json(operation, parameters.clone(), InvocationContext::default()),
         )
         .with_body(Body::Descriptors(
@@ -552,7 +500,7 @@ impl NodeClient {
         ));
         let response = running
             .0
-            .node
+            .node()
             .dispatch
             .client
             .call_with_metadata(envelope)
@@ -577,14 +525,14 @@ impl NodeClient {
                 // No new client is accepted from here on; the ones already connected finish.
                 #[cfg(unix)]
                 booted
-                    .node
+                    .node()
                     .fd_clients
                     .as_ref()
                     .expect("a holder boots with its descriptor socket attached")
                     .drain()
                     .await?;
                 booted
-                    .node
+                    .node()
                     .unix_clients
                     .as_ref()
                     .expect("a holder boots with its socket attached")
