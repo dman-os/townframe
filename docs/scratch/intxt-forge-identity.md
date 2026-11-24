@@ -1,6 +1,11 @@
 # intxt: forge credentials, sign-in and PR links
 
-**Status:** Scratch for discussion, second draft 2026-11-24 (ledger D80, D81). It covers how the forge integration starts:
+Status: Proposal, second draft (ledger D80, D81); forge work deferred by D85
+Owner: intxt lane
+Updated: 2026-11-24
+Scope: Where forge credentials live, what signing in means for the web viewer, and how a PR and an intxt are linked.
+
+It covers how the forge integration starts:
 - where forge credentials live;
 - what "sign in" means in the web app;
 - how a PR and an intxt are linked so a reader can trust the link.

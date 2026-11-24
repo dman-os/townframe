@@ -18,7 +18,18 @@ Set by the operator, 2026-11-24 (D76, D77). These outrank the older week goals (
 
 **The principle under both** (D74): record and structure always; work out use and delivery later.
 
-**This week (D77, D78–D80), product goals.** Both are a matter of code, not invention, so they go first:
+**This week (D77–D86), product goals:**
+- **Review on mobile is the read-only web viewer** in a phone's browser (D86).
+- Anything that changes an intxt, review included, lives in the desktop and phone app.
+- Forges are deferred (D85).
+
+The viewer's remaining work, in order:
+1. A real source: read an intxt through the viewer's relay node. Until "public" exists (C11), access is a per-intxt invite of that node.
+2. Hosting the relay and the viewer on the x86 box that replaces mothership (operator).
+3. Commits, messages and patches from the intxt itself (VCS-agnostic): plain server-rendered diffs first, then claytxt's diff view (C12).
+4. A phone-first layout, with its own Tailwind build.
+5. `day x intxt show` and the PR block carry the viewer link.
+6. Comment threads, session summaries, and Markdown descriptions.
 
 - **The web app** (D79): a neutral viewer of intxts across any number of relays, run by a relay provider, so review works from a phone's browser. MVP grade.
   - It's built in Dioxus, SSR first, as a wasm `wasi:http` component, after the `src/btress_sysadmin` precedent (Leptos SSR).
@@ -26,7 +37,7 @@ Set by the operator, 2026-11-24 (D76, D77). These outrank the older week goals (
   - Don't over-depend on that model: intxts should be viewable without a node, and webnodes are coming. So the rendering and resolving components are built to be reused by a webnode, and the relay-backed server is one host of them.
   - What "public" means is still developing; progress doesn't wait on it.
   - This is the web app, not the phone app.
-- **Forge integration** (D80), designed generally (C5). Authentication and identity come first, including linking a PR and an intxt; how to start is to be discussed with the operator (`intxt-forge-identity.md`).
+- **Forge integration: deferred (D85).** The notes below stay for when it returns. It was to be designed generally (C5), with authentication and identity first, including linking a PR and an intxt (`intxt-forge-identity.md`).
   - TypeScript is usable: `src/btress_auth` runs Better Auth as a `jco componentize` wasm component.
   - No Rust port of forges.link was found (11-24); the closest is `vcs-forge`, which covers the PR lifecycle on GitHub, GitLab and Gitea and is CLI-oriented.
   - forges.link is the reference vocabulary. It is `forges`, Daniel Roe's MIT TypeScript client for 14 forges, not a protocol. Its parts that matter here:
@@ -241,6 +252,12 @@ Round 1 as given (2026-11-19, CLI dogfood; proposals mine where marked):
   - `day <name>` execs `day-<name>` when `<name>` isn't a built-in, and built-ins always win.
   - intxt is the first plugin: argv[0] `intxt` or `day-intxt` behaves as `day x intxt`, so a symlink serves both `day intxt` and `intxt` now. Later `day-intxt` becomes its own binary on nodules' SDK, with no change for users. Being built on stack/intxt-35.
   - Open with nodules: the desktop refuses a node that `day` already holds, because the GUI hosts micros in-process on the booted node and attaching isn't built. The options are attach over the socket, a holder handoff, or the node as its own long-lived service (D83's shape).
+  - Nodules (11-24) owns it and picks attach: the micro host's in-process work (installing micro actors, minting their capabilities, dispatching their calls) becomes privileged node methods behind the operator root capability (#245), routed by ADR 045, and the composition attaches through the SDK client crate. It is also the road to the long-lived service. A holder handoff is dropped as fragile. The write-up comes with the SDK's.
+- **D85 (2026-11-24, operator) Forges are deferred.**
+  - No forge cartridge, no forge datums, no ingesting from GitHub, and no pushing comments back.
+  - intxt is VCS-agnostic and carries its own commits (commits documents and packs), so the viewer needs nothing from a forge to show them.
+  - The forge identity proposal waits.
+- **D86 (2026-11-24, operator) Mutations live in the app; the web viewer only reads.** Review and anything else that changes an intxt belong in the desktop and phone app, never in the web viewer. Review on mobile this week means reading an intxt in the viewer.
 
 ## For the ADRs
 
