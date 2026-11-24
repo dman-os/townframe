@@ -5,8 +5,10 @@ use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
+use big_cabinet_core::authority::CapabilityStatus;
 use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::MintCapability;
+use big_cabinet_core::authority::ObserveCapability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::ResolveActor;
 use big_cabinet_core::authority::ResolveAuthority;
@@ -308,6 +310,35 @@ impl DomainCapabilities {
                 },
             )
             .await
+    }
+
+    /// Resolves when `capability` is no longer live: retracted itself, or under a retracted
+    /// ancestor. A handle that is already dead resolves at once, because the authority refuses to
+    /// observe it. The authority's change stream ends only with a retraction, so a stream that
+    /// ends without one means the authority itself went away, which is an error.
+    pub async fn retracted(
+        &self,
+        context: &RequestContext,
+        capability: CapId,
+    ) -> Result<(), Error> {
+        use futures::StreamExt as _;
+        let mut changes = match self
+            .authority
+            .subscribe(context.child(), ObserveCapability { capability })
+            .await
+        {
+            Ok(changes) => changes,
+            Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        while let Some(change) = changes.next().await {
+            if change?.status == CapabilityStatus::Retracted {
+                return Ok(());
+            }
+        }
+        Err(ClientError::Method(AuthorityServiceError::Storage(
+            "the observation of a capability ended without its retraction".to_owned(),
+        )))
     }
 
     /// Retract a handle this domain minted. The handle is its own `via`, so this needs no

@@ -13,6 +13,7 @@ allowed_dependencies = [
     "big_cartridges_core",
     "big_sync_core",
     "service_client_native_rs",
+    "service_core_rs",
     "service_utils_rs",
     "utils_rs",
 ]
