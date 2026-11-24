@@ -1,0 +1,27 @@
+[package]
+name = "micro_theme_lab_manifest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+#
+# internal
+clay_mdk = { workspace = true, features = ["contract"] }
+micro_shell_manifest = { workspace = true }
+#
+# external
+serde_json.workspace = true
+
+[dev-dependencies]
+#
+# internal
+# `host::declared_rows` checks the declared rows in tests; the contract itself stays backend-free.
+clay_mdk = { workspace = true, features = ["in_process"] }
+insta.workspace = true
+
+[lints]
+workspace = true
