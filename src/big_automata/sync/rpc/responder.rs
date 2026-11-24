@@ -9,6 +9,7 @@ use crate::interlude::*;
 use crate::part_store::LeafEntry;
 use crate::part_store::PartStoreServe;
 use crate::part_store::bucket_summary::BucketSummary;
+use crate::sync::rpc::MAX_LEAF_BUCKETS;
 use crate::sync::rpc::MAX_LEAF_PAGE;
 use crate::sync::rpc::MAX_LIST_BUCKETS;
 use crate::sync::rpc::MAX_SUMMARY_PARTS;
@@ -147,6 +148,11 @@ impl<S: PartStoreServe> RpcResponder<S> {
             seed,
             limit_hint,
         } = req;
+        if buckets.len() > MAX_LEAF_BUCKETS {
+            return Ok(Err(BucketsError::TooManyBuckets {
+                cap: MAX_LEAF_BUCKETS,
+            }));
+        }
         // The store takes an `after` of another bucket as a caller bug and panics, and a
         // non-canonical bucket id reaches arithmetic that assumes canonical ones; both are
         // remote input, refused here before any part is looked at.

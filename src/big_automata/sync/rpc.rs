@@ -25,6 +25,8 @@
 //!    cap is capped, not refused), each page echoing the `after` it answers and carrying
 //!    `next_after` exactly when the bucket has more (the walk drops a redelivered page by the
 //!    echo). A bucket unchanged past `since` answers an empty page.
+//!    A request naming more than [`MAX_LEAF_BUCKETS`] buckets is refused whole with
+//!    `TooManyBuckets { cap }` before the store is read, and the asker never sends one.
 //!    A request that is malformed whatever the store holds (a bucket id beyond the deepest level
 //!    or not canonical, an `after` that is not in its bucket, a listing offset beyond the deepest
 //!    level) is refused whole as `Invalid` before the store is read, which discloses nothing
@@ -53,6 +55,12 @@ pub const MAX_SUMMARY_PARTS: usize = 64;
 
 /// Ceiling on a bucket listing's `limit_hint`.
 pub const MAX_LIST_BUCKETS: u32 = 1024;
+
+/// Ceiling on the buckets one leaf request may name. Remote input: each bucket answers a page
+/// of up to [`MAX_LEAF_PAGE`] entries, so a request is bounded by this times that. The old
+/// `big_sync` responder had no such cap, only the page-size ceiling. The asker
+/// (`BucketMachine`) splits a larger selection across requests.
+pub const MAX_LEAF_BUCKETS: usize = 64;
 
 /// Ceiling on the entries of one leaf page, whatever the hint.
 pub const MAX_LEAF_PAGE: u32 = 1024;
@@ -129,8 +137,8 @@ pub trait BigSyncRpcClient {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display,
 )]
 pub enum RpcError {
-    /// TransportError
-    TransportError,
+    /// TransportError {0}
+    TransportError(String),
     /// InvalidRequest {0}
     InvalidRequest(String),
     /// Unauthorized

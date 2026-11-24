@@ -93,6 +93,8 @@ pub enum BucketsError {
     /// The part is unknown, or the requester may not read it: both answer alike, so a refusal
     /// does not confirm the part exists.
     UnknownPart,
+    /// the request names more buckets than the responder answers at once; none was answered
+    TooManyBuckets { cap: usize },
     /// the request is malformed: {0}
     Invalid(String),
     /// the request context failed: {0}

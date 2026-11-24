@@ -946,6 +946,45 @@ fn the_wire_types_round_trip_through_json() {
                 .unwrap(),
         );
         round_trip(&BucketsError::UnknownPart);
+        round_trip(&BucketsError::TooManyBuckets { cap: 64 });
         round_trip(&BucketsError::Invalid("x".into()));
+    })
+}
+
+#[test]
+fn law_5_a_request_naming_too_many_buckets_is_refused_whole() {
+    block_on(async {
+        let mut rig = Rig::new();
+        rig.populate(20).await;
+        let responder = rig.responder();
+        let asker = asker();
+        let naming = |count: usize| {
+            // Real, readable buckets: only the count may be what trips the cap.
+            let buckets = (0..count)
+                .map(|at| (BuckId::new(2, u16::try_from(at).unwrap()), None))
+                .collect();
+            leaf_request(part(1), buckets, 0, Some(5))
+        };
+        assert!(
+            responder
+                .leaf_buckets(&asker, naming(MAX_LEAF_BUCKETS))
+                .await
+                .unwrap()
+                .is_ok(),
+            "a request at the cap is answered"
+        );
+        let calls = rig.store.calls();
+        for part_index in [1, 2, 9] {
+            let mut request = naming(MAX_LEAF_BUCKETS + 1);
+            request.part_key = part(part_index);
+            assert_eq!(
+                responder.leaf_buckets(&asker, request).await.unwrap(),
+                Err(BucketsError::TooManyBuckets {
+                    cap: MAX_LEAF_BUCKETS
+                }),
+                "refused alike whatever the part"
+            );
+        }
+        assert_eq!(rig.store.calls(), calls, "before the store is read");
     })
 }

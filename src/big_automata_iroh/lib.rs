@@ -332,7 +332,7 @@ impl PeerRpcClient {
         match client.call(RequestContext::root(), params).await {
             Ok(output) => Ok(Ok(output)),
             Err(ClientError::Method(error)) => Ok(Err(error)),
-            Err(ClientError::Transport { .. }) => Err(RpcError::TransportError),
+            Err(ClientError::Transport { message, .. }) => Err(RpcError::TransportError(message)),
         }
     }
 }
