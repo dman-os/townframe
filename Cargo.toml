@@ -30,7 +30,6 @@ members = [
   "./src/macros",
   "./src/pierre_diffs",
   "./src/pierre_diffs_dioxus",
-  "./src/mltools/",
   "./src/pauperfuse/",
   "./src/native_utils_rs",
   "./src/secrets_rs",
@@ -103,6 +102,8 @@ exclude = [
   "src/daybook_pdk",
   "src/daybook_sdk",
   "src/daybook_types",
+  # Only the legacy daybook crates above use it, and its live tests call paid cloud APIs.
+  "src/mltools",
   "src/plug_dayledger_manifest",
   "src/plug_dayledger_routines",
   "src/plug_plabels_manifest",
