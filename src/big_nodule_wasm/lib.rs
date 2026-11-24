@@ -173,6 +173,11 @@ const DISPATCH_AUTHORITY: &str = "dispatch.local";
 /// whose JSON body is `{ "error": "GuestFault", "message", "fault": <this> }`, and the same
 /// record is logged at `error` with the cartridge id, so it is in the log file beside the
 /// host's own events.
+///
+/// The stdio tails are node-side only: they are neither serialized into the body nor logged
+/// anywhere a caller reads. A guest instance serves many callers, so its recent output can hold
+/// another caller's data; they appear in the node's own `error` event and in this struct for
+/// in-process consumers, and a deserialized body has them empty.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuestFault {
     pub kind: FaultKind,
@@ -187,7 +192,9 @@ pub struct GuestFault {
     /// The last 16 KiB the workload wrote to its stdout and stderr, lossily decoded. A Rust
     /// guest prints its panic message to stderr just before it traps, so it is in
     /// `stderr_tail`. Guest-written: render it as text, never as markup.
+    #[serde(skip_serializing, default)]
     pub stdout_tail: String,
+    #[serde(skip_serializing, default)]
     pub stderr_tail: String,
 }
 
@@ -662,6 +669,7 @@ impl WasmProvider {
             kind = ?fault.kind,
             component_hash = %fault.component_hash,
             frames = ?fault.frames,
+            stdout_tail = fault.stdout_tail,
             stderr_tail = fault.stderr_tail,
             "{}",
             fault.message

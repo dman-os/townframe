@@ -815,6 +815,18 @@ async fn a_trapping_guest_answers_with_a_fault_naming_its_frames_component_and_s
     let secrets = secrets().await;
     let (node, stop) = boot_node(&secrets).await;
     let spec = caller();
+    // The node's own `error` event for the fault is captured on this thread (a current-thread
+    // runtime serves the call here), where the tails are allowed to appear.
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let _logging = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer({
+                let log = std::sync::Arc::clone(&log);
+                move || LogWriter(std::sync::Arc::clone(&log))
+            })
+            .with_ansi(false)
+            .finish(),
+    );
     put(&node, &bytes).await;
     admit(&node, cartridge(&spec, &bytes, &[])).await;
     assert_eq!(
@@ -839,15 +851,35 @@ async fn a_trapping_guest_answers_with_a_fault_naming_its_frames_component_and_s
         "the guest keeps its name section, so a frame is named: {:?}",
         fault.frames
     );
-    // The guest prints its panic message to stderr just before it traps.
+    // The guest prints its panic message to stderr just before it traps. The tail is another
+    // caller's data as far as this caller is concerned, so it is not in the body, only in the
+    // node's own log.
     assert!(
-        fault
-            .stderr_tail
-            .contains("the nodule fixture panicked on purpose"),
-        "the panic message is in the stderr tail: {:?}",
-        fault.stderr_tail
+        body["fault"].get("stderr_tail").is_none() && body["fault"].get("stdout_tail").is_none(),
+        "the body carries no stdio tail: {body}"
+    );
+    assert!(!body.to_string().contains("panicked on purpose"));
+    let log = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+    assert!(log.contains("stderr_tail"), "the fault is logged: {log}");
+    assert!(
+        log.contains("the nodule fixture panicked on purpose"),
+        "the panic message is in the logged stderr tail: {log}"
     );
     shutdown(node, stop).await;
+}
+
+/// Collects what a test subscriber writes.
+struct LogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[tokio::test]
