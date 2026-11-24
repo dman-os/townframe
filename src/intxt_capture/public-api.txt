@@ -12,6 +12,7 @@ pub enum intxt_capture::anchor::Placement { # [doc = " `exact` is whether the qu
 pub enum intxt_capture::anchor::Source { # [doc = " A commit, spelled as the hex id (full or abbreviated; resolving it is the caller's)."] Commit (String), # [doc = " A worktree op by its sequence number, spelled `op<seq>`: the prefix keeps it from being"] # [doc = " read as an all-digit abbreviated commit id."] Op (u64) }
 pub enum intxt_capture::git_hooks::HookState { # [doc = " The hook is capture's and is in place."] Installed, # [doc = " A `post-rewrite` that is not capture's is there, so none was installed and rewrites are"] # [doc = " not seen exactly (`add` falls back to patch ids)."] ForeignPostRewrite, # [doc = " Installing failed (a read-only hooks directory, say). Capture goes on recording and tries"] # [doc = " again at its next observation, or when `capture install-git-hooks` is run."] Failed { reason : String } }
 pub enum intxt_capture::git_hooks::Install { # [doc = " Wrote the hook (none was there, or ours was out of date)."] Installed (PathBuf), # [doc = " Ours was already in place; nothing changed."] AlreadyInstalled (PathBuf), # [doc = " A `post-rewrite` that is not ours is at the path; nothing was written."] Foreign (PathBuf) }
+pub enum intxt_capture::git_hooks::PostRewrite { Absent (PathBuf), # [doc = " A hook carrying [`MARKER`]: capture's."] Ours (PathBuf), # [doc = " A hook that is not capture's, which capture never overwrites."] Foreign (PathBuf) }
 pub enum intxt_capture::hook::Event { SessionStart, PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, Stop, SubagentStop, PreCompact, SessionEnd, Other (String) }
 pub enum intxt_capture::transcript::ImportError { # [error ("reading the transcript: {0}")] Io (# [from] std :: io :: Error), # [error ("the transcript is {len} bytes, shorter than the offset {offset} already imported")] Shrank { len : u64 , offset : u64 }, # [error ("transcript line at byte {at}: {reason}")] Line { at : u64 , reason : String }, # [error ("transcript record {uuid}: {reason}")] Record { uuid : String , reason : String } }
 pub impl intxt_capture::acp::Recorder::fn feed (& mut self , direction : Direction , at : Timestamp , bytes : & [u8] ,) -> Result < Vec < Emit > , Error >
@@ -44,6 +45,7 @@ pub intxt_capture::anchor::fn first_parent (git : & Git , commit : & str) -> Res
 pub intxt_capture::anchor::fn quote (content : & str , lines : & LineRange) -> Result < TextQuote , Error >
 pub intxt_capture::git::fn commit (git : & Git , sha : & str) -> Result < GitCommit , Error >
 pub intxt_capture::git::fn observe (root : & Path , git_dir : & Path , common_dir : & Path , state : & GitState , import : & [String] ,) -> Result < (GitObserved , GitState) , Error >
+pub intxt_capture::git_hooks::fn inspect_post_rewrite (root : & Path) -> Result < PostRewrite , Error >
 pub intxt_capture::git_hooks::fn install_post_rewrite (root : & Path) -> Result < Install , Error >
 pub intxt_capture::git_hooks::fn parse_post_rewrite (input : & str) -> Result < Vec < RewritePair > , Error >
 pub intxt_capture::host::fn install_git_hooks (identity : & Identity) -> Result < git_hooks :: Install , Error >
