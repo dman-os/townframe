@@ -54,6 +54,7 @@ use clay_mdk::host::DocumentService;
 use clay_mdk::host::Resources;
 use clay_mdk::host::RootRow;
 use clay_mdk::Collection;
+use clay_mdk::CollectionId;
 use clay_mdk::MicroId;
 use clay_mdk::Nsid;
 use clay_mdk::SHELL_ROOTS;
@@ -133,7 +134,10 @@ impl InstalledMicro {
 /// facet per micro, `{ "enabled": bool, "package_version": u32 }`, keyed by micro id.
 const INSTALLS_DOCUMENT: &str = "dayframe.installs";
 const INSTALLS_BRANCH: &str = "main";
-const INSTALL_TAG: &str = "clay.micro.install";
+/// Facet tags of Clay's own desired-state document are host-formed keys, not NSIDs: an NSID
+/// names a Lexicon (ADR 050 §2) and no other cartridge could provide this datum, so the `/`
+/// keeps the tag out of the Lexicon namespace the node's record tags share.
+const INSTALL_TAG: &str = "clay/micro-install";
 
 fn install_route(micro: &MicroId) -> FacetRoute {
     FacetRoute {
@@ -372,7 +376,7 @@ async fn declare<St: OrderedStore + Send + Sync + 'static>(
     collections: &CollectionRegistry<BytesRegistrations>,
     store: &Arc<St>,
     contract: CollectionContract,
-) -> Result<Result<BytesRegistrations, clay_host::DeclareError>, StoreError> {
+) -> Result<Result<(CollectionId, BytesRegistrations), clay_host::DeclareError>, StoreError> {
     let registrations = durable_bytes_registrations(
         Arc::clone(store),
         contract.id.as_str().as_bytes().to_vec(),
@@ -382,7 +386,7 @@ async fn declare<St: OrderedStore + Send + Sync + 'static>(
     .await?;
     Ok(collections
         .declare(contract, registrations.clone())
-        .map(|()| registrations))
+        .map(|id| (id, registrations)))
 }
 
 /// The replica identity of this store: read from the `replica` subspace, or generated once and
@@ -488,11 +492,11 @@ impl CompositionRuntime {
         // requirement several micros serve is an installation error and left unsupplied.
         let (requirements, supply_errors) = requirements::resolve(&installed);
         errors.extend(supply_errors);
-        // A declared collection's id is its contract's id today (see `DeclaredCollections`).
+        // The host mints each declared collection's id (see `DeclaredCollections`).
         let mut declared_collections = DeclaredCollections::default();
 
         let shell_roots = Nsid::literal(SHELL_ROOTS);
-        let roots_collection = declare(
+        let (shell_roots_id, roots_collection) = declare(
             &collections,
             &store,
             CollectionContract {
@@ -503,7 +507,7 @@ impl CompositionRuntime {
         )
         .await?
         .expect("the root declares shell.roots first");
-        declared_collections.declare(&shell_roots, &shell_roots);
+        declared_collections.declare(&shell_roots, &shell_roots_id);
         for micro in &installed {
             for request in &micro.sidecar.manifest.configuration_requests {
                 documents.mock_documents().bind_config(
@@ -524,7 +528,7 @@ impl CompositionRuntime {
                 )
                 .await?;
                 match declared {
-                    Ok(_) => declared_collections.declare(&contract.id, &contract.id),
+                    Ok((id, _)) => declared_collections.declare(&contract.id, &id),
                     Err(error) => errors.push(format!("{}: {error}", micro.id)),
                 }
             }
@@ -699,7 +703,7 @@ impl CompositionRuntime {
     }
 
     /// A declared collection, for inspection and tests.
-    pub fn collection(&self, id: &Nsid) -> Option<BytesRegistrations> {
+    pub fn collection(&self, id: &CollectionId) -> Option<BytesRegistrations> {
         self.collections.collection(id)
     }
 
@@ -751,7 +755,7 @@ impl CompositionRuntime {
         &self,
         micro: &MicroId,
         binding: &str,
-        collection: Option<&Nsid>,
+        collection: Option<&CollectionId>,
     ) -> impl Future<Output = ()> + use<> {
         let grant = collection.map(|collection| {
             let request = self.collection_requests[micro]

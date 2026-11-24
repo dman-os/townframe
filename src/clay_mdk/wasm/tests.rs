@@ -331,6 +331,7 @@ async fn a_guest_slot_mounts_another_guests_presentation_and_follows_it_through_
             CollectionRegistry::new(ReplicaId::from_bytes([1; ReplicaId::LEN])),
         );
         let feed = Nsid::literal("org.example.clay.test.context.feed");
+        let feed_id = clay_collection::CollectionId::minted_for(&feed);
         resources
             .collections
             .declare(
@@ -390,7 +391,7 @@ async fn a_guest_slot_mounts_another_guests_presentation_and_follows_it_through_
                     consumer_manifest,
                     CollectionBindings::new([(
                         "feed".to_owned(),
-                        crate::native::BoundCollection::write(feed.clone()),
+                        crate::native::BoundCollection::write(feed_id.clone()),
                     )]),
                     consumer_package,
                 ),
@@ -415,7 +416,7 @@ async fn a_guest_slot_mounts_another_guests_presentation_and_follows_it_through_
         .grant_writer(
             resources
                 .collections
-                .grant(&feed, &clay_host::MicroId::new("seeder"))
+                .grant(&feed_id, &clay_host::MicroId::new("seeder"))
                 .unwrap(),
         )
         .unwrap()

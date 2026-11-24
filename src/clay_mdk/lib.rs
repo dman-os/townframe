@@ -424,6 +424,7 @@ macro_rules! __export_guest_world {
 }
 
 mod manifest;
+pub use clay_collection::CollectionId;
 pub use manifest::Access;
 pub use manifest::BindingResolution;
 pub use manifest::CollectionCapability;

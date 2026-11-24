@@ -15,6 +15,7 @@ use clay_docs::FacetRoute;
 use clay_mdk::host::BoundCollection;
 use clay_mdk::Access;
 use clay_mdk::BindingResolution;
+use clay_mdk::CollectionId;
 use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
@@ -26,7 +27,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 /// The binding datum shares the install datum's document, one facet per micro.
-pub(crate) const BINDINGS_TAG: &str = "clay.micro.bindings";
+pub(crate) const BINDINGS_TAG: &str = "clay/micro-bindings";
 
 pub(crate) fn bindings_route(micro: &MicroId) -> FacetRoute {
     FacetRoute {
@@ -42,7 +43,7 @@ pub(crate) fn bindings_route(micro: &MicroId) -> FacetRoute {
 /// manifest's current request is covered by `contract` and `access`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct BindingGrant {
-    pub collection: Nsid,
+    pub collection: CollectionId,
     /// The contract NSID the request named when it was granted.
     pub contract: Nsid,
     pub access: Access,
@@ -50,7 +51,7 @@ pub(crate) struct BindingGrant {
 
 impl BindingGrant {
     /// Grant `collection` to `request`, which names the contract and access being consented to.
-    pub fn of(request: &Request, collection: Nsid) -> Self {
+    pub fn of(request: &Request, collection: CollectionId) -> Self {
         Self {
             collection,
             contract: request.contract.clone(),
@@ -100,26 +101,26 @@ impl BindingsDatum {
 }
 
 /// The declared collections by the contract they implement. A contract may later have several
-/// declared instances; today a declared collection's id is its contract's id.
+/// declared instances; today the host mints one instance per contract.
 #[derive(Default)]
-pub(crate) struct DeclaredCollections(BTreeMap<Nsid, BTreeSet<Nsid>>);
+pub(crate) struct DeclaredCollections(BTreeMap<Nsid, BTreeSet<CollectionId>>);
 
 impl DeclaredCollections {
-    pub fn declare(&mut self, contract: &Nsid, collection: &Nsid) {
+    pub fn declare(&mut self, contract: &Nsid, collection: &CollectionId) {
         self.0
             .entry(contract.clone())
             .or_default()
             .insert(collection.clone());
     }
 
-    fn implements(&self, contract: &Nsid, collection: &Nsid) -> bool {
+    fn implements(&self, contract: &Nsid, collection: &CollectionId) -> bool {
         self.0
             .get(contract)
             .is_some_and(|collections| collections.contains(collection))
     }
 
     /// The one collection implementing `contract`, when there is exactly one.
-    fn sole(&self, contract: &Nsid) -> Option<&Nsid> {
+    fn sole(&self, contract: &Nsid) -> Option<&CollectionId> {
         let mut collections = self.0.get(contract)?.iter();
         match (collections.next(), collections.next()) {
             (Some(only), None) => Some(only),
@@ -214,10 +215,14 @@ mod tests {
         Nsid::literal(&format!("org.example.test.{name}"))
     }
 
+    fn cid(name: &str) -> CollectionId {
+        CollectionId::minted_for(&nsid(name))
+    }
+
     fn declared(collections: &[&str]) -> DeclaredCollections {
         let mut declared = DeclaredCollections::default();
         for collection in collections {
-            declared.declare(&nsid("tallies"), &nsid(collection));
+            declared.declare(&nsid("tallies"), &cid(collection));
         }
         declared
     }
@@ -228,7 +233,7 @@ mod tests {
                 .iter()
                 .map(|(binding, id)| {
                     let grant = id.map(|id| BindingGrant {
-                        collection: nsid(id),
+                        collection: cid(id),
                         contract: nsid("tallies"),
                         access: Access::Write,
                     });
@@ -249,7 +254,7 @@ mod tests {
         let resolution = resolve(&manifest, None, &declared(&["a"]));
         assert_eq!(
             resolution.bound,
-            BTreeMap::from([("book".to_owned(), BoundCollection::write(nsid("a")))])
+            BTreeMap::from([("book".to_owned(), BoundCollection::write(cid("a")))])
         );
         assert!(resolution.unresolved.is_empty());
     }
@@ -280,7 +285,7 @@ mod tests {
             Some(&datum(&[("book", Some("b"))])),
             &declared(&["a", "b"]),
         );
-        assert_eq!(resolution.bound["book"], BoundCollection::write(nsid("b")));
+        assert_eq!(resolution.bound["book"], BoundCollection::write(cid("b")));
         // Configuration is final: a collection the contract does not allow is not replaced by
         // the default, and an explicit null leaves the binding unbound.
         for entry in [Some("elsewhere"), None] {
@@ -328,7 +333,7 @@ mod tests {
             Some(&datum(&[("later", Some("a"))])),
             &declared(&["a"]),
         );
-        assert_eq!(resolution.bound["later"], BoundCollection::write(nsid("a")));
+        assert_eq!(resolution.bound["later"], BoundCollection::write(cid("a")));
         assert!(resolution.unresolved.is_empty());
     }
 
@@ -339,7 +344,7 @@ mod tests {
     #[test]
     fn a_widened_request_does_not_inherit_the_granted_binding() {
         let granted = |access: Access, contract: &str| BindingGrant {
-            collection: nsid("a"),
+            collection: cid("a"),
             contract: nsid(contract),
             access,
         };
@@ -356,7 +361,7 @@ mod tests {
         };
         let mut declared = declared(&["a"]);
         // The same collection also implements the other contract, so only the grant decides.
-        declared.declare(&nsid("other"), &nsid("a"));
+        declared.declare(&nsid("other"), &cid("a"));
 
         // Identical and narrowed requests keep the grant, narrowed ones at the narrower access.
         for (given, asked) in [
@@ -373,8 +378,8 @@ mod tests {
             assert_eq!(
                 resolution.bound["book"],
                 match asked {
-                    Access::Read => BoundCollection::read(nsid("a")),
-                    _ => BoundCollection::write(nsid("a")),
+                    Access::Read => BoundCollection::read(cid("a")),
+                    _ => BoundCollection::write(cid("a")),
                 }
             );
         }
@@ -408,6 +413,6 @@ mod tests {
 
         // No stored grant: the default still applies, widened request or not.
         let resolution = resolve(&asking(Access::Write, "tallies"), None, &declared);
-        assert_eq!(resolution.bound["book"], BoundCollection::write(nsid("a")));
+        assert_eq!(resolution.bound["book"], BoundCollection::write(cid("a")));
     }
 }

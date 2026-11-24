@@ -21,6 +21,7 @@ pub use declared::declared_rows;
 pub use declared::manifest_scope;
 pub use declared::runtime_scope;
 
+use clay_collection::CollectionId;
 use clay_collection::Nsid;
 use clay_collection::ReadError;
 use clay_collection::ReadLimits;
@@ -111,18 +112,18 @@ impl Resources {
 /// One local collection binding resolved to a declared collection (ADR 031 §11).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundCollection {
-    /// The declared collection's id.
-    pub id: Nsid,
+    /// The declared collection instance's id.
+    pub id: CollectionId,
     /// Whether the micro may also register rows; a writable binding is always readable.
     pub write: bool,
 }
 
 impl BoundCollection {
-    pub fn read(id: Nsid) -> Self {
+    pub fn read(id: CollectionId) -> Self {
         Self { id, write: false }
     }
 
-    pub fn write(id: Nsid) -> Self {
+    pub fn write(id: CollectionId) -> Self {
         Self { id, write: true }
     }
 }

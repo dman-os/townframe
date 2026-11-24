@@ -37,7 +37,9 @@ async fn desktop_runtime_installs_the_counter_section_from_its_package_manifest(
     let mut key = Vec::new();
     ciborium::into_writer(micro_counter_manifest::ID, &mut key).unwrap();
     let row = runtime
-        .collection(&clay_mdk::Nsid::literal(micro_settings_manifest::SECTIONS))
+        .collection(&clay_mdk::CollectionId::minted_for(
+            &clay_mdk::Nsid::literal(micro_settings_manifest::SECTIONS),
+        ))
         .unwrap()
         .get(&key)
         .unwrap()
@@ -79,7 +81,9 @@ async fn redeeming_the_counter_section_runs_the_guest_only_while_held() {
                     &shell,
                     runtime.supervisor().activator(),
                     &runtime
-                        .collection(&clay_mdk::Nsid::literal(micro_settings_manifest::SECTIONS))
+                        .collection(&clay_mdk::CollectionId::minted_for(
+                            &clay_mdk::Nsid::literal(micro_settings_manifest::SECTIONS),
+                        ))
                         .unwrap(),
                 )
                 .unwrap();
