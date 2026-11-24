@@ -175,3 +175,49 @@ proptest! {
         result.map_err(|err| TestCaseError::fail(format!("{err:?}")))?;
     }
 }
+
+/// One revision holding keys whose length order and byte order disagree pages in the keys'
+/// order, as the oracle does: `[1]` before `[0, 0]`, the 32 byte key before the 33 byte one.
+#[test]
+fn length_first_keys_page_in_key_order() -> Res<()> {
+    block_on(async {
+        let store = super::fresh().await?;
+        let mut oracle = PartOracle::default();
+        let part = PartKey::new(&[9]);
+        let objs = [vec![0, 0], vec![1], vec![255; 32], vec![0; 33], vec![]]
+            .iter()
+            .map(|bytes| ObjKey::new(bytes))
+            .collect::<Vec<_>>();
+        let writes = vec![
+            PartWrite::SetPayloads(objs.iter().map(|obj| (obj.clone(), payload(1))).collect()),
+            PartWrite::AddMembers(objs.iter().map(|obj| (obj.clone(), part.clone())).collect()),
+        ];
+        commit(&store, &writes).await?;
+        oracle.commit(writes);
+        let mut page = Page::default();
+        store
+            .read(
+                &LogSelector::All,
+                0,
+                1,
+                Limits {
+                    max_entries: NonZeroUsize::MAX,
+                    max_bytes: None,
+                },
+                &mut page,
+            )
+            .await?;
+        let paged = page
+            .entries
+            .iter()
+            .map(|entry| match &entry.key {
+                big_automata::part_store::LogKey::Member { obj, .. } => obj.clone(),
+                big_automata::part_store::LogKey::Access { .. } => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        let mut sorted = objs.clone();
+        sorted.sort();
+        assert_eq!(paged, sorted);
+        assert_pages(&store, &oracle, 1).await
+    })
+}

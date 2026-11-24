@@ -6,9 +6,9 @@
 
 mod portable;
 pub use portable::ExecuteResult;
-pub use portable::Migration;
 pub use portable::FromValue;
 pub use portable::IntoValue;
+pub use portable::Migration;
 pub use portable::ResultSet;
 pub use portable::Row;
 pub use portable::SqlError;
