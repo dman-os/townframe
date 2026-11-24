@@ -70,6 +70,9 @@ expression: supported
 - output
 - time
 - data
+- style
+- slot
+- bdi
 - "http://www.w3.org/2000/svg:svg"
 - "http://www.w3.org/2000/svg:g"
 - "http://www.w3.org/2000/svg:path"
@@ -79,3 +82,5 @@ expression: supported
 - "http://www.w3.org/2000/svg:polyline"
 - "http://www.w3.org/2000/svg:polygon"
 - "http://www.w3.org/2000/svg:defs"
+- "http://www.w3.org/2000/svg:symbol"
+- "http://www.w3.org/2000/svg:use"

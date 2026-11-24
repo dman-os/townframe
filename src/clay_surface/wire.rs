@@ -39,6 +39,10 @@ pub enum Mutation<C = ()> {
     InsertBefore(u32),
     SetAttribute((String, Option<String>, AttributeValue)),
     SetText(String),
+    /// The mount's whole stylesheet, replacing any earlier one. The host sanitizes it at ingress
+    /// (see `stylesheet`) and renders it as a `<style>` first child of the mount's root. It is a
+    /// surface-level fact, not a node edit, so it has no `WriteMutations` counterpart.
+    SetStyleSheet(String),
     AddEventListener(String),
     RemoveEventListener(String),
     Remove,
@@ -61,9 +65,125 @@ pub struct EventResponse {
 
 pub type SurfaceEventHandler = Rc<dyn Fn(Event) -> EventResponse>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollBehavior {
+    Instant,
+    Smooth,
+}
+
+/// Offsets of an element's own scrollable content, in CSS pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollOffsets {
+    pub left: f64,
+    pub top: f64,
+    pub behavior: ScrollBehavior,
+}
+
+/// A geometry value the host reads from a mounted element.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElementRead {
+    ClientRect,
+    ScrollOffset,
+    ScrollSize,
+}
+
+/// Where `scroll_to` (`scrollIntoView`) aligns an element along one axis of its scroll container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollAlign {
+    Start,
+    Center,
+    End,
+    Nearest,
+}
+
+/// Dioxus's `ScrollToOptions`: scroll an element itself into view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollIntoView {
+    pub behavior: ScrollBehavior,
+    pub vertical: ScrollAlign,
+    pub horizontal: ScrollAlign,
+}
+
+/// What a guest asks the host to do to one mounted element: the imperative half of Dioxus's
+/// `MountedData`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ElementAction {
+    /// `MountedData::scroll`: scroll the element's own content to these offsets.
+    Scroll(ScrollOffsets),
+    /// `MountedData::scroll_to`: scroll the element into view.
+    ScrollIntoView(ScrollIntoView),
+    SetFocus(bool),
+    Read(ElementRead),
+}
+
+/// A command sent by a guest to one element it was told is mounted. Every command carries a
+/// request id the guest chose and is answered by exactly one [`ELEMENT_REPLY`] event carrying
+/// that id, `Ok` or `Err`, so the guest's future resolves the way a plain Dioxus app's would.
+///
+/// Ordering contract: commands a guest issues while handling one event are applied by the host
+/// in the order issued, after that dispatch's mutations have been applied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ElementCommand {
+    pub request: u64,
+    pub action: ElementAction,
+}
+
+/// The name of the event through which the host answers every [`ElementCommand`]. It is not a
+/// Dioxus event: the guest adapter consumes it before Dioxus sees it. `data_json` is
+/// `{"request": id, "value": ...}` or `{"request": id, "error": "..."}`.
+pub const ELEMENT_REPLY: &str = "element-reply";
+
+/// The host's `MountedData` of every guest element that announced `mounted`, by guest element
+/// id: what an [`ElementCommand`] acts on. It holds `Rc`s, so it stays on the renderer's
+/// thread; the thread-safe side of a surface only tracks which ids are mounted.
+#[derive(Clone, Default)]
+pub struct ElementHandles(
+    Rc<std::cell::RefCell<std::collections::BTreeMap<NodeId, Rc<dioxus_html::MountedData>>>>,
+);
+
+impl PartialEq for ElementHandles {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl ElementHandles {
+    pub fn insert(&self, element: NodeId, mounted: dioxus_html::MountedData) {
+        self.0.borrow_mut().insert(element, Rc::new(mounted));
+    }
+
+    pub fn get(&self, element: NodeId) -> Option<Rc<dioxus_html::MountedData>> {
+        self.0.borrow().get(&element).cloned()
+    }
+
+    /// Forget the handles of elements the guest removed.
+    pub fn remove(&self, elements: impl IntoIterator<Item = NodeId>) {
+        let mut handles = self.0.borrow_mut();
+        for element in elements {
+            handles.remove(&element);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.borrow().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.borrow().is_empty()
+    }
+}
+
 pub trait SurfaceSink<C = ()>: Send + Sync {
     fn is_live(&self) -> bool;
     fn apply(&self, edits: &[Mutation<C>]) -> Result<u64, PresentationError>;
+    /// Queue `command` for `element`. A sink with no renderer behind it cannot run one.
+    fn element_command(
+        &self,
+        _element: NodeId,
+        _command: ElementCommand,
+    ) -> Result<(), PresentationError> {
+        Err(PresentationError::Unsupported("element commands".into()))
+    }
     fn withdraw(&self);
 }
 
