@@ -72,10 +72,11 @@ impl DrawerService {
     async fn remove_doc(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: RemoveDoc,
     ) -> Result<WriteReceipt, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core.invocation(context, metadata, params.capability).await?;
         let actor = &caller.signer;
         core.authorize(context, &caller.authority, &params.drawer_id, Access::Write)
             .await?;
@@ -105,7 +106,7 @@ impl Handler<RemoveDoc> for DrawerService {
         request: Envelope<RemoveDoc>,
     ) -> Result<ResponseEnvelope<WriteReceipt>, DrawersError> {
         Ok(self
-            .remove_doc(&request.context, request.params)
+            .remove_doc(&request.context, &request.metadata, request.params)
             .await?
             .into())
     }

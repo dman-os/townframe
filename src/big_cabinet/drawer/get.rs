@@ -8,10 +8,11 @@ impl DrawerService {
     async fn get(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: GetDrawer,
     ) -> Result<DrawerView, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core.invocation(context, metadata, params.capability).await?;
         let access = core
             .level(context, &caller.authority, &params.drawer_id)
             .await?
@@ -42,7 +43,7 @@ impl Handler<GetDrawer> for DrawerService {
         &self,
         request: Envelope<GetDrawer>,
     ) -> Result<ResponseEnvelope<DrawerView>, DrawersError> {
-        Ok(self.get(&request.context, request.params).await?.into())
+        Ok(self.get(&request.context, &request.metadata, request.params).await?.into())
     }
 }
 

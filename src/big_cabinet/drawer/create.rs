@@ -65,11 +65,12 @@ impl Core {
     async fn create_self_doc(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         capability: CapId,
         command: CommandId,
         doc_id: DocId,
     ) -> Result<DrawerCreated, DrawersError> {
-        let caller = self.invocation(context, capability).await?;
+        let caller = self.invocation(context, metadata, capability).await?;
         let actor = &caller.signer;
         if self.state.drawer(&doc_id).await?.is_some() {
             return Err(DrawersError::AlreadyDrawer(doc_id));
@@ -587,16 +588,20 @@ impl DrawerService {
     async fn create(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: CreateDrawer,
     ) -> Result<DrawerCreated, DrawersError> {
         match params.layout {
             CreateLayout::SelfDoc { doc_id } => {
                 self.core
-                    .create_self_doc(context, params.capability, params.command, doc_id)
+                    .create_self_doc(context, metadata, params.capability, params.command, doc_id)
                     .await
             }
             CreateLayout::SingleGroup => {
-                let caller = self.core.invocation(context, params.capability).await?;
+                let caller = self
+                    .core
+                    .invocation(context, metadata, params.capability)
+                    .await?;
                 drop(
                     self.core
                         .authorize_create(context, &caller.authority)
@@ -709,7 +714,10 @@ impl Handler<CreateDrawer> for DrawerService {
         &self,
         request: Envelope<CreateDrawer>,
     ) -> Result<ResponseEnvelope<DrawerCreated>, DrawersError> {
-        Ok(self.create(&request.context, request.params).await?.into())
+        Ok(self
+            .create(&request.context, &request.metadata, request.params)
+            .await?
+            .into())
     }
 }
 
@@ -717,9 +725,13 @@ impl DrawerService {
     async fn create_meta_doc(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: CreateMetaDoc,
     ) -> Result<MetaDocCreated, DrawersError> {
-        let caller = self.core.invocation(context, params.capability).await?;
+        let caller = self
+            .core
+            .invocation(context, metadata, params.capability)
+            .await?;
         let actor = &caller.signer;
         self.core
             .authorize(context, &caller.authority, &params.drawer_id, Access::Write)
@@ -756,7 +768,7 @@ impl Handler<CreateMetaDoc> for DrawerService {
         request: Envelope<CreateMetaDoc>,
     ) -> Result<ResponseEnvelope<MetaDocCreated>, DrawersError> {
         Ok(self
-            .create_meta_doc(&request.context, request.params)
+            .create_meta_doc(&request.context, &request.metadata, request.params)
             .await?
             .into())
     }

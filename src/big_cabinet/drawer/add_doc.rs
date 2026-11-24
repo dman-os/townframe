@@ -220,10 +220,11 @@ impl DrawerService {
     async fn add_doc(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: AddDoc,
     ) -> Result<WriteReceipt, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core.invocation(context, metadata, params.capability).await?;
         let actor = &caller.signer;
         // Conferring Admin on the doc takes Admin on the drawer; any other level takes Write.
         let needed = if params.access == Access::Admin {
@@ -236,7 +237,7 @@ impl DrawerService {
         // Granting the docs group on a doc gives away what the caller holds on it: the `reach`
         // handle must itself reach the doc at the level it confers, through whatever path carries
         // it. It may be a handle lent by whoever asked for the entry, not the drawer's own.
-        let reach = core.invocation(context, params.reach).await?;
+        let reach = core.invocation(context, metadata, params.reach).await?;
         if core
             .doc_level(context, &reach.authority, &params.doc_id)
             .await?
@@ -278,7 +279,7 @@ impl Handler<AddDoc> for DrawerService {
         &self,
         request: Envelope<AddDoc>,
     ) -> Result<ResponseEnvelope<WriteReceipt>, DrawersError> {
-        Ok(self.add_doc(&request.context, request.params).await?.into())
+        Ok(self.add_doc(&request.context, &request.metadata, request.params).await?.into())
     }
 }
 

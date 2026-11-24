@@ -279,13 +279,14 @@ impl DrawerService {
     async fn add_child(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: AddChild,
     ) -> Result<WriteReceipt, DrawersError> {
         let core = &self.core;
         if params.parent_id == params.child_id {
             return Err(DrawersError::SelfChild);
         }
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core.invocation(context, metadata, params.capability).await?;
         let actor = &caller.signer;
         core.authorize(context, &caller.authority, &params.parent_id, Access::Write)
             .await?;
@@ -325,7 +326,7 @@ impl Handler<AddChild> for DrawerService {
         request: Envelope<AddChild>,
     ) -> Result<ResponseEnvelope<WriteReceipt>, DrawersError> {
         Ok(self
-            .add_child(&request.context, request.params)
+            .add_child(&request.context, &request.metadata, request.params)
             .await?
             .into())
     }

@@ -337,36 +337,19 @@ fn unaccepted(verdict: Verdict) -> Result<Vec<ChangeHash>, Unaccepted> {
 }
 
 impl DocsService {
-    /// The invocation of a request that signs: a create, write, branch or merge. The handle signs
-    /// as its own subject unless the caller attached an `Authorization` whose `authority` is this
-    /// request's handle, whose `signer` is then the handle the call signs through. That is how a
-    /// service signs on behalf of its authenticated caller without being introduced to the
-    /// caller's actor: the signature is exactly as wide as the handle the caller presented. Any
-    /// other credential in the metadata (dispatch forwards its caller's) is the transport's, not a
-    /// signer for this handle, and is not consulted.
-    async fn signing_invocation(
+    /// The invocation of a request whose body carries `capability`: who may present it, and who a
+    /// request that signs signs as, is [`DomainCapabilities::resolve`]'s. For the requests that
+    /// sign (a create, write, branch or merge) a credential whose `authority` is this request's
+    /// handle names the handle the call signs through, which is how a service signs on behalf of
+    /// its authenticated caller without being introduced to the caller's actor.
+    async fn invocation(
         &self,
         context: &RequestContext,
         metadata: &HttpMetadata,
         capability: CapId,
     ) -> Result<Invocation<DocScope>, DocsError> {
-        let signer = match Authorization::from_metadata(metadata) {
-            Ok(authorization) if authorization.authority == capability => authorization.signer,
-            _ => capability,
-        };
         self.capabilities
-            .resolve_signed(context, capability, signer)
-            .await
-            .map_err(authority_error)
-    }
-
-    async fn invocation(
-        &self,
-        context: &RequestContext,
-        capability: CapId,
-    ) -> Result<Invocation<DocScope>, DocsError> {
-        self.capabilities
-            .resolve(context, capability)
+            .resolve(context, metadata, capability)
             .await
             .map_err(authority_error)
     }
