@@ -413,6 +413,25 @@ pub enum RecordCommands {
     },
 }
 
+impl RecordCommands {
+    async fn run(self, verbose: bool) -> Res<ExitCode> {
+        match self {
+            Self::Install {
+                harness: Harness::ClaudeCode { user, dry_run },
+            } => hooks::run(user, dry_run),
+            Self::Hook => capture::CaptureCommands::run(None, verbose).await,
+            Self::Acp { thinking, agent } => record::run(agent, thinking).await,
+            Self::GitRewrite { kind } => {
+                capture::CaptureCommands::run(
+                    Some(capture::CaptureCommands::GitRewrite { kind }),
+                    verbose,
+                )
+                .await
+            }
+        }
+    }
+}
+
 /// The harnesses `record install` writes a configuration for.
 #[derive(Debug, clap::Subcommand)]
 pub enum Harness {
@@ -461,20 +480,7 @@ pub enum GithubCommands {
 
 pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
     match command {
-        IntxtCommands::Record { verbose, command } => match command {
-            RecordCommands::Install {
-                harness: Harness::ClaudeCode { user, dry_run },
-            } => hooks::run(user, dry_run),
-            RecordCommands::Hook => capture::CaptureCommands::run(None, verbose).await,
-            RecordCommands::Acp { thinking, agent } => record::run(agent, thinking).await,
-            RecordCommands::GitRewrite { kind } => {
-                capture::CaptureCommands::run(
-                    Some(capture::CaptureCommands::GitRewrite { kind }),
-                    verbose,
-                )
-                .await
-            }
-        },
+        IntxtCommands::Record { verbose, command } => command.run(verbose).await,
         IntxtCommands::Github { command } => {
             with_packaging(async |packaging| match command {
                 GithubCommands::Pull { target } => {
