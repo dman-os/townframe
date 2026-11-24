@@ -1,8 +1,12 @@
+// Ported from @pierre/diffs 1.6.4 (tag diffs-v1.6.4, commit
+// 75e00805b44e193c0fb235c1bd9d7fadfa06acf6): packages/diffs/test/CodeView.pointerEvents.test.ts
+// Copyright 2025 Pierre Computer Company, Apache-2.0; see THIRD_PARTY_NOTICES.md.
+// Changes: bun:test to nextest; test titles are snake_case; file items become diff items (divergences.psv).
+
 //! Upstream's `test/CodeView.pointerEvents.test.ts` (C4), ported with its names
 //! (prefixed by its `describe`). Each case runs `setup(root)` on an empty
-//! viewer, so the immediate `render` `setup` ends with is the one thing C5
-//! owns: `render_stub` records it and returns until the render pass exists
-//! (rules.psv). `await wait(150)` is `advance_clock(150.0)` on the fake clock;
+//! viewer, so the immediate `render` `setup` ends with runs the real render
+//! pass over no items. `await wait(150)` is `advance_clock(150.0)` on the fake clock;
 //! the mobile Safari case builds its viewer over a host whose `PlatformInfo`
 //! says so, where upstream re-imports the module under a cache-busting query.
 //! Below them, the shell's own arms that no upstream case reaches (the
@@ -22,15 +26,13 @@ use crate::managers::universal_rendering_manager::UniversalRenderingManager;
 pub(super) type View = CodeView<FakeDom, u8, u8>;
 
 pub(super) fn viewer_with(dom: &Rc<FakeDom>, options: CodeViewOptions<u8, u8>) -> Rc<View> {
-    let view = CodeView::new(
+    CodeView::new(
         Rc::clone(dom),
         ResizeObserverHub::new(Rc::clone(dom)),
         UniversalRenderingManager::new(Rc::clone(dom)),
         Rc::new(PlainTextHighlighter),
         options,
-    );
-    view.render_stub.set(true);
-    view
+    )
 }
 
 fn viewer(options: CodeViewOptions<u8, u8>) -> (Rc<FakeDom>, Rc<View>) {

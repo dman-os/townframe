@@ -165,8 +165,8 @@ where
         self.mark_layout_dirty_from_index(index);
     }
 
-    /// `resetRenderState()` (private upstream; `pub` until C5's render pass is its caller)
-    pub fn reset_render_state(&self) {
+    /// `resetRenderState()`
+    pub(crate) fn reset_render_state(&self) {
         self.state.borrow_mut().render_state = RenderState::RESET;
     }
 
@@ -357,6 +357,14 @@ where
             let mut state = self.state.borrow_mut();
             state.options = options.clone();
             state.item_metrics_cache = next_item_metrics;
+        }
+        // Upstream's per-item options read the viewer's options live, so every
+        // instance sees the new ones from here on: the anchor the next render
+        // captures asks the instances for line positions under them, before the
+        // layout is recomputed.
+        let items = self.state.borrow().items.clone();
+        for item in &items {
+            self.push_item_options(item);
         }
         let item_metrics_changed = previous_item_metrics != next_item_metrics;
         let layout_changed = previous_layout != self.get_layout();

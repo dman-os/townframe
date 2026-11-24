@@ -492,14 +492,7 @@ fn signature(dom: &FakeDom, node: NodeKey) -> String {
     format!("<{tag} {attributes}>{children}</{tag}>")
 }
 
-pub(crate) fn snapshot_tree(dom: &FakeDom, node: NodeKey) -> Value {
-    let tag = dom.doc.tag_name(node);
-    if tag.is_empty() {
-        return json!(dom.doc.text_content(node));
-    }
-    if tag == "SVG" && dom.doc.get_attribute(node, "data-icon-sprite").is_some() {
-        return json!(["SVG", format!("sprite:{}", fnv32(&signature(dom, node)))]);
-    }
+fn snapshot_attributes(dom: &FakeDom, node: NodeKey) -> Vec<(String, String)> {
     let mut attributes: Vec<(String, String)> = dom
         .doc
         .attributes(node)
@@ -516,6 +509,18 @@ pub(crate) fn snapshot_tree(dom: &FakeDom, node: NodeKey) -> Value {
         })
         .collect();
     attributes.sort();
+    attributes
+}
+
+pub(crate) fn snapshot_tree(dom: &FakeDom, node: NodeKey) -> Value {
+    let tag = dom.doc.tag_name(node);
+    if tag.is_empty() {
+        return json!(dom.doc.text_content(node));
+    }
+    if tag == "SVG" && dom.doc.get_attribute(node, "data-icon-sprite").is_some() {
+        return json!(["SVG", format!("sprite:{}", fnv32(&signature(dom, node)))]);
+    }
+    let attributes = snapshot_attributes(dom, node);
     let children: Vec<Value> = dom
         .doc
         .child_nodes(node)
@@ -530,6 +535,39 @@ pub(crate) fn snapshot_tree(dom: &FakeDom, node: NodeKey) -> Value {
             .collect::<Vec<_>>()
     });
     json!([tag, attributes, children, shadow])
+}
+
+/// `snapshotTree` with every shadow child summarised by a hash of its
+/// snapshot (`snapshotOutline` of `s12b_render.mjs`).
+pub(crate) fn snapshot_outline(dom: &FakeDom, node: NodeKey) -> Value {
+    if std::env::var("S12_FULL").is_ok() {
+        return snapshot_tree(dom, node);
+    }
+    let tag = dom.doc.tag_name(node);
+    if tag.is_empty() || (tag == "SVG" && dom.doc.get_attribute(node, "data-icon-sprite").is_some())
+    {
+        return snapshot_tree(dom, node);
+    }
+    let children: Vec<Value> = dom
+        .doc
+        .child_nodes(node)
+        .into_iter()
+        .map(|child| snapshot_outline(dom, child))
+        .collect();
+    let shadow = dom.doc.shadow_root(node).map(|root| {
+        dom.doc
+            .child_nodes(root)
+            .into_iter()
+            .map(|child| match snapshot_tree(dom, child) {
+                Value::Array(snapshot) if snapshot[0] != "SVG" => {
+                    let hash = fnv32(&Value::Array(snapshot.clone()).to_string());
+                    json!([snapshot[0], snapshot[1], hash])
+                }
+                other => other,
+            })
+            .collect::<Vec<_>>()
+    });
+    json!([tag, snapshot_attributes(dom, node), children, shadow])
 }
 
 fn expanded_hunks(instance: &Instance) -> Vec<(usize, usize, usize)> {

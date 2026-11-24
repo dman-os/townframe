@@ -2,11 +2,11 @@
 //! (`oracle/s12e_code_view_shell.mjs`, golden
 //! `oracle/golden/s12e_code_view_shell.json.gz`): the published class over
 //! jsdom, with a fake clock, scripted `Math.random`, scripted geometry and
-//! focus, and `render` replaced by a recorder, ran scenarios of `setup`, the
+//! focus, and `render` observed (and forwarded to the real render pass), ran scenarios of `setup`, the
 //! root handlers, scroll interaction suspension, the header and footer hosts,
 //! the sticky slab and the element pool. Each step records its value, the host
 //! trace, the observable state and the trees of the root and the pool. The port
-//! replays them over `FakeDom` (`render_stub` is the recorder). Test-only,
+//! replays them over `FakeDom` (`render_calls` is the observer). Test-only,
 //! original to this crate.
 
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ use super::scroll_oracle_tests::anchor_json;
 use super::scroll_oracle_tests::animation_from_json;
 use super::scroll_oracle_tests::pending_json;
 use super::state::ItemRef;
-use crate::components::file_diff_render_oracle_tests::snapshot_tree;
+use crate::components::file_diff_render_oracle_tests::snapshot_outline;
 use crate::components::virtualized_file_diff::layout_oracle_tests::MetricsSpec;
 use crate::components::virtualized_file_diff::layout_oracle_tests::Spec;
 use crate::components::virtualized_file_diff::layout_oracle_tests::options_from_spec;
@@ -37,13 +37,15 @@ use crate::js_collections::PtrEq;
 use crate::managers::resize_manager::ResizeObserverEntry;
 use crate::managers::resize_manager::ResizeObserverHub;
 use crate::managers::universal_rendering_manager::UniversalRenderingManager;
-use crate::oracle_testing::assert_json_eq;
+use crate::oracle_testing::assert_json_close;
 use crate::oracle_testing::load_golden;
 use crate::types::layout::CodeViewLayout;
 use crate::types::layout::VirtualWindowSpecs;
+use crate::types::options::LineDiffTypes;
 use crate::types::patch::FileDiffMetadata;
 use crate::types::view::CodeViewDiffItem;
 use crate::types::view::CodeViewItem;
+use crate::types::view::CodeViewScrollTarget;
 use crate::utils::compute_virtual_file_metrics::PartialVirtualFileMetrics;
 
 type View = CodeView<FakeDom, u8, u8>;
@@ -87,6 +89,15 @@ struct Env {
     platform: Option<String>,
     max_touch_points: Option<u32>,
     dpr: Option<f64>,
+    /// The geometry rules of the render scenarios (`FakeDom`'s `rules`).
+    #[serde(default)]
+    rules: bool,
+    /// A root that clamps its scroll position to the container's extent.
+    #[serde(default)]
+    clamp: bool,
+    /// A root that does not clamp it at all.
+    #[serde(default)]
+    unclamped: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -115,6 +126,8 @@ fn present<'de, D: serde::Deserializer<'de>>(
 struct ItemSpec {
     id: String,
     diff: String,
+    version: Option<usize>,
+    collapsed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -144,6 +157,33 @@ enum Step {
     },
     SetItems {
         items: Vec<ItemSpec>,
+    },
+    AddItems {
+        items: Vec<ItemSpec>,
+    },
+    UpdateItem {
+        item: ItemSpec,
+    },
+    RemoveItem {
+        id: String,
+    },
+    UpdateItemId {
+        from: String,
+        to: String,
+    },
+    ScrollTo {
+        target: CodeViewScrollTarget,
+    },
+    Render {
+        #[serde(default)]
+        immediate: bool,
+    },
+    Frames {
+        #[serde(default = "one")]
+        rounds: usize,
+    },
+    Viewport {
+        height: f64,
     },
     Recompute,
     SetOptions {
@@ -194,6 +234,10 @@ enum Step {
     CleanUp,
 }
 
+fn one() -> usize {
+    1
+}
+
 #[derive(Deserialize, Clone, Copy)]
 struct Window {
     top: f64,
@@ -223,11 +267,16 @@ struct World {
     diffs: HashMap<String, Rc<FileDiffMetadata>>,
     slots: HashMap<String, RenderCodeViewSlotCallback<u8>>,
     root: std::cell::Cell<Option<NodeKey>>,
+    env_rules: bool,
+    env_clamp: bool,
+    env_unclamped: bool,
 }
 
 /// The shell vocabulary of the trace; document mutations are compared through
 /// the trees.
-const TRACED: [&str; 10] = [
+const TRACED: [&str; 12] = [
+    "raf.request",
+    "raf.cancel",
     "element.scrollTo",
     "setTimeout",
     "clearTimeout",
@@ -246,6 +295,14 @@ impl World {
             diff: options_from_spec(&spec.diff, &mut HashMap::new()),
             ..CodeViewOptions::default()
         };
+        // The port's word diff is `similar`'s, not jsdiff's (PARITY.md,
+        // diffWordsWithSpace), so the renders compared here carry no intra-line
+        // diff spans.
+        options
+            .diff
+            .base
+            .line_diff_type
+            .get_or_insert(LineDiffTypes::None);
         options.pointer_events_on_scroll = spec.pointer_events_on_scroll;
         options.sticky_headers = spec.sticky_headers;
         options.item_metrics = spec
@@ -279,6 +336,21 @@ impl World {
         }
     }
 
+    fn item(&self, spec: &ItemSpec) -> CodeViewItem<u8> {
+        CodeViewItem::Diff(CodeViewDiffItem {
+            id: spec.id.clone(),
+            file_diff: Rc::clone(&self.diffs[&spec.diff]),
+            annotations: None,
+            version: spec.version,
+            collapsed: spec.collapsed,
+            edit: None,
+        })
+    }
+
+    fn items(&self, specs: &[ItemSpec]) -> Vec<CodeViewItem<u8>> {
+        specs.iter().map(|spec| self.item(spec)).collect()
+    }
+
     fn item_at(&self, index: usize) -> Option<ItemRef<FakeDom, u8, u8>> {
         self.view.state.borrow().items.get(index).cloned()
     }
@@ -299,6 +371,15 @@ impl World {
                 self.root.set(Some(root));
                 let viewport = dom.world.borrow().viewport_height;
                 dom.heights.borrow_mut().insert(root, viewport);
+                {
+                    let mut world = dom.world.borrow_mut();
+                    world.rules = self.env_rules;
+                    if self.env_clamp {
+                        world.clamp_root = Some(root);
+                    } else if self.env_unclamped {
+                        world.scroll_height = f64::INFINITY;
+                    }
+                }
                 if let Some(tabindex) = tabindex {
                     dom.doc
                         .set_attribute(root, "tabindex", &tabindex.to_string());
@@ -337,20 +418,36 @@ impl World {
                 Value::Null
             }
             Step::SetItems { items } => {
-                let items = items
-                    .iter()
-                    .map(|spec| {
-                        CodeViewItem::Diff(CodeViewDiffItem {
-                            id: spec.id.clone(),
-                            file_diff: Rc::clone(&self.diffs[&spec.diff]),
-                            annotations: None,
-                            version: None,
-                            collapsed: None,
-                            edit: None,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                view.set_items(&items);
+                view.set_items(&self.items(items));
+                Value::Null
+            }
+            Step::AddItems { items } => {
+                view.add_items(&self.items(items));
+                Value::Null
+            }
+            Step::UpdateItem { item } => json!(view.update_item(&self.item(item))),
+            Step::RemoveItem { id } => json!(view.remove_item(id)),
+            Step::UpdateItemId { from, to } => json!(view.update_item_id(from, to)),
+            Step::ScrollTo { target } => {
+                view.scroll_to(target);
+                Value::Null
+            }
+            Step::Render { immediate } => {
+                view.render(*immediate);
+                Value::Null
+            }
+            Step::Frames { rounds } => {
+                for _ in 0..*rounds {
+                    if !dom.frames.run_round(dom.clock.get()) {
+                        break;
+                    }
+                }
+                Value::Null
+            }
+            Step::Viewport { height } => {
+                dom.world.borrow_mut().viewport_height = *height;
+                let root = self.root.get().expect("the viewport follows a setup");
+                dom.heights.borrow_mut().insert(root, *height);
                 Value::Null
             }
             Step::Recompute => {
@@ -629,7 +726,7 @@ impl World {
 
     fn snapshot(&self) -> Value {
         let state = self.view.state.borrow();
-        let tree = |node: NodeKey| snapshot_tree(&self.dom, node);
+        let tree = |node: NodeKey| snapshot_outline(&self.dom, node);
         let host = |host: &super::state::HeaderFooterHost<u8>| {
             json!({
                 "height": host.height,
@@ -678,14 +775,33 @@ impl World {
             "hasContainer": state.container.is_some(),
             "renders": self.view.render_calls.borrow().clone(),
             "clock": self.dom.clock.get(),
+            "domScrollTop": self.dom.world.borrow().scroll_top,
+            "pendingFrames": self.dom.frames.frame_ids().len(),
         })
     }
 }
 
 #[test]
 fn code_view_shell_matches_the_published_class() {
-    let golden: Rc<Golden> = Rc::new(load_golden("s12e_code_view_shell.json"));
-    assert!(golden.cases.len() > 100, "{} scenarios", golden.cases.len());
+    let steps = replay("s12e_code_view_shell.json", 100);
+    assert!(steps > 1_000, "{steps} steps");
+}
+
+#[test]
+fn code_view_render_pass_matches_the_published_class() {
+    let steps = replay("s12f_code_view_render.json", 60);
+    assert!(steps > 1_000, "{steps} steps");
+}
+
+/// Replays every scenario of a golden over `FakeDom`, comparing each step's
+/// value, trace and state; returns the steps replayed.
+fn replay(golden_file: &str, min_scenarios: usize) -> usize {
+    let golden: Rc<Golden> = Rc::new(load_golden(golden_file));
+    assert!(
+        golden.cases.len() > min_scenarios,
+        "{} scenarios",
+        golden.cases.len()
+    );
     let mut steps = 0;
     for case in &golden.cases {
         let scenario = &case.scenario;
@@ -732,6 +848,9 @@ fn code_view_shell_matches_the_published_class() {
             diffs,
             slots,
             root: std::cell::Cell::new(None),
+            env_rules: scenario.env.rules,
+            env_clamp: scenario.env.clamp,
+            env_unclamped: scenario.env.unclamped,
         };
         let options = placeholder.options(&scenario.options);
         let view = CodeView::new(
@@ -741,7 +860,6 @@ fn code_view_shell_matches_the_published_class() {
             Rc::new(PlainTextHighlighter),
             options,
         );
-        view.render_stub.set(true);
         let world = World {
             view,
             ..placeholder
@@ -756,10 +874,11 @@ fn code_view_shell_matches_the_published_class() {
                 Ok(value) => json!({ "value": value }),
                 Err(payload) => json!({ "throws": panic_message(&*payload) }),
             };
-            assert_json_eq(
+            assert_json_close(
                 &format!("{context} result"),
                 &Value::Object(recorded.result.clone()),
                 &result,
+                1e-9,
             );
             let trace: Vec<Value> = dom
                 .shared
@@ -768,14 +887,15 @@ fn code_view_shell_matches_the_published_class() {
                 .drain(..)
                 .filter(|entry| TRACED.contains(&entry[0].as_str().unwrap_or_default()))
                 .collect();
-            assert_json_eq(
+            assert_json_close(&context, &recorded.state, &world.snapshot(), 1e-9);
+            assert_json_close(
                 &format!("{context} trace"),
                 &Value::Array(recorded.trace.clone()),
                 &Value::Array(trace),
+                1e-9,
             );
-            assert_json_eq(&context, &recorded.state, &world.snapshot());
             steps += 1;
         }
     }
-    assert!(steps > 1_000, "{steps} steps");
+    steps
 }
