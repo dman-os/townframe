@@ -37,10 +37,14 @@
 //! 3. **Peer input is checked at the edge; nothing the peer sends reaches an assert.** A page
 //!    event that names no target, or a target the round did not ask for, makes the whole page
 //!    a protocol violation: the round counts as failed (lanes law 7) and none of the page
-//!    applies. This is judged against the round's request, not the current routes: an event
-//!    for a target the round asked for whose route was dropped since is legitimate and is
-//!    skipped for that route only. A summary entry for
-//!    a part not asked is ignored (PartLifecycle law 3). A bucket or leaf page for a bucket
+//!    applies. So is an event outside its target's window: a `rev` at or below the cursor the
+//!    round asked that target from or above the `resume` of its `Events` verdict in the same
+//!    page (replay law 8), or an event for a target whose verdict is `Refused` or absent; a
+//!    hostile peer could otherwise push the persisted cursor past rows it never delivered.
+//!    So is a `Removed` event on an object target (replay law 12).
+//!    All of this is judged against the round's request and page, not the current routes: an
+//!    event for a target the round asked for whose route was dropped since is legitimate and
+//!    is skipped for that route only. A summary entry for a part not asked is ignored (PartLifecycle law 3). A bucket or leaf page for a bucket
 //!    not asked is ignored (bucket law 7). Asserts inside sub-machines guard only the
 //!    parent's own bugs.
 //!

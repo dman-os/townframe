@@ -169,15 +169,79 @@ fn law_3_a_listing_the_walk_cannot_take_is_a_failed_call_not_an_assert() {
 }
 
 #[test]
-fn law_3_a_removal_on_an_object_route_is_ignored() {
+fn law_3_a_removal_on_an_object_route_fails_the_whole_page() {
     let mut rig = Rig::new();
     let (call, update) = rig.add_object(5).sessions().remove(0);
     rig.sync.update_replied(call, updated(&update));
     let (round, _, page) = rig.flush().only_round();
     let removal = rig.removed(7, 5, &obj_route(5));
-    let cmds = rig.answer_round(round, &page, vec![removal], 7, true);
-    assert!(cmds.records().is_empty());
-    assert_eq!(cmds.rounds().len(), 1, "the lane carries on");
+    let answer = SessionPage {
+        events: vec![removal],
+        verdicts: vec![(
+            page.targets[0].0,
+            Verdict::Events {
+                resume: 7,
+                drained: true,
+            },
+        )],
+    };
+    rig.sync.round_replied(round, Reply::Answer(Ok(answer)));
+    let cmds = rig.flush();
+    assert!(cmds.records().is_empty() && cmds.rounds().is_empty());
+    rig.wait(1);
+    assert_eq!(rig.flush().only_round().2.targets, page.targets);
+}
+
+#[test]
+fn law_3_a_row_at_or_below_the_cursor_the_target_was_asked_from_fails_the_page() {
+    assert_page_fails(|rig| {
+        vec![PageEvent::Changed {
+            rev: 0,
+            obj_key: obj(2),
+            targets: vec![rig.target(&part_route(1))],
+            payload: serde_json::json!(0),
+        }]
+    });
+}
+
+#[test]
+fn law_3_a_row_past_the_resume_of_its_target_fails_the_page() {
+    // the page resumes at 5; this row is at 6 and would carry the cursor past rows never read
+    assert_page_fails(|rig| {
+        vec![PageEvent::Changed {
+            rev: 6,
+            obj_key: obj(2),
+            targets: vec![rig.target(&part_route(1))],
+            payload: serde_json::json!(6),
+        }]
+    });
+    assert_page_fails(|rig| vec![rig.removed(6, 2, &part_route(1))]);
+}
+
+#[test]
+fn law_3_a_row_for_a_target_without_an_events_verdict_fails_the_page() {
+    for refused in [true, false] {
+        let mut rig = Rig::new();
+        let (call, _, page) = rig.follow(1, 0).only_round();
+        let event = rig.changed(5, 1, &[part_route(1)]);
+        let verdicts = match refused {
+            true => vec![(page.targets[0].0, Verdict::Refused)],
+            false => vec![],
+        };
+        let answer = SessionPage {
+            events: vec![event],
+            verdicts,
+        };
+        rig.sync.round_replied(call, Reply::Answer(Ok(answer)));
+        let cmds = rig.flush();
+        assert!(
+            cmds.records().is_empty() && cmds.rounds().is_empty(),
+            "refused: {refused}"
+        );
+        assert_eq!(rig.sync.phase(&part(1)), Some(Phase::Cursor));
+        rig.wait(1);
+        assert_eq!(rig.flush().only_round().2.targets, page.targets);
+    }
 }
 
 #[test]

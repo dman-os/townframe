@@ -63,6 +63,7 @@ use crate::replay::wire::SessionPage;
 use crate::replay::wire::SessionUpdated;
 use crate::replay::wire::TargetId;
 use crate::replay::wire::UpdateSession;
+use crate::replay::wire::Verdict;
 use crate::rev::Rev;
 use crate::sync::bucket::BucketMachine;
 use crate::sync::bucket::BucketMachineCommand;
@@ -113,7 +114,10 @@ pub(crate) struct Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Reply<T> {
     Answer(T),
-    /// The call failed, timed out or was lost: it is retried on its lane's backoff.
+    /// The call failed, timed out, was lost or cannot be answered (a peer that stopped serving
+    /// a part answers its walk calls so). It is retried on its lane's backoff, a walk call
+    /// unchanged and for ever: a walk on a part the peer stopped serving keeps retrying with
+    /// backoff until the embedder removes the part.
     Lost,
 }
 
@@ -354,17 +358,6 @@ fn asked_from(request: &PageSession, id: TargetId) -> Option<Rev> {
         .binary_search_by_key(&id, |(id, _)| *id)
         .ok()
         .map(|at| request.targets[at].1)
-}
-
-/// Law 3: a page is a protocol violation when an event names no target or a target the round
-/// did not ask for. Judged against the request, never the current routes.
-fn page_violates(request: &PageSession, page: &SessionPage) -> bool {
-    page.events.iter().any(|event| match event {
-        PageEvent::Changed { targets, .. } => {
-            targets.is_empty() || targets.iter().any(|id| asked_from(request, *id).is_none())
-        }
-        PageEvent::Removed { target, .. } => asked_from(request, *target).is_none(),
-    })
 }
 
 /// A bucket listing the walk's machine can take without asserting: in order from `offset`,
@@ -643,7 +636,7 @@ impl PeerSync {
         // Law 3: nothing of a violating page applies, not even its verdicts.
         if answer
             .as_ref()
-            .is_ok_and(|page| page_violates(&request, page))
+            .is_ok_and(|page| self.page_violates(&request, page))
         {
             tracing::warn!(
                 call,
@@ -669,6 +662,38 @@ impl PeerSync {
             }
         }
         self.outcomes = outcomes;
+    }
+
+    /// Law 3: a page is a protocol violation when an event names no target, or a target whose
+    /// window in this page it falls outside of. A target's window is `(asked cursor, resume]`
+    /// of its `Events` verdict (replay law 8); a target the round did not ask for, one with a
+    /// `Refused` verdict and one with no verdict have none. An event on a target the client
+    /// still holds as an object route may not be a `Removed` (replay law 12). Judged against
+    /// the request and the page, never the current routes: a target whose route was dropped
+    /// since is legitimate (its events are skipped when applied).
+    fn page_violates(&self, request: &PageSession, page: &SessionPage) -> bool {
+        let windows: Map<TargetId, (Rev, Rev)> = page
+            .verdicts
+            .iter()
+            .filter_map(|(id, verdict)| match verdict {
+                Verdict::Events { resume, .. } => Some((*id, (asked_from(request, *id)?, *resume))),
+                Verdict::Refused => None,
+            })
+            .collect();
+        let inside = |id: &TargetId, rev: Rev| {
+            windows
+                .get(id)
+                .is_some_and(|(asked, resume)| *asked < rev && rev <= *resume)
+        };
+        page.events.iter().any(|event| match event {
+            PageEvent::Changed { rev, targets, .. } => {
+                targets.is_empty() || targets.iter().any(|id| !inside(id, *rev))
+            }
+            PageEvent::Removed { rev, target, .. } => {
+                !inside(target, *rev)
+                    || matches!(self.client.route_of(*target), Some(Route::Object { .. }))
+            }
+        })
     }
 
     /// The server lost the session: the client starts a new one and its lanes are empty until
