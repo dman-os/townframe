@@ -18,7 +18,8 @@ node      [..]
 path      [..]/node
 mode      serving
 socket    [..]/run/day/[..].sock (live)
-nodules   0 enabled of 0
+nodules   1 enabled of 1
+  did:key:[..]/core  enabled  ready
 relay     yes
 services  not exposed by the node
 peers     0 connected
