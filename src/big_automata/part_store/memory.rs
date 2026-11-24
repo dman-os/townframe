@@ -98,6 +98,7 @@ enum Staged {
     SetPayloads(Vec<(ObjKey, ObjPayload, PayloadDigest)>),
     AddMembers(Vec<(ObjKey, PartKey)>),
     RemoveMembers(Vec<(ObjKey, PartKey)>),
+    DropPayloads(Vec<ObjKey>),
     GrantAccess(Vec<(PartKey, PeerKey, AccessLevel)>),
     RevokeAccess(Vec<(PartKey, PeerKey)>),
 }
@@ -172,6 +173,10 @@ impl State {
             Staged::SetPayloads(payloads) => self.set_payloads(rev, payloads),
             Staged::AddMembers(members) => self.add_members(rev, &members),
             Staged::RemoveMembers(members) => self.remove_members(rev, &members),
+            Staged::DropPayloads(objs) => {
+                self.drop_payloads(&objs);
+                false
+            }
             Staged::GrantAccess(grants) => self.grant_access(rev, &grants),
             Staged::RevokeAccess(revokes) => self.revoke_access(rev, &revokes),
         }
@@ -242,6 +247,15 @@ impl PartStoreWrite for MemoryPartStore {
         std::future::ready(Ok(()))
     }
 
+    fn drop_payloads(
+        &self,
+        tx: &mut MemoryPartTx,
+        objs: &[ObjKey],
+    ) -> impl Future<Output = Res<()>> + Send {
+        self.stage(tx, Staged::DropPayloads(objs.to_vec()));
+        std::future::ready(Ok(()))
+    }
+
     fn grant_access(
         &self,
         tx: &mut MemoryPartTx,
@@ -283,6 +297,16 @@ impl PartStoreRead for MemoryPartStore {
 
     fn member_count(&self, part: &PartKey) -> impl Future<Output = Res<u64>> + Send {
         std::future::ready(Ok(self.with_state(|state| state.member_count(part))))
+    }
+
+    fn partless_objects(
+        &self,
+        limit: usize,
+        after: Option<&ObjKey>,
+    ) -> impl Future<Output = Res<Vec<ObjKey>>> + Send {
+        std::future::ready(Ok(
+            self.with_state(|state| state.partless_objects(limit, after))
+        ))
     }
 }
 

@@ -219,3 +219,21 @@ async fn law_9_failures_are_retried_and_nothing_else_is_fatal() {
         .collect();
     assert_eq!(facts, [(part(1), Fact::Synced), (part(7), Fact::Unsynced)]);
 }
+
+/// Law 6: a reconnect closes the replaced session through the new connection, so a client that
+/// reconnects more often than the peer's per-client session cap keeps being served instead of
+/// being refused with `Limit` until the old sessions expire.
+#[tokio::test(start_paused = true)]
+async fn law_6_reconnecting_past_the_session_cap_closes_the_replaced_sessions() {
+    let rig = Rig::new();
+    rig.peer.publish(1, &[1], 10).await;
+    rig.want(&[1]).await;
+    for _ in 0..crate::replay::server::MAX_SESSIONS_PER_CLIENT + 4 {
+        rig.connect();
+        rig.synced(1).await;
+        rig.driver.disconnect();
+        rig.fact(1, Fact::Unsynced).await;
+    }
+    rig.connect();
+    rig.synced(1).await;
+}

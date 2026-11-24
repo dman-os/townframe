@@ -16,9 +16,39 @@
 //! - **Membership before payload is pending.** Adding an object that has no payload yet writes
 //!   no log row and no bucket entry; when the payload arrives, every pending membership goes
 //!   live in that transaction, stamped once. A live membership always has a payload; payload
-//!   removal is explicit: remove the object from every part, then drop the payload.
+//!   removal is explicit: remove the object from every part, then drop the payload
+//!   ([`PartStoreWrite::drop_payloads`]). [`PartStoreRead::partless_objects`] lists the objects
+//!   that are ready for it.
+//! - **Dropping a payload** (laws 1 to 4 below). It changes no log row, so it stamps nothing.
 //! - **A write that changes nothing stamps nothing:** re-writing the payload an object holds,
 //!   adding a live member, removing a non-member, granting the level a principal has.
+//!
+//! # Payload laws
+//!
+//! 1. **A dropped payload is gone.** After the transaction that drops an object's payload
+//!    commits, [`obj_states`](PartStoreRead::obj_states) and
+//!    [`readable_obj_states`](PartStoreServe::readable_obj_states) answer `None` for it and no
+//!    authorized read carries it (it has no live row to carry it for). Its tombstones stay in
+//!    the log, so removals still reach routes. Dropping a payload an object does not hold (never
+//!    set, already dropped, or an object with only pending memberships) is a no-op.
+//! 2. **Only a part-less object's payload may be dropped.** Dropping the payload of an object
+//!    that holds one and is a live member of any part is a caller bug and panics, the same
+//!    panic in every backend. It is not an `Err`: the order (remove from every part, then
+//!    drop) is the embedder's own sequencing, a store that returned an error could not be
+//!    recovered from by anything but fixing the caller, and an `Err` at commit time could not be
+//!    rolled back by the memory store. The check sees the transaction's own earlier batches, so
+//!    `remove_members` then `drop_payloads` in one transaction is valid and the reverse order
+//!    is the bug. A backend must not commit a transaction after its drop panicked.
+//! 3. **A part-less object is listed until its payload is dropped.**
+//!    [`partless_objects`](PartStoreRead::partless_objects) lists, in key order, exactly the
+//!    objects that hold a payload and are a live member of no part: an object whose memberships
+//!    were all removed, and nothing else (a live member is not listed; an object with no payload
+//!    is not listed, pending memberships included). It leaves the list when its payload is
+//!    dropped, and when it is added to a part again.
+//! 4. **Dropping is a batch of its transaction.** It is invisible before commit, gone with a
+//!    rollback, and after commit it has happened in order with the transaction's other batches
+//!    (a payload set after the drop in the same transaction survives; a membership added after
+//!    the drop is pending).
 //!
 //! Three traits, one per audience: [`PartStoreWrite`] for the embedder that owns the data,
 //! [`PartStoreRead`] for the sync client, [`PartStoreServe`] for the responder (which assembles
@@ -296,6 +326,15 @@ pub trait PartStoreWrite {
         tx: &mut Self::Tx,
         members: &[(ObjKey, PartKey)],
     ) -> impl Future<Output = Res<()>> + Send;
+    /// Drop the payloads of objects that are members of no part (payload laws 1, 2 and 4). An
+    /// object with no payload is skipped; one that holds a payload and is a live member of a
+    /// part panics, see law 2. Stamps nothing: a part-less object has no live log row, and its
+    /// tombstones stay.
+    fn drop_payloads(
+        &self,
+        tx: &mut Self::Tx,
+        objs: &[ObjKey],
+    ) -> impl Future<Output = Res<()>> + Send;
     /// Grant principals access to parts, `(part, principal, level)`.
     fn grant_access(
         &self,
@@ -327,6 +366,14 @@ pub trait PartStoreRead {
     ) -> impl Future<Output = Res<Vec<BucketSummary>>> + Send;
     /// The part's live members.
     fn member_count(&self, part: &PartKey) -> impl Future<Output = Res<u64>> + Send;
+    /// Objects that hold a payload and are a live member of no part (payload law 3), in key
+    /// order, at most `limit`, strictly after `after`: pass the last key returned to page. The
+    /// candidates for [`PartStoreWrite::drop_payloads`].
+    fn partless_objects(
+        &self,
+        limit: usize,
+        after: Option<&ObjKey>,
+    ) -> impl Future<Output = Res<Vec<ObjKey>>> + Send;
 }
 
 /// The responder's reads. Every one answers a principal, and every one decides access and

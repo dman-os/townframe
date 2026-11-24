@@ -1071,6 +1071,45 @@ Port items from this cut:
 - **A bucket page must move `next_after` strictly forward** (to land with the walk's
   `next_after` trust, which lets a hostile peer page a bucket without end otherwise).
 
+**Scope until big_repo (operator, 2026-11-25).** Finish everything from big_sync down before
+moving any embedder or porting the walkers:
+1. SQLite store (`big_automata_sqlite`, own lane): part store + the driver's peer-cursor table,
+   passing the same store laws and proptests as memory, with a baseline benchmark. `sqlite_rs`
+   targets native and wasip3 guests, not the browser; a browser-native store (OPFS or
+   IndexedDB) is a later item.
+2. Tests: comb the old contract and whole-machine tests for gaps (audit running), port the gaps
+   into the matching layer (store law, replay law, machine law, sim op/check, driver test,
+   backend contract test, e2e).
+3. Durable outbox component.
+4. Browser: the sync stack builds and runs in the browser on `service_client_iroh_rs`
+   (`Send` dropped from the driver's traits, the embedder spawns the loop).
+5. Test types across the board, benchmarks included: once the stack is assembled, benchmark it
+   and revisit the driver defaults (window 64, fetch cap 4, backoff 1-60 s, Live hold 15 s,
+   Bulk batch 16 with 50 ms linger), which are accepted for now.
+**Merge point: "done with big automata"** (operator, 2026-11-25). The stack merges once the
+items above are done; big_repo starts after. Until then CI and `check-matrix` may stay red
+(e.g. dead code in `kit/` that the durable outbox and the big_repo port will use).
+Deferred to the big_repo phase: the backend migrations, the embedder cutover, deleting
+big_sync, and the delta-walker/frontier family with the other big_sync_core workers.
+
+**Store generations (operator, 2026-11-25).** Generations cover data loss: a node that keeps
+its identity but not its previous data (a lost or recreated store, a restore from an older
+backup). A client's cursor from before means nothing on the new log, and rows in (new head, old
+cursor] would be silently missed. A fresh store mints a new generation by being created, so
+plain data loss needs no operator action. Clearing tombstones is not part of this and is not to
+be implemented now.
+- Each part store carries a `generation` id, minted when the store is created and minted again
+  by an explicit reset or a restore from backup (an admin operation; the store cannot tell a
+  restored file from a live one by itself).
+- Part summaries carry the peer's generation. The driver's peer-cursor table stores
+  `(generation, rev)` per (peer, backend, part).
+- A summary from another generation than the stored cursor's: the part restarts from cursor 0,
+  which makes it walk and reconcile, and the event is logged loudly. A summary whose latest
+  cursor is below the stored cursor is treated the same (a restore that forgot to mint).
+- Checked at summary time only: a generation change mid-connection means the peer restarted,
+  which loses the replay session and forces a reconnect, hence fresh summaries.
+- Store-level only.
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a

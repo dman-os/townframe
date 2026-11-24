@@ -30,6 +30,7 @@ pub fn part_writes() -> impl Strategy<Value = Vec<PartWrite>> {
         3 => vec((any_obj(), any_payload()), 1..3).prop_map(PartWrite::SetPayloads),
         3 => vec((any_obj(), any_part()), 1..3).prop_map(PartWrite::AddMembers),
         2 => vec((any_obj(), any_part()), 1..3).prop_map(PartWrite::RemoveMembers),
+        2 => vec(any_obj(), 1..3).prop_map(PartWrite::DropPayloads),
         2 => vec((any_part(), any_principal(), any_level()), 1..3).prop_map(PartWrite::GrantAccess),
         1 => vec((any_part(), any_principal()), 1..3).prop_map(PartWrite::RevokeAccess),
     ];

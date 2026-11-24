@@ -52,7 +52,20 @@ use service_utils_rs::xrpc::XrpcRouter;
 use service_utils_rs::xrpc::iroh_protocol_handler;
 use utils_rs::prelude::Uuid;
 
-use super::*;
+use std::sync::Arc;
+
+use big_automata::sync::rpc::BigSyncRpcClient;
+use big_automata::sync::rpc::SyncRpcProtocol;
+use big_automata::sync::rpc::bucket::BucketsError;
+use big_automata::sync::rpc::summary::PartSummariesError;
+use method_core::ContextError;
+use service_utils_rs::StopToken;
+
+use crate::PeerRpcClient;
+use crate::serve::Replay;
+use crate::serve::ReplayBinding;
+use crate::serve::SyncRpcBinding;
+use crate::serve::boot;
 
 /// The one principal every test client acts as, so the grants and revokes below are its own.
 fn client_principal() -> PeerKey {
@@ -665,10 +678,8 @@ async fn the_rpc_client_calls_both_protocols_over_iroh() {
         )
         .spawn();
     let wire = IrohHttp::new(client_endpoint.clone(), server.addr(), 1 << 20);
-    let client = PeerRpcClient::new(
-        Client::new(Transport::iroh(wire.clone())),
-        Client::new(Transport::iroh(wire)),
-    );
+    // The browser's client: `IrohHttp` under the core client, no native transport.
+    let client = PeerRpcClient::over_iroh(wire);
     exercise_the_rpc_client(&client, revs).await;
 
     server_router.shutdown().await.expect("router shutdown");
@@ -714,15 +725,12 @@ async fn a_driver_syncs_a_part_between_two_nodes_over_iroh() {
         )
         .spawn();
     let wire = IrohHttp::new(client_endpoint.clone(), server.addr(), 1 << 20);
-    let rpc = PeerRpcClient::new(
-        Client::new(Transport::iroh(wire.clone())),
-        Client::new(Transport::iroh(wire)),
-    );
+    let rpc = PeerRpcClient::over_iroh(wire);
 
     let local = MemoryPartStore::default();
     let peer = principal(5);
     let facts = Facts::new();
-    let driver = PeerDriver::spawn(
+    let (driver, driver_loop) = PeerDriver::start(
         DriverConfig::new(peer.clone(), "memory"),
         Arc::new(std::time::Instant::now),
         facts.clone(),
@@ -730,6 +738,7 @@ async fn a_driver_syncs_a_part_between_two_nodes_over_iroh() {
         MemoryPeerCursors::default(),
         local.clone(),
     );
+    tokio::spawn(driver_loop);
     driver
         .update_routes(RouteUpdate {
             added_parts: vec![part(1)],

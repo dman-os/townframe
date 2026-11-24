@@ -5,6 +5,7 @@ use super::*;
 use crate::sync::cursor::JobKey::RemoveFromPart;
 use crate::sync::cursor::JobKey::Sync;
 
+mod backoff;
 mod sim;
 
 fn obj(n: u8) -> ObjKey {

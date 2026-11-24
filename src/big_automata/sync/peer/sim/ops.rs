@@ -58,6 +58,9 @@ pub(super) enum Op {
         committed: u8,
         close: bool,
     },
+    /// The backend fails every call for the objects of this mask, until a later mask clears
+    /// them: a persistent failure, which backs the objects off outside the window.
+    Poison(u8),
     /// The peer's summaries claim every part is far behind, so the machine walks.
     Bias(bool),
 }
@@ -77,6 +80,8 @@ impl Sim {
             self.local
                 .die_with(call, (committed >> (at % 8)) & 1 == 1, payload);
         }
+        // the new machine knows no backoff
+        self.local.failed.clear();
         self.net.clear();
         self.relist.clear();
         self.mirror.clear();
@@ -233,6 +238,12 @@ impl Sim {
             }
             Op::Crash { committed, close } => self.crash(committed, close),
             Op::Bias(on) => self.remote.walk_bias = on,
+            Op::Poison(mask) => {
+                self.local.poisoned = (0..objs)
+                    .filter(|at| (mask >> at) & 1 == 1)
+                    .map(obj)
+                    .collect();
+            }
         }
     }
 }
@@ -273,6 +284,7 @@ fn op() -> impl Strategy<Value = Op> {
         1 => Just(Op::Restart),
         1 => (any::<u8>(), any::<bool>()).prop_map(|(committed, close)| Op::Crash { committed, close }),
         1 => any::<bool>().prop_map(Op::Bias),
+        2 => any::<u8>().prop_map(Op::Poison),
     ]
 }
 
@@ -282,6 +294,8 @@ pub(super) fn run(ops: Vec<Op>, seed: u64) {
     for op in ops {
         sim.step(op);
     }
+    // persistent failures end, or the drain could never converge
+    sim.step(Op::Poison(0));
     sim.quiesce();
     sim.step(Op::Crash {
         committed: 0,

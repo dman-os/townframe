@@ -1,7 +1,9 @@
 //! The dumbest model of `ObjectJobs`: flat vectors of wants and owed cursors, scanned
 //! linearly, with no index and no state beyond them. It answers what a job must contain, who
-//! has settled, `room` and `part_outstanding`; it knows nothing of calls, backoff or windows
-//! of time.
+//! has settled, `room` and `part_outstanding`. It knows nothing of call ids or clocks; for
+//! law 7 it is only told which lanes (a stage's lane: `Fresh` is the record lane, `NeedsFetch`
+//! the fetch lane) of an object have a call in flight and which last ended in a failure that
+//! no later issue or success has cleared, and it derives which objects wait out a backoff.
 
 use super::*;
 
@@ -57,6 +59,18 @@ pub(super) struct Oracle {
     /// Object, seq, stage and the newest content want's payload.
     routes: Vec<(ObjKey, u64, Stage, Option<ObjPayload>)>,
     expected: Vec<Settlement>,
+    /// Lanes with a call in flight.
+    flying: Vec<(ObjKey, Stage)>,
+    /// Lanes whose last call failed and which have not been issued or succeeded since.
+    failed: Vec<(ObjKey, Stage)>,
+}
+
+/// How a lane's call ended, as far as law 7 cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum End {
+    Ok,
+    Failed,
+    Cancelled,
 }
 
 impl Oracle {
@@ -310,6 +324,56 @@ impl Oracle {
         Some((job, snap))
     }
 
+    /// A call of `stage`'s lane was issued for `obj`.
+    pub(super) fn issued(&mut self, obj: &ObjKey, stage: Stage) {
+        self.failed.retain(|lane| *lane != (obj.clone(), stage));
+        self.flying.push((obj.clone(), stage));
+    }
+
+    pub(super) fn ended(&mut self, obj: &ObjKey, stage: Stage, end: End) {
+        let lane = (obj.clone(), stage);
+        let at = self.flying.iter().position(|l| *l == lane).unwrap();
+        self.flying.remove(at);
+        match end {
+            End::Ok => self.failed.retain(|l| *l != lane),
+            End::Failed => self.failed.push(lane),
+            End::Cancelled => {}
+        }
+    }
+
+    /// The machine forgets an object once it has no want, route or call; its backoff goes
+    /// with it.
+    pub(super) fn prune(&mut self) {
+        let live = |obj: &ObjKey| {
+            self.pairs.iter().any(|p| p.obj == *obj)
+                || self.routes.iter().any(|(o, ..)| o == obj)
+                || self.flying.iter().any(|(o, _)| o == obj)
+        };
+        let failed = std::mem::take(&mut self.failed);
+        self.failed = failed.into_iter().filter(|(o, _)| live(o)).collect();
+    }
+
+    /// Whether the object's only outstanding work waits out a failure backoff (law 7).
+    fn backing_off(&self, obj: &ObjKey) -> bool {
+        let mut waiting = false;
+        for stage in [Stage::Fresh, Stage::NeedsFetch] {
+            let has_work = self.pairs.iter().any(|p| p.obj == *obj && p.stage == stage)
+                || self
+                    .routes
+                    .iter()
+                    .any(|(o, _, st, _)| o == obj && *st == stage);
+            if !has_work {
+                continue;
+            }
+            let lane = (obj.clone(), stage);
+            if self.flying.contains(&lane) || !self.failed.contains(&lane) {
+                return false;
+            }
+            waiting = true;
+        }
+        waiting
+    }
+
     pub(super) fn room(&self) -> usize {
         let mut unsettled: Vec<&ObjKey> = self.pairs.iter().map(|p| &p.obj).collect();
         unsettled.extend(
@@ -320,6 +384,7 @@ impl Oracle {
         );
         unsettled.sort();
         unsettled.dedup();
+        unsettled.retain(|obj| !self.backing_off(obj));
         self.window.saturating_sub(unsettled.len())
     }
 

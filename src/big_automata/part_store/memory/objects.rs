@@ -217,6 +217,33 @@ impl State {
         stamped
     }
 
+    /// Payload law 2: drop each object's payload, applied in the transaction's order.
+    pub(super) fn drop_payloads(&mut self, objs: &[ObjKey]) {
+        for obj in objs {
+            if !self.objs.contains_key(obj) {
+                continue;
+            }
+            assert!(
+                self.live_parts_of(obj).next().is_none(),
+                "dropped the payload of {obj}, which is still a live member of a part: remove \
+                 it from every part first"
+            );
+            self.objs.remove(obj);
+        }
+    }
+
+    /// Payload law 3: objects with a payload and no live member row, after `after`.
+    pub(super) fn partless_objects(&self, limit: usize, after: Option<&ObjKey>) -> Vec<ObjKey> {
+        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+        self.objs
+            .range::<ObjKey, _>((from, Bound::Unbounded))
+            .map(|(obj, _)| obj)
+            .filter(|obj| self.live_parts_of(obj).next().is_none())
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
     /// The parts `obj` is a live member of.
     pub(super) fn live_parts_of<'a>(
         &'a self,

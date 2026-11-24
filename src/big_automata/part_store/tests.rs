@@ -118,6 +118,37 @@ fn unchanged_writes_stamp_nothing() -> Res<()> {
 }
 
 #[test]
+fn a_dropped_payload_is_gone() -> Res<()> {
+    block_on(laws::a_dropped_payload_is_gone(&Memory))
+}
+
+#[test]
+#[should_panic(expected = "live member")]
+fn dropping_the_payload_of_a_member_is_a_caller_bug() {
+    block_on(laws::dropping_the_payload_of_a_member_is_a_caller_bug(
+        &Memory,
+    ))
+    .unwrap();
+}
+
+#[test]
+fn removing_then_dropping_in_one_transaction_is_valid() -> Res<()> {
+    block_on(laws::removing_then_dropping_in_one_transaction_is_valid(
+        &Memory,
+    ))
+}
+
+#[test]
+fn a_partless_object_is_listed_until_its_payload_is_dropped() -> Res<()> {
+    block_on(laws::a_partless_object_is_listed_until_its_payload_is_dropped(&Memory))
+}
+
+#[test]
+fn dropping_is_atomic_with_its_transaction() -> Res<()> {
+    block_on(laws::dropping_is_atomic_with_its_transaction(&Memory))
+}
+
+#[test]
 fn log_stream_commit_during_replay() -> Res<()> {
     block_on(stream_laws::stream_commit_during_replay(&LogStreams::new(
         Memory,

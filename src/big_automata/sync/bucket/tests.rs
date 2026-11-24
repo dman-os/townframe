@@ -76,6 +76,10 @@ impl PartStoreRead for SummaryStore {
     async fn member_count(&self, _part: &PartKey) -> Res<u64> {
         unreachable!("filter_buckets does not count members")
     }
+
+    async fn partless_objects(&self, _limit: usize, _after: Option<&ObjKey>) -> Res<Vec<ObjKey>> {
+        unreachable!("filter_buckets does not list part-less objects")
+    }
 }
 
 fn summary(id: BuckId, len: u32, live_count: u32, changed_at: Rev) -> BucketSummary {

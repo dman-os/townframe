@@ -52,12 +52,18 @@ impl Sim {
             );
         }
         // a page is never split inside a revision, so it can overshoot the window by the
-        // objects of one revision less one: a batch commits at most `MAX_BATCH` objects
+        // objects of one revision less one: a batch commits at most `MAX_BATCH` objects. An
+        // object that failed may have waited its backoff out of the window and be retried
+        // beside a full one (law 7 of ObjectJobs), so only the others are bounded.
         let bound = jobs.window + MAX_BATCH - 1;
+        let counted = per_obj
+            .keys()
+            .filter(|obj| !self.local.failed.contains(**obj))
+            .count();
         assert!(
-            per_obj.len() <= bound,
-            "{} objects have calls in flight, the window is {} and a revision brings up to {MAX_BATCH}",
-            per_obj.len(),
+            counted <= bound,
+            "{counted} objects that never failed have calls in flight, the window is {} and a \
+             revision brings up to {MAX_BATCH}",
             jobs.window
         );
         // a reset session leaves the old session's rounds in flight; they are answered stale
@@ -273,7 +279,7 @@ impl Sim {
             && walks_ok
             && self.sync.job_calls.is_empty()
             && !readable_blocked
-            && self.sync.jobs.room() == self.shape.config.jobs.window
+            && self.sync.jobs.unsettled() == 0
             && parts_ok
             && objects_ok
     }

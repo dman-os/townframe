@@ -3,6 +3,7 @@
 
 use super::*;
 
+use crate::sync::object_jobs::oracle::End;
 use crate::sync::object_jobs::oracle::OSnap;
 use crate::sync::object_jobs::oracle::Oracle;
 use crate::sync::object_jobs::oracle::Stage;
@@ -41,6 +42,11 @@ pub(in crate::sync::object_jobs::tests) enum Op {
     Retire {
         part: u8,
     },
+    /// The backend starts or stops failing every call for the object, for as long as it is on.
+    Poison {
+        obj: u8,
+        on: bool,
+    },
     Flush {
         secs: u8,
     },
@@ -64,6 +70,7 @@ pub(in crate::sync::object_jobs::tests) fn op() -> impl Strategy<Value = Op> {
         1 => (0u8..3, any::<bool>()).prop_map(|(obj, on)| Op::Route { obj, on }),
         1 => (0u8..3, 0u8..3).prop_map(|(obj, payload)| Op::Content { obj, payload }),
         1 => (0u8..3).prop_map(|part| Op::Retire { part }),
+        2 => (0u8..3, any::<bool>()).prop_map(|(obj, on)| Op::Poison { obj, on }),
         3 => (0u8..4).prop_map(|secs| Op::Flush { secs }),
         6 => (any::<usize>(), how).prop_map(|(pick, how)| Op::Finish { pick, how }),
     ]
@@ -85,6 +92,8 @@ pub(in crate::sync::object_jobs::tests) struct Sim {
     /// The newest cursor wanted per (object, part): the cursor machine never redelivers one.
     ever: Map<(u8, u8), Rev>,
     reported: Vec<Settlement>,
+    /// Objects whose every call fails: persistent failure, which lands them in backoff.
+    poisoned: Vec<ObjKey>,
 }
 
 impl Sim {
@@ -97,6 +106,7 @@ impl Sim {
             calls: default(),
             ever: default(),
             reported: vec![],
+            poisoned: vec![],
         }
     }
 
@@ -141,6 +151,12 @@ impl Sim {
                 self.ever.retain(|(_, q), _| *q != p);
                 self.oracle.retire(&part(p));
                 self.jobs.retire_part(&part(p));
+            }
+            Op::Poison { obj: o, on } => {
+                self.poisoned.retain(|p| *p != obj(o));
+                if on {
+                    self.poisoned.push(obj(o));
+                }
             }
             Op::Flush { secs } => {
                 self.now += Duration::from_secs(secs.into());
@@ -203,6 +219,25 @@ impl Sim {
 
     fn finish(&mut self, call: CallId, how: How) {
         let sim = self.calls.remove(&call).unwrap();
+        // a poisoned object's call fails, unless it was cancelled, which only needs the driver
+        let how = match how {
+            How::Cancelled if sim.cancel_sent => how,
+            _ if self.poisoned.contains(&sim.obj) => How::Fail,
+            _ => how,
+        };
+        let stage = match sim.kind {
+            CallKind::Record => Stage::Fresh,
+            CallKind::Fetch => Stage::NeedsFetch,
+        };
+        let end = match (sim.kind, how) {
+            (CallKind::Record, How::Fail | How::Cancelled) | (CallKind::Fetch, How::Fail) => {
+                End::Failed
+            }
+            (CallKind::Fetch, How::Cancelled) if sim.cancel_sent => End::Cancelled,
+            (CallKind::Fetch, How::Cancelled) => End::Failed,
+            _ => End::Ok,
+        };
+        self.oracle.ended(&sim.obj, stage, end);
         match sim.kind {
             CallKind::Record => {
                 let outcome = match how {
@@ -269,6 +304,7 @@ impl Sim {
                         .job(&o, Stage::Fresh)
                         .expect("a record with no fresh want");
                     assert_eq!(job, expected, "law 5: the record is the difference");
+                    self.oracle.issued(&o, Stage::Fresh);
                     self.register(call, CallKind::Record, o, snap);
                 }
                 JobsCommand::Fetch { call, job } => {
@@ -282,6 +318,7 @@ impl Sim {
                         .job(&o, Stage::NeedsFetch)
                         .expect("a fetch with nothing to fetch");
                     assert_eq!(job, expected);
+                    self.oracle.issued(&o, Stage::NeedsFetch);
                     self.register(call, CallKind::Fetch, o, snap);
                     let fetching = self
                         .calls
@@ -341,7 +378,8 @@ impl Sim {
         assert!(old.is_none(), "call id {call} reused");
     }
 
-    fn check(&self) {
+    fn check(&mut self) {
+        self.oracle.prune();
         assert_eq!(self.jobs.room(), self.oracle.room());
         for p in 0..3 {
             assert_eq!(
@@ -355,6 +393,7 @@ impl Sim {
 
     /// Answer everything with success until nothing moves, then check that all is settled.
     pub(in crate::sync::object_jobs::tests) fn drain(&mut self) {
+        self.poisoned.clear();
         for _ in 0..200 {
             self.now += Duration::from_secs(10);
             let issued = self.flush();
