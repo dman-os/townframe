@@ -1,94 +1,175 @@
 # Clay docs on the collection waist
 
-Status: design note for the operator, 2026-11-24. Nothing here is built.
+Status: design note for the operator, second draft. Nothing here is built.
 Owner: claytxt lane.
 Updated: 2026-11-24
-Scope: how micros read and write node documents. Clay docs becomes a collection that the host provides, over the
-node's `pollDatums`/`writeDatums`, instead of a separate document mechanism.
-Context: the operator, 2026-11-24: "build on top of the clay collections waist if possible"; a micro mounts a query
-over what its grants reach and never streams every document it can access (TanStack DB style live queries);
-intxt is waiting on this to drop its interim `docCap` reads.
+Scope: how micros (and, through the same contract, nodules) find, watch, read and write node documents.
+Clay docs becomes collections that the host provides over the node's document and drawer methods, instead of a
+separate document mechanism.
+Context: the operator's review of the first draft, 2026-11-24:
+- build on the collection waist;
+- a micro mounts queries and never streams its whole reach;
+- the Clay host owns one intermediate cache that every micro goes through;
+- a query must never make a drawer eligible for mirroring;
+- the API has to work with sync interest;
+- hydration is the cost to bound;
+- it covers both a live document or datum and the sync of a set ("what is a collection?").
 
 ## What exists today
 
-- **The node.** Every document method takes a capability.
-  - Documents: `docs.createDoc`, `readDatums`, `listDatums`, `writeDatums` (with an idempotent `command` id),
-    `pollDatums`, `branchDoc`, `mergeDoc`, `getDocAvailability`, `observeDocAvailability`, `queryDatumRefs`.
-  - Drawers: `drawers.*` (`listDocs`, `addDoc`, `getDrawer`, ...).
-  - Source: `big_cabinet_core/doc.rs`.
-- **Nodules** call these with the handles the nodules service mints for their actor.
-- **Micros** have no document API of their own. The review micro calls the same methods through `Context::call`,
-  holding a `docCap` minted for it at install (interim, `daytxt_native/interim.rs`).
-- **`clay_docs`** (ADR 015 §4) has typed facets, a shared cache and optimistic transactions, over an in-memory
-  `MockDocuments` only. Nothing connects it to the node.
+Checked against the code, 2026-11-24.
 
-## Why the waist fits
+- **Polls see the index, not documents.** `pollDatums` answers from `big_cabinet_datum_set_entries`, which holds
+  `(doc_id, datum_key, tag, doc_heads, datum_heads, clock)` and no values. A `datum` event carries a version
+  (`ObservedDatum::Present { doc_heads, version }`), not the datum. So a poll never hydrates a document.
+- **Values cost a hydration.** `readDatums { docId, at, datums? }` and `listDatums` load the document.
+- **Only local documents are in the index.** A document gets index rows when it materializes on this node. A
+  roster entry for a document that is not here moves nothing in a poll: the document matches `InDrawer`, but has no
+  rows to deliver.
+- **Membership is readable without the members.** A roster lives as `drawer.docEntry/<docId>` datums on the
+  drawer's metadata document, and `drawers.listDocs` reads the scoped roster, including members not present locally.
+- **Interest is per document.** `big_repo::DocInterest` leases one document into `DocSyncDemand`, which becomes
+  big_sync object subscriptions to the connected peers. A poll with an `IsDoc` anchor holds one for the poll's
+  duration, with a 30 s grace after it drops. An `InDrawer` poll takes no interest.
+- **Mirroring is a durable node decision.** The known-drawers list (`knownEntry/<drawerId> { mirror?: true }`,
+  written only by `rememberDrawer`/`forgetDrawer`/`setDrawerPolicy`) is what `drawer/mirror.rs` turns into group-part
+  subscriptions. Nothing else subscribes a drawer's parts.
+- **Availability is per document.** `getDocAvailability`/`observeDocAvailability` return
+  `{ localUsability: NotObserved | NoLocalContent | PendingMaterialization | Usable, syncDemand }`.
+- **Micros have no document API.** The review micro calls node methods through `Context::call` with an interim
+  `docCap` (`daytxt_native/interim.rs`). `clay_docs` (ADR 015 §4) runs over `MockDocuments` only.
 
-`pollDatums` is already a projection lease in ADR 017's terms:
+## A document is in one of four states
 
-| ADR 017 waist (`clay_collection`)            | `pollDatums` (ADR 023, ADR 025)                         |
-|----------------------------------------------|---------------------------------------------------------|
-| `acquire(selector)`                          | `predicate` + `datums` selection                        |
-| `read(committed, limits, poll-timeout)`      | `after`, `limit`, `hold_ms`                             |
-| `Page { transactions, through, bootstrap_complete }` | `DatumPage { events, through, caught_up }`      |
-| `Change::Upsert` / `Change::Remove`          | `DatumEvent::Datum` / `DatumEvent::Leave` (move-out)    |
-| `RowEvidence::Pending` + `Ledger` overlays    | `writeDatums` with a `command` id; settles or rejects   |
+For a given caller and document, these four facts are independent:
+
+| Fact        | Source                                            | What it lets a micro do                          |
+|-------------|---------------------------------------------------|--------------------------------------------------|
+| listed      | a roster it can read (`listDocs`, `docEntry` rows) | know the document exists and its id              |
+| authorized  | its cartridge's grants (ADR 049)                  | ask for anything about it                        |
+| local       | the datum-set index, availability                 | query its datums and versions; read values       |
+| live        | someone holds interest                            | expect peers' changes to arrive soon             |
+
+A list view needs listed + local. A detail view needs local + live. The API keeps the four facts apart, and never
+lets one silently cause another:
+- a query never fetches anything;
+- reading a listed but absent document is an explicit open, which takes interest;
+- mirroring a whole drawer is an explicit, authorized policy change, never a side effect of a query or an open.
 
 ## Proposal
 
-1. **A host-provided collection contract `docs`.**
-   - Selector: `{ predicate, datums }`, the `pollDatums` query language.
-   - Key: `(doc_id, datum_key)`. Value: the observed datum.
-   - A micro requests it like any collection (`collection_requests`, ADR 028 §4). Its scope is its cartridge's
-     grants, the same for its nodules and micros (operator, 2026-11-24).
-2. **A micro mounts queries, never its whole reach.** Each mounted query is one projection lease. The MDK gives it
-   a live-query hook, `use_docs(selector)`, which returns the narrow list and updates incrementally.
-3. **The host polls with the micro's own authority.** The docs handle comes from `micros.handles` (ADR 052). The
-   host runs one `pollDatums` loop per distinct `(handle, selector)` and feeds it into the projection.
-4. **Writes are collection commands.** A write is a domain command on the collection, which the host lowers to
-   `writeDatums`.
-   - The `command` id is the collection's `OperationId`.
-   - The pending row shows at once through `clay_collection`'s overlay, and the authoritative row retires it.
-   - A rejection removes the overlay and reaches the micro as the command's failure.
-5. **`clay_docs` becomes a view over that collection.** The typed `Facet<T>` stays as the authoring surface.
-   `DocumentService`'s own cache, refresh and transaction machinery goes away.
+### 1. Three contracts, one waist
 
-## The one structural special case
+All three are collections on the ADR 017 waist: leases, pages, cursors, overlays, resets.
 
-`clay_collection::Projection` assumes its authority publishes the whole collection into the host, and each lease
-filters locally (`Source::matches(selector, key, value)`). Node documents cannot work like that: the host does not
-hold every document, and the node evaluates the predicate.
+1. **`docs.datums`: a datum query.**
+   - Selector: `{ predicate, datums }`, `pollDatums`' language unchanged.
+   - Row key: `(docId, datumKey)`. Row value: the version, plus the value when the host already holds it.
+   - Membership comes from the node (`Datum`/`Leave`), so it only ever covers local documents.
+   - This is what a list view mounts.
+2. **`docs.roster`: drawer membership.**
+   - Selector: `{ drawerId, transitive }`. Row key: `docId`. Row value: the entry (access level), plus the
+     document's availability as a field.
+   - Backed by the drawer's own `docEntry` rows, which are local whenever the drawer is known, so it lists members
+     that are not here.
+   - A micro that wants a non-mirrored drawer's members uses this, then picks documents to open.
+3. **`docs.open`: one document, live.**
+   - Selector: `{ docId, datums? }`. The lease **is** the interest: acquiring it takes a `DocInterest` in the host,
+     and dropping it releases it, after the node's grace.
+   - Rows are the selected datums with values; the document's availability is a field on the lease's page.
+   - This is what a detail view mounts, and the `use_doc`/`use_datum` hook sits on it.
 
-So the docs source **selects remotely**:
-- `Source::acquire` starts the upstream poll for that selector.
-- Membership comes from the node's `Datum`/`Leave` events instead of `matches`.
-- Release stops the poll.
+Writes go through all three the same way: a write is a domain command on the collection, which the host lowers to
+`writeDatums`. The `command` id is the collection's `OperationId`, the pending row shows at once through
+`clay_collection`'s overlay, the authoritative row retires it, and a rejection removes it and fails the command.
+A write to a document that is not local fails; it never fetches.
 
-This is a variant of `Source`, not a fork of the waist: leases, pages, cursors, overlays and resets stay as they
-are. Does `Source` gain a "remote selection" mode, or does each selector become its own projection? Measure both
-once there is a fake node.
+`clay_docs`' typed `Facet<T>` stays as the authoring surface, as a view over `docs.open` and `docs.datums`. Its own
+cache, refresh and transaction machinery goes away.
+
+### 2. The host owns one cache
+
+Like other collections, the Clay host holds one projection per distinct selector, and every lease on it reads from
+that projection. Two micros mounting the same query share one upstream poll.
+
+Authority stays per lease:
+- the projection is fed with the host's own reach;
+- each lease is checked against its micro's handle on acquire and on every page, as `pollDatums` re-authorizes
+  every poll;
+- a lease only ever sees rows its handle reaches. ADR 017 §2: "authorization never overfetches".
+
+Values are cached by version, `(docId, datumKey, datum_heads)`. A version names immutable content, so one cached
+value serves every lease that was authorized to see that version, and a value is read (and its document hydrated)
+once, however many micros show it.
+
+Nodules use the node directly and get no host cache. The contracts are the same, so a nodule's poll and a micro's
+lease describe the same rows. That is the isomorphism: the same selectors, rows and commands, with or without the
+Clay host in between.
+
+### 3. Hydration is the budget
+
+The expensive step is reading values, because that hydrates documents. Polls and rosters are index reads.
+- A `docs.datums` page carries versions. The host fetches values only for rows some lease asks to see, and only up
+  to a byte budget per page. Rows past the budget arrive as versions and fill in on later pages.
+- `docs.open` hydrates its document, once in the host, however many leases hold it.
+- The host bounds concurrent hydrations per micro, and in total, so a list of ten thousand rows cannot hydrate ten
+  thousand documents at once.
+
+### 4. Interest follows leases
+
+- `docs.open` holds document interest for the lease's life. This is today's `DocInterest`, unchanged.
+- `docs.datums` and `docs.roster` hold no interest. A list view stays current with whatever the node already syncs.
+- **Proposed node addition: drawer interest.** A lease-scoped subscription to a drawer's group parts, so a micro
+  that has a drawer open sees its roster and metadata changes live, without the node adopting the drawer as a
+  mirror. It is the group-part analogue of `DocInterest`: held, then released after a grace, and never written to
+  the known-drawers list. Without it, a non-mirrored drawer's roster only changes when something else syncs its
+  metadata document.
+
+### 5. Mirroring stays explicit
+
+A micro or nodule that needs a whole drawer present asks for it with `setDrawerPolicy { mirror: true }`, gated like
+any drawer write by its cartridge's grants. Querying, listing and opening never change policy. A drawer the node
+knows about but doesn't mirror is still fully usable through `docs.roster` plus `docs.open`.
+
+## Use cases
+
+| Use case (FDR 001, drawer wiki)              | What the micro mounts                                         |
+|----------------------------------------------|---------------------------------------------------------------|
+| Personal multi-device cabinet (mirrored)     | `docs.datums` with `InDrawer` + tags; `docs.open` on select     |
+| One shared document                          | `docs.open` on the document                                    |
+| Family photo album                           | `docs.datums` for the list; blobs through `blobs` (ADR 026)     |
+| Workplace project, child drawers             | `docs.datums` with `InDrawer { transitive: true }`              |
+| Chat                                         | `docs.open` on the thread document: interest gives liveness    |
+| Large public wiki, plug registry (not mirrored) | `docs.roster` plus drawer interest; `docs.open` per page read |
+| XRPC-only client, third-party index          | out of scope: a remote index is a different source             |
+| intxt review micro                           | `docs.datums` for its review queue; `docs.open` for one review |
 
 ## Open questions
 
-1. **Sharing.** May two micros with the same grants share one upstream poll and cache? Or is each projection keyed
-   by the handle that made it, so the cache never crosses authority? Proposed: key by handle, and revisit only if
-   it costs too much.
-2. **Availability.** With partial replication a matching document may not be local yet. Does a row carry a
-   `pending` availability state (from `observeDocAvailability`), or does it only appear once present?
-3. **Latency and fan-out.**
-   - Long-poll holds are enough to start. When is a push stream worth it?
-   - What bounds one query: the most documents in a result, or the most concurrent leases per micro?
-4. **Large values.** Datums can be large. Page limits bound transactions, not bytes per row. Do we need field
-   selection inside a datum, or a byte bound on a page?
-5. **Out of the first cut:** history reads (`at`), branches and merges, and `queryDatumRefs` (references across
-   documents).
+1. **Drawer interest** (§4): a node change, so it needs the nodules lane. Is it a `big_repo` group-part lease next
+   to `DocInterest`, and does a poll with an `InDrawer` anchor take one, as an `IsDoc` poll takes a `DocInterest`?
+2. **Roster availability.** `docs.roster` reports each member's availability. Fed by `observeDocAvailability` per
+   member, that is one stream per member. Does the node need a drawer-scoped availability poll?
+3. **What is a collection to the user?** A drawer, a saved query, or both? This note treats a drawer as a scope
+   and a query as the thing mounted. Saved queries as documents are left for later.
+4. **Byte budgets.** The numbers for the per-page value budget and the hydration bounds. Measure with the fake
+   node first.
+5. **Remote rosters.** A huge public drawer whose metadata isn't local at all needs a remote listing (the drawer
+   wiki's XRPC). Out of the first cut, along with history reads (`at`), branches and merges, and
+   `queryDatumRefs`.
 
 ## Order of work
 
-1. A fake node source in tests: `pollDatums`/`writeDatums` over an in-memory store, behind the same seam the real
-   node uses.
-2. The remote-selecting `Source` plus the `docs` contract, with leases end to end in `clay_collection` tests.
-3. Writes through the overlay, including rejection.
-4. `use_docs` in the MDK; `clay_docs` facets as a view over it.
-5. The real node: handles from `micros.handles`, polls through dispatch. The review micro drops its interim
-   `docCap` reads.
+1. A fake node in tests: datum index, roster, values and availability over an in-memory store, behind the same seam
+   the real node uses. It counts hydrations, so the budgets are measurable.
+2. `docs.datums` with the remote-selecting source, and the shared host projection, with leases end to end in
+   `clay_collection` tests.
+3. `docs.open` with interest held by the lease, and the value cache by version.
+4. Writes through the overlay, including rejection.
+5. `docs.roster`.
+6. `use_doc`/`use_datums` in the MDK, and `clay_docs` facets as a view.
+7. The real node: handles from `micros.handles`, then the review micro drops its interim `docCap` reads.
+
+The remote-selecting `Source` from the first draft stands: `Projection` filters locally with `Source::matches`, but
+for node documents the node evaluates the predicate, so the source selects remotely. Membership comes from
+`Datum`/`Leave` events, and acquiring or releasing a selector starts or stops its upstream poll.
