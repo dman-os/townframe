@@ -1,6 +1,6 @@
 # Clay docs on the collection waist
 
-Status: design note for the operator, second draft. Nothing here is built.
+Status: design note for the operator, third draft. Nothing here is built.
 Owner: claytxt lane.
 Updated: 2026-11-24
 Scope: how micros (and, through the same contract, nodules) find, watch, read and write node documents.
@@ -31,9 +31,14 @@ Checked against the code, 2026-11-24.
 - **Interest is per document.** `big_repo::DocInterest` leases one document into `DocSyncDemand`, which becomes
   big_sync object subscriptions to the connected peers. A poll with an `IsDoc` anchor holds one for the poll's
   duration, with a 30 s grace after it drops. An `InDrawer` poll takes no interest.
-- **Mirroring is a durable node decision.** The known-drawers list (`knownEntry/<drawerId> { mirror?: true }`,
-  written only by `rememberDrawer`/`forgetDrawer`/`setDrawerPolicy`) is what `drawer/mirror.rs` turns into group-part
-  subscriptions. Nothing else subscribes a drawer's parts.
+- **Mirroring is a durable node decision, and it already streams.** The known-drawers list
+  (`knownEntry/<drawerId> { mirror?: true }`, written only by `rememberDrawer`/`forgetDrawer`/`setDrawerPolicy`) is
+  what `Drawers::mirrored` (`drawer/mirror.rs`) turns into wanted parts. On every connection, and on access deltas,
+  `big_node`'s peer loop (`peers.rs`, `apply`) intersects them with the groups the peer is a member of
+  (`groups_with_member`) and subscribes those parts there. So a mirrored drawer's meta, docs and sensitive groups stream
+  from every peer that holds them, with no interest needed.
+- **A known but unmirrored drawer streams nothing.** Only its descriptor doc's id is known; no part is subscribed, so
+  its roster only changes when something else pulls its metadata doc.
 - **Availability is per document.** `getDocAvailability`/`observeDocAvailability` return
   `{ localUsability: NotObserved | NoLocalContent | PendingMaterialization | Usable, syncDemand }`.
 - **Micros have no document API.** The review micro calls node methods through `Context::call` with an interim
@@ -115,17 +120,30 @@ The expensive step is reading values, because that hydrates documents. Polls and
 - The host bounds concurrent hydrations per micro, and in total, so a list of ten thousand rows cannot hydrate ten
   thousand documents at once.
 
-### 4. Interest follows leases
+### 4. Interest is per document only
 
-- `docs.open` holds document interest for the lease's life. This is today's `DocInterest`, unchanged.
+There is no drawer-level interest: a mirrored drawer already streams from every peer that holds it (see above).
+- `docs.open` holds document interest for the lease's life. This is today's `DocInterest`, unchanged. It also covers
+  a document that isn't local: the interest becomes an object subscription to every connected peer, so the document
+  is fetched from whichever peer has it. The host first checks that the micro's grants reach the document, through
+  any drawer whose roster lists it.
 - `docs.datums` and `docs.roster` hold no interest. A list view stays current with whatever the node already syncs.
-- **Proposed node addition: drawer interest.** A lease-scoped subscription to a drawer's group parts, so a micro
-  that has a drawer open sees its roster and metadata changes live, without the node adopting the drawer as a
-  mirror. It is the group-part analogue of `DocInterest`: held, then released after a grace, and never written to
-  the known-drawers list. Without it, a non-mirrored drawer's roster only changes when something else syncs its
-  metadata document.
+- **Proposed node change, small:** subscribe the **meta group** of every *known* drawer, not only the mirrored ones.
+  It carries the descriptor and roster, never member bytes, so it is cheap. A known drawer's roster then stays live
+  and `docs.roster` stays current. Mirroring still adds the docs and sensitive groups. This replaces the drawer
+  interest the second draft proposed.
 
-### 5. Mirroring stays explicit
+### 5. Drawer policy is queryable, mirroring stays explicit
+
+A micro can ask the node's policy for a drawer, because it may want to know whether a drawer is mirrored before it
+offers the user something. Today's states, from the known-drawers list:
+- **unknown**: not in the list;
+- **known**: in the list, not mirrored (`knownEntry` without `mirror`);
+- **mirrored**: `mirror: true`.
+
+ADR 019's deferred per-node policy adds **selected** (a subset). The state is a field on `docs.roster`'s page and a
+row in a small `docs.drawers` collection (selector: all drawers the micro's grants reach, or one drawer id), so it
+updates live when the policy changes.
 
 A micro or nodule that needs a whole drawer present asks for it with `setDrawerPolicy { mirror: true }`, gated like
 any drawer write by its cartridge's grants. Querying, listing and opening never change policy. A drawer the node
@@ -140,18 +158,22 @@ knows about but doesn't mirror is still fully usable through `docs.roster` plus 
 | Family photo album                           | `docs.datums` for the list; blobs through `blobs` (ADR 026)     |
 | Workplace project, child drawers             | `docs.datums` with `InDrawer { transitive: true }`              |
 | Chat                                         | `docs.open` on the thread document: interest gives liveness    |
-| Large public wiki, plug registry (not mirrored) | `docs.roster` plus drawer interest; `docs.open` per page read |
+| Large public wiki, plug registry (not mirrored) | `docs.roster` (live through the meta group); `docs.open` per page read |
+| Micro with its own remote index                | its own call for ids; `docs.open` per id, fetched from any peer |
 | XRPC-only client, third-party index          | out of scope: a remote index is a different source             |
 | intxt review micro                           | `docs.datums` for its review queue; `docs.open` for one review |
 
 ## Open questions
 
-1. **Drawer interest** (§4): a node change, so it needs the nodules lane. Is it a `big_repo` group-part lease next
-   to `DocInterest`, and does a poll with an `InDrawer` anchor take one, as an `IsDoc` poll takes a `DocInterest`?
+Settled in review (2026-11-24): the collection a micro sees is defined by the query it mounts, which may cross
+drawers; the drawer is the primitive the query is anchored on. No drawer-level interest.
+
+1. **Meta groups of known drawers** (§4): a node change for the nodules lane. Is subscribing every known drawer's
+   meta group cheap enough on a node that knows many drawers, or does it need a cap?
 2. **Roster availability.** `docs.roster` reports each member's availability. Fed by `observeDocAvailability` per
    member, that is one stream per member. Does the node need a drawer-scoped availability poll?
-3. **What is a collection to the user?** A drawer, a saved query, or both? This note treats a drawer as a scope
-   and a query as the thing mounted. Saved queries as documents are left for later.
+3. **Opening many documents.** `docs.open` fetches one non-local document. A micro with its own index may want N
+   at once: resolving each one's authority, and fetching from any peer in bulk. Deferred until a use case needs it.
 4. **Byte budgets.** The numbers for the per-page value budget and the hydration bounds. Measure with the fake
    node first.
 5. **Remote rosters.** A huge public drawer whose metadata isn't local at all needs a remote listing (the drawer
@@ -166,7 +188,7 @@ knows about but doesn't mirror is still fully usable through `docs.roster` plus 
    `clay_collection` tests.
 3. `docs.open` with interest held by the lease, and the value cache by version.
 4. Writes through the overlay, including rejection.
-5. `docs.roster`.
+5. `docs.roster` and `docs.drawers` (policy state).
 6. `use_doc`/`use_datums` in the MDK, and `clay_docs` facets as a view.
 7. The real node: handles from `micros.handles`, then the review micro drops its interim `docCap` reads.
 
