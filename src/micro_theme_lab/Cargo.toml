@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 #
 # internal
 clay_dioxus_kit = { workspace = true }
+clay_dioxus_specimens = { workspace = true }
 micro_shell_manifest = { workspace = true }
 micro_theme_lab_manifest = { workspace = true }
 #

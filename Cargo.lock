@@ -8729,6 +8729,7 @@ name = "micro_theme_lab"
 version = "0.1.0"
 dependencies = [
  "clay_dioxus_kit",
+ "clay_dioxus_specimens",
  "clay_mdk",
  "dioxus",
  "dioxus-core",
