@@ -6,11 +6,11 @@
 //! is a leftover of a daemon that died without cleaning up. Nothing here sleeps or polls:
 //! `start` waits for the daemon's readiness line, `stop` blocks on the lock.
 
-use crate::context::Booted;
-use crate::context::LockRole;
-use crate::context::NodeDir;
-use crate::context::SocketState;
 use crate::interlude::*;
+use day_node::Booted;
+use day_node::LockRole;
+use day_node::NodeDir;
+use day_node::SocketState;
 
 use std::future::Future;
 use std::io::Write;
@@ -64,7 +64,7 @@ pub async fn serve(
         }
     };
     dir.ensure_run_dir()?;
-    let booted = Booted::boot(dir, lock, LockRole::Daemon).await?;
+    let booted = Booted::boot(dir, lock, LockRole::Daemon, crate::client::empty_schemas()?).await?;
     let served = ready(&booted);
     if served.is_ok() {
         shutdown.await;
@@ -86,7 +86,7 @@ async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
         dir,
         |booted| {
             let socket = booted
-                .node
+                .node()
                 .listeners
                 .unix_socket
                 .as_ref()
