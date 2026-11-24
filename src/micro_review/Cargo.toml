@@ -39,6 +39,7 @@ clay_mdk = { workspace = true, features = ["guest"] }
 clay_mdk = { workspace = true, features = ["in_process", "view"] }
 
 [dev-dependencies]
+dioxus-ssr = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]

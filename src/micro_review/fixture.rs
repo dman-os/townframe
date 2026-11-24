@@ -40,11 +40,12 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::future::ready;
 use std::rc::Rc;
+use std::time::Duration;
 
 type Datums = BTreeMap<DatumKey, Value>;
 
 /// The unified patch the sample's first commit entry carries.
-const SAMPLE_PATCH: &str = "diff --git a/src/review.rs b/src/review.rs
+pub(crate) const SAMPLE_PATCH: &str = "diff --git a/src/review.rs b/src/review.rs
 --- a/src/review.rs
 +++ b/src/review.rs
 @@ -1,3 +1,4 @@
@@ -405,6 +406,16 @@ impl NodeCalls for Fixture {
                 .cloned()
                 .ok_or_else(|| CallError::Refused("blob is not locally available".to_owned())),
         )
+    }
+
+    /// Time does not pass at a fixture node: its clock stays at zero and a sleep never ends, so
+    /// a view that paces itself on them is laid out once and never advances a frame.
+    fn sleep(&self, _duration: Duration) -> impl Future<Output = ()> {
+        std::future::pending()
+    }
+
+    fn now(&self) -> Duration {
+        Duration::ZERO
     }
 
     fn configuration(&self) -> Result<Configuration, CallError> {
