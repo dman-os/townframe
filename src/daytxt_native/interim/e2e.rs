@@ -47,6 +47,7 @@ async fn a_review_install_file_configures_the_micro_and_no_file_leaves_it_unconf
         "intxtDrawers": [intxt.to_string()],
         // A file that carries `docCap` must not decide it: only the composition mints one.
         "docCap": "forged",
+        "blobCap": "forged",
     });
     let file = serde_json::to_vec(&file).unwrap();
     let installs = interim_installs([REVIEW.to_owned()], |name| {
@@ -79,14 +80,34 @@ async fn a_review_install_file_configures_the_micro_and_no_file_leaves_it_unconf
         }),
         "the review manifest requests {tag}/{key}"
     );
+    let mut decoded = config.clone();
+    let blob_cap = decoded
+        .as_object_mut()
+        .unwrap()
+        .remove("blobCap")
+        .expect("the composition mints the review micro a blobCap");
+    assert_ne!(
+        blob_cap,
+        json!("forged"),
+        "the file does not decide blobCap"
+    );
+    // The micro's config requires `blobCap`: a datum without it does not decode, which left the
+    // micro Unconfigured before the composition minted one.
+    assert!(
+        serde_json::from_value::<micro_review_manifest::ReviewConfig>(decoded.clone()).is_err()
+    );
     assert_eq!(
-        *config,
+        decoded,
         json!({
             "githubDrawer": github.to_string(),
             "intxtDrawers": [intxt.to_string()],
             "docCap": serde_json::to_value(capability).unwrap(),
         })
     );
+    let decoded: micro_review_manifest::ReviewConfig =
+        serde_json::from_value(config.clone()).expect("the installed config decodes");
+    assert_eq!(serde_json::to_value(&decoded.blob_cap).unwrap(), blob_cap);
+    assert_ne!(decoded.blob_cap, decoded.doc_cap);
     let egress = composition.egress(REVIEW).unwrap();
     let (status, read) = read_datums(&egress, capability, &github_doc).await;
     assert_eq!(status, 200, "{read}");
