@@ -3,10 +3,10 @@
 **Status:** Draft (2026-11-24). Proposed by the nodules lane and agreed in shape with the claytxt lane; the operator signs
 off. Nothing here is built. Decisions marked **To confirm** need the operator.
 
-**Amends:** ADR 049 §6.1 (the `micros` service actor is the actor of a nodule in the core cartridge, ADR 053, no longer a
+**Amends:** ADR 049 §6.1 (the `micros` service actor is the `micros` subsystem actor the node opens at boot and hands to the core cartridge's nodule (§2), no longer a
 composition the GUI opens; the "same holds for the `micros` service actor" line becomes this ADR) and ADR 050 (§3's micro
-surface gains its node-side host; the micro manifest is unchanged). It also changes the authority service's `openActor`
-and `mintCapability` (§2.2).
+surface gains its node-side host; the micro manifest is unchanged). It needs no further change to the authority service's
+`openActor` (§2.2).
 
 **Who does what.** The node *manages* micro installs and authority: it opens each micro's actor, mints the handles the
 micro may use and re-mints them when grants move. Clay, the GUI's host, *hosts and runs* the micros. The micro wasm runs in
@@ -46,20 +46,29 @@ mints for guests, so the micros layer is one more guest of it.
 ## 2. A `micros` nodule in the core cartridge
 
 The micros service is a **nodule** (a request handler: a wasm component the `nodules` host calls per request, ADR 047)
-that ships in the **core cartridge** (ADR 053). It is not native node code. Its actor is the cartridge's own nodule actor,
-the one `nodules` opens for every installed nodule (`big_nodule/state.rs` `ensure_nodule_actor`). For each enabled micro of
-each installed cartridge, the nodule:
+that ships in the **core cartridge** (ADR 053). It is not native node code. Its actor is the `micros` subsystem actor, not the
+`nodules/<core>` actor the `nodules` service would open for it. Each runtime has one subsystem actor: node root, `micros`,
+`micros/<cartridge>`, `micros/<cartridge>/<micro>`. That makes `micros` a sibling of `nodules/<cartridge>`, as a nodule's
+actor is `nodules/<cartridge segment>`, and each runtime is trusted to manage the identities in its own subtree.
 
-1. **Opens the micro's actor** under its own actor with `openActor { parent, path, rights: USE }` (§2.2). Actor paths grow
-   one segment per open (`InvalidActorPath` otherwise), so the nodule opens `<own>/micros`, `<own>/micros/<cartridge>` and
-   `<own>/micros/<cartridge>/<micro>` in turn (a path that already exists opens to the same actor, which
+The mechanism: the node opens `micros` at boot beside `nodules`, `cartridges` and the other subsystem actors
+(`big_node/lib.rs`, `open_actor`). It hands that actor to the nodules service as the core cartridge's nodule actor, so for
+the core cartridge `ensure_nodule_actor` (`big_nodule/state.rs`) uses `micros` instead of opening `nodules/<core>`. The
+micros nodule's own actor is therefore `micros`, it signs as `micros`, and its routines' handles have subject `micros`.
+It has to be the nodule's own actor, and not just a handle the nodule holds, because of holder binding: dispatch and the
+authority admit a handle only when its holder's actor presents it, so a delegator bound to `micros` would be useless to a
+nodule that signs as `nodules/<core>`. For each enabled micro of each installed cartridge, the nodule:
+
+1. **Opens the micro's actor** under `micros` with `openActor { parent, path, rights: USE }` (§2.2). Actor paths grow
+   one segment per open (`InvalidActorPath` otherwise), so the nodule opens `micros/<cartridge>` and
+   `micros/<cartridge>/<micro>` in turn (a path that already exists opens to the same actor, which
    `big_nodule/state.rs:3104` relies on), each cartridge and micro id encoded into the one segment that
    `store::actor_segment` makes of a cartridge id. The micro's id is ADR 050 §1's `<cartridge id>/micro/<name>`. An actor is
    durable and survives the GUI that asks for it. Today the GUI opens it per boot with root authority.
 2. **Mints its handles** with that actor as `subject`, from the micro's `uses` intersected with the cartridge's grants
    (ADR 049 §3, §4.1): dispatch (the operations it binds), docs (`#datum` kinds in each granted drawer), blobs
    (`BlobsScope`, including `drawers`), and drawers when the `uses` reach them. Every handle is minted from a handle the
-   nodule itself holds (its own permbinds, §2.2), narrowed with `attenuateCapability` or `mintCapability` with `subject` set
+   nodule itself holds (its own permbinds, §2.2), narrowed with `attenuateCapability` with `subject` set
    to the micro's actor. This is ADR 049 §6.1's "a runtime grants itself first, then its children" with the runtime being a
    nodule, and with no native code behind it. The result has the shape of `RoutineCapabilities`
    (`big_nodule/executor.rs:41`). The lowering from `uses` to scopes is the one the native `nodules` service runs for a
@@ -81,23 +90,21 @@ The authority service, dispatch, the cabinet (drawers, documents, blobs) and the
 code. Something has to hold keys, route calls and host wasm, and none of those can be a guest of itself. The micros layer
 is the first surface that is not one of those, which is why it can leave.
 
-### 2.2 What the authority service needs (three changes)
+### 2.2 What the authority service needs (two changes)
 
 The authority code (`big_cabinet_core/authority.rs:405-482`) says today: `openActor { parent: CapId, path, rights }` opens
 a child actor under a held capability; `mintCapability`'s `subject` must be a **strict descendant** of the subject it
 inherits, and an introduction needs `DELEGATE` on the parent or issuer; `attenuateCapability` and `retractCapability`
-are already unprivileged (the latter only retracts descendants of its `via` handle, `may_retract`). `openActor` and
-`mintCapability` are `privileged`, because they bring a principal into being and mint under a caller-named issuer
-namespace. A nodule is not the operator, so as built it could not do the work above. Three changes:
+are already unprivileged (the latter only retracts descendants of its `via` handle, `may_retract`). `mintCapability`
+is `privileged`, because it mints under a caller-named issuer namespace. Two changes remain, and the first is none:
 
-1. **Descendant-scoped `openActor` and `mintCapability`.** They stop being `privileged` when the new actor (for
-   `openActor`) or the `subject` (for `mintCapability`) is strictly under the caller's own actor. The service already has
-   the actor path rule and the strict-descendant test that raises `Escalation`; the new check reuses them. A call outside
-   the caller's subtree keeps needing the operator root. A nodule can then mint for its descendants only, which is the rule
-   the micros nodule needs and nothing wider. Layer node-78 implements this. One detail needs the operator:
-   `mintCapability` takes a free-form `object` under a caller-named issuer, so the descendant scope must also pin the
-   object to a handle the caller already holds (minting narrows from `parent`), or the nodule could mint anything for a
-   descendant. **To confirm.**
+1. **No further change: `openActor` and `attenuateCapability` already suffice.** Node-78 (#325) made `openActor`
+   unprivileged and keyed on a held identity capability: `parent` is a held handle with MINT_CHILD, and each open adds one
+   path segment. `attenuateCapability { subject }` introduces strict descendants of the held handle's subject, so the
+   nodule narrows its own handles onto each micro's actor with it. `mintCapability` stays privileged and the nodule does
+   not use it, which settles the earlier question of pinning its free-form `object`: attenuation narrows from a held
+   handle, so there is nothing to pin. A privileged micros subsystem (the operator's alternative) is rejected: the
+   subsystem-actor shape needs no new privilege.
 2. **An explicit runtime permbind to read other cartridges' installs and grants.** The nodule must read what other
    cartridges are granted (`listCartridgeGrants`, `awaitCartridgeGrants`, both `privileged` today) and which are installed
    and enabled. A routine does not get that from its `uses`. The core cartridge's manifest declares a permbind on those
@@ -294,8 +301,9 @@ either one of them.
 
 Each layer is one small PR (see `.agents/skills/pr-stacks`). Lanes:
 
-1. **Descendant-scoped authority** (§2.2 item 1, node-78): `openActor` and `mintCapability` unprivileged inside the
-   caller's subtree. Nodules.
+1. **Unprivileged `openActor`** (§2.2 item 1, node-78, #325, landed): a held identity capability opens children, and
+   `attenuateCapability` introduces descendants. Nothing further to build. The node opens the `micros` actor at boot and
+   hands it to the nodules service for the core cartridge (§2). Nodules.
 2. **The core cartridge** (ADR 053): the preinstalled cartridge, its Lexicons as the source of `node_type_libraries()`,
    the runtime permbind of §2.2 item 2. It comes first among the cartridge work because it is where the micros nodule
    lives and holds the type library every other cartridge's admission needs. Nodules.
@@ -320,8 +328,9 @@ Steps 1, 2 and the typed client of 4 are independent and can land first; 3 needs
 1. **The micros layer as a nodule in the core cartridge** (§2). The operator's direction of 2026-11-24 ("let us indeed try
    to make the micros layer itself a cartridge"); this ADR is the trial. What to watch is the lazy re-mint (§3); if its
    two edges prove unacceptable, a native follower is the fallback.
-2. **Descendant-scoped `openActor`/`mintCapability`** (§2.2 item 1), including pinning `mintCapability`'s `object` to a
-   handle the caller already holds.
+2. **Actor placement and descendant authority** (§2.2 item 1): settled. The micros actors live under a top-level `micros`
+   subsystem actor, and `openActor` plus `attenuateCapability` need no further change. A privileged micros subsystem is
+   rejected.
 3. **The runtime permbind** to `listCartridgeGrants`/`awaitCartridgeGrants`, granted at install of the core cartridge by
    the node (§2.2 item 2, ADR 053 §3).
 4. **The daytxt cartridge as the home of built-in micros** (§6), and not a cartridge per built-in.
