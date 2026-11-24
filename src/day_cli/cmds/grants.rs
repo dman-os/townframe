@@ -265,6 +265,9 @@ fn grant_sentence(grant: &GrantKey, body: &GrantBody) -> String {
             format!("may {} your data from {cartridge}", access(body))
         }
         GrantKey::Net(net) => format!("may use the network to reach {net}"),
+        GrantKey::Method(nsid) if body.privileged => {
+            format!("may use the node's own operation `{nsid}`")
+        }
         GrantKey::Method(nsid) => format!("may use the operation `{nsid}`"),
         GrantKey::Authority(prefix) if prefix == "*" => "may use any operation".to_owned(),
         GrantKey::Authority(prefix) => format!("may use the operations under `{prefix}`"),

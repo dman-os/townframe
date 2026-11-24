@@ -13,6 +13,37 @@ pub(super) fn core_cartridge_id() -> CartridgeId {
 /// The version these nodes' builds carry of [`core_cartridge_id`].
 pub(super) const CORE_VERSION: &str = "1.0.0";
 
+/// The grants these nodes make their core cartridge at boot, as `big_node` does (ADR 052 §2.2):
+/// the authority methods that open an actor and narrow handles onto it, and the read-only
+/// privileged methods, each privileged grant naming exactly its method.
+pub(super) fn core_grants() -> BTreeMap<GrantKey, GrantBody> {
+    use big_cabinet_core::authority::AttenuateCapability;
+    use big_cabinet_core::authority::OpenActor;
+    use big_cabinet_core::authority::RetractCapability;
+    use big_cartridges_core::protocol::AwaitCartridgeGrants;
+    use big_cartridges_core::protocol::ListCartridgeGrants;
+    [
+        (OpenActor::XRPC, false),
+        (AttenuateCapability::XRPC, false),
+        (RetractCapability::XRPC, false),
+        (ListCartridgeGrants::XRPC, true),
+        (AwaitCartridgeGrants::XRPC, true),
+        (ListCartridgeInstalls::XRPC, true),
+    ]
+    .into_iter()
+    .map(|(method, privileged)| {
+        (
+            GrantKey::Method(method.nsid.to_owned()),
+            if privileged {
+                GrantBody::privileged()
+            } else {
+                GrantBody::present()
+            },
+        )
+    })
+    .collect()
+}
+
 /// The core cartridge's install is the node's (ADR 053 §3 item 5): only the version the node's
 /// build carries installs, so a person cannot move it to another, and once installed it cannot be
 /// uninstalled, disabled, granted or cleared, by the operator either.
