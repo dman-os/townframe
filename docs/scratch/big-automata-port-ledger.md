@@ -1002,6 +1002,30 @@ doubt.
 **Order:** ObjectJobs (laws, oracle, conformance) → PartLifecycle → the per-peer parent and
 SyncStats → whole-machine simulation → driver, with full-sync waiters as the layer above.
 
+**The backend cut (operator approved 2026-11-24).** Laws in `object_jobs.rs`. `SyncBackend`
+becomes `record(job) -> Settle { Done | Fetch }` (short, cancel-safe, default `Fetch`) plus
+`fetch(job)` (may be long, cancel-safe, idempotent). A job combines adds, removes and the
+payload hint, with no partial outcomes. big_sync stays stateless across sessions apart from the
+applied cursor; the fetch lane is per connection, bounded by a receive window `W` and a fetch
+cap `C`. Why: backends chose between downloading inline (`daybook_core/blobs/sync.rs`, which
+blocks removals for the whole download) and recording and deferring (`big_blobs/sync.rs`)
+with nothing in the contract saying which. In the blob picture big_sync is the provider
+discovery half: big_blobs adds a blob to its inventory part only after verifying the bytes
+(`admission/project.rs:70–88`), so membership means "this peer can serve it", while pins say
+what is wanted.
+
+Port items from this cut:
+- **Durable outbox component** in big_automata: an okv table of wants, a concurrent rev-stream
+  walker and `KeyedScheduler`, with backend-chosen priorities and fetching from any connected
+  peer that advertised the object. For backends that answer `Done` and keep durable work;
+  big_blobs' transfer worker should be rebuilt on it (operator: its workers regressed, with no
+  concurrent walkers and unclear rollback and task tracking).
+- **Peer cursors leave the part store.** `HostPartStore::{get,set}_peer_part_cursor` hold what
+  we consumed from peers inside the store of what we serve; their only reader besides the
+  cursor machine is `decide_peer_strat`. They move to a small table the driver owns.
+- **Backends move to the contract:** big_repo and `daybook_core` blobs implement `fetch`;
+  big_blobs implements `record` answering `Done`.
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a
