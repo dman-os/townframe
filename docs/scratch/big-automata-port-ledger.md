@@ -1089,6 +1089,22 @@ moving any embedder or porting the walkers:
 Deferred to the big_repo phase: the backend migrations, the embedder cutover, deleting
 big_sync, and the delta-walker/frontier family with the other big_sync_core workers.
 
+**Store generations (draft for operator redline, 2026-11-25).** A peer's log can be rewound
+(restored from a backup) or reset; a client's cursor from before means nothing on the new log,
+and rows in (new head, old cursor] would be silently missed.
+- Each part store carries a `generation` id, minted when the store is created and minted again
+  by an explicit reset or a restore from backup (an admin operation; the store cannot tell a
+  restored file from a live one by itself).
+- Part summaries carry the peer's generation. The driver's peer-cursor table stores
+  `(generation, rev)` per (peer, backend, part).
+- A summary from another generation than the stored cursor's: the part restarts from cursor 0,
+  which makes it walk and reconcile, and the event is logged loudly. A summary whose latest
+  cursor is below the stored cursor is treated the same (a restore that forgot to mint).
+- Checked at summary time only: a generation change mid-connection means the peer restarted,
+  which loses the replay session and forces a reconnect, hence fresh summaries.
+- Store-level only. Clearing tombstones stays impossible in the p2p design: a backend that
+  wants a clean slate uses a new part key per generation of its data.
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a
