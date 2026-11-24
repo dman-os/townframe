@@ -1,0 +1,40 @@
+---
+source: src/micro_theme_lab_manifest/lib.rs
+expression: sidecar()
+---
+id: dayframe.theme-lab
+package_version: 1
+authority: org.example.dayframe.themelab
+entrypoints:
+  initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
+  presentation: "townframe:dayframe/presentation-events@0.4.0"
+  installer: ~
+endpoints:
+  view:
+    $type: "org.example.clay.micro.manifest#viewEndpoint"
+requires:
+  - binding: nav-button
+    contract: org.example.dayframe.shell.navButton
+  - binding: get-theme
+    contract: org.example.dayframe.shell.getTheme
+  - binding: set-theme
+    contract: org.example.dayframe.shell.setTheme
+configuration_requests: []
+collection_contracts: []
+collection_requests:
+  - binding: panels
+    contract: org.example.dayframe.shell.panels
+    access: write
+contributions:
+  - id: panel
+    binding: panels
+    key: dayframe.theme-lab
+    value:
+      content:
+        $link: 0
+      sockets:
+        - list
+      title: Theme lab
+    links:
+      - index: 0
+        endpoint: view

@@ -1,0 +1,111 @@
+/*
+ * The theme lab's own stylesheet (a micro's rules sit above the kit and the user's theme). Parts
+ * are local to this micro: `.ct-theme-lab` and its `data-part`s. The monospace field and the text
+ * roles have no kit component yet, so they are built from kit tokens here.
+ */
+.ct-theme-lab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-dimension-spacing-6);
+  margin: 0 var(--ct-dimension-spacing-4);
+  padding-bottom: var(--ct-dimension-spacing-6);
+}
+
+.ct-theme-lab [data-part="editor"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-dimension-spacing-2);
+}
+
+.ct-theme-lab [data-part="heading"] {
+  font-weight: var(--ct-font-weight-medium);
+}
+
+.ct-theme-lab [data-part="field"] {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 16rem;
+  padding: var(--ct-dimension-spacing-3);
+  border: var(--ct-dimension-border-width-thin) solid var(--ct-color-border);
+  border-radius: var(--ct-dimension-radius-md);
+  background: var(--ct-color-surface-sunken);
+  color: var(--ct-color-text);
+  font-family: var(--ct-font-family-mono);
+  font-size: var(--ct-dimension-font-size-sm);
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.ct-theme-lab [data-part="field"]:focus-visible {
+  outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
+}
+
+.ct-theme-lab [data-part="actions"] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ct-dimension-spacing-2);
+}
+
+.ct-theme-lab [data-part="toggle"] {
+  display: flex;
+  align-items: center;
+  gap: var(--ct-dimension-spacing-2);
+  min-height: var(--ct-dimension-target-coarse);
+}
+
+.ct-theme-lab [data-part="preview"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-dimension-spacing-4);
+}
+
+.ct-theme-lab [data-part="preview"] > h2 {
+  margin: 0;
+  font-size: var(--ct-dimension-font-size-lg);
+  font-weight: var(--ct-font-weight-semibold);
+}
+
+.ct-theme-lab [data-part="specimens"] {
+  overflow: hidden;
+  border: var(--ct-dimension-border-width-thin) solid var(--ct-color-border);
+  border-radius: var(--ct-dimension-radius-lg);
+  background: var(--ct-color-canvas);
+}
+
+.ct-theme-lab [data-part="samples"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-dimension-spacing-3);
+  padding: var(--ct-dimension-spacing-4);
+}
+
+.ct-theme-lab [data-part="text"],
+.ct-theme-lab [data-part="muted"],
+.ct-theme-lab [data-part="subtle"] {
+  margin: 0;
+}
+
+.ct-theme-lab [data-part="text"] {
+  color: var(--ct-color-text);
+}
+
+.ct-theme-lab [data-part="muted"] {
+  color: var(--ct-color-text-muted);
+  font-size: var(--ct-dimension-font-size-sm);
+}
+
+.ct-theme-lab [data-part="subtle"] {
+  color: var(--ct-color-text-subtle);
+  font-size: var(--ct-dimension-font-size-sm);
+}
+
+.ct-theme-lab [data-part="buttons"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ct-dimension-spacing-2);
+}
+
+.ct-theme-lab [data-part="rows"] {
+  height: 10rem;
+}
