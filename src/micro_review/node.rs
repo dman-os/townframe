@@ -155,7 +155,7 @@ impl NodeCalls for ContextNode {
     }
 
     async fn read_blob(&self, input: ReadBlob) -> Result<Vec<u8>, CallError> {
-        let blob = input.blob_id.clone();
+        let blob = input.blob_id;
         let mut body = self.context.call_bytes(input).await?;
         let mut octets = Vec::new();
         while let Some(chunk) = body.next().await {
