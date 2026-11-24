@@ -78,7 +78,10 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
             self.detach_from_parent(child);
             self.node_mut(child).parent = Some(parent);
         }
-        self.node_mut(parent).children.extend(children);
+        self.node_mut(parent)
+            .children
+            .extend(children.iter().copied());
+        self.sanitize_style_text(parent, &children);
     }
 
     fn replace_with(&mut self, m: usize) {
@@ -99,8 +102,9 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
             .iter()
             .position(|&existing| existing == target.node)
             .expect("target node must be in parent's children");
-        siblings.splice(pos..=pos, replacements);
+        siblings.splice(pos..=pos, replacements.iter().copied());
         self.drop_subtree(target.node);
+        self.sanitize_style_text(parent, &replacements);
     }
 
     fn insert_after(&mut self, m: usize) {
@@ -121,7 +125,8 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
             .iter()
             .position(|&existing| existing == anchor)
             .expect("anchor node must be in parent's children");
-        siblings.splice(pos + 1..pos + 1, nodes);
+        siblings.splice(pos + 1..pos + 1, nodes.iter().copied());
+        self.sanitize_style_text(parent, &nodes);
     }
 
     fn insert_before(&mut self, m: usize) {
@@ -142,7 +147,8 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
             .iter()
             .position(|&existing| existing == anchor)
             .expect("anchor node must be in parent's children");
-        siblings.splice(pos..pos, nodes);
+        siblings.splice(pos..pos, nodes.iter().copied());
+        self.sanitize_style_text(parent, &nodes);
     }
 
     fn set_attribute(&mut self, name: &str, ns: Option<&str>, value: BorrowedAttributeValue<'_>) {
@@ -191,6 +197,9 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
                 let previous_bytes = text.len();
                 *text = value.to_owned();
                 self.retained_bytes = self.retained_bytes - previous_bytes + value.len();
+                if let Some(parent) = self.node(node).parent {
+                    self.sanitize_style_text(parent, &[node]);
+                }
             }
             SurfaceNodeKind::Element { .. } => {
                 let children = self.node(node).children.clone();
@@ -200,6 +209,7 @@ impl<C: Clone> WriteMutations for SurfaceTree<C> {
                 let text_node = self.alloc_node(SurfaceNodeKind::Text(value.to_owned()));
                 self.node_mut(text_node).parent = Some(node);
                 self.node_mut(node).children = vec![text_node];
+                self.sanitize_style_text(node, &[text_node]);
             }
             SurfaceNodeKind::Root | SurfaceNodeKind::Component(_) => {
                 panic!("set_text called on a non-DOM surface node")
