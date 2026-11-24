@@ -98,8 +98,54 @@ fn main() -> Res<ExitCode> {
     }
 }
 
+/// Parses `args` as `day`'s command line, or as `day x intxt`'s when `args[0]` is named `intxt`
+/// or `day-intxt`.
+///
+/// `intxt` is `day` linked under another name (`ln -s "$(command -v day)" ~/.local/bin/intxt`),
+/// so that the hooks recording agent sessions call a command whose name outlives how `day`'s
+/// commands are arranged. It is temporary: a stable `intxt` now, until the platform and product
+/// command line settle. `intxt <args>` is exactly `day x intxt <args>`. Parsing is `day`'s, whose
+/// usage lines would say `day exec intxt`, so a help or failed parse is redone on [`IntxtCli`],
+/// which has the same arguments and says `intxt`.
+fn parse_cli(args: Vec<std::ffi::OsString>) -> Result<Cli, clap::Error> {
+    let (rewritten, invoked_as_intxt) = multicall(args.clone());
+    match (Cli::try_parse_from(rewritten), invoked_as_intxt) {
+        (Err(day_error), true) => Err(IntxtCli::try_parse_from(args)
+            .err()
+            .unwrap_or(day_error)),
+        (parsed, _) => parsed,
+    }
+}
+
+/// The command line of `intxt`, for the help and errors of [`parse_cli`].
+#[derive(Debug, clap::Parser)]
+#[clap(name = "intxt", version, styles = CLAP_STYLE)]
+struct IntxtCli {
+    /// The node's directory
+    #[arg(long = "node", global = true, env = "DAY_NODE", value_name = "DIR")]
+    _node: Option<PathBuf>,
+    #[clap(subcommand)]
+    _command: cmds::intxt::IntxtCommands,
+}
+
+/// When `args[0]`'s file name is `intxt` or `day-intxt` (the name `day intxt` finds among the
+/// `PATH` plugins), the arguments of `day x intxt <rest>`, and true. The program name becomes
+/// `day` and `x intxt` goes before the rest, so the global `--node` is read wherever the caller
+/// put it.
+fn multicall(mut args: Vec<std::ffi::OsString>) -> (Vec<std::ffi::OsString>, bool) {
+    let invoked_as_intxt = args.first().is_some_and(|arg0| {
+        Path::new(arg0)
+            .file_name()
+            .is_some_and(|name| name == "intxt" || name == "day-intxt")
+    });
+    if invoked_as_intxt {
+        args.splice(0..1, ["day", "x", "intxt"].map(Into::into));
+    }
+    (args, invoked_as_intxt)
+}
+
 fn try_static_cli() -> Res<StaticCliResult> {
-    let cli = match Cli::try_parse() {
+    let cli = match parse_cli(std::env::args_os().collect()) {
         Err(err) => {
             let kind = err.kind();
             use clap::error::ErrorKind;
@@ -384,6 +430,64 @@ mod tests {
             panic!("`day x org.example.a.b '{{}}'` is an operation call");
         };
         assert_eq!((nsid.as_str(), input.as_str()), ("org.example.a.b", "{}"));
+    }
+
+    fn os(args: &[&str]) -> Vec<std::ffi::OsString> {
+        args.iter().map(Into::into).collect()
+    }
+
+    #[test]
+    fn invoked_as_intxt_is_day_x_intxt() {
+        for (argv, expected) in [
+            (&["intxt", "show"][..], &["day", "x", "intxt", "show"][..]),
+            (
+                &["/home/o/.local/bin/intxt", "--node", "d", "show"],
+                &["day", "x", "intxt", "--node", "d", "show"],
+            ),
+            (&["intxt"], &["day", "x", "intxt"]),
+            (
+                &["/usr/bin/day-intxt", "show"],
+                &["day", "x", "intxt", "show"],
+            ),
+        ] {
+            assert_eq!(multicall(os(argv)), (os(expected), true));
+        }
+        for argv in [
+            &["day", "x", "intxt", "show"][..],
+            &["day", "node", "status"],
+            &["intxt-old"],
+        ] {
+            assert_eq!(multicall(os(argv)), (os(argv), false));
+        }
+    }
+
+    #[test]
+    fn intxt_parses_as_the_intxt_command_with_its_own_program_name() {
+        let cli = parse_cli(os(&[
+            "intxt",
+            "--node",
+            "d",
+            "record",
+            "install",
+            "claude-code",
+        ]))
+        .unwrap();
+        assert_eq!(cli.node, Some(PathBuf::from("d")));
+        let StaticCommands::Exec {
+            command:
+                Some(ExecCommands::Intxt {
+                    command: cmds::intxt::IntxtCommands::Record { .. },
+                }),
+            ..
+        } = cli.command
+        else {
+            panic!("`intxt record ..` is `day x intxt record ..`");
+        };
+        let help = parse_cli(os(&["intxt", "--help"])).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = help.to_string();
+        assert!(help.contains("Usage: intxt "), "{help}");
+        assert!(!help.contains("day x intxt"), "{help}");
     }
 
     #[test]
