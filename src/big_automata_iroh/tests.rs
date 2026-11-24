@@ -3,7 +3,10 @@
 
 use std::collections::BTreeMap;
 
+use big_automata::BuckId;
+use big_automata::PartKey;
 use big_automata::PeerKey;
+use big_automata::fingerprint::FingerprintSeed;
 use big_automata::part_store::laws::add;
 use big_automata::part_store::laws::grant;
 use big_automata::part_store::laws::obj;
@@ -27,6 +30,12 @@ use big_automata::replay::wire::Route;
 use big_automata::replay::wire::SessionError;
 use big_automata::replay::wire::TargetId;
 use big_automata::replay::wire::UpdateSession;
+use big_automata::sync::rpc::MAX_SUMMARY_PARTS;
+use big_automata::sync::rpc::bucket::BucketObjPageEntry;
+use big_automata::sync::rpc::bucket::GetChangedBucketsRequest;
+use big_automata::sync::rpc::bucket::LeafBucketRequest;
+use big_automata::sync::rpc::bucket::LeafBucketsRequest;
+use big_automata::sync::rpc::summary::PartSummariesRequest;
 use service_client_core_rs::Client as CoreClient;
 use service_client_core_rs::UnaryTransport;
 use service_client_iroh_rs::IROH_XRPC_HTTP_ALPN;
@@ -54,7 +63,7 @@ fn client_principal() -> PeerKey {
 /// [`client_principal`]; any other endpoint is refused before the store is read.
 fn principal_of(
     allowed: EndpointId,
-) -> impl Fn(&RequestContext, &TransportContext) -> Result<PeerKey, SessionError> {
+) -> impl Fn(&RequestContext, &TransportContext) -> Result<PeerKey, ContextError> {
     move |_, transport| match transport {
         TransportContext::Direct {
             origin: CallOrigin::LocalNode,
@@ -67,7 +76,7 @@ fn principal_of(
         {
             Ok(client_principal())
         }
-        _ => Err(method_core::ContextError::Unauthenticated.into()),
+        _ => Err(ContextError::Unauthenticated),
     }
 }
 
@@ -135,7 +144,7 @@ impl Puller {
             let reply = answer(client.call(RequestContext::root(), update.clone()).await);
             let outcome = self
                 .machine
-                .update_answered(&update, &reply)
+                .update_answered(&update, &reply, &mut Vec::new())
                 .expect("the server answers correctly");
             assert!(
                 matches!(outcome, UpdateOutcome::Applied { .. }),
@@ -283,7 +292,7 @@ async fn an_unreadable_part_is_refused_at_the_update_and_a_revoke_refuses_it_at_
     assert_eq!(
         puller
             .machine
-            .update_answered(&update, &Ok(updated))
+            .update_answered(&update, &Ok(updated), &mut Vec::new())
             .unwrap(),
         UpdateOutcome::Applied { blocked: 1 }
     );
@@ -452,6 +461,217 @@ async fn a_client_machine_pulls_a_part_over_iroh() {
 
     server_router.shutdown().await.expect("router shutdown");
     other.close().await;
+    client_endpoint.close().await;
+    server.close().await;
+    stop.stop().await;
+}
+
+/// Every call of `BigSyncRpcClient` against the store `seed` wrote, through whatever carries it:
+/// summaries (per part, refusal as absence, the cap), the bucket listing, leaf paging with the
+/// echoed `after`, and the replay methods delegating to the replay protocol.
+async fn exercise_the_rpc_client(client: &impl BigSyncRpcClient, (first, second): (u64, u64)) {
+    let asked = |parts: &[(u8, u64)]| PartSummariesRequest {
+        parts: parts
+            .iter()
+            .map(|&(index, since)| (part(index), since))
+            .collect(),
+    };
+
+    // Part 1 is readable, part 2 is known to no one: the answer names only the first.
+    let summaries = client
+        .part_summaries(asked(&[(1, 0), (2, 0)]))
+        .await
+        .expect("transport")
+        .expect("method");
+    assert_eq!(summaries.keys().collect::<Vec<_>>(), [&part(1)]);
+    let summary = summaries[&part(1)];
+    assert_eq!(summary.member_count, 2);
+    assert_eq!(summary.latest_cursor, second);
+    assert_eq!(summary.dirty.member_changes, 2);
+    let from_first = client
+        .part_summaries(asked(&[(1, first)]))
+        .await
+        .expect("transport")
+        .expect("method");
+    assert_eq!(from_first[&part(1)].dirty.member_changes, 1);
+
+    let over = PartSummariesRequest {
+        parts: (0..=MAX_SUMMARY_PARTS)
+            .map(|index| (PartKey::new(&index.to_be_bytes()), 0))
+            .collect(),
+    };
+    assert_eq!(
+        client.part_summaries(over).await.expect("transport"),
+        Err(PartSummariesError::TooManyParts {
+            cap: MAX_SUMMARY_PARTS
+        })
+    );
+
+    // The listing: one root bucket holding both members; a refused part is unknown.
+    let list = |part_key| GetChangedBucketsRequest {
+        part_key,
+        offset: BuckId::ROOT,
+        to_level: 0,
+        since: 0,
+        limit_hint: 16,
+    };
+    let listed = client
+        .get_changed_buckets(list(part(1)))
+        .await
+        .expect("transport")
+        .expect("method");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        (listed[0].id, listed[0].live_count, listed[0].changed_at),
+        (BuckId::ROOT, 2, second)
+    );
+    assert_eq!(
+        client
+            .get_changed_buckets(list(part(2)))
+            .await
+            .expect("transport"),
+        Err(BucketsError::UnknownPart)
+    );
+
+    // Leaves, one entry a page: the second page echoes the position the first named.
+    let seed = FingerprintSeed::new(3, 4);
+    let leaves = |part_key, after| LeafBucketsRequest {
+        part_key,
+        since: 0,
+        buckets: vec![LeafBucketRequest {
+            buck_id: BuckId::ROOT,
+            after,
+        }],
+        seed,
+        limit_hint: Some(1),
+    };
+    let mut pages = Vec::new();
+    let mut after = None;
+    loop {
+        let mut answer = client
+            .leaf_buckets(leaves(part(1), after.clone()))
+            .await
+            .expect("transport")
+            .expect("method");
+        let page = answer.remove(&BuckId::ROOT).expect("the asked bucket");
+        assert_eq!(page.after, after);
+        after = page.next_after.clone();
+        let done = after.is_none();
+        pages.push(page);
+        if done {
+            break;
+        }
+    }
+    let entries = pages
+        .iter()
+        .flat_map(|page| page.entries.iter().cloned())
+        .collect::<Vec<_>>();
+    let entry = |index, value| BucketObjPageEntry {
+        obj_key: obj(index),
+        fp: Some(BucketObjPageEntry::fingerprint(
+            &seed,
+            &obj(index),
+            big_automata::part_store::PayloadDigest::of(&payload(value)).unwrap(),
+        )),
+    };
+    assert_eq!(pages.len(), 2);
+    let mut expected = [entry(1, 10), entry(2, 20)];
+    expected.sort_by(|a, b| a.obj_key.cmp(&b.obj_key));
+    assert_eq!(entries, expected);
+    assert_eq!(
+        client
+            .leaf_buckets(leaves(part(2), None))
+            .await
+            .expect("transport"),
+        Err(BucketsError::UnknownPart)
+    );
+
+    // The replay methods are the replay protocol's calls.
+    let session_id = Uuid::from_u128(11);
+    let updated = client
+        .update_replay_session(UpdateSession {
+            session_id,
+            generation: 0,
+            additions: vec![(0, part_route(1))],
+            removals: Vec::new(),
+        })
+        .await
+        .expect("transport")
+        .expect("method");
+    assert_eq!(updated.refused, Vec::<u32>::new());
+    let page = client
+        .page_replay_session(PageSession {
+            session_id,
+            targets: vec![(0, 0)],
+            limit: 8,
+            hold_ms: 0,
+        })
+        .await
+        .expect("transport")
+        .expect("method");
+    assert_eq!(page.events, [changed(first, 1, 10), changed(second, 2, 20)]);
+    client
+        .close_replay_session(CloseSession { session_id })
+        .await
+        .expect("transport")
+        .expect("method");
+    assert_eq!(
+        client
+            .page_replay_session(PageSession {
+                session_id,
+                targets: vec![(0, 0)],
+                limit: 8,
+                hold_ms: 0,
+            })
+            .await
+            .expect("transport"),
+        Err(SessionError::UnknownSession)
+    );
+}
+
+#[tokio::test]
+async fn the_rpc_client_calls_both_protocols_of_the_hosted_service_in_process() {
+    let (store, replay, stop) = booted(stranger());
+    let revs = seed(&store).await;
+    let client = PeerRpcClient::new(replay.client, replay.rpc_client);
+    exercise_the_rpc_client(&client, revs).await;
+    stop.stop().await;
+}
+
+/// The same calls over iroh: both protocols mounted on one router, one connection.
+#[tokio::test]
+async fn the_rpc_client_calls_both_protocols_over_iroh() {
+    let server = endpoint().await;
+    let client_endpoint = endpoint().await;
+    let allowed = EndpointId::from_bytes(*client_endpoint.id().as_bytes());
+    let (store, replay, stop) = booted(allowed);
+    let revs = seed(&store).await;
+
+    let mut router = XrpcRouter::new(1 << 20);
+    <ReplayBinding<_> as ServerBinding<ReplayProtocol>>::mount(
+        &mut router,
+        ReplayBinding::new(Arc::clone(&replay.host)),
+    )
+    .expect("mount the replay protocol");
+    <SyncRpcBinding<_> as ServerBinding<SyncRpcProtocol>>::mount(
+        &mut router,
+        SyncRpcBinding::new(Arc::clone(&replay.host)),
+    )
+    .expect("mount the sync rpc protocol");
+    let server_router = iroh::protocol::Router::builder(server.clone())
+        .accept(
+            IROH_XRPC_HTTP_ALPN,
+            iroh_protocol_handler(router.into_router(), 1, 8),
+        )
+        .spawn();
+    let wire = IrohHttp::new(client_endpoint.clone(), server.addr(), 1 << 20);
+    let client = PeerRpcClient::new(
+        Client::new(Transport::iroh(wire.clone())),
+        Client::new(Transport::iroh(wire)),
+    );
+    exercise_the_rpc_client(&client, revs).await;
+
+    server_router.shutdown().await.expect("router shutdown");
     client_endpoint.close().await;
     server.close().await;
     stop.stop().await;

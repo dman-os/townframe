@@ -8,18 +8,20 @@ mod interlude {
     pub use std::collections::HashSet as Set;
 }
 
+pub use ids::BuckId;
+pub use ids::BuckLevel;
 pub use ids::ObjKey;
 pub use ids::PartKey;
 pub use ids::PeerKey;
 
-mod fingerprint;
+pub mod fingerprint;
 mod ids;
 mod kit;
 pub mod okv;
 pub mod part_store;
 pub mod replay;
 pub mod rev;
-mod sync;
+pub mod sync;
 mod utils;
 
 use crate::interlude::*;

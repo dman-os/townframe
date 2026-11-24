@@ -94,7 +94,7 @@ impl DecidePeerStrategyTask {
         let Some(peer_rpc) = cx.rpc_clients.get(&self.peer_key) else {
             // Peer teardown can race a queued strategy task. Treat the
             // missing client as a transport failure instead of panicking.
-            return Err(DecidePeerStrategyErrorDeets::Rpc(RpcError::TransportError));
+            return Err(DecidePeerStrategyErrorDeets::Rpc(RpcError::TransportError(String::new())));
         };
 
         // The peer counts relevance against the cursor we advertise, so gather the

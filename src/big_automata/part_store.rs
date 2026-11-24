@@ -202,8 +202,9 @@ pub struct ObjState {
     pub parts: BTreeSet<PartKey>,
 }
 
-/// A part as a principal sees it from a cursor: what a peer decides its sync strategy on.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// A part as a principal sees it from a cursor: what a peer decides its sync strategy on. It is
+/// also the wire answer of the summary call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartSummary {
     /// The rev of the part's latest member row. The cursor strat resumes from it, and a bucket
     /// walk hands over to the cursor strat at it: the walk reads state no older than this
@@ -219,7 +220,7 @@ pub struct PartSummary {
 }
 
 /// How far a principal is behind on a part: the part's log rows past a cursor.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartDirtyCount {
     /// Member rows of the part, live or removed.
     pub member_changes: u64,

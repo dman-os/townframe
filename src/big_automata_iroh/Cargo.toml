@@ -11,15 +11,16 @@ path = "lib.rs"
 
 [dependencies]
 big_automata = { path = "../big_automata" }
+method_core.workspace = true
+service_client_core_rs.workspace = true
 service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 big_automata = { path = "../big_automata", features = ["test-support"] }
-method_core.workspace = true
-service_client_core_rs.workspace = true
 service_client_iroh_rs.workspace = true
+service_client_native_rs = { workspace = true, features = ["iroh"] }
 service_utils_rs = { workspace = true, features = ["iroh-http"] }
 iroh.workspace = true
 utils_rs.workspace = true

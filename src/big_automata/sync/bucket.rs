@@ -33,6 +33,8 @@
 //!    walk from reading ahead.
 //! 7. **A page for an unknown bucket is ignored.** So is a page for a bucket with no outstanding
 //!    leaf request.
+//! 9. **A leaf request names at most `MAX_LEAF_BUCKETS` buckets**; a larger selection is
+//!    several requests, so a responder never has to refuse the walk.
 //! 8. **No stall.** While the caller keeps pulling with a positive budget and answering the
 //!    requests the machine emits, the walk reaches `walk_done`.
 
@@ -44,6 +46,7 @@ use crate::part_store::ObjState;
 use crate::part_store::PartStoreRead;
 use crate::part_store::bucket_summary::BucketSummary;
 use crate::rev::Rev;
+use crate::sync::rpc::MAX_LEAF_BUCKETS;
 use crate::sync::rpc::bucket::BucketObjPageEntry as RawLeafBucketEntry;
 use crate::sync::rpc::bucket::LeafBucketPage as RawLeafBucketPage;
 use crate::sync::rpc::bucket::LeafBucketRequest;
@@ -381,15 +384,19 @@ impl BucketMachine {
             }
         }
 
-        if !selected.is_empty() {
-            let buckets = selected
-                .into_iter()
-                .map(|(buck_id, after)| LeafBucketRequest { buck_id, after })
-                .collect();
+        // A responder refuses a request naming more than `MAX_LEAF_BUCKETS` buckets whole, so a
+        // larger selection goes out as several requests.
+        for chunk in selected.chunks(MAX_LEAF_BUCKETS) {
             out.push(BucketMachineCommand::LeafBuckets {
                 part_key: self.part_key.clone(),
                 since: self.last_cursor,
-                buckets,
+                buckets: chunk
+                    .iter()
+                    .map(|(buck_id, after)| LeafBucketRequest {
+                        buck_id: *buck_id,
+                        after: after.clone(),
+                    })
+                    .collect(),
             });
         }
 
@@ -553,7 +560,6 @@ pub struct BucketObjLeafPage {
 /// or pending.
 pub async fn filter_objects<S: PartStoreRead>(
     part_key: PartKey,
-    requests: Vec<LeafBucketRequest>,
     bucks: Map<BuckId, RawLeafBucketPage>,
     seed: FingerprintSeed,
     part_store: &S,
@@ -577,10 +583,6 @@ pub async fn filter_objects<S: PartStoreRead>(
     let states = part_store.obj_states(&objs).await?;
     let states = objs.into_iter().zip(states).collect::<Map<_, _>>();
 
-    let mut afters = requests
-        .into_iter()
-        .map(|req| (req.buck_id, req.after))
-        .collect::<Map<_, _>>();
     let mut out = Map::new();
     for (buck_id, page) in bucks {
         let empty = local_empty[&buck_id];
@@ -621,9 +623,7 @@ pub async fn filter_objects<S: PartStoreRead>(
         out.insert(
             buck_id,
             BucketObjLeafPage {
-                after: afters
-                    .remove(&buck_id)
-                    .expect("every page answers a requested bucket"),
+                after: page.after,
                 entries,
                 next_after: page.next_after,
             },

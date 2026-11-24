@@ -1,8 +1,9 @@
+//! The bucket calls: listing a part's changed buckets and paging a bucket's members.
+
 use crate::interlude::*;
 
 use crate::fingerprint::Fingerprint;
 use crate::fingerprint::FingerprintSeed;
-use crate::ids::BuckId;
 use crate::part_store::PayloadDigest;
 use crate::part_store::bucket_summary::BucketSummary;
 use crate::rev::Rev;
@@ -20,7 +21,8 @@ pub struct GetChangedBucketsRequest {
     /// A mutation stamps every level's `changed_at`, filtering on
     /// the last replay cursor returns only the buckets whose ranges would differ.
     pub since: Rev,
-    /// Soft limit on the number of buckets returned.
+    /// Soft limit on the number of buckets returned, capped at
+    /// [`MAX_LIST_BUCKETS`](super::MAX_LIST_BUCKETS).
     /// Extra headroom of [`BuckId::ARITY`] is allowed to return
     /// all qualifying sibling buckets of the last one since that'd just be
     /// at most an extra 15 buckets.
@@ -28,15 +30,6 @@ pub struct GetChangedBucketsRequest {
 }
 
 pub type GetChangedBucketsResponse = Vec<BucketSummary>;
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display,
-)]
-pub enum GetChangedBucketsError {
-    /// The part is unknown, or the requester may not read it: both answer alike, so a refusal
-    /// does not confirm the part exists.
-    UnknownPart,
-}
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
@@ -65,6 +58,9 @@ pub type LeafBucketsResponse = Map<BuckId, LeafBucketPage>;
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub struct LeafBucketPage {
+        /// The `after` of the request this page answers, echoed so the walk can drop a page
+        /// that answers a request it no longer has outstanding.
+        pub after: Option<ObjKey>,
         pub entries: Vec<pub struct BucketObjPageEntry {
             pub obj_key: ObjKey,
             /// Over the object's payload digest, under the request's seed (see
@@ -89,10 +85,18 @@ impl BucketObjPageEntry {
     }
 }
 
+/// Why a bucket call was not answered. Shared by listing and leaves: both are per part.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display,
 )]
-pub enum LeafBucketsError {
-    /// The part is unknown, or the requester may not read it: both answer alike.
+pub enum BucketsError {
+    /// The part is unknown, or the requester may not read it: both answer alike, so a refusal
+    /// does not confirm the part exists.
     UnknownPart,
+    /// the request names more buckets than the responder answers at once; none was answered
+    TooManyBuckets { cap: usize },
+    /// the request is malformed: {0}
+    Invalid(String),
+    /// the request context failed: {0}
+    Context(#[from] method_core::ContextError),
 }

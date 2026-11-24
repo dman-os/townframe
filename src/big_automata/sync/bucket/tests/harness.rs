@@ -12,13 +12,6 @@ use std::collections::VecDeque;
 
 use proptest::prelude::*;
 
-use crate::sync::bucket::BucketMachine;
-use crate::sync::bucket::BucketMachineCommand;
-use crate::sync::bucket::FilteredBuckets;
-use crate::sync::bucket::calc_working_level;
-use crate::sync::bucket::filter_buckets;
-use crate::sync::bucket::filter_objects;
-use crate::sync::bucket::summaries_agree;
 use crate::fingerprint::FingerprintSeed;
 use crate::interlude::*;
 use crate::part_store::AccessLevel;
@@ -33,14 +26,19 @@ use crate::part_store::bucket_summary::BucketSummary;
 use crate::part_store::memory::MemoryPartStore;
 use crate::part_store::memory::MemoryPartTx;
 use crate::rev::Rev;
-use crate::sync::rpc::bucket::BucketObjPageEntry;
-use crate::sync::rpc::bucket::GetChangedBucketsError;
+use crate::sync::bucket::BucketMachine;
+use crate::sync::bucket::BucketMachineCommand;
+use crate::sync::bucket::FilteredBuckets;
+use crate::sync::bucket::calc_working_level;
+use crate::sync::bucket::filter_buckets;
+use crate::sync::bucket::filter_objects;
+use crate::sync::bucket::summaries_agree;
+use crate::sync::rpc::bucket::BucketsError;
 use crate::sync::rpc::bucket::GetChangedBucketsRequest;
-use crate::sync::rpc::bucket::LeafBucketPage;
-use crate::sync::rpc::bucket::LeafBucketRequest;
-use crate::sync::rpc::bucket::LeafBucketsError;
 use crate::sync::rpc::bucket::LeafBucketsRequest;
 use crate::sync::rpc::bucket::LeafBucketsResponse;
+use crate::sync::rpc::responder::RpcResponder;
+use crate::sync::rpc::summary::PartSummariesRequest;
 
 /// Each side's store as the harness reaches it: through the part store traits, plus the memory
 /// store's own `begin`.
@@ -170,23 +168,25 @@ pub struct Traffic {
     pub fetches: u64,
 }
 
-/// The responder's side of the bucket RPCs, answered from its store for one principal.
+/// The responder's side of the bucket RPCs: the production [`RpcResponder`] for one principal,
+/// counting what it hands out per part.
 pub struct Responder<S> {
-    pub store: S,
+    rpc: RpcResponder<S>,
     principal: PeerKey,
-    /// The responder's hard cap on a leaf page: a request above it is capped, not refused.
-    leaf_cap: u32,
     pub traffic: BTreeMap<PartKey, Traffic>,
 }
 
 impl<S: Store> Responder<S> {
     pub fn new(store: S, leaf_cap: u32) -> Self {
         Self {
-            store,
+            rpc: RpcResponder::new(store).with_leaf_cap(leaf_cap),
             principal: requester_principal(),
-            leaf_cap,
             traffic: default(),
         }
+    }
+
+    pub fn store(&self) -> &S {
+        self.rpc.store()
     }
 
     /// The part's live member count, or `None` for a part the requester may not read or the
@@ -196,121 +196,50 @@ impl<S: Store> Responder<S> {
             .entry(part.clone())
             .or_default()
             .summary_requests += 1;
-        let summary = self
-            .store
-            .part_summaries(&self.principal, &[(part.clone(), SINCE)])
+        let mut answer = self
+            .rpc
+            .part_summaries(
+                &self.principal,
+                PartSummariesRequest {
+                    parts: Map::from([(part.clone(), SINCE)]),
+                },
+            )
             .await?
-            .remove(0);
-        Ok(summary.map(|summary| summary.member_count))
+            .expect("one part is under the cap");
+        Ok(answer.remove(part).map(|summary| summary.member_count))
     }
 
-    /// The buckets changed past `since` from `offset` through `to_level`, in bucket order:
-    /// `limit_hint` of them, plus the remaining siblings of the last one (at most
-    /// [`BuckId::ARITY`] more). One store read, so the listing and its authorization share a
-    /// snapshot.
     pub async fn changed_buckets(
         &mut self,
         req: GetChangedBucketsRequest,
-    ) -> Res<Result<Vec<BucketSummary>, GetChangedBucketsError>> {
-        let GetChangedBucketsRequest {
-            part_key,
-            offset,
-            to_level,
-            since,
-            limit_hint,
-        } = req;
+    ) -> Res<Result<Vec<BucketSummary>, BucketsError>> {
         self.traffic
-            .entry(part_key.clone())
+            .entry(req.part_key.clone())
             .or_default()
             .list_requests += 1;
-        // A zero `limit_hint` is a zero-bucket page, not an unspecified one, and the part is
-        // still checked, so a refusal reads the same at any limit.
-        let limit = usize::try_from(limit_hint).expect(ERROR_IMPOSSIBLE);
-        let Some(listed) = self
-            .store
-            .bucket_list(
-                &self.principal,
-                &part_key,
-                offset,
-                to_level,
-                since,
-                limit + usize::from(BuckId::ARITY),
-            )
-            .await?
-        else {
-            return Ok(Err(GetChangedBucketsError::UnknownPart));
-        };
-        let mut out = Vec::<BucketSummary>::new();
-        for bucket in listed {
-            // Past the limit, only the last bucket's siblings (the store read is capped at
-            // `ARITY` past it).
-            let sibling = out
-                .last()
-                .is_some_and(|last| last.id.parent() == bucket.id.parent());
-            if out.len() >= limit && !sibling {
-                break;
-            }
-            out.push(bucket);
+        let part_key = req.part_key.clone();
+        let answer = self.rpc.changed_buckets(&self.principal, req).await?;
+        if let Ok(listed) = &answer {
+            self.traffic.entry(part_key).or_default().buckets_out += listed.len() as u64;
         }
-        self.traffic.entry(part_key).or_default().buckets_out += out.len() as u64;
-        Ok(Ok(out))
+        Ok(answer)
     }
 
-    /// One page of members per requested bucket, after each bucket's `after`, with each live
-    /// member's fingerprint under the request's seed. One store read answers the whole request.
     pub async fn leaf_buckets(
         &mut self,
         req: LeafBucketsRequest,
-    ) -> Res<Result<LeafBucketsResponse, LeafBucketsError>> {
-        let LeafBucketsRequest {
-            part_key,
-            since,
-            buckets,
-            seed,
-            limit_hint,
-        } = req;
-        self.traffic
-            .entry(part_key.clone())
-            .or_default()
-            .leaf_requests += 1;
-        let limit = usize::try_from(limit_hint.map_or(1, |hint| hint.max(1)).min(self.leaf_cap))
-            .expect(ERROR_IMPOSSIBLE);
-        let bucks = buckets
-            .into_iter()
-            .map(|LeafBucketRequest { buck_id, after }| (buck_id, after))
-            .collect::<Vec<_>>();
-        // One past the limit tells whether a page finishes its bucket.
-        let Some(leaves) = self
-            .store
-            .bucket_leaves(&self.principal, &part_key, &bucks, since, limit + 1)
-            .await?
-        else {
-            return Ok(Err(LeafBucketsError::UnknownPart));
-        };
-        let mut pages = Map::new();
-        let mut entries_out = 0;
-        for ((buck_id, _), mut entries) in bucks.into_iter().zip(leaves) {
-            let done = entries.len() <= limit;
-            entries.truncate(limit);
-            entries_out += entries.len() as u64;
-            let next_after = (!done).then(|| entries.last().expect(ERROR_IMPOSSIBLE).obj.clone());
-            let entries = entries
-                .into_iter()
-                .map(|LeafEntry { obj, live }| BucketObjPageEntry {
-                    fp: live.map(|digest| BucketObjPageEntry::fingerprint(&seed, &obj, digest)),
-                    obj_key: obj,
-                })
-                .collect();
-            pages.insert(
-                buck_id,
-                LeafBucketPage {
-                    entries,
-                    next_after,
-                },
-            );
+    ) -> Res<Result<LeafBucketsResponse, BucketsError>> {
+        let part_key = req.part_key.clone();
+        let traffic = self.traffic.entry(part_key).or_default();
+        traffic.leaf_requests += 1;
+        let answer = self.rpc.leaf_buckets(&self.principal, req).await?;
+        if let Ok(pages) = &answer {
+            traffic.leaf_entries_out += pages
+                .values()
+                .map(|page| page.entries.len() as u64)
+                .sum::<u64>();
         }
-        self.traffic.entry(part_key).or_default().leaf_entries_out += entries_out;
-        Ok(Ok(pages))
+        Ok(answer)
     }
 
     /// The object's payload, for a sync of its membership in `part`. The machine only
@@ -319,7 +248,8 @@ impl<S: Store> Responder<S> {
     pub async fn fetch(&mut self, obj: &ObjKey, part: &PartKey) -> Res<ObjPayload> {
         self.traffic.entry(part.clone()).or_default().fetches += 1;
         let state = self
-            .store
+            .rpc
+            .store()
             .readable_obj_states(&self.principal, std::slice::from_ref(obj))
             .await?
             .remove(0)
@@ -483,7 +413,6 @@ impl<S: Store> Driver<S> {
                     assert_eq!((part_key, since), (part.clone(), SINCE));
                     let seed = FingerprintSeed::new(self.seeds, 0x5eed);
                     self.seeds += 1;
-                    let requests = buckets.clone();
                     let pages = self
                         .responder
                         .leaf_buckets(LeafBucketsRequest {
@@ -495,9 +424,7 @@ impl<S: Store> Driver<S> {
                         })
                         .await?
                         .expect("the part stays readable");
-                    let pages =
-                        filter_objects(part.clone(), requests, pages, seed, &self.requester)
-                            .await?;
+                    let pages = filter_objects(part.clone(), pages, seed, &self.requester).await?;
                     machine.on_obj_page(pages, &mut out);
                 }
                 BucketMachineCommand::SyncObj {

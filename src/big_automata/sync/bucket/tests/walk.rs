@@ -468,7 +468,6 @@ impl Rig {
             BucketMachineCommand::LeafBuckets { since, buckets, .. } => {
                 let seed = FingerprintSeed::new(self.seeds, 0x5eed);
                 self.seeds += 1;
-                let requests = buckets.clone();
                 let pages = self
                     .responder
                     .leaf_buckets(LeafBucketsRequest {
@@ -480,9 +479,7 @@ impl Rig {
                     })
                     .await?
                     .expect("the part is readable");
-                let pages =
-                    filter_objects(self.part.clone(), requests, pages, seed, &self.requester)
-                        .await?;
+                let pages = filter_objects(self.part.clone(), pages, seed, &self.requester).await?;
                 self.delivered.push(pages.clone());
                 self.machine.on_obj_page(pages, &mut self.out);
             }
@@ -805,4 +802,39 @@ fn law_4_a_bucket_that_grew_since_it_was_listed_is_read_to_the_end_the_peer_says
         "every entry of both pages is emitted"
     );
     assert!(machine.walk_done());
+}
+
+/// Law 9: a selection wider than a responder answers goes out as several requests, none over
+/// `MAX_LEAF_BUCKETS`, and together they name every bucket once.
+#[test]
+fn law_9_a_leaf_request_never_names_more_than_the_responder_cap() {
+    // 200 one-member buckets at level 2 and room for all of them at once.
+    let mut machine = BucketMachine::with_limits(harness::part(0), 2, 256, 0, 1000, 1);
+    let mut out = vec![];
+    let listed = (0..200)
+        .map(|at| summary(BuckId::new(2, at), 1, 1, 0))
+        .collect();
+    machine.on_bucket_page(listed, &mut out);
+    let requests = out
+        .iter()
+        .filter_map(|cmd| match cmd {
+            BucketMachineCommand::LeafBuckets { buckets, .. } => Some(buckets),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(requests.len() > 1, "{}", requests.len());
+    assert!(
+        requests
+            .iter()
+            .all(|buckets| buckets.len() <= MAX_LEAF_BUCKETS)
+    );
+    let named = requests
+        .iter()
+        .flat_map(|buckets| buckets.iter().map(|req| req.buck_id))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(named.len(), 200);
+    assert_eq!(
+        requests.iter().map(|buckets| buckets.len()).sum::<usize>(),
+        200
+    );
 }
