@@ -333,8 +333,10 @@ wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "a24366c874177c2
 # WASI 0.3 imports a wasm32-wasip3 component brings in.
 wasmtime-wasi = { version = "48.0.7", default-features = false, features = ["p3"] }
 # Our fork's `townframe-changes`: upstream 1bcaebae plus the in-process
-# `Ingress::dispatch_request` the nodule Wasm executor (`big_nodule_wasm`) calls.
-wash-runtime = { git = "https://github.com/dman-os/wasmCloud", rev = "e7648c6e939c50ba1be8d9c138ef6da3305a672e", default-features = false }
+# `Ingress::dispatch_request` the nodule Wasm executor (`big_nodule_wasm`) calls, an
+# `EngineBuilder::with_guest_stdio` hook for a workload's stdout/stderr, and a P3 guest trap
+# that reaches the caller with its backtrace.
+wash-runtime = { git = "https://github.com/dman-os/wasmCloud", rev = "f9c740425488ec045061c065636e4d4b8170d6eb", default-features = false }
 wasmtime-wasi-http = { version = "48.0.7", default-features = false }
 # `default-features = false` is load-bearing on wasm32-wasip3: wit-bindgen's `std` feature keeps the
 # async export task state in a libc `thread_local!`, which cannot be swapped per component-model
