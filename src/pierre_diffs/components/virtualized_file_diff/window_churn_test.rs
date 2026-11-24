@@ -6,6 +6,7 @@
 
 use std::rc::Rc;
 
+use super::advanced::VirtualizerKind;
 use super::instance::VirtualizedFileDiff;
 use super::layout::VIRTUALIZED_FILE_DIFF_LAYOUT_CHECKPOINT_INTERVAL;
 use super::layout_upstream_tests::parse_files;
@@ -63,7 +64,7 @@ fn scrolling_a_long_diff_through_its_window_keeps_the_layout_cache_and_the_docum
         UniversalRenderingManager::new(Rc::clone(&dom)),
         Rc::new(PlainTextHighlighter),
         options,
-        Rc::clone(&virtualizer),
+        VirtualizerKind::Simple(Rc::clone(&virtualizer)),
         PartialVirtualFileMetrics::default(),
         None,
     );

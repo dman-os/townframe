@@ -12,6 +12,7 @@ use serde_json::Value;
 use serde_json::json;
 
 use super::*;
+use crate::components::virtualized_file_diff::advanced::VirtualizerKind;
 use crate::components::virtualized_file_diff::instance::VirtualizedFileDiff;
 use crate::components::virtualizer::IntersectionEntry;
 use crate::components::virtualizer::ResizeEntry;
@@ -241,7 +242,7 @@ impl<'a> Replay<'a> {
             self.render_queue.clone(),
             Rc::new(PlainTextHighlighter),
             self.world.build_options(spec),
-            Rc::clone(&self.virtualizer),
+            VirtualizerKind::Simple(Rc::clone(&self.virtualizer)),
             Default::default(),
             self.managed
                 .then(|| Rc::new(move || owner.emit(json!(["ownerRender"]))) as Rc<dyn Fn()>),

@@ -64,6 +64,13 @@ where
         std::mem::take(&mut self.state.borrow_mut().force_render_override)
     }
 
+    /// `virtualizedSetup()`: CodeView re-enables an instance it recycled
+    /// (`cleanUp` disables it) before rendering it again; the worker pool
+    /// subscription is dropped with the pool.
+    pub fn virtualized_setup(&self) {
+        self.state.borrow_mut().enabled = true;
+    }
+
     /// `this.forceRenderOverride = true`
     pub fn force_render_override(&self) {
         self.state.borrow_mut().force_render_override = true;

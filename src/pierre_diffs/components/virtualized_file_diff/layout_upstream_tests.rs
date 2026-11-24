@@ -237,7 +237,7 @@ pub(super) fn padding_base_metrics() -> PartialVirtualFileMetrics {
     }
 }
 
-pub(super) fn plain_file(name: &str, contents: &str) -> FileContents {
+pub(crate) fn plain_file(name: &str, contents: &str) -> FileContents {
     FileContents {
         name: name.to_owned(),
         contents: contents.to_owned(),
@@ -247,7 +247,7 @@ pub(super) fn plain_file(name: &str, contents: &str) -> FileContents {
     }
 }
 
-pub(super) fn parse_files(old_file: FileContents, new_file: FileContents) -> Rc<FileDiffMetadata> {
+pub(crate) fn parse_files(old_file: FileContents, new_file: FileContents) -> Rc<FileDiffMetadata> {
     Rc::new(
         parse_diff_from_file(
             &DiffFileInput::Both { old_file, new_file },

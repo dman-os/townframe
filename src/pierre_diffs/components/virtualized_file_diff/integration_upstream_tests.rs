@@ -24,6 +24,7 @@
 
 use std::rc::Rc;
 
+use super::advanced::VirtualizerKind;
 use super::instance::VirtualizedFileDiff;
 use super::layout::get_expanded_line_count;
 use super::layout_upstream_tests::METRICS;
@@ -140,7 +141,13 @@ fn sparse_layout_checkpoints_virtualized_file_diff_marks_diff_indicator_changes_
         contents: "one\nchanged\nthree".to_owned(),
         ..old_file.clone()
     };
-    let virtualizer = Rc::clone(world.instance.virtualizer());
+    let virtualizer = Rc::clone(
+        world
+            .instance
+            .virtualizer()
+            .simple()
+            .expect("a simple virtualizer"),
+    );
     // Set the virtualizer up and let its pass clear the geometry flags, so a
     // flag set afterwards is `instanceChanged(this, true)`'s doing.
     virtualizer.setup(Root::Document, None);
@@ -149,7 +156,7 @@ fn sparse_layout_checkpoints_virtualized_file_diff_marks_diff_indicator_changes_
 
     world
         .instance
-        .update_code_view_layout(&parse_files(old_file, new_file), 0.0, None);
+        .update_code_view_layout(&parse_files(old_file, new_file), 0.0, None, None);
     world.set_options(|options| options.base.disable_background = Some(true));
     assert!(!virtualizer.is_dom_dirty());
     world.set_options(|options| options.base.diff_indicators = Some(DiffIndicators::Classic));
@@ -229,11 +236,11 @@ fn virtualized_file_diff_set_visibility_renders_a_replacement_after_an_off_scree
         UniversalRenderingManager::new(Rc::clone(&dom)),
         Rc::new(PlainTextHighlighter),
         FileDiffOptions::default(),
-        Virtualizer::new(
+        VirtualizerKind::Simple(Virtualizer::new(
             Rc::clone(&dom),
             UniversalRenderingManager::new(Rc::clone(&dom)),
             VirtualizerConfig::default(),
-        ),
+        )),
         Default::default(),
         Some(Rc::new(|| ())),
     );
