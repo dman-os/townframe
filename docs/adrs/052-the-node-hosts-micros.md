@@ -95,7 +95,7 @@ micros.awaitHandles { since: { <cartridgeId>: revision, ... }, holdMs }
 - **`actor`.** The result names the micro's actor capability too, because dispatch requires it: dispatch admits a call only when the capability's holder is the signer's actor (ADR 037; `big_nodule/egress.rs` states the check dispatch runs), and the GUI is a separate process from the node, so something outside the node has
   to sign as the micro. That is the signer the in-process composition holds today (`claytxt: clay_node/egress.rs`,
   `MicroEgress::install`). It carries `USE` only, and it is the host's, never the guest's: the guest names an operation,
-  the host attaches handle and signer (ADR 049 §3, asymmetry 2).
+  the host attaches handle and signer (ADR 049 §3, asymmetry 2). The actor capability stays in the host and never crosses into the guest: the host overwrites whatever `authorization` a guest request carries (`claytxt: clay_node/egress.rs:12`).
 
 **What is privileged, and how the GUI is authorized.** Like `listCartridgeGrants` and `awaitCartridgeGrants`, all three
 are `privileged`: they hand out capabilities, so only the operator may ask. The service recognises the operator by the
@@ -123,7 +123,7 @@ rule. Options:
 - A `micros.call` proxy that re-enters dispatch with `Origin::Remote`. It puts every micro byte through one more method
   for no authority gain.
 
-Proposed: the listener. **To confirm.** In process the egress already stamps `Remote`, so only the socket path changes.
+Proposed: the listener, which keeps today's rule rather than adding one (the claytxt lane agrees). **To confirm.** In process the egress already stamps `Remote`, so only the socket path changes.
 
 ## 5. What moves out of boot config
 
