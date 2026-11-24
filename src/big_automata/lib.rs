@@ -14,6 +14,7 @@ pub use ids::ObjKey;
 pub use ids::PartKey;
 pub use ids::PeerKey;
 
+pub mod driver;
 pub mod fingerprint;
 mod ids;
 mod kit;
@@ -33,6 +34,6 @@ pub enum AllowedStrat {
     CursorAndBucket,
 }
 
-// FIXME(port): becomes an injected clock with big_repo's `Clock` shape when the machine is
-// ported; its instant is the web-safe `kit::scheduler::Instant`.
-pub type Clock = Box<dyn Fn() -> kit::scheduler::Instant>;
+/// The driver's injected clock; the machine never reads time itself. Its instant is the
+/// web-safe `kit::scheduler::Instant`.
+pub type Clock = std::sync::Arc<dyn Fn() -> kit::scheduler::Instant + Send + Sync>;

@@ -676,3 +676,91 @@ async fn the_rpc_client_calls_both_protocols_over_iroh() {
     server.close().await;
     stop.stop().await;
 }
+
+/// Two nodes over the real binding: a driver pulls a part from a hosted store through
+/// `PeerRpcClient` over iroh into a memory backend, reaches `Synced`, and follows a later write
+/// of the peer.
+#[tokio::test]
+async fn a_driver_syncs_a_part_between_two_nodes_over_iroh() {
+    use big_automata::driver::DriverConfig;
+    use big_automata::driver::Facts;
+    use big_automata::driver::PeerDriver;
+    use big_automata::driver::RouteUpdate;
+    use big_automata::driver::memory::MemoryBackend;
+    use big_automata::driver::memory::MemoryPeerCursors;
+    use big_automata::part_store::PartStoreRead;
+
+    let server = endpoint().await;
+    let client_endpoint = endpoint().await;
+    let allowed = EndpointId::from_bytes(*client_endpoint.id().as_bytes());
+    let (store, replay, stop) = booted(allowed);
+    seed(&store).await;
+
+    let mut router = XrpcRouter::new(1 << 20);
+    <ReplayBinding<_> as ServerBinding<ReplayProtocol>>::mount(
+        &mut router,
+        ReplayBinding::new(Arc::clone(&replay.host)),
+    )
+    .expect("mount the replay protocol");
+    <SyncRpcBinding<_> as ServerBinding<SyncRpcProtocol>>::mount(
+        &mut router,
+        SyncRpcBinding::new(Arc::clone(&replay.host)),
+    )
+    .expect("mount the sync rpc protocol");
+    let server_router = iroh::protocol::Router::builder(server.clone())
+        .accept(
+            IROH_XRPC_HTTP_ALPN,
+            iroh_protocol_handler(router.into_router(), 1, 8),
+        )
+        .spawn();
+    let wire = IrohHttp::new(client_endpoint.clone(), server.addr(), 1 << 20);
+    let rpc = PeerRpcClient::new(
+        Client::new(Transport::iroh(wire.clone())),
+        Client::new(Transport::iroh(wire)),
+    );
+
+    let local = MemoryPartStore::default();
+    let peer = principal(5);
+    let facts = Facts::new();
+    let driver = PeerDriver::spawn(
+        DriverConfig::new(peer.clone(), "memory"),
+        Arc::new(std::time::Instant::now),
+        facts.clone(),
+        MemoryBackend::new(local.clone(), store.clone()),
+        MemoryPeerCursors::default(),
+        local.clone(),
+    );
+    driver
+        .update_routes(RouteUpdate {
+            added_parts: vec![part(1)],
+            ..Default::default()
+        })
+        .await;
+    driver.connect(rpc);
+    facts
+        .wait_for_full_sync([(peer.clone(), part(1))])
+        .await
+        .expect("part 1 stays wanted");
+
+    let payload_of = async |index: u8| {
+        let states = local.obj_states(&[obj(index)]).await.unwrap();
+        states[0]
+            .as_ref()
+            .and_then(|state| state.content.as_ref())
+            .map(|(payload, _)| payload.clone())
+    };
+    assert_eq!(payload_of(1).await, Some(payload(10)));
+    assert_eq!(payload_of(2).await, Some(payload(20)));
+
+    // a later write reaches the held round and the local store
+    commit(&store, vec![set(&[(2, 99)])]).await;
+    while payload_of(2).await != Some(payload(99)) {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    drop(driver);
+    server_router.shutdown().await.expect("router shutdown");
+    client_endpoint.close().await;
+    server.close().await;
+    stop.stop().await;
+}

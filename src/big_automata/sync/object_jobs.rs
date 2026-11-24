@@ -153,15 +153,16 @@ pub(crate) enum Origin {
 
 /// One combined backend job.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ObjJob {
+pub struct ObjJob {
     pub obj: ObjKey,
     pub add: Vec<PartKey>,
     pub remove: Vec<PartKey>,
     pub payload: Option<ObjPayload>,
 }
 
+/// What `record` answers (the backend contract above).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Settle {
+pub enum Settle {
     Done,
     Fetch,
 }
