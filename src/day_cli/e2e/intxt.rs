@@ -1585,15 +1585,6 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
     .await;
 }
 
-/// `capture` is for the daemon: with none serving, its entry point refuses, naming the command
-/// that starts one, without booting the node.
-#[tokio::test(flavor = "multi_thread")]
-async fn capture_refuses_without_a_daemon() {
-    let (_tmp, dir) = new_node().await;
-    let error = crate::cmds::intxt::require_daemon(&dir).await.unwrap_err();
-    assert!(format!("{error:#}").contains("day node start"), "{error:#}");
-}
-
 /// `org.example.intxt.addToIntxt` includes captured parts: each gets an entry keyed by the
 /// part's identity, the body lists the entries in the order they were added, adding a part
 /// again changes nothing, and the parts' documents are entered in the intxt's drawer so its

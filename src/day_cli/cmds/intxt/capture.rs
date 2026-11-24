@@ -99,7 +99,7 @@ impl CaptureCommands {
     /// The hook's JSON from stdin, captured against the node `--node` names.
     async fn hook(verbose: bool) -> Res<()> {
         let node_dir = lazy::config().await?.node_dir.clone();
-        super::require_daemon(&node_dir).await?;
+        super::ensure_server(&node_dir).await?;
         let mut input = Vec::new();
         std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)
             .wrap_err("reading the hook's JSON from stdin")?;
@@ -113,7 +113,7 @@ impl CaptureCommands {
     /// in (the current directory).
     async fn rewritten(kind: RewriteKind, verbose: bool) -> Res<()> {
         let node_dir = lazy::config().await?.node_dir.clone();
-        super::require_daemon(&node_dir).await?;
+        super::ensure_server(&node_dir).await?;
         let mut input = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
             .wrap_err("reading post-rewrite's pairs from stdin")?;

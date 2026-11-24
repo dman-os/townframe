@@ -977,6 +977,66 @@ mod blackbox {
         );
     }
 
+    /// Capture hooks firing at once against a node nobody serves start exactly one background
+    /// server between them and all succeed, printing nothing (a hook's stdout is the harness's).
+    /// The server outlives them until `day node stop`.
+    #[test]
+    fn parallel_captures_start_one_server_and_all_succeed() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        let worktree = sandbox.node().with_file_name("worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let runs: Vec<_> = (0..4)
+            .map(|_| {
+                Command::new(day_bin())
+                    .env("RUST_LOG", "error")
+                    .env("NO_COLOR", "1")
+                    .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+                    .current_dir(&worktree)
+                    .arg("--node")
+                    .arg(sandbox.node())
+                    // git's post-rewrite hook with nothing rewritten.
+                    .args(["x", "intxt", "capture", "git-rewrite", "amend"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        for run in runs {
+            let output = run.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        let text = |output: &std::process::Output| {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+                + &String::from_utf8_lossy(&output.stderr)
+        };
+        let status = text(&sandbox.day(&["node", "status"]));
+        assert!(status.contains("serving"), "{status}");
+        let stopped = sandbox.day(&["node", "stop"]);
+        assert!(stopped.status.success(), "{}", text(&stopped));
+        let stopped = text(&stopped);
+        assert!(stopped.contains("server stopped"), "{stopped}");
+    }
+
     /// Output whose reader has gone away (`day exec ... | head`) ends the command with status 0
     /// and nothing on stderr: the broken pipe is not a failure and not a panic. The pipe's read
     /// end is closed before the command starts, so its first write fails with `EPIPE` however
