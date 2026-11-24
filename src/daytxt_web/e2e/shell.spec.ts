@@ -5,9 +5,7 @@ import { watchFailures } from "./shell";
 // sections, a section is the details, and back unwinds the stack on a phone-width window, where
 // the details come over the list, as on a desktop one, where they sit beside it. The browser's
 // own back button is the platform back gesture.
-test("home, Settings and a section unwind with back at a compact and a wide width", async ({
-  page,
-}) => {
+test("home, Settings and a section unwind with back at a compact and a wide width", async ({ page }) => {
   const failures = watchFailures(page);
 
   const sample = page.getByRole("button", {
@@ -103,9 +101,7 @@ test("home, Settings and a section unwind with back at a compact and a wide widt
 // on a fresh install) shows a placeholder, and the micro that would place the sidebar/back button
 // is the one that is absent. The shell supplies the button then, or a compact window is a dead
 // end that only the platform back leaves. Found by the Bombadil exploration (`bombadil/shell.ts`).
-test("a panel that is unavailable still offers the way back or the sidebar", async ({
-  page,
-}) => {
+test("a panel that is unavailable still offers the way back or the sidebar", async ({ page }) => {
   const failures = watchFailures(page);
   const unavailable = page.getByRole("alert");
 
