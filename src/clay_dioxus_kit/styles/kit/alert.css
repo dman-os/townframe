@@ -1,0 +1,119 @@
+/*
+ * ct-alert (headless/alert.rs). Parts: icon, content, title, body, dismiss. Axis: data-status
+ * (info|success|warning|danger). The tint is the status colour mixed into the surface, so a theme
+ * that recolours --ct-color-<status> recolours every alert and chip.
+ */
+.ct-alert {
+  --ct-alert-tone: var(--ct-color-info);
+  --ct-alert-on-tone: var(--ct-color-on-info);
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: var(--ct-dimension-spacing-3);
+  padding: var(--ct-dimension-spacing-3) var(--ct-dimension-spacing-4);
+  border: var(--ct-dimension-border-width-thin) solid var(--ct-alert-tone);
+  border-radius: var(--ct-dimension-radius-md);
+  background: color-mix(
+    in srgb,
+    var(--ct-alert-tone) 14%,
+    var(--ct-color-surface)
+  );
+  color: var(--ct-color-text);
+  font-family: var(--ct-font-family);
+  font-size: var(--ct-dimension-font-size-md);
+  line-height: 1.4;
+}
+
+.ct-alert[data-status="success"] {
+  --ct-alert-tone: var(--ct-color-success);
+  --ct-alert-on-tone: var(--ct-color-on-success);
+}
+
+.ct-alert[data-status="warning"] {
+  --ct-alert-tone: var(--ct-color-warning);
+  --ct-alert-on-tone: var(--ct-color-on-warning);
+}
+
+.ct-alert[data-status="danger"] {
+  --ct-alert-tone: var(--ct-color-danger);
+  --ct-alert-on-tone: var(--ct-color-on-danger);
+}
+
+.ct-alert [data-part="icon"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-top: 0.0625rem;
+  border-radius: var(--ct-dimension-radius-pill);
+  background: var(--ct-alert-tone);
+  color: var(--ct-alert-on-tone);
+  font-size: var(--ct-dimension-font-size-sm);
+  font-weight: var(--ct-font-weight-bold);
+  line-height: 1;
+}
+
+.ct-alert [data-part="icon"]::before {
+  content: "i";
+}
+
+.ct-alert[data-status="success"] [data-part="icon"]::before {
+  content: "\2713";
+}
+
+.ct-alert[data-status="warning"] [data-part="icon"]::before,
+.ct-alert[data-status="danger"] [data-part="icon"]::before {
+  content: "!";
+}
+
+.ct-alert [data-part="content"] {
+  min-width: 0;
+}
+
+.ct-alert [data-part="title"] {
+  margin: 0;
+  font-weight: var(--ct-font-weight-semibold);
+}
+
+.ct-alert [data-part="body"] {
+  color: var(--ct-color-text);
+}
+
+.ct-alert [data-part="dismiss"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ct-dimension-radius-sm);
+  background: transparent;
+  color: var(--ct-color-text-muted);
+  font-size: var(--ct-dimension-font-size-lg);
+  cursor: pointer;
+}
+
+.ct-alert [data-part="dismiss"]::before {
+  content: "\00d7";
+}
+
+.ct-alert [data-part="dismiss"]:hover {
+  background: var(--ct-color-surface-sunken);
+  color: var(--ct-color-text);
+}
+
+.ct-alert [data-part="dismiss"]:focus-visible {
+  outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
+  outline-offset: 1px;
+}
+
+@media (pointer: coarse) {
+  .ct-alert [data-part="dismiss"] {
+    width: var(--ct-dimension-target-coarse);
+    height: var(--ct-dimension-target-coarse);
+    margin: calc(var(--ct-spacing) * -3);
+  }
+}
