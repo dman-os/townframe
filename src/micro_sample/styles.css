@@ -1,0 +1,41 @@
+/*
+ * The sample's own stylesheet (a micro's rules sit above the kit and the user's theme). Parts are
+ * local to this micro: `.ct-sample` and its `data-part`s. The text field has no kit component yet,
+ * so its look is built from kit tokens here.
+ */
+.ct-sample {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-dimension-spacing-4);
+}
+
+.ct-sample [data-part="actions"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ct-dimension-spacing-2);
+}
+
+.ct-sample [data-part="field"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-dimension-spacing-2);
+}
+
+.ct-sample [data-part="input"] {
+  padding: var(--ct-dimension-spacing-2) var(--ct-dimension-spacing-4);
+  border: var(--ct-dimension-border-width-thin) solid var(--ct-color-border);
+  border-radius: var(--ct-dimension-radius-md);
+  background: var(--ct-color-surface);
+  color: var(--ct-color-text);
+  font: inherit;
+}
+
+.ct-sample [data-part="input"]:focus-visible {
+  outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
+}
+
+.ct-sample [data-part="detail"] {
+  margin: 0;
+  color: var(--ct-color-text-muted);
+  font-size: var(--ct-dimension-font-size-sm);
+}
