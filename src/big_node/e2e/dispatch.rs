@@ -31,6 +31,7 @@ pub(super) async fn narrowed(node: &BigNode, scope: DispatchScope) -> Authorizat
             RequestContext::root(),
             operator.metadata(),
             MintDispatchCapability {
+                capability: None,
                 scope,
                 rights: Rights::USE | Rights::NARROW,
                 subject: None,
@@ -380,6 +381,7 @@ async fn second_caller(
             RequestContext::root(),
             operator.metadata(),
             MintDispatchCapability {
+                capability: None,
                 scope: self::operations(operations),
                 rights: Rights::USE,
                 subject: Some(opened.actor.actor_id),

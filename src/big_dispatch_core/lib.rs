@@ -11,6 +11,7 @@
 //! themselves are the host's.
 
 use big_cabinet_core::authority::AuthorityServiceError;
+use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Uuid7;
@@ -106,6 +107,13 @@ impl DispatchScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintDispatchCapability {
+    /// The handle to mint from, a body capability like every resource method's: it must be live,
+    /// bound to the presenting actor (ADR 037, #348) and carry `Rights::NARROW`, and the new scope
+    /// must be covered by its own. `None` mints from the request's `Authorization` credential.
+    /// A nodule's credential is its own dispatch handle (dispatch forwards it), so a nodule
+    /// that mints names the handle to mint from here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<CapId>,
     pub scope: DispatchScope,
     pub rights: Rights,
     /// The actor the new handle is bound to; `None` binds it to the presented handle's own

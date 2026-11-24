@@ -357,22 +357,54 @@ impl DomainCapabilities {
         }
     }
 
-    /// The caller of a mint: the body `capability` when the request names one (resolved as any
-    /// resource handle is, so only its bound actor may present it), else the request's
+    /// The caller of a mint: the body `capability` when the request names one, else the request's
     /// `Authorization` credential.
+    ///
+    /// A body capability is either a handle this domain minted, resolved as any resource handle
+    /// is ([`Self::resolve`]), or an actor's identity capability, which mints as that actor
+    /// (`DomainAuthority::Identity`) and so proves what the actor itself stands on. An identity
+    /// capability is nobody's handle in the way a scoped one is (`source` lets a descendant's signer
+    /// present one), so here the presenter must be the identity's own actor, exactly as for a
+    /// scoped handle: without that check, a leaked identity id would let any actor mint with
+    /// the standing of the actor it names (`micros` holds the standing of every drawer granted to
+    /// a micro's cartridge).
     pub async fn minter<S: DeserializeOwned>(
         &self,
         context: &RequestContext,
         metadata: &HttpMetadata,
         capability: Option<CapId>,
     ) -> Result<Invocation<S>, Error> {
-        match capability {
-            Some(capability) => self.resolve(context, metadata, capability).await,
-            None => {
-                let authorization = Authorization::from_metadata(metadata)
-                    .map_err(|error| ClientError::Method(AuthorityServiceError::Context(error)))?;
-                self.source(context, authorization).await
+        let credential = Authorization::from_metadata(metadata)
+            .map_err(|error| ClientError::Method(AuthorityServiceError::Context(error)))?;
+        let Some(capability) = capability else {
+            return self.source(context, credential).await;
+        };
+        let resolved = self
+            .authority
+            .call(context.child(), ResolveAuthority { capability })
+            .await?;
+        match resolved.actor {
+            // The operator's root capability mints through the credential alone.
+            Some(_) if resolved.is_operator_root() => {
+                Err(ClientError::Method(AuthorityServiceError::Unauthorized))
             }
+            Some(actor) => {
+                let presenter = self.inspect(context, credential.signer).await?;
+                if !presenter.rights.contains(Rights::USE)
+                    || presenter.subject != Some(actor.actor_id)
+                {
+                    return Err(ClientError::Method(AuthorityServiceError::Unauthorized));
+                }
+                self.source(
+                    context,
+                    Authorization {
+                        authority: capability,
+                        signer: credential.signer,
+                    },
+                )
+                .await
+            }
+            None => self.resolve(context, metadata, capability).await,
         }
     }
 

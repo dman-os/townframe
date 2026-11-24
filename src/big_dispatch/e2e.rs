@@ -237,6 +237,7 @@ impl Harness {
                 RequestContext::root(),
                 authorization.metadata(),
                 MintDispatchCapability {
+                    capability: None,
                     scope,
                     rights: Rights::USE | Rights::NARROW,
                     subject: None,

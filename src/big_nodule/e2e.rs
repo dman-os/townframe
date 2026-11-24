@@ -279,6 +279,7 @@ async fn grant_nodule_dispatch(
             RequestContext::root(),
             Authorization::identity(authority.root).metadata(),
             MintDispatchCapability {
+ capability: None,
                 scope: DispatchScope {
                     authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
                     privileged: true,

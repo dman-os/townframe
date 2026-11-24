@@ -849,13 +849,42 @@ async fn apply_nodule_capabilities(
         .await?;
     revoke_settings_for_cartridge(state, context, cartridge_id, None).await?;
 
-    let desired = if installed.enabled {
+    let mut desired = if installed.enabled {
         installed.routine_scopes(desired_grants, effective_operations, |nsid| {
             method_lexicon::builtin_method(nsid).and_then(|built_in| built_in.handle)
         })
     } else {
         BTreeMap::new()
     };
+    if *cartridge_id == state.stores.core_cartridge.id {
+        // The core nodule is the micros runtime, and a runtime's actor is the delegator of
+        // everything its children can be granted (ADR 049 section 6.1): `micros` is the micro
+        // runtime as `nodules` is the nodule runtime, whose service mints every nodule's handle
+        // from delegators of that full scope. The core nodule cannot narrow a handle to a
+        // micro's scope unless its own covers it, and `attenuateCapability` and the mints only
+        // narrow, so its delivered dispatch and blobs handles are the delegators' scopes and not
+        // lowered from its own `uses`. Dispatch's privilege bit stays what its grants say, as for
+        // any nodule, so it reaches a privileged method only on the node's own grants.
+        // The handles are never written down: they are minted for the boot, which is why the
+        // ids are not kept in the config document (it outlives a restart and syncs to sisters).
+        let privileged = state
+            .stores
+            .core_cartridge
+            .grants
+            .values()
+            .any(|grant| grant.privileged);
+        for scopes in desired.values_mut() {
+            scopes.dispatch = Some(DispatchScope {
+                authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
+                privileged,
+                ..Default::default()
+            });
+            scopes.blobs = Some(big_blobs_core::protocol::BlobsScope {
+                put: true,
+                ..Default::default()
+            });
+        }
+    }
     let previous = state
         .routine_capabilities
         .get(cartridge_id)
@@ -3018,6 +3047,7 @@ impl Stores {
                 }
                 .metadata(),
                 MintDispatchCapability {
+                    capability: None,
                     scope: scope.clone(),
                     rights: handle_rights(),
                     subject: Some(actor.actor.actor_id),

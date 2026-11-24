@@ -617,6 +617,15 @@ fn register_built_ins(
             "builtin:cartridges",
             ServiceProvider::default().serve(&cartridges.client),
         ),
+        // Dispatch's own mint, so a nodule that holds a dispatch handle for the purpose (the
+        // core nodule's, minted at the `micros` delegator's scope) mints a narrower one for a
+        // micro's actor. Its `invoke` is how a call enters dispatch, not an operation behind it.
+        (
+            "builtin:dispatch",
+            ServiceProvider::default()
+                .serve(&dispatch.client)
+                .except(<big_dispatch_core::Invoke as method_core::Method>::XRPC.nsid),
+        ),
     ];
     let mut provider_ids = Vec::with_capacity(built_ins.len());
     for (provider_id, provider) in built_ins {
@@ -1102,6 +1111,7 @@ async fn boot_dispatch(
                 RequestContext::root(),
                 Authorization::identity(authority.root).metadata(),
                 MintDispatchCapability {
+                    capability: None,
                     // Every method: a nodule's method grants are narrowed from this scope. The
                     // privilege bit is the most a handle minted from it can carry, and a handle
                     // carries it only when its cartridge's grants say so
