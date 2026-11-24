@@ -81,8 +81,8 @@ impl Spec {
         format!("{}.fetch", self.authority)
     }
 
-    /// Served by the guest: opens an actor under the nodule's own actor and narrows its actor
-    /// capability onto it, through dispatch.
+    /// Served by the guest: opens an actor under the nodule's own actor and narrows its docs
+    /// handle onto it, through dispatch.
     fn adopt(&self) -> String {
         format!("{}.adopt", self.authority)
     }

@@ -30,7 +30,7 @@
 //!   query is called.
 //! - `/xrpc/<nsid>.adopt` takes `{ path }`: it opens the actor at `path` under the nodule's own
 //!   actor (`openActor` with `x-nodule-actor-capability` as `parent`) and, when that opens,
-//!   narrows the same capability onto the new actor (`attenuateCapability { subject }`), both
+//!   narrows the nodule's docs handle onto the new actor (`attenuateCapability { subject }`), both
 //!   through dispatch. It answers 200 `{ open: { status, body }, attenuate: { status, body } | null }`.
 //! - `/xrpc/<nsid>.fetch` takes `{ url, method?, headers? }` (`method` defaults to `GET`) and sends
 //!   that request to the URL with `Cx::fetch`, answering 200 `{ status, body }` (`body` is the
@@ -120,8 +120,8 @@ struct Relay {
     query: Option<String>,
 }
 
-/// Opens the actor at `path` under the nodule's own actor and narrows the nodule's actor
-/// capability onto it, both through dispatch.
+/// Opens the actor at `path` under the nodule's own actor and narrows the nodule's docs handle
+/// onto it, both through dispatch.
 #[derive(Debug, Serialize, Deserialize)]
 struct Adopt {
     path: String,
@@ -536,15 +536,19 @@ impl Handler<Relay> for Fixture {
 
 impl Handler<Adopt> for Fixture {
     async fn call(&self, cx: &Cx, input: Adopt) -> Result<Value, FixtureError> {
-        let (Some(actor), Some(authority)) = (cx.actor_capability(), cx.nodule_capability()) else {
+        let (Some(actor), Some(authority), Some(docs)) = (
+            cx.actor_capability(),
+            cx.nodule_capability(),
+            cx.config_capability(),
+        ) else {
             return Err(FixtureError::InvalidRequest(
-                "no actor capability and no nodule capability".to_owned(),
+                "no actor, nodule and docs capabilities".to_owned(),
             ));
         };
-        // Both calls present the nodule's dispatch handle as the authority, and its own actor
-        // identity capability as the thing acted through: `parent` of the open, and the handle
-        // narrowed onto the child by the attenuation. The egress signs as the same actor, so the
-        // authority's holder binding passes.
+        // Both calls present the nodule's dispatch handle as the authority. The actor identity
+        // capability is the `parent` of the open, and the docs handle is what the attenuation
+        // narrows onto the child. The egress signs as the same actor, so the authority's holder
+        // binding passes.
         let post = |operation: &'static str, body: Value| {
             send_to_dispatch(
                 cx,
@@ -567,7 +571,7 @@ impl Handler<Adopt> for Fixture {
             Some(child) => {
                 let (status, body) = post(
                     "attenuateCapability",
-                    json!({ "capability": actor, "rights": ["use"], "subject": child }),
+                    json!({ "capability": docs, "rights": ["use"], "subject": child }),
                 )
                 .await?;
                 Some(json!({ "status": status, "body": body }))
