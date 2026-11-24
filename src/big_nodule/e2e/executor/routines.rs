@@ -2543,8 +2543,11 @@ mod core_like {
             )
             .await
             .unwrap_err();
+        // The docs service reports an authority's `Unauthorized` as `Denied`. The read just above,
+        // with the same handle under the child's signer, is the control that it is the presenter
+        // that is refused.
         assert!(
-            format!("{parent_refused:?}").contains("Unauthorized"),
+            format!("{parent_refused:?}").contains("Denied"),
             "{parent_refused:?}"
         );
         // A path that is not one segment under the presenting actor is refused: a sibling, the
