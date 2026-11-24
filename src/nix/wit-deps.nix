@@ -51,8 +51,16 @@ let
       file: file.name == "wkg.toml" || file.name == "wkg.lock" || file.hasExt "wit"
     ) (repoRoot + "/src");
   };
+  # A fixed-output path depends only on its name and `outputHash`, so under a constant name a
+  # store that already holds the output (a warm CI cache, a dev machine) never reruns the fetch
+  # after the inputs change: a stale `outputHash` goes unnoticed until a cold build fails. The
+  # input tree's store hash in the name gives every input change a new output path, which has to
+  # be built, so a stale `outputHash` fails on the change that made it stale.
+  inputsDigest = builtins.substring 0 12 (
+    builtins.unsafeDiscardStringContext (baseNameOf witFetchInputs)
+  );
 in
-pkgs.runCommand "townframe-wit-deps"
+pkgs.runCommand "townframe-wit-deps-${inputsDigest}"
   {
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
