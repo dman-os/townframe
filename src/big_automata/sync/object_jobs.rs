@@ -66,7 +66,8 @@
 //!    `remove_part` releases them on its side.
 //! 7. **Bounded work.** Unsettled jobs count against a receive window `W` that gates the next
 //!    replay round, so a part with a million objects is recorded at most `W` ahead of what has
-//!    settled. At most `C` fetches run at once. A long fetch holds one slot of each; the rest
+//!    settled. The window can be overshot by the rows of one revision: a page never splits a
+//!    revision, and one transaction may touch many objects. At most `C` fetches run at once. A long fetch holds one slot of each; the rest
 //!    keep flowing. Fetches start in cursor order, which is what moves the watermark.
 //! 8. **Retry backs off per call.** Failed and stale calls are reissued with a backoff that
 //!    starts at 2s, doubles and is capped (a minute by default). Merging new wants keeps the

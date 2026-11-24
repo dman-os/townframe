@@ -26,7 +26,8 @@
 //!    round naming it is in flight stays in that round; its answer still applies (the parent
 //!    matches answers to the cursor the round was asked from, replay law 11).
 //! 6. **Backpressure.** The row limits of the rounds in flight never add up to more than the
-//!    parent's receive window: a round goes out only into what the window has left after the
+//!    parent's receive window (an answer may still overshoot its limit by the rows of one
+//!    revision, which a page never splits): a round goes out only into what the window has left after the
 //!    rounds already in flight, and not at all when nothing is left. `Live` is served first
 //!    and takes at most `Config::live_limit` rows; `Bulk` gets the rest, so a held `Live`
 //!    round never starves the backlog of the window.
