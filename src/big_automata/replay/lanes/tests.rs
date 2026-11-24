@@ -25,6 +25,8 @@ pub(super) fn config() -> Config {
     Config {
         hold_ms: 300,
         live_limit: 2,
+        bulk_batch: 1,
+        bulk_linger: Duration::from_secs(1),
         min_backoff: Duration::from_secs(2),
         max_backoff: Duration::from_secs(5),
     }
@@ -749,5 +751,66 @@ fn law_8_an_answer_to_a_round_of_the_old_session_is_ignored() {
         rig.lanes
             .flight(Lane::Bulk)
             .is_some_and(|(call, _)| call == new)
+    );
+}
+
+fn batching() -> Rig {
+    let mut rig = Rig::new();
+    rig.lanes = Lanes::new(Config {
+        bulk_batch: 3,
+        ..config()
+    });
+    rig
+}
+
+#[test]
+fn law_9_bulk_waits_for_its_batch_then_lingers_out() {
+    let mut rig = batching();
+    rig.ack(part_route(1));
+    assert!(
+        rig.flush_with(2).is_empty(),
+        "2 rows are below the batch of 3"
+    );
+    assert_eq!(
+        rig.lanes.next_due(),
+        Some(rig.now + Duration::from_secs(1)),
+        "the linger is due"
+    );
+    rig.wait(1);
+    let out = rig.flush_with(2);
+    assert_eq!(rig.round_of(&out, Lane::Bulk).unwrap().2.limit, 2);
+}
+
+#[test]
+fn law_9_bulk_goes_at_once_with_its_batch() {
+    let mut rig = batching();
+    rig.ack(part_route(1));
+    assert!(rig.flush_with(1).is_empty());
+    let out = rig.flush_with(3);
+    assert_eq!(
+        rig.round_of(&out, Lane::Bulk).unwrap().2.limit,
+        3,
+        "the window grew to the batch before the linger ran out"
+    );
+    assert_eq!(rig.lanes.next_due(), None, "nothing lingers once it went");
+}
+
+#[test]
+fn law_9_live_never_waits_for_a_batch() {
+    let mut rig = batching();
+    rig.ack(obj_route(1));
+    let out = rig.flush_with(1);
+    assert_eq!(rig.round_of(&out, Lane::Live).unwrap().2.limit, 1);
+}
+
+#[test]
+fn law_9_a_lane_with_nothing_to_send_does_not_linger() {
+    let mut rig = batching();
+    rig.ack(obj_route(1));
+    rig.flush_with(1);
+    assert_eq!(
+        rig.lanes.next_due(),
+        None,
+        "Bulk has no routes, so no linger is due"
     );
 }

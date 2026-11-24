@@ -1052,6 +1052,25 @@ Port items from this cut:
   `is_settled(part)` query; one receive window from `ObjectJobs::room()`; the `cursor.rs`
   header TODO/FIXME go (stats are derived; deletes are ObjectJobs' `Absent`).
 
+**Decisions and follow-ups from the PeerSync simulation (operator, 2026-11-24).**
+- **Ghost members: the server always sends removals after the cursor** (replay law 11
+  amended). A client's applied state can be ahead of its persisted cursor (a long fetch holds
+  the cursor while later adds apply), so a removal skipped "because the client never saw the
+  member" left that member in the local store for good after a crash or a re-want. The
+  rejected alternative was a persisted "seen up to" cursor, which needs a write before every
+  record. **Later wire optimisation:** removal rows for members the client may never have
+  held cost bandwidth; send them compactly (a hash or fingerprint of the object id, batched)
+  instead of reinstating the skip.
+- **`Bulk` rounds batch with a linger** (lanes law 9): wait for `bulk_batch` free rows, but
+  send what is free after `bulk_linger`, so long fetches holding the window cannot stall it.
+- **Browser client for the sync calls:** `big_automata_iroh`'s client sits on the native
+  transport (`service_client_native_rs`, tokio `net`), so it does not build for
+  `wasm32-unknown-unknown`. Build it on `service_client_iroh_rs`'s `Client<IrohHttp>` (HTTP/1
+  over QUIC, `n0_future`, relay-only in the browser); the open point is the `Send` bound on
+  the transport futures in a generic client.
+- **A bucket page must move `next_after` strictly forward** (to land with the walk's
+  `next_after` trust, which lets a hostile peer page a bucket without end otherwise).
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a

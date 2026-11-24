@@ -30,6 +30,13 @@
 //!    rounds already in flight, and not at all when nothing is left. `Live` is served first
 //!    and takes at most `Config::live_limit` rows; `Bulk` gets the rest, so a held `Live`
 //!    round never starves the backlog of the window.
+//! 9. **`Bulk` batches, with a linger.** A `Bulk` round goes out once at least
+//!    `Config::bulk_batch` rows of the window are left for it, or once it has waited
+//!    `Config::bulk_linger` since it first could have gone out with fewer. The parent frees the
+//!    window one settled object at a time; without this the lane would ask for the one free
+//!    row, and the rows freed while that round is in flight would wait for it, so rounds would
+//!    alternate between one row and nearly the whole window. The linger keeps the lane moving
+//!    when long fetches hold most of the window for hours.
 //! 7. **A failed or lost round backs its lane off** from `min_backoff`, doubling, capped at
 //!    `max_backoff`, reset by an answered round. The other lane is not delayed. A round the
 //!    client calls stale (`RoundOutcome::Stale`: answered for an older session, or racing a
@@ -74,6 +81,9 @@ pub(crate) struct Config {
     pub hold_ms: u32,
     /// The most rows a `Live` round asks for; `Bulk` gets the rest of the window (law 6).
     pub live_limit: usize,
+    /// The rows a `Bulk` round waits for, up to `bulk_linger` (law 9).
+    pub bulk_batch: usize,
+    pub bulk_linger: Duration,
     pub min_backoff: Duration,
     pub max_backoff: Duration,
 }
@@ -171,6 +181,8 @@ pub(crate) struct Lanes {
     bulk: LaneState,
     next_call: CallId,
     last_flush: Option<Instant>,
+    /// Since when `Bulk` has had a round to send with fewer than `bulk_batch` rows (law 9).
+    bulk_waiting: Option<Instant>,
 }
 
 impl Lanes {
@@ -182,6 +194,7 @@ impl Lanes {
             bulk: default(),
             next_call: 0,
             last_flush: None,
+            bulk_waiting: None,
         }
     }
 
@@ -222,6 +235,7 @@ impl Lanes {
         self.routes.clear();
         self.live = default();
         self.bulk = default();
+        self.bulk_waiting = None;
     }
 
     /// Take the answer to round `call`. An answer for a call that is not in flight (failed,
@@ -334,8 +348,20 @@ impl Lanes {
                 hold_ms,
             );
             let Some(page) = page else {
+                if lane == Lane::Bulk {
+                    self.bulk_waiting = None;
+                }
                 continue;
             };
+            if lane == Lane::Bulk {
+                if limit < self.config.bulk_batch {
+                    let since = *self.bulk_waiting.get_or_insert(now);
+                    if now < since + self.config.bulk_linger {
+                        continue;
+                    }
+                }
+                self.bulk_waiting = None;
+            }
             let call = self.next_call;
             self.next_call = call.checked_add(1).expect(ERROR_IMPOSSIBLE);
             let routes = page
@@ -353,9 +379,15 @@ impl Lanes {
         }
     }
 
-    /// The earliest backoff deadline after the last flush of an idle lane that has routes.
+    /// The earliest backoff deadline after the last flush of an idle lane that has routes, or
+    /// the end of `Bulk`'s linger (law 9).
     pub fn next_due(&self) -> Option<Instant> {
         let last = self.last_flush?;
+        let linger = self
+            .bulk_waiting
+            .filter(|_| self.bulk.flight.is_none())
+            .map(|since| since + self.config.bulk_linger)
+            .filter(|at| *at > last);
         [Lane::Live, Lane::Bulk]
             .into_iter()
             .filter(|lane| self.routes.values().any(|have| have == lane))
@@ -365,6 +397,7 @@ impl Lanes {
                 Gate::Until(at) if at > last => Some(at),
                 _ => None,
             })
+            .chain(linger)
             .min()
     }
 

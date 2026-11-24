@@ -34,6 +34,8 @@ pub(super) struct Oracle {
     bulk: OLane,
     next_call: CallId,
     last_flush: Option<Instant>,
+    /// When `Bulk` first had a round with fewer than `bulk_batch` rows to send.
+    bulk_waiting: Option<Instant>,
 }
 
 impl Oracle {
@@ -45,6 +47,7 @@ impl Oracle {
             bulk: default(),
             next_call: 0,
             last_flush: None,
+            bulk_waiting: None,
         }
     }
 
@@ -89,6 +92,7 @@ impl Oracle {
         self.members.clear();
         self.live = default();
         self.bulk = default();
+        self.bulk_waiting = None;
     }
 
     fn call_lane(&self, call: CallId) -> Option<Lane> {
@@ -210,7 +214,21 @@ impl Oracle {
                 .filter_map(|(route, _)| cursor_of(route).map(|cursor| (route.clone(), cursor)))
                 .collect();
             if targets.is_empty() {
+                if lane == Lane::Bulk {
+                    self.bulk_waiting = None;
+                }
                 continue;
+            }
+            if lane == Lane::Bulk {
+                if limit < self.config.bulk_batch {
+                    if self.bulk_waiting.is_none() {
+                        self.bulk_waiting = Some(now);
+                    }
+                    if now < self.bulk_waiting.unwrap() + self.config.bulk_linger {
+                        continue;
+                    }
+                }
+                self.bulk_waiting = None;
             }
             let call = self.next_call;
             self.next_call += 1;
@@ -239,6 +257,11 @@ impl Oracle {
             .filter(|lane| self.members.iter().any(|(_, have)| have == lane))
             .filter(|lane| self.lane(*lane).flight.is_none())
             .filter_map(|lane| self.lane(lane).open_at)
+            .chain(
+                self.bulk_waiting
+                    .filter(|_| self.bulk.flight.is_none())
+                    .map(|since| since + self.config.bulk_linger),
+            )
             .filter(|at| *at > last)
             .min()
     }

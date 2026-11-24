@@ -28,6 +28,8 @@ pub(super) fn config() -> Config {
         lanes: lanes::Config {
             hold_ms: 300,
             live_limit: 1,
+            bulk_batch: 1,
+            bulk_linger: Duration::from_secs(1),
             min_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(4),
         },

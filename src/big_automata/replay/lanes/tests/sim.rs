@@ -15,6 +15,7 @@ const ROUTES: usize = 5;
 fn sim_config() -> Config {
     Config {
         max_backoff: Duration::from_secs(3),
+        bulk_batch: 3,
         ..config()
     }
 }
