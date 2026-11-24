@@ -76,7 +76,7 @@ collection_requests:
     contract: org.example.dayframe.shell.panels
     access: write
   - binding: roots
-    contract: org.example.clay.shell.roots
+    contract: "org.example.clay.shell#roots"
     access: write
 contributions:
   - id: home-panel

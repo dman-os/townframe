@@ -237,7 +237,7 @@ impl<E: Incarnations> ContextRig<E> {
 
     /// Write the `feed` row `key`, attaching the provider's `publication` (of `contract`) as a
     /// lazy reference.
-    fn seed_endpoint(&self, key: &str, publication: &str, contract: Nsid) {
+    fn seed_endpoint(&self, key: &str, publication: &str, contract: Contract) {
         self.seed(
             key,
             RowAttachment::Endpoint(PublicationEndpoint {
@@ -304,12 +304,10 @@ impl ContextWorld {
     /// The publications the `context` micro's manifest declares, by name.
     pub(super) fn declared() -> BTreeMap<String, DeclaredPublication> {
         let call = |contract: &str| DeclaredPublication {
-            kind: PublicationKind::Call,
-            contract: Nsid::literal(contract),
+            contract: Contract::Call(Nsid::literal(contract)),
         };
         let presentation = || DeclaredPublication {
-            kind: PublicationKind::Presentation,
-            contract: presentation_component(),
+            contract: Contract::Presentation,
         };
         BTreeMap::from([
             (
@@ -420,7 +418,7 @@ impl Root for PresenterRoot {
 /// A wake the host failed to deliver would leave the call parked, so the scenario would hang.
 pub async fn context_follows_a_provider<E: Incarnations>(engine: E) {
     let rig = ContextRig::boot(engine, [97, 98]).await;
-    rig.seed_endpoint("view", "view", presentation_component());
+    rig.seed_endpoint("view", "view", Contract::Presentation);
     let (provider, supervisor) = (&rig.provider, &rig.supervisor);
     let registrations = &rig.registrations;
     supervisor.disable(provider).await.unwrap();
@@ -477,7 +475,7 @@ pub async fn context_follows_a_provider<E: Incarnations>(engine: E) {
 /// the binding, which the provider observes as going idle.
 pub async fn context_retains_a_call<E: Incarnations>(engine: E) {
     let rig = ContextRig::boot(engine, [99, 100]).await;
-    rig.seed_endpoint("echo", "echo", Nsid::literal(ECHO_CONTRACT));
+    rig.seed_endpoint("echo", "echo", Contract::Call(Nsid::literal(ECHO_CONTRACT)));
     let (provider, supervisor) = (&rig.provider, &rig.supervisor);
     let call = |name: &str, request: Vec<u8>| {
         let reference = rig
@@ -657,7 +655,9 @@ impl PeerRig {
                             attachments: vec![RowAttachment::Endpoint(PublicationEndpoint {
                                 micro: MicroId::new(peer),
                                 publication: "echo".to_owned(),
-                                contract: Nsid::literal("org.example.clay.test.context.echo"),
+                                contract: Contract::Call(Nsid::literal(
+                                    "org.example.clay.test.context.echo",
+                                )),
                             })],
                         },
                     )
@@ -823,7 +823,7 @@ async fn attach_own_publication(attach: &CapabilityRef, registrations: &BytesReg
         [RowAttachment::Endpoint(PublicationEndpoint {
             micro: MicroId::new("context"),
             publication: "detail".into(),
-            contract: presentation_component(),
+            contract: Contract::Presentation,
         })]
     );
     assert!(matches!(

@@ -28,6 +28,7 @@ mod types;
 mod tests;
 
 pub use datum_core::InvalidNsid;
+pub use datum_core::LexRef;
 pub use datum_core::Nsid;
 pub use ledger::Ledger;
 pub use ledger::Overlay;

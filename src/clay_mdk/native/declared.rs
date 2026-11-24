@@ -50,7 +50,7 @@ pub fn declared_rows(
                 .endpoints
                 .get(&link.endpoint)
                 .expect("validate checked that the link names a declared endpoint");
-            let Some((_, contract)) = super::admitted_endpoint(endpoint) else {
+            let Some(contract) = super::admitted_endpoint(endpoint) else {
                 return Err(format!(
                     "contribution {:?} links {:?}, which is not a servable endpoint",
                     contribution.id, link.endpoint

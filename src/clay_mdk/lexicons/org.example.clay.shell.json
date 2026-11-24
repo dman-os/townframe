@@ -1,0 +1,30 @@
+{
+  "lexicon": 1,
+  "id": "org.example.clay.shell",
+  "description": "The collections the Clay runtime defines for shells. A collection is a token def named by `nsid#def`, with its row key and row value as sibling defs of this file.",
+  "defs": {
+    "roots": {
+      "type": "token",
+      "description": "The collection a shell micro reads its roots from (`org.example.clay.shell#roots`). A micro registers one row, keyed by its own micro id (`rootKey`), that holds the root presentation it offers (`root`); the shell mounts each one it finds."
+    },
+    "rootKey": {
+      "type": "string",
+      "description": "The key of a `roots` row: the id of the micro that registered it."
+    },
+    "root": {
+      "type": "object",
+      "description": "The value of a `roots` row.",
+      "required": ["title", "content"],
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "What the shell calls the root."
+        },
+        "content": {
+          "type": "unknown",
+          "description": "A Clay link: a CBOR tag wrapping an index into the row's links, naming the presentation the root mounts. Rows are CBOR, not atproto data, and the link's JSON spelling `{\"$link\": index}` collides with the reserved `$link` of the atproto data model (a CID), so this def documents the shape and no Lexicon codec admits a link."
+        }
+      }
+    }
+  }
+}

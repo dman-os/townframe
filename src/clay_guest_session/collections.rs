@@ -1,3 +1,4 @@
+use crate::capabilities::Contract;
 use crate::capabilities::PublicationEndpoint;
 use crate::capabilities::RowAttachment;
 use clay_collection::AcquireError;
@@ -57,7 +58,7 @@ impl CollectionValue {
 }
 
 /// The durable form of a [`CollectionValue`]: CBOR `[body, [[micro, publication, contract],
-/// ...]]`, the contract as its NSID text. A durable row persists endpoints and never references
+/// ...]]`, the contract as its NSID text, or null for a presentation. A durable row persists endpoints and never references
 /// (ADR 031 §7), so encoding a bound attachment is a programming error; a row that does not
 /// decode is corrupt storage. Both crash.
 pub fn durable_codec() -> DurableCodec<Bytes, CollectionValue> {
@@ -73,7 +74,10 @@ pub fn durable_codec() -> DurableCodec<Bytes, CollectionValue> {
                 Value::Array(vec![
                     Value::Text(endpoint.micro.as_str().to_owned()),
                     Value::Text(endpoint.publication.clone()),
-                    Value::Text(endpoint.contract.to_string()),
+                    match &endpoint.contract {
+                        Contract::Presentation => Value::Null,
+                        Contract::Call(nsid) => Value::Text(nsid.to_string()),
+                    },
                 ])
             })
             .collect();
@@ -112,8 +116,13 @@ pub fn durable_codec() -> DurableCodec<Bytes, CollectionValue> {
                 RowAttachment::Endpoint(PublicationEndpoint {
                     micro: MicroId::new(text(micro)),
                     publication: text(publication),
-                    contract: Nsid::parse(&text(contract))
-                        .expect("a stored endpoint's contract is an NSID"),
+                    contract: match contract {
+                        Value::Null => Contract::Presentation,
+                        call => Contract::Call(
+                            Nsid::parse(&text(call))
+                                .expect("a stored call endpoint's contract is an NSID"),
+                        ),
+                    },
                 })
             })
             .collect();

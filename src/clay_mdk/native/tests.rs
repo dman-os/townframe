@@ -12,9 +12,10 @@ use crate::Request;
 use crate::RootRow;
 use crate::SHELL_ROOTS;
 use crate::Sidecar;
+use clay_collection::LexRef;
 use clay_collection::ReplicaId;
+use clay_guest_session::capabilities::Contract;
 use clay_guest_session::capabilities::PublicationEndpoint;
-use clay_guest_session::capabilities::presentation_component;
 use clay_guest_session::collections::bytes_registrations;
 use clay_host::CollectionContract;
 use clay_host::ConfiguredMicro;
@@ -27,7 +28,7 @@ use dioxus_core::VNode;
 use std::cell::Cell;
 use std::num::NonZeroUsize;
 
-const ROWS: &str = "org.example.clay.test.rows";
+const ROWS: &str = "org.example.clay.test#rows";
 const INCREMENT: &str = "org.example.clay.test.calls.increment";
 
 /// The test collection as a declaration.
@@ -57,8 +58,8 @@ impl ComponentDecl for UndeclaredPub {
     const NAME: &'static str = "undeclared";
 }
 
-fn rows() -> Nsid {
-    Nsid::literal(ROWS)
+fn rows() -> LexRef {
+    LexRef::literal(ROWS)
 }
 
 fn blank() -> Element {
@@ -99,8 +100,8 @@ impl Rig {
             .declare(
                 CollectionContract {
                     id: rows(),
-                    key_schema: Nsid::literal("org.example.clay.test.rowKey"),
-                    value_schema: Nsid::literal("org.example.clay.test.rowValue"),
+                    key_schema: LexRef::literal("org.example.clay.test#rowKey"),
+                    value_schema: LexRef::literal("org.example.clay.test#rowValue"),
                 },
                 bytes_registrations(NonZeroUsize::new(64).unwrap(), [0, 0]),
             )
@@ -502,7 +503,7 @@ async fn a_requirement_resolves_to_a_live_reference_to_its_provider() {
 fn required(binding: &str, necessity: Necessity) -> Request {
     Request {
         binding: binding.into(),
-        contract: Nsid::literal(INCREMENT),
+        contract: LexRef::literal(INCREMENT),
         access: None,
         necessity,
         resolution: BindingResolution::Configured,
@@ -763,9 +764,9 @@ fn declared_endpoints_keep_the_manifest_contract_and_skip_unknown_members() {
     assert_eq!(declared.len(), 2, "an unknown member is not served");
     assert_eq!(
         declared["echo"].contract,
-        Nsid::literal("org.example.clay.test.lifecycle.echoV2")
+        Contract::Call(Nsid::literal("org.example.clay.test.lifecycle.echoV2"))
     );
-    assert_eq!(declared["view"].contract, presentation_component());
+    assert_eq!(declared["view"].contract, Contract::Presentation);
 }
 
 #[test]
@@ -784,7 +785,7 @@ fn declared_rows_store_endpoints_and_tag_link_slots() {
             collection_contracts: vec![],
             collection_requests: vec![Request {
                 binding: "roots".into(),
-                contract: Nsid::literal(SHELL_ROOTS),
+                contract: LexRef::literal(SHELL_ROOTS),
                 access: Some(Access::Write),
                 necessity: Necessity::Required,
                 resolution: BindingResolution::Configured,
@@ -822,7 +823,7 @@ fn declared_rows_store_endpoints_and_tag_link_slots() {
             PublicationEndpoint {
                 micro: host_id(micro.name()),
                 publication: "view".into(),
-                contract: presentation_component(),
+                contract: Contract::Presentation,
             }
         )]
     );

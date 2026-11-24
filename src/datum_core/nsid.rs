@@ -1,7 +1,7 @@
 //! Namespaced identifiers (NSIDs), the one name format for contracts and schemas (ADR 028 §4).
 //!
 //! An NSID is AT Protocol syntax: a reverse-DNS authority followed by one name segment, like
-//! `org.example.clay.shell.roots`. Compatibility lives in the name: a breaking change is a new
+//! `org.example.clay.shell`. Compatibility lives in the name: a breaking change is a new
 //! NSID, so no version is part of the identifier and two equal strings are the same contract.
 //! The type validates at construction, so every held [`Nsid`] is well formed and consumers
 //! never re-check it; wire data that is not an NSID fails to deserialize.
@@ -115,6 +115,113 @@ impl fmt::Debug for Nsid {
     }
 }
 
+/// A reference to one definition of a Lexicon, `nsid#def` (ADR 050 §2). A bare NSID is the file's
+/// `main`, and `nsid#main` is the same reference, so the two spellings are one value and the
+/// canonical text omits `#main`. A collection definition is such a reference to a `token` def,
+/// with its row key and value as sibling defs of the same file.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct LexRef {
+    /// The canonical text: the NSID, then `#def` unless the def is `main`.
+    text: Arc<str>,
+    nsid: Nsid,
+}
+
+impl LexRef {
+    /// Parse `nsid` or `nsid#def`, where `def` is an AT Protocol definition name: ASCII letters
+    /// and digits, starting with a letter.
+    pub fn parse(text: &str) -> Result<Self, InvalidNsid> {
+        let invalid = || InvalidNsid {
+            text: text.to_owned(),
+        };
+        let Some((nsid, def)) = text.split_once('#') else {
+            return Nsid::parse(text).map(Self::from);
+        };
+        let named = def.starts_with(|first: char| first.is_ascii_alphabetic())
+            && def.chars().all(|c| c.is_ascii_alphanumeric());
+        if !named {
+            return Err(invalid());
+        }
+        let nsid = Nsid::parse(nsid).map_err(|_| invalid())?;
+        Ok(if def == "main" {
+            Self::from(nsid)
+        } else {
+            Self {
+                text: text.into(),
+                nsid,
+            }
+        })
+    }
+
+    /// The canonical text, `nsid` or `nsid#def`.
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    /// A reference written as a literal in source. A malformed literal is a programming error.
+    pub fn literal(text: &str) -> Self {
+        Self::parse(text).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// The Lexicon file the reference points into.
+    pub fn nsid(&self) -> &Nsid {
+        &self.nsid
+    }
+
+    /// The definition name, `main` when the reference is a bare NSID.
+    pub fn def(&self) -> &str {
+        self.text.split_once('#').map_or("main", |(_, def)| def)
+    }
+
+    /// Whether this is the file's `main`: the only definition an operation or a datum names.
+    pub fn is_main(&self) -> bool {
+        self.text.len() == self.nsid.0.len()
+    }
+}
+
+impl From<Nsid> for LexRef {
+    fn from(nsid: Nsid) -> Self {
+        Self {
+            text: Arc::clone(&nsid.0),
+            nsid,
+        }
+    }
+}
+
+impl FromStr for LexRef {
+    type Err = InvalidNsid;
+
+    fn from_str(text: &str) -> Result<Self, InvalidNsid> {
+        Self::parse(text)
+    }
+}
+
+impl TryFrom<String> for LexRef {
+    type Error = InvalidNsid;
+
+    fn try_from(text: String) -> Result<Self, InvalidNsid> {
+        Self::parse(&text)
+    }
+}
+
+impl From<LexRef> for String {
+    fn from(reference: LexRef) -> Self {
+        reference.text.as_ref().to_owned()
+    }
+}
+
+impl fmt::Display for LexRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.text)
+    }
+}
+
+impl fmt::Debug for LexRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "LexRef({self})")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +274,41 @@ mod tests {
         assert!(!nsid.is_under("org.example.count"));
         assert!(!nsid.is_under("org.example.counter.count"));
         assert!(!nsid.is_under(""));
+    }
+
+    #[test]
+    fn a_reference_names_a_def_and_main_is_the_bare_nsid() {
+        let token = LexRef::parse("org.example.clay.shell#roots").unwrap();
+        assert_eq!(token.nsid().as_str(), "org.example.clay.shell");
+        assert_eq!(token.def(), "roots");
+        assert!(!token.is_main());
+        assert_eq!(token.to_string(), "org.example.clay.shell#roots");
+
+        let main = LexRef::parse("org.example.clay.shell#main").unwrap();
+        assert_eq!(main, LexRef::parse("org.example.clay.shell").unwrap());
+        assert_eq!(main, LexRef::from(Nsid::literal("org.example.clay.shell")));
+        assert_eq!(main.to_string(), "org.example.clay.shell");
+        assert_eq!(main.def(), "main");
+    }
+
+    #[test]
+    fn rejects_malformed_references() {
+        for text in [
+            "",
+            "shell#roots",
+            "org.example.clay.shell#",
+            "org.example.clay.shell#0roots",
+            "org.example.clay.shell#ro-ots",
+            "org.example.clay.shell#roots#again",
+            "#roots",
+        ] {
+            assert!(LexRef::parse(text).is_err(), "{text:?} must be rejected");
+        }
+        let token: LexRef = serde_json::from_str("\"org.example.clay.shell#roots\"").unwrap();
+        assert_eq!(
+            serde_json::to_string(&token).unwrap(),
+            "\"org.example.clay.shell#roots\""
+        );
     }
 
     #[test]

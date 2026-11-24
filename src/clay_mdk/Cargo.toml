@@ -101,6 +101,8 @@ ciborium.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 #
 # internal
+# Admits the Lexicon documents this crate ships (`lexicons/`) with the datum Lexicon compiler.
+big_cabinet_core = { workspace = true, features = ["schemars"] }
 # The engine-conformance scenarios, which the in-process run (`native::conformance_tests`) joins.
 clay_guest_session = { workspace = true, features = ["test-utils"] }
 clay_surface = { workspace = true }

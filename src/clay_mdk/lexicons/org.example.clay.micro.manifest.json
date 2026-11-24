@@ -1,0 +1,174 @@
+{
+  "lexicon": 1,
+  "id": "org.example.clay.micro.manifest",
+  "description": "The format of a Clay micro's manifest: what the package can serve, require, request and contribute, inspectable without instantiating it. A breaking change to the format is a new NSID. The manifest is the `description` of the cartridge's micro contribution, filed under this id as its `schema`.",
+  "defs": {
+    "main": {
+      "type": "object",
+      "required": [
+        "entrypoints",
+        "endpoints",
+        "requires",
+        "configuration_requests",
+        "collection_contracts",
+        "collection_requests",
+        "contributions"
+      ],
+      "properties": {
+        "entrypoints": { "type": "ref", "ref": "#entrypoints" },
+        "endpoints": {
+          "type": "unknown",
+          "description": "A map from endpoint name to one member of the open union `methodEndpoint | callbackEndpoint | viewEndpoint`, each tagged by `$type`. A member with an unknown `$type` is carried verbatim and never served."
+        },
+        "requires": {
+          "type": "array",
+          "description": "What the micro needs another micro to serve (a method or a view). A requirement declares no access.",
+          "items": { "type": "ref", "ref": "#request" }
+        },
+        "configuration_requests": {
+          "type": "array",
+          "items": { "type": "ref", "ref": "#configurationRequest" }
+        },
+        "collection_contracts": {
+          "type": "array",
+          "description": "The collections this package owns.",
+          "items": { "type": "ref", "ref": "#collectionContract" }
+        },
+        "collection_requests": {
+          "type": "array",
+          "description": "The collections the micro reads or writes. Every one declares an access.",
+          "items": { "type": "ref", "ref": "#request" }
+        },
+        "contributions": {
+          "type": "array",
+          "items": { "type": "ref", "ref": "#contribution" }
+        }
+      }
+    },
+    "entrypoints": {
+      "type": "object",
+      "description": "The component exports a host drives, as fully qualified WIT interfaces. `installer` is reserved: it round-trips and is never executed.",
+      "required": ["initialize"],
+      "nullable": ["presentation", "installer"],
+      "properties": {
+        "initialize": { "type": "string" },
+        "presentation": { "type": "string" },
+        "installer": { "type": "string" }
+      }
+    },
+    "request": {
+      "type": "object",
+      "description": "One thing the package asks for. `contract` is the Lexicon reference of what is wanted (a method or view NSID, or the `nsid#def` token of a collection) and never a concrete supplier: configuration resolves `binding`, the package-local name, to one. Declaring a request grants no authority.",
+      "required": ["binding", "contract"],
+      "properties": {
+        "binding": { "type": "string" },
+        "contract": { "type": "string", "description": "An NSID, or `nsid#def`." },
+        "access": {
+          "type": "string",
+          "description": "Open vocabulary: `read` or `write`. Absent on a requirement, required on a collection request."
+        },
+        "necessity": {
+          "type": "string",
+          "description": "Open vocabulary: `required` (the default) or `optional`."
+        },
+        "resolution": {
+          "type": "string",
+          "description": "Open vocabulary: `configured` (the default) or `atRuntime`."
+        },
+        "minRevision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "facetAccess": {
+      "type": "object",
+      "required": ["tag", "read", "write", "create", "delete"],
+      "nullable": ["key_id"],
+      "properties": {
+        "tag": { "type": "string", "description": "The NSID of the facet's datum." },
+        "key_id": { "type": "string" },
+        "read": { "type": "boolean" },
+        "write": { "type": "boolean" },
+        "create": { "type": "boolean" },
+        "delete": { "type": "boolean" }
+      }
+    },
+    "configurationRequest": {
+      "type": "object",
+      "required": ["binding", "facets"],
+      "properties": {
+        "binding": { "type": "string" },
+        "facets": {
+          "type": "array",
+          "items": { "type": "ref", "ref": "#facetAccess" }
+        }
+      }
+    },
+    "collectionContract": {
+      "type": "object",
+      "description": "A collection the package serves. `id` is the `nsid#def` token of the collection in the package's own Lexicon, and the schemas name sibling defs of the same file, or a requested one.",
+      "required": ["id", "selector_schema", "key_schema", "value_schema", "offered"],
+      "nullable": ["write_context_schema"],
+      "properties": {
+        "id": { "type": "string", "description": "`nsid#def` of a `token` def." },
+        "selector_schema": { "type": "string" },
+        "key_schema": { "type": "string" },
+        "value_schema": { "type": "string" },
+        "write_context_schema": { "type": "string" },
+        "offered": {
+          "type": "array",
+          "description": "Open vocabulary: `read`, `register`, `causal-write`, `domain-commands`.",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "contribution": {
+      "type": "object",
+      "description": "A row the package declares into a collection it requested with `write` access, by that request's binding.",
+      "required": ["id", "binding", "key", "value", "links"],
+      "properties": {
+        "id": { "type": "string" },
+        "binding": { "type": "string" },
+        "key": { "type": "string" },
+        "value": {
+          "type": "unknown",
+          "description": "The static row body, which the collection's own contract interprets."
+        },
+        "links": {
+          "type": "array",
+          "items": { "type": "ref", "ref": "#linkDeclaration" }
+        }
+      }
+    },
+    "linkDeclaration": {
+      "type": "object",
+      "description": "The row value's link `index` refers to one of this package's own endpoints.",
+      "required": ["index", "endpoint"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "endpoint": { "type": "string" }
+      }
+    },
+    "methodEndpoint": {
+      "type": "object",
+      "description": "A request/response operation registered under `nsid` and routed by it to its one provider.",
+      "required": ["nsid"],
+      "properties": {
+        "nsid": { "type": "string", "description": "The NSID of the method's Lexicon." }
+      }
+    },
+    "callbackEndpoint": {
+      "type": "object",
+      "description": "A request/response operation that is never registered: reachable only through a link or endpoint reference a row carries. Many micros may implement one contract.",
+      "required": ["implements"],
+      "properties": {
+        "implements": { "type": "string", "description": "The NSID of the contract Lexicon." }
+      }
+    },
+    "viewEndpoint": {
+      "type": "object",
+      "description": "A mountable presentation. Every view is a presentation component, so `implements` only names the contract another micro requires it by.",
+      "properties": {
+        "implements": { "type": "string", "description": "The NSID of the contract Lexicon." }
+      }
+    }
+  }
+}

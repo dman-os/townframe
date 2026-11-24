@@ -148,8 +148,8 @@ Prior art: OSGi's `Import-Package` over `Require-Bundle`, and Debian's virtual p
 - **Strictness is at the NSID level.** Every NSID a cartridge touches outside its own prefix must
   appear in its manifest requests, or admission refuses. Broad untyped access (any datum in a
   drawer or document) may be added later, but only as an explicit manifest request that an
-  audit can see. The default is least access. NSIDs a runtime itself defines (Clay's
-  presentation-component contract and shell collections such as `shell.roots`) are requested
+  audit can see. The default is least access. What a runtime itself defines (Clay's
+  shell collections such as the `roots` token of `org.example.clay.shell`) is requested
   like any other, so the audit sees them, but are satisfied by the runtime rather than by a
   cartridge.
 - **Cartridge-to-cartridge dependencies are a delivery hint only** (for example "also fetch

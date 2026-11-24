@@ -49,9 +49,8 @@ use big_dispatch_core::Body;
 use big_dispatch_core::InvocationContext;
 use bytes::Bytes;
 use clay_guest_session::InitialContext;
+use clay_guest_session::capabilities::Contract;
 use clay_guest_session::capabilities::DeclaredPublication;
-use clay_guest_session::capabilities::PublicationKind;
-use clay_guest_session::capabilities::presentation_component;
 use clay_guest_session::egress::DispatchEgress;
 use clay_host::ComponentRef;
 use clay_host::Host;
@@ -131,8 +130,7 @@ async fn run_fixture(composition: &NodeComposition) -> BTreeMap<String, String> 
         publications: [(
             "view".to_owned(),
             DeclaredPublication {
-                kind: PublicationKind::Presentation,
-                contract: presentation_component(),
+                contract: Contract::Presentation,
             },
         )]
         .into(),

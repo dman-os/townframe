@@ -436,9 +436,11 @@ pub use manifest::Entrypoints;
 pub use manifest::FacetAccess;
 pub use manifest::InterfaceRef;
 pub use manifest::LOCAL_NAMESPACE;
+pub use manifest::LexRef;
 pub use manifest::LinkDeclaration;
 #[cfg(feature = "contract")]
 pub use manifest::Links;
+pub use manifest::MANIFEST_LEXICON;
 pub use manifest::MANIFEST_NSID;
 #[cfg(feature = "contract")]
 pub use manifest::ManifestBuilder;
@@ -447,6 +449,7 @@ pub use manifest::MicroManifest;
 pub use manifest::Necessity;
 pub use manifest::Nsid;
 pub use manifest::Request;
+pub use manifest::SHELL_LEXICON;
 pub use manifest::SHELL_ROOTS;
 pub use manifest::Sidecar;
 

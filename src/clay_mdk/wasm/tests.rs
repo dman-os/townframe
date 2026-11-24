@@ -4,12 +4,13 @@ use crate::Endpoint;
 use crate::Entrypoints;
 use crate::FacetAccess;
 use crate::MicroId;
+use clay_collection::LexRef;
 use clay_collection::Nsid;
 use clay_collection::ReplicaId;
 use clay_dioxus::ComponentMount;
 use clay_dioxus::NativeComponents;
 use clay_docs::DocumentService;
-use clay_guest_session::capabilities::presentation_component;
+use clay_guest_session::capabilities::Contract;
 use clay_host::AccessError;
 use clay_host::CollectionRegistry;
 use clay_host::ConfiguredMicro;
@@ -330,15 +331,15 @@ async fn a_guest_slot_mounts_another_guests_presentation_and_follows_it_through_
             DocumentService::new(16),
             CollectionRegistry::new(ReplicaId::from_bytes([1; ReplicaId::LEN])),
         );
-        let feed = Nsid::literal("org.example.clay.test.context.feed");
+        let feed = LexRef::literal("org.example.clay.test.context#feed");
         let feed_id = clay_collection::CollectionId::minted_for(&feed);
         resources
             .collections
             .declare(
                 CollectionContract {
                     id: feed.clone(),
-                    key_schema: Nsid::literal("org.example.clay.test.rowKey"),
-                    value_schema: Nsid::literal("org.example.clay.test.rowValue"),
+                    key_schema: LexRef::literal("org.example.clay.test#rowKey"),
+                    value_schema: LexRef::literal("org.example.clay.test#rowValue"),
                 },
                 bytes_registrations(std::num::NonZeroUsize::new(64).unwrap(), [0, 0]),
             )
@@ -428,7 +429,7 @@ async fn a_guest_slot_mounts_another_guests_presentation_and_follows_it_through_
                 attachments: vec![RowAttachment::Endpoint(PublicationEndpoint {
                     micro: counter_id.clone(),
                     publication: "view".to_owned(),
-                    contract: presentation_component(),
+                    contract: Contract::Presentation,
                 })],
             },
         )

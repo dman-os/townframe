@@ -55,8 +55,8 @@ use clay_mdk::host::Resources;
 use clay_mdk::host::RootRow;
 use clay_mdk::Collection;
 use clay_mdk::CollectionId;
+use clay_mdk::LexRef;
 use clay_mdk::MicroId;
-use clay_mdk::Nsid;
 use clay_mdk::SHELL_ROOTS;
 use clay_store::BatchOp;
 use clay_store::OrderedStore;
@@ -495,14 +495,14 @@ impl CompositionRuntime {
         // The host mints each declared collection's id (see `DeclaredCollections`).
         let mut declared_collections = DeclaredCollections::default();
 
-        let shell_roots = Nsid::literal(SHELL_ROOTS);
+        let shell_roots = LexRef::literal(SHELL_ROOTS);
         let (shell_roots_id, roots_collection) = declare(
             &collections,
             &store,
             CollectionContract {
                 id: shell_roots.clone(),
-                key_schema: Nsid::literal("org.example.clay.shell.rootKey"),
-                value_schema: Nsid::literal("org.example.clay.shell.root"),
+                key_schema: LexRef::literal("org.example.clay.shell#rootKey"),
+                value_schema: LexRef::literal("org.example.clay.shell#root"),
             },
         )
         .await?

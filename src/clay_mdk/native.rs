@@ -56,6 +56,7 @@ use crate::rows::Stored;
 use crate::rows::stored_page;
 use clay_guest_session::capabilities::CapabilityLimits;
 use clay_guest_session::capabilities::CapabilitySession;
+use clay_guest_session::capabilities::Contract;
 use clay_guest_session::capabilities::DeclaredPublication;
 use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::capabilities::PublishedCapability;
@@ -239,9 +240,8 @@ impl Activation {
     fn declared_call(&self, name: &str) -> Nsid {
         match self.declared.get(name) {
             Some(DeclaredPublication {
-                kind: clay_guest_session::capabilities::PublicationKind::Call,
-                contract,
-            }) => contract.clone(),
+                contract: Contract::Call(nsid),
+            }) => nsid.clone(),
             _ => panic!("the manifest declares no call publication {name:?}"),
         }
     }
@@ -704,15 +704,13 @@ pub(crate) fn declared_endpoints(
         .endpoints
         .iter()
         .filter_map(|(name, endpoint)| {
-            let (kind, contract) = admitted_endpoint(endpoint)?;
-            Some((name.clone(), DeclaredPublication { kind, contract }))
+            let contract = admitted_endpoint(endpoint)?;
+            Some((name.clone(), DeclaredPublication { contract }))
         })
         .collect()
 }
 
-pub(crate) fn routine_facets(
-    facets: &[FacetAccess],
-) -> Vec<clay_docs::FacetAccess> {
+pub(crate) fn routine_facets(facets: &[FacetAccess]) -> Vec<clay_docs::FacetAccess> {
     facets
         .iter()
         .map(|facet| clay_docs::FacetAccess {
@@ -731,21 +729,15 @@ mod conformance_tests;
 #[cfg(test)]
 mod tests;
 
-/// The kind and contract the capability bank admits `endpoint` under, or `None` for a member
-/// this build does not serve. Every view shares the one presentation-component contract, so a
-/// contract alone tells a redeemer which kind to expect. A method is a call under its NSID and
-/// a callback a call under the contract it implements.
-pub(crate) fn admitted_endpoint(
-    endpoint: &Endpoint,
-) -> Option<(clay_guest_session::capabilities::PublicationKind, Nsid)> {
-    use clay_guest_session::capabilities::PublicationKind as Kind;
+/// The contract the capability bank admits `endpoint` under, or `None` for a member this build
+/// does not serve. Every view is a presentation, so its contract alone tells a redeemer which
+/// kind to expect. A method is a call under its NSID and a callback a call under the contract
+/// it implements.
+pub(crate) fn admitted_endpoint(endpoint: &Endpoint) -> Option<Contract> {
     match endpoint {
-        Endpoint::View { .. } => Some((
-            Kind::Presentation,
-            clay_guest_session::capabilities::presentation_component(),
-        )),
-        Endpoint::Method { nsid } => Some((Kind::Call, nsid.clone())),
-        Endpoint::Callback { implements } => Some((Kind::Call, implements.clone())),
+        Endpoint::View { .. } => Some(Contract::Presentation),
+        Endpoint::Method { nsid } => Some(Contract::Call(nsid.clone())),
+        Endpoint::Callback { implements } => Some(Contract::Call(implements.clone())),
         Endpoint::Other(_) => None,
     }
 }

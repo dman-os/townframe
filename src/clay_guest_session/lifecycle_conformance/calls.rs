@@ -261,11 +261,26 @@ pub async fn calls_reenter_their_provider<E: Incarnations>(engine: E) {
     let lazy = |micro: &str, publication: &str, contract| {
         harness.lazy_ref(&supervisor, micro, publication, contract)
     };
-    assert!(a_to_b.0.set(lazy("b", RELAY, relay_contract())).is_ok());
-    assert!(b_to_a.0.set(lazy("a", ECHO, echo_contract())).is_ok());
-    assert!(c_to_c.0.set(lazy("c", ECHO, echo_contract())).is_ok());
-    let relay_a = lazy("a", RELAY, relay_contract());
-    let relay_c = lazy("c", RELAY, relay_contract());
+    assert!(
+        a_to_b
+            .0
+            .set(lazy("b", RELAY, Contract::Call(relay_contract())))
+            .is_ok()
+    );
+    assert!(
+        b_to_a
+            .0
+            .set(lazy("a", ECHO, Contract::Call(echo_contract())))
+            .is_ok()
+    );
+    assert!(
+        c_to_c
+            .0
+            .set(lazy("c", ECHO, Contract::Call(echo_contract())))
+            .is_ok()
+    );
+    let relay_a = lazy("a", RELAY, Contract::Call(relay_contract()));
+    let relay_c = lazy("c", RELAY, Contract::Call(relay_contract()));
     tokio::select! {
         never = supervisor.drive() => never,
         () = async {

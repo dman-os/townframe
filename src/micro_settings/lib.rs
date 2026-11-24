@@ -117,6 +117,7 @@ mod tests {
     use clay_host::Necessity;
     use clay_host::Requirement;
     use clay_host::Supervisor;
+    use clay_mdk::LexRef;
     use clay_mdk::Nsid;
     use clay_mdk::host::BoundCollection;
     use clay_mdk::host::CapabilityPublication;
@@ -206,9 +207,9 @@ mod tests {
                     .collections
                     .declare(
                         CollectionContract {
-                            id: Nsid::literal(contract::SECTIONS),
-                            key_schema: Nsid::literal(contract::SECTION_KEY_SCHEMA),
-                            value_schema: Nsid::literal(contract::SECTION_VALUE_SCHEMA),
+                            id: LexRef::literal(contract::SECTIONS),
+                            key_schema: LexRef::literal(contract::SECTION_KEY_SCHEMA),
+                            value_schema: LexRef::literal(contract::SECTION_VALUE_SCHEMA),
                         },
                         bytes_registrations(NonZeroUsize::new(8).unwrap(), [0, 0]),
                     )
@@ -244,7 +245,7 @@ mod tests {
                         CollectionBindings::new([(
                             contract::SECTIONS_BINDING.to_owned(),
                             BoundCollection::read(clay_mdk::CollectionId::minted_for(
-                                &Nsid::literal(contract::SECTIONS),
+                                &LexRef::literal(contract::SECTIONS),
                             )),
                         )]),
                         activate,

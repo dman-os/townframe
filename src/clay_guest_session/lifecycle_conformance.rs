@@ -54,6 +54,7 @@ use crate::capabilities::CapabilityLimits;
 use crate::capabilities::CapabilityPublication;
 use crate::capabilities::CapabilityRef;
 use crate::capabilities::CapabilitySession;
+use crate::capabilities::Contract;
 use crate::capabilities::DeclaredPublication;
 use crate::capabilities::InFlightCalls;
 use crate::capabilities::PublicationEndpoint;
@@ -61,7 +62,6 @@ use crate::capabilities::PublicationKind;
 use crate::capabilities::PublishedCapability;
 use crate::capabilities::RefStatus;
 use crate::capabilities::RowAttachment;
-use crate::capabilities::presentation_component;
 use crate::collections::BytesRegistrations;
 use crate::collections::CollectionSession;
 use crate::collections::bytes_registrations;
@@ -291,11 +291,11 @@ pub async fn lazy_references_activate_retain_and_release<E: Incarnations>(engine
     let harness = Harness::new(engine);
     let supervisor = harness.supervisor(false);
     let provider_id = MicroId::new("provider");
-    let lazy = |publication: &str, contract: Nsid| {
+    let lazy = |publication: &str, contract: Contract| {
         harness.lazy_ref(&supervisor, provider_id.as_str(), publication, contract)
     };
-    let echo = lazy(ECHO, echo_contract());
-    let view = lazy(PUBLICATION, presentation_component());
+    let echo = lazy(ECHO, Contract::Call(echo_contract()));
+    let view = lazy(PUBLICATION, Contract::Presentation);
     let closed = |closes: usize| {
         let mut expected = Vec::new();
         for _ in 0..closes {
@@ -370,10 +370,10 @@ pub async fn undeclared_publications_fail_initialization<E: Incarnations>(engine
     let engine = Rc::new(engine);
     let declared = ContextWorld::declared();
     let mut wrong_kind = declared.clone();
-    wrong_kind.get_mut(ECHO).unwrap().kind = PublicationKind::Presentation;
+    wrong_kind.get_mut(ECHO).unwrap().contract = Contract::Presentation;
     let mut wrong_contract = declared.clone();
     wrong_contract.get_mut(ECHO).unwrap().contract =
-        Nsid::literal("org.example.clay.test.context.echoV2");
+        Contract::Call(Nsid::literal("org.example.clay.test.context.echoV2"));
     let mut undeclared = declared;
     undeclared.remove(ECHO);
     for (publications, refusal) in [
@@ -625,7 +625,7 @@ impl<E: Incarnations> Harness<E> {
         supervisor: &Supervisor<CapabilityPublication>,
         micro: &str,
         publication: &str,
-        contract: Nsid,
+        contract: Contract,
     ) -> CapabilityRef {
         // The observer's instance, with this scenario's supervisor behind its lazy references.
         let session = CapabilitySession::new(

@@ -3,6 +3,7 @@ use clay_collection::Stamped;
 use clay_dioxus::NativeComponents;
 use clay_guest_session::capabilities::RowAttachment;
 use clay_host::StartError;
+use clay_mdk::Nsid;
 use clay_mdk::Capability;
 use clay_mdk::CollectionDecl;
 use clay_mdk::ComponentDecl;
@@ -59,8 +60,8 @@ fn sections_id() -> clay_mdk::CollectionId {
     clay_mdk::CollectionId::minted_for(&sections())
 }
 
-fn sections() -> Nsid {
-    Nsid::literal(SECTIONS)
+fn sections() -> LexRef {
+    LexRef::literal(SECTIONS)
 }
 
 /// The id a built-in micro named `micro` is installed as.
@@ -556,7 +557,7 @@ async fn a_contribution_through_a_read_only_binding_is_an_installation_error() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_declaration_outside_the_packages_authority_is_an_installation_error() {
     let (runtime, error) = refused(|sidecar| {
-        let hijack = |name: &str| Nsid::literal(&format!("org.example.dayframe.settings.{name}"));
+        let hijack = |name: &str| LexRef::literal(&format!("org.example.dayframe.settings.{name}"));
         sidecar
             .manifest
             .collection_contracts
@@ -853,10 +854,10 @@ fn probe_sidecar(
             collection_contracts: contracts
                 .iter()
                 .map(|contract| clay_mdk::CollectionContract {
-                    id: Nsid::literal(contract),
-                    selector_schema: Nsid::literal("org.example.test.selector"),
-                    key_schema: Nsid::literal("org.example.test.key"),
-                    value_schema: Nsid::literal("org.example.test.value"),
+                    id: LexRef::literal(contract),
+                    selector_schema: LexRef::literal("org.example.test.selector"),
+                    key_schema: LexRef::literal("org.example.test.key"),
+                    value_schema: LexRef::literal("org.example.test.value"),
                     write_context_schema: None,
                     offered: vec![clay_mdk::CollectionCapability::Read],
                 })
@@ -896,7 +897,7 @@ fn probe_asking<C: CollectionDecl>(
         &[],
         vec![clay_mdk::Request {
             binding: BOOK.into(),
-            contract: Nsid::literal(C::NSID),
+            contract: LexRef::literal(C::NSID),
             access: Some(access),
             necessity,
             resolution: clay_mdk::BindingResolution::Configured,
@@ -1078,7 +1079,7 @@ async fn a_widened_request_is_unresolved_until_configured_again_and_enablement_i
                         .set_binding(
                             &micro,
                             BOOK,
-                            Some(&clay_mdk::CollectionId::minted_for(&Nsid::literal(ROWS))),
+                            Some(&clay_mdk::CollectionId::minted_for(&LexRef::literal(ROWS))),
                         )
                         .await;
                 })
@@ -1116,7 +1117,7 @@ async fn a_widened_request_is_unresolved_until_configured_again_and_enablement_i
             .set_binding(
                 &micro,
                 BOOK,
-                Some(&clay_mdk::CollectionId::minted_for(&Nsid::literal(ROWS))),
+                Some(&clay_mdk::CollectionId::minted_for(&LexRef::literal(ROWS))),
             )
             .await;
         assert_eq!(activations(&mut seen, 1).await, [true]);
@@ -1381,7 +1382,7 @@ async fn the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press
             runtime.shell(),
             runtime.supervisor.activator(),
             &runtime
-                .collection(&clay_mdk::CollectionId::minted_for(&Nsid::literal(
+                .collection(&clay_mdk::CollectionId::minted_for(&LexRef::literal(
                     micro_shell_manifest::PANELS,
                 )))
                 .unwrap(),
@@ -1419,7 +1420,7 @@ async fn the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press
             runtime.shell(),
             runtime.supervisor.activator(),
             &runtime
-                .collection(&clay_mdk::CollectionId::minted_for(&Nsid::literal(
+                .collection(&clay_mdk::CollectionId::minted_for(&LexRef::literal(
                     micro_toolbar_manifest::BUTTONS,
                 )))
                 .unwrap(),
@@ -1481,7 +1482,7 @@ fn editor_sidecar() -> clay_mdk::Sidecar {
         &[SOURCES],
         vec![clay_mdk::Request {
             binding: "sources".into(),
-            contract: Nsid::literal(SOURCES),
+            contract: LexRef::literal(SOURCES),
             access: Some(clay_mdk::Access::Read),
             necessity: clay_mdk::Necessity::Required,
             resolution: clay_mdk::BindingResolution::Configured,
@@ -1606,7 +1607,7 @@ fn provider(name: &'static str, trigger: &'static str) -> (InstalledMicro, Serve
             collection_contracts: vec![],
             collection_requests: vec![clay_mdk::Request {
                 binding: "sources".into(),
-                contract: Nsid::literal(SOURCES),
+                contract: LexRef::literal(SOURCES),
                 access: Some(clay_mdk::Access::Write),
                 necessity: clay_mdk::Necessity::Optional,
                 resolution: clay_mdk::BindingResolution::Configured,
@@ -1777,7 +1778,7 @@ async fn an_untouched_declared_collection_reads_known_empty_without_starting_its
             runtime.shell(),
             runtime.supervisor.activator(),
             &runtime
-                .collection(&clay_mdk::CollectionId::minted_for(&Nsid::literal(SOURCES)))
+                .collection(&clay_mdk::CollectionId::minted_for(&LexRef::literal(SOURCES)))
                 .expect("the editor's manifest declared the collection"),
         )
         .unwrap();
@@ -1848,7 +1849,7 @@ fn sheet_micro() -> InstalledMicro {
         collection_contracts: vec![],
         collection_requests: vec![clay_mdk::Request {
             binding: "panels".into(),
-            contract: Nsid::literal(micro_shell_manifest::PANELS),
+            contract: LexRef::literal(micro_shell_manifest::PANELS),
             access: Some(clay_mdk::Access::Write),
             necessity: clay_mdk::Necessity::Required,
             resolution: clay_mdk::BindingResolution::Configured,

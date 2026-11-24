@@ -34,7 +34,7 @@ fn canonical_manifest() -> MicroManifest {
         ]),
         requires: vec![Request {
             binding: "shelf".into(),
-            contract: shelf(),
+            contract: shelf().into(),
             access: None,
             necessity: Necessity::Optional,
             resolution: BindingResolution::Configured,
@@ -52,16 +52,16 @@ fn canonical_manifest() -> MicroManifest {
             }],
         }],
         collection_contracts: vec![CollectionContract {
-            id: nsid("tallies"),
-            selector_schema: nsid("tallySelector"),
-            key_schema: nsid("tallyKey"),
-            value_schema: nsid("tally"),
+            id: nsid("tallies").into(),
+            selector_schema: nsid("tallySelector").into(),
+            key_schema: nsid("tallyKey").into(),
+            value_schema: nsid("tally").into(),
             write_context_schema: None,
             offered: vec![CollectionCapability::Read, CollectionCapability::Register],
         }],
         collection_requests: vec![Request {
             binding: "tally-book".into(),
-            contract: nsid("tallies"),
+            contract: nsid("tallies").into(),
             access: Some(Access::Write),
             necessity: Necessity::Required,
             resolution: BindingResolution::Configured,
@@ -351,7 +351,7 @@ fn micro_id_text_form_is_a_did_slash_a_plug_name() {
 fn request_defaults_are_off_the_wire() {
     let request = Request {
         binding: "shelf".into(),
-        contract: shelf(),
+        contract: shelf().into(),
         access: Some(Access::Read),
         necessity: Necessity::Required,
         resolution: BindingResolution::Configured,
@@ -418,7 +418,7 @@ fn sidecar_without_authority_omits_it_and_roundtrips() {
 fn a_contract_may_reference_a_foreign_schema_it_requests() {
     let foreign = Nsid::literal("org.other.tally.value");
     let mut sidecar = canonical_sidecar();
-    sidecar.manifest.collection_contracts[0].value_schema = foreign.clone();
+    sidecar.manifest.collection_contracts[0].value_schema = foreign.clone().into();
     assert_eq!(
         sidecar.validate().unwrap_err(),
         "value schema org.other.tally.value is outside the package's authority \
@@ -426,7 +426,7 @@ fn a_contract_may_reference_a_foreign_schema_it_requests() {
     );
     sidecar.manifest.requires.push(Request {
         binding: "tally-value".into(),
-        contract: foreign.clone(),
+        contract: foreign.clone().into(),
         access: None,
         necessity: Necessity::Required,
         resolution: BindingResolution::Configured,
@@ -436,7 +436,7 @@ fn a_contract_may_reference_a_foreign_schema_it_requests() {
     // The write-context schema is held to the same rule, and a request for another NSID does
     // not stand in for it.
     let context = Nsid::literal("org.other.tally.context");
-    sidecar.manifest.collection_contracts[0].write_context_schema = Some(context.clone());
+    sidecar.manifest.collection_contracts[0].write_context_schema = Some(context.clone().into());
     assert!(
         sidecar
             .validate()
@@ -445,7 +445,7 @@ fn a_contract_may_reference_a_foreign_schema_it_requests() {
     );
     sidecar.manifest.collection_requests.push(Request {
         binding: "tally-context".into(),
-        contract: context,
+        contract: context.into(),
         access: Some(Access::Read),
         necessity: Necessity::Optional,
         resolution: BindingResolution::Configured,
@@ -469,7 +469,7 @@ fn a_package_declares_only_nsids_under_its_authority() {
     canonical_sidecar().validate().unwrap();
     // Requests may name anyone's NSIDs: only declarations are held to the authority.
     let mut foreign_request = canonical_sidecar();
-    foreign_request.manifest.collection_requests[0].contract = Nsid::literal("org.other.tallies");
+    foreign_request.manifest.collection_requests[0].contract = LexRef::literal("org.other.tallies");
     foreign_request.validate().unwrap();
     // Implementing a contract is not owning it (ADR 028 §5): a callback may implement, and a
     // method may be registered under, any NSID, while a collection contract the package
@@ -493,7 +493,7 @@ fn a_package_declares_only_nsids_under_its_authority() {
     let cases: &[(Mutation, &str)] = &[
         (
             |sidecar| {
-                sidecar.manifest.collection_contracts[0].id = Nsid::literal("org.other.tallies")
+                sidecar.manifest.collection_contracts[0].id = LexRef::literal("org.other.tallies")
             },
             "collection contract org.other.tallies is outside the package's authority \
              org.example.test.counter",
@@ -501,7 +501,7 @@ fn a_package_declares_only_nsids_under_its_authority() {
         (
             |sidecar| {
                 sidecar.manifest.collection_contracts[0].write_context_schema =
-                    Some(Nsid::literal("org.example.test.counterfeit.context"))
+                    Some(LexRef::literal("org.example.test.counterfeit.context"))
             },
             "write-context schema org.example.test.counterfeit.context is outside the package's \
              authority org.example.test.counter",
@@ -636,4 +636,71 @@ mod builder {
         );
         assert_eq!(bytes[..3], [0xd9, 0xa7, 0xf8]);
     }
+}
+
+// ── Lexicon documents ──
+
+fn lexicon(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).expect("a shipped Lexicon document is JSON")
+}
+
+/// The datum Lexicon compiler's validator for the def `def` of `document`.
+fn def_validator(
+    document: &serde_json::Value,
+    def: &str,
+) -> big_cabinet_core::datum::PositionValidator {
+    big_cabinet_core::datum::compile_position(
+        document,
+        &[],
+        &serde_json::json!({"type": "ref", "ref": format!("#{def}")}),
+        def,
+    )
+    .unwrap_or_else(|error| panic!("{def}: {error}"))
+}
+
+/// The manifest's Lexicon is admitted, names itself by [`MANIFEST_NSID`], and states the
+/// manifest the Rust types write: the canonical manifest conforms and one missing a member does
+/// not. Each endpoint kind's `$type` names a def of the same file.
+#[test]
+fn the_manifest_lexicon_admits_and_states_the_wire() {
+    let document = lexicon(MANIFEST_LEXICON);
+    assert_eq!(document["id"], MANIFEST_NSID);
+    let main = def_validator(&document, "main");
+    let mut wire = serde_json::to_value(canonical_manifest()).unwrap();
+    let violations = main.violations(&wire);
+    assert!(violations.is_empty(), "{violations:#?}");
+
+    wire.as_object_mut().unwrap().remove("endpoints");
+    assert!(!main.is_valid(&wire), "`endpoints` is required");
+
+    let endpoints = serde_json::to_value(canonical_manifest().endpoints).unwrap();
+    for (name, endpoint) in endpoints.as_object().unwrap() {
+        let (nsid, def) = endpoint["$type"]
+            .as_str()
+            .and_then(|tag| tag.split_once('#'))
+            .unwrap_or_else(|| panic!("{name}: an endpoint is tagged `nsid#def`"));
+        assert_eq!(nsid, MANIFEST_NSID);
+        let mut member = endpoint.clone();
+        member.as_object_mut().unwrap().remove("$type");
+        let violations = def_validator(&document, def).violations(&member);
+        assert!(violations.is_empty(), "{name}: {violations:#?}");
+    }
+}
+
+/// [`SHELL_ROOTS`] is `nsid#def` of a `token` in the shell Lexicon, whose sibling `rootKey` and
+/// `root` defs are the row key and value a `RootRow` is written as.
+#[test]
+fn the_shell_roots_collection_is_a_token_in_the_shell_lexicon() {
+    let document = lexicon(SHELL_LEXICON);
+    let roots = LexRef::literal(SHELL_ROOTS);
+    assert_eq!(document["id"], roots.nsid().as_str());
+    assert_eq!(document["defs"][roots.def()]["type"], "token");
+    assert_eq!(document["defs"]["rootKey"]["type"], "string");
+    let root = def_validator(&document, "root");
+    assert!(root.is_valid(&serde_json::json!({"title": "Home", "content": {}})));
+    assert!(
+        !root.is_valid(&serde_json::json!({"title": "Home"})),
+        "`content` is required"
+    );
+    def_validator(&document, "rootKey");
 }
