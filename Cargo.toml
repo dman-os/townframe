@@ -373,6 +373,7 @@ clap = "4.5"
 clap_complete = "4.5"
 clap_mangen = "0.3"
 clap-markdown = "0.1"
+comfy-table = "7.2"
 shadow-rs = { version = "2", default-features = false }
 
 # 

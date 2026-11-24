@@ -791,7 +791,7 @@ async fn assert_new_with_shares_commits_document(
     assert_eq!(list().await, before);
 }
 
-/// An intxt whose data cannot be read, such as one made before D70 with no index document, is
+/// An intxt whose data cannot be read, such as a drawer with no index document, is
 /// listed as unreadable instead of failing `list` for every other intxt, is only counted by
 /// `status`, and can still be dropped, which is how it is cleaned up.
 #[tokio::test(flavor = "multi_thread")]
@@ -812,7 +812,7 @@ async fn an_unreadable_intxt_is_listed_and_dropped_without_failing_the_others() 
             .create(&mut Vec::new(), "Stale", None, None)
             .await
             .unwrap();
-        // What an intxt made before D70 looks like: a marked drawer with no index pointer.
+        // A marked drawer with no index pointer, as a `createIntxt` that did not finish leaves.
         operator(client)
             .write_datums(
                 &stale,
@@ -832,9 +832,9 @@ async fn an_unreadable_intxt_is_listed_and_dropped_without_failing_the_others() 
         };
 
         let listed = run("list").await;
-        assert!(listed.contains("\"Readable\""), "{listed}");
+        assert!(listed.contains("Readable"), "{listed}");
         assert!(
-            listed.contains("(unreadable: it has no index document"),
+            listed.contains("(unreadable: it has no index document)"),
             "{listed}"
         );
         assert!(listed.contains(&format!("day x intxt drop {stale}")), "{listed}");
@@ -846,7 +846,7 @@ async fn an_unreadable_intxt_is_listed_and_dropped_without_failing_the_others() 
         let dropped = run("drop").await;
         assert!(dropped.contains("(unreadable)"), "{dropped}");
         let listed = run("list").await;
-        assert!(listed.contains("\"Readable\""), "{listed}");
+        assert!(listed.contains("Readable"), "{listed}");
         assert!(!listed.contains("unreadable"), "{listed}");
     })
     .await;
@@ -913,12 +913,10 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
         };
 
         let listed_before_add = list().await;
+        // The intxt's row: its title, then no commits, refs or sessions yet.
         assert!(
-            listed_before_add.contains("\"Two files\""),
-            "{listed_before_add}"
-        );
-        assert!(
-            listed_before_add.contains("commits: 0, refs: 0, sessions: 0"),
+            listed_before_add.lines().any(|line| line.contains("Two files")
+                && line.split_whitespace().rev().take(3).all(|count| count == "0")),
             "{listed_before_add}"
         );
         let (tip, merge_base) = (rev(&repo, "feat/x"), rev(&repo, "main"));
@@ -1072,7 +1070,7 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
         assert!(restored.contains("\"Two files\""), "{restored}");
         let listed_after_restore = list().await;
         assert!(
-            listed_after_restore.contains("\"Two files\""),
+            listed_after_restore.contains("Two files"),
             "{listed_after_restore}"
         );
 
