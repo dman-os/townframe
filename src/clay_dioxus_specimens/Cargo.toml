@@ -6,6 +6,9 @@ rust-version.workspace = true
 
 [lib]
 path = "lib.rs"
+# The crate root is the package root, so the `tests` module would otherwise be auto-discovered as
+# a Cargo integration-test target.
+autotests = false
 
 [lints]
 workspace = true
@@ -19,3 +22,11 @@ clay_dioxus_kit = { workspace = true }
 # Spelled out (not `dioxus.workspace = true`) so default features stay off, like the kit: the
 # wasip3 guest build has no renderer, launcher or document integration to link.
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+
+[dev-dependencies]
+#
+# internal
+clay_surface.workspace = true
+#
+# external
+dioxus-core.workspace = true

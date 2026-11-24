@@ -968,6 +968,11 @@ fn benign_link_and_style_values_are_admitted() {
         (
             "style",
             None,
+            text("outline: 2px solid var(--ct-color-focus); outline-offset: 2px;"),
+        ),
+        (
+            "style",
+            None,
             text("position:sticky;top:0;--x: calc(1px + 2px);"),
         ),
         ("width", Some("style"), text("calc(100% - 4px)")),

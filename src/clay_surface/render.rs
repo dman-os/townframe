@@ -258,7 +258,10 @@ pub(crate) fn static_attribute(
             "box-shadow", "transform", "transform-origin", "transition", "object-fit",
             // Containment and stacking only narrow what an element's layout and paint can
             // reach; the Pierre CodeView port sets both on its scroller, slab and buffers.
-            "contain", "isolation"
+            "contain", "isolation",
+            // Outlines are how focus rings are drawn (INTERACTION-002); they paint around the
+            // box and take no url, so they fetch nothing.
+            "outline", "outline-color", "outline-width", "outline-style", "outline-offset"
         ],
         Some("http://www.w3.org/1999/xlink") => Some("http://www.w3.org/1999/xlink") => ["href"]
     ))

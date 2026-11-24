@@ -1,8 +1,9 @@
 version = 1
 role = "foundation"
-dependency_reason = "the specimen and foundation pages render in the native showcase and in wasm guest micros (the theme lab), so they sit beside the component kit: Dioxus and the kit only, never a backend or a renderer"
+dependency_reason = "the specimen and foundation pages render in the native showcase and in wasm guest micros (the theme lab), so they sit beside the component kit: Dioxus and the kit only, never a backend or a renderer. clay_surface is a dev-dependency only: a test admits every page through a Clay surface, as the theme lab's mount does"
 allowed_dependencies = [
     "clay_dioxus_kit",
+    "clay_surface",
 ]
 # Every public prop is a Dioxus type (`Element`, `MountedData` handles): a Dioxus library.
 allow_external_api_types = true
