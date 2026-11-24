@@ -91,6 +91,11 @@ impl Spec {
         format!("{}.emit", self.authority)
     }
 
+    /// Served by the guest: panics, which traps the guest.
+    fn panic(&self) -> String {
+        format!("{}.panic", self.authority)
+    }
+
     /// Implemented by the nodule but not served by the guest, which answers 404 for it.
     fn absent(&self) -> String {
         format!("{}.absent", self.authority)
@@ -224,6 +229,7 @@ fn cartridge_requiring(
         spec.ingest(),
         spec.emit(),
         spec.fetch(),
+        spec.panic(),
     ];
     let settings = format!("{}.settings", spec.authority);
     // Each routine holds its own capability, built from what it uses: the settings kind it
@@ -799,6 +805,39 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
             .await
             .unwrap()["input"],
         json!({ "n": 2 })
+    );
+    shutdown(node, stop).await;
+}
+
+#[tokio::test]
+async fn a_trapping_guest_answers_with_a_fault_naming_its_frames_and_component() {
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let spec = caller();
+    put(&node, &bytes).await;
+    admit(&node, cartridge(&spec, &bytes, &[])).await;
+    assert_eq!(
+        set_enabled(&node, &spec, true).await.readiness,
+        Readiness::Ready
+    );
+
+    let Err(DispatchError::Provider { status: 502, body }) =
+        invoke(&node, &spec.panic(), json!({}), Default::default()).await
+    else {
+        panic!("a trapping guest answers a bad gateway");
+    };
+    assert_eq!(body["error"], "GuestFault");
+    let fault: big_nodule_wasm::GuestFault = serde_json::from_value(body["fault"].clone()).unwrap();
+    assert_eq!(fault.kind, big_nodule_wasm::FaultKind::Trap, "{fault:?}");
+    assert_eq!(
+        fault.component_hash.to_string(),
+        big_blobs_core::BlobId::new(big_cartridges_core::Digest::of(&bytes).0).to_string()
+    );
+    assert!(
+        fault.frames.iter().any(|frame| frame.func_name.is_some()),
+        "the guest keeps its name section, so a frame is named: {:?}",
+        fault.frames
     );
     shutdown(node, stop).await;
 }
