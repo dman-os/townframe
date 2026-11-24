@@ -24,6 +24,7 @@ use big_blobs_core::ReadBlob;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::DocId;
+use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::MultibaseKey;
@@ -73,6 +74,7 @@ use std::collections::VecDeque;
 pub const NODE_VAR: &str = "INTXT_WEB_NODE";
 pub const DOC_CAP_VAR: &str = "INTXT_WEB_DOC_CAP";
 pub const BLOB_CAP_VAR: &str = "INTXT_WEB_BLOB_CAP";
+pub const DISPATCH_CAP_VAR: &str = "INTXT_WEB_DISPATCH_CAP";
 
 /// Where the node is and what the viewer may read there.
 ///
@@ -87,6 +89,12 @@ pub struct NodeConfig {
     pub node: String,
     pub doc_cap: CapId,
     pub blob_cap: CapId,
+    /// The dispatch capability every request is presented with as its `Authorization: Bearer`.
+    /// The node's TCP edge admits no anonymous request, and dispatch admits a call only for a
+    /// bearer whose scope names the method, so the scope of this one is `readDatums`,
+    /// `pollDatums` and `blobs.read`. The doc and blob capabilities above are the method
+    /// parameters that say what those calls may reach.
+    pub bearer: CapId,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -105,14 +113,18 @@ impl NodeConfig {
         let node = var(NODE_VAR).filter(|value| !value.is_empty());
         let doc = var(DOC_CAP_VAR).filter(|value| !value.is_empty());
         let blob = var(BLOB_CAP_VAR).filter(|value| !value.is_empty());
-        let (Some(node), Some(doc), Some(blob)) = (node.clone(), doc.clone(), blob.clone()) else {
-            if node.is_none() && doc.is_none() && blob.is_none() {
+        let bearer = var(DISPATCH_CAP_VAR).filter(|value| !value.is_empty());
+        let (Some(node), Some(doc), Some(blob), Some(bearer)) =
+            (node.clone(), doc.clone(), blob.clone(), bearer.clone())
+        else {
+            if node.is_none() && doc.is_none() && blob.is_none() && bearer.is_none() {
                 return Ok(None);
             }
             let missing = [
                 (NODE_VAR, node.is_none()),
                 (DOC_CAP_VAR, doc.is_none()),
                 (BLOB_CAP_VAR, blob.is_none()),
+                (DISPATCH_CAP_VAR, bearer.is_none()),
             ]
             .into_iter()
             .filter_map(|(name, absent)| absent.then_some(name))
@@ -131,6 +143,7 @@ impl NodeConfig {
             node,
             doc_cap: cap(DOC_CAP_VAR, doc)?,
             blob_cap: cap(BLOB_CAP_VAR, blob)?,
+            bearer: cap(DISPATCH_CAP_VAR, bearer)?,
         }))
     }
 }
@@ -219,13 +232,17 @@ impl<H: HttpTransport> NodeSource<H> {
         Self { transport, config }
     }
 
+    fn metadata(&self, range: Option<ByteRange>) -> HttpMetadata {
+        HttpMetadata {
+            authorization: Some(Authorization::identity(self.config.bearer).header_value()),
+            idempotency_key: None,
+            range,
+        }
+    }
+
     async fn call<M: Unary>(&self, input: M) -> Result<M::Output, Fault<M::Error>> {
         let context = RequestContext::root();
-        let metadata = HttpMetadata {
-            authorization: None,
-            idempotency_key: None,
-            range: None,
-        };
+        let metadata = self.metadata(None);
         let request = encode_request(M::XRPC, &context, &metadata, &input)
             .expect("a typed method's request encodes");
         let response = self
@@ -367,14 +384,10 @@ impl<H: HttpTransport> NodeSource<H> {
             return Ok(Some(Vec::new()));
         }
         let context = RequestContext::root();
-        let metadata = HttpMetadata {
-            authorization: None,
-            idempotency_key: None,
-            range: Some(ByteRange::Between {
-                start: 0,
-                end: wanted - 1,
-            }),
-        };
+        let metadata = self.metadata(Some(ByteRange::Between {
+            start: 0,
+            end: wanted - 1,
+        }));
         let input = ReadBlob {
             capability: self.config.blob_cap,
             blob_id,

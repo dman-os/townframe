@@ -139,7 +139,7 @@ fn Commit(commit: CommitView) -> Element {
     rsx! {
         div { class: "intxt-commit",
             p { class: "intxt-muted text-text-muted",
-                code { "{commit.sha}" }
+                code { "{commit.sha.get(..12).unwrap_or(&commit.sha)}" }
                 " {commit.author}, {commit.date}"
             }
             p { class: "intxt-commit-message", "{commit.message}" }
@@ -254,7 +254,7 @@ pub fn IndexPage(origin: Origin) -> Element {
                 match origin {
                     Origin::Fixture { example_path } => rsx! {
                         p {
-                            "No node is configured (INTXT_WEB_NODE, INTXT_WEB_DOC_CAP and INTXT_WEB_BLOB_CAP are unset), so every page is the built-in fixture. Example: "
+                            "No node is configured (INTXT_WEB_NODE and its capabilities are unset), so every page is the built-in fixture. Example: "
                             a { href: "{example_path}", "{example_path}" }
                         }
                     },

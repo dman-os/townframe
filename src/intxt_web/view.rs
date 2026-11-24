@@ -274,12 +274,12 @@ fn entry_view(entry: &EntryDatum<'_>) -> EntryView {
             let name = slot.split_once('/').map_or(slot.as_str(), |(_, name)| name);
             let mut refs = vec![EntryRef {
                 name: "tip",
-                value: short(&git_ref.target).to_owned(),
+                value: short(sha_of(&git_ref.target)).to_owned(),
             }];
             if let Some(base) = git_ref.base.as_ref().or(entry.base.as_ref()) {
                 refs.push(EntryRef {
                     name: "base",
-                    value: short(base).to_owned(),
+                    value: short(sha_of(base)).to_owned(),
                 });
             }
             row(EntryKind::GitRef, name.to_owned(), refs)

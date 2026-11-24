@@ -254,6 +254,13 @@ impl HttpTransport for Wire {
                 message: "connection refused".to_owned(),
             });
         }
+        // The node's TCP edge refuses a request with no bearer, so every call carries the
+        // dispatch capability as `<id>.<id>`.
+        let bearer = request.headers.get("authorization").expect("a bearer");
+        assert_eq!(
+            bearer.to_str().unwrap(),
+            format!("Bearer {0}.{0}", Authorization::id_text(cap(3)))
+        );
         let target = request.path.strip_prefix("xrpc/").expect("an xrpc path");
         let (nsid, query) = target.split_once('?').unwrap_or((target, ""));
         self.calls.borrow_mut().push(nsid.to_owned());
@@ -384,6 +391,7 @@ fn source(node: &Rc<FakeNode>) -> NodeSource<Wire> {
             node: "http://127.0.0.1:1".to_owned(),
             doc_cap: cap(1),
             blob_cap: cap(2),
+            bearer: cap(3),
         },
     )
 }
@@ -554,6 +562,7 @@ fn the_environment_names_a_node_the_fixture_or_a_mistake() {
         (NODE_VAR, "http://127.0.0.1:8080"),
         (DOC_CAP_VAR, cap),
         (BLOB_CAP_VAR, cap),
+        (DISPATCH_CAP_VAR, cap),
     ]))
     .unwrap()
     .unwrap();
@@ -561,14 +570,15 @@ fn the_environment_names_a_node_the_fixture_or_a_mistake() {
     assert_eq!(
         NodeConfig::from_env(env(&[(NODE_VAR, "http://x"), (BLOB_CAP_VAR, cap)])),
         Err(ConfigError::Incomplete {
-            missing: vec![DOC_CAP_VAR]
+            missing: vec![DOC_CAP_VAR, DISPATCH_CAP_VAR]
         })
     );
     assert!(matches!(
         NodeConfig::from_env(env(&[
             (NODE_VAR, "http://x"),
             (DOC_CAP_VAR, "nope"),
-            (BLOB_CAP_VAR, cap)
+            (BLOB_CAP_VAR, cap),
+            (DISPATCH_CAP_VAR, cap)
         ])),
         Err(ConfigError::BadCapability {
             var: DOC_CAP_VAR,
