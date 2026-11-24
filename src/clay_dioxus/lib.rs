@@ -9,23 +9,34 @@ use clay_host::Host;
 use clay_host::Instance;
 use clay_host::Mount;
 use clay_host::RendererRegistry;
+use clay_surface::ELEMENT_REPLY;
+use clay_surface::ElementAction;
+use clay_surface::ElementCommand;
+use clay_surface::ElementHandles;
+use clay_surface::ElementRead;
 use clay_surface::EventResponse;
 use clay_surface::Mutation;
+use clay_surface::NodeId;
 use clay_surface::PresentationError;
+use clay_surface::ScrollAlign;
+use clay_surface::ScrollBehavior;
 use clay_surface::SurfaceEventHandler;
 use clay_surface::SurfaceTree;
 use dioxus::prelude::*;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::rc::Weak;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 type Renderer = Rc<dyn Fn(&Arc<Mount>) -> Element>;
+type CommandReceiver = mpsc::UnboundedReceiver<(NodeId, ElementCommand)>;
 
 /// Handle through which a mounted surface commits wire batches into its retained [`SurfaceTree`].
 ///
@@ -41,6 +52,17 @@ pub struct SurfaceWriter {
     ancestor_surfaces: Vec<Arc<AtomicBool>>,
     revoked: Arc<AtomicBool>,
     revisions: watch::Sender<u64>,
+    /// Element commands the guest sent, drained by the mounted surface on the renderer's thread
+    /// (the host handles they act on are not `Send`).
+    commands: mpsc::UnboundedSender<(NodeId, ElementCommand)>,
+    command_receiver: Arc<Mutex<Option<CommandReceiver>>>,
+    /// Guest element ids whose `mounted` event the renderer has delivered: the only elements a
+    /// command may address. Entries leave when the tree retires the element (see
+    /// [`Self::retire_elements`]).
+    mounted: Arc<Mutex<BTreeSet<NodeId>>>,
+    /// Elements the tree retired whose host handle the renderer has not yet dropped; drained by
+    /// the mounted surface before each render. Bounded by the element id space.
+    retired: Arc<Mutex<BTreeSet<NodeId>>>,
 }
 
 impl SurfaceWriter {
@@ -49,6 +71,7 @@ impl SurfaceWriter {
     /// builds one directly to feed a sink it holds.
     pub fn new(mount: Arc<Mount>) -> Self {
         let (revisions, _) = watch::channel(0);
+        let (commands, command_receiver) = mpsc::unbounded_channel();
         Self {
             mount,
             tree: Arc::new(Mutex::new(SurfaceTree::new())),
@@ -56,6 +79,28 @@ impl SurfaceWriter {
             ancestor_surfaces: Vec::new(),
             revoked: Arc::new(AtomicBool::new(false)),
             revisions,
+            commands,
+            command_receiver: Arc::new(Mutex::new(Some(command_receiver))),
+            mounted: Arc::default(),
+            retired: Arc::default(),
+        }
+    }
+
+    /// Move the elements `tree` retired out of the mounted set and queue their host handles for
+    /// release. Dioxus recycles element ids, so an entry kept past its element would let a command
+    /// hit a detached node, and a virtualized list would grow the set without bound.
+    fn retire_elements(&self, tree: &mut SurfaceTree<ComponentRef>) {
+        let retired = tree.take_retired_elements();
+        if retired.is_empty() {
+            return;
+        }
+        let mut mounted = self.mounted.lock().unwrap();
+        let mut handles = self.retired.lock().unwrap();
+        for element in retired {
+            mounted.remove(&element);
+            // Also for an element that never announced `mounted`: its `mounted` event may have
+            // been dropped as stale after the host captured the handle.
+            handles.insert(element);
         }
     }
 
@@ -78,6 +123,7 @@ impl SurfaceWriter {
         if !self.is_live() {
             if !self.revoked.swap(true, Ordering::AcqRel) {
                 tree.clear();
+                self.retire_elements(&mut tree);
                 self.revisions.send_replace(tree.revision());
             }
             return Err(PresentationError::Revoked);
@@ -86,6 +132,7 @@ impl SurfaceWriter {
         if result.is_err() {
             self.revoked.store(true, Ordering::Release);
         }
+        self.retire_elements(&mut tree);
         self.revisions.send_replace(tree.revision());
         result
     }
@@ -94,6 +141,7 @@ impl SurfaceWriter {
         let mut tree = self.tree.lock().unwrap();
         if !self.revoked.swap(true, Ordering::AcqRel) {
             tree.clear();
+            self.retire_elements(&mut tree);
             self.revisions.send_replace(tree.revision());
         }
     }
@@ -112,6 +160,86 @@ impl clay_surface::SurfaceSink<ComponentRef> for SurfaceWriter {
 
     fn withdraw(&self) {
         self.withdraw();
+    }
+
+    fn element_command(
+        &self,
+        element: NodeId,
+        command: ElementCommand,
+    ) -> Result<(), PresentationError> {
+        if !self.is_live() {
+            return Err(PresentationError::Revoked);
+        }
+        if !self.mounted.lock().unwrap().contains(&element) {
+            return Err(PresentationError::InvalidBatch(format!(
+                "element {element} has not announced mounted"
+            )));
+        }
+        // The channel is the ordering mechanism: commands are drained in send order by one task
+        // (see `MountedSurface`), which is what makes them apply in issue order.
+        self.commands
+            .send((element, command))
+            .map_err(|_| PresentationError::Revoked)
+    }
+}
+
+/// Run one element command against the element's host handle and return the value of its reply:
+/// `null` for the actions that answer nothing, the measurement for a read. A failure is the
+/// message of the `MountedError` the renderer returned (hosts such as Blitz answer
+/// `NotSupported` for geometry they cannot measure), which the guest surfaces as a
+/// `MountedError` of its own.
+async fn run_element_action(
+    mounted: &dioxus_html::MountedData,
+    action: ElementAction,
+) -> Result<serde_json::Value, String> {
+    use dioxus_html::geometry::PixelsVector2D;
+    let behavior = |behavior| match behavior {
+        ScrollBehavior::Instant => dioxus_html::ScrollBehavior::Instant,
+        ScrollBehavior::Smooth => dioxus_html::ScrollBehavior::Smooth,
+    };
+    let align = |align| match align {
+        ScrollAlign::Start => dioxus_html::ScrollLogicalPosition::Start,
+        ScrollAlign::Center => dioxus_html::ScrollLogicalPosition::Center,
+        ScrollAlign::End => dioxus_html::ScrollLogicalPosition::End,
+        ScrollAlign::Nearest => dioxus_html::ScrollLogicalPosition::Nearest,
+    };
+    let failed = |error: dioxus_html::MountedError| error.to_string();
+    let unit = |result: dioxus_html::MountedResult<()>| {
+        result.map(|()| serde_json::Value::Null).map_err(failed)
+    };
+    match action {
+        ElementAction::Scroll(to) => unit(
+            mounted
+                .scroll(PixelsVector2D::new(to.left, to.top), behavior(to.behavior))
+                .await,
+        ),
+        ElementAction::ScrollIntoView(view) => unit(
+            mounted
+                .scroll_to_with_options(dioxus_html::ScrollToOptions {
+                    behavior: behavior(view.behavior),
+                    vertical: align(view.vertical),
+                    horizontal: align(view.horizontal),
+                })
+                .await,
+        ),
+        ElementAction::SetFocus(focus) => unit(mounted.set_focus(focus).await),
+        ElementAction::Read(what) => Ok(match what {
+            ElementRead::ClientRect => {
+                let rect = mounted.get_client_rect().await.map_err(failed)?;
+                serde_json::json!({
+                    "x": rect.origin.x, "y": rect.origin.y,
+                    "width": rect.size.width, "height": rect.size.height,
+                })
+            }
+            ElementRead::ScrollOffset => {
+                let offset = mounted.get_scroll_offset().await.map_err(failed)?;
+                serde_json::json!({ "x": offset.x, "y": offset.y })
+            }
+            ElementRead::ScrollSize => {
+                let size = mounted.get_scroll_size().await.map_err(failed)?;
+                serde_json::json!({ "width": size.width, "height": size.height })
+            }
+        }),
     }
 }
 
@@ -352,8 +480,71 @@ fn MountedComponent(
     // only after the close returns, so a render in that window finds the mount live and the
     // renderer gone: it shows what a withdrawn component shows.
     match render {
-        Some(render) => render(&mount),
+        Some(render) => rsx! { NativeMount { render, mount } },
         None => rsx! { p { "Component withdrawn." } },
+    }
+}
+
+/// What one mount's render scope is made of. Equal while it is the same renderer and the same
+/// mount, so a `MountedComponent` re-render (its liveness flipping, say) does not re-run the
+/// micro's render.
+#[derive(Props, Clone)]
+struct RenderedMountProps {
+    render: Renderer,
+    mount: Arc<Mount>,
+}
+
+impl PartialEq for RenderedMountProps {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.render, &other.render) && Arc::ptr_eq(&self.mount, &other.mount)
+    }
+}
+
+/// The scope a micro's render closure runs in, one per mount, like one instance of a custom
+/// element: the hooks the closure calls are this mount's own, and nothing shares them with
+/// another mount of the same publication. Being its own component, those hooks also run in a
+/// fixed order, unlike in `MountedComponent`, which returns early while the mount is withdrawn.
+#[expect(non_snake_case, reason = "Dioxus component naming")]
+fn RenderedMount(props: RenderedMountProps) -> Element {
+    (props.render)(&props.mount)
+}
+
+/// Runs the element commands a surface's guest sent, one at a time and in the order issued, and
+/// answers each with an `element-reply` event (see the ordering contract in `MountedSurface`).
+async fn drain_element_commands(
+    session: Option<Rc<SurfaceSession>>,
+    writer: SurfaceWriter,
+    handles: ElementHandles,
+    revision: Signal<u64>,
+) {
+    let Some(session) = session else { return };
+    let mut commands = writer
+        .command_receiver
+        .lock()
+        .unwrap()
+        .take()
+        .expect("one command drain per surface writer");
+    let dispatch = session.handler();
+    while let Some((element, command)) = commands.recv().await {
+        // A command can race the removal of its element, which dropped the handle.
+        let outcome = match handles.get(element) {
+            Some(mounted) => run_element_action(&mounted, command.action).await,
+            None => Err("element is not mounted".to_owned()),
+        };
+        let data_json = match outcome {
+            Ok(value) => serde_json::json!({ "request": command.request, "value": value }),
+            Err(error) => serde_json::json!({ "request": command.request, "error": error }),
+        }
+        .to_string();
+        dispatch(clay_surface::Event {
+            revision: writer.revision(),
+            element,
+            name: ELEMENT_REPLY.to_owned(),
+            bubbles: false,
+            data_json,
+        });
+        let mut rev = revision;
+        rev.set(writer.revision());
     }
 }
 
@@ -398,6 +589,29 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
         drop(session_for_drop);
     });
 
+    // Element commands the guest sent run here, in a spawned task on the renderer's thread and
+    // never inside the event dispatch: a Blitz handler runs with the document borrowed, and a
+    // geometry read that borrows it again panics. Ordering contract: the task drains one queue,
+    // so the commands a guest issued while handling an event run in the order it issued them,
+    // and only after that dispatch has returned, i.e. after its mutations were applied. Every
+    // command is answered, `Ok` or `Err`, by an `element-reply` event through the raw session
+    // handler: a reply is not an input event and must not be dropped as stale.
+    let handles = use_hook(ElementHandles::default);
+    let command_session = session.as_ref().ok().cloned();
+    let command_writer = writer.clone();
+    let command_handles = handles.clone();
+    use_future(move || {
+        drain_element_commands(
+            command_session.clone(),
+            command_writer.clone(),
+            command_handles.clone(),
+            revision,
+        )
+    });
+    // Drop the host handles of elements the tree retired since the last render, before this
+    // render can project (and so mount) a new element under a recycled id.
+    handles.remove(std::mem::take(&mut *writer.retired.lock().unwrap()));
+
     let _current_revision = revision();
     let session = match session {
         Err(error) => return rsx! { p { "Component unavailable: {error}" } },
@@ -416,18 +630,132 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
             rev.set(current_revision);
             return EventResponse::default();
         }
+        if event.name == "mounted" {
+            // Under the tree lock, so a removal applied by another thread between the revision
+            // check above and this insert cannot leave a retired id marked mounted.
+            let tree = writer_for_event.tree.lock().unwrap();
+            if tree.revision() != current_revision {
+                return EventResponse::default();
+            }
+            writer_for_event
+                .mounted
+                .lock()
+                .unwrap()
+                .insert(event.element);
+        }
         let response = dispatch(event);
         let mut rev = revision;
         rev.set(writer_for_event.revision());
         response
     });
     let tree = writer.tree.lock().unwrap();
-    tree.render(&handler, &|reference| {
-        rsx! {
-            ComponentMount { owner: owner.clone(), reference: *reference }
-        }
-    })
+    // A presentation mounted under another guest's surface is a child: its box stops bubbling.
+    let nested = !path.surfaces.is_empty();
+    let content = tree.render(
+        &handler,
+        &|reference| {
+            rsx! {
+                ComponentMount { owner: owner.clone(), reference: *reference }
+            }
+        },
+        &handles,
+        nested,
+    );
+    rsx! {
+        ShadowMount { sheet: tree.stylesheet().to_owned(), {content} }
+    }
 }
+
+/// The root every mount renders into, a wasm guest's surface and a natively linked micro's
+/// alike, so no micro puts a `<style>` element into the host document (a CSP without
+/// `'unsafe-inline'` in `style-src-elem`, the web shell's, refuses one) and every micro gets the
+/// same cascade.
+///
+/// `data-dioxus-shadow` asks the Dioxus interpreter to attach a shadow root to the element and
+/// place its children inside, so a micro's stylesheet and `:host` rules apply to this mount only.
+/// The sheet reaches that root as the `data-dioxus-shadow-sheet` attribute, which the interpreter
+/// adopts as a constructable sheet after the host document's own sheets (the kit's, adopted as
+/// `@layer host`). A renderer without shadow roots (Blitz, which provides
+/// [`LightDomStylesheets`]) gets the sheet as a light-DOM `<style>` ahead of the content
+/// instead. The wrapper is kept out of layout by the kit's reset layer (`[data-dioxus-shadow]
+/// { display: contents }`), not by an inline style.
+#[component]
+fn ShadowMount(sheet: String, children: Element) -> Element {
+    let light_dom = use_hook(|| try_consume_context::<LightDomStylesheets>().is_some());
+    let user_sheet = use_hook(try_consume_context::<UserStylesheet>);
+    let mut sheet = sheet;
+    // The end user's theme follows the micro's own sheet, in `@layer user`: the kit's document
+    // sheets are adopted into this root as `@layer host`, which the fork's interpreter declares
+    // ahead of `user`, so a theme outranks the kit and every host-wide rule. The micro's own
+    // unlayered rules still outrank a layered theme, which is what lets a micro that previews
+    // a draft theme (the theme lab) see the draft and not the applied sheet. Reading the signal
+    // here subscribes this mount, so applying a theme restyles it live.
+    if let Some(UserStylesheet(user)) = user_sheet {
+        let user = user.read();
+        if !user.is_empty() {
+            sheet.push_str("\n@layer user {\n");
+            sheet.push_str(&user);
+            sheet.push_str("\n}");
+        }
+    }
+    let light_dom = light_dom && !sheet.is_empty();
+    rsx! {
+        div {
+            "data-dioxus-shadow": "",
+            "data-dioxus-shadow-sheet": if !light_dom { sheet.clone() },
+            if light_dom {
+                style { "{sheet}" }
+            }
+            {children}
+        }
+    }
+}
+
+/// The stylesheet of one natively linked micro's mount: the micro sets it through
+/// [`use_mount_stylesheet`] (the native counterpart of a guest's `document::Style`), and the
+/// mount's [`ShadowMount`] adopts it. Shared by every presentation of the micro, one per mount.
+#[derive(Clone, Copy)]
+struct NativeMountSheet(Signal<String>);
+
+/// Set the calling native micro's stylesheet for its mount, replacing the previous one. Returns
+/// `false`, having done nothing, outside a natively linked micro's mount (a guest sets its sheet
+/// through `document::Style`, which its engine forwards to the host's mount). The write happens
+/// during render so the first paint already has the sheet; it is a no-op when the text is
+/// unchanged, so a micro that renders the same sheet on every render does not loop.
+pub fn use_mount_stylesheet(css: &str) -> bool {
+    let Some(NativeMountSheet(mut sheet)) = try_consume_context::<NativeMountSheet>() else {
+        return false;
+    };
+    if *sheet.peek() != css {
+        sheet.set(css.to_owned());
+    }
+    true
+}
+
+/// A natively linked micro's render, inside its mount's shadow root and under the context
+/// [`use_mount_stylesheet`] writes to.
+#[expect(non_snake_case, reason = "Dioxus component naming")]
+fn NativeMount(props: RenderedMountProps) -> Element {
+    let sheet = use_signal(String::new);
+    use_context_provider(|| NativeMountSheet(sheet));
+    let content = rsx! { RenderedMount { render: props.render, mount: props.mount } };
+    rsx! { ShadowMount { sheet: sheet.read().clone(), {content} } }
+}
+
+/// Provided by a host whose renderer has no shadow roots (Blitz): a mount's stylesheet is then
+/// a light-DOM `<style>` ahead of its content rather than its shadow root's adopted sheet (see
+/// `MountedSurface`). Without it, mounts assume a browser engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightDomStylesheets;
+
+/// Provided by a host that has an end-user theme: the CSS every mount adopts after its own
+/// sheet, in `@layer user` (see `MountedSurface`). The provider owns the rule that theme CSS may
+/// not make the host fetch: what it publishes here has been refused or sanitized once, at the
+/// change, because a mount reads it on every render.
+pub use clay_surface::refuse_fetching_stylesheet;
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct UserStylesheet(pub ReadSignal<String>);
 
 #[cfg(test)]
 mod tests;
