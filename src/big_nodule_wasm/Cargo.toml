@@ -30,6 +30,7 @@ utils_rs.workspace = true
 #
 # wasm host
 wash-runtime.workspace = true
+wasmtime-wasi.workspace = true
 wasmtime-wasi-http.workspace = true
 hyper.workspace = true
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio"] }

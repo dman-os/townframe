@@ -810,7 +810,7 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
 }
 
 #[tokio::test]
-async fn a_trapping_guest_answers_with_a_fault_naming_its_frames_and_component() {
+async fn a_trapping_guest_answers_with_a_fault_naming_its_frames_component_and_stderr() {
     let bytes = guest_bytes();
     let secrets = secrets().await;
     let (node, stop) = boot_node(&secrets).await;
@@ -838,6 +838,14 @@ async fn a_trapping_guest_answers_with_a_fault_naming_its_frames_and_component()
         fault.frames.iter().any(|frame| frame.func_name.is_some()),
         "the guest keeps its name section, so a frame is named: {:?}",
         fault.frames
+    );
+    // The guest prints its panic message to stderr just before it traps.
+    assert!(
+        fault
+            .stderr_tail
+            .contains("the nodule fixture panicked on purpose"),
+        "the panic message is in the stderr tail: {:?}",
+        fault.stderr_tail
     );
     shutdown(node, stop).await;
 }
