@@ -28,6 +28,7 @@
 #![recursion_limit = "256"]
 
 mod net;
+mod stdio;
 
 use async_trait::async_trait;
 use big_blobs::BlobService;
@@ -183,6 +184,11 @@ pub struct GuestFault {
     /// The guest's frames at a trap, innermost first, as raw data. They are `file:line` only
     /// after a lookup against the side file: the shipped component carries no DWARF.
     pub frames: Vec<FaultFrame>,
+    /// The last 16 KiB the workload wrote to its stdout and stderr, lossily decoded. A Rust
+    /// guest prints its panic message to stderr just before it traps, so it is in
+    /// `stderr_tail`. Guest-written: render it as text, never as markup.
+    pub stdout_tail: String,
+    pub stderr_tail: String,
 }
 
 /// What failed.
@@ -218,6 +224,8 @@ pub struct WasmExecutor {
     hosted: Mutex<BTreeMap<CartridgeId, Running>>,
     /// The signer of each running workload's outgoing calls, shared with [`Egress`].
     signers: Signers,
+    /// Each running workload's captured stdout and stderr.
+    pipes: stdio::Pipes,
     /// The cartridges waiting on a blob that was not in the store, to be woken on its arrival.
     arrivals: Arc<Mutex<BTreeMap<BlobId, BTreeMap<CartridgeId, Reensure>>>>,
 }
@@ -247,6 +255,7 @@ pub async fn boot(
     allow_host_loopback: bool,
 ) -> Res<(Arc<WasmExecutor>, StopToken)> {
     let signers = Signers::default();
+    let pipes = stdio::Pipes::default();
     let ingress = Arc::new(
         Ingress::builder(Sealed, "127.0.0.1:0".parse().expect("literal address"))
             .outgoing_handler(Egress {
@@ -259,7 +268,12 @@ pub async fn boot(
             .to_eyre()?,
     );
     let host = HostBuilder::new()
-        .with_engine(Engine::builder().build().to_eyre()?)
+        .with_engine(
+            Engine::builder()
+                .with_guest_stdio(Arc::new(stdio::Stdio(Arc::clone(&pipes))))
+                .build()
+                .to_eyre()?,
+        )
         .with_friendly_name("nodules-wasm")
         .with_http_handler(Arc::clone(&ingress) as Arc<dyn HostHandler>)
         .build()
@@ -323,6 +337,7 @@ pub async fn boot(
             blobs,
             hosted: Mutex::default(),
             signers,
+            pipes,
             arrivals,
         }),
         stop,
@@ -371,6 +386,10 @@ impl WasmExecutor {
         self.signers
             .lock()
             .expect("signers lock")
+            .remove(&running.workload_id);
+        self.pipes
+            .lock()
+            .expect("pipes lock")
             .remove(&running.workload_id);
     }
 }
@@ -461,6 +480,11 @@ impl NoduleExecutor for WasmExecutor {
                     missing_authority: spec.missing_authority.clone(),
                 },
             );
+            // The host asks for the workload's stdio while starting it, so the pipes exist first.
+            self.pipes.lock().expect("pipes lock").insert(
+                workload_id.clone(),
+                Arc::new(stdio::WorkloadPipes::new(&spec.cartridge_id)),
+            );
             let started = self
                 .host
                 .workload_start(WorkloadStartRequest {
@@ -486,6 +510,7 @@ impl NoduleExecutor for WasmExecutor {
                     .lock()
                     .expect("signers lock")
                     .remove(&workload_id);
+                self.pipes.lock().expect("pipes lock").remove(&workload_id);
                 for component in components.values() {
                     self.stop_workload(component).await;
                 }
@@ -514,6 +539,7 @@ impl NoduleExecutor for WasmExecutor {
         let routines = Self::route_table(spec, &components);
         let provider = Arc::new(WasmProvider {
             cartridge: spec.cartridge_id.clone(),
+            pipes: Arc::clone(&self.pipes),
             ingress: Arc::clone(&self.ingress),
             routines,
             routine_capabilities: Mutex::new(spec.routine_capabilities.clone()),
@@ -570,6 +596,7 @@ struct RoutineTarget {
 /// Calls one running routine component workload over in-process `wasi:http`.
 struct WasmProvider {
     cartridge: CartridgeId,
+    pipes: stdio::Pipes,
     ingress: Arc<Ingress<Sealed, Egress>>,
     routines: BTreeMap<String, RoutineTarget>,
     routine_capabilities: Mutex<BTreeMap<String, RoutineCapabilities>>,
@@ -611,6 +638,15 @@ impl WasmProvider {
             ),
             None => (FaultKind::Host, Vec::new()),
         };
+        // A call still draining after its workload was stopped has no pipes left, so its tails
+        // are empty.
+        let (stdout_tail, stderr_tail) = self
+            .pipes
+            .lock()
+            .expect("pipes lock")
+            .get(&routine.workload_id)
+            .map(|pipes| pipes.tails())
+            .unwrap_or_default();
         // The root cause is the trap's own text ("wasm trap: wasm `unreachable` instruction
         // executed"); the outer layers are the host's context and the backtrace.
         let fault = GuestFault {
@@ -618,12 +654,15 @@ impl WasmProvider {
             message: error.root_cause().to_string(),
             component_hash: routine.artifact,
             frames,
+            stdout_tail,
+            stderr_tail,
         };
         tracing::error!(
             cartridge = %self.cartridge,
             kind = ?fault.kind,
             component_hash = %fault.component_hash,
             frames = ?fault.frames,
+            stderr_tail = fault.stderr_tail,
             "{}",
             fault.message
         );
