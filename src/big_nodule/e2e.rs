@@ -1457,7 +1457,7 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
 /// uninstalled, disabled, granted or cleared, by the operator either.
 #[tokio::test]
 async fn the_core_cartridge_installs_only_at_its_build_version_and_its_install_cannot_change() {
-    let node = node().await;
+    let mut node = node().await;
     let operator = node.operator();
     let core = core_cartridge_id();
     let version = |label: &str| {
@@ -1479,15 +1479,22 @@ async fn the_core_cartridge_installs_only_at_its_build_version_and_its_install_c
             .nodule
             .is_some_and(|nodule| nodule.enabled)
     );
-    // Its nodule acts as the micros subsystem actor, not as `nodules/<cartridge segment>`.
-    assert_eq!(
-        node.get(operator, &core.to_string())
-            .await
-            .unwrap()
-            .actor
-            .map(|actor| actor.actor_id),
-        Some(node.micros_actor_id().await)
-    );
+    // Its nodule acts as the micros subsystem actor, not as `nodules/<cartridge segment>`, and
+    // still does when the service recovers its persisted actors after a restart.
+    let micros = Some(node.micros_actor_id().await);
+    for restarted in [false, true] {
+        if restarted {
+            node.restart_nodules().await.unwrap();
+        }
+        assert_eq!(
+            node.get(operator, &core.to_string())
+                .await
+                .unwrap()
+                .actor
+                .map(|actor| actor.actor_id),
+            micros
+        );
+    }
     // Installing the build's version again is the node's idempotent boot step.
     node.install_cartridge(operator, version(CORE_VERSION))
         .await

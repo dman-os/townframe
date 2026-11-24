@@ -2570,15 +2570,7 @@ impl State {
         if let Some(actor) = self.actors.get(cartridge_id) {
             return Ok(actor.clone());
         }
-        // The core cartridge's nodule is the micros runtime (ADR 052 §2), so it acts as the
-        // `micros` subsystem actor the node opened beside `nodules`, and the micro actors it
-        // opens (`micros/<cartridge>/<micro>`) are its own subtree. Every other nodule's actor is
-        // `nodules/<cartridge segment>`.
-        let opened = if *cartridge_id == self.stores.core_cartridge.id {
-            self.stores.core_cartridge.actor.clone()
-        } else {
-            self.stores.open_actor(context, cartridge_id).await?
-        };
+        let opened = self.stores.open_actor(context, cartridge_id).await?;
         if let Some(saved_actor_id) = self.persisted_actors.get(cartridge_id) {
             if opened.actor.actor_id != *saved_actor_id {
                 return Err(NodulesError::Storage(format!(
@@ -2874,11 +2866,19 @@ impl Stores {
         Ok(actors)
     }
 
+    /// The actor `cartridge_id`'s nodule acts as. The core cartridge's nodule is the micros
+    /// runtime (ADR 052 §2), so it acts as the `micros` subsystem actor the node opened beside
+    /// `nodules`, and the micro actors it opens (`micros/<cartridge>/<micro>`) are its own
+    /// subtree. Every other nodule's actor is `nodules/<cartridge segment>`, opened here (a path
+    /// that exists opens to the same actor).
     async fn open_actor(
         &self,
         context: &RequestContext,
         cartridge_id: &CartridgeId,
     ) -> Res<OpenedActor> {
+        if *cartridge_id == self.core_cartridge.id {
+            return Ok(self.core_cartridge.actor.clone());
+        }
         self.authority
             .call(
                 context.child(),

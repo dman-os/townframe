@@ -247,16 +247,32 @@ async fn watch(
 }
 
 async fn list(node: &BigNode) -> Vec<big_cartridges_core::protocol::CartridgeRecord> {
-    node.cartridges
-        .client
-        .call_with(
-            RequestContext::root(),
-            operator(node).metadata(),
-            ListCartridges {},
-        )
-        .await
-        .unwrap()
-        .cartridges
+    without_core(
+        node,
+        node.cartridges
+            .client
+            .call_with(
+                RequestContext::root(),
+                operator(node).metadata(),
+                ListCartridges {},
+            )
+            .await
+            .unwrap()
+            .cartridges,
+    )
+}
+
+/// `cartridges` without the node's own core cartridge, which every node publishes at boot (ADR
+/// 053): these tests look at what they published themselves.
+fn without_core(
+    node: &BigNode,
+    cartridges: Vec<big_cartridges_core::protocol::CartridgeRecord>,
+) -> Vec<big_cartridges_core::protocol::CartridgeRecord> {
+    let core = crate::core_cartridge::id(&node.cartridges.publisher);
+    cartridges
+        .into_iter()
+        .filter(|record| record.id != core)
+        .collect()
 }
 
 async fn retained(sql: &Database, document: &DocId) -> BTreeSet<String> {
@@ -304,17 +320,19 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
         .await
         .unwrap();
 
-    let list = node
-        .cartridges
-        .client
-        .call_with(
-            RequestContext::root(),
-            operator.metadata(),
-            ListCartridges {},
-        )
-        .await
-        .unwrap()
-        .cartridges;
+    let list = without_core(
+        &node,
+        node.cartridges
+            .client
+            .call_with(
+                RequestContext::root(),
+                operator.metadata(),
+                ListCartridges {},
+            )
+            .await
+            .unwrap()
+            .cartridges,
+    );
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].id, cartridge_id("photos"));
     assert_eq!(
@@ -528,18 +546,7 @@ async fn staging_refuses_components_whose_bytes_are_not_local() {
             artifact: "handler".into(),
         })
     );
-    let listed = node
-        .cartridges
-        .client
-        .call_with(
-            RequestContext::root(),
-            operator(&node).metadata(),
-            ListCartridges {},
-        )
-        .await
-        .unwrap()
-        .cartridges;
-    assert!(listed.is_empty());
+    assert!(list(&node).await.is_empty());
     shutdown(node, stop).await;
 }
 
@@ -847,10 +854,17 @@ async fn the_watch_observes_publish_and_remove_from_a_cursor() {
     let secrets = secrets().await;
     let (node, stop, _sql) = boot_memory(&secrets).await;
     let operator = operator(&node);
-    // With no cursor the answer is the current state, flagged as a reset; an empty registry says
-    // so at once rather than holding.
+    // With no cursor the answer is the current state, flagged as a reset, at once rather than
+    // holding: here only the node's own core cartridge (ADR 053).
     let start = watch(&node, None, 10_000).await.unwrap();
-    assert!(start.reset && start.caught_up && start.changes.is_empty());
+    let core = crate::core_cartridge::id(&node.cartridges.publisher);
+    assert!(start.reset && start.caught_up);
+    assert!(
+        start
+            .changes
+            .iter()
+            .all(|change| change.cartridge_id == core)
+    );
 
     let info = put(&node, b"watched handler").await;
     // Staging creates the cartridge's document, which the watch reports as a change of its own,
