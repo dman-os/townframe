@@ -1069,7 +1069,6 @@ impl State {
             grant_requests,
             missing_authority: BTreeMap::new(),
         };
-        // Followed before the boot reconcile reads any claim: see `Claims::follow`.
         let mut claims = claims::Claims::follow(&state.stores.dispatch);
         let context = RequestContext::root();
         // The boot reconcile may already have started initializers, and the config documents it
@@ -1143,14 +1142,7 @@ impl State {
                 }
             }
             state.docs.stop_all().await;
-            // Dispatch outlives this service and its router keeps every provider registered, but
-            // an executor's provider reaches back into dispatch (a Wasm guest's outgoing calls
-            // go through dispatch's client), which would make dispatch own itself through the
-            // router. Withdrawing the registrations at shutdown breaks that cycle; a restart
-            // derives them again from the config.
-            for cartridge_id in state.records.keys() {
-                state.stores.dispatch.unbind(&cartridge_id.to_string());
-            }
+            state.unbind_nodules();
             Res::Ok(())
         };
         tasks

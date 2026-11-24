@@ -1,7 +1,8 @@
 //! Following dispatch's claims: a request resolves against the providers that claim its contract,
 //! and some providers register after this service has booted and reconciled (the node's own
 //! nodules and info providers, see `BigNode::register_late_built_ins`). The router's claims
-//! revision is how this service learns an answer it gave may be stale.
+//! revision is how this service learns an answer it gave may be stale. The other direction, the
+//! nodules' own registrations, is withdrawn here at stop.
 
 use super::*;
 use tokio::sync::watch;
@@ -70,5 +71,18 @@ impl State {
             );
         }
         Ok(())
+    }
+
+    /// Withdraws every nodule's registration from dispatch at shutdown.
+    ///
+    /// Dispatch outlives this service and its router keeps every provider registered, but
+    /// an executor's provider reaches back into dispatch (a Wasm guest's outgoing calls
+    /// go through dispatch's client), which would make dispatch own itself through the
+    /// router. Withdrawing the registrations at shutdown breaks that cycle; a restart
+    /// derives them again from the config.
+    pub(super) fn unbind_nodules(&self) {
+        for cartridge_id in self.records.keys() {
+            self.stores.dispatch.unbind(&cartridge_id.to_string());
+        }
     }
 }
