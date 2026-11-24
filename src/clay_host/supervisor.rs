@@ -1184,6 +1184,13 @@ impl<P: Clone + 'static> Supervisor<P> {
     }
 
     fn set(&self, identity: &MicroId, state: NodeState<P>) {
+        // Every path into a fault (a refused start, a failed close, a runtime that closed the
+        // incarnation) lands here, so this one line is what makes a fault visible in the log and
+        // not only in a shell's lifecycle view. A fault is the guest's failure, not the host's,
+        // so it is a warning.
+        if let NodeState::Faulted(fault) = &state {
+            tracing::warn!(micro = %identity, %fault, "micro faulted");
+        }
         let previous = std::mem::replace(
             &mut self
                 .inner
