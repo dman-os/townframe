@@ -378,3 +378,122 @@ the difference that ATSMS publishes the inbox endpoint publicly in the PDS and w
    path. It also fixes today's `UnknownPeer` friction, because it carries the `via` addresses.
 5. **Check the two open points before building:** whether our relay policy gates ingest by membership
    (`protocol.rs:1210-1260`), and whether a group can be created whose members the granter never sees.
+
+## Upstream keyhive and keyline (re-checked 2026-11-24)
+
+The operator suspected our fork was stale. It is. Everything above that cites `../keyhive` describes the fork, which
+predates keyline. This section re-reads upstream. Where the two disagree, this section supersedes the previous one, and
+the supersession is marked.
+
+**What I read, and where keyline is.** Keyline is not a separate repository. It is two crates, `keyline/` and
+`keyline_memory/`, plus design docs under `design/keyline/`, all inside `github.com/inkandswitch/keyhive`. Upstream
+`keyhive_core` now depends on it (`keyhive_core/Cargo.toml:20`). I cloned `main` read-only into
+`/run/media/asdf/p3N/repos/keyhive-upstream` at commit `fef75a5038a0f69533322e3abdb6d2c2fa5d82d1` (2026-11-23, "Bump
+versions (#381)"). The fork `../keyhive` (`townframe-changes`) is at `a84137d1f2bdd81cc6c883253a534cc3f0380b5e`
+(2026-11-06). Their merge base is `b7968be799705492428c94226ca28042c733a9e0` (2026-10-01), and upstream is 113 commits
+ahead of it. The fork has no keyline (`grep keyline` in its two `Cargo.toml` files finds nothing). Paths below are
+relative to the upstream clone. A branch named `pairing` exists upstream but dates from 2025 and is unmerged, so I
+did not use it.
+
+### a. Can a non-admin member delegate at an equal or lower level?
+
+Yes, and it needs no right at all beyond holding the level. "Anyone may issue a delegation over any subject. The
+issuer's effective power over `subject` clamps the result; issuing needs no Admin" (`design/keyline/implementation.md:69`).
+The audience receives `min(power, issuer's effective power)` (`implementation.md:62`, and attenuation at
+`design/keyline/README.md:158-160`). The code agrees: `Keyhive::sign_delegation` reads the signer's effective power over
+the subject, refuses `NoAuthority` if it has none and `Escalation` if the request exceeds it
+(`keyhive_core/src/keyhive.rs:1598-1620`). Upstream rejected an admin-only rule on purpose, naming this very case:
+"It pushes people toward key-sharing when they want to hand a document to a second device"
+(`design/keyline/alternatives.md:82-90`). Admin is needed only to revoke other people's delegations
+(`implementation.md:71`). So a `Read` member can grant `Read` or `Relay`, a `Relay` member can grant `Relay`.
+The fork allowed the same (ADR 005 cites it), so this is not new.
+
+### b. A grants D to N1, N1 adds N2: does anyone learn N2?
+
+**Yes. The granter and every other reader learn N2, and N2 becomes a CGKA leaf.** Three mechanisms:
+
+- *The delegation travels with the document.* What a peer is sent is `certificates_for_agent`: "the closure of every
+  subject it stands over" (`keyhive.rs:2420-2440`). A subject's closure is "`S`, every node with standing over `S`...
+  every certificate about those nodes" (`design/keyline/README.md:457`), and "No certificate outside `closure(S)` can
+  change any answer about `S`" (`:461`). N1's delegation `N1 -> N2` about `D` is in `closure(D)`, so A receives it the
+  next time A syncs D.
+- *N2 becomes a leaf.* A `Read` holder may add a CGKA leaf. The authorization rule is: signer has `Read` or higher,
+  and an add must carry a key proof, "a prekey operation, signed by the added member" (`keyhive.rs:2921-2946`).
+  Seating needs neither `Edit` nor `Admin`. The operations are sent to everyone with standing over D
+  (`cgka_ops_reachable_by_agent`, `keyhive.rs:2463-2477`), and the prekey operations of every agent they name go with
+  them (`prekey_ops_referenced_by`, `:2313`).
+- *Relay is the exception.* A `Relay` delegate is not a leaf (`keyhive.rs:2455-2458`; `design/threat_model.md:33`),
+  but its delegation is still in the closure, so the device is still named.
+
+What changes is **timing and control, not secrecy**. A does not need to know N2 at grant time, cannot be asked to
+act, and learns N2 only on a later sync. That is the nearest thing to the operator's model ("devices become known
+when one comes and asks"). The authority part works; the hiding part does not.
+
+### c. Invites without write access; what must the invitee publish?
+
+Seating and delegating both need only `Read`, as above. A contact card is "an individual's introduction: one of its
+prekey operations, verified" (`keyhive_core/src/contact_card.rs:18-20`), and `receive_contact_card` registers the
+individual from it (`keyhive.rs:1453`). The invitee must have published, or handed over, at least one prekey operation
+that the seater holds. `addable_key` picks a prekey for the document and fetches the proof (`keyhive.rs:845-854`);
+without one, the reader is skipped. There is no invite object separate from this: an invite is a delegation plus a
+prekey the inviter already has.
+
+**This supersedes the previous section on one point.** In the fork, granting a group failed with `MissingPrekeys` unless
+the granter held a prekey for every member (`agent.rs:171-205`). Upstream grants first and seats later:
+`issue_implied_cgka_ops` adds a leaf "for each reader who is not currently a CGKA member and whose prekeys this
+replica has locally" and skips the rest (`keyhive.rs:756-840`), and `add_member` does not check prekeys
+(`keyhive.rs:1570-1596`). So the granter does not need every member's prekeys at grant time. Whoever holds the
+tree and a member's prekey seats it afterwards.
+
+### d. Groups, several local agents, hiding membership
+
+- **Groups.** A group has no state of its own: "Its membership is the Keyline certificate set, so a replica stores
+  nothing for it" (`keyhive_core/src/principal/group.rs:1-2`). At keyline level "there is no distinction between
+  individuals, groups, and documents; they are all merely keys" (`design/keyline/README.md:~52-54`). There is still no
+  group contact card, because a card is an individual's prekey op. Granting needs the group to be a known subject
+  (`has_agent`, `keyhive.rs:1719-1731`), which means the granter holds at least one certificate about it.
+- **Several local agents.** No. `Keyhive` holds one `active: Active` (`keyhive.rs:121`). Two personas on one device are
+  still two keyhive instances, as before.
+- **Hiding membership from readers.** Not offered. The closure rule above ships every certificate about every node
+  with standing to every reader, including through nested roles, and the threat model accepts it: a holder "sees
+  ... the membership graph, and the CGKA group's shape and public keys" (`design/threat_model.md:31`, T8 at `:116-118`).
+  Upstream's only mitigation is topology: "Roles whose memberships name only individuals keep [the closure] small"
+  (`README.md:473`), which is about size, not secrecy.
+
+### e. What changed from the fork that matters here
+
+| | Fork (`a84137d`) | Upstream (`fef75a5`) |
+|---|---|---|
+| Who may delegate | Member up to own level (ADR 005) | Anyone, clamped to own level (`implementation.md:69`) |
+| Granting a group | Needs every member's prekey, else `MissingPrekeys` | Grants; seats those whose prekeys are held, others later |
+| Who seats a leaf | Any reader | Any reader, with the added member's key proof |
+| Proof carried | `proof` field on delegations | None: "justification is computed at verification-time" (`README.md:129`) |
+| Group | Stateful object | A key with certificates, no state (`group.rs:1-2`) |
+| What a reader receives | Reachable ops per agent | Closure of every subject it stands over |
+| Local agents | One | One |
+
+### The direct answers
+
+- **Can the granter grant one node and have it invite the rest without the granter learning them?** The first half is
+  possible: N1 needs only `Read` (a), and N2 needs only a published prekey (c). **The second half is not.** The
+  delegation and the CGKA leaf for N2 are in D's closure, so A and every reader receive them on the next sync (b).
+  A can still be spared having to know N2 at grant time.
+- **Does keyline support invites without write access?** Yes. Delegating needs only holding the level (a), and
+  seating a leaf needs only `Read` (b, c).
+
+### What this means for the design
+
+1. **Rewrite the promise.** The earlier recommendation "the grantee chooses what to expose by choosing which group to
+   present" stands, but the new fact is that a grantee can also *add devices later* through a device the granter
+   already knows, with no further granter action. State the guarantee as: the granter learns the devices that
+   join the drawer, when they join, never devices that stay out of it.
+2. **Prefer one device per context.** The only way for the granter never to learn N2 is for N2 never to be a member
+   of D. If the person wants a second device to read D, the second device is exposed to every reader of D. Offer
+   the per-context group as the tool for choosing which devices that is.
+3. **Drop two earlier premises.** Granting a group no longer needs the granter to hold every member's prekeys
+   (section 4, "someone has to know the group", and section 2's `MissingPrekeys`). The group's certificates must
+   still be held, so an introduction bundle for a group stays the group id plus its certificates.
+4. **Plan to move off the fork.** Upstream has the delegation model and the late seating the design wants. Moving is a
+   separate decision (pins, `big_repo` surfaces, the `Agent`/`Group` types it uses), and I did not assess its cost.
+   I did not read upstream's sync protocol or `subduction_keyhive` against it: the claims about what a peer is sent
+   come from `keyhive_core`, not from the wire.
