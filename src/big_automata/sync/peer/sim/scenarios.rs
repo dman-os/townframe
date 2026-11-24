@@ -161,9 +161,12 @@ fn lanes_a_live_write_is_applied_within_a_few_live_rounds_of_a_backlog_drain() {
         sim.member(obj, 0);
     }
     sim.want(&[0]);
-    for _ in 0..4 {
+    // the backlog is draining: some of it is in, most is not
+    while sim.local_members(0).len() < 8 {
+        assert!(sim.rounds.len() < 100, "the backlog does not start");
         sim.cycle();
     }
+    assert!(sim.local_members(0).len() < usize::from(BACKLOG) / 2);
     assert_eq!(
         sim.sync.synced(&part(0)),
         Some(false),
@@ -403,6 +406,8 @@ fn a_bucket_that_grows_during_a_walk_is_read_to_its_end() {
 /// starts from that cursor, and the store hands out a removal only to a reader whose cursor is at
 /// or past the member's `added_at` (`removals_skip_routes_that_never_saw_the_member`). The
 /// restarted machine is below it, so the removal never comes and the member stays for good.
+/// Unwanting the part and wanting it again restarts its replay from the persisted cursor the same
+/// way.
 /// Fixing it means changing the rule, the persisted cursor or the recovery; when one does, this
 /// test should assert the removal arrives, and the simulation's `ghosts` allowance goes.
 #[test]
@@ -448,5 +453,108 @@ fn a_removal_of_a_member_applied_above_the_persisted_cursor_is_skipped_after_a_c
         sim.local_members(0),
         [obj(3)].into(),
         "the removal was skipped: the member is a ghost"
+    );
+}
+
+/// Shrunk by the simulation at 4000 cases: the same gap as above without a crash. The part is
+/// unwanted and wanted again (`rem_parts` and `add_parts` of one `Routes`), the machine starts
+/// the part over from the persisted cursor, which is below the member the local store already
+/// holds, and the peer's removal of that member never comes. Passes through the simulation's
+/// `ghosts` allowance, like the crash case.
+#[test]
+fn a_part_wanted_again_replays_from_its_persisted_cursor() {
+    run(
+        vec![
+            Op::Write {
+                kind: 0,
+                obj: 0,
+                part: 0,
+                val: 0,
+            },
+            Op::Routes {
+                add_parts: 1,
+                rem_parts: 0,
+                add_objs: 0,
+                rem_objs: 0,
+            },
+            Op::Write {
+                kind: 24,
+                obj: 19,
+                part: 0,
+                val: 0,
+            },
+            Op::Access(39),
+            Op::Write {
+                kind: 0,
+                obj: 0,
+                part: 0,
+                val: 0,
+            },
+            Op::Write {
+                kind: 52,
+                obj: 3,
+                part: 198,
+                val: 0,
+            },
+            Op::Write {
+                kind: 9,
+                obj: 0,
+                part: 0,
+                val: 0,
+            },
+            Op::Write {
+                kind: 0,
+                obj: 0,
+                part: 0,
+                val: 0,
+            },
+            Op::Write {
+                kind: 0,
+                obj: 0,
+                part: 0,
+                val: 0,
+            },
+            Op::Deliver(0),
+            Op::Deliver(0),
+            Op::Deliver(0),
+            Op::Duplicate(0),
+            Op::Write {
+                kind: 0,
+                obj: 0,
+                part: 0,
+                val: 0,
+            },
+            Op::Deliver(0),
+            Op::Deliver(0),
+            Op::Deliver(0),
+            Op::Deliver(0),
+            Op::Write {
+                kind: 0,
+                obj: 0,
+                part: 0,
+                val: 0,
+            },
+            Op::Write {
+                kind: 113,
+                obj: 107,
+                part: 21,
+                val: 0,
+            },
+            Op::Write {
+                kind: 0,
+                obj: 0,
+                part: 0,
+                val: 0,
+            },
+            Op::Advance(0),
+            Op::Routes {
+                add_parts: 5,
+                rem_parts: 5,
+                add_objs: 0,
+                rem_objs: 0,
+            },
+            Op::Bias(false),
+        ],
+        1419127500411581189,
     );
 }
