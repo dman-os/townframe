@@ -82,26 +82,32 @@ fn alpha(routines: &[&str], methods: &[&str], settings: &[&str]) -> FixtureCartr
             .collect(),
     );
     for kind in settings {
-        cartridge.with_lexicon(lexicon(json!({
-            "lexicon": 1,
-            "id": kind,
-            "defs": { "main": { "type": "object", "properties": {} } }
-        })));
-        cartridge.settings.insert(kind.parse().unwrap());
-        cartridge.permbinds.insert(
-            (*kind).to_owned(),
-            Permbind::Datum(PermbindDatum {
-                nsid: kind.parse().unwrap(),
-                description: (*kind).to_owned(),
-                read: Some(Necessity::Optional),
-                write: Some(Necessity::Optional),
-                create: None,
-                delete: None,
-                extra: Default::default(),
-            }),
-        );
+        with_setting(&mut cartridge, kind);
     }
     cartridge
+}
+
+/// Declares `kind` as a settings datum of `cartridge`, bound by a `#datum` permbind of the same
+/// name that a routine lists in its `uses` to reach it.
+fn with_setting(cartridge: &mut FixtureCartridge, kind: &str) {
+    cartridge.with_lexicon(lexicon(json!({
+        "lexicon": 1,
+        "id": kind,
+        "defs": { "main": { "type": "object", "properties": {} } }
+    })));
+    cartridge.settings.insert(kind.parse().unwrap());
+    cartridge.permbinds.insert(
+        kind.to_owned(),
+        Permbind::Datum(PermbindDatum {
+            nsid: kind.parse().unwrap(),
+            description: kind.to_owned(),
+            read: Some(Necessity::Optional),
+            write: Some(Necessity::Optional),
+            create: None,
+            delete: None,
+            extra: Default::default(),
+        }),
+    );
 }
 
 /// `routine` lists `binding` in its `uses` with `usage`.
@@ -2321,6 +2327,7 @@ mod core_like {
 
     const CORE: &str = example_cartridge!("core");
     const TICK: &str = "org.example.core.tick";
+    const CORE_NOTES: &str = "org.example.core.notes";
 
     fn open_actor() -> &'static str {
         OpenActor::XRPC.nsid
@@ -2380,23 +2387,30 @@ mod core_like {
         ServiceProvider::default()
             .serve(&node.nodules.client)
             .register(&node.dispatch.router, "builtin:nodules");
-        node.admit(
-            node.operator(),
-            using(
-                "core",
-                crate::e2e::installs::CORE_VERSION,
-                TICK,
-                &[
-                    open_actor(),
-                    attenuate(),
-                    list_grants(),
-                    await_grants(),
-                    list_installs(),
-                ],
-            ),
-        )
-        .await
-        .unwrap();
+        let mut core = using(
+            "core",
+            crate::e2e::installs::CORE_VERSION,
+            TICK,
+            &[
+                open_actor(),
+                attenuate(),
+                list_grants(),
+                await_grants(),
+                list_installs(),
+            ],
+        );
+        // The routine reads a settings kind of its own, which is what gives it a docs handle.
+        with_setting(&mut core, CORE_NOTES);
+        uses(
+            &mut core,
+            TICK,
+            CORE_NOTES,
+            RoutineUse {
+                read: true,
+                ..Default::default()
+            },
+        );
+        node.admit(node.operator(), core).await.unwrap();
         let held = executor.routine_capabilities_of(&id(CORE))[TICK].clone();
         (node, executor, held)
     }
@@ -2461,7 +2475,8 @@ mod core_like {
         assert_eq!(inspected.rights, Rights::all());
 
         // Presented as `parent` through dispatch, signed as the same actor (ADR 037's holder
-        // binding), it opens a child, and `attenuateCapability { subject }` narrows it onto it.
+        // binding), it opens a child; and the nodule narrows its docs handle onto it with
+        // `attenuateCapability { subject }`, which the child then reads the config document with.
         let child = node
             .invoke(
                 core_auth,
@@ -2472,25 +2487,42 @@ mod core_like {
             .unwrap();
         let child_id = child["actorId"].clone();
         assert!(child_id.is_string(), "{child}");
+        let docs = core.docs.expect("the routine reads a settings kind");
         let narrowed = node
             .invoke(
                 core_auth,
                 attenuate(),
-                json!({ "capability": actor, "rights": ["use"], "subject": child_id }),
+                json!({ "capability": docs, "rights": ["use"], "subject": child_id }),
             )
             .await
             .unwrap();
         assert_eq!(narrowed["subject"], child_id, "{narrowed}");
         assert_eq!(narrowed["rights"], json!(["use"]));
-
+        let narrowed_cap: CapId = serde_json::from_value(narrowed["capabilityId"].clone()).unwrap();
+        let child_cap: CapId = serde_json::from_value(child["capability"].clone()).unwrap();
+        let config_doc = node.install_of(CORE).await.config_doc;
+        node.docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization {
+                    authority: narrowed_cap,
+                    signer: child_cap,
+                }
+                .metadata(),
+                ReadDatums {
+                    capability: narrowed_cap,
+                    doc_id: config_doc,
+                    at: At::Current,
+                    datums: Some(BTreeSet::new()),
+                    optimistic: false,
+                },
+            )
+            .await
+            .expect("the child reads with the handle narrowed onto it");
         // A path that is not one segment under the presenting actor is refused: a sibling, the
         // `nodules` subtree, an ancestor.
-        for path in [
-            "sibling",
-            "nodules/alpha",
-            "",
-            "micros/child/grandchild",
-        ] {
+        for path in ["sibling", "nodules/alpha", "", "micros/child/grandchild"] {
             let refused = node
                 .invoke(
                     core_auth,

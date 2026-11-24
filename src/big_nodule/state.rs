@@ -206,6 +206,16 @@ pub(crate) struct Delegators {
     pub(crate) signer: CapId,
 }
 
+/// The rights of every handle delivered to a routine. `NARROW | DELEGATE` let a nodule attenuate
+/// its handles onto its own descendants (`attenuateCapability { subject }`: the micros nodule
+/// onto its micro actors), which needs a live strict descendant of the handle's subject. A
+/// non-core nodule's actor is opened with `USE` alone, so it cannot open a descendant and the
+/// extra rights reach nothing: only an actor opened with `MINT_CHILD` (the `micros` actor) has
+/// descendants to introduce a handle to.
+fn handle_rights() -> Rights {
+    Rights::USE | Rights::NARROW | Rights::DELEGATE
+}
+
 /// The provider name a boot schema is offered under in the lockfile.
 const NATIVE_SCHEMAS: &str = "native";
 
@@ -707,7 +717,7 @@ async fn mint_missing_handles(
                     authorization.metadata(),
                     MintDocCapability {
                         scope: scope.clone(),
-                        rights: Rights::USE,
+                        rights: handle_rights(),
                         subject: Some(actor.actor.actor_id),
                     },
                 )
@@ -732,7 +742,7 @@ async fn mint_missing_handles(
                     Authorization::identity(delegators.signer).metadata(),
                     MintDrawerCapability {
                         scope: scope.clone(),
-                        rights: Rights::USE,
+                        rights: handle_rights(),
                         subject: Some(actor.actor.actor_id),
                     },
                 )
@@ -763,7 +773,7 @@ async fn mint_missing_handles(
                     .metadata(),
                     big_blobs_core::MintBlobsCapability {
                         scope: scope.clone(),
-                        rights: Rights::USE,
+                        rights: handle_rights(),
                         subject: Some(actor.actor.actor_id),
                     },
                 )
@@ -2986,7 +2996,7 @@ impl Stores {
                 .metadata(),
                 MintDispatchCapability {
                     scope: scope.clone(),
-                    rights: Rights::USE,
+                    rights: handle_rights(),
                     subject: Some(actor.actor.actor_id),
                 },
             )
