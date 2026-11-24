@@ -979,11 +979,11 @@ outputs. No sub-machine calls another or mirrors another's state; the parent rou
 
 | Sub-machine | Owns | From |
 | --- | --- | --- |
-| Routes | the wanted set; diffs into part add/remove and replay targets | `peer_routes.rs`, `handle_peer_route_change` |
+| Routes | dropped: the parent keeps the route set and applies `UpdatePeer` deltas (see below) | `peer_routes.rs`, `handle_peer_route_change` |
 | PartLifecycle (per part) | `Pending(strategy task)` → `Cursor` / `Bucket` → `Cursor`; `Unanswered`; strategy retries | `PeerPartStrategy`, `handle_set_peer_strat` |
 | ReplayClient | session, rounds, targets, verdicts | done |
 | CursorSyncMachine | replay events → object jobs, part cursor watermark | `cursor.rs` |
-| BucketMachine (per part) | the bucket walk; leafing uses the batched `bucket_leaves` | `bucket.rs` |
+| BucketMachine (per part) | the bucket walk only: list, leaf, emit object deltas, report walk done; no job tracking | `bucket.rs` |
 | ObjectJobs | per-object sync/remove coalescing, cursor sets, zombie-removal deferral | `sync_workers`, `remove_workers`, `pending_removals`, "sync support" |
 | SyncStats | last emitted fact per (peer, part); see below | `SyncStatMachine` |
 
@@ -1001,6 +1001,56 @@ doubt.
 
 **Order:** ObjectJobs (laws, oracle, conformance) → PartLifecycle → the per-peer parent and
 SyncStats → whole-machine simulation → driver, with full-sync waiters as the layer above.
+
+**The backend cut (operator approved 2026-11-24).** Laws in `object_jobs.rs`. `SyncBackend`
+becomes `record(job) -> Settle { Done | Fetch }` (short, cancel-safe, default `Fetch`) plus
+`fetch(job)` (may be long, cancel-safe, idempotent). A job combines adds, removes and the
+payload hint, with no partial outcomes. big_sync stays stateless across sessions apart from the
+applied cursor; the fetch lane is per connection, bounded by a receive window `W` and a fetch
+cap `C`. Why: backends chose between downloading inline (`daybook_core/blobs/sync.rs`, which
+blocks removals for the whole download) and recording and deferring (`big_blobs/sync.rs`)
+with nothing in the contract saying which. In the blob picture big_sync is the provider
+discovery half: big_blobs adds a blob to its inventory part only after verifying the bytes
+(`admission/project.rs:70–88`), so membership means "this peer can serve it", while pins say
+what is wanted.
+
+Port items from this cut:
+- **Durable outbox component** in big_automata: an okv table of wants, a concurrent rev-stream
+  walker and `KeyedScheduler`, with backend-chosen priorities and fetching from any connected
+  peer that advertised the object. For backends that answer `Done` and keep durable work;
+  big_blobs' transfer worker should be rebuilt on it (operator: its workers regressed, with no
+  concurrent walkers and unclear rollback and task tracking).
+- **Peer cursors leave the part store.** `HostPartStore::{get,set}_peer_part_cursor` hold what
+  we consumed from peers inside the store of what we serve; their only reader besides the
+  cursor machine is `decide_peer_strat`. They move to a small table the driver owns.
+- **Backends move to the contract:** big_repo and `daybook_core` blobs implement `fetch`;
+  big_blobs implements `record` answering `Done`.
+
+**Sub-machine decisions (operator, 2026-11-24).**
+- **Incremental routes, no diffs.** The BSM takes only `UpdatePeer { added/removed parts,
+  added/removed objects }`; a fresh per-peer machine starts empty, so the first update is all
+  additions. No full-set form, so no diff in the parent. `ReplayClient::set_wanted(&set)`
+  (which diffs the whole set) becomes per-route add/drop. Check whether `daybook_core/sync.rs`
+  has deltas at hand or diffs itself; if it diffs, that stays above the BSM.
+- **BucketMachine stops tracking jobs.** `active_obj_jobs`, `active_objs` and
+  `on_obj_sync_completed` mirror ObjectJobs' state (the rule forbids it), and they tracked only
+  syncs: a removal went out untracked, so the walk could upgrade, the parent persisted the
+  cursor, and a crash lost the removal for good (the next session resumes by cursor and never
+  re-diffs). Now ObjectJobs owns every bucket-origin want and settles it
+  (`Settlement::Bucket`, Present and Absent alike); the parent upgrades a part when the walk is
+  done **and** `ObjectJobs::part_outstanding(part) == 0`. Flow control comes from ObjectJobs'
+  window instead of `ACTIVE_SYNC_JOB_TARGET`. The duplicate-page dedup (FIXME at
+  `bucket.rs:183`) goes with it: a repeated want on the same (object, part) merges in ObjectJobs.
+- **Peer part cursors:** the bucket machine only reads the stored cursor (`since`); the parent
+  writes it. During a walk the cursor tail's watermark is held and persisted only at upgrade
+  (named law in PartLifecycle). Verify while porting that the persisted value is the tail's
+  applied watermark: the old upgrade persisted `replay_cursor` (`big_sync_core/lib.rs:3174`).
+- **Summary requests are chunked** instead of latching `PeerPartSetTooLarge`
+  (`daybook_core/sync.rs:1022` loses its handler).
+- **CursorSyncMachine trims:** `object_replays` leaves (the object-route resume cursor is the
+  parent's, session only, advanced by content settlements); `PartIdle` becomes an
+  `is_settled(part)` query; one receive window from `ObjectJobs::room()`; the `cursor.rs`
+  header TODO/FIXME go (stats are derived; deletes are ObjectJobs' `Absent`).
 
 ## Cross-cutting items
 

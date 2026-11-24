@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bcb4b041d7240098c43daa8200e07b8258354e7f29c2bf1f4a49eb9c62a3452f # shrinks to ops = [Want { obj: 2, part: 2, present: None, cursor: None }, Want { obj: 0, part: 0, present: None, cursor: None }, Want { obj: 0, part: 0, present: None, cursor: None }, Flush { secs: 0 }, Want { obj: 0, part: 0, present: None, cursor: None }, Flush { secs: 0 }, Finish { pick: 2037290773690551619, how: Fetch }, Flush { secs: 0 }, Want { obj: 2, part: 2, present: Some(0), cursor: None }, Want { obj: 0, part: 0, present: None, cursor: None }]

@@ -17,6 +17,7 @@ mod cursor;
 mod fingerprint;
 mod ids;
 mod mpsc;
+mod object_jobs;
 pub mod okv;
 mod outbox;
 pub mod part_store;
