@@ -1,5 +1,5 @@
-//! Drawer: the left sheet of a compact host (FDR 006 "on a phone the sidebar is the left
-//! drawer").
+//! Drawer (`ct-drawer`): the left sheet of a compact host (FDR 006 "on a phone the sidebar is the
+//! left drawer").
 //!
 //! A modal panel that comes from the leading edge over its host, with a scrim over the rest that
 //! dismisses it. Unlike [`Sheet`](super::sheet::Sheet), which a caller mounts only while it is
@@ -7,8 +7,15 @@
 //! prop, and a closed drawer renders nothing (its content is unmounted, not hidden). It fills its
 //! nearest positioned ancestor, like the sheet, so the panel that owns it decides what it covers.
 //!
-//! It sits on [`Layer::Drawer`], scrim and panel together (see `layer.rs`); tapping the scrim
-//! dismisses it, because the scrim is the whole area the panel does not cover (`KIT-103`).
+//! Only a compact host shows a drawer (`KIT-101`): a wider host has room for the sidebar beside
+//! its content, so the drawer takes the `width` and drops itself there whatever `open` says,
+//! rather than leaving every owner to repeat "drawer only when compact". A window that grows while
+//! the drawer is open swaps it for the side panel without the owner doing anything.
+//!
+//! Parts: `scrim` (the dismiss button) and `panel` (the dialog). State: `data-state` (`open`, the
+//! only one that renders). Axis: `data-placement` (`leading`). The skin puts scrim and panel on
+//! the `drawer` layer together; tapping the scrim dismisses it, because the scrim is the whole
+//! area the panel does not cover (`KIT-103`).
 //!
 //! "Leading" is the left edge: the kit has no right-to-left layout yet (see the README's
 //! design-language gaps).
@@ -17,55 +24,45 @@
 //!
 //! The drawer slides in from the leading edge (a skin animation, `KIT-108`) but does not slide
 //! out: an exit would keep the closed drawer mounted until its animation ends, and neither Blitz
-//! nor the guest wire reports that, so a closed drawer is gone at once. Dismissal is the scrim button (every renderer), Escape (where the
-//! renderer delivers key events inside the drawer: not on Blitz today) and whatever the owner
+//! nor the guest wire reports that, so a closed drawer is gone at once. Dismissal is the scrim button (every renderer), Escape (the panel
+//! takes focus on mount, `focus_on_mount`) and whatever the owner
 //! wires to `on_dismiss`, such as the platform back gesture. Focus is neither trapped nor
-//! restored, for the reason documented on `Sheet`; the web build needs both before it ships
+//! restored yet (see `Sheet`); the web build needs both before it ships
 //! (`KIT-052`). A swipe from the screen edge is not handled: Blitz touch drags become scroll pans
 //! and Android reserves the edge for the system back gesture (the Android findings in the shell
 //! ledger).
-use crate::Layer;
+use crate::WidthClass;
 use dioxus::prelude::*;
-
-/// The classes a skin gives each part of [`Drawer`]. The panel's width belongs here.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct DrawerSkin {
-    pub root: &'static str,
-    pub scrim: &'static str,
-    pub panel: &'static str,
-}
 
 #[component]
 pub fn Drawer(
+    width: WidthClass,
     name: String,
     open: bool,
     on_dismiss: EventHandler<()>,
-    #[props(default)] skin: DrawerSkin,
     children: Element,
 ) -> Element {
-    if !open {
+    if !open || width.fits_side_by_side() {
         return rsx! {};
     }
-    let layer = Layer::Drawer.css();
     rsx! {
         div {
-            class: skin.root,
+            class: "ct-drawer",
             "data-state": "open",
-            "data-value": "leading",
-            style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:{layer};display:flex;flex-direction:row;justify-content:flex-start",
+            "data-placement": "leading",
             button {
-                class: skin.scrim,
+                "data-part": "scrim",
                 r#type: "button",
                 "aria-label": "Dismiss {name}",
-                style: "position:absolute;top:0;right:0;bottom:0;left:0;border:0;padding:0",
                 onclick: move |_| on_dismiss.call(()),
             }
             div {
-                class: skin.panel,
+                "data-part": "panel",
                 role: "dialog",
                 "aria-modal": "true",
                 "aria-label": "{name}",
-                style: "position:relative;min-height:0;min-width:0",
+                tabindex: "-1",
+                onmounted: super::focus_on_mount,
                 onkeydown: move |event| {
                     if event.key() == Key::Named(NamedKey::Escape) {
                         event.prevent_default();
@@ -89,6 +86,7 @@ mod tests {
     #[derive(Clone)]
     struct Probe {
         open: bool,
+        width: WidthClass,
         dismissals: Rc<RefCell<u32>>,
     }
 
@@ -96,6 +94,7 @@ mod tests {
         let dismissals = probe.dismissals;
         rsx! {
             Drawer {
+                width: probe.width,
                 name: "Sidebar",
                 open: probe.open,
                 on_dismiss: move |()| *dismissals.borrow_mut() += 1,
@@ -108,6 +107,7 @@ mod tests {
         let dismissals = Rc::new(RefCell::new(0));
         let probe = Probe {
             open,
+            width: WidthClass::Compact,
             dismissals: Rc::clone(&dismissals),
         };
         (Page::with_props(app, probe), dismissals)
@@ -118,21 +118,40 @@ mod tests {
         let (page, _) = render(true);
         let dialog = page.by_role("dialog", "Sidebar");
         assert_eq!(page.attr(dialog, "aria-modal").as_deref(), Some("true"));
+        let root = page.by_class("ct-drawer");
+        assert_eq!(page.parent(dialog), root);
+        assert_eq!(page.attr(root, "data-state").as_deref(), Some("open"));
         assert_eq!(
-            page.attr(page.parent(dialog), "data-value").as_deref(),
+            page.attr(root, "data-placement").as_deref(),
             Some("leading")
         );
+        assert_eq!(page.parts(root), ["scrim", "panel"]);
         assert!(page.has_role("button", "Home"));
     }
 
     #[test]
-    fn the_overlay_is_on_the_drawer_layer() {
-        let (page, _) = render(true);
-        let root = page.parent(page.by_role("dialog", "Sidebar"));
-        assert_eq!(
-            page.style(root, "z-index").as_deref(),
-            Some(Layer::Drawer.css())
-        );
+    fn only_a_compact_host_shows_a_drawer() {
+        for (width, shown) in [
+            (WidthClass::Compact, true),
+            (WidthClass::Medium, false),
+            (WidthClass::Expanded, false),
+        ] {
+            let dismissals = Rc::new(RefCell::new(0));
+            let page = Page::with_props(
+                app,
+                Probe {
+                    open: true,
+                    width,
+                    dismissals,
+                },
+            );
+            assert_eq!(page.has_role("dialog", "Sidebar"), shown, "{width:?}");
+            assert_eq!(
+                page.has_role("button", "Dismiss Sidebar"),
+                shown,
+                "{width:?}"
+            );
+        }
     }
 
     #[test]
@@ -161,17 +180,53 @@ mod tests {
         assert_eq!(*dismissals.borrow(), 1);
     }
 
+    #[test]
+    fn the_panel_takes_focus_on_mount_so_escape_works_with_no_focusable_child() {
+        fn text_only() -> Element {
+            rsx! {
+                Drawer { width: WidthClass::Compact, name: "Sidebar", open: true, on_dismiss: |_| {}, p { "Nothing to focus" } }
+            }
+        }
+        let mut page = Page::with_props(|()| text_only(), ());
+        let dialog = page.by_role("dialog", "Sidebar");
+        assert_eq!(page.attr(dialog, "tabindex").as_deref(), Some("-1"));
+        assert_eq!(page.mount(dialog).get(), Some(true));
+    }
+
     fn owner() -> Element {
         let mut open = use_signal(|| false);
         rsx! {
             button { onclick: move |_| open.toggle(), "Toggle" }
             Drawer {
+                width: WidthClass::Compact,
                 name: "Sidebar",
                 open: open(),
                 on_dismiss: move |()| open.set(false),
                 button { "Inside" }
             }
         }
+    }
+
+    /// An owner as an app writes it: `open` is a signal and a button sets it. Dismissal only counts
+    /// if the owner's state follows, so this drives the whole loop.
+    #[test]
+    fn an_owner_can_dismiss_the_drawer_by_scrim_or_escape_and_reopen_it() {
+        let mut page = Page::with_props(|()| owner(), ());
+        let toggle = page.by_role("button", "Toggle");
+        page.click(toggle);
+        assert!(page.has_role("dialog", "Sidebar"), "opens");
+
+        let scrim = page.by_role("button", "Dismiss Sidebar");
+        page.click(scrim);
+        assert!(!page.has_role("dialog", "Sidebar"), "scrim dismiss");
+
+        let toggle = page.by_role("button", "Toggle");
+        page.click(toggle);
+        assert!(page.has_role("dialog", "Sidebar"), "reopens");
+
+        let dialog = page.by_role("dialog", "Sidebar");
+        page.key(dialog, Key::Named(NamedKey::Escape));
+        assert!(!page.has_role("dialog", "Sidebar"), "escape dismiss");
     }
 
     #[test]
