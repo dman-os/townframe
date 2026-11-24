@@ -26,7 +26,9 @@ use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
+use tokio::sync::watch;
 
 /// What a provider answers when it refuses a call, mapped by dispatch onto
 /// [`DispatchError`]: a malformed input, or the provider's own XRPC error.
@@ -270,12 +272,51 @@ struct Table {
     routes_to: BTreeMap<String, Route>,
 }
 
-#[derive(Default)]
 pub struct Router {
     table: RwLock<Arc<Table>>,
+    /// The claims revision: bumped by every swap that changes what a provider claims, so a
+    /// follower that reads claims (the nodule service resolving its requests against them)
+    /// learns when its answer may be stale. A watch coalesces: a burst of registrations is one
+    /// notification, and a follower busy with the last one sees a single pending change.
+    /// `None` once [`Self::retire_claims`] closed it.
+    claims: Mutex<Option<watch::Sender<u64>>>,
+}
+
+impl Default for Router {
+    fn default() -> Self {
+        Self {
+            table: RwLock::default(),
+            claims: Mutex::new(Some(watch::channel(0).0)),
+        }
+    }
 }
 
 impl Router {
+    /// Follows the claims revision. Every change of what a provider claims (a registration that
+    /// swaps the table, an unbind that removes claims) moves it; routes do not, they are the
+    /// follower's own to set. A receiver that sees the sender closed has been told the node is
+    /// coming down ([`Self::retire_claims`]) and stops following.
+    ///
+    /// # Panics
+    ///
+    /// When the claims were already retired: nothing starts following a router that is down.
+    pub fn follow_claims(&self) -> watch::Receiver<u64> {
+        self.claims
+            .lock()
+            .expect("claims signal lock")
+            .as_ref()
+            .expect("claims are followed only while the router is live")
+            .subscribe()
+    }
+
+    /// Ends claims notification for good: followers' receivers close. Registrations and unbinds
+    /// still apply but no longer say so. Called when the node begins to stop, before the
+    /// providers it unbinds, so a follower does not re-resolve against claims that are being
+    /// withdrawn while the services behind them are stopping. Idempotent.
+    pub fn retire_claims(&self) {
+        self.claims.lock().expect("claims signal lock").take();
+    }
+
     fn snapshot(&self) -> Arc<Table> {
         Arc::clone(&self.table.read().expect("routing table lock"))
     }
@@ -457,6 +498,9 @@ impl Router {
             providers,
             routes_to: current.routes_to.clone(),
         });
+        if let Some(claims) = self.claims.lock().expect("claims signal lock").as_ref() {
+            claims.send_modify(|revision| *revision += 1);
+        }
         Ok(())
     }
 
@@ -537,6 +581,42 @@ mod tests {
 
     fn provider_of(router: &Router, nsid: &str) -> String {
         router.resolve(nsid).unwrap().provider_id.clone()
+    }
+
+    #[test]
+    fn claims_followers_see_each_change_of_claims_once_and_a_close_on_retire() {
+        let router = Router::default();
+        let mut claims = router.follow_claims();
+        assert!(!claims.has_changed().unwrap());
+
+        router.register("p", ops(&["x.a"]), ready()).unwrap();
+        router.register("q", ops(&["x.b"]), ready()).unwrap();
+        // A burst is one pending change to the follower, which then reads the claims as they are.
+        assert!(claims.has_changed().unwrap());
+        assert_eq!(*claims.borrow_and_update(), 2);
+        assert!(!claims.has_changed().unwrap());
+
+        // Registering what is already registered swaps nothing, and routes are not claims.
+        router.register("p", ops(&["x.a"]), ready()).unwrap();
+        router.set_routes(BTreeMap::from([(
+            "x.a".to_owned(),
+            Route::Provider("p".to_owned()),
+        )]));
+        assert!(!claims.has_changed().unwrap());
+
+        router.unbind("p");
+        assert!(claims.has_changed().unwrap());
+        claims.borrow_and_update();
+
+        // Retired, the signal closes for its followers and the router still applies claims.
+        router.retire_claims();
+        router.retire_claims();
+        assert!(claims.has_changed().is_err());
+        router.unbind("q");
+        assert_eq!(
+            router.resolve("x.b").unwrap_err(),
+            DispatchError::UnknownOperation
+        );
     }
 
     #[test]

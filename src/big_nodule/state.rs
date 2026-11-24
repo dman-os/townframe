@@ -197,6 +197,14 @@ impl Stores {
     }
 }
 
+/// Drops the nodules from `claimants`: the claims a reconcile's resolution depends on, since the
+/// snapshot decides a nodule's own registrations (see [`ProviderIndex::offers`]). It is also what
+/// keeps a reconcile's own registrations from being a reason to reconcile again.
+fn external(mut claimants: Vec<String>) -> Vec<String> {
+    claimants.retain(|provider_id| provider_id.parse::<CartridgeId>().is_err());
+    claimants
+}
+
 /// What a routine's handles are minted with: the delegators they are minted from and the
 /// capability that presents them, which is the actor the delegators are bound to.
 pub(crate) struct Delegators {
@@ -411,6 +419,10 @@ pub(crate) struct State {
     applied_heads: BTreeMap<CartridgeId, Vec<ChangeHash>>,
     records: BTreeMap<CartridgeId, NoduleRecord>,
     observed_heads: Vec<ChangeHash>,
+    /// The non-nodule claimants of every operation contract a request named in the last
+    /// reconcile, as it resolved them. A claims change in dispatch matters to this service
+    /// exactly when it moves one of these (see `reconcile_if_claims_moved`).
+    observed_claims: BTreeMap<String, Vec<String>>,
     /// Memoized per-envelope admission, shared with the config-mutation closures.
     admission_cache: Arc<AdmissionCache>,
     /// The revision the executor was last asked to host for each cartridge. A cartridge is here exactly
@@ -1048,6 +1060,7 @@ impl State {
             reported_unreadable_routes: BTreeSet::new(),
             records: BTreeMap::new(),
             observed_heads: Vec::new(),
+            observed_claims: BTreeMap::new(),
             admission_cache: Arc::default(),
             hosted: BTreeMap::new(),
             reensure: Arc::default(),
@@ -1063,6 +1076,10 @@ impl State {
             grant_requests,
             missing_authority: BTreeMap::new(),
         };
+        // Followed before the boot reconcile reads any claim, so a provider registering while it
+        // runs is a change this loop sees (the node registers some providers after the nodule
+        // service boots).
+        let mut claims = Some(state.stores.dispatch.follow_claims());
         let context = RequestContext::root();
         // The boot reconcile may already have started initializers, and the config documents it
         // loads run tasks; a failure here must not leave them running behind a service that
@@ -1124,6 +1141,24 @@ impl State {
                         // watch while we are still running is a lifecycle break.
                         changed.expect("nodule config watch closed while the state actor was running");
                         state.reconcile_if_moved().await?;
+                    },
+                    // A provider registered or unregistered in dispatch. The watch coalesces: a burst
+                    // of registrations while a reconcile runs is one change here, and the loop is
+                    // the single follower, so there is never more than the running reconcile plus
+                    // one follow-up. A closed signal is the node telling us it is coming down (it
+                    // retires the claims before it unbinds the providers it registered), so the
+                    // loop stops following: reconciling against claims being withdrawn would race
+                    // the services stopping behind them.
+                    changed = async {
+                        match claims.as_mut() {
+                            Some(claims) => claims.changed().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        match changed {
+                            Ok(()) => state.reconcile_if_claims_moved().await?,
+                            Err(_closed) => claims = None,
+                        }
                     },
                     // A cartridge config document moved: a grant written elsewhere, or by this
                     // actor (which already reconciled it, so the heads below say nothing moved).
@@ -1198,6 +1233,29 @@ impl State {
     async fn reconcile_if_moved(&mut self) -> Res<()> {
         let snapshot = self.config().await?;
         if snapshot.heads != self.observed_heads {
+            drop(
+                self.reconcile(&RequestContext::root(), snapshot, Trigger::Change)
+                    .await?,
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether a claim a request resolved against has moved since the last reconcile read it.
+    fn claims_moved(&self) -> bool {
+        self.observed_claims
+            .iter()
+            .any(|(contract, seen)| external(self.stores.dispatch.claimants(contract)) != *seen)
+    }
+
+    /// Reconciles when a claim a request resolved against has moved since the last reconcile. A
+    /// registration that no request names, or the one this actor's own reconcile just made for a
+    /// nodule, moves nothing here. A claim that moved while a reconcile was running is caught the
+    /// same way: the reconcile recorded the claims it read, and the loop compares them against
+    /// the router's now.
+    async fn reconcile_if_claims_moved(&mut self) -> Res<()> {
+        if self.claims_moved() {
+            let snapshot = self.config().await?;
             drop(
                 self.reconcile(&RequestContext::root(), snapshot, Trigger::Change)
                     .await?,
@@ -1780,8 +1838,12 @@ impl State {
         // records would keep reporting `granted: true`. Check only those capabilities' liveness
         // and run the full reconcile, which re-applies or re-reports the grant, just when one
         // died.
+        // The claims are checked here as well as followed by the loop: the loop's change may not
+        // be handled yet when a read arrives (commands are polled first), and a read made after a
+        // provider registered must not answer from before it.
         if snapshot.heads != self.observed_heads
             || has_unapplied
+            || self.claims_moved()
             || self.any_applied_grant_dead(context).await?
         {
             drop(self.reconcile(context, snapshot, Trigger::Change).await?);
@@ -1862,6 +1924,7 @@ impl State {
         snapshot: StoreSnapshot<NoduleConfig>,
         trigger: Trigger,
     ) -> Res<BTreeMap<CartridgeId, NodulesError>> {
+        self.observed_claims.clear();
         let mut resolved = snapshot.value.resolve(&self.admission_cache);
         self.sync_schemas(&mut resolved);
         let mut revoke_errors: BTreeMap<CartridgeId, NodulesError> = BTreeMap::new();
@@ -2594,11 +2657,14 @@ impl State {
                 );
                 continue;
             }
-            let offers = providers.offers(
-                &request.contract,
-                self.stores
-                    .native_offers(&request.contract, request.is_operation_call()),
-            );
+            let native = self
+                .stores
+                .native_offers(&request.contract, request.is_operation_call());
+            if request.is_operation_call() {
+                self.observed_claims
+                    .insert(request.contract.clone(), external(native.clone()));
+            }
+            let offers = providers.offers(&request.contract, native);
             statuses.insert(
                 request.binding.clone(),
                 RequestStatus::evaluate(&request, &offers, pinned),
