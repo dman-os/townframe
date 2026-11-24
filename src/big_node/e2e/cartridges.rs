@@ -835,9 +835,23 @@ async fn a_node_installs_its_core_cartridge_at_boot_and_a_reboot_keeps_the_insta
         )
         .await
         .unwrap();
+    // Opening a path that exists opens the same actor.
+    let micros = node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            big_cabinet_core::authority::OpenActor {
+                parent: node.authority.root,
+                path: "micros".into(),
+                rights: big_cabinet_core::authority::Rights::all(),
+            },
+        )
+        .await
+        .unwrap();
     assert_eq!(
         nodule.actor.map(|actor| actor.actor_id),
-        Some(node.micros_actor.actor.actor_id)
+        Some(micros.actor.actor_id)
     );
     get_version(&node, &core.to_string(), crate::core_cartridge::VERSION)
         .await
