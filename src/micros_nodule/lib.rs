@@ -385,7 +385,7 @@ impl Micros {
             &handle_need,
         );
         let id = micro_id(&record.cartridge_id);
-        let scopes_json = serde_json::to_value(&scopes_wire(&scopes)).expect("scopes serialize");
+        let scopes_json = scopes_wire(&scopes);
         if let Some(held) = &held
             && held.scopes.get(&id) == Some(&scopes_json)
             && let Some(kept) = held.micros.iter().find(|held| held.micro == id)
