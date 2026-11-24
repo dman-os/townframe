@@ -68,6 +68,16 @@ Ways intxt is special-cased or ahead of the general mechanism. Each entry gives 
 - **C13, a micro can't read blobs that arrive after install.** The review micro reads patch blobs that the intxt commits documents reference (`org.example.daybook.blob/<digest>`). On node-55, `BlobsScope` lists exact blob ids, so no capability minted at install covers them. **Already built by nodules** in #244 (`stack/node-67-blobs-drawer-read`): `BlobsScope.drawers` reads any blob in the inventory of a drawer the minter reaches at Read. It's checked at read time, and a read right after a write can briefly race the inventory's projection. Closed by restacking onto node-76; no new design is needed. Then:
   - claytxt mints `{drawers: [intxtDrawers]}` as the review micro's `blobCap` and grants `blobs.read`. Their layer 56 mints an empty `blobCap` until then, so the configuration decodes.
   - claytxt cherry-picks intxt's `read_blob` wiring (7224c1c0) onto their layer 27.
+  - Status (11-24): intxt is restacked onto node-76 (#321). claytxt is rebasing onto it and adds the blob grant as a layer.
+- **C14, micros had no clock.** CodeView needs `sleep`/`now` to pace frames. **Closed 11-24** by claytxt #317: `Context::sleep` and `Context::now`, whose guest sleep wakes the views. The review micro's CodeView switch (3a675d3c) uses them, and claytxt carries it above their tip.
+  - Open in claytxt's lane:
+    - ScrubStrip with owned labels and an optional viewport;
+    - rows on a first render, for SSR and headless tests;
+    - `from_patch` over bytes.
+- **C15, a node can't be told to listen on TCP.** `node.json` has no listener setting; day_cli's boot hardcodes the Unix socket. The web viewer reads its node over TCP XRPC. Owner: nodules.
+- **C16, no operator way to mint a dispatch capability.** Over TCP an anonymous call is refused (401), and the bearer must be a dispatch capability scoped to the methods called. `dispatch.mintCapability` isn't routed over XRPC, so `day exec` can't mint one. INTERIM: the viewer is configured with three shared capabilities (`INTXT_WEB_DOC_CAP`, `INTXT_WEB_BLOB_CAP`, `INTXT_WEB_DISPATCH_CAP`). Owner: nodules.
+- **C17, the viewer's real access is public read.** An anonymous dispatch scope covering readDatums, pollDatums and blobs.read, over drawers granted Read to keyhive's Public agent, with no bearer at all. Folded into C11's sketch. Owner: nodules.
+- **C18, minted capabilities don't survive a restart.** They live in memory, so every node restart invalidates the viewer's configuration. Owner: nodules.
 - **C3, the cartridge is published with the fixture key** (`sign_as_example`). Fix: the publisher signing namespace / DID, which the operator deferred on 11-18. Owner: nodules.
 - **C4, intxt's CLI is compiled into `day`** (`src/day_cli/cmds/intxt*`). A cartridge can't contribute commands, so intxt is a special case in the node's own binary. Fix: cartridge-contributed CLI verbs, or a generic `day x <cartridge> …` dispatch over the cartridge's methods. Owner: nodules.
   - Nodules' leaning (11-24), with a written proposal to follow: `day x <cartridge> <verb>` resolves a command binding (consumer-owned metadata naming a method NSID, their D2b) and derives its flags from the method's Lexicon `parameters`/`input`, so the manifest carries only the verb name and help text. A host-side CLI component comes later, for verbs that need local files or a TTY.
@@ -459,7 +469,25 @@ Round 1 as given (2026-11-19, CLI dogfood; proposals mine where marked):
 
 Keep this section short: what's moving now and what's next. Move finished entries to `intxt-ledger-history.md`.
 
-- **The stack (2026-11-24):** GitHub stack #221, 32 draft PRs (#123 … #230), on nodules' node-55 (`91fb13c0`). The tip was green on mothership on 11-19 (137/137 intxt, 34/34 day_cli, clippy and lint clean). Nothing merged. All refs from the laptop and mothership are on origin (`wip/intxt/*`) before mothership retires.
+- **The stack (2026-11-24, later):** GitHub stack #221, 36 draft PRs (#123 … #321), restacked onto nodules' node-76 (#252). Layers above the 11-19 tip:
+  - 34 `PrLinks::split` (#290);
+  - 35 the `intxt` multicall, `day` PATH plugins and `record install claude-code` (#312);
+  - 36 docs (#320);
+  - 37 the node-76 fixups (#321).
+  
+  Verified on the laptop: clippy clean; intxt crates 138/138; day_cli 75/75 on a clean run; `guardrails lint` 0. Nothing merged. All refs from the laptop and mothership are on origin (`wip/intxt/*`).
+  - **F (11-24) An intermittent day_cli e2e failure under heavy load.** `intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_op` failed once after 28 s, and several e2e tests timed out at 120 s, while the desktop and other builds were compiling on the laptop. It wasn't reproduced in 45 stressed runs (-j6) or a clean -j4 run. The message wasn't captured; next time run with `--failure-output immediate`.
+- **The web viewer (#310, `feat/intxt-web`, on intxt-37), 11-24:** it reads a real intxt from a node over TCP XRPC (`NodeSource`) and renders:
+  - the title and a Markdown description (raw HTML escaped);
+  - commits from the commits documents;
+  - the range's patch as escaped HTML, capped at 256 KiB;
+  - PR descriptions with the block stripped.
+  
+  25 tests pass; it was checked end to end against a real node. The component is 8.9 MB, unstripped. It carries `big_blobs_core` with `irpc` default features off, so it builds for wasm. Shortcuts are C15–C18. Open for the operator:
+  - Should `via` choose the node per request, or should a viewer node sync drawers first?
+  - Should `add` record per-commit patches, or is the range patch enough?
+  - Should one unreadable datum render a partial page, rather than a 502?
+- **The review micro's CodeView switch:** 3a675d3c on `feat/intxt-review-codeview`, carried by claytxt above their tip (C14).
 - **Recording Claude Code today, and what it lacks** (2026-11-24, from the code):
   - `day x intxt capture` handles every hook (SessionStart, Pre/PostToolUse, UserPromptSubmit, Stop, SubagentStop, SessionEnd) and imports transcripts with subagents.
   - It is not installed anywhere: hooks are added to `settings.json` by hand, and FDR 008's `record install` is unbuilt.
