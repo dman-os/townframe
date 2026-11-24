@@ -22,6 +22,7 @@
 //! not share a host's UI loop, and the host's runtime flavor is not the node's business.
 
 use big_blobs_core::BlobsProtocol;
+use big_blobs_core::BlobsScope;
 use big_blobs_core::MintBlobsCapability;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
@@ -116,6 +117,9 @@ pub struct InstallConfig {
     pub tag: String,
     pub key: String,
     pub value: serde_json::Map<String, serde_json::Value>,
+    /// Whether the micro's config also carries a blobs capability as `blobCap`, minted for its
+    /// actor with the empty scope (see [`install_one`]).
+    pub blob_cap: bool,
 }
 
 pub struct NodeConfig {
@@ -508,15 +512,48 @@ async fn install_one(minting: &Minting, install: MicroInstall) -> Res<Installed>
         };
         Some(mint_docs(minting, &actor, scope).await?)
     };
+    // INTERIM: a micro whose config asks for `blobCap` is minted a blobs capability bound to its
+    // actor, with the EMPTY scope: it reads nothing. `BlobsScope` names exact blob ids and has no
+    // read-all or per-drawer form, and the blobs a micro reads (an intxt's patches) arrive after
+    // install, so no scope minted here could name them. The capability exists so the config
+    // decodes (the micro's config requires `blobCap`, and without it the micro stays
+    // Unconfigured); it widens when blob reach for drawers is designed with nodules (ADR 049
+    // §6.2 domain handle). The install file never decides it, as for `docCap`.
+    let blob_capability = match &config {
+        Some(InstallConfig { blob_cap: true, .. }) => Some(
+            minting
+                .blobs
+                .call_with(
+                    RequestContext::root(),
+                    minting.operator().metadata(),
+                    MintBlobsCapability {
+                        scope: BlobsScope::default(),
+                        rights: Rights::USE,
+                        subject: Some(actor.actor.actor_id),
+                    },
+                )
+                .await
+                .wrap_err_with(|| format!("minting the blobs capability of micro {micro}"))?
+                .capability_id,
+        ),
+        _ => None,
+    };
     let config = config.map(
         |InstallConfig {
              tag,
              key,
              mut value,
+             blob_cap: _,
          }| {
             if let Some(capability) = doc_capability {
                 value.insert(
                     "docCap".to_owned(),
+                    serde_json::to_value(capability).expect("a capability id is JSON"),
+                );
+            }
+            if let Some(capability) = blob_capability {
+                value.insert(
+                    "blobCap".to_owned(),
                     serde_json::to_value(capability).expect("a capability id is JSON"),
                 );
             }

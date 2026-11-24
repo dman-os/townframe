@@ -162,6 +162,8 @@ fn parse_install_file(
             tag: config.tag.to_owned(),
             key: config.key.to_owned(),
             value,
+            // The review micro's config requires `blobCap` (see `clay_node::install_one`).
+            blob_cap: true,
         },
     ))
 }

@@ -11,7 +11,12 @@ use clay_mdk::Context;
 use clay_mdk::FacetState;
 use method_core::Unary;
 use micro_review_manifest::ReviewConfig;
+use futures::StreamExt;
 use std::future::Future;
+
+/// The most octets [`NodeCalls::read_blob`] collects: capture writes no patch blob larger than
+/// 8 MiB (`MAX_PATCH_BYTES` in `day x intxt`), and records a larger change as having no patch.
+const MAX_BLOB_OCTETS: usize = 8 * 1024 * 1024;
 
 /// Why a call did not return its answer: all are the edge's failures to report, not invariants.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -150,14 +155,26 @@ impl NodeCalls for ContextNode {
     }
 
     async fn read_blob(&self, input: ReadBlob) -> Result<Vec<u8>, CallError> {
-        // INTERIM: the micro's node transport answers JSON only: `Context::call` takes a `Unary`
-        // method, and `blobs.read` answers a byte stream. Until the guest transport hands a byte
-        // body back (the `XrpcBody::Bytes` its HTTP import already carries), a read says so
-        // instead of showing nothing.
-        Err(CallError::Transport(format!(
-            "blob {} cannot be read yet: the micro's node transport carries no byte bodies",
-            input.blob_id
-        )))
+        let blob = input.blob_id;
+        let mut body = self.context.call_bytes(input).await?;
+        let mut octets = Vec::new();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.map_err(|error| {
+                CallError::Transport(format!(
+                    "blob {blob} broke off after {} octets: {error}",
+                    octets.len()
+                ))
+            })?;
+            // The body is collected to be shown, so a blob larger than any patch capture
+            // writes is refused as it arrives rather than buffered whole.
+            if octets.len() + chunk.len() > MAX_BLOB_OCTETS {
+                return Err(CallError::Unshowable(format!(
+                    "blob {blob} is larger than the {MAX_BLOB_OCTETS} octets a patch can be"
+                )));
+            }
+            octets.extend_from_slice(&chunk);
+        }
+        Ok(octets)
     }
 
     fn configuration(&self) -> Result<Configuration, CallError> {
