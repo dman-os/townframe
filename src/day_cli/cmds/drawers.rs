@@ -178,7 +178,9 @@ pub(super) async fn known_drawers_handle(
         .call(MintDrawerCapability {
             scope: DrawerScope {
                 drawers: [(
-                    info.drawers.config(big_node::ConfigDrawerRole::KnownDrawers).clone(),
+                    info.drawers
+                        .config(big_node::ConfigDrawerRole::KnownDrawers)
+                        .clone(),
                     DrawerAccess::Admin,
                 )]
                 .into(),

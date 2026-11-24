@@ -40,7 +40,8 @@ async fn add(ticket: &str) -> Res<ExitCode> {
                 .add_bootstrap(ticket)
         })
         .await?;
-    writeln!(out,
+    writeln!(
+        out,
         "{}",
         if changed {
             "added to the bootstrap list"
