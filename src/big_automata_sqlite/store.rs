@@ -230,11 +230,12 @@ impl<D: PartDb> RevSource for SqlitePartStore<D> {
         page: &mut Page<LogKey, LogEntry>,
     ) -> Res<()> {
         assert!(after < until, "empty read window ({after}, {until}]");
-        Ok(snapshot!(self, reader => {
+        snapshot!(self, reader => {
             let latest = read::latest_rev(&reader).await?;
             assert!(until <= latest, "read until {until} past the committed rev {latest}");
-            log::read_selected(&reader, selector, after, until, limits, page).await?
-        }))
+            log::read_selected(&reader, selector, after, until, limits, page).await?;
+        });
+        Ok(())
     }
 
     fn watch(&self) -> RevWatch {
@@ -261,9 +262,10 @@ impl<D: PartDb> PartStoreServe for SqlitePartStore<D> {
         limits: Limits,
         page: &mut AuthorizedPage,
     ) -> Res<()> {
-        Ok(snapshot!(self, reader => {
-            serve::read_authorized(&reader, principal, routes, after, until, limits, page).await?
-        }))
+        snapshot!(self, reader => {
+            serve::read_authorized(&reader, principal, routes, after, until, limits, page).await?;
+        });
+        Ok(())
     }
 
     async fn part_summaries(

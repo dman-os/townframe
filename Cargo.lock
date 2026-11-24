@@ -1466,6 +1466,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "big_automata_sqlite"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "big_automata",
+ "futures",
+ "proptest",
+ "serde_json",
+ "sqlite_rs",
+ "tempfile",
+ "tokio",
+ "utils_rs",
+]
+
+[[package]]
 name = "big_blobs"
 version = "0.1.0"
 dependencies = [

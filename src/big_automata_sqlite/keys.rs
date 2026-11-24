@@ -9,8 +9,6 @@
 //! - up to 32 bytes: `0x00`, the length, the bytes zero-padded to 32;
 //! - longer: `0x01`, the bytes.
 
-use crate::interlude::*;
-
 /// The memcmp-ordered encoding of a key's bytes.
 fn encode(bytes: &[u8]) -> Vec<u8> {
     if bytes.len() <= 32 {

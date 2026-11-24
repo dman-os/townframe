@@ -64,7 +64,7 @@ mod store;
 mod write;
 
 #[cfg(test)]
-mod tests;
+mod suite;
 
 pub use cursors::SqlitePeerCursors;
 pub use db::PartDb;
