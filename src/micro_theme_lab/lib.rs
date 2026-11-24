@@ -1,7 +1,7 @@
 //! The theme lab, authored once against the MDK's [`Context`]: the end user's theme editor, the
 //! home of iterating on the design language. A theme is one stylesheet of CSS text. The lab shows
-//! it in a plain monospace textarea, previews the draft on its own surface (sample kit
-//! components) before anything is applied, and Apply sends it to the host, which applies it to
+//! it in a plain monospace textarea, previews the draft on the specimen board (every foundation
+//! and kit component page, `clay_dioxus_specimens`) before anything is applied, and Apply sends it to the host, which applies it to
 //! the shell and every micro live and keeps it across restarts. Revert returns the draft to what
 //! is applied.
 //!
@@ -18,16 +18,27 @@ use clay_dioxus_kit::Alert;
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::Button;
 use clay_dioxus_kit::ButtonVariant;
-use clay_dioxus_kit::Card;
-use clay_dioxus_kit::CardContent;
-use clay_dioxus_kit::CardHeader;
-use clay_dioxus_kit::CardVariant;
-use clay_dioxus_kit::ListDetails;
-use clay_dioxus_kit::ListRow;
 use clay_dioxus_kit::PanelPage;
-use clay_dioxus_kit::Split;
+use clay_dioxus_kit::Renderer;
 use clay_dioxus_kit::Status as Tone;
-use clay_dioxus_kit::WidthClass;
+use clay_dioxus_specimens::AlertSpecimens;
+use clay_dioxus_specimens::AppBarSpecimens;
+use clay_dioxus_specimens::ButtonSpecimens;
+use clay_dioxus_specimens::CardSpecimens;
+use clay_dioxus_specimens::ChipSpecimens;
+use clay_dioxus_specimens::ColorFoundation;
+use clay_dioxus_specimens::DrawerSpecimens;
+use clay_dioxus_specimens::FoundationSection;
+use clay_dioxus_specimens::ListDetailsSpecimens;
+use clay_dioxus_specimens::ListRowSpecimens;
+use clay_dioxus_specimens::NavButtonSpecimens;
+use clay_dioxus_specimens::PanelPageSpecimens;
+use clay_dioxus_specimens::ScrubStripSpecimens;
+use clay_dioxus_specimens::SectionsSpecimens;
+use clay_dioxus_specimens::SeparatorSpecimens;
+use clay_dioxus_specimens::SheetSpecimens;
+use clay_dioxus_specimens::TabsSpecimens;
+use clay_dioxus_specimens::TokenFoundations;
 use clay_mdk::Capability;
 use clay_mdk::Context;
 use clay_mdk::Error;
@@ -39,6 +50,8 @@ use micro_theme_lab_manifest::SHELL_GET_THEME;
 use micro_theme_lab_manifest::SHELL_NAV_BUTTON;
 use micro_theme_lab_manifest::SHELL_SET_THEME;
 use micro_theme_lab_manifest::ThemeLabView;
+use std::collections::BTreeMap;
+use std::rc::Rc;
 
 /// What the view asks of the host: the shell's sidebar/back button, and the theme calls, which a
 /// view may await (`Capability::call` runs them on a task of the incarnation).
@@ -202,7 +215,7 @@ fn view(host: Host) -> Element {
                         },
                     }
                 }
-                Specimens {}
+                Board {}
             }
         },
     )
@@ -216,50 +229,131 @@ fn page(leading: Element, body: Element) -> Element {
     }
 }
 
-/// Sample surfaces the draft is judged on: kit components and the semantic roles they are made
-/// of. They are the lab's own surfaces, not the host's: the preview restyles these (and the
-/// editor around them) before anything is applied.
+/// One page of the specimen board: the foundations, or one kit component's specimens.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BoardPage {
+    Foundations,
+    Colours,
+    Button,
+    Card,
+    Alert,
+    Chip,
+    Tabs,
+    Separator,
+    AppBar,
+    NavButton,
+    ListRow,
+    ListDetails,
+    PanelPage,
+    Sections,
+    Sheet,
+    Drawer,
+    ScrubStrip,
+}
+
+impl BoardPage {
+    const ALL: [BoardPage; 17] = [
+        Self::Foundations,
+        Self::Colours,
+        Self::Button,
+        Self::Card,
+        Self::Alert,
+        Self::Chip,
+        Self::Tabs,
+        Self::Separator,
+        Self::AppBar,
+        Self::NavButton,
+        Self::ListRow,
+        Self::ListDetails,
+        Self::PanelPage,
+        Self::Sections,
+        Self::Sheet,
+        Self::Drawer,
+        Self::ScrubStrip,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Foundations => "Foundations",
+            Self::Colours => "Colours",
+            Self::Button => "Button",
+            Self::Card => "Card",
+            Self::Alert => "Alert",
+            Self::Chip => "Chip",
+            Self::Tabs => "Tabs",
+            Self::Separator => "Separator",
+            Self::AppBar => "App bar",
+            Self::NavButton => "Nav button",
+            Self::ListRow => "List row",
+            Self::ListDetails => "List details",
+            Self::PanelPage => "Panel page",
+            Self::Sections => "Sections",
+            Self::Sheet => "Sheet",
+            Self::Drawer => "Drawer",
+            Self::ScrubStrip => "Scrub strip",
+        }
+    }
+
+    fn render(self) -> Element {
+        match self {
+            Self::Foundations => rsx! { TokenFoundations {} },
+            Self::Colours => rsx! {
+                FoundationSection {
+                    id: "colours".to_owned(),
+                    title: "Colour roles".to_owned(),
+                    description: "Every semantic colour role, painted from its live custom property: \
+                        a theme that sets a role changes its swatch here."
+                        .to_owned(),
+                    ColorFoundation {}
+                }
+            },
+            Self::Button => rsx! { ButtonSpecimens {} },
+            Self::Card => rsx! { CardSpecimens {} },
+            Self::Alert => rsx! { AlertSpecimens {} },
+            Self::Chip => rsx! { ChipSpecimens {} },
+            Self::Tabs => rsx! { TabsSpecimens {} },
+            Self::Separator => rsx! { SeparatorSpecimens {} },
+            Self::AppBar => rsx! { AppBarSpecimens {} },
+            Self::NavButton => rsx! { NavButtonSpecimens {} },
+            Self::ListRow => rsx! { ListRowSpecimens {} },
+            Self::ListDetails => rsx! { ListDetailsSpecimens {} },
+            Self::PanelPage => rsx! { PanelPageSpecimens {} },
+            Self::Sections => rsx! { SectionsSpecimens {} },
+            Self::Sheet => rsx! { SheetSpecimens {} },
+            Self::Drawer => rsx! { DrawerSpecimens {} },
+            // The strip sizes itself to a viewport; the board gives it a fixed one, as the
+            // showcase does, since a micro does not know its mount's size yet.
+            Self::ScrubStrip => rsx! { ScrubStripSpecimens { viewport: (720.0, 860.0) } },
+        }
+    }
+}
+
+/// The specimen board: the foundation pages and every kit component's specimen page, from
+/// `clay_dioxus_specimens`, the same pages the showcase shows. It renders inside the lab's mount,
+/// so the draft previewing as the lab's stylesheet restyles every cell before anything is
+/// applied. One page at a time: the whole board in one render would be one oversized batch.
 #[component]
-fn Specimens() -> Element {
+fn Board() -> Element {
+    // The pages' sections register their mounted handles here (`FoundationSection`), and the
+    // Tabs and ScrubStrip pages read the renderer. A micro renders under a browser engine on
+    // every host that adopts its shadow root (Wry, the web build); Blitz never shapes this.
+    use_context_provider(|| Signal::new(BTreeMap::<String, Rc<MountedData>>::new()));
+    use_context_provider(|| Renderer::Browser);
+    let mut page = use_signal(|| BoardPage::Foundations);
     rsx! {
-        section { "data-part": "preview", "aria-label": "Preview",
-            h2 { "Preview" }
-            div { "data-part": "specimens",
-                AppBar { title: "App bar" }
-                div { "data-part": "samples",
-                    p { "data-part": "text", "Body text in the text role." }
-                    p { "data-part": "muted", "Muted text, for secondary detail." }
-                    div { "data-part": "buttons",
-                        Button { onclick: |()| {}, "Primary" }
-                        Button { variant: ButtonVariant::Secondary, onclick: |()| {}, "Secondary" }
-                        Button { variant: ButtonVariant::Destructive, onclick: |()| {}, "Destructive" }
-                    }
-                    div { "data-part": "rows",
-                        ListDetails {
-                            width: WidthClass::Compact,
-                            list_name: "Examples",
-                            list: rsx! {
-                                for name in ["Inbox", "Today", "Archive"] {
-                                    ListRow { key: "{name}", id: name, name: "{name}", "{name}" }
-                                }
-                            },
-                            details_name: "Example details",
-                            details: None,
-                            current: Some("Inbox".to_owned()),
-                            split: Split::new(vec![1.0], 320.0),
-                            on_resize: |_| {},
-                            on_open: |_| {},
-                            on_back: |()| {},
-                        }
-                    }
-                    Card { variant: CardVariant::Raised,
-                        CardHeader { "A card" }
-                        CardContent {
-                            p { "data-part": "subtle", "On the card role, with subtle text." }
-                        }
+        section { "data-part": "board", "aria-label": "Specimen board",
+            nav { "data-part": "index", "aria-label": "Board pages",
+                for each in BoardPage::ALL {
+                    Button {
+                        key: "{each.title()}",
+                        variant: ButtonVariant::Ghost,
+                        current: page() == each,
+                        onclick: move |()| page.set(each),
+                        "{each.title()}"
                     }
                 }
             }
+            div { "data-part": "page", {page().render()} }
         }
     }
 }

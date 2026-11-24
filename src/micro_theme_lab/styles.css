@@ -54,58 +54,39 @@
   min-height: var(--ct-dimension-target-coarse);
 }
 
-.ct-theme-lab [data-part="preview"] {
-  display: flex;
-  flex-direction: column;
-  gap: var(--ct-dimension-spacing-4);
-}
-
-.ct-theme-lab [data-part="preview"] > h2 {
-  margin: 0;
-  font-size: var(--ct-dimension-font-size-lg);
-  font-weight: var(--ct-font-weight-semibold);
-}
-
-.ct-theme-lab [data-part="specimens"] {
-  overflow: hidden;
-  border: var(--ct-dimension-border-width-thin) solid var(--ct-color-border);
-  border-radius: var(--ct-dimension-radius-lg);
-  background: var(--ct-color-canvas);
-}
-
-.ct-theme-lab [data-part="samples"] {
+/* The specimen board: an index of pages, then the selected page on the canvas role. */
+.ct-theme-lab [data-part="board"] {
   display: flex;
   flex-direction: column;
   gap: var(--ct-dimension-spacing-3);
-  padding: var(--ct-dimension-spacing-4);
+  min-width: 0;
 }
 
-.ct-theme-lab [data-part="text"],
-.ct-theme-lab [data-part="muted"],
-.ct-theme-lab [data-part="subtle"] {
-  margin: 0;
+.ct-theme-lab [data-part="index"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ct-dimension-spacing-1);
 }
 
-.ct-theme-lab [data-part="text"] {
+.ct-theme-lab [data-part="page"] {
+  min-width: 0;
+  padding: 0 var(--ct-dimension-spacing-4) var(--ct-dimension-spacing-4);
+  border: var(--ct-dimension-border-width-thin) solid var(--ct-color-border);
+  border-radius: var(--ct-dimension-radius-lg);
+  background: var(--ct-color-canvas);
   color: var(--ct-color-text);
 }
 
-.ct-theme-lab [data-part="muted"] {
-  color: var(--ct-color-text-muted);
-  font-size: var(--ct-dimension-font-size-sm);
-}
+/* Side by side once there is room for both: the editor stays in view while the board scrolls. */
+@media (min-width: 64rem) {
+  .ct-theme-lab {
+    display: grid;
+    grid-template-columns: minmax(20rem, 28rem) minmax(0, 1fr);
+    align-items: start;
+  }
 
-.ct-theme-lab [data-part="subtle"] {
-  color: var(--ct-color-text-subtle);
-  font-size: var(--ct-dimension-font-size-sm);
-}
-
-.ct-theme-lab [data-part="buttons"] {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--ct-dimension-spacing-2);
-}
-
-.ct-theme-lab [data-part="rows"] {
-  height: 10rem;
+  .ct-theme-lab [data-part="editor"] {
+    position: sticky;
+    top: var(--ct-dimension-spacing-4);
+  }
 }
