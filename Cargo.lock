@@ -9800,6 +9800,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "micros_nodule"
+version = "0.1.0"
+dependencies = [
+ "big_blobs_core",
+ "big_cabinet_core",
+ "big_cartridges_core",
+ "big_dispatch_core",
+ "big_ndk",
+ "big_nodule_core",
+ "futures",
+ "method_core",
+ "serde",
+ "serde_json",
+ "service_core_rs",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
