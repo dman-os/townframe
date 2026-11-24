@@ -322,7 +322,7 @@ impl RoutineScopes {
         let dispatch = (!operations.is_empty()).then(|| DispatchScope {
             operations,
             authorities: effective_operations.authorities.clone(),
-            privileged: effective_operations.privileged,
+            privileged: effective_operations.privileged.clone(),
         });
         RoutineScopes {
             dispatch,

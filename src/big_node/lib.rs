@@ -1112,16 +1112,17 @@ async fn boot_dispatch(
                 Authorization::identity(authority.root).metadata(),
                 MintDispatchCapability {
                     capability: None,
-                    // Every method: a nodule's method grants are narrowed from this scope. The
-                    // privilege bit is the most a handle minted from it can carry, and a handle
-                    // carries it only when its cartridge's grants say so
+                    // Every method: a nodule's method grants are narrowed from this scope. Its
+                    // privilege names every privileged built-in method, the most a handle
+                    // minted from it can carry, and a handle carries a method of it only when
+                    // its cartridge's grants name that method as privileged
                     // (`GrantBody::privileged`), which only the node writes, for its core
                     // cartridge, for the boot. A person's grant, however it is configured, never
                     // reaches a method that manages nodules or mints authority
                     // (`XrpcMethod::privileged`).
                     scope: DispatchScope {
                         authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
-                        privileged: true,
+                        privileged: method_lexicon::privileged_methods(),
                         ..Default::default()
                     },
                     rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,

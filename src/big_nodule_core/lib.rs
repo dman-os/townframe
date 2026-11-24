@@ -271,7 +271,14 @@ impl NoduleAdmission for ResolvedCartridge {
             // Privilege is not narrowed by the manifest (a request names a method, not its
             // declaration), so a grant that asks for it carries it through; the mint then
             // refuses it unless the nodule service itself holds it.
-            privileged: grants.privileged,
+            // A grant of a privileged method carries through, for the methods the manifest asks
+            // for: it names exactly its method.
+            privileged: grants
+                .privileged
+                .iter()
+                .filter(|nsid| requested.contains(*nsid))
+                .cloned()
+                .collect(),
         };
         let unrequested = DispatchScope {
             operations: grants
@@ -290,7 +297,7 @@ impl NoduleAdmission for ResolvedCartridge {
                 })
                 .cloned()
                 .collect(),
-            privileged: false,
+            privileged: BTreeSet::new(),
         };
         (applied, unrequested)
     }

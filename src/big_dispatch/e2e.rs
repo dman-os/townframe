@@ -511,7 +511,7 @@ async fn privilege_is_a_scope_bit_that_names_cannot_confer() {
 
     // Only a handle that holds the bit can mint one with it.
     let privileged = DispatchScope {
-        privileged: true,
+        privileged: [SENSITIVE.to_owned()].into(),
         ..authorities(&[DispatchScope::ALL_AUTHORITIES])
     };
     assert_eq!(
@@ -519,6 +519,18 @@ async fn privilege_is_a_scope_bit_that_names_cannot_confer() {
         Err(DispatchError::Denied)
     );
     let holder = h.mint_dispatch(operator, privileged).await.unwrap();
+    // Privilege is a set: a holder of one method's cannot mint a handle that adds another's.
+    assert_eq!(
+        h.mint_dispatch(
+            holder,
+            DispatchScope {
+                privileged: [SENSITIVE.to_owned(), "org.example.admin.other".to_owned()].into(),
+                ..authorities(&[DispatchScope::ALL_AUTHORITIES])
+            },
+        )
+        .await,
+        Err(DispatchError::Denied)
+    );
     assert!(h.invoke(holder, SENSITIVE, json!({})).await.is_ok());
     // Narrowing still works from either, and a narrowed handle of the holder keeps the bit only
     // if it asks for it.

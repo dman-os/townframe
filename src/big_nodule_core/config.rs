@@ -814,9 +814,11 @@ impl ResolvedGrants {
             }
             GrantKey::Method(nsid) => {
                 self.operations.operations.insert(nsid.clone());
-                // The scope's one privilege bit lets the handle reach the privileged methods it
-                // names; the names stay what bounds it.
-                self.operations.privileged |= body.privileged;
+                // A privileged grant reaches exactly its method (node-91's rule): the scope's
+                // privilege set names it, and the names stay what bounds it.
+                if body.privileged {
+                    self.operations.privileged.insert(nsid.clone());
+                }
             }
             GrantKey::Authority(prefix) => {
                 self.operations.authorities.insert(prefix.clone());
@@ -1619,7 +1621,7 @@ fn substituted_grants(
             .map(|request| request.contract.clone())
             .collect(),
         authorities: BTreeSet::new(),
-        privileged: granted.privileged,
+        privileged: granted.privileged.clone(),
     }
 }
 

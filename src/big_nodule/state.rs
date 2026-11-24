@@ -863,16 +863,23 @@ async fn apply_nodule_capabilities(
         // from delegators of that full scope. The core nodule cannot narrow a handle to a
         // micro's scope unless its own covers it, and `attenuateCapability` and the mints only
         // narrow, so its delivered dispatch and blobs handles are the delegators' scopes and not
-        // lowered from its own `uses`. Dispatch's privilege bit stays what its grants say, as for
-        // any nodule, so it reaches a privileged method only on the node's own grants.
+        // lowered from its own `uses`. Its privilege is exactly the privileged methods the node
+        // grants it (node-91's rule: a privileged grant covers its method and no other), so it
+        // reaches `listCartridgeGrants` and the like and is refused `installCartridge` and
+        // `setCartridgeGrant`.
         // The handles are never written down: they are minted for the boot, which is why the
         // ids are not kept in the config document (it outlives a restart and syncs to sisters).
-        let privileged = state
+        let privileged: BTreeSet<String> = state
             .stores
             .core_cartridge
             .grants
-            .values()
-            .any(|grant| grant.privileged);
+            .iter()
+            .filter(|(_, grant)| grant.privileged)
+            .filter_map(|(key, _)| match key {
+                GrantKey::Method(nsid) => Some(nsid.clone()),
+                _ => None,
+            })
+            .collect();
         for scopes in desired.values_mut() {
             scopes.dispatch = Some(DispatchScope {
                 authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),

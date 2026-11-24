@@ -282,7 +282,7 @@ async fn grant_nodule_dispatch(
  capability: None,
                 scope: DispatchScope {
                     authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
-                    privileged: true,
+                    privileged: method_lexicon::privileged_methods(),
                     ..Default::default()
                 },
                 rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,

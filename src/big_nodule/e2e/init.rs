@@ -689,7 +689,7 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
         DispatchScope {
             operations: [REMOTE.to_owned()].into(),
             authorities: BTreeSet::new(),
-            privileged: false,
+            privileged: Default::default(),
         }
     );
     assert_eq!(
@@ -697,7 +697,7 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
         DispatchScope {
             operations: ["org.example.mail.send".to_owned()].into(),
             authorities: ["org.example.other".to_owned()].into(),
-            privileged: false,
+            privileged: Default::default(),
         }
     );
 

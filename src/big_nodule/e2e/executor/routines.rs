@@ -2644,6 +2644,18 @@ mod core_like {
             .await
             .unwrap();
         assert!(awaited["revision"].is_string(), "{awaited}");
+        // Its privilege is exactly the methods the node granted it, so the methods that change
+        // an install or a grant stay out of its reach.
+        for nsid in [
+            "org.example.daybook.cartridges.installCartridge",
+            "org.example.daybook.cartridges.setCartridgeGrant",
+        ] {
+            assert_eq!(
+                node.invoke(core_auth, nsid, json!({})).await,
+                Err(DispatchError::Denied),
+                "{nsid}"
+            );
+        }
 
         // A plain nodule granted the very same methods is refused: the grant states no
         // privilege, so its handle does not reach a privileged method, and dispatch says so.
