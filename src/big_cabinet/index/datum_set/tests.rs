@@ -1633,6 +1633,47 @@ async fn matching_docs_bounds_the_predicate_to_its_candidates_without_needing_en
     );
 }
 
+/// The SQL interpretation of the table the in-memory evaluator also runs
+/// (`big_cabinet_core::query::conformance`, ADR 054 §7).
+#[tokio::test]
+async fn matching_docs_agrees_with_the_conformance_table() {
+    let sql = ephemeral();
+    let store = DatumSetStore::new(sql.clone(), schemas()).await.unwrap();
+    seed_drawers(&sql).await;
+    let fixture = big_cabinet_core::query::conformance::Fixture::new();
+    for (doc_id, datum_key) in &fixture.entries {
+        seed_entry(
+            &sql,
+            &DatumRoute {
+                doc_id: doc_id.clone(),
+                datum_key: datum_key.clone(),
+            },
+        )
+        .await;
+    }
+    for drawer in fixture.rosters.keys() {
+        seed_drawer(&sql, drawer, "org.example.daybook.drawer.singleGroup").await;
+    }
+    for (drawer, docs) in &fixture.rosters {
+        for doc_id in docs {
+            seed_drawer_doc(&sql, drawer, doc_id, "Write").await;
+        }
+    }
+    for (parent, children) in &fixture.children {
+        for child in children {
+            seed_drawer_child(&sql, parent, child, "Write").await;
+        }
+    }
+    let universe = fixture.universe();
+    for (name, predicate, expected) in big_cabinet_core::query::conformance::cases() {
+        assert_eq!(
+            store.matching_docs(&predicate, &universe).await.unwrap(),
+            expected,
+            "case {name}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn in_drawer_follows_the_reach_cte_with_and_without_transitivity() {
     let sql = ephemeral();

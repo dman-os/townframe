@@ -10,7 +10,7 @@ default_features = true
 features = ["manifest", "schemars"]
 
 [builds.native]
-features = ["manifest", "schemars"]
+features = ["manifest", "schemars", "test-support"]
 
 [builds.wasm32-wasip3]
 features = ["manifest"]
