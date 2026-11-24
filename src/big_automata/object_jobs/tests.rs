@@ -252,6 +252,27 @@ fn law_4_a_contradiction_cancels_and_the_follow_up_record_waits() {
     assert_eq!((job.add, job.remove), (vec![], vec![part(1)]));
 }
 
+/// The fetch carries its snapshot's removals too, so an add on a part it removes from
+/// contradicts it just as a removal on a part it adds to does.
+#[test]
+fn law_4_an_add_on_a_part_the_fetch_removes_from_cancels_it() {
+    let mut rig = Rig::new();
+    rig.cursor(1, 1, present(1), 1);
+    rig.cursor(1, 2, Want::Absent, 1);
+    let (record, job) = rig.record();
+    assert_eq!((job.add, job.remove), (vec![part(1)], vec![part(2)]));
+    rig.jobs.record_ended(record, FETCH);
+    let (fetch, job) = rig.fetch();
+    assert_eq!(job.remove, [part(2)], "the fetch removes from part 2");
+    rig.cursor(1, 2, present(2), 2);
+    let cmds = rig.flush();
+    assert_eq!(cancels(&cmds), [fetch]);
+    assert!(records(&cmds).is_empty(), "the add waits for the cancelled event");
+    rig.jobs.fetch_ended(fetch, Outcome::Cancelled);
+    let (_, job) = rig.record();
+    assert_eq!(job.add, [part(2)]);
+}
+
 #[test]
 fn law_4_retiring_a_part_the_fetch_adds_to_cancels_it() {
     let mut rig = Rig::new();
