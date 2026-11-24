@@ -1,3 +1,26 @@
+//! The calls the per-peer machine makes besides the replay session: part summaries, bucket
+//! listing and bucket leaves. Draft laws for the responder and its binding; the replay methods
+//! below are already served by `ReplayProtocol` (`big_automata_iroh`).
+//!
+//! # Laws
+//!
+//! 1. **Answers are per principal, and refusal looks like absence.** Every answer is read for
+//!    the asking peer from `PartStoreServe`: a part it may not read and a part the store does
+//!    not know answer alike, so no answer confirms that a part exists.
+//! 2. **One snapshot per answer.** Access is decided and rows are read under one snapshot, so a
+//!    grant or revocation never lands between deciding and reading.
+//! 3. **Summaries are per part.** The answer holds a `PartSummary` for each readable part
+//!    asked and nothing for the rest. A request naming more than `MAX_SUMMARY_PARTS` parts is
+//!    refused whole with `TooManyParts { cap }`; the asker chunks (PartLifecycle law 4).
+//! 4. **Bucket listing** returns the part's buckets at the asked working level from `offset`, in
+//!    order, changed after `since`, at most the limit; a refused part answers `UnknownPart`.
+//! 5. **Leaves** return, per asked bucket, its member entries after `after`, at most the limit,
+//!    each page echoing the `after` it answers (the walk drops a redelivered page by it).
+//! 6. **Binding.** The three methods are a sibling protocol of `ReplayProtocol` on the same
+//!    service stack and connection, so the replay protocol's spec and conformance stay as
+//!    they are. The wire types are the store's (`PartSummary`, `BucketSummary`, leaf entries);
+//!    the older summary types in `rpc/summary.rs` go.
+
 use crate::interlude::*;
 
 pub mod bucket;
