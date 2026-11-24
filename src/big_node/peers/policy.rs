@@ -26,8 +26,9 @@ pub struct PolicyContext {
 }
 
 impl PolicyContext {
-    /// This node's own known-drawers list (ADR 019), as parts and docs: the descriptor doc and
-    /// meta group of every known drawer, and the docs and sensitive groups of the `mirror` entries.
+    /// This node's own known-drawers list (ADR 019), as parts and docs: the meta group of every
+    /// known drawer, the docs and sensitive groups of the `mirror` entries, and the descriptor doc
+    /// of a drawer whose groups are not yet known.
     pub async fn mirrored(&self) -> Res<Mirrored> {
         Ok(self.drawers.mirrored(&RequestContext::root()).await?)
     }

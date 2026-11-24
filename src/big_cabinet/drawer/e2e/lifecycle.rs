@@ -429,10 +429,9 @@ async fn a_removal_interrupted_after_its_roster_write_is_finished_at_boot() {
 }
 
 /// ADR 019 Boundaries and ADR 054 section 5: the mirror query is the node's own policy, in two
-/// tiers. A known drawer yields its descriptor doc and meta group (the roster, never member
-/// content); a mirrored one also yields its docs and sensitive groups. A drawer nobody
-/// remembered yields nothing, and a known drawer whose descriptor this node does not carry yields
-/// only the doc to fetch it by.
+/// tiers. A known drawer yields its meta group (the roster, never member content); a mirrored one
+/// also yields its docs and sensitive groups. A drawer nobody remembered yields nothing, and a
+/// known drawer whose descriptor this node does not carry yields only the doc to fetch it by.
 #[tokio::test]
 async fn the_mirror_query_names_what_the_known_list_wants() {
     let node = Node::boot().await;
@@ -459,9 +458,10 @@ async fn the_mirror_query_names_what_the_known_list_wants() {
         wanted,
         Mirrored {
             groups: [meta, docs, sensitive, known_meta].into(),
-            docs: [mirrored.clone(), remembered.clone(), absent.clone()].into(),
+            docs: [absent.clone()].into(),
         },
-        "the mirrored drawer adds all three groups, the merely known one only its meta group"
+        "the mirrored drawer adds all three groups, the merely known one only its meta group, and a \
+         descriptor doc is wanted only until the groups it names are known"
     );
     assert!(
         !wanted.groups.contains(&known_docs) && !wanted.groups.contains(&known_sensitive),
@@ -473,7 +473,7 @@ async fn the_mirror_query_names_what_the_known_list_wants() {
         drawers.mirrored(&context).await.unwrap(),
         Mirrored {
             groups: [known_meta].into(),
-            docs: [remembered, absent].into(),
+            docs: [absent].into(),
         }
     );
     node.stop().await;
@@ -525,7 +525,7 @@ async fn long_test_mirrored_cost_by_known_drawers() {
     };
     let answer = median_wall("projected").await;
     assert_eq!(answer.groups.len(), known + 2 * mirrored_count);
-    assert_eq!(answer.docs.len(), known);
+    assert_eq!(answer.docs.len(), 0);
 
     // Known by id only: each ask runs a discovery read of a doc this node does not have.
     for ordinal in 0..known {
@@ -536,7 +536,7 @@ async fn long_test_mirrored_cost_by_known_drawers() {
     }
     let answer = median_wall("plus_absent").await;
     assert_eq!(answer.groups.len(), known + 2 * mirrored_count);
-    assert_eq!(answer.docs.len(), 2 * known);
+    assert_eq!(answer.docs.len(), known);
     node.stop().await;
 }
 
