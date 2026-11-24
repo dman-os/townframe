@@ -505,7 +505,7 @@ impl Rig {
         cursors: MemoryPeerCursors,
         config: DriverConfig,
     ) -> Self {
-        let driver = PeerDriver::spawn(
+        let (driver, driver_loop) = PeerDriver::start(
             config.clone(),
             clock(),
             facts.clone(),
@@ -513,6 +513,7 @@ impl Rig {
             cursors.clone(),
             local.clone(),
         );
+        tokio::spawn(driver_loop);
         Self {
             peer,
             local,

@@ -188,7 +188,7 @@ async fn law_5_cursor_writes_land_in_order_and_never_go_back() {
     let local = MemoryPartStore::default();
     let backend = ScriptedBackend::new(local.clone(), peer.store().clone());
     let config = DriverConfig::new(principal(LOCAL_PEER), "memory");
-    let driver = PeerDriver::spawn(
+    let (driver, driver_loop) = PeerDriver::start(
         config.clone(),
         clock(),
         Facts::new(),
@@ -199,6 +199,7 @@ async fn law_5_cursor_writes_land_in_order_and_never_go_back() {
         },
         local,
     );
+    tokio::spawn(driver_loop);
     peer.publish(1, &[1], 1).await;
     driver
         .update_routes(RouteUpdate {
