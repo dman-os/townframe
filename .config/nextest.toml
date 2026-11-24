@@ -23,9 +23,13 @@ slow-timeout = { period = "60s", terminate-after = 8 }
 [profile.ci]
 fail-fast = false
 retries = { backoff = "exponential", count = 3, delay = "2s", max-delay = "10s", jitter = true }
-# Test output stays out of the job log (its volume broke the GitHub pipelines); failures carry
-# their output in the JUnit file instead, which each job uploads as an artifact.
-failure-output = "never"
+# Passing output stays out of the job log (its volume broke the GitHub pipelines), so
+# `success-output` keeps its default of never. A failing attempt prints its output the moment it
+# fails and again in the final summary: `never` hid the text of attempts that a retry later
+# turned green, so a flake (`a_sole_doc_poll_is_not_woken_by_writes_to_other_documents`, run
+# 45400013189, failed in 1.1 s then passed) left a log with no assertion to read. Only failures
+# print, so the volume stays bounded; the JUnit file keeps them too.
+failure-output = "immediate-final"
  
 [profile.ci.junit]
 path = "target/nextest/ci/results.xml"
