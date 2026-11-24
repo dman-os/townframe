@@ -1,5 +1,7 @@
 # claytxt lane ledger
 
+Scope: The claytxt lane's stack, decisions and the request accounting.
+
 Status: living ledger of the claytxt lane (Clay, the kit, micros, daytxt apps, Pierre/CodeView, builds/mbx).
 Owner: Claude (claytxt manager); operator reviews and merges.
 Updated: 2026-11-24 (rewritten: stack rebuilt, accounting of operator requests 2026-11-03..24).

@@ -1,5 +1,9 @@
 # Clay surface: standard Dioxus inside a micro (claytxt lane, draft)
 
+Owner: claytxt lane; operator reviews.
+Updated: 2026-11-11
+Scope: What a micro's surface must admit so standard Dioxus runs unchanged inside it.
+
 Status: draft, 2026-11-11. Item 2 of the claytxt week plan. Inputs: the operator's calls of
 2026-11-10 (open `data-*`, a scoped stylesheet per mount plus the shared theme sheet, forward
 `visible`, commands before paint) and 2026-11-11 (the diff view is plain Dioxus and a micro uses it

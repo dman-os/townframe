@@ -1,5 +1,10 @@
 # mbx hit rate across worktrees, and build-time tracking
 
+Status: investigation, read-only.
+Owner: claytxt lane; operator reviews.
+Updated: 2026-11-19
+Scope: mbx cache hit rate across worktrees and build-time tracking.
+
 Investigation 2026-11-19, mbx 1.30.0. Read-only except two throwaway scratch
 crates for experiments. Data: mbx session recordings
 (`$(mbx cache dir)/sessions/v1/*.jsonl`) on both machines, which carry per

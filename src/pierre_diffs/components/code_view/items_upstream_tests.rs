@@ -31,7 +31,6 @@ type View = CodeView<FakeDom, u8, u8>;
 
 /// A viewer over `FakeDom`, no root and no render pass.
 struct Harness {
-    #[allow(dead_code, reason = "the world the viewer's host is")]
     dom: Rc<FakeDom>,
     view: Rc<View>,
 }

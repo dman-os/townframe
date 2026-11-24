@@ -1,5 +1,10 @@
 # Overnight 2026-11-18 (claytxt lane)
 
+Status: report of the night; decisions pending the operator.
+Owner: claytxt lane; operator reviews.
+Updated: 2026-11-18
+Scope: The phone app and what landed overnight 2026-11-18.
+
 What landed while you slept, where it is, and the decisions waiting for you. Test results are filled
 in as the mothership runs finish (see "Verification").
 
