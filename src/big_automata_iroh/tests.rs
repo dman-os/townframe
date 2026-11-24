@@ -61,7 +61,11 @@ use big_automata::sync::rpc::summary::PartSummariesError;
 use method_core::ContextError;
 use service_utils_rs::StopToken;
 
-use super::*;
+use crate::PeerRpcClient;
+use crate::serve::Replay;
+use crate::serve::ReplayBinding;
+use crate::serve::SyncRpcBinding;
+use crate::serve::boot;
 
 /// The one principal every test client acts as, so the grants and revokes below are its own.
 fn client_principal() -> PeerKey {

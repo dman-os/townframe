@@ -9,25 +9,20 @@ workspace = true
 [lib]
 path = "lib.rs"
 
-[features]
-default = ["serve"]
-# The serving half: `ReplayService` and `boot` on `service_utils_rs`'s host and a tokio timer.
-# A native serving host; the browser builds the calling half alone (`default-features = false`).
-serve = [
-    "dep:service_client_native_rs",
-    "dep:service_utils_rs",
-    "dep:tokio",
-]
-
 [dependencies]
 big_automata = { path = "../big_automata" }
 method_core.workspace = true
 service_core_rs.workspace = true
 service_client_core_rs.workspace = true
 service_client_iroh_rs.workspace = true
-service_client_native_rs = { workspace = true, optional = true }
-service_utils_rs = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["time"], optional = true }
+
+# The serving half (`serve`) is a native host: it sits on `service_utils_rs`'s host stack and
+# its native client, whose tokio `net` and mio have no browser build. The calling half above is
+# all a browser needs.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+service_client_native_rs.workspace = true
+service_utils_rs.workspace = true
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 big_automata = { path = "../big_automata", features = ["test-support"] }
