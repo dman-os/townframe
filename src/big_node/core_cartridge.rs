@@ -23,6 +23,7 @@ use big_blobs_core::BlobsScope;
 use big_blobs_core::MintBlobsCapability;
 use big_cabinet_core::DatumPin;
 use big_cabinet_core::authority::Authorization;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::DocScope;
@@ -54,11 +55,13 @@ pub fn id(publisher: &str) -> CartridgeId {
     CartridgeId::new(publisher, "core").expect("a publisher DID and `core` form a cartridge id")
 }
 
-/// The id and version the nodule service refuses changes to.
-pub(crate) fn pin(publisher: &str) -> big_nodule::CoreCartridge {
+/// The id and version the nodule service refuses changes to, and `micros`, the subsystem actor
+/// the core nodule acts as.
+pub(crate) fn pin(publisher: &str, micros: OpenedActor) -> big_nodule::CoreCartridge {
     big_nodule::CoreCartridge {
         id: id(publisher),
         version: version(),
+        actor: micros,
     }
 }
 
