@@ -47,7 +47,7 @@ pub(super) async fn drawer_cap(node: &BigNode, drawer: &DocId) -> CapId {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
- capability: None,
+                capability: None,
                 scope: DrawerScope {
                     create: false,
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
@@ -170,7 +170,7 @@ async fn blob_cap(
             RequestContext::root(),
             operator(node).metadata(),
             MintBlobsCapability {
- capability: None,
+                capability: None,
                 scope,
                 rights: Rights::USE,
                 subject,
@@ -446,7 +446,7 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
- capability: None,
+                capability: None,
                 scope: DrawerScope {
                     create: true,
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
@@ -479,7 +479,7 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
- capability: None,
+                capability: None,
                 scope: DrawerScope {
                     create: false,
                     drawers: BTreeMap::from([
@@ -915,7 +915,7 @@ async fn the_operator_stores_and_reads_a_file_over_the_socket_as_raw_bytes() {
                 RequestContext::root(),
                 operator(&node).metadata(),
                 MintBlobsCapability {
- capability: None,
+                    capability: None,
                     scope,
                     rights: Rights::USE,
                     subject: None,
@@ -1037,7 +1037,7 @@ async fn a_blobs_handle_presented_by_an_actor_it_is_not_bound_to_cannot_mint() {
             RequestContext::root(),
             operator(&node).metadata(),
             MintBlobsCapability {
- capability: None,
+                capability: None,
                 scope: BlobsScope {
                     put: true,
                     ..Default::default()
@@ -1060,7 +1060,7 @@ async fn a_blobs_handle_presented_by_an_actor_it_is_not_bound_to_cannot_mint() {
                 }
                 .metadata(),
                 MintBlobsCapability {
- capability: None,
+                    capability: None,
                     scope: BlobsScope {
                         put: true,
                         ..Default::default()
@@ -1076,6 +1076,80 @@ async fn a_blobs_handle_presented_by_an_actor_it_is_not_bound_to_cannot_mint() {
     let stolen = super::cartridges::bystander(&node).await.signer;
     assert!(matches!(
         mint_as(stolen).await,
+        Err(ClientError::Method(BlobsError::Denied))
+    ));
+    shutdown(node, stop).await;
+}
+
+/// A blobs handle named in the body is the mint's parent: its holder narrows it, and a wider
+/// scope or another actor naming it is refused.
+#[tokio::test]
+async fn a_blobs_handle_named_in_the_body_narrows_and_never_widens() {
+    let secrets = secrets().await;
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let (node, stop) = BigNode::boot(config(
+        Arc::clone(&secrets),
+        runtime.ephemeral(&[]).unwrap(),
+        big_repo::Storage::memory(&runtime).unwrap(),
+    ))
+    .await
+    .unwrap();
+    let held = node
+        .blobs
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            MintBlobsCapability {
+                capability: None,
+                scope: BlobsScope {
+                    put: true,
+                    ..Default::default()
+                },
+                rights: Rights::USE | Rights::NARROW,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    let mint_from_body = async |signer: CapId, scope: BlobsScope| {
+        node.blobs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(signer).metadata(),
+                MintBlobsCapability {
+                    capability: Some(held),
+                    scope,
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+    };
+    let put = BlobsScope {
+        put: true,
+        ..Default::default()
+    };
+    mint_from_body(operator(&node).signer, put.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        mint_from_body(
+            operator(&node).signer,
+            BlobsScope {
+                put: true,
+                read: std::collections::BTreeSet::from([big_blobs_core::BlobId::new([1; 32])]),
+                ..Default::default()
+            }
+        )
+        .await,
+        Err(ClientError::Method(BlobsError::Denied))
+    ));
+    let stolen = super::cartridges::bystander(&node).await.signer;
+    assert!(matches!(
+        mint_from_body(stolen, put).await,
         Err(ClientError::Method(BlobsError::Denied))
     ));
     shutdown(node, stop).await;
@@ -1101,7 +1175,7 @@ async fn blobs_handles_are_minted_by_the_operator_and_a_handle_only_narrows() {
                     RequestContext::root(),
                     authorization.metadata(),
                     MintBlobsCapability {
- capability: None,
+                        capability: None,
                         scope,
                         rights,
                         subject: None,
@@ -1220,7 +1294,7 @@ async fn blobs_handles_are_minted_by_the_operator_and_a_handle_only_narrows() {
         .call(
             RequestContext::root(),
             MintBlobsCapability {
- capability: None,
+                capability: None,
                 scope: put_only,
                 rights: Rights::USE,
                 subject: None,
@@ -1342,7 +1416,7 @@ async fn a_blobs_handle_reaching_a_drawer_reads_what_the_drawer_inventories_pin(
                 RequestContext::root(),
                 authorization.metadata(),
                 MintBlobsCapability {
- capability: None,
+                    capability: None,
                     scope: BlobsScope {
                         drawers: drawers
                             .iter()
