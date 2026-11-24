@@ -139,16 +139,47 @@ export async function prepareDaytxtPackages(
       : {}),
   };
   const componentEnv: Record<string, string> = {};
+  // Every guest ships without its DWARF and keeps its `name` section; the build as rustc linked it
+  // is kept as the guest's debug side file (docs/scratch/guest-faults-and-logs.md §3). Stripping
+  // removes custom sections only, so the side file has the shipped component's core modules, in
+  // the same order with the same code, plus their DWARF: a trap frame's (core module, offset)
+  // resolves against it. The DWARF is ~94% of a micro (review: 69.6 MB linked, ~4.7 MB shipped).
+  // The side file is named by the shipped component's BLAKE3 digest, the package identity
+  // `clay_mdk::package::Package::digest` computes, so no second hash names a guest. Deno's
+  // WebCrypto lacks BLAKE3, so `b3sum` computes it (as `x/daytxt-site.ts` does).
+  const debugDirectory = directory.join("debug");
+  await Deno.mkdir(debugDirectory.toString(), { recursive: true });
+  // A side file is a whole unstripped component (70 MB for review), and every rebuild with
+  // changed source writes a new one. Only the side files of the components `directory` holds
+  // after this run are kept: a fault from an older build would not resolve after a rebuild
+  // anyway. Components an earlier run left (test fixtures this run did not build) keep theirs.
+  const kept = new Set<string>();
   for (const name in components) {
     const [relative, variableName] = components[name];
     const artifact = directory.join(`${variableName}.component.wasm`);
-    // rustc's wasm32-wasip3 target already emits a component; no adapter step.
-    await $`cp ${target.join(relative)} ${artifact}`;
+    const linked = target.join(relative);
+    // rustc's wasm32-wasip3 target already emits a component; no adapter step. `strip`'s default
+    // keeps `name` and `component-type` and removes every other custom section.
+    await $`wasm-tools strip ${linked} -o ${artifact}`;
+    const digest = (await $`b3sum --no-names ${artifact}`.text()).trim();
+    await $`cp ${linked} ${debugDirectory.join(`${digest}.wasm`)}`;
+    kept.add(digest);
     const variable = `DAYTXT_${
       variableName.toUpperCase().replaceAll("-", "_")
     }_COMPONENT`;
     componentEnv[variable] = artifact.toString();
     console.log(`${variable}=${artifact}`);
+  }
+  for (const entry of Deno.readDirSync(directory.toString())) {
+    if (entry.isFile && entry.name.endsWith(".component.wasm")) {
+      const component = directory.join(entry.name);
+      kept.add((await $`b3sum --no-names ${component}`.text()).trim());
+    }
+  }
+  for (const entry of Deno.readDirSync(debugDirectory.toString())) {
+    if (!kept.has(entry.name.replace(/\.wasm$/, ""))) {
+      await Deno.remove(debugDirectory.join(entry.name).toString());
+    }
   }
 
   // The counter, the layout, the lab, the review micro and the theme lab are also packages: the desktop shell scans a package directory for
