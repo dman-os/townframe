@@ -160,3 +160,22 @@ fn law_11_a_failed_leaf_call_is_reissued_unchanged_and_the_walk_carries_on() {
     rig.sync.leaf_replied(retry, Reply::Answer(page));
     assert_eq!(rig.flush().records().len(), 1, "the walk never knew");
 }
+
+/// Law 3: a leaf page that does not move past the `after` it answers makes no progress; the
+/// call fails and is reissued, so a peer cannot page one bucket for ever.
+#[test]
+fn law_3_a_leaf_page_that_does_not_move_forward_fails_its_call() {
+    let mut rig = Rig::new();
+    let (list, ..) = rig.walk(1, 0, 10);
+    let (leaf, _) = rig.list_root(list, 10, 1);
+    let page = leaf_page(None, &[(1, PartObjDelta::New)], Some(obj(2)));
+    rig.sync.leaf_replied(leaf, Reply::Answer(page));
+    let (next, _, asked) = rig.flush().leaves().remove(0);
+    assert_eq!(asked[0].after, Some(obj(2)));
+    let stuck = leaf_page(Some(obj(2)), &[], Some(obj(2)));
+    rig.sync.leaf_replied(next, Reply::Answer(stuck));
+    assert!(rig.flush().leaves().is_empty(), "the call backs off");
+    rig.wait(1);
+    let (_, _, again) = rig.flush().leaves().remove(0);
+    assert_eq!(again[0].after, Some(obj(2)), "the same request is reissued");
+}

@@ -948,6 +948,14 @@ impl PeerSync {
         match reply {
             Reply::Answer(mut pages) => {
                 self.walk_pacer.succeed();
+                // A page that does not move its bucket forward makes no progress: the peer
+                // could page one bucket for ever. The call failed (law 3).
+                let stuck = pages.values().any(|page| {
+                    matches!((&page.after, &page.next_after), (Some(after), Some(next)) if next <= after)
+                });
+                if stuck {
+                    return self.walk_failed(part, WalkRequest::Leaf { since, buckets });
+                }
                 // a page for a bucket this call did not ask for is ignored (law 3)
                 pages.retain(|id, _| buckets.iter().any(|asked| asked.buck_id == *id));
                 let walk = self.walks.get_mut(&part).expect(ERROR_IMPOSSIBLE);
