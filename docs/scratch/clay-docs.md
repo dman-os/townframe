@@ -1,6 +1,6 @@
 # Clay docs on the collection waist
 
-Status: design note for the operator, third draft. Nothing here is built.
+Status: design note for the operator, fourth draft. Nothing here is built.
 Owner: claytxt lane.
 Updated: 2026-11-24
 Scope: how micros (and, through the same contract, nodules) find, watch, read and write node documents.
@@ -128,10 +128,12 @@ There is no drawer-level interest: a mirrored drawer already streams from every 
   is fetched from whichever peer has it. The host first checks that the micro's grants reach the document, through
   any drawer whose roster lists it.
 - `docs.datums` and `docs.roster` hold no interest. A list view stays current with whatever the node already syncs.
-- **Proposed node change, small:** subscribe the **meta group** of every *known* drawer, not only the mirrored ones.
-  It carries the descriptor and roster, never member bytes, so it is cheap. A known drawer's roster then stays live
-  and `docs.roster` stays current. Mirroring still adds the docs and sensitive groups. This replaces the drawer
-  interest the second draft proposed.
+- **What a drawer subscription buys.** A mirrored drawer's docs-group part streams every member document's content
+  changes, not only membership: big_sync keeps one subscription per part, however many documents it holds, so watching
+  a whole drawer is cheap. The cost is paid once, when the part is first subscribed and the member ids are exchanged.
+- **Proposed node change, small:** also subscribe the **meta group** of every *known* drawer, not only the mirrored
+  ones. It carries the descriptor and roster, never member content, so a known drawer's roster stays live and
+  `docs.roster` stays current. Mirroring still adds the docs and sensitive groups, and with them member content.
 
 ### 5. Drawer policy is queryable, mirroring stays explicit
 
@@ -166,19 +168,24 @@ knows about but doesn't mirror is still fully usable through `docs.roster` plus 
 ## Open questions
 
 Settled in review (2026-11-24): the collection a micro sees is defined by the query it mounts, which may cross
-drawers; the drawer is the primitive the query is anchored on. No drawer-level interest.
+drawers; the drawer is the primitive the query is anchored on. No drawer-level interest. Subscribing every known
+drawer's meta group is assumed cheap enough.
 
-1. **Meta groups of known drawers** (§4): a node change for the nodules lane. Is subscribing every known drawer's
-   meta group cheap enough on a node that knows many drawers, or does it need a cap?
-2. **Roster availability.** `docs.roster` reports each member's availability. Fed by `observeDocAvailability` per
-   member, that is one stream per member. Does the node need a drawer-scoped availability poll?
-3. **Opening many documents.** `docs.open` fetches one non-local document. A micro with its own index may want N
-   at once: resolving each one's authority, and fetching from any peer in bulk. Deferred until a use case needs it.
-4. **Byte budgets.** The numbers for the per-page value budget and the hydration bounds. Measure with the fake
+1. **Member availability in bulk.** `docs.roster` shows, per member, whether it is local. Today the node answers
+   that one document at a time (`getDocAvailability`/`observeDocAvailability`), so a roster of n members needs n
+   calls or n streams. Proposed: the host derives it from the datum-set index (a member with rows is local), and the
+   node needs nothing new. Confirm when the fake node exists.
+2. **Byte budgets.** The numbers for the per-page value budget and the hydration bounds. Measure with the fake
    node first.
-5. **Remote rosters.** A huge public drawer whose metadata isn't local at all needs a remote listing (the drawer
-   wiki's XRPC). Out of the first cut, along with history reads (`at`), branches and merges, and
-   `queryDatumRefs`.
+
+## Deferred
+
+- **Opening many documents at once.** `docs.open` fetches one non-local document. Resolving authority and fetching
+  n of them in bulk is a later optimization.
+- **Remote rosters and remote queries.** Querying a drawer whose metadata isn't local, through another node's
+  cabinet, is deferred until there are requirements. This is a peer-to-peer system first. One later shape is a
+  proxied drawer: the local cabinet answers for a drawer it doesn't mirror by forwarding to a node that does.
+- History reads (`at`), branches and merges, and `queryDatumRefs`.
 
 ## Order of work
 
