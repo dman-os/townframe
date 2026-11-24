@@ -7,7 +7,7 @@ use dioxus::prelude::*;
 
 /// `Separator`: horizontal between blocks, vertical between inline items, decorative or announced.
 #[component]
-pub(crate) fn SeparatorSpecimens() -> Element {
+pub fn SeparatorSpecimens() -> Element {
     rsx! {
         FoundationSection {
             id: "separator-orientations".to_string(),

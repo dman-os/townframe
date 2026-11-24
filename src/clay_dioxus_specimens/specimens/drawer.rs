@@ -1,7 +1,7 @@
-use super::Frame;
-use super::COMPACT_PX;
-use super::EXPANDED_PX;
 use crate::foundations::FoundationSection;
+use crate::specimens::Frame;
+use crate::specimens::COMPACT_PX;
+use crate::specimens::EXPANDED_PX;
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::Button;
 use clay_dioxus_kit::ButtonVariant;
@@ -12,7 +12,7 @@ use dioxus::prelude::*;
 /// `Drawer`: the compact host's sidebar. A wide host has room for the sidebar beside its content,
 /// so its frame stays empty on purpose (`KIT-101`).
 #[component]
-pub(crate) fn DrawerSpecimens() -> Element {
+pub fn DrawerSpecimens() -> Element {
     rsx! {
         FoundationSection {
             id: "drawer-widths".to_string(),

@@ -12,7 +12,7 @@ const STATUSES: [(Status, &str); 4] = [
 
 /// `Alert`: every status with a title and without, and dismissible ones that can be brought back.
 #[component]
-pub(crate) fn AlertSpecimens() -> Element {
+pub fn AlertSpecimens() -> Element {
     let mut dismissed = use_signal(Vec::<Status>::new);
     rsx! {
         FoundationSection {

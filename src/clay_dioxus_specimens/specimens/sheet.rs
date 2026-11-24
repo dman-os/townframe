@@ -1,8 +1,8 @@
-use super::Frame;
-use super::COMPACT_PX;
-use super::EXPANDED_PX;
-use super::MEDIUM_PX;
 use crate::foundations::FoundationSection;
+use crate::specimens::Frame;
+use crate::specimens::COMPACT_PX;
+use crate::specimens::EXPANDED_PX;
+use crate::specimens::MEDIUM_PX;
 use clay_dioxus_kit::Button;
 use clay_dioxus_kit::ButtonVariant;
 use clay_dioxus_kit::Sheet;
@@ -12,7 +12,7 @@ use dioxus::prelude::*;
 /// `Sheet`: a bottom sheet on a compact host and a side sheet on a wider one, sized by the width
 /// class; it fills its frame, as it fills the panel that owns it.
 #[component]
-pub(crate) fn SheetSpecimens() -> Element {
+pub fn SheetSpecimens() -> Element {
     rsx! {
         FoundationSection {
             id: "sheet-widths".to_string(),

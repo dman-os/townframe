@@ -1,13 +1,15 @@
 //! The Tokens and Colors tabs: one section per design-language foundation (typography, spacing,
 //! shape, surfaces, states, colour), each rendered from the live tokens.
 
-use super::*;
 use clay_dioxus_kit::Card;
 use clay_dioxus_kit::CardContent;
 use clay_dioxus_kit::CardHeader;
+use dioxus::prelude::*;
+use std::collections::BTreeMap;
+use std::rc::Rc;
 
 #[component]
-pub(super) fn TokenFoundations() -> Element {
+pub fn TokenFoundations() -> Element {
     rsx! {
                 FoundationSection {
                     id: "typography".to_string(),
@@ -43,7 +45,7 @@ pub(super) fn TokenFoundations() -> Element {
 }
 
 #[component]
-pub(super) fn FoundationSection(
+pub fn FoundationSection(
     id: String,
     title: String,
     description: String,
@@ -305,92 +307,70 @@ fn StateRow(name: &'static str, detail: &'static str, decoration: &'static str) 
     }
 }
 
-#[component]
-pub(super) fn ColorFoundation(theme: MaterialTheme) -> Element {
-    rsx! {
-        h3 {
-            class: "mb-3 text-lg",
-            "Palettes"
-        }
-        for (palette_name, colors) in theme.palettes {
-            section {
-                key: "palette-{palette_name}",
-                class: "mb-8",
-                h4 {
-                    class: "mb-3 text-base font-medium",
-                    "{palette_name}"
-                }
-                div {
-                    class: "grid grid-cols-[repeat(auto-fill,minmax(11.25rem,1fr))] gap-2",
-                    for (name, value) in colors {
-                        ColorSwatch {
-                            key: "{palette_name}-{name}",
-                            name,
-                            value,
-                            rounded: false,
-                        }
-                    }
-                }
-            }
-        }
-        h3 {
-            class: "mt-12 mb-6 text-lg",
-            "Schemes"
-        }
-        for (scheme_name, colors) in theme.schemes {
-            section {
-                key: "scheme-{scheme_name}",
-                class: "mb-8",
-                h4 {
-                    class: "mb-3 text-base font-medium",
-                    "{scheme_name}"
-                }
-                div {
-                class: "grid grid-cols-[repeat(auto-fill,minmax(11.25rem,1fr))] gap-3",
-                    for (name, value) in colors {
-                        ColorSwatch {
-                            key: "{scheme_name}-{name}",
-                            name,
-                            value,
-                            rounded: true,
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+/// The semantic colour tokens of `styles/tokens/semantic.tokens.json`, in the order the file
+/// declares them. A token named `on-X` is the content colour drawn over `X`.
+const SEMANTIC_COLORS: [&str; 26] = [
+    "canvas",
+    "surface",
+    "surface-raised",
+    "surface-sunken",
+    "text",
+    "text-muted",
+    "text-subtle",
+    "border",
+    "focus",
+    "primary",
+    "on-primary",
+    "accent",
+    "on-accent",
+    "accent-container",
+    "on-accent-container",
+    "selected",
+    "on-selected",
+    "scrim",
+    "danger",
+    "on-danger",
+    "success",
+    "on-success",
+    "warning",
+    "on-warning",
+    "info",
+    "on-info",
+];
 
+/// One swatch per semantic colour token, painted with the live `var(--ct-color-*)` so a theme
+/// stylesheet changes what it shows. A swatch's text is its `on-` pair when the token has one,
+/// the paired base when the token is itself an `on-` token, and `--ct-color-text` otherwise.
 #[component]
-fn ColorSwatch(name: String, value: String, rounded: bool) -> Element {
-    let foreground = readable_text_color(&value);
-    let radius_class = if rounded { "rounded-lg" } else { "rounded-sm" };
-
+pub fn ColorFoundation() -> Element {
     rsx! {
         div {
-            class: "min-h-18 box-border rounded-md p-3 {radius_class}",
-            style: "background:{value}; color:{foreground};",
-            div { class: "font-medium", "{name}" }
-            div { class: "mt-1 text-sm opacity-80", "{value}" }
+            class: "grid grid-cols-[repeat(auto-fill,minmax(11.25rem,1fr))] gap-3",
+            for name in SEMANTIC_COLORS {
+                ColorSwatch { key: "{name}", name }
+            }
         }
     }
 }
 
-fn readable_text_color(value: &str) -> &'static str {
-    let hex = value.strip_prefix('#').unwrap_or(value);
-    if hex.len() != 6 {
-        return "#111827";
-    }
-
-    let red = u8::from_str_radix(&hex[0..2], 16).expect("Material colors must be hex values");
-    let green = u8::from_str_radix(&hex[2..4], 16).expect("Material colors must be hex values");
-    let blue = u8::from_str_radix(&hex[4..6], 16).expect("Material colors must be hex values");
-    let luminance =
-        (0.299 * f64::from(red) + 0.587 * f64::from(green) + 0.114 * f64::from(blue)) / 255.0;
-
-    if luminance > 0.58 {
-        "#111827"
-    } else {
-        "#ffffff"
+#[component]
+fn ColorSwatch(name: &'static str) -> Element {
+    let text = match name.strip_prefix("on-") {
+        Some(base) => base.to_string(),
+        None if SEMANTIC_COLORS
+            .iter()
+            .any(|each| each.strip_prefix("on-") == Some(name)) =>
+        {
+            format!("on-{name}")
+        }
+        None => "text".to_string(),
+    };
+    rsx! {
+        div {
+            class: "min-h-18 box-border rounded-lg p-3",
+            style: "background:var(--ct-color-{name}); color:var(--ct-color-{text});",
+            div { class: "font-medium", "{name}" }
+            code { class: "mt-1 block text-sm opacity-80", "--ct-color-{name}" }
+        }
     }
 }

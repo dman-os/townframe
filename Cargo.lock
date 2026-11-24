@@ -2642,6 +2642,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clay_dioxus_specimens"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "dioxus",
+]
+
+[[package]]
 name = "clay_docs"
 version = "0.1.0"
 dependencies = [
@@ -2870,6 +2878,7 @@ name = "claytxt_showcase"
 version = "0.1.0"
 dependencies = [
  "clay_dioxus_kit",
+ "clay_dioxus_specimens",
  "console_error_panic_hook",
  "dioxus",
  "dioxus-native",

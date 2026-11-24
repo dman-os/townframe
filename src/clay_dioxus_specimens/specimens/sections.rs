@@ -1,7 +1,7 @@
-use super::Frame;
-use super::COMPACT_PX;
-use super::EXPANDED_PX;
 use crate::foundations::FoundationSection;
+use crate::specimens::Frame;
+use crate::specimens::COMPACT_PX;
+use crate::specimens::EXPANDED_PX;
 use clay_dioxus_kit::SectionPane;
 use clay_dioxus_kit::Sections;
 use clay_dioxus_kit::SizeRule;
@@ -12,7 +12,7 @@ use dioxus::prelude::*;
 /// `Sections`: a resizable run of panes, two at a compact width and three at an expanded one. The
 /// first pane has the Kotlin sidebar's rule (an 80px rail, or at least 240px, never in between).
 #[component]
-pub(crate) fn SectionsSpecimens() -> Element {
+pub fn SectionsSpecimens() -> Element {
     rsx! {
         FoundationSection {
             id: "sections-widths".to_string(),

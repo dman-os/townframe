@@ -1,5 +1,5 @@
-use super::Row;
 use crate::foundations::FoundationSection;
+use crate::specimens::Row;
 use clay_dioxus_kit::Button;
 use clay_dioxus_kit::ButtonVariant;
 use clay_dioxus_kit::Card;
@@ -12,7 +12,7 @@ use dioxus::prelude::*;
 
 /// `Card`: the three variants with all three parts, and a card with only its content.
 #[component]
-pub(crate) fn CardSpecimens() -> Element {
+pub fn CardSpecimens() -> Element {
     rsx! {
         FoundationSection {
             id: "card-variants".to_string(),

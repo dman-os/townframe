@@ -1,10 +1,9 @@
 mod diff_fixtures;
 mod diffs;
-mod foundations;
-mod specimens;
+mod material_colors;
 
-use foundations::ColorFoundation;
-use foundations::FoundationSection;
+use clay_dioxus_specimens::FoundationSection;
+use material_colors::ColorFoundation;
 
 #[cfg(not(any(feature = "desktop", target_arch = "wasm32")))]
 compile_error!(
@@ -48,6 +47,17 @@ const MATERIAL_THEME_JSON: &str = include_str!(concat!(
 struct MaterialTheme {
     schemes: BTreeMap<String, BTreeMap<String, String>>,
     palettes: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// The renderer the showcase runs under, which decides whether the kit may move focus and set
+/// `tabindex` (`KIT-052`): Blitz when `DAYTXT_RENDERER=blitz`, otherwise a browser engine (Wry
+/// or the web build). The specimen pages read it from context (`App` provides it).
+fn renderer() -> clay_dioxus_kit::Renderer {
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::env::var("DAYTXT_RENDERER").as_deref() == Ok("blitz") {
+        return clay_dioxus_kit::Renderer::Blitz;
+    }
+    clay_dioxus_kit::Renderer::Browser
 }
 
 /// Wry unless `DAYTXT_RENDERER=blitz`. `dioxus::launch` would pick Blitz whenever any crate in
@@ -210,6 +220,7 @@ fn App() -> Element {
             .collect::<Vec<_>>()
     });
     use_context_provider(|| Signal::new(BTreeMap::<String, Rc<MountedData>>::new()));
+    use_context_provider(renderer);
     let items = LabTab::ALL.map(|tab| TabItem::new(tab.value(), tab.label()));
 
     rsx! {
@@ -268,7 +279,7 @@ fn App() -> Element {
                         tab.set(LabTab::from_value(&value).expect("the tab list is LabTab::ALL"));
                     },
                     label: "Showcase pages".to_string(),
-                    renderer: specimens::renderer(),
+                    renderer: renderer(),
                     for each in LabTab::ALL {
                         TabPanel { key: "{each.value()}", value: each.value().to_string(),
                             if tab() == each {
@@ -441,24 +452,24 @@ impl LabTab {
 
     fn page(self, theme: MaterialTheme, available_width: f64) -> Element {
         match self {
-            LabTab::Button => rsx! { specimens::ButtonSpecimens {} },
-            LabTab::Tabs => rsx! { specimens::TabsSpecimens {} },
-            LabTab::Card => rsx! { specimens::CardSpecimens {} },
-            LabTab::Separator => rsx! { specimens::SeparatorSpecimens {} },
-            LabTab::Alert => rsx! { specimens::AlertSpecimens {} },
-            LabTab::Chip => rsx! { specimens::ChipSpecimens {} },
+            LabTab::Button => rsx! { clay_dioxus_specimens::ButtonSpecimens {} },
+            LabTab::Tabs => rsx! { clay_dioxus_specimens::TabsSpecimens {} },
+            LabTab::Card => rsx! { clay_dioxus_specimens::CardSpecimens {} },
+            LabTab::Separator => rsx! { clay_dioxus_specimens::SeparatorSpecimens {} },
+            LabTab::Alert => rsx! { clay_dioxus_specimens::AlertSpecimens {} },
+            LabTab::Chip => rsx! { clay_dioxus_specimens::ChipSpecimens {} },
             LabTab::ScrubStrip => {
-                rsx! { specimens::ScrubStripSpecimens { viewport: (available_width, 860.0) } }
+                rsx! { clay_dioxus_specimens::ScrubStripSpecimens { viewport: (available_width, 860.0) } }
             }
-            LabTab::NavButton => rsx! { specimens::NavButtonSpecimens {} },
-            LabTab::AppBar => rsx! { specimens::AppBarSpecimens {} },
-            LabTab::ListRow => rsx! { specimens::ListRowSpecimens {} },
-            LabTab::PanelPage => rsx! { specimens::PanelPageSpecimens {} },
-            LabTab::Sheet => rsx! { specimens::SheetSpecimens {} },
-            LabTab::Drawer => rsx! { specimens::DrawerSpecimens {} },
-            LabTab::Sections => rsx! { specimens::SectionsSpecimens {} },
-            LabTab::ListDetails => rsx! { specimens::ListDetailsSpecimens {} },
-            LabTab::Tokens => rsx! { foundations::TokenFoundations {} },
+            LabTab::NavButton => rsx! { clay_dioxus_specimens::NavButtonSpecimens {} },
+            LabTab::AppBar => rsx! { clay_dioxus_specimens::AppBarSpecimens {} },
+            LabTab::ListRow => rsx! { clay_dioxus_specimens::ListRowSpecimens {} },
+            LabTab::PanelPage => rsx! { clay_dioxus_specimens::PanelPageSpecimens {} },
+            LabTab::Sheet => rsx! { clay_dioxus_specimens::SheetSpecimens {} },
+            LabTab::Drawer => rsx! { clay_dioxus_specimens::DrawerSpecimens {} },
+            LabTab::Sections => rsx! { clay_dioxus_specimens::SectionsSpecimens {} },
+            LabTab::ListDetails => rsx! { clay_dioxus_specimens::ListDetailsSpecimens {} },
+            LabTab::Tokens => rsx! { clay_dioxus_specimens::TokenFoundations {} },
             LabTab::Colors => rsx! {
                 FoundationSection {
                     id: "colors".to_string(),
@@ -520,9 +531,9 @@ fn ThemeLabNav(viewport: (f64, f64), tab: LabTab) -> Element {
             key: "{tab.value()}",
             viewport,
             items: sections.iter().map(|(_, label)| *label).collect::<Vec<_>>(),
-            renderer: specimens::renderer(),
+            renderer: renderer(),
             label: "Sections of this page".to_string(),
-            on_select: move |index: usize| specimens::jump_to(anchors, sections[index].0.to_string()),
+            on_select: move |index: usize| clay_dioxus_specimens::jump_to(anchors, sections[index].0.to_string()),
         }
     }
 }

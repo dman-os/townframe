@@ -1,6 +1,6 @@
-use super::jump_to;
-use super::renderer;
 use crate::foundations::FoundationSection;
+use crate::specimens::jump_to;
+use clay_dioxus_kit::Renderer;
 use clay_dioxus_kit::ScrubStrip;
 use dioxus::prelude::*;
 use std::collections::BTreeMap;
@@ -15,13 +15,14 @@ const LETTERS: [&str; 26] = [
 /// drag the edge (or tab onto it and use the arrow keys, Home and End) to jump between letters.
 /// The window's size is the strip's `viewport`.
 #[component]
-pub(crate) fn ScrubStripSpecimens(viewport: (f64, f64)) -> Element {
+pub fn ScrubStripSpecimens(viewport: (f64, f64)) -> Element {
     let anchors = use_context::<Signal<BTreeMap<String, Rc<MountedData>>>>();
+    let renderer = use_context::<Renderer>();
     rsx! {
         ScrubStrip {
             viewport,
             items: LETTERS.to_vec(),
-            renderer: renderer(),
+            renderer,
             label: "Letters".to_string(),
             on_select: move |index: usize| jump_to(anchors, format!("letter-{}", LETTERS[index])),
         }

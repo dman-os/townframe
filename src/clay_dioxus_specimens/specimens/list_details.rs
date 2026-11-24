@@ -1,7 +1,7 @@
-use super::Frame;
-use super::COMPACT_PX;
-use super::EXPANDED_PX;
 use crate::foundations::FoundationSection;
+use crate::specimens::Frame;
+use crate::specimens::COMPACT_PX;
+use crate::specimens::EXPANDED_PX;
 use clay_dioxus_kit::use_list_details;
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::ListDetails;
@@ -16,7 +16,7 @@ use dioxus::prelude::*;
 /// `ListDetails`: one pane at a time on a compact host (the details cover the list), both side by
 /// side otherwise.
 #[component]
-pub(crate) fn ListDetailsSpecimens() -> Element {
+pub fn ListDetailsSpecimens() -> Element {
     rsx! {
         FoundationSection {
             id: "list-details-widths".to_string(),

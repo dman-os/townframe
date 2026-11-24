@@ -1,6 +1,6 @@
-use super::renderer;
 use crate::foundations::FoundationSection;
 use clay_dioxus_kit::Orientation;
+use clay_dioxus_kit::Renderer;
 use clay_dioxus_kit::TabItem;
 use clay_dioxus_kit::TabPanel;
 use clay_dioxus_kit::Tabs;
@@ -18,9 +18,10 @@ fn sections() -> Vec<TabItem> {
 /// `Tabs`: a horizontal and a vertical list, each with a disabled tab. Arrow keys, Home and End
 /// move between the enabled tabs and select as they go.
 #[component]
-pub(crate) fn TabsSpecimens() -> Element {
+pub fn TabsSpecimens() -> Element {
     let mut horizontal = use_signal(|| "overview".to_string());
     let mut vertical = use_signal(|| "files".to_string());
+    let renderer = use_context::<Renderer>();
     rsx! {
         FoundationSection {
             id: "tabs-horizontal".to_string(),
@@ -31,7 +32,7 @@ pub(crate) fn TabsSpecimens() -> Element {
                 value: horizontal(),
                 on_value_change: move |next| horizontal.set(next),
                 label: "Horizontal sections".to_string(),
-                renderer: renderer(),
+                renderer,
                 for item in sections() {
                     TabPanel { key: "{item.value}", value: item.value.clone(), p { "The {item.label} panel." } }
                 }
@@ -47,7 +48,7 @@ pub(crate) fn TabsSpecimens() -> Element {
                 on_value_change: move |next| vertical.set(next),
                 label: "Vertical sections".to_string(),
                 orientation: Orientation::Vertical,
-                renderer: renderer(),
+                renderer,
                 for item in sections() {
                     TabPanel { key: "{item.value}", value: item.value.clone(), p { "The {item.label} panel." } }
                 }

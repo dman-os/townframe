@@ -33,8 +33,8 @@ use std::time::Duration;
 
 use super::Segmented;
 use crate::LabViewport;
-use review_mock::DiffOptions;
 use clay_dioxus_kit::ScrubStrip;
+use review_mock::DiffOptions;
 use web_time::Instant;
 
 /// Where the diff comes from unless `DAYTXT_LAB_DIFF` says otherwise: the gitignored `public/` beside the
@@ -356,7 +356,7 @@ fn PrCodeFiles(
                 ScrubStrip {
                     viewport: (viewport(), 860.0),
                     items: labels.to_vec(),
-                    renderer: crate::specimens::renderer(),
+                    renderer: crate::renderer(),
                     label: "Files of the PR diff".to_string(),
                     current: Some(current()),
                     on_select: move |index: usize| {
