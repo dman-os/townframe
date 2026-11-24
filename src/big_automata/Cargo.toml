@@ -60,7 +60,10 @@ tracing.workspace = true
 
 #
 # test-support
-proptest = { workspace = true, optional = true }
+# Without proptest's defaults: `fork` and `timeout` pull in `wait-timeout`, which has no
+# wasm32-unknown-unknown build, and the browser host (`big_automata_web`) takes `test-support`
+# for the memory backend.
+proptest = { version = "1.12", default-features = false, features = ["std", "bit-set"], optional = true }
 
 [dev-dependencies]
 proptest.workspace = true

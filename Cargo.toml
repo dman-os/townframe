@@ -19,6 +19,7 @@ members = [
   "./src/big_blobs_core/",
   "./src/big_automata/",
   "./src/big_automata_iroh/",
+  "./src/big_automata_web/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
@@ -363,6 +364,8 @@ clap_complete = "4.5"
 # 
 # networks
 iroh = "1"
+# the in-process relay of the browser e2e fixture (`big_automata_iroh`'s `web_fixture` example)
+iroh-relay = "1"
 iroh-tickets = "1"
 # iroh-blobs = "0.103.0"
 iroh-blobs = { git = "https://github.com/dman-os/iroh-blobs", rev = "b3d641036c807b30d9fc62fd22a83801a38386d3" }
