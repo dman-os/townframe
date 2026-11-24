@@ -428,12 +428,12 @@ async fn a_removal_interrupted_after_its_roster_write_is_finished_at_boot() {
     node.stop().await;
 }
 
-/// ADR 019 Boundaries: the mirror query is the node's own policy, keyed on the `mirror` intent
-/// alone. A mirrored grouped drawer yields its three groups and its descriptor doc; a remembered
-/// drawer that is not mirrored, and a drawer nobody remembered, yield nothing; a mirrored drawer
-/// whose descriptor this node does not carry yields only the doc to fetch it by.
+/// ADR 019 Boundaries and ADR 054 section 5: the mirror query is the node's own policy, in two
+/// tiers. A known drawer yields its meta group (the roster, never member content); a mirrored one
+/// also yields its docs and sensitive groups. A drawer nobody remembered yields nothing, and a
+/// known drawer whose descriptor this node does not carry yields only the doc to fetch it by.
 #[tokio::test]
-async fn the_mirror_query_names_what_the_mirror_intent_wants() {
+async fn the_mirror_query_names_what_the_known_list_wants() {
     let node = Node::boot().await;
     let alice = node.creator("alice").await;
     let mirrored = node.collection(&alice, "mirrored").await;
@@ -449,24 +449,107 @@ async fn the_mirror_query_names_what_the_mirror_intent_wants() {
 
     node.remember(&node.drawers_actor, &mirrored, true).await;
     node.remember(&node.drawers_actor, &remembered, false).await;
-    node.remember(&node.drawers_actor, &absent, true).await;
+    node.remember(&node.drawers_actor, &absent, false).await;
     let (meta, docs, sensitive) = groups_of(&node.view(&alice, &mirrored).await.unwrap());
+    let (known_meta, known_docs, known_sensitive) =
+        groups_of(&node.view(&alice, &remembered).await.unwrap());
+    let wanted = drawers.mirrored(&context).await.unwrap();
     assert_eq!(
-        drawers.mirrored(&context).await.unwrap(),
+        wanted,
         Mirrored {
-            groups: [meta, docs, sensitive].into(),
-            docs: [mirrored.clone(), absent].into(),
-        }
+            groups: [meta, docs, sensitive, known_meta].into(),
+            docs: [absent.clone()].into(),
+        },
+        "the mirrored drawer adds all three groups, the merely known one only its meta group, and a \
+         descriptor doc is wanted only until the groups it names are known"
+    );
+    assert!(
+        !wanted.groups.contains(&known_docs) && !wanted.groups.contains(&known_sensitive),
+        "a known drawer's content groups stay mirror-only"
     );
 
     node.forget(&node.drawers_actor, &mirrored).await;
     assert_eq!(
         drawers.mirrored(&context).await.unwrap(),
         Mirrored {
-            groups: Default::default(),
-            docs: [DrawerId::new([7; 32])].into(),
+            groups: [known_meta].into(),
+            docs: [absent].into(),
         }
     );
+    node.stop().await;
+}
+
+/// The cost of one `mirrored()` ask on a node that knows many drawers, few of them mirrored
+/// (ADR 054 section 5 asks for it measured). `mirrored()` is re-asked on every drawer projection
+/// change and per connected peer, and walks every known entry with one `ensure_drawer` each, so
+/// the number of known drawers is the variable. Run in release with output shown:
+///
+/// ```text
+/// BIG_CABINET_KNOWN=1000 cargo nextest run --release -p big_cabinet --no-capture -E 'test(long_test_mirrored_cost)'
+/// ```
+///
+/// Reports `COST` lines: wall per call (median of five), and the size of the answer. Wall time is
+/// reported only; the answer's sizes are asserted since they are counted work.
+#[tokio::test]
+async fn long_test_mirrored_cost_by_known_drawers() {
+    let known: usize = std::env::var("BIG_CABINET_KNOWN")
+        .ok()
+        .map_or(10, |value| value.parse().unwrap());
+    let mirrored_count = known / 50 + 1;
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let context = RequestContext::root();
+    let drawers = node.drawers.as_ref().unwrap();
+    for ordinal in 0..known {
+        let drawer = node.collection(&alice, &format!("drawer-{ordinal}")).await;
+        node.remember(&node.drawers_actor, &drawer, ordinal < mirrored_count)
+            .await;
+    }
+    let median_wall = async |label: &str| {
+        let mut walls = Vec::new();
+        let mut answer = Mirrored::default();
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            answer = drawers.mirrored(&context).await.unwrap();
+            walls.push(started.elapsed());
+        }
+        walls.sort();
+        println!(
+            "COST mirrored {label} known={known} mirrored={mirrored_count} groups={} docs={} wall_p50={:?} wall_per_known={:?}",
+            answer.groups.len(),
+            answer.docs.len(),
+            walls[2],
+            walls[2] / u32::try_from(known.max(1)).unwrap(),
+        );
+        answer
+    };
+    // Where the per-call time goes: the known list's read against the projection's one query.
+    let started = std::time::Instant::now();
+    let entries = node.core().known_entries(&context).await.unwrap();
+    let list = started.elapsed();
+    let started = std::time::Instant::now();
+    let projected = node.core().state.drawers().await.unwrap();
+    println!(
+        "COST mirrored parts known={known} known_entries={:?} ({} entries) projection_query={:?} ({} records)",
+        list,
+        entries.len(),
+        started.elapsed(),
+        projected.len(),
+    );
+    let answer = median_wall("projected").await;
+    assert_eq!(answer.groups.len(), known + 2 * mirrored_count);
+    assert_eq!(answer.docs.len(), 0);
+
+    // Known by id only: each ask runs a discovery read of a doc this node does not have.
+    for ordinal in 0..known {
+        let mut id = [0; 32];
+        id[..8].copy_from_slice(&u64::try_from(ordinal + 1).unwrap().to_be_bytes());
+        node.remember(&node.drawers_actor, &DrawerId::new(id), false)
+            .await;
+    }
+    let answer = median_wall("plus_absent").await;
+    assert_eq!(answer.groups.len(), known + 2 * mirrored_count);
+    assert_eq!(answer.docs.len(), known);
     node.stop().await;
 }
 

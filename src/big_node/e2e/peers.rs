@@ -344,6 +344,76 @@ async fn default_policy_replicates_mirrored_drawers_only() {
     shutdown(owner, owner_stop).await;
 }
 
+/// ADR 054 section 5: a drawer the reader only knows (never mirrors) still streams its roster.
+/// The reader pulls the descriptor doc and subscribes the meta group, so a doc the owner adds to
+/// the drawer afterwards shows in the reader's roster, while the docs group stays unsubscribed
+/// and neither that doc nor the earlier one replicates.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_known_drawers_roster_streams_without_mirroring_it() {
+    utils_rs::testing::setup_tracing_once();
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let peers = || PeersConfig {
+        loopback_only: true,
+        sweep_interval: std::time::Duration::from_millis(200),
+        ..Default::default()
+    };
+    let (owner, owner_stop) = node(165, secrets().await, &runtime, peers()).await;
+    let (reader, reader_stop) = node(166, secrets().await, &runtime, peers()).await;
+
+    let drawer = collection(&owner, "known-only").await;
+    let before = create_in(&owner, &drawer, "doc-before", "before").await;
+    invite(&owner, &reader, &drawer, Access::Read).await;
+    remember(&reader, &drawer, false).await;
+
+    let owner_key = owner.repo.local_peer_id();
+    let mut events = reader.peers.as_ref().unwrap().subscribe();
+    let link = network::link(&owner, &reader).await;
+    link.sync_keyhive(&owner, &reader).await;
+    doc_synced(&mut events, &owner_key, &drawer).await;
+
+    let after = create_in(&owner, &drawer, "doc-after", "after").await;
+    // The roster is inline on the drawer's descriptor doc, so the reader has the new roster when
+    // its copy of that doc has the owner's heads. Every roster change on the owner reaches the
+    // reader as a DocSynced of that doc.
+    let heads = |node: &BigNode| {
+        let drawer = drawer.clone();
+        let repo = Arc::clone(&node.repo);
+        async move {
+            match repo.get_doc(&drawer).await.unwrap() {
+                big_repo::DocLookup::Ready(handle) => handle
+                    .with_document_read(|doc| {
+                        let mut heads = doc.get_heads();
+                        heads.sort();
+                        heads
+                    })
+                    .await,
+                _ => Vec::new(),
+            }
+        }
+    };
+    let owned = heads(&owner).await;
+    loop {
+        if heads(&reader).await == owned {
+            break;
+        }
+        match events.recv().await {
+            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                panic!("the peers service stopped")
+            }
+        }
+    }
+    for member in [before, after] {
+        assert!(
+            !reader.repo.contains_sedimentree_id(member).await.unwrap(),
+            "a known drawer's member content must not replicate without mirroring"
+        );
+    }
+
+    shutdown(reader, reader_stop).await;
+    shutdown(owner, owner_stop).await;
+}
+
 /// Wants whatever the test last set, from every peer, and dials nobody. Wanting the groups
 /// directly (rather than through the mirror intent) means they are known before keyhive has
 /// admitted anyone into them, which is the window the access stream closes.
