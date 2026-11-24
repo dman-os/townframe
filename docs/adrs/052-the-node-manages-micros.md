@@ -1,4 +1,4 @@
-# ADR 052: The node hosts micros: a `micros` nodule in the core cartridge, attach, and one node SDK
+# ADR 052: The node manages micros: a `micros` nodule in the core cartridge, `micros.handles`, and one node SDK
 
 **Status:** Draft (2026-11-24). Proposed by the nodules lane and agreed in shape with the claytxt lane; the operator signs
 off. Nothing here is built. Decisions marked **To confirm** need the operator.
@@ -7,6 +7,11 @@ off. Nothing here is built. Decisions marked **To confirm** need the operator.
 composition the GUI opens; the "same holds for the `micros` service actor" line becomes this ADR) and ADR 050 (§3's micro
 surface gains its node-side host; the micro manifest is unchanged). It also changes the authority service's `openActor`
 and `mintCapability` (§2.2).
+
+**Who does what.** The node *manages* micro installs and authority: it opens each micro's actor, mints the handles the
+micro may use and re-mints them when grants move. Clay, the GUI's host, *hosts and runs* the micros. The micro wasm runs in
+the GUI process, never on the node; the node never executes a micro. Where this ADR says "the host" it means Clay in the
+GUI.
 
 Revised 2026-11-24 on the operator's decision "let us indeed try to make the micros layer itself a cartridge". The first
 draft put the service in native node code.
@@ -110,15 +115,15 @@ All three are in the `org.example.daybook.micros.` namespace. They are the nodul
 to the core cartridge's nodule like any nodule method (ADR 045), so they are no longer host methods.
 
 ```text
-micros.attach { cartridgeId, micro? }
+micros.handles { cartridgeId, micro? }
   -> { micros: [{ micro, actor, handles: { dispatch, docs, blobs }, config }], revision }
 
 micros.awaitHandles { since: { <cartridgeId>: revision, ... }, holdMs }
   -> { cartridges: { <cartridgeId>: { micros: [...], revision } } }      // only those that moved
 ```
 
-- **`attach` returns all of a cartridge's micros in one call** (or one, when `micro` is given), so booting the GUI is one
-  round trip however many micros the cartridge ships. It is idempotent: attaching again returns the live handles, it
+- **`handles` is what the host fetches the handles it mounts a micro with.** It returns all of a cartridge's micros in one call (or one, when `micro` is given), so booting the GUI is one
+  round trip however many micros the cartridge ships. It is idempotent: asking again returns the live handles, it
   does not re-mint. It answers at once and never holds.
 - **`awaitHandles` is `awaitCartridgeGrants`' pattern, and it does the re-minting itself.** A revision is opaque and
   names the boot it was taken in. A `since` that is missing or not current answers at once. Otherwise the call holds up
@@ -134,12 +139,14 @@ micros.awaitHandles { since: { <cartridgeId>: revision, ... }, holdMs }
   refreshes. Two hosts polling the same cartridge converge on one re-mint, because the handle revision is the nodule's
   durable state and not a call's local one. If these edges prove unacceptable in the trial, a native follower is the
   fallback (§12 item 1).
-- **Nothing blocks on the long poll.** The host mounts each micro with the handles `attach` returned and re-renders the
+- **Nothing blocks on the long poll.** The host mounts each micro with the handles `handles` returned and re-renders the
   mounts of a cartridge when `awaitHandles` reports a new revision. A mount never waits for the poll, and a micro that
   loses a handle sees a retryable not-ready answer between retraction and re-mint (ADR 049 §6.4), never a stale handle.
 - **`actor`.** The result names the micro's actor capability too, because dispatch requires it: dispatch admits a call only
   when the capability's holder is the signer's actor (ADR 037; `big_nodule/egress.rs` states the check dispatch runs), and
-  the GUI is a separate process from the node, so something outside the node has to sign as the micro. That is the signer
+  the GUI is a separate process from the node, so something outside the node has to sign as the micro. (This only matters
+  when `day node start` holds the node in another process and the GUI reaches it over the socket; in process it is the same as
+  today.) That is the signer
   the in-process composition holds today (`claytxt: clay_node/egress.rs`, `MicroEgress::install`). It carries `USE` only,
   and it is the host's, never the guest's: the guest names an operation, the host attaches handle and signer (ADR 049 §3,
   asymmetry 2). The actor capability stays in the host and never crosses into the guest: the host overwrites whatever
@@ -203,7 +210,7 @@ each with its `uses`:
 - the **packaged** micros (the review micro among them, ADR 050's several micros per cartridge).
 
 This deletes `INTERIM_GRANTS` and the interim install path. Built-ins stay native code in the GUI; only their identity
-and grants live on the node. A built-in micro attaches like any other (§3) and receives handles it uses through the
+and grants live on the node. A built-in micro fetches its handles like any other (§3) and receives handles it uses through the
 same egress, so the person sees one consent and audit view per cartridge (ADR 049 item 6) that includes the app's own
 micros.
 
@@ -249,8 +256,8 @@ proposal to lift everything out of `day_cli`.
 - **The typed client goes into `day_node` or beside it.** Proposed: **a `client` module in `day_node`**. The crate already
   depends on `big_node` and `reqwest` (`Attached` holds a `reqwest::Client`), so the cost a separate crate would avoid,
   client transport code pulled into a crate that is not the node, is already paid. A sibling crate is the alternative if
-  an app shell that never attaches (Android) must not link the client's method crates. **To confirm.**
-- **Adds.** A typed micros client over it: `attach`, an `awaitHandles` follower that yields new handles on a channel
+  an app shell that never reaches a running node (Android) must not link the client's method crates. **To confirm.**
+- **Adds.** A typed micros client over it: `handles`, an `awaitHandles` follower that yields new handles on a channel
   (the host's loop; the long poll of §3 is the nodule's, and this follower is its client), and a micro egress that signs
   with the micro's actor over either transport (the in-process one replaces `claytxt: clay_node/egress.rs`).
 - **What stays in `day_cli`.** The commands, argument parsing, output rendering and `config.rs`, and the `serve`/`node`
@@ -276,8 +283,8 @@ proposal to lift everything out of `day_cli`.
 
 `day` yields the node to the GUI: the GUI asks the holder to release the lock, boots the node itself, and the CLI
 becomes its client. Rejected. A yielding holder has live commands, peers and subscriptions to drain or move, and the
-node's lock is also a storage lock (SQLite and the keyring). Nothing about the holder is cheap to hand off, and attach
-makes it unnecessary: the GUI is a client of whoever holds the node.
+node's lock is also a storage lock (SQLite and the keyring). Nothing about the holder is cheap to hand off, and reaching
+the running holder as a client makes it unnecessary: the GUI is a client of whoever holds the node.
 
 The end state also falls out of this design: the node as its own long-lived service (`day node start`, a systemd unit),
 with the GUI and the CLI both as clients. Nothing in this ADR requires it, and each step works with a holder that is
@@ -292,7 +299,7 @@ Each layer is one small PR (see `.agents/skills/pr-stacks`). Lanes:
 2. **The core cartridge** (ADR 053): the preinstalled cartridge, its Lexicons as the source of `node_type_libraries()`,
    the runtime permbind of §2.2 item 2. It comes first among the cartridge work because it is where the micros nodule
    lives and holds the type library every other cartridge's admission needs. Nodules.
-3. **The micros nodule, with `attach` and `awaitHandles`** (§2, §3, and §4's listener): the lowering moved out of
+3. **The micros nodule, with `handles` and `awaitHandles`** (§2, §3, and §4's listener): the lowering moved out of
    `big_nodule` into a shared crate, the nodule in the core cartridge, e2e tests with a granted drawer and a re-mint.
    Needs 1 and 2. Nodules.
 4. **The typed client in `day_node`** (§8), then the micros client on it. The typed client is independent of 1-3 and can
@@ -320,5 +327,6 @@ Steps 1, 2 and the typed client of 4 are independent and can land first; 3 needs
 4. **The daytxt cartridge as the home of built-in micros** (§6), and not a cartridge per built-in.
 5. **The typed client as a module of `day_node`**, versus a sibling crate (§8).
 6. **The guest-egress listener** for a micro's calls over the socket, versus a proxy method (§4).
-7. **Returning the micro's `actor` capability from `attach`** (§3): the host process signs for the micro. It follows from
-   holder binding as built; the alternative is a node-side signer, which makes every micro call a hop through the node.
+7. **Returning the micro's `actor` capability from `handles`** (§3): the host process signs for the micro. The signing only matters when
+   `day node start` holds the node in another process and the GUI reaches it over the socket; in process it is the same as
+   today. It follows from holder binding as built; the alternative is a node-side signer, which makes every micro call a hop through the node.
