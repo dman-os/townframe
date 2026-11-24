@@ -1434,6 +1434,7 @@ dependencies = [
  "irpc",
  "json-canon",
  "method_core",
+ "n0-future",
  "proptest",
  "rand 0.9.5",
  "serde",
