@@ -29,5 +29,8 @@ big_automata = { path = "../big_automata", features = ["test-support"] }
 service_client_native_rs = { workspace = true, features = ["iroh"] }
 service_utils_rs = { workspace = true, features = ["iroh-http"] }
 iroh.workspace = true
+# `server` is the relay the `web_fixture` example runs for the browser e2e: plain HTTP, in process.
+iroh-relay = { workspace = true, features = ["server"] }
+serde_json.workspace = true
 utils_rs.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

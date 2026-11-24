@@ -1,4 +1,5 @@
 packages:
+  - ./src/big_automata_web/
   - ./src/btress_auth/
   - ./src/btress_sysadmin/
   - ./src/dayframe_web/

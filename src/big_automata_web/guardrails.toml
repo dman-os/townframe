@@ -1,0 +1,13 @@
+version = 1
+role = "application"
+dependency_reason = "The browser host of the big_automata sync stack: drives a PeerDriver over big_automata_iroh's PeerRpcClient on service_client_iroh_rs's iroh transport, syncing into big_automata's memory backend."
+allowed_dependencies = [
+    "big_automata",
+    "big_automata_iroh",
+    "service_client_iroh_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+# The page only has behaviour in a browser; the native binary is empty.
+[builds.wasm32-unknown-unknown]
