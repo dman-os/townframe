@@ -165,7 +165,7 @@ async fn the_list_is_one_poll_then_one_read_per_pull() {
 }
 
 #[tokio::test]
-async fn the_block_reads_one_descriptor_per_link_in_order() {
+async fn the_block_reads_each_link_in_order_its_pointer_then_its_index() {
     let fixture = Fixture::sample();
     let review = review(&fixture);
     let Read::Ready(pull) = review.pulls().await.unwrap().remove(0) else {
@@ -192,13 +192,11 @@ async fn the_block_reads_one_descriptor_per_link_in_order() {
         &rows[1].outcome,
         LinkOutcome::Found { description: Some(text), entries: 1, .. } if text.contains("phone")
     ));
+    // Each intxt is two reads, its drawer document for the index pointer and then the index
+    // for the title and body; the document that is no intxt stops at the first.
     assert_eq!(
         fixture.calls(),
-        [
-            "org.example.daybook.docs.readDatums",
-            "org.example.daybook.docs.readDatums",
-            "org.example.daybook.docs.readDatums"
-        ]
+        ["org.example.daybook.docs.readDatums"; 5]
     );
 }
 
@@ -333,8 +331,8 @@ async fn a_patch_is_read_only_when_asked_for_and_resolves_self_and_concrete_refe
     let Changes::Blob(source) = &intxt.entries[0].changes else {
         panic!("the first commit carries a patch")
     };
-    // `self` is the document the entry is in.
-    assert_eq!(source.doc, Fixture::doc_id("31"));
+    // `self` is the document the entry is in: the intxt's index document (D70), not its drawer.
+    assert_eq!(source.doc, Fixture::doc_id("33"));
     assert!(
         review
             .patch(source)
@@ -367,7 +365,7 @@ async fn a_patch_is_read_only_when_asked_for_and_resolves_self_and_concrete_refe
         }),
     );
     let drawer = Fixture::doc_id("6");
-    let held = held.intxt(drawer.clone(), "moved", None, vec![entry]);
+    let held = held.intxt(drawer.clone(), Fixture::doc_id("9"), "moved", None, vec![entry]);
     let Read::Ready(intxt) = Review::new(held.clone()).intxt(&drawer).await.unwrap() else {
         panic!("the intxt is readable")
     };
@@ -397,17 +395,31 @@ async fn a_patch_that_cannot_be_read_is_an_error_not_an_empty_diff() {
 }
 
 #[tokio::test]
-async fn an_intxt_missing_its_title_or_an_entry_says_so_instead_of_showing_less() {
+async fn an_intxt_missing_its_index_title_or_an_entry_says_so_instead_of_showing_less() {
     let drawer = Fixture::doc_id("7");
-    let fixture = Fixture::empty().doc(drawer.clone(), []);
-    let reading = review(&fixture).intxt(&drawer).await.unwrap();
-    assert!(
-        matches!(&reading, Read::Unreadable(reason) if reason.contains("title")),
-        "{reading:?}"
-    );
+    let index = Fixture::doc_id("8");
+    let at = &drawer;
+    let unreadable = |fixture: Fixture, says: &'static str| async move {
+        let reading = review(&fixture).intxt(at).await.unwrap();
+        assert!(
+            matches!(&reading, Read::Unreadable(reason) if reason.contains(says)),
+            "{says}: {reading:?}"
+        );
+    };
+    let intxt = Fixture::empty().intxt(drawer.clone(), index.clone(), "t", None, vec![]);
+    // The drawer document carries no marker: it is no intxt.
+    unreadable(Fixture::empty().doc(drawer.clone(), []), "no intxt marker").await;
+    // The marker is there and the pointer to the index document is not.
+    let marker = [(
+        key(IntxtMarker::ID, "main"),
+        serde_json::to_value(IntxtMarker::default()).unwrap(),
+    )];
+    unreadable(Fixture::empty().doc(drawer.clone(), marker), "index pointer").await;
+    // The index document is there without its title.
+    unreadable(intxt.doc(index, []), "title").await;
 
     let Read::Ready(intxt) =
-        review(&Fixture::sample().listing_a_missing_entry(&Fixture::doc_id("32")))
+        review(&Fixture::sample().listing_a_missing_entry(&Fixture::doc_id("34")))
             .intxt(&Fixture::doc_id("32"))
             .await
             .unwrap()

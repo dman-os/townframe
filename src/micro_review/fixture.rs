@@ -146,12 +146,14 @@ impl Fixture {
             .held_pull(doc, pull)
     }
 
-    /// Hold an intxt: the drawer's descriptor document with the intxt marker, a title, and a
-    /// body listing `entries` in order.
+    /// Hold an intxt as D70 lays it out: the drawer's own document with the intxt marker and a
+    /// pointer to `index`, and the `index` content document with the title, a body listing
+    /// `entries` in order, and the entries.
     #[must_use]
     pub fn intxt(
         self,
         drawer: DocId,
+        index: DocId,
         title: &str,
         description: Option<&str>,
         entries: Vec<(DatumKey, Value)>,
@@ -168,11 +170,21 @@ impl Fixture {
             description: description.map(str::to_owned),
             extra: Default::default(),
         };
-        let marker = [
+        let pointer = generic::Index {
+            doc: index.to_string(),
+            extra: Default::default(),
+        };
+        let descriptor = [
             (
                 key(generic::Intxt::ID, "main"),
                 serde_json::to_value(generic::Intxt::default()).expect("a marker is plain JSON"),
             ),
+            (
+                key(generic::Index::ID, "main"),
+                serde_json::to_value(pointer).expect("an index pointer is plain JSON"),
+            ),
+        ];
+        let listing = [
             (
                 key(generic::Title::ID, "main"),
                 serde_json::to_value(title).expect("a title is plain JSON"),
@@ -182,18 +194,19 @@ impl Fixture {
                 serde_json::to_value(body).expect("a body is plain JSON"),
             ),
         ];
-        self.doc(drawer, marker.into_iter().chain(entries))
+        self.doc(drawer, descriptor)
+            .doc(index, listing.into_iter().chain(entries))
     }
 
-    /// A body that lists an entry its document does not hold.
+    /// A body that lists an entry its index document does not hold.
     #[cfg(test)]
     #[must_use]
-    pub fn listing_a_missing_entry(mut self, drawer: &DocId) -> Self {
+    pub fn listing_a_missing_entry(mut self, index: &DocId) -> Self {
         let body_key = key(generic::Body::ID, "main");
         let datums = Rc::make_mut(&mut self.held)
             .docs
-            .get_mut(drawer)
-            .expect("the drawer is held");
+            .get_mut(index)
+            .expect("the index is held");
         let mut body: generic::Body =
             serde_json::from_value(datums[&body_key].clone()).expect("a body");
         body.order.push(DatumReference::new(
@@ -222,6 +235,8 @@ impl Fixture {
     pub fn sample() -> Self {
         let first = Self::doc_id("31");
         let second = Self::doc_id("32");
+        let first_index = Self::doc_id("33");
+        let second_index = Self::doc_id("34");
         let not_an_intxt = Self::doc_id("41");
 
         let commit = |tip: &str, base: Option<&str>, patch: Option<&str>| {
@@ -280,6 +295,7 @@ impl Fixture {
             )
             .intxt(
                 first.clone(),
+                first_index.clone(),
                 "intxt: commits live with the intxt",
                 Some("Commits travel with the intxt that names them."),
                 vec![
@@ -288,9 +304,10 @@ impl Fixture {
                     pull_entry.clone(),
                 ],
             )
-            .patch_blob(&first, "patch-4c1f0a7", SAMPLE_PATCH)
+            .patch_blob(&first_index, "patch-4c1f0a7", SAMPLE_PATCH)
             .intxt(
                 second,
+                second_index,
                 "review micro: the PR on the phone",
                 Some("Reads a PR on the phone and finds the intxts it names."),
                 vec![pull_entry],

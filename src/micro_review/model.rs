@@ -471,31 +471,78 @@ impl<C: NodeCalls> Review<C> {
         }))
     }
 
-    /// The intxts `description` names, with the descriptor each node lets this micro read.
-    /// One descriptor read is made per drawer, in the block's order.
+    /// The intxt's index document (D70): the drawer's own document holds only the intxt marker
+    /// and a pointer to the index content document, which holds the title, the body and the
+    /// entries. `None` is a readable document with no intxt marker.
+    async fn index(&self, drawer: &DocId) -> Result<Read<Option<DocId>>, CallError> {
+        let marker = key(generic::Intxt::ID, "main");
+        let pointer = key(generic::Index::ID, "main");
+        let datums = match self
+            .read(drawer, Some([marker.clone(), pointer.clone()].into()))
+            .await?
+        {
+            Read::Ready(datums) => datums,
+            Read::Unreadable(reason) => return Ok(Read::Unreadable(reason)),
+        };
+        match datums.get(&marker) {
+            None | Some(DatumRead::Absent { .. }) => return Ok(Read::Ready(None)),
+            Some(DatumRead::Accepted { .. }) => {}
+            Some(other) => {
+                return Ok(Read::Unreadable(format!(
+                    "{drawer}: its intxt marker is {}",
+                    why(other)
+                )));
+            }
+        }
+        let pointer = match accepted(&datums, &pointer) {
+            Ok(pointer) => pointer,
+            Err(reason) => {
+                return Ok(Read::Unreadable(format!(
+                    "{drawer}: its index pointer is {reason}"
+                )));
+            }
+        };
+        let pointer: generic::Index = serde_json::from_value(pointer.clone())
+            .expect("the node admitted this value as an index pointer");
+        // The pointer's text is the node's own writing, admitted as an index; an id that does
+        // not parse is a broken invariant, not a reading to show.
+        let index = pointer
+            .doc
+            .parse()
+            .expect("the node admitted this index pointer's document id");
+        Ok(Read::Ready(Some(index)))
+    }
+
+    /// The intxts `description` names, with the title and entry count each node lets this micro
+    /// read: per drawer, in the block's order, its index pointer and then the index's title and
+    /// body.
     pub(crate) async fn links(&self, description: &str) -> Result<Links, CallError> {
         let named = match generic::PrLinks::read(description) {
             Ok(named) => named,
             Err(malformed) => return Ok(Links::Malformed(malformed.to_string())),
         };
         let descriptor_keys = BTreeSet::from([
-            key(generic::Intxt::ID, "main"),
             key(generic::Title::ID, "main"),
             key(generic::Body::ID, "main"),
         ]);
         let mut rows = Vec::new();
         for link in named.intxts.into_iter().take(MAX_LINKS_PER_PULL) {
             let drawer = link.reference.document().clone();
-            let outcome = match self.read(&drawer, Some(descriptor_keys.clone())).await? {
-                Read::Ready(datums) => match descriptor(&datums) {
-                    Ok(Some((title, body))) => LinkOutcome::Found {
-                        title: title.title,
-                        description: title.description,
-                        entries: u32::try_from(body.order.len()).expect("few entries"),
-                    },
-                    Ok(None) => LinkOutcome::NotFound,
-                    Err(reason) => LinkOutcome::Unreadable(format!("{drawer}: {reason}")),
-                },
+            let outcome = match self.index(&drawer).await? {
+                Read::Ready(None) => LinkOutcome::NotFound,
+                Read::Ready(Some(index)) => {
+                    match self.read(&index, Some(descriptor_keys.clone())).await? {
+                        Read::Ready(datums) => match title_and_body(&datums) {
+                            Ok((title, body)) => LinkOutcome::Found {
+                                title: title.title,
+                                description: title.description,
+                                entries: u32::try_from(body.order.len()).expect("few entries"),
+                            },
+                            Err(reason) => LinkOutcome::Unreadable(format!("{index}: {reason}")),
+                        },
+                        Read::Unreadable(reason) => LinkOutcome::Unreadable(reason),
+                    }
+                }
                 Read::Unreadable(reason) => LinkOutcome::Unreadable(reason),
             };
             rows.push(LinkRow {
@@ -535,11 +582,20 @@ impl<C: NodeCalls> Review<C> {
         })
     }
 
+    /// The intxt in `drawer`, assembled from its index document.
     pub(crate) async fn intxt(&self, drawer: &DocId) -> Result<Read<Intxt>, CallError> {
-        Ok(match self.read(drawer, None).await? {
-            Read::Ready(datums) => {
-                assemble(drawer, &datums).map_or_else(Read::Unreadable, Read::Ready)
+        let index = match self.index(drawer).await? {
+            Read::Ready(Some(index)) => index,
+            Read::Ready(None) => {
+                return Ok(Read::Unreadable(format!(
+                    "{drawer}: it is not an intxt (no intxt marker)"
+                )));
             }
+            Read::Unreadable(reason) => return Ok(Read::Unreadable(reason)),
+        };
+        Ok(match self.read(&index, None).await? {
+            Read::Ready(datums) => assemble(&index, &datums)
+                .map_or_else(|reason| Read::Unreadable(format!("{index}: {reason}")), Read::Ready),
             Read::Unreadable(reason) => Read::Unreadable(reason),
         })
     }
@@ -567,7 +623,7 @@ fn accepted<'datums>(
     }
 }
 
-/// The title and body are the descriptor datums shared by the intxt page and its PR rows.
+/// The title and body are the index datums shared by the intxt page and its PR rows.
 fn title_and_body(
     datums: &BTreeMap<DatumKey, DatumRead>,
 ) -> Result<(generic::Title, generic::Body), String> {
@@ -588,23 +644,11 @@ fn title_and_body(
     Ok((title, body))
 }
 
-/// Read only the descriptor shape needed for a PR row. An absent marker is a readable, ordinary
-/// document; a marker with an unreadable descriptor datum is an unreadable intxt.
-fn descriptor(
-    datums: &BTreeMap<DatumKey, DatumRead>,
-) -> Result<Option<(generic::Title, generic::Body)>, String> {
-    let marker = key(generic::Intxt::ID, "main");
-    match datums.get(&marker) {
-        None | Some(DatumRead::Absent { .. }) => Ok(None),
-        Some(DatumRead::Accepted { .. }) => title_and_body(datums).map(Some),
-        Some(other) => Err(format!("its intxt marker is {}", why(other))),
-    }
-}
-
-/// An intxt from its descriptor document's datums: the title, and the body's entries in order, a
+/// An intxt from its index document's datums: the title, and the body's entries in order, a
 /// duplicated reference once (ADR 036 §2). The title and the body are what make it an intxt; an
-/// entry that cannot be read is a row saying so.
-fn assemble(drawer: &DocId, datums: &BTreeMap<DatumKey, DatumRead>) -> Result<Intxt, String> {
+/// entry that cannot be read is a row saying so. `index` is the document a `self` reference in
+/// an entry resolves to.
+fn assemble(index: &DocId, datums: &BTreeMap<DatumKey, DatumRead>) -> Result<Intxt, String> {
     let (title, body) = title_and_body(datums)?;
     let mut shown = BTreeSet::new();
     let entries = body
@@ -612,7 +656,7 @@ fn assemble(drawer: &DocId, datums: &BTreeMap<DatumKey, DatumRead>) -> Result<In
         .iter()
         .map(|reference| reference.key())
         .filter(|listed| shown.insert((*listed).clone()))
-        .map(|listed| entry(drawer, listed, accepted(datums, listed)))
+        .map(|listed| entry(index, listed, accepted(datums, listed)))
         .collect();
     Ok(Intxt {
         title: title.title,
@@ -621,7 +665,7 @@ fn assemble(drawer: &DocId, datums: &BTreeMap<DatumKey, DatumRead>) -> Result<In
     })
 }
 
-fn entry(drawer: &DocId, key: &DatumKey, value: Result<&serde_json::Value, String>) -> Entry {
+fn entry(index: &DocId, key: &DatumKey, value: Result<&serde_json::Value, String>) -> Entry {
     let slot = String::from_utf8_lossy(key.slot_bytes()).into_owned();
     let value = match value {
         Ok(value) => value,
@@ -639,7 +683,7 @@ fn entry(drawer: &DocId, key: &DatumKey, value: Result<&serde_json::Value, Strin
     let changes = |patch: &Option<DatumReference>| match patch {
         None => Changes::TooLarge,
         Some(reference) => Changes::Blob(PatchSource {
-            doc: reference.document().resolve(drawer),
+            doc: reference.document().resolve(index),
             key: reference.key().clone(),
         }),
     };
