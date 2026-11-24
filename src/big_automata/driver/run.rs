@@ -97,6 +97,11 @@ impl DriverConfig {
                 // a held `Live` round takes at most a quarter of the window, which leaves the
                 // machine's requirement that the window exceed twice that
                 live_limit: (self.window / 4).max(1),
+                // a quarter of the window is what `Bulk` is left even while a walk takes half
+                // of it and a held `Live` round a quarter, so the batch is always reachable;
+                // the linger only covers long fetches holding the window (lanes law 9)
+                bulk_batch: (self.window / 4).max(1),
+                bulk_linger: Duration::from_millis(50),
                 min_backoff: backoffs.0,
                 max_backoff: backoffs.1,
             },
