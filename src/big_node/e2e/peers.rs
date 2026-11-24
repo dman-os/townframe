@@ -377,7 +377,7 @@ async fn a_known_drawers_roster_streams_without_mirroring_it() {
     // reader as a DocSynced of that doc.
     let heads = |node: &BigNode| {
         let drawer = drawer.clone();
-        let repo = node.repo.clone();
+        let repo = Arc::clone(&node.repo);
         async move {
             match repo.get_doc(&drawer).await.unwrap() {
                 big_repo::DocLookup::Ready(handle) => handle
