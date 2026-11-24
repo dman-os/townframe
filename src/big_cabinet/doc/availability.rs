@@ -11,12 +11,13 @@ async fn authorize_availability(
     capabilities: &DomainCapabilities,
     access: &dyn DocAccess,
     context: &RequestContext,
+    metadata: &HttpMetadata,
     capability: CapId,
     doc_id: &DocId,
 ) -> Result<(), DocsError> {
     context.validate()?;
     let caller = capabilities
-        .resolve::<DocScope>(context, capability)
+        .resolve::<DocScope>(context, metadata, capability)
         .await
         .map_err(authority_error)?;
     if !matches!(&caller.authority, DomainAuthority::Scoped(_))
@@ -48,12 +49,14 @@ impl DocsService {
     async fn availability(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: GetDocAvailability,
     ) -> Result<DocAvailability, DocsError> {
         authorize_availability(
             &self.capabilities,
             self.access.as_ref(),
             context,
+            metadata,
             params.capability,
             &params.doc_id,
         )
@@ -67,6 +70,7 @@ impl DocsService {
             &self.capabilities,
             self.access.as_ref(),
             context,
+            metadata,
             params.capability,
             &params.doc_id,
         )
@@ -85,6 +89,7 @@ impl DocsService {
     async fn observe_availability(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: ObserveDocAvailability,
     ) -> Result<EventStream<DocAvailability, DocsError>, DocsError> {
         context.validate()?;
@@ -103,6 +108,7 @@ impl DocsService {
             &self.capabilities,
             self.access.as_ref(),
             context,
+            metadata,
             params.capability,
             &params.doc_id,
         )
@@ -112,6 +118,7 @@ impl DocsService {
                 capabilities: self.capabilities.clone(),
                 access: Arc::clone(&self.access),
                 context,
+                metadata: metadata.clone(),
                 params,
                 tasks: self.tasks.clone(),
             };
@@ -172,6 +179,8 @@ struct AvailabilityObserver {
     capabilities: DomainCapabilities,
     access: Arc<dyn DocAccess>,
     context: RequestContext,
+    /// The credential the subscription was opened with, which every re-authorization presents.
+    metadata: HttpMetadata,
     params: ObserveDocAvailability,
     tasks: Spawner,
 }
@@ -182,6 +191,7 @@ impl AvailabilityObserver {
             &self.capabilities,
             self.access.as_ref(),
             &self.context,
+            &self.metadata,
             self.params.capability,
             &self.params.doc_id,
         )
@@ -330,7 +340,7 @@ impl Handler<GetDocAvailability> for DocsService {
             _ = self.tasks.cancelled() => Err(ContextError::Cancelled.into()),
             _ = request.context.cancellation.cancelled() => Err(ContextError::Cancelled.into()),
             _ = request.context.expired() => Err(ContextError::DeadlineExceeded.into()),
-            result = self.availability(&request.context, request.params) => result.map(Into::into),
+            result = self.availability(&request.context, &request.metadata, request.params) => result.map(Into::into),
         }
     }
 }
@@ -345,7 +355,7 @@ impl Handler<ObserveDocAvailability> for DocsService {
             _ = self.tasks.cancelled() => Err(ContextError::Cancelled.into()),
             _ = request.context.cancellation.cancelled() => Err(ContextError::Cancelled.into()),
             _ = request.context.expired() => Err(ContextError::DeadlineExceeded.into()),
-            result = self.observe_availability(&request.context, request.params) => result.map(Into::into),
+            result = self.observe_availability(&request.context, &request.metadata, request.params) => result.map(Into::into),
         }
     }
 }

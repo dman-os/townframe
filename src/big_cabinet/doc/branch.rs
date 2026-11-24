@@ -21,7 +21,7 @@ impl DocsService {
         params: BranchDoc,
     ) -> Result<WriteReceipt, DocsError> {
         let caller = self
-            .signing_invocation(context, metadata, params.capability)
+            .invocation(context, metadata, params.capability)
             .await?;
         let actor = &caller.signer;
         // A branch carries the whole source into the new document, so it needs the source at

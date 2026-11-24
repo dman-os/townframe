@@ -6,10 +6,11 @@ impl DrawerService {
     async fn revoke(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: RevokeDrawer,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core.invocation(context, metadata, params.capability).await?;
         core.authorize(context, &caller.authority, &params.drawer_id, Access::Admin)
             .await?;
         core.grants
@@ -30,7 +31,7 @@ impl Handler<RevokeDrawer> for DrawerService {
         &self,
         request: Envelope<RevokeDrawer>,
     ) -> Result<ResponseEnvelope<()>, DrawersError> {
-        Ok(self.revoke(&request.context, request.params).await?.into())
+        Ok(self.revoke(&request.context, &request.metadata, request.params).await?.into())
     }
 }
 

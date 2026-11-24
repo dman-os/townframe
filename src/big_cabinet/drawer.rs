@@ -162,6 +162,7 @@ use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
 use service_utils_rs::Host;
+use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
 use service_utils_rs::ResponseEnvelope;
 use service_utils_rs::StopToken;
@@ -447,10 +448,11 @@ impl Core {
     pub(crate) async fn invocation(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         capability: CapId,
     ) -> Result<Invocation<DrawerScope>, DrawersError> {
         self.capabilities
-            .resolve(context, capability)
+            .resolve(context, metadata, capability)
             .await
             .map_err(authority_error)
     }

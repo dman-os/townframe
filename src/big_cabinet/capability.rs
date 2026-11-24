@@ -18,6 +18,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
+use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
 
@@ -151,32 +152,49 @@ impl DomainCapabilities {
             .await
     }
 
-    /// A bare handle, presented with no separate signer: it is its own `handle` and signs as the
-    /// actor it is bound to.
+    /// A resource handle this domain minted, carried in a request body, resolved for the call
+    /// whose HTTP `metadata` it arrived with. The handle decides scope and rights; who may
+    /// present it is decided by the credential the transport attached (ADR 037 §1, §2):
+    ///
+    /// - No credential: an in-process built-in service presenting a handle it holds itself
+    ///   (ADR 037's "in-process built-in service: its own actor"). The handle signs as the actor
+    ///   it is bound to. Every external channel reaches a service through dispatch, which always
+    ///   attaches the caller's credential, so an outside caller cannot take this branch.
+    /// - A credential whose `authority` is this very handle: a service signing on behalf of its
+    ///   caller through a handle it minted for that call. The call signs through the credential's
+    ///   `signer`, exactly as wide as the handle the caller presented.
+    /// - Any other credential (dispatch forwards its caller's): the presenter is the actor the
+    ///   credential's `signer` is bound to, and a handle bound to anyone else is `Unauthorized`.
+    ///   A leaked handle id is a dead number under another actor's signer.
+    ///
+    /// A header that is present but unparseable is never read as "no credential".
     pub async fn resolve<S: DeserializeOwned>(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         capability: CapId,
-    ) -> Result<Invocation<S>, Error> {
-        self.resolve_signed(context, capability, capability).await
-    }
-
-    /// A handle this domain minted, signing through `signer` instead of through itself. The
-    /// handle decides scope and rights, and `signer` (live, `USE`, bound to an actor) decides
-    /// whose signature the call carries, exactly as wide as the handle the caller presented.
-    /// Unlike [`Self::source`] the authority must be a scoped handle, never an identity.
-    pub async fn resolve_signed<S: DeserializeOwned>(
-        &self,
-        context: &RequestContext,
-        capability: CapId,
-        signer: CapId,
     ) -> Result<Invocation<S>, Error> {
         let cap = self.inspect(context, capability).await?;
-        let (bound, _) = self.bound(&cap)?;
-        let signing = if signer == capability {
-            cap.clone()
-        } else {
-            self.inspect(context, signer).await?
+        let (bound, subject) = self.bound(&cap)?;
+        let credential = match metadata.authorization {
+            None => None,
+            Some(_) => Some(
+                Authorization::from_metadata(metadata)
+                    .map_err(|_| ClientError::Method(AuthorityServiceError::Unauthorized))?,
+            ),
+        };
+        let (signer, signing) = match credential {
+            Some(credential) if credential.authority == capability => {
+                (credential.signer, self.inspect(context, credential.signer).await?)
+            }
+            Some(credential) => {
+                let presenter = self.inspect(context, credential.signer).await?;
+                if !presenter.rights.contains(Rights::USE) || presenter.subject != Some(subject) {
+                    return Err(ClientError::Method(AuthorityServiceError::Unauthorized));
+                }
+                (capability, cap.clone())
+            }
+            None => (capability, cap.clone()),
         };
         let signer_actor = self.signing_actor(context, &signing, None).await?;
         Ok(Invocation {

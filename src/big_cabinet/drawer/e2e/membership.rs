@@ -1415,7 +1415,7 @@ async fn metadata_protocol_respects_root_and_child_audiences() {
             .unwrap();
         let narrowed = node
             .core()
-            .invocation(&RequestContext::root(), scoped)
+            .invocation(&RequestContext::root(), &Default::default(), scoped)
             .await
             .unwrap()
             .authority;

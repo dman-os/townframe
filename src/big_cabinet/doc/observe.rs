@@ -56,7 +56,7 @@ impl Handler<PollDatums> for DocsService {
         request: Envelope<PollDatums>,
     ) -> Result<ResponseEnvelope<DatumPage>, DocsError> {
         let params = request.params;
-        let caller = self.invocation(&request.context, params.capability).await?;
+        let caller = self.invocation(&request.context, &request.metadata, params.capability).await?;
         let anchors = params.predicate.anchors().map_err(|_| DocsError::Denied)?;
         // An unanchored predicate is a node-wide request; a scoped caller may not make one.
         if anchors.is_empty() && matches!(caller.authority, DomainAuthority::Scoped(_)) {
