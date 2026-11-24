@@ -145,6 +145,11 @@ impl ReplayClient {
         self.acked.get(&id)
     }
 
+    /// Whether the server holds `route` (acknowledged, not merely wanted).
+    pub fn is_acked(&self, route: &Route) -> bool {
+        matches!(self.routes.get(route), Some(Standing::Acked(_)))
+    }
+
     /// The refused routes waiting for [`ReplayClient::retry_blocked`].
     pub fn blocked(&self) -> impl Iterator<Item = &Route> {
         self.blocked.iter()
@@ -264,19 +269,26 @@ impl ReplayClient {
 
     /// Take the server's answer to `request`.
     ///
+    /// `acked` is cleared and then holds the routes this answer acknowledged, the only routes
+    /// an update makes acknowledged: the caller tells its lanes about each (an answer that
+    /// resets, limits or errs acknowledges none). The routes it blocked are counted in
+    /// [`UpdateOutcome::Applied`]; they were never acknowledged, so nothing leaves a lane.
+    ///
     /// Errors are answers no correct server gives this client's requests; the driver treats
     /// the peer as faulty.
     pub fn update_answered(
         &mut self,
         request: &UpdateSession,
         answer: &Result<SessionUpdated, SessionError>,
+        acked: &mut Vec<Route>,
     ) -> Res<UpdateOutcome> {
+        acked.clear();
         if !self.is_in_flight(request) {
             return Ok(UpdateOutcome::Stale);
         }
         match answer {
             Ok(updated) if updated.generation == request.generation => self
-                .acknowledge(&updated.refused)
+                .acknowledge(&updated.refused, acked)
                 .map(|blocked| UpdateOutcome::Applied { blocked }),
             // Law 2 answers a repeat with the generation held, which is never below the
             // request's.
@@ -313,7 +325,7 @@ impl ReplayClient {
     }
 
     /// The update in flight applied: its additions are acknowledged, its refusals blocked.
-    fn acknowledge(&mut self, refused: &[TargetId]) -> Res<usize> {
+    fn acknowledge(&mut self, refused: &[TargetId], acked: &mut Vec<Route>) -> Res<usize> {
         let InFlight { update, .. } = self.in_flight.take().expect(ERROR_IMPOSSIBLE);
         self.refused_buf.clear();
         self.refused_buf.extend(refused.iter().copied());
@@ -338,6 +350,7 @@ impl ReplayClient {
                         blocked += 1;
                     } else {
                         *standing = Standing::Acked(id);
+                        acked.push(route.clone());
                         self.acked.insert(id, route);
                     }
                 }

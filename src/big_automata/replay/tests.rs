@@ -29,6 +29,7 @@ use super::wire::SessionUpdated;
 use super::wire::TargetId;
 use super::wire::UpdateSession;
 use super::wire::Verdict;
+use crate::kit::scheduler::Instant;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
 use crate::part_store::ObjPayload;
@@ -41,7 +42,6 @@ use crate::part_store::oracle::PartOracle;
 use crate::part_store::oracle::PartWrite;
 use crate::rev::Limits;
 use crate::rev::Rev;
-use crate::kit::scheduler::Instant;
 
 /// Routes 0..4 are parts 0..4, 4..6 objects 4 and 5.
 const ROUTES: u8 = 6;
@@ -302,7 +302,7 @@ impl Sim {
             Msg::Update(request) => self.serve_update(request),
             Msg::Updated(request, answer) => {
                 self.client
-                    .update_answered(&request, &answer)
+                    .update_answered(&request, &answer, &mut vec![])
                     .expect("a correct server's answer");
             }
             Msg::Round(request) => {
@@ -755,7 +755,9 @@ fn a_late_opening_update_revives_a_forgotten_session() {
     let exchange = |client: &mut ReplayClient, server: &mut ReplayServer, now| {
         let request = client.next_update().unwrap().clone();
         let answer = server.update(&principal(0), &request, now, |_| true);
-        client.update_answered(&request, &answer).unwrap();
+        client
+            .update_answered(&request, &answer, &mut vec![])
+            .unwrap();
         request
     };
     client.want(route(0));

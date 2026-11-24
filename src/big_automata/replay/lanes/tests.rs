@@ -72,7 +72,9 @@ impl Rig {
             generation: update.generation,
             refused: vec![],
         });
-        self.client.update_answered(&update, &answer).unwrap();
+        self.client
+            .update_answered(&update, &answer, &mut vec![])
+            .unwrap();
         self.lanes.acked(route);
     }
 

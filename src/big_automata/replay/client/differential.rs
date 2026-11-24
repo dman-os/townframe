@@ -119,7 +119,32 @@ impl Harness {
             Op::Answer => {
                 if !self.answers.is_empty() {
                     let (update, answer) = self.answers.remove(0);
-                    self.client.update_answered(&update, &answer).unwrap();
+                    let before: BTreeSet<Route> = self
+                        .client
+                        .acked()
+                        .map(|(_, route)| route.clone())
+                        .collect();
+                    let mut named = vec![];
+                    self.client
+                        .update_answered(&update, &answer, &mut named)
+                        .unwrap();
+                    // an answer only ever adds acknowledged routes, and names exactly those
+                    let after: BTreeSet<Route> = self
+                        .client
+                        .acked()
+                        .map(|(_, route)| route.clone())
+                        .collect();
+                    assert_eq!(named.len(), named.iter().collect::<BTreeSet<_>>().len());
+                    assert_eq!(
+                        before
+                            .iter()
+                            .chain(&named)
+                            .cloned()
+                            .collect::<BTreeSet<_>>(),
+                        after
+                    );
+                    assert!(named.iter().all(|route| !before.contains(route)));
+                    assert!(named.iter().all(|route| self.client.is_acked(route)));
                 }
             }
             Op::Lose => {
