@@ -108,11 +108,6 @@ fn dirty_count_counts_log_rows() -> Res<()> {
 }
 
 #[test]
-fn peer_cursors_only_advance() -> Res<()> {
-    block_on(laws::peer_cursors_only_advance(&Memory))
-}
-
-#[test]
 fn writes_are_atomic() -> Res<()> {
     block_on(laws::writes_are_atomic(&Memory))
 }

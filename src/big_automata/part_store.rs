@@ -327,18 +327,6 @@ pub trait PartStoreRead {
     ) -> impl Future<Output = Res<Vec<BucketSummary>>> + Send;
     /// The part's live members.
     fn member_count(&self, part: &PartKey) -> impl Future<Output = Res<u64>> + Send;
-    /// The peer's cursors on the parts, in the order asked.
-    fn peer_part_cursors(
-        &self,
-        peer: &PeerKey,
-        parts: &[PartKey],
-    ) -> impl Future<Output = Res<Vec<Option<Rev>>>> + Send;
-    /// Move peers' cursors, `(peer, part, cursor)`. A cursor only advances: a lower one than
-    /// stored is ignored.
-    fn set_peer_part_cursors(
-        &self,
-        cursors: &[(PeerKey, PartKey, Rev)],
-    ) -> impl Future<Output = Res<()>> + Send;
 }
 
 /// The responder's reads. Every one answers a principal, and every one decides access and

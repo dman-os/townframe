@@ -2,8 +2,6 @@ use crate::interlude::*;
 
 pub mod decide_peer_strat;
 use decide_peer_strat::*;
-mod set_peer_part_cursor;
-use set_peer_part_cursor::*;
 
 use crate::kit::mpsc;
 use crate::part_store::ObjPayload;

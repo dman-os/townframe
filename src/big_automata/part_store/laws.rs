@@ -24,7 +24,6 @@
 //! | incremental bucket summaries equal a recompute | every check |
 //! | part summaries (member count, dirt) equal a count over the oracle's log | every check, [`dirty_count_counts_log_rows`] |
 //! | bucket reads, summaries and object states follow current access, revocation mid-walk included | [`revocation_hides_the_parts_buckets`], every check |
-//! | peer cursors only advance | [`peer_cursors_only_advance`], every check |
 //! | a transaction is atomic: nothing before commit, everything after, nothing on rollback | [`writes_are_atomic`] |
 //! | a write that changes nothing stamps nothing | [`unchanged_writes_stamp_nothing`] |
 //! | all of the above over generated sequences, authorized reads by random principals included | [`differential`] |
@@ -181,12 +180,6 @@ impl<B: Backend> Harness<B> {
         Ok(())
     }
 
-    pub async fn set_peer_part_cursors(&mut self, cursors: &[(PeerKey, PartKey, Rev)]) -> Res<()> {
-        self.store.set_peer_part_cursors(cursors).await?;
-        self.oracle.set_peer_part_cursors(cursors);
-        self.check().await
-    }
-
     /// Compare the store's whole observable state over the universe with the oracle.
     pub async fn check(&self) -> Res<()> {
         let store = &self.store;
@@ -278,13 +271,6 @@ impl<B: Backend> Harness<B> {
                     .map(|obj| oracle.readable_obj_state(principal, obj))
                     .collect::<Vec<_>>(),
                 "objects readable by {principal}"
-            );
-            assert_eq!(
-                store.peer_part_cursors(principal, &parts).await?,
-                parts
-                    .iter()
-                    .map(|part| oracle.peer_part_cursor(principal, part))
-                    .collect::<Vec<_>>()
             );
         }
         if latest > 0 {
@@ -1181,25 +1167,6 @@ pub async fn removals_reach_every_route_above_its_bound<B: Backend>(backend: &B)
     Ok(())
 }
 
-/// A peer cursor only moves forward; setting a lower one keeps the higher.
-pub async fn peer_cursors_only_advance<B: Backend>(backend: &B) -> Res<()> {
-    let mut harness = Harness::open(backend).await?;
-    harness
-        .set_peer_part_cursors(&[(principal(0), part(0), 5), (principal(0), part(1), 2)])
-        .await?;
-    harness
-        .set_peer_part_cursors(&[(principal(0), part(0), 3), (principal(0), part(1), 7)])
-        .await?;
-    assert_eq!(
-        harness
-            .store
-            .peer_part_cursors(&principal(0), &[part(0), part(1), part(2)])
-            .await?,
-        vec![Some(5), Some(7), None]
-    );
-    Ok(())
-}
-
 /// A transaction is atomic: none of its batches is visible before commit (log, objects,
 /// buckets, watch), all of them are after, stamped with one rev, and a rollback leaves nothing.
 pub async fn writes_are_atomic<B: Backend>(backend: &B) -> Res<()> {
@@ -1262,7 +1229,6 @@ strike! {
     pub enum PartOp {
         Commit(Vec<PartWrite>),
         Rollback(Vec<PartWrite>),
-        SetPeerCursors(Vec<(PeerKey, PartKey, Rev)>),
         /// A log read; `after` and `until` are fractions (of 256) of the stamped revs.
         Read {
             selector: LogSelector,
@@ -1301,7 +1267,6 @@ pub async fn differential<B: Backend>(backend: &B, ops: Vec<PartOp>) -> Res<()> 
                 harness.commit(writes).await?;
             }
             PartOp::Rollback(writes) => harness.rollback(writes).await?,
-            PartOp::SetPeerCursors(cursors) => harness.set_peer_part_cursors(&cursors).await?,
             PartOp::Read {
                 selector,
                 after,

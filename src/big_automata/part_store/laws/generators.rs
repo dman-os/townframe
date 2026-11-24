@@ -57,7 +57,6 @@ pub fn part_ops() -> impl Strategy<Value = Vec<PartOp>> {
     let op = prop_oneof![
         4 => part_writes().prop_map(PartOp::Commit),
         1 => part_writes().prop_map(PartOp::Rollback),
-        1 => vec((any_principal(), any_part(), 0u64..8), 1..3).prop_map(PartOp::SetPeerCursors),
         2 => (any_selector(), any::<u8>(), any::<u8>(), any_limits()).prop_map(
             |(selector, after, until, limits)| PartOp::Read { selector, after, until, limits }
         ),

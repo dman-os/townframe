@@ -56,7 +56,6 @@ pub struct PartOracle {
     access: BTreeMap<(PartKey, PeerKey), AccessLevel>,
     /// The collapsed log: each key's last stamp.
     log: BTreeMap<LogKey, (Rev, Option<LogEntry>)>,
-    peer_cursors: BTreeMap<(PeerKey, PartKey), Rev>,
 }
 
 impl PartOracle {
@@ -186,22 +185,6 @@ impl PartOracle {
             self.rev = rev;
         }
         stamped.then_some(rev)
-    }
-
-    pub fn set_peer_part_cursors(&mut self, cursors: &[(PeerKey, PartKey, Rev)]) {
-        for (peer, part, cursor) in cursors {
-            let stored = self
-                .peer_cursors
-                .entry((peer.clone(), part.clone()))
-                .or_default();
-            *stored = (*stored).max(*cursor);
-        }
-    }
-
-    pub fn peer_part_cursor(&self, peer: &PeerKey, part: &PartKey) -> Option<Rev> {
-        self.peer_cursors
-            .get(&(peer.clone(), part.clone()))
-            .copied()
     }
 
     /// With a payload, the content and the live parts; without, the parts it was added to,

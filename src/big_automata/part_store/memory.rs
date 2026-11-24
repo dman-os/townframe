@@ -67,7 +67,6 @@ strike! {
         pending: BTreeSet<(ObjKey, PartKey)>,
         /// Each part's bucket summaries, every level, maintained per transition.
         buckets: BTreeMap<(PartKey, BuckId), BucketSummaryState>,
-        peer_cursors: BTreeMap<(PeerKey, PartKey), Rev>,
         /// Scratch for an object's parts while its rows are rewritten.
         part_buf: Vec<PartKey>,
     }
@@ -284,41 +283,6 @@ impl PartStoreRead for MemoryPartStore {
 
     fn member_count(&self, part: &PartKey) -> impl Future<Output = Res<u64>> + Send {
         std::future::ready(Ok(self.with_state(|state| state.member_count(part))))
-    }
-
-    fn peer_part_cursors(
-        &self,
-        peer: &PeerKey,
-        parts: &[PartKey],
-    ) -> impl Future<Output = Res<Vec<Option<Rev>>>> + Send {
-        std::future::ready(Ok(self.with_state(|state| {
-            parts
-                .iter()
-                .map(|part| {
-                    state
-                        .peer_cursors
-                        .get(&(peer.clone(), part.clone()))
-                        .copied()
-                })
-                .collect()
-        })))
-    }
-
-    fn set_peer_part_cursors(
-        &self,
-        cursors: &[(PeerKey, PartKey, Rev)],
-    ) -> impl Future<Output = Res<()>> + Send {
-        surelock::key::lock_scope(|key| {
-            let (mut state, _key) = key.lock(&self.state);
-            for (peer, part, cursor) in cursors {
-                let stored = state
-                    .peer_cursors
-                    .entry((peer.clone(), part.clone()))
-                    .or_default();
-                *stored = (*stored).max(*cursor);
-            }
-        });
-        std::future::ready(Ok(()))
     }
 }
 

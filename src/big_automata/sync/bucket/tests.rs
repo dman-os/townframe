@@ -76,18 +76,6 @@ impl PartStoreRead for SummaryStore {
     async fn member_count(&self, _part: &PartKey) -> Res<u64> {
         unreachable!("filter_buckets does not count members")
     }
-
-    async fn peer_part_cursors(
-        &self,
-        _peer: &PeerKey,
-        _parts: &[PartKey],
-    ) -> Res<Vec<Option<Rev>>> {
-        unreachable!("filter_buckets does not read peer cursors")
-    }
-
-    async fn set_peer_part_cursors(&self, _cursors: &[(PeerKey, PartKey, Rev)]) -> Res<()> {
-        unreachable!("filter_buckets does not write peer cursors")
-    }
 }
 
 fn summary(id: BuckId, len: u32, live_count: u32, changed_at: Rev) -> BucketSummary {
