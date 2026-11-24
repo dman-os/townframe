@@ -110,12 +110,9 @@ fn components() -> Vec<(String, String)> {
         .collect()
 }
 
-/// The styled part of every component (`<name>.rs` at the crate root).
-fn styled_parts() -> Vec<Source> {
-    components()
-        .iter()
-        .map(|(snake, _)| read(&crate_root().join(format!("{snake}.rs"))))
-        .collect()
+/// The root class of a component: `ct-` and its name in kebab case (`KIT-201`).
+fn root_class(snake: &str) -> String {
+    format!("ct-{}", snake.replace('_', "-"))
 }
 
 fn headless_parts() -> Vec<Source> {
@@ -151,10 +148,11 @@ fn the_only_runtime_dependency_is_dioxus_without_default_features() {
     );
 }
 
-/// `KIT-002`, `KIT-072`: a component is `headless/<name>.rs` (public) plus `<name>.rs` (private),
-/// both declared, the headless part with tests, and the README lists it.
+/// `KIT-002`, `KIT-072`, `KIT-200`: a component is `headless/<name>.rs` (public) plus a stylesheet
+/// (`styles/kit/<name>.css`), and nothing else visual: no styled Rust part beside it. The headless
+/// part is declared and re-exported at the root, has tests, and the README lists it.
 #[test]
-fn a_component_is_a_public_headless_module_and_a_private_styled_one() {
+fn a_component_is_a_public_headless_module_and_a_skin() {
     let lib = read(&crate_root().join("lib.rs"));
     let headless = read(&crate_root().join("headless.rs"));
     let readme = read(&crate_root().join("README.md"));
@@ -165,19 +163,26 @@ fn a_component_is_a_public_headless_module_and_a_private_styled_one() {
                 "KIT-002: headless.rs does not declare `pub mod {snake};`"
             ));
         }
-        if !lib.text.contains(&format!("\nmod {snake};")) {
+        if !crate_root()
+            .join("styles/kit")
+            .join(format!("{snake}.css"))
+            .exists()
+        {
             violations.push(format!(
-                "KIT-002: lib.rs does not declare a private `mod {snake};`"
+                "KIT-200: `{snake}` has no stylesheet `styles/kit/{snake}.css`"
             ));
         }
-        if lib.text.contains(&format!("pub mod {snake};")) {
+        if crate_root().join(format!("{snake}.rs")).exists() {
             violations.push(format!(
-                "KIT-002: lib.rs makes the styled `{snake}` module public"
+                "KIT-200: `{snake}` has a styled Rust part; a component is its headless part and its stylesheet"
             ));
         }
-        if !lib.text.contains(&format!("pub use {snake}::{pascal};")) {
+        if !lib
+            .text
+            .contains(&format!("pub use headless::{snake}::{pascal};"))
+        {
             violations.push(format!(
-                "KIT-002: lib.rs does not re-export `{snake}::{pascal}`"
+                "KIT-002: lib.rs does not re-export `headless::{snake}::{pascal}`"
             ));
         }
         if !readme.text.contains(&format!("`headless::{snake}`")) {
@@ -190,34 +195,35 @@ fn a_component_is_a_public_headless_module_and_a_private_styled_one() {
             .text
             .split_once("#[cfg(test)]")
             .unwrap_or(("", ""));
-        if !tests.contains("#[test]") {
+        // The tests may sit in `headless/<name>/tests.rs` instead of inline.
+        let external = crate_root().join("headless").join(&snake).join("tests.rs");
+        let external = tests.contains("mod tests;") && read(&external).text.contains("#[test]");
+        if !tests.contains("#[test]") && !external {
             violations.push(format!("KIT-072: headless/{snake}.rs has no test"));
         }
     }
     assert_no_violations(violations);
 }
 
-/// `KIT-010`, `KIT-011`: a headless part names no class and imports no styled part; it receives
-/// class strings through its `*Skin` props.
+/// `KIT-010`, `KIT-200`: a headless part names no class but its root (`ct-<name>`), holds no
+/// utility strings and has no skin prop.
 #[test]
 fn headless_parts_hold_no_styling() {
-    let styled: Vec<_> = components()
-        .into_iter()
-        .flat_map(|(snake, pascal)| [snake, pascal])
-        .collect();
     let violations = headless_parts()
         .iter()
         .flat_map(|source| {
-            let mut found = source.violations("KIT-011", |line| {
-                let class_literal = line.contains("class: \"") || line.contains("class:\"");
-                let styled_import = line.split("crate::").skip(1).any(|rest| {
-                    let head: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-                    styled.contains(&head)
-                });
-                (class_literal || styled_import).then(|| format!("a headless part names a class or imports a styled part: {}", line.trim()))
+            let own_root = Path::new(&source.path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(root_class);
+            let mut found = source.violations("KIT-200", |line| {
+                let class_literal = (line.contains("class: \"") || line.contains("class:\""))
+                    && !own_root.as_ref().is_some_and(|root| {
+                        line.contains(&format!("class: \"{root}\""))
+                    });
+                let skin = line.contains("Skin");
+                (class_literal || skin).then(|| format!("a headless part names a class other than its root, or a skin: {}", line.trim()))
             });
-            // A `use` of a Tailwind-looking token is not possible, but a literal in a skin
-            // default would be: the skin structs hold no literal either.
             found.extend(
                 source
                     .literals()
@@ -225,7 +231,7 @@ fn headless_parts_hold_no_styling() {
                     .filter(|(_, literal)| looks_like_utility_classes(literal))
                     .map(|(line_number, literal)| {
                         format!(
-                            "KIT-011: {}:{line_number}: utility classes in a headless part: {literal:?}",
+                            "KIT-200: {}:{line_number}: utility classes in a headless part: {literal:?}",
                             source.path
                         )
                     }),
@@ -250,77 +256,19 @@ fn looks_like_utility_classes(literal: &str) -> bool {
         >= 2
 }
 
-/// `KIT-011`: the styled part uses utilities that resolve to semantic tokens: no palette colours
-/// and no arbitrary values, except Tailwind's `data-[state=...]` variant.
+/// `KIT-200`: a component takes no `class` or `style` pass-through, so a caller cannot bring its
+/// own look to it: appearance is the stylesheet's and the variants are enum props.
 #[test]
-fn styled_parts_use_semantic_tokens_only() {
-    const PALETTE: [&str; 22] = [
-        "red", "orange", "amber", "yellow", "lime", "green", "emerald", "teal", "cyan", "sky",
-        "blue", "indigo", "violet", "purple", "fuchsia", "pink", "rose", "slate", "gray", "zinc",
-        "neutral", "stone",
-    ];
+fn components_take_no_class_or_style_pass_through() {
     let mut violations = Vec::new();
-    for source in styled_parts() {
-        for (line_number, literal) in source.literals() {
-            for token in literal.split_whitespace() {
-                let utility = token.rsplit(':').next().unwrap_or(token);
-                // `data-[state=x]:` and its `group-` form are the data-attribute variant; any other
-                // bracket is an arbitrary value.
-                let without_state_variants = token
-                    .split("data-[state=")
-                    .enumerate()
-                    .map(|(index, part)| {
-                        if index == 0 {
-                            part
-                        } else {
-                            part.split_once(']').map_or(part, |(_, rest)| rest)
-                        }
-                    })
-                    .collect::<String>();
-                let arbitrary = without_state_variants.contains('[');
-                let palette = PALETTE.iter().any(|colour| {
-                    utility
-                        .split('-')
-                        .skip(1)
-                        .collect::<Vec<_>>()
-                        .windows(2)
-                        .any(|pair| {
-                            pair[0] == *colour && pair[1].chars().all(|c| c.is_ascii_digit())
-                        })
-                }) || ["white", "black"].iter().any(|colour| {
-                    utility.ends_with(&format!("-{colour}")) && !utility.starts_with("outline-")
-                });
-                if arbitrary || palette {
-                    violations.push(format!(
-                        "KIT-011: {}:{line_number}: `{token}` is {} (use a semantic token)",
-                        source.path,
-                        if arbitrary {
-                            "an arbitrary value"
-                        } else {
-                            "a palette colour"
-                        }
-                    ));
-                }
-            }
-        }
-    }
-    assert_no_violations(violations);
-}
-
-/// `KIT-012`: a styled component takes no `class` or `style` pass-through.
-#[test]
-fn styled_components_take_no_class_or_style() {
-    let mut violations = Vec::new();
-    for source in styled_parts() {
+    for source in headless_parts() {
         let production = source.text.split("#[cfg(test)]").next().unwrap_or_default();
         for signature in production.split("#[component]").skip(1) {
             let parameters = signature.split(") ->").next().unwrap_or_default();
             for name in ["class", "style"] {
-                if parameters.contains(&format!("{name}:"))
-                    || parameters.contains(&format!("{name}: "))
-                {
+                if parameters.contains(&format!("{name}:")) {
                     violations.push(format!(
-                        "KIT-012: {}: a #[component] takes a `{name}` parameter",
+                        "KIT-200: {}: a #[component] takes a `{name}` parameter",
                         source.path
                     ));
                 }
@@ -334,10 +282,9 @@ fn styled_components_take_no_class_or_style() {
 /// measures the DOM (Blitz panics on rect reads inside handlers; a guest has no DOM).
 #[test]
 fn breakpoints_live_in_width_rs_and_nothing_measures_the_dom() {
-    const MEASURING: [&str; 10] = [
+    const MEASURING: [&str; 9] = [
         "get_client_rect",
         "getBoundingClientRect",
-        "onmounted",
         "MountedData",
         "get_scroll_offset",
         "get_scroll_size",
@@ -356,9 +303,16 @@ fn breakpoints_live_in_width_rs_and_nothing_measures_the_dom() {
                     .map(|literal| format!("breakpoint literal `{literal}` outside width.rs"))
             }));
         }
+        // The harness hands handlers an element backing; it measures nothing.
+        if source.path == "testing.rs" {
+            continue;
+        }
         violations.extend(source.violations("KIT-040", |line| {
             MEASURING
                 .iter()
+                // `headless.rs` holds the roving-focus helper, which keeps element handles to
+                // focus them and never measures through them.
+                .filter(|api| !(source.path == "headless.rs" && **api == "MountedData"))
                 .find(|api| line.contains(**api))
                 .map(|api| format!("`{api}` measures the DOM or asks the window"))
         }));
@@ -366,8 +320,11 @@ fn breakpoints_live_in_width_rs_and_nothing_measures_the_dom() {
     assert_no_violations(violations);
 }
 
-/// `KIT-052`: `tabindex` (which panics Blitz) is set only by the `Split::renderer` path (`Renderer::takes_focus`),
-/// and nothing moves focus programmatically.
+/// `KIT-052`: `tabindex` (which panics Blitz) is set only by the `Split::renderer` path
+/// (`Renderer::takes_focus`), by the roving widgets (`Tabs`, `ScrubStrip`) on a line that names
+/// `takes_focus`, and by the modal panels (`Sheet`, `Drawer`), which take `-1` and are focused on
+/// mount by `headless::focus_on_mount`. Focus moves programmatically only in `headless.rs`
+/// (`focus_on_mount` and the roving-focus ring).
 #[test]
 fn tabindex_is_only_the_renderer_focus_gate() {
     let mut violations = Vec::new();
@@ -377,8 +334,22 @@ fn tabindex_is_only_the_renderer_focus_gate() {
             continue;
         }
         violations.extend(source.violations("KIT-052", |line| {
-            if line.contains("tabindex") && source.path != "headless/sections.rs" {
+            let modal_panel =
+                ["headless/sheet.rs", "headless/drawer.rs"].contains(&source.path.as_str());
+            let roving =
+                ["headless/tabs.rs", "headless/scrub_strip.rs"].contains(&source.path.as_str());
+            if roving && line.contains("tabindex") && !line.contains("takes_focus") {
+                return Some("`tabindex` not gated on `Renderer::takes_focus`".into());
+            }
+            if line.contains("tabindex")
+                && source.path != "headless/sections.rs"
+                && !modal_panel
+                && !roving
+            {
                 return Some("`tabindex` outside the Sections renderer gate".into());
+            }
+            if source.path == "headless.rs" {
+                return None;
             }
             if line.contains("let tabindex") && !line.contains(".takes_focus()") {
                 return Some("`tabindex` not gated on `Renderer::takes_focus`".into());
@@ -428,32 +399,154 @@ fn tests_neither_sleep_nor_wait() {
     assert_no_violations(violations);
 }
 
-/// `KIT-080`: every component has a specimen in the showcase, and a framed specimen has both a
-/// compact and an expanded frame. `NavButton` is a leaf button shown inline and `ListRow` is shown
-/// inside the `ListDetails` frames, so neither has a frame of its own.
+/// `KIT-204`: every component has a specimen page, `claytxt_showcase/specimens/<name>.rs`, that
+/// mounts it. A component that is laid out against its host's width (the ones that take a
+/// `WidthClass` or a split extent) shows a compact and an expanded frame, because the kit never
+/// measures and a frame is the host that hands the component its class.
 #[test]
-fn every_component_has_a_specimen_at_both_widths() {
-    const UNFRAMED: [&str; 2] = ["NavButton", "ListRow"];
-    let showcase = read(&crate_root().join("../dayframe_showcase/kit.rs"));
+fn every_component_has_a_specimen() {
+    const FRAMED: [&str; 5] = ["app_bar", "drawer", "list_details", "sections", "sheet"];
     let mut violations = Vec::new();
-    for (_, pascal) in components() {
-        if !showcase.text.contains(&format!("{pascal} {{")) {
+    for (snake, pascal) in components() {
+        let page = crate_root()
+            .join("../claytxt_showcase/specimens")
+            .join(format!("{snake}.rs"));
+        let text = match std::fs::read_to_string(&page) {
+            Ok(text) => text,
+            Err(_) => {
+                violations.push(format!(
+                    "KIT-204: the showcase has no specimen page `specimens/{snake}.rs`"
+                ));
+                continue;
+            }
+        };
+        if !text.contains(&format!("{pascal} {{")) {
             violations.push(format!(
-                "KIT-080: the showcase has no specimen of `{pascal}`"
+                "KIT-204: the specimen page of `{pascal}` never mounts it"
             ));
-            continue;
         }
-        if UNFRAMED.contains(&pascal.as_str()) {
-            continue;
+        if FRAMED.contains(&snake.as_str()) {
+            for width in ["COMPACT_PX", "EXPANDED_PX"] {
+                if !text.contains(width) {
+                    violations.push(format!("KIT-204: no `{pascal}` frame at {width}"));
+                }
+            }
         }
-        let frames: Vec<_> = showcase
+    }
+    assert_no_violations(violations);
+}
+
+/// `KIT-200`: a headless part sets no inline style but custom properties (`--ct-*`), which its
+/// stylesheet reads. (The harness refuses the same at run time.)
+#[test]
+fn contract_parts_set_only_custom_properties_inline() {
+    let mut violations = Vec::new();
+    for source in headless_parts() {
+        violations.extend(source.violations("KIT-200", |line| {
+            let inline = line.contains("style:") || line.contains("\"style\":");
+            (inline && !line.contains("\"--ct-")).then(|| {
+                format!(
+                    "inline style that is not a `--ct-*` custom property: {}",
+                    line.trim()
+                )
+            })
+        }));
+    }
+    assert_no_violations(violations);
+}
+
+/// `KIT-201`, `KIT-202`, `KIT-203`: a contract component's skin is a stylesheet keyed on its root
+/// class, imported into the `kit` layer, with no `!important` (layers order the cascade, not
+/// weight), no `@apply`, no fetching `url()`, and a `prefers-reduced-motion` guard wherever it
+/// transitions or animates. The generated bundle carries it, so a skin edited without
+/// regenerating the bundle fails here.
+#[test]
+fn contract_skins_are_stylesheets_in_the_kit_layer() {
+    let entry = read(&crate_root().join("tailwind.css"));
+    let bundle = read(&crate_root().join("assets/tailwind.css"));
+    let mut violations = Vec::new();
+    for (snake, _) in components() {
+        let root = root_class(&snake);
+        let path = format!("styles/kit/{snake}.css");
+        let css = read(&crate_root().join(&path));
+        if !entry
             .text
-            .lines()
-            .filter(|line| line.contains(&format!("Frame {{ title: \"{pascal}")))
-            .collect();
-        for width in ["COMPACT_PX", "EXPANDED_PX"] {
-            if !frames.iter().any(|frame| frame.contains(width)) {
-                violations.push(format!("KIT-080: no `{pascal}` frame at {width}"));
+            .contains(&format!("@import \"./{path}\" layer(kit);"))
+        {
+            violations.push(format!(
+                "KIT-202: tailwind.css does not import {path} into `layer(kit)`"
+            ));
+        }
+        if !css.text.contains(&format!(".{root}")) {
+            violations.push(format!("KIT-201: {path} never styles `.{root}`"));
+        }
+        if !bundle.text.contains(&format!(".{root}")) {
+            violations.push(format!(
+                "KIT-202: assets/tailwind.css has no `.{root}`: regenerate the bundle"
+            ));
+        }
+        for banned in ["!important", "@apply", "url("] {
+            if css.text.contains(banned) {
+                violations.push(format!("KIT-202: {path} uses `{banned}`"));
+            }
+        }
+        let animates = css.text.contains("transition") || css.text.contains("animation");
+        if animates && !css.text.contains("prefers-reduced-motion") {
+            violations.push(format!(
+                "KIT-203: {path} animates without a `prefers-reduced-motion` guard"
+            ));
+        }
+    }
+    assert_no_violations(violations);
+}
+
+/// `KIT-102`: one z-order scale. A skin never writes a number as a `z-index`: it names a layer
+/// token (`var(--ct-layer-sheet)`), and every such token exists in `semantic.tokens.json`, whose
+/// scale runs content, raised, app bar, drawer, sheet, toast, gesture, lowest first. (A sheet
+/// opened from the sidebar covers it, so the sheet is above the drawer.)
+#[test]
+fn skins_stack_on_the_layer_scale_and_never_name_a_z_index_number() {
+    const SCALE: [&str; 7] = [
+        "content", "raised", "app-bar", "drawer", "sheet", "toast", "gesture",
+    ];
+    let tokens: serde_json::Value =
+        serde_json::from_str(&read(&crate_root().join("styles/tokens/semantic.tokens.json")).text)
+            .expect("semantic tokens are JSON");
+    let layers = tokens["layer"].as_object().expect("a layer token group");
+    let mut previous = None;
+    for name in SCALE {
+        let z = layers[name]["$value"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("layer.{name} is a number"));
+        assert!(
+            previous < Some(z),
+            "{name} is not above the layer before it"
+        );
+        previous = Some(z);
+    }
+    assert_eq!(
+        layers.keys().filter(|key| !key.starts_with('$')).count(),
+        SCALE.len(),
+        "a layer token this test does not know, or the reverse"
+    );
+    let mut violations = Vec::new();
+    for entry in std::fs::read_dir(crate_root().join("styles/kit")).expect("the skins directory") {
+        let path = entry.expect("directory entry").path();
+        let css = read(&path);
+        for (index, line) in css.text.lines().enumerate() {
+            let Some((_, value)) = line.trim().split_once("z-index:") else {
+                continue;
+            };
+            let value = value.trim().trim_end_matches(';');
+            let token = value
+                .strip_prefix("var(--ct-layer-")
+                .and_then(|rest| rest.strip_suffix(')'));
+            if !token.is_some_and(|name| SCALE.contains(&name)) {
+                violations.push(format!(
+                    "KIT-102: {}:{}: `z-index: {value}` is not a layer token",
+                    css.path,
+                    index + 1
+                ));
             }
         }
     }
