@@ -1,9 +1,13 @@
 //! A read-only, server-rendered viewer of intxts, as a `wasi:http/handler` component.
 //!
 //! The page is `view(state)`: [`source`] loads an [`view::IntxtView`] on the server, [`ui`] renders
-//! it, [`route`] connects a request path to the two. There are no mutations, accounts, sessions,
+//! it, [`route`] connects a request path to the two. [`source`] has the fixture, [`node`] reads a
+//! day node over its XRPC. There are no mutations, accounts, sessions,
 //! server functions or hydration.
 
+pub mod diff;
+pub mod markdown;
+pub mod node;
 pub mod route;
 pub mod source;
 pub mod ui;

@@ -1,7 +1,7 @@
 //! Request path to page: parse the route, load on the server, then render plain SSR.
 
-use crate::source::FixtureSource;
 use crate::source::IntxtSource;
+use crate::source::Origin;
 use crate::ui::Document;
 use crate::ui::ErrorPage;
 use crate::ui::IndexPage;
@@ -108,10 +108,7 @@ impl Page {
 /// before rendering starts, so a failure is an error page with its own status, never a half page.
 pub async fn serve(source: &impl IntxtSource, path_with_query: &str) -> Page {
     match Route::parse(path_with_query) {
-        Ok(Route::Index) => Page::html(
-            200,
-            render(index_page, format!("/i/{}", FixtureSource::DRAWER)),
-        ),
+        Ok(Route::Index) => Page::html(200, render(index_page, source.origin())),
         Ok(Route::Stylesheet) => Page {
             status: 200,
             content_type: "text/css; charset=utf-8",
@@ -130,11 +127,16 @@ pub fn method_not_allowed() -> Page {
     error_page_for(405, "this viewer is read-only".to_owned())
 }
 
+/// The viewer's own configuration is wrong: every page says so instead of guessing a source.
+pub fn misconfigured(message: String) -> Page {
+    error_page_for(500, message)
+}
+
 fn error_page_for(status: u16, message: String) -> Page {
     Page::html(status, render(error_page, (status, message)))
 }
 
-fn intxt_page(view: IntxtView) -> Element {
+pub(crate) fn intxt_page(view: IntxtView) -> Element {
     rsx! {
         Document { title: view.title.clone(),
             IntxtPage { view }
@@ -142,10 +144,10 @@ fn intxt_page(view: IntxtView) -> Element {
     }
 }
 
-fn index_page(fixture_path: String) -> Element {
+fn index_page(origin: Origin) -> Element {
     rsx! {
         Document { title: "intxt".to_owned(),
-            IndexPage { fixture_path }
+            IndexPage { origin }
         }
     }
 }
@@ -171,6 +173,7 @@ pub fn render<P: Clone + 'static>(root: fn(P) -> Element, props: P) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::FixtureSource;
     use crate::source::LoadError;
 
     const DRAWER: &str = "z11111111111111111111111111111111";
@@ -212,9 +215,15 @@ mod tests {
 
     #[test]
     fn the_index_and_error_pages_render() {
+        insta::assert_snapshot!("index", render(index_page, FixtureSource.origin()));
         insta::assert_snapshot!(
-            "index",
-            render(index_page, format!("/i/{}", FixtureSource::DRAWER))
+            "index_of_a_node",
+            render(
+                index_page,
+                Origin::Node {
+                    url: "http://127.0.0.1:8080".to_owned()
+                }
+            )
         );
         insta::assert_snapshot!(
             "error",
@@ -235,6 +244,12 @@ mod tests {
                     drawer: drawer.clone(),
                     reason: "no via node answered".into(),
                 })
+            }
+
+            fn origin(&self) -> Origin {
+                Origin::Node {
+                    url: "http://down.example".into(),
+                }
             }
         }
         let fixture = |path: &str| pollster::block_on(super::serve(&FixtureSource, path));

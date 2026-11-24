@@ -2,7 +2,11 @@
 //! nothing below it reads anything but its props, so any host that builds the view can render the
 //! same markup. Everything under `Document` is the server's own business (the HTML envelope).
 
+use crate::diff::Diff;
+use crate::markdown;
+use crate::source::Origin;
 use crate::view::CommentView;
+use crate::view::CommitView;
 use crate::view::EntryRef;
 use crate::view::EntryView;
 use crate::view::IntxtView;
@@ -20,8 +24,17 @@ const PAGE_STYLE: &str = "\
 .intxt-page ul,.intxt-page ol{padding:0;list-style:none}\
 .intxt-page li{padding:.5rem 0}\
 .intxt-page h2{font-size:1.125rem;font-weight:600;margin:1.5rem 0 .5rem}\
-.intxt-description{white-space:pre-wrap}\
-.intxt-page code{font-family:ui-monospace,monospace;font-size:.875em}\
+.intxt-markdown p{margin:.5rem 0}\
+.intxt-markdown pre{overflow-x:auto}\
+.intxt-page code,.intxt-page pre{font-family:ui-monospace,monospace;font-size:.875em}\
+.intxt-commit{margin:.5rem 0}\
+.intxt-commit-message{white-space:pre-wrap;margin:.25rem 0}\
+.intxt-diff{overflow-x:auto;border:1px solid var(--df-color-border,#ccc);padding:.5rem 0;margin:.5rem 0}\
+.intxt-diff span{display:block;padding:0 .75rem;white-space:pre}\
+.diff-file{font-weight:600}\
+.diff-hunk{background:rgba(127,127,255,.15)}\
+.diff-added{background:rgba(46,160,67,.2)}\
+.diff-removed{background:rgba(248,81,73,.2)}\
 .intxt-muted{font-size:.875rem}\
 .intxt-thread{border-left:2px solid var(--df-color-border,#ccc);padding-left:.75rem;margin:1rem 0}\
 .intxt-comment{margin:.5rem 0}\
@@ -59,7 +72,7 @@ pub fn IntxtPage(view: IntxtView) -> Element {
                     code { "{view.drawer}" }
                 }
                 if let Some(description) = &view.description {
-                    p { class: "intxt-description", "{description}" }
+                    Markdown { source: description.clone() }
                 }
                 section { aria_labelledby: "entries",
                     h2 { id: "entries", "Entries" }
@@ -97,7 +110,57 @@ fn EntryRow(entry: EntryView) -> Element {
                 code { "{entry.label}" }
             }
             RefList { refs: entry.refs.clone() }
+            if let Some(description) = &entry.description {
+                Markdown { source: description.clone() }
+            }
             PrLinks { links: entry.pr_links.clone() }
+            for commit in entry.commits.iter().cloned() {
+                Commit { commit }
+            }
+            if let Some(diff) = &entry.patch {
+                DiffBlock { diff: diff.clone() }
+            }
+        }
+    }
+}
+
+/// Markdown source as HTML. The one place a page writes markup from text it did not write, which
+/// `markdown::to_html` has made safe to do.
+#[component]
+fn Markdown(source: String) -> Element {
+    let html = markdown::to_html(&source);
+    rsx! {
+        div { class: "intxt-markdown", dangerous_inner_html: "{html}" }
+    }
+}
+
+#[component]
+fn Commit(commit: CommitView) -> Element {
+    rsx! {
+        div { class: "intxt-commit",
+            p { class: "intxt-muted text-text-muted",
+                code { "{commit.sha}" }
+                " {commit.author}, {commit.date}"
+            }
+            p { class: "intxt-commit-message", "{commit.message}" }
+        }
+    }
+}
+
+/// A unified diff as `<pre>` of one `<span>` per line, classed by what the line is. The lines are
+/// text nodes, so they are escaped like any other text on the page.
+#[component]
+fn DiffBlock(diff: Diff) -> Element {
+    rsx! {
+        pre { class: "intxt-diff",
+            for line in diff.lines {
+                span { class: line.kind.class(), "{line.text}\n" }
+            }
+        }
+        if diff.omitted_octets > 0 {
+            p { class: "intxt-muted text-text-muted",
+                "The diff is cut here: {diff.omitted_octets} more octets are not shown."
+            }
         }
     }
 }
@@ -176,9 +239,9 @@ fn Comment(comment: CommentView) -> Element {
     }
 }
 
-/// `/`: a pointer at the fixture until the viewer has a real index to show.
+/// `/`: what the viewer is, and where it reads from.
 #[component]
-pub fn IndexPage(fixture_path: String) -> Element {
+pub fn IndexPage(origin: Origin) -> Element {
     rsx! {
         div { class: "intxt-page",
             AppBar { title: "intxt".to_owned() }
@@ -188,9 +251,20 @@ pub fn IndexPage(fixture_path: String) -> Element {
                     code { "/i/<drawer id>?via=<node key>" }
                     "."
                 }
-                p {
-                    "Example: "
-                    a { href: "{fixture_path}", "{fixture_path}" }
+                match origin {
+                    Origin::Fixture { example_path } => rsx! {
+                        p {
+                            "No node is configured (INTXT_WEB_NODE, INTXT_WEB_DOC_CAP and INTXT_WEB_BLOB_CAP are unset), so every page is the built-in fixture. Example: "
+                            a { href: "{example_path}", "{example_path}" }
+                        }
+                    },
+                    Origin::Node { url } => rsx! {
+                        p {
+                            "Reading intxts from the node at "
+                            code { "{url}" }
+                            "."
+                        }
+                    },
                 }
             }
         }

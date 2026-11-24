@@ -5,6 +5,7 @@
 //! micro's node, a browser webnode) builds the same value, and the components in `ui` render it
 //! without knowing which host that was.
 
+use crate::diff::Diff;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
@@ -14,6 +15,7 @@ use intxt_core::annotation::Target;
 use intxt_core::generic::PrLinks;
 use intxt_core::generic::Title;
 use intxt_core::work::AgentSession;
+use intxt_core::work::GitCommit;
 use intxt_core::work::GitCommitEntry;
 use intxt_core::work::GitRef;
 use intxt_core::work::GitRefEntry;
@@ -32,7 +34,7 @@ pub struct IntxtView {
     /// The nodes the reader was told hold the intxt (the `via` hint), as node keys.
     pub via: Vec<String>,
     pub title: String,
-    /// Markdown source. Shown as written; the viewer does not render markdown yet.
+    /// Markdown source, rendered by the page with raw HTML escaped.
     pub description: Option<String>,
     pub entries: Vec<EntryView>,
     pub threads: Vec<ThreadView>,
@@ -69,9 +71,28 @@ pub struct EntryView {
     pub refs: Vec<EntryRef>,
     /// Where the entry lives outside the node (a PR's URL), when it has such a place.
     pub href: Option<String>,
+    /// For a pull request: its description as Markdown source, without the intxt block.
+    pub description: Option<String>,
     /// For a pull request: the intxts its description names (including this one), and a note when
     /// the description's intxt block is there but unreadable.
     pub pr_links: PrLinksView,
+    /// For a commit range or a jj change: the commits it names that the intxt holds, newest first.
+    pub commits: Vec<CommitView>,
+    /// For a commit range or a jj change: the recorded patch of the whole entry (the diff from
+    /// its base to its tip), when the intxt holds one.
+    pub patch: Option<Diff>,
+}
+
+/// One commit of an entry, from the `gitCommit` datum the intxt carries for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommitView {
+    pub sha: String,
+    /// `Name <email>`, as the commit says. A claim of the content, not of who wrote the datum.
+    pub author: String,
+    /// The author date, as `YYYY-MM-DD HH:MM` in UTC.
+    pub date: String,
+    /// The whole message, subject first.
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,7 +146,11 @@ pub struct TargetView {
 /// holds a reference (a branch's name, a session's id), and the page shows the resolved datum.
 #[derive(Debug, Clone, Copy)]
 pub enum EntryDatum<'a> {
-    Commits(&'a GitCommitEntry),
+    Commits {
+        entry: &'a GitCommitEntry,
+        commits: &'a [CommitDatum],
+        patch: Option<&'a PatchDatum>,
+    },
     GitRef {
         entry: &'a GitRefEntry,
         git_ref: &'a GitRef,
@@ -133,6 +158,8 @@ pub enum EntryDatum<'a> {
     JjChange {
         entry: &'a JjChangeEntry,
         change: &'a JjChange,
+        commits: &'a [CommitDatum],
+        patch: Option<&'a PatchDatum>,
     },
     Session {
         entry: &'a SessionEntry,
@@ -142,6 +169,20 @@ pub enum EntryDatum<'a> {
         entry: &'a GithubPullEntry,
         pull: &'a GithubPull,
     },
+}
+
+/// A `gitCommit` datum and the sha of its slot.
+#[derive(Debug, Clone)]
+pub struct CommitDatum {
+    pub sha: String,
+    pub commit: GitCommit,
+}
+
+/// A patch blob as far as the source read it: `text` is the first octets of `total_octets`.
+#[derive(Debug, Clone)]
+pub struct PatchDatum {
+    pub text: String,
+    pub total_octets: u64,
 }
 
 /// A comment datum and the reference that names it, which its replies' `replyTo` point at.
@@ -205,15 +246,27 @@ fn entry_view(entry: &EntryDatum<'_>) -> EntryView {
         label,
         refs,
         href: None,
+        description: None,
         pr_links: PrLinksView::default(),
+        commits: Vec::new(),
+        patch: None,
     };
     match entry {
-        EntryDatum::Commits(entry) => {
+        EntryDatum::Commits {
+            entry,
+            commits,
+            patch,
+        } => {
+            // The entry's base and tip are commit keys (`<tag>/<sha>`); the page shows shas.
+            let tip = sha_of(&entry.tip);
             let label = match &entry.base {
-                Some(base) => format!("{}..{}", short(base), short(&entry.tip)),
-                None => short(&entry.tip).to_owned(),
+                Some(base) => format!("{}..{}", short(sha_of(base)), short(tip)),
+                None => short(tip).to_owned(),
             };
-            row(EntryKind::Commits, label, Vec::new())
+            let mut view = row(EntryKind::Commits, label, Vec::new());
+            view.commits = commits.iter().map(commit_view).collect();
+            view.patch = patch.map(patch_view);
+            view
         }
         EntryDatum::GitRef { entry, git_ref } => {
             // The reference's slot is `<worktree>/<ref name>`; the name is what a reader knows.
@@ -231,18 +284,28 @@ fn entry_view(entry: &EntryDatum<'_>) -> EntryView {
             }
             row(EntryKind::GitRef, name.to_owned(), refs)
         }
-        EntryDatum::JjChange { change, .. } => row(
-            EntryKind::JjChange,
-            "change".to_owned(),
-            change
-                .commits
-                .iter()
-                .map(|commit| EntryRef {
-                    name: "commit",
-                    value: short(commit).to_owned(),
-                })
-                .collect(),
-        ),
+        EntryDatum::JjChange {
+            change,
+            commits,
+            patch,
+            ..
+        } => {
+            let mut view = row(
+                EntryKind::JjChange,
+                "change".to_owned(),
+                change
+                    .commits
+                    .iter()
+                    .map(|commit| EntryRef {
+                        name: "commit",
+                        value: short(commit).to_owned(),
+                    })
+                    .collect(),
+            );
+            view.commits = commits.iter().map(commit_view).collect();
+            view.patch = patch.map(patch_view);
+            view
+        }
         EntryDatum::Session { session, .. } => row(
             EntryKind::Session,
             session
@@ -280,34 +343,63 @@ fn entry_view(entry: &EntryDatum<'_>) -> EntryView {
                 ],
             );
             view.href = Some(pull.url.clone());
-            view.pr_links = pr_links(&pull.body);
+            let (description, links) = pr_description(&pull.body);
+            view.description = Some(description).filter(|text| !text.trim().is_empty());
+            view.pr_links = links;
             view
         }
     }
 }
 
-fn pr_links(description: &str) -> PrLinksView {
-    match PrLinks::read(description) {
-        Ok(links) => PrLinksView {
-            intxts: links
-                .intxts
-                .iter()
-                .map(|link| {
-                    let drawer = link.reference.document();
-                    LinkedIntxt {
-                        path: intxt_path(drawer, link.reference.via()),
-                        label: link.title.clone().unwrap_or_else(|| drawer.to_string()),
-                        refs: link.refs.clone(),
-                    }
-                })
-                .collect(),
-            malformed: None,
-        },
-        Err(error) => PrLinksView {
-            intxts: Vec::new(),
-            malformed: Some(error.to_string()),
-        },
+/// The PR description a reader sees (the text without its intxt block) and the intxts the block
+/// names. A block that is there but unreadable leaves the description as written and says so.
+fn pr_description(description: &str) -> (String, PrLinksView) {
+    match PrLinks::split(description) {
+        Ok((text, links)) => (
+            text,
+            PrLinksView {
+                intxts: links
+                    .intxts
+                    .iter()
+                    .map(|link| {
+                        let drawer = link.reference.document();
+                        LinkedIntxt {
+                            path: intxt_path(drawer, link.reference.via()),
+                            label: link.title.clone().unwrap_or_else(|| drawer.to_string()),
+                            refs: link.refs.clone(),
+                        }
+                    })
+                    .collect(),
+                malformed: None,
+            },
+        ),
+        Err(error) => (
+            description.to_owned(),
+            PrLinksView {
+                intxts: Vec::new(),
+                malformed: Some(error.to_string()),
+            },
+        ),
     }
+}
+
+fn commit_view(commit: &CommitDatum) -> CommitView {
+    let author = &commit.commit.author;
+    CommitView {
+        sha: commit.sha.clone(),
+        author: format!("{} <{}>", author.name, author.email),
+        date: author.at.strftime("%Y-%m-%d %H:%M").to_string(),
+        message: commit.commit.message.trim_end().to_owned(),
+    }
+}
+
+fn patch_view(patch: &PatchDatum) -> Diff {
+    Diff::parse(&patch.text, patch.total_octets)
+}
+
+/// The sha of a commit key (`org.example.intxt.work.gitCommit/<sha>`), or of a bare sha.
+pub fn sha_of(commit_key: &str) -> &str {
+    commit_key.rsplit('/').next().unwrap_or(commit_key)
 }
 
 /// Groups comments into threads by `replyTo`. A reply names its parent, and a reply to a reply

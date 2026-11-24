@@ -5,8 +5,10 @@
 //! node's source replaces it without touching a component.
 
 use crate::view::CommentDatum;
+use crate::view::CommitDatum;
 use crate::view::EntryDatum;
 use crate::view::IntxtView;
+use crate::view::PatchDatum;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
@@ -15,6 +17,7 @@ use intxt_core::generic::PrLink;
 use intxt_core::generic::PrLinks;
 use intxt_core::generic::Title;
 use intxt_core::work::AgentSession;
+use intxt_core::work::GitCommit;
 use intxt_core::work::GitCommitEntry;
 use intxt_core::work::GitRef;
 use intxt_core::work::GitRefEntry;
@@ -33,6 +36,14 @@ pub enum LoadError {
     /// The source could not ask: none of the `via` nodes (nor any default) answered.
     #[error("could not reach a node holding {drawer}: {reason}")]
     Unreachable { drawer: DocId, reason: String },
+    /// The source answered and refused the viewer's capability for the intxt.
+    #[error("this viewer's capability does not reach intxt {0}")]
+    Forbidden(DocId),
+    /// The source answered with something that is not an intxt as the viewer reads one: a datum
+    /// that is missing, unreadable or of another shape. What a peer wrote is not trusted to be
+    /// well formed, so this is a page and not a crash.
+    #[error("what the node holds for {drawer} is not an intxt this viewer can read: {reason}")]
+    Unreadable { drawer: DocId, reason: String },
 }
 
 impl LoadError {
@@ -40,9 +51,19 @@ impl LoadError {
     pub fn status(&self) -> u16 {
         match self {
             Self::NotFound(_) => 404,
-            Self::Unreachable { .. } => 502,
+            Self::Forbidden(_) => 403,
+            Self::Unreachable { .. } | Self::Unreadable { .. } => 502,
         }
     }
+}
+
+/// Where the pages' data comes from, as the index page says it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Origin {
+    /// The built-in fixture, because no node is configured.
+    Fixture { example_path: String },
+    /// The node at this base URL.
+    Node { url: String },
 }
 
 /// Loads the intxt in `drawer`, reading through the nodes `via` names (a locator hint; the drawer
@@ -55,6 +76,9 @@ impl LoadError {
 )]
 pub trait IntxtSource {
     async fn load(&self, drawer: &DocId, via: &[MultibaseKey]) -> Result<IntxtView, LoadError>;
+
+    /// Where `load` reads from, for the index page.
+    fn origin(&self) -> Origin;
 }
 
 /// One intxt, built from real `intxt_core` datums, served under [`FixtureSource::DRAWER`] whatever
@@ -83,7 +107,31 @@ impl IntxtSource for FixtureSource {
         }
         Ok(Self::view())
     }
+
+    fn origin(&self) -> Origin {
+        Origin::Fixture {
+            example_path: format!("/i/{}", Self::DRAWER),
+        }
+    }
 }
+
+/// A patch with a rename-free modification and a line that would be markup if it were not
+/// escaped.
+const FIXTURE_PATCH: &str = "\
+diff --git a/src/intxt_web/ui.rs b/src/intxt_web/ui.rs
+index 3f4c1a2..9b7e0d4 100644
+--- a/src/intxt_web/ui.rs
++++ b/src/intxt_web/ui.rs
+@@ -10,7 +10,9 @@ use crate::view::EntryView;
+ use crate::view::IntxtView;
+-use crate::view::OldThing;
++use crate::view::CommitView;
++use crate::diff::Diff;
+ const KEEP: &str = \"unchanged\";
++const MARKUP: &str = \"<script>alert('not run')</script> & more\";
+ fn page() {}
+\\ No newline at end of file
+";
 
 fn node(byte: u8) -> MultibaseKey {
     MultibaseKey::try_from([byte; 32].as_slice()).expect("32 bytes")
@@ -113,7 +161,25 @@ fn fixture() -> IntxtView {
         FixtureSource::DRAWER
     );
     let commits: GitCommitEntry = serde_json::from_value(json!({
-        "base": "43f9b548c0de1234", "tip": "aa0fcdcc77a1b2c3", "pack": pack
+        "base": "org.example.intxt.work.gitCommit/43f9b548c0de1234",
+        "tip": "org.example.intxt.work.gitCommit/aa0fcdcc77a1b2c3",
+        "pack": pack
+    }))
+    .unwrap();
+    let tip_commit: GitCommit = serde_json::from_value(json!({
+        "parents": ["bb0fcdcc77a1b2c3"],
+        "author": {"name": "dman", "email": "dman@example.org", "at": "2026-11-23T14:05:00Z"},
+        "committer": {"name": "dman", "email": "dman@example.org", "at": "2026-11-23T14:05:00Z"},
+        "message": "feat(intxt_web): show commits and their patch\n\nThe page renders the diff as plain HTML: <b>no markup</b> from the patch gets through.\n",
+        "files": [{"path": "src/intxt_web/ui.rs", "status": "modified"}]
+    }))
+    .unwrap();
+    let base_commit: GitCommit = serde_json::from_value(json!({
+        "parents": ["43f9b548c0de1234"],
+        "author": {"name": "Ada", "email": "ada@example.org", "at": "2026-11-22T09:30:00Z"},
+        "committer": {"name": "Ada", "email": "ada@example.org", "at": "2026-11-22T09:30:00Z"},
+        "message": "refactor(intxt_web): the view carries entries, not datums",
+        "files": [{"path": "src/intxt_web/view.rs", "status": "modified"}]
     }))
     .unwrap();
     let ref_entry: GitRefEntry = serde_json::from_value(json!({
@@ -202,7 +268,23 @@ fn fixture() -> IntxtView {
         &[relay],
         &title,
         &[
-            EntryDatum::Commits(&commits),
+            EntryDatum::Commits {
+                entry: &commits,
+                commits: &[
+                    CommitDatum {
+                        sha: "aa0fcdcc77a1b2c3".into(),
+                        commit: tip_commit,
+                    },
+                    CommitDatum {
+                        sha: "bb0fcdcc77a1b2c3".into(),
+                        commit: base_commit,
+                    },
+                ],
+                patch: Some(&PatchDatum {
+                    text: FIXTURE_PATCH.into(),
+                    total_octets: FIXTURE_PATCH.len() as u64,
+                }),
+            },
             EntryDatum::GitRef {
                 entry: &ref_entry,
                 git_ref: &git_ref,
@@ -210,6 +292,8 @@ fn fixture() -> IntxtView {
             EntryDatum::JjChange {
                 entry: &jj_entry,
                 change: &jj_change,
+                commits: &[],
+                patch: None,
             },
             EntryDatum::Session {
                 entry: &session_entry,

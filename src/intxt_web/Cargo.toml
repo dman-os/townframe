@@ -18,10 +18,23 @@ dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa
 clay_dioxus_kit = { path = "../clay_dioxus_kit" }
 intxt_core = { path = "../intxt_core" }
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
+big_blobs_core = { path = "../big_blobs_core" }
+method_core = { path = "../method_core", default-features = false }
+# The XRPC envelope (`encode_request`, `decode_response`) and the `HttpTransport` the node source
+# is generic over: the same code the CLI and the nodules speak to a node with.
+service_client_core_rs = { path = "../service_client_core_rs", default-features = false }
+service_core_rs = { path = "../service_core_rs", default-features = false }
+http = "1"
+# Raw HTML in a description is turned into text before it is written (see `markdown`).
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 jiff = { version = "0.2", features = ["serde"] }
 thiserror = "2"
 serde = "1"
 serde_json = "1"
+
+# The component links getrandom's `custom` backend (`.cargo/config.toml`) and supplies the entropy.
+[target.'cfg(target_os = "wasi")'.dependencies]
+getrandom03 = { package = "getrandom", version = "0.3" }
 
 [dev-dependencies]
 insta = { version = "1.44", features = ["yaml", "filters"] }
