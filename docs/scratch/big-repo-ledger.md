@@ -39,6 +39,13 @@ Scope: Costs, wrong turns and lifecycle defects in `big_repo` (and its keyhive a
 
 ## Open: lifecycle, correctness and liveness
 
+- **The causal checkpoint worker and upstream keyhive** (checked 2026-11-25, #349): most of what the worker does is handled upstream in the graph or the CGKA, and our fork lacks both changes.
+  - A new reader needs old keys: #262 (`1a91c2b`) wraps root secrets in the Add.
+  - Content under ancestor keys during a partition: #264 (`f132d2e`), predecessor key chains.
+  - Upstream has no `RootConflicted`: a writer rotates its own leaf when it cannot derive the root, so our election exists only because the worker mints without a write.
+  - Revocation falls out of the graph.
+  - Still needed after a move: eager seating when only prekeys arrive (`receive_prekey_op` seats nobody), possible gaps where the inviter lacked secrets, and content coverage for our blob format.
+  - So when automata moves `big_repo` onto upstream, retire most of the worker, the checkpoint feedback loop and the `RootConflicted` election; don't port them.
 - **Keyhive Arc cycle** (group <-> `DelegationStore`). Worked around by detaching listener storage on stop (`998b73d9`); not fixed in the fork because upstream is rewriting keyhive. Check the rewrite for the same cycle. A smaller `async_channel` buffered-event cycle also exists.
 - **Residual temp-dir leak:** big_repo's own suite leaves ~16 dirs of ~1 MB per run. WIP parked in `git stash` ("wip: big_repo residual temp-dir leak"): test stops, `TempDir` ownership in the stress fixture, `SqliteRuntime::drain_workers`. Low priority.
 - `register_bundle_lease` (`doc_worker.rs` ~708) swallows a send error and `registered_rx.await.ok()`, against AGENTS' channel rule.
