@@ -368,7 +368,7 @@ impl Lanes {
             .min()
     }
 
-    #[cfg(test)]
+    /// The rows the rounds in flight hold against the window (law 6).
     pub(crate) fn in_flight_limit(&self) -> usize {
         [&self.live, &self.bulk]
             .into_iter()

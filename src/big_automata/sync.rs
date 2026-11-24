@@ -106,6 +106,7 @@ pub(crate) mod bucket;
 pub(crate) mod cursor;
 pub(crate) mod lifecycle;
 pub(crate) mod object_jobs;
+pub(crate) mod peer;
 pub(crate) mod rpc;
 pub(crate) mod strategy;
 // FIXME(port): the old task bodies, disabled with `cfg(any())`; they become the driver's I/O.

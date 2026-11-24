@@ -76,6 +76,7 @@ structstruck::strike! {
 }
 
 structstruck::strike! {
+    #[derive(Debug)]
     pub struct BucketMachine {
         part_key: PartKey,
         //remote_depth: BuckLevel,
@@ -520,7 +521,7 @@ pub async fn filter_buckets<S: PartStoreRead>(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum PartObjDelta {
+pub(crate) enum PartObjDelta {
     New,
     Change,
     Delete,
@@ -528,8 +529,8 @@ enum PartObjDelta {
 
 #[derive(Debug, Clone)]
 pub struct BucketObjEntry {
-    obj_key: ObjKey,
-    delta: PartObjDelta,
+    pub(crate) obj_key: ObjKey,
+    pub(crate) delta: PartObjDelta,
 }
 
 #[derive(Debug, Clone)]
