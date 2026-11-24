@@ -25,12 +25,16 @@ members = [
   "./src/big_repo/",
   "./src/big_node/",
   "./src/day_cli",
+  "./src/day_node",
+  "./src/clay_node",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
   "./src/daybook_pdk",
   "./src/daybook_types",
   "./src/macros",
+  "./src/pierre_diffs",
+  "./src/pierre_diffs_dioxus",
   "./src/mltools/",
   "./src/pauperfuse/",
   "./src/native_utils_rs",
@@ -78,15 +82,21 @@ members = [
   "./src/micro_counter",
   "./src/micro_collection_probe",
   "./src/micro_counter_manifest",
-  "./src/ui",
+  "./src/micro_review_manifest",
+  "./src/micro_review",
+  "./src/micro_lab_manifest",
+  "./src/micro_lab",
+  "./src/micro_theme_lab_manifest",
+  "./src/micro_theme_lab",
+  "./src/review_mock",
   "./src/clay_dioxus_kit",
   "./src/dioxus_storm",
-  "./src/dayframe_composition",
-  "./src/dayframe_native",
-  "./src/dayframe_web",
-  "./src/dayframe_desktop",
-  "./src/dayframe_mobile",
-  "./src/dayframe_showcase",
+  "./src/daytxt_core",
+  "./src/daytxt_native",
+  "./src/daytxt_web",
+  "./src/daytxt_desktop",
+  "./src/daytxt_mobile",
+  "./src/claytxt_showcase",
 ]
 exclude = [
   "src/wasm_utils_rs",
@@ -160,19 +170,23 @@ test_nodule_handlers = { path = "./src/test_nodule_handlers/" }
 big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
 big_node = { path = "./src/big_node/" }
+day_node = { path = "./src/day_node" }
+clay_node = { path = "./src/clay_node" }
 clay_collection = { path = "./src/clay_collection" }
 clay_store = { path = "./src/clay_store" }
 clay_host = { path = "./src/clay_host" }
 clay_docs = { path = "./src/clay_docs" }
 clay_surface = { path = "./src/clay_surface" }
 clay_dioxus = { path = "./src/clay_dioxus" }
+pierre_diffs = { path = "./src/pierre_diffs" }
 clay_dioxus_kit = { path = "./src/clay_dioxus_kit" }
+pierre_diffs_dioxus = { path = "./src/pierre_diffs_dioxus" }
 dioxus_storm = { path = "./src/dioxus_storm" }
 clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
 clay_rt_wcmp = { path = "./src/clay_rt_wcmp" }
 clay_rt_wcmp_wasmi = { path = "./src/clay_rt_wcmp_wasmi" }
 # Lives in the `src/wasm_utils_rs` workspace (it is the only root-workspace consumer), but
-# `dayframe_web` links it as a plain path dependency.
+# `daytxt_web` links it as a plain path dependency.
 clay_rt_wcmp_web = { path = "./src/clay_rt_wcmp_web" }
 clay_guest_session = { path = "./src/clay_guest_session" }
 clay_mdk = { path = "./src/clay_mdk", default-features = false }
@@ -183,12 +197,15 @@ micro_shell = { path = "./src/micro_shell" }
 micro_toolbar_manifest = { path = "./src/micro_toolbar_manifest" }
 micro_toolbar = { path = "./src/micro_toolbar" }
 micro_layout_manifest = { path = "./src/micro_layout_manifest" }
+micro_lab_manifest = { path = "./src/micro_lab_manifest" }
+micro_theme_lab_manifest = { path = "./src/micro_theme_lab_manifest" }
+review_mock = { path = "./src/review_mock" }
 micro_sample = { path = "./src/micro_sample" }
 micro_counter = { path = "./src/micro_counter" }
 micro_counter_manifest = { path = "./src/micro_counter_manifest" }
-dayframe_composition = { path = "./src/dayframe_composition" }
-ui = { path = "./src/ui" }
-dayframe_native = { path = "./src/dayframe_native" }
+micro_review_manifest = { path = "./src/micro_review_manifest" }
+daytxt_core = { path = "./src/daytxt_core" }
+daytxt_native = { path = "./src/daytxt_native" }
 
 #
 # meta
@@ -240,6 +257,7 @@ atproto-dasl = "0.14.5"
 #
 # macros
 pastey = "0.1"
+cssparser = "0.38"
 displaydoc = "0.2"
 educe = "0.6"
 struct-patch = "0.10.4"
@@ -348,7 +366,7 @@ wasmtime-wasi-http = { version = "48.0.7", default-features = false }
 # async export task state in a libc `thread_local!`, which cannot be swapped per component-model
 # task. Without `std` it goes through the `wit_bindgen_0_62_0_{get,set}_task_context` hooks that
 # `clay_mdk` defines over context slot 0 (see `clay_mdk/lib.rs`). Each guest crate names the
-# features it needs; `x/check-dayframe.ts` fails if `std` comes back. The exact `=` pin is on
+# features it needs; `x/check-daytxt.ts` fails if `std` comes back. The exact `=` pin is on
 # purpose: `clay_mdk` defines `wit_bindgen_0_62_0_*` symbols, so a bump must be a visible edit there.
 wit-bindgen = { version = "=0.62.0", default-features = false }
 wstd = "0.6.8"
@@ -385,11 +403,14 @@ irpc-iroh = "0.17.0"
 
 #
 # gui
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
-dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
-dioxus-html = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
-dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
-dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-core-template = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-html = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-desktop = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
 blitz-dom = "=0.3.0-beta.4"
 # xilem = { path = "../xilem/xilem/" }
 #
@@ -398,8 +419,8 @@ blitz-dom = "=0.3.0-beta.4"
 wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "a24366c874177c2beecd96c7dfae6754c847d361" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
-dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
 # blitz 0.3.0-beta.4 plus a fix: a form control added and dropped in one mutation batch stayed
 # queued and the mutator's flush indexed its freed node id. Every blitz crate comes from the same
 # rev, since blitz-dom reaches its siblings by path inside that workspace.
@@ -423,6 +444,9 @@ blitz-traits = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2c
 # gets its own slot, so in-process service hops (dispatch → drawers → docs → authority) piled
 # up frames of hundreds of KB: creating a drawer at boot peaked at 1.18 MB of a 2 MiB thread,
 # and 0.33 MB at opt-level 1.
+# Not day_cli: the binary crate is where edits land most, and at opt-level 1 a one-line edit
+# rebuilds it in about 55 s (LLVM passes and local ThinLTO) against about 20 s at opt-level 0.
+# The deep service hops whose frames needed slot reuse live in the crates below.
 [profile.dev.package.service_utils_rs]
 opt-level = 1
 [profile.dev.package.service_client_core_rs]
@@ -444,8 +468,6 @@ opt-level = 1
 [profile.dev.package.big_repo]
 opt-level = 1
 [profile.dev.package.big_sync]
-opt-level = 1
-[profile.dev.package.day_cli]
 opt-level = 1
 
 # Keep the application debuggable while optimizing the native UI hot path in dev.

@@ -63,7 +63,7 @@ _: {
       };
 
       # Every shell that drives a browser (the dev shell, and `ci-desktop` for the
-      # dayframe web e2e) points playwright at the farm above instead of letting
+      # daytxt web e2e) points playwright at the farm above instead of letting
       # it download its own builds.
       playwrightEnv = {
         PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
@@ -175,6 +175,8 @@ _: {
         pnpm
         nodejs_24
         biome
+        # The kit's bundle check (`x/check-kit-bundle.ts`) regenerates the stylesheet.
+        tailwindcss_4
         playwright-driver
         playwrightBrowsers
 
@@ -237,7 +239,6 @@ _: {
         wasm-tools
         cargo-leptos
         trunk
-        tailwindcss_4
         watchexec
 
         # maestro
