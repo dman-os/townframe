@@ -1071,6 +1071,24 @@ Port items from this cut:
 - **A bucket page must move `next_after` strictly forward** (to land with the walk's
   `next_after` trust, which lets a hostile peer page a bucket without end otherwise).
 
+**Scope until big_repo (operator, 2026-11-25).** Finish everything from big_sync down before
+moving any embedder or porting the walkers:
+1. SQLite store (`big_automata_sqlite`, own lane): part store + the driver's peer-cursor table,
+   passing the same store laws and proptests as memory, with a baseline benchmark. `sqlite_rs`
+   targets native and wasip3 guests, not the browser; a browser-native store (OPFS or
+   IndexedDB) is a later item.
+2. Tests: comb the old contract and whole-machine tests for gaps (audit running), port the gaps
+   into the matching layer (store law, replay law, machine law, sim op/check, driver test,
+   backend contract test, e2e).
+3. Durable outbox component.
+4. Browser: the sync stack builds and runs in the browser on `service_client_iroh_rs`
+   (`Send` dropped from the driver's traits, the embedder spawns the loop).
+5. Test types across the board, benchmarks included: once the stack is assembled, benchmark it
+   and revisit the driver defaults (window 64, fetch cap 4, backoff 1-60 s, Live hold 15 s,
+   Bulk batch 16 with 50 ms linger), which are accepted for now.
+Deferred to the big_repo phase: the backend migrations, the embedder cutover, deleting
+big_sync, and the delta-walker/frontier family with the other big_sync_core workers.
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a
