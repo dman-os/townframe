@@ -64,11 +64,20 @@
 //!    through these). A content want owes no cursor and reports nothing: it is met when its
 //!    call settles. Retiring a part drops its unsettled cursors; the cursor machine's
 //!    `remove_part` releases them on its side.
-//! 7. **Bounded work.** Unsettled jobs count against a receive window `W` that gates the next
-//!    replay round, so a part with a million objects is recorded at most `W` ahead of what has
-//!    settled. The window can be overshot by the rows of one revision: a page never splits a
-//!    revision, and one transaction may touch many objects. At most `C` fetches run at once. A long fetch holds one slot of each; the rest
-//!    keep flowing. Fetches start in cursor order, which is what moves the watermark.
+//! 7. **Bounded work.** Unsettled objects count against a receive window `W` that gates the
+//!    next replay round, so a part with a million objects is recorded at most `W` ahead of what
+//!    has settled, with one exception: an object whose only outstanding work is waiting out a
+//!    failure backoff (every lane that has work for it has no call in flight and a deadline not
+//!    yet reached) does not count. It keeps retrying on its ladder (law 8) and counts again from
+//!    the moment its next call is issued, so `W` persistently failing objects, for example ones
+//!    a local policy rejects while membership has not arrived, do not stop the peer's replay
+//!    rounds. It still owes its cursors, so its part's cursor does not advance past it: cursor
+//!    liveness is then the backend's responsibility. A backend that cannot apply something yet
+//!    should accept and park it, answering `Done`; one that fails forever holds that part's
+//!    cursor forever. The window can be overshot by the rows of one revision: a page never
+//!    splits a revision, and one transaction may touch many objects. At most `C` fetches run
+//!    at once. A long fetch holds one slot of each; the rest keep flowing. Fetches start in
+//!    cursor order, which is what moves the watermark.
 //! 8. **Retry backs off per call.** Failed and stale calls are reissued with a backoff that
 //!    starts at 2s, doubles and is capped (a minute by default). Merging new wants keeps the
 //!    backoff; only a success resets it.
@@ -368,6 +377,29 @@ impl ObjState {
                 .route
                 .as_ref()
                 .is_some_and(|route| route.status != Status::Settled)
+    }
+
+    /// Law 7: the object's only outstanding work waits out a failure backoff. A lane counts
+    /// only if it has work. A call in flight, or an open gate (no failure since the lane's
+    /// last issue or success), makes the object live; `Unarmed` and `Until` are the failure's
+    /// own states, and stay until the next call is issued, even once the deadline has passed.
+    /// Merging wants keeps the gate, so a merge does not make the object count again.
+    fn backing_off(&self) -> bool {
+        let lanes = [
+            (&self.record, self.has(Status::Fresh)),
+            (&self.fetch, self.has(Status::NeedsFetch)),
+        ];
+        let mut waiting = false;
+        for (lane, has_work) in lanes {
+            if !has_work {
+                continue;
+            }
+            if lane.flight.is_some() || lane.gate == Gate::Open {
+                return false;
+            }
+            waiting = true;
+        }
+        waiting
     }
 
     fn has(&self, status: Status) -> bool {
@@ -826,14 +858,25 @@ impl ObjectJobs {
             .min()
     }
 
-    /// Objects with unsettled wants still admissible under the receive window.
+    /// Objects with unsettled wants still admissible under the receive window (law 7: objects
+    /// waiting out a failure backoff do not count).
     pub(crate) fn room(&self) -> usize {
         self.config.window.saturating_sub(
             self.objs
                 .values()
-                .filter(|state| state.is_unsettled())
+                .filter(|state| state.is_unsettled() && !state.backing_off())
                 .count(),
         )
+    }
+
+    /// Objects with unsettled wants, backing off or not: what a quiet drain must see reach 0
+    /// ([`room`](Self::room) hides the ones waiting out a backoff).
+    #[cfg(test)]
+    pub(crate) fn unsettled(&self) -> usize {
+        self.objs
+            .values()
+            .filter(|state| state.is_unsettled())
+            .count()
     }
 
     pub(crate) fn part_outstanding(&self, part: &PartKey) -> bool {
