@@ -1818,6 +1818,7 @@ dependencies = [
  "serde",
  "serde_json",
  "service_client_native_rs",
+ "service_core_rs",
  "service_utils_rs",
  "thiserror 2.0.21",
  "tokio",

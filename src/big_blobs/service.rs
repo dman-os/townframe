@@ -52,6 +52,8 @@ use tokio::io::AsyncSeekExt;
 use tokio::sync::Notify;
 use utils_rs::prelude::Res;
 
+pub mod mount;
+
 #[derive(Clone)]
 pub struct ImportedBlob {
     pub info: BlobInfo,
@@ -87,6 +89,8 @@ impl std::fmt::Debug for ImportedBlob {
 /// opens the store ([`Storage::memory`] or [`Storage::filesystem`]) and passes it in.
 pub struct Storage {
     store: Store,
+    /// The directory a filesystem store lives in; `None` for a memory store.
+    root: Option<PathBuf>,
     provider: Arc<CipherBlobProvider>,
     /// Holds the exclusive owner lock of a filesystem store for as long as the store lives.
     owner: Option<std::fs::File>,
@@ -101,6 +105,7 @@ impl Storage {
         provider.register(&providers)?;
         Ok(Self {
             store: Store::from(memory),
+            root: None,
             provider,
             owner: None,
         })
@@ -136,6 +141,7 @@ impl Storage {
         provider.register(&providers)?;
         Ok(Self {
             store: Store::from(filesystem),
+            root: Some(root),
             provider,
             owner: Some(owner),
         })
@@ -191,6 +197,13 @@ impl SqliteFrontierCodec for AvailabilityCodec {
 
 pub struct BlobService {
     store: Store,
+    /// Where a filesystem store keeps its files (`<root>/data/<hex>.data`), which a working mount
+    /// hard-links from. `None` for a memory store, whose blobs are always copied out.
+    root: Option<PathBuf>,
+    /// The working mounts of this node's workloads (ADR 051 §2).
+    mounts: mount::WorkingMounts,
+    /// Spawns the tasks that follow handles materialized into a mount.
+    tasks: service_utils_rs::Spawner,
     pub provider: Arc<CipherBlobProvider>,
     pub roots: PairRoots,
     pub(crate) ownership: ByteOwnership,
@@ -284,10 +297,13 @@ impl Blobs {
 pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
     let Storage {
         store,
+        root,
         provider,
         owner,
     } = config.storage;
     let prepared = async {
+        // Opening the working mounts removes the ones a previous run left behind.
+        let mounts = mount::WorkingMounts::open(root.as_deref()).await?;
         let roots = PairRoots::boot(config.sql.clone()).await?;
         provider.restore(&store, &roots).await?;
         let availability = SqliteKeyedFrontier::new(
@@ -299,18 +315,28 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
         .await?;
         let (ownership, ownership_stop) =
             ByteOwnership::boot(config.sql.clone(), store.clone(), Arc::clone(&provider)).await?;
-        Ok::<_, utils_rs::prelude::eyre::Report>((roots, ownership, availability, ownership_stop))
+        Ok::<_, utils_rs::prelude::eyre::Report>((
+            mounts,
+            roots,
+            ownership,
+            availability,
+            ownership_stop,
+        ))
     }
     .await;
-    let (roots, ownership, availability, ownership_stop) = match prepared {
+    let (mounts, roots, ownership, availability, ownership_stop) = match prepared {
         Ok(value) => value,
         Err(error) => {
             store.shutdown().await?;
             return Err(error);
         }
     };
+    let (store_stop, tasks) = StopToken::new();
     let service = Arc::new(BlobService {
         store,
+        root,
+        mounts,
+        tasks: tasks.clone(),
         provider,
         roots,
         ownership,
@@ -322,7 +348,6 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
             .unwrap_or(DEFAULT_UPLOAD_HOLD_GRACE),
         _owner: owner,
     });
-    let (store_stop, tasks) = StopToken::new();
     let shutdown = Arc::clone(&service);
     let cancellation = tasks.clone();
     tasks
@@ -350,6 +375,11 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
 impl BlobService {
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// The node's working mounts, from which each workload takes one.
+    pub fn working_mounts(&self) -> &mount::WorkingMounts {
+        &self.mounts
     }
 
     /// Resolves `capability` to the scope its handle was minted with and requires `permits` to
