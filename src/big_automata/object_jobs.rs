@@ -1,5 +1,4 @@
-//! ObjectJobs: one peer's backend work per object. DRAFT LAWS for operator review; no code yet,
-//! and the module is not wired into `lib.rs`.
+//! ObjectJobs: one peer's backend work per object. This module implements the laws below.
 //!
 //! The cursor and bucket machines decide *what* an object's local membership should be on each
 //! part. This machine decides *when* the backend is asked to act on it, merges what arrives
@@ -100,3 +99,734 @@
 //! - Backends decided for themselves whether to download inline (`daybook_core/blobs/sync.rs`)
 //!   or record and defer (`big_blobs/sync.rs`), with nothing in the contract saying which; the
 //!   inline ones blocked removals for the length of the download (the contract above).
+
+// # Implementation notes
+//
+// Each object owns its (part -> current want) pairs, an optional route, the cursors it still
+// owes, and two call lanes (record, fetch). A want carries a `version` from one machine-wide
+// counter. A call's snapshot names the version it covered per part, so "the work that covers a
+// cursor" is the comparison `owed version <= snapshot version`, and a want that arrived after
+// the call was issued is never settled by it.
+//
+// Inputs only mark state. Settlements decided by a terminal event wait in `pending` and leave
+// with the next `flush`, which also arms backoff deadlines (the terminal events carry no clock),
+// cancels contradicted fetches and issues every call that is due.
+
+use crate::interlude::*;
+
+use std::collections::BTreeMap;
+
+use crate::cursor::JobKey;
+use crate::part_store::ObjPayload;
+use crate::rev::Rev;
+use crate::scheduler::Instant;
+
+#[cfg(test)]
+mod oracle;
+#[cfg(test)]
+mod tests;
+
+pub(crate) type CallId = u64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Want {
+    Present { payload: ObjPayload },
+    Absent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Origin {
+    Cursor(Rev),
+    Bucket,
+}
+
+/// One combined backend job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObjJob {
+    pub obj: ObjKey,
+    pub add: Vec<PartKey>,
+    pub remove: Vec<PartKey>,
+    pub payload: Option<ObjPayload>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Settle {
+    Done,
+    Fetch,
+}
+
+/// A call's terminal event. A call the backend found stale reports `Failed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcome<T> {
+    Succeeded(T),
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum JobsCommand {
+    Record {
+        call: CallId,
+        job: ObjJob,
+    },
+    Fetch {
+        call: CallId,
+        job: ObjJob,
+    },
+    /// The driver aborts the call. It still reports `Cancelled`, or its real outcome if it
+    /// raced, and the call counts as in flight until then.
+    Cancel {
+        call: CallId,
+    },
+    Settled(Settlement),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Settlement {
+    /// `Sync(obj)` for a settled `Present` want's cursor, `RemoveFromPart(obj)` for an
+    /// `Absent` want's. Sent once per cursor, when every part that owed it has settled.
+    Cursor { job: JobKey, cursor: Rev },
+    /// A settled bucket-origin want of either kind, `Present` or `Absent`: the bucket machine
+    /// tracks its upserts and its removals alike.
+    Bucket { part: PartKey, obj: ObjKey },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Config {
+    /// The receive window: unsettled objects admitted before the next replay round waits.
+    pub window: usize,
+    /// Fetches in flight at once, across objects.
+    pub fetch_cap: usize,
+    pub min_backoff: Duration,
+    pub max_backoff: Duration,
+}
+
+/// Which `JobKey` a cursor settles under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum JobLane {
+    Sync,
+    Remove,
+}
+
+/// What an unsettled want still needs from the backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Status {
+    /// Needs a `record`.
+    Fresh,
+    /// `record` answered `Fetch`; needs a `fetch`.
+    NeedsFetch,
+    /// Routes only: the content want is met until the route is set again.
+    Settled,
+}
+
+#[derive(Debug)]
+struct Pair {
+    want: Want,
+    /// The cursor of the current want, `None` for a bucket walk's.
+    cursor: Option<Rev>,
+    /// The newest cursor-origin cursor seen here; a cursor at or below it is dropped (law 3).
+    high: Option<Rev>,
+    version: u64,
+    status: Status,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum OwedKey {
+    /// Ordered by cursor, so settlements come out in watermark order.
+    Cursor(Rev, JobLane),
+    Bucket(PartKey),
+}
+
+/// A settlement the cursor or bucket machine waits on. A cursor an event gave to several
+/// parts settles once, when the last of them has settled or been retired.
+#[derive(Debug, Default)]
+struct Owed {
+    /// The parts still owing it, with the version of the want that created the debt.
+    parts: BTreeMap<PartKey, u64>,
+    /// Some part settled it, so it is reported once `parts` is empty.
+    settled: bool,
+}
+
+#[derive(Debug)]
+struct Route {
+    version: u64,
+    status: Status,
+}
+
+/// What a call was issued for: per part the want version it covered and whether it adds.
+#[derive(Debug, Default)]
+struct Snapshot {
+    parts: BTreeMap<PartKey, (u64, bool)>,
+    route: Option<u64>,
+}
+
+#[derive(Debug)]
+struct Flight {
+    snapshot: Snapshot,
+    /// A `Cancel` was sent; the call stays in flight until its terminal event.
+    cancel_sent: bool,
+    /// A want arrived that makes the snapshot wrong. Records wait for the terminal event.
+    contradicted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    Open,
+    /// A failure waits for the next flush to read the clock and fix the deadline.
+    Unarmed,
+    Until(Instant),
+}
+
+#[derive(Debug)]
+struct CallLane {
+    flight: Option<(CallId, Flight)>,
+    backoff: Duration,
+    gate: Gate,
+}
+
+impl Default for CallLane {
+    fn default() -> Self {
+        Self {
+            flight: None,
+            backoff: Duration::ZERO,
+            gate: Gate::Open,
+        }
+    }
+}
+
+impl CallLane {
+    fn gate_open(&self, now: Instant) -> bool {
+        match self.gate {
+            Gate::Open => true,
+            Gate::Unarmed => false,
+            Gate::Until(at) => at <= now,
+        }
+    }
+
+    /// Same ladder as `Scheduler::retry`: the first retry waits the floor, later ones double,
+    /// the cap wins.
+    fn fail(&mut self, config: &Config) {
+        self.backoff = if self.backoff.is_zero() {
+            config.min_backoff.min(config.max_backoff)
+        } else {
+            self.backoff
+                .saturating_mul(2)
+                .max(config.min_backoff)
+                .min(config.max_backoff)
+        };
+        self.gate = Gate::Unarmed;
+    }
+
+    fn succeed(&mut self) {
+        self.backoff = Duration::ZERO;
+        self.gate = Gate::Open;
+    }
+}
+
+#[derive(Debug, Default)]
+struct ObjState {
+    pairs: BTreeMap<PartKey, Pair>,
+    route: Option<Route>,
+    owed: BTreeMap<OwedKey, Owed>,
+    record: CallLane,
+    fetch: CallLane,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallKind {
+    Record,
+    Fetch,
+}
+
+impl ObjState {
+    fn is_idle(&self) -> bool {
+        self.pairs.is_empty()
+            && self.route.is_none()
+            && self.record.flight.is_none()
+            && self.fetch.flight.is_none()
+    }
+
+    fn is_unsettled(&self) -> bool {
+        !self.pairs.is_empty()
+            || self
+                .route
+                .as_ref()
+                .is_some_and(|route| route.status != Status::Settled)
+    }
+
+    fn has(&self, status: Status) -> bool {
+        self.pairs.values().any(|pair| pair.status == status)
+            || self
+                .route
+                .as_ref()
+                .is_some_and(|route| route.status == status)
+    }
+
+    /// The job for every want in `status`, and the snapshot it covers.
+    fn build(&self, obj: &ObjKey, status: Status) -> Option<(ObjJob, Snapshot)> {
+        let mut job = ObjJob {
+            obj: obj.clone(),
+            add: vec![],
+            remove: vec![],
+            payload: None,
+        };
+        let mut snapshot = Snapshot::default();
+        // newest cursor wins, a bucket walk's by arrival
+        let mut payload_rank = None;
+        for (part, pair) in self.pairs.iter().filter(|(_, pair)| pair.status == status) {
+            let add = matches!(pair.want, Want::Present { .. });
+            snapshot.parts.insert(part.clone(), (pair.version, add));
+            match &pair.want {
+                Want::Present { payload } => {
+                    job.add.push(part.clone());
+                    let rank = (pair.cursor, pair.version);
+                    if payload_rank.is_none_or(|best| rank > best) {
+                        payload_rank = Some(rank);
+                        job.payload = Some(payload.clone());
+                    }
+                }
+                Want::Absent => job.remove.push(part.clone()),
+            }
+        }
+        if let Some(route) = self.route.as_ref().filter(|route| route.status == status) {
+            snapshot.route = Some(route.version);
+        }
+        (!snapshot.parts.is_empty() || snapshot.route.is_some()).then_some((job, snapshot))
+    }
+
+    /// The lowest cursor the fetch would settle; bucket origin has none and goes last.
+    fn lowest_owed_for_fetch(&self) -> Option<Rev> {
+        self.owed.iter().find_map(|(key, owed)| match key {
+            OwedKey::Cursor(cursor, _)
+                if owed.parts.keys().any(|part| {
+                    self.pairs
+                        .get(part)
+                        .is_some_and(|pair| pair.status == Status::NeedsFetch)
+                }) =>
+            {
+                Some(*cursor)
+            }
+            _ => None,
+        })
+    }
+
+    /// The work `snapshot` covered is done: settle every debt it covers and drop the wants it
+    /// met unchanged.
+    fn settle(&mut self, obj: &ObjKey, snapshot: &Snapshot, pending: &mut Vec<Settlement>) {
+        self.owed.retain(|key, owed| {
+            owed.parts.retain(|part, version| {
+                let covered = snapshot
+                    .parts
+                    .get(part)
+                    .is_some_and(|(covered, _)| *version <= *covered);
+                owed.settled |= covered;
+                !covered
+            });
+            if !owed.parts.is_empty() {
+                return true;
+            }
+            if owed.settled {
+                pending.push(match key {
+                    OwedKey::Cursor(cursor, JobLane::Sync) => Settlement::Cursor {
+                        job: JobKey::Sync(obj.clone()),
+                        cursor: *cursor,
+                    },
+                    OwedKey::Cursor(cursor, JobLane::Remove) => Settlement::Cursor {
+                        job: JobKey::RemoveFromPart(obj.clone()),
+                        cursor: *cursor,
+                    },
+                    OwedKey::Bucket(part) => Settlement::Bucket {
+                        part: part.clone(),
+                        obj: obj.clone(),
+                    },
+                });
+            }
+            false
+        });
+        for (part, (version, _)) in &snapshot.parts {
+            if self
+                .pairs
+                .get(part)
+                .is_some_and(|pair| pair.version == *version)
+            {
+                self.pairs.remove(part);
+            }
+        }
+        if let (Some(route), Some(version)) = (self.route.as_mut(), snapshot.route)
+            && route.version == version
+        {
+            route.status = Status::Settled;
+        }
+    }
+
+    /// A `record` answered `Fetch`: the wants it covered now wait for a fetch.
+    fn promote(&mut self, snapshot: &Snapshot) {
+        for (part, (version, _)) in &snapshot.parts {
+            if let Some(pair) = self.pairs.get_mut(part)
+                && pair.version == *version
+            {
+                pair.status = Status::NeedsFetch;
+            }
+        }
+        if let (Some(route), Some(version)) = (self.route.as_mut(), snapshot.route)
+            && route.version == version
+        {
+            route.status = Status::NeedsFetch;
+        }
+    }
+
+    /// Whether the fetch in flight must be cancelled: a want contradicted its snapshot, and no
+    /// live object route keeps its content wanted anyway (law 9).
+    fn fetch_must_cancel(&self) -> bool {
+        let Some((_, flight)) = &self.fetch.flight else {
+            return false;
+        };
+        let route_keeps = flight.snapshot.route.is_some_and(|version| {
+            self.route
+                .as_ref()
+                .is_some_and(|route| route.version == version)
+        });
+        flight.contradicted && !flight.cancel_sent && !route_keeps
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ObjectJobs {
+    config: Config,
+    /// Objects with an unsettled want, a route or a call in flight.
+    objs: BTreeMap<ObjKey, ObjState>,
+    calls: Map<CallId, (ObjKey, CallKind)>,
+    next_call: CallId,
+    next_version: u64,
+    /// Settlements decided by terminal events, sent by the next flush.
+    pending: Vec<Settlement>,
+    last_flush: Option<Instant>,
+}
+
+impl ObjectJobs {
+    pub(crate) fn new(config: Config) -> Self {
+        Self {
+            config,
+            objs: default(),
+            calls: default(),
+            next_call: 0,
+            next_version: 0,
+            pending: default(),
+            last_flush: None,
+        }
+    }
+
+    fn next_version(&mut self) -> u64 {
+        self.next_version += 1;
+        self.next_version
+    }
+
+    pub(crate) fn want(&mut self, obj: ObjKey, part: PartKey, want: Want, origin: Origin) {
+        // law 3: a cursor at or below the current one is dropped
+        if let Origin::Cursor(cursor) = origin
+            && self
+                .objs
+                .get(&obj)
+                .and_then(|state| state.pairs.get(&part))
+                .and_then(|pair| pair.high)
+                .is_some_and(|high| cursor <= high)
+        {
+            return;
+        }
+        let version = self.next_version();
+        let state = self.objs.entry(obj).or_default();
+        if let Some((_, flight)) = &mut state.fetch.flight
+            && let Some((_, adds)) = flight.snapshot.parts.get(&part)
+        {
+            flight.contradicted |= *adds == matches!(want, Want::Absent);
+        }
+        let (cursor, key) = match origin {
+            Origin::Cursor(cursor) => {
+                let lane = match want {
+                    Want::Present { .. } => JobLane::Sync,
+                    Want::Absent => JobLane::Remove,
+                };
+                (Some(cursor), OwedKey::Cursor(cursor, lane))
+            }
+            Origin::Bucket => (None, OwedKey::Bucket(part.clone())),
+        };
+        let high = state
+            .pairs
+            .get(&part)
+            .and_then(|pair| pair.high)
+            .max(cursor);
+        state.pairs.insert(
+            part.clone(),
+            Pair {
+                want,
+                cursor,
+                high,
+                version,
+                status: Status::Fresh,
+            },
+        );
+        // a newer bucket want supersedes the older one: only the newest is reported
+        state
+            .owed
+            .entry(key)
+            .or_default()
+            .parts
+            .insert(part, version);
+    }
+
+    pub(crate) fn set_object_route(&mut self, obj: ObjKey, routed: bool) {
+        if routed {
+            let version = self.next_version();
+            let state = self.objs.entry(obj).or_default();
+            state.route.get_or_insert(Route {
+                version,
+                status: Status::Fresh,
+            });
+            return;
+        }
+        let Some(state) = self.objs.get_mut(&obj) else {
+            return;
+        };
+        if let Some(route) = state.route.take()
+            && let Some((_, flight)) = &mut state.fetch.flight
+        {
+            flight.contradicted |= flight.snapshot.route == Some(route.version);
+        }
+        if state.is_idle() {
+            self.objs.remove(&obj);
+        }
+    }
+
+    pub(crate) fn retire_part(&mut self, part: &PartKey) {
+        self.pending.retain(
+            |settlement| !matches!(settlement, Settlement::Bucket { part: p, .. } if p == part),
+        );
+        let pending = &mut self.pending;
+        self.objs.retain(|obj, state| {
+            if let Some((_, flight)) = &mut state.fetch.flight
+                && flight
+                    .snapshot
+                    .parts
+                    .get(part)
+                    .is_some_and(|(_, adds)| *adds)
+            {
+                flight.contradicted = true;
+            }
+            state.pairs.remove(part);
+            state.owed.retain(|key, owed| {
+                owed.parts.remove(part);
+                if !owed.parts.is_empty() {
+                    return true;
+                }
+                // Another part settled it before this one went away: the cursor machine
+                // still waits to hear that.
+                if let (true, OwedKey::Cursor(cursor, lane)) = (owed.settled, key) {
+                    pending.push(Settlement::Cursor {
+                        job: match lane {
+                            JobLane::Sync => JobKey::Sync(obj.clone()),
+                            JobLane::Remove => JobKey::RemoveFromPart(obj.clone()),
+                        },
+                        cursor: *cursor,
+                    });
+                }
+                false
+            });
+            !state.is_idle()
+        });
+    }
+
+    fn ended(&mut self, call: CallId, kind: CallKind) -> Option<(ObjKey, Flight)> {
+        // law 2: not the object's call in flight, so stale
+        let (obj, expected) = self.calls.remove(&call)?;
+        assert_eq!(expected, kind, "call {call} ended as the wrong kind");
+        let state = self.objs.get_mut(&obj).expect(ERROR_IMPOSSIBLE);
+        let lane = match kind {
+            CallKind::Record => &mut state.record,
+            CallKind::Fetch => &mut state.fetch,
+        };
+        let (id, flight) = lane.flight.take().expect(ERROR_IMPOSSIBLE);
+        assert_eq!(id, call);
+        Some((obj, flight))
+    }
+
+    pub(crate) fn record_ended(&mut self, call: CallId, outcome: Outcome<Settle>) {
+        let Some((obj, flight)) = self.ended(call, CallKind::Record) else {
+            return;
+        };
+        let state = self.objs.get_mut(&obj).expect(ERROR_IMPOSSIBLE);
+        match outcome {
+            Outcome::Succeeded(Settle::Done) => {
+                state.record.succeed();
+                state.settle(&obj, &flight.snapshot, &mut self.pending);
+            }
+            Outcome::Succeeded(Settle::Fetch) => {
+                state.record.succeed();
+                state.promote(&flight.snapshot);
+            }
+            Outcome::Failed => state.record.fail(&self.config),
+            Outcome::Cancelled => {}
+        }
+        if state.is_idle() {
+            self.objs.remove(&obj);
+        }
+    }
+
+    pub(crate) fn fetch_ended(&mut self, call: CallId, outcome: Outcome<()>) {
+        let Some((obj, flight)) = self.ended(call, CallKind::Fetch) else {
+            return;
+        };
+        let state = self.objs.get_mut(&obj).expect(ERROR_IMPOSSIBLE);
+        match outcome {
+            Outcome::Succeeded(()) => {
+                state.fetch.succeed();
+                state.settle(&obj, &flight.snapshot, &mut self.pending);
+            }
+            Outcome::Failed => state.fetch.fail(&self.config),
+            Outcome::Cancelled => {}
+        }
+        if state.is_idle() {
+            self.objs.remove(&obj);
+        }
+    }
+
+    pub(crate) fn flush(&mut self, now: Instant, out: &mut Vec<JobsCommand>) {
+        self.last_flush = Some(now);
+        out.extend(self.pending.drain(..).map(JobsCommand::Settled));
+        for state in self.objs.values_mut() {
+            for lane in [&mut state.record, &mut state.fetch] {
+                if lane.gate == Gate::Unarmed {
+                    lane.gate = Gate::Until(now + lane.backoff);
+                }
+            }
+            if state.fetch_must_cancel() {
+                let (call, flight) = state.fetch.flight.as_mut().expect(ERROR_IMPOSSIBLE);
+                flight.cancel_sent = true;
+                out.push(JobsCommand::Cancel { call: *call });
+            }
+        }
+        for (obj, state) in &mut self.objs {
+            // A contradicted fetch may still be applying the part the record is about to
+            // change, so the record waits for its terminal event (law 4).
+            let blocked = state
+                .fetch
+                .flight
+                .as_ref()
+                .is_some_and(|(_, flight)| flight.contradicted);
+            if state.record.flight.is_some() || blocked || !state.record.gate_open(now) {
+                continue;
+            }
+            let Some((job, snapshot)) = state.build(obj, Status::Fresh) else {
+                continue;
+            };
+            let call = self.next_call;
+            self.next_call += 1;
+            self.calls.insert(call, (obj.clone(), CallKind::Record));
+            state.record.gate = Gate::Open;
+            state.record.flight = Some((
+                call,
+                Flight {
+                    snapshot,
+                    cancel_sent: false,
+                    contradicted: false,
+                },
+            ));
+            out.push(JobsCommand::Record { call, job });
+        }
+        // law 7: fetches start in order of their lowest owed cursor, bucket origin last
+        let running = self
+            .objs
+            .values()
+            .filter(|state| state.fetch.flight.is_some())
+            .count();
+        if running >= self.config.fetch_cap {
+            return;
+        }
+        let mut ready: Vec<_> = self
+            .objs
+            .iter()
+            .filter(|(_, state)| {
+                state.fetch.flight.is_none()
+                    && state.fetch.gate_open(now)
+                    && state.has(Status::NeedsFetch)
+            })
+            .map(|(obj, state)| {
+                let lowest = state.lowest_owed_for_fetch();
+                (lowest.is_none(), lowest, obj.clone())
+            })
+            .collect();
+        ready.sort();
+        let slots = self.config.fetch_cap - running;
+        for (_, _, obj) in ready.into_iter().take(slots) {
+            let state = self.objs.get_mut(&obj).expect(ERROR_IMPOSSIBLE);
+            let (job, snapshot) = state
+                .build(&obj, Status::NeedsFetch)
+                .expect(ERROR_IMPOSSIBLE);
+            let call = self.next_call;
+            self.next_call += 1;
+            self.calls.insert(call, (obj, CallKind::Fetch));
+            state.fetch.gate = Gate::Open;
+            state.fetch.flight = Some((
+                call,
+                Flight {
+                    snapshot,
+                    cancel_sent: false,
+                    contradicted: false,
+                },
+            ));
+            out.push(JobsCommand::Fetch { call, job });
+        }
+    }
+
+    /// The earliest backoff deadline after the last flush of a lane that has work waiting.
+    pub(crate) fn next_due(&self) -> Option<Instant> {
+        let last = self.last_flush?;
+        self.objs
+            .values()
+            .flat_map(|state| {
+                [
+                    (&state.record, state.has(Status::Fresh)),
+                    (&state.fetch, state.has(Status::NeedsFetch)),
+                ]
+            })
+            .filter(|(lane, has_work)| *has_work && lane.flight.is_none())
+            .filter_map(|(lane, _)| match lane.gate {
+                Gate::Until(at) if at > last => Some(at),
+                _ => None,
+            })
+            .min()
+    }
+
+    /// Objects with unsettled wants still admissible under the receive window.
+    pub(crate) fn room(&self) -> usize {
+        self.config.window.saturating_sub(
+            self.objs
+                .values()
+                .filter(|state| state.is_unsettled())
+                .count(),
+        )
+    }
+
+    pub(crate) fn part_outstanding(&self, part: &PartKey) -> bool {
+        self.objs
+            .values()
+            .any(|state| state.pairs.contains_key(part))
+    }
+
+    /// Law 10: cancel every call in flight, report nothing, forget everything. Late terminal
+    /// events of the cancelled calls are stale: their ids are forgotten and never reused.
+    pub(crate) fn clear(&mut self, out: &mut Vec<JobsCommand>) {
+        for state in self.objs.values() {
+            for lane in [&state.record, &state.fetch] {
+                if let Some((call, flight)) = &lane.flight
+                    && !flight.cancel_sent
+                {
+                    out.push(JobsCommand::Cancel { call: *call });
+                }
+            }
+        }
+        self.objs.clear();
+        self.calls.clear();
+        self.pending.clear();
+        self.last_flush = None;
+    }
+}
