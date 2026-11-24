@@ -78,8 +78,10 @@ impl Timer for Expired {
 
 #[derive(Debug, Clone)]
 enum Step {
-    /// Toggle whether the embedder wants a route.
+    /// The embedder wants a route (index mod the routes); redundant when it already does.
     Want(u8),
+    /// The embedder stops wanting a route; redundant when it does not want it.
+    Unwant(u8),
     /// Toggle the client's access to a part.
     Access(u8),
     /// One store write on `(object, part or value)`: set a payload, add or remove a member.
@@ -212,10 +214,13 @@ impl Sim {
         match step {
             Step::Want(index) => {
                 let route = route(index % ROUTES);
-                if !self.wanted.remove(&route) {
-                    self.wanted.insert(route);
-                }
-                self.client.set_wanted(&self.wanted);
+                self.wanted.insert(route.clone());
+                self.client.want(route);
+            }
+            Step::Unwant(index) => {
+                let route = route(index % ROUTES);
+                self.wanted.remove(&route);
+                self.client.unwant(&route);
             }
             Step::Access(index) => {
                 let index = index % PARTS;
@@ -633,7 +638,8 @@ impl Sim {
 
 fn step() -> impl Strategy<Value = Step> {
     prop_oneof![
-        3 => any::<u8>().prop_map(Step::Want),
+        2 => any::<u8>().prop_map(Step::Want),
+        2 => any::<u8>().prop_map(Step::Unwant),
         2 => any::<u8>().prop_map(Step::Access),
         3 => (any::<u8>(), any::<u8>(), any::<u8>())
             .prop_map(|(kind, obj, other)| Step::Write(kind, obj, other)),
@@ -675,14 +681,14 @@ fn a_removed_member_leaves_the_clients_view() {
         Write(15, 61, 0),
         Want(165),
         Want(52),
-        Want(15),
-        Want(34),
+        Unwant(15),
+        Unwant(34),
         Want(0),
         Write(91, 181, 143),
         Access(43),
         SendUpdate,
         Want(4),
-        Want(64),
+        Unwant(64),
         Access(11),
         Want(201),
         Want(4),
@@ -694,7 +700,7 @@ fn a_removed_member_leaves_the_clients_view() {
         SendUpdate,
         Deliver(0),
         Duplicate(0),
-        Want(0),
+        Unwant(0),
         Deliver(0),
         Write(0, 0, 0),
         SendRound,
@@ -713,12 +719,12 @@ fn a_part_wanted_during_an_update_catches_up() {
     use Step::*;
     let mut sim = Sim::new();
     for step in [
-        Want(70),
-        Want(9),
+        Unwant(70),
+        Unwant(9),
         Access(214),
         Access(43),
         Want(92),
-        Want(182),
+        Unwant(182),
         SendUpdate,
         Want(20),
         Deliver(0),
@@ -752,16 +758,16 @@ fn a_late_opening_update_revives_a_forgotten_session() {
         client.update_answered(&request, &answer).unwrap();
         request
     };
-    client.set_wanted(&[route(0)].into());
+    client.want(route(0));
     let open = exchange(&mut client, &mut server, start);
-    client.set_wanted(&BTreeSet::new());
+    client.unwant(&route(0));
     exchange(&mut client, &mut server, start);
     // The session goes quiet for a TTL and is swept; nothing tells the client.
     server.sweep(start + SESSION_TTL);
     // A copy of the opening, delayed past the TTL, arrives and opens the session again.
     let late = start + SESSION_TTL;
     server.update(&principal(0), &open, late, |_| true).unwrap();
-    client.set_wanted(&[route(1)].into());
+    client.want(route(1));
     exchange(&mut client, &mut server, late);
 
     let held: BTreeMap<_, _> = server
