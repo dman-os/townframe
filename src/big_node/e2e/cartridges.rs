@@ -2074,7 +2074,10 @@ async fn the_core_nodules_requests_for_nodules_methods_resolve_after_boot() {
         let status = &record.requests[method];
         assert_eq!(status.unresolved, None, "{method}");
         assert_eq!(
-            status.locked.as_ref().map(|locked| locked.provider.as_str()),
+            status
+                .locked
+                .as_ref()
+                .map(|locked| locked.provider.as_str()),
             Some("builtin:nodules"),
             "{method}"
         );
