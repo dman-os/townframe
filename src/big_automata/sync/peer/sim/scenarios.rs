@@ -149,7 +149,7 @@ fn lanes_a_live_write_is_applied_within_a_few_live_rounds_of_a_backlog_drain() {
     let mut shape = Shape::small();
     shape.objs = 60;
     shape.obj_routes = 0;
-    shape.config.jobs.window = 4;
+    shape.config.jobs.window = 5;
     shape.config.jobs.fetch_cap = 2;
     shape.config.lanes.live_limit = 2;
     let mut sim = Sim::new(shape, 1);

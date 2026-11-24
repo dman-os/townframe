@@ -380,6 +380,16 @@ fn listing_is_sound(
 
 impl PeerSync {
     pub(crate) fn new(config: Config, session_id: SessionId) -> Self {
+        // While a walk runs, rounds get half the window (law 12) and a held `Live` round takes
+        // up to `live_limit` of that first; a window not above twice `live_limit` would leave
+        // `Bulk` nothing for as long as any walk runs, and a walk of a part the peer stopped
+        // serving retries for good.
+        assert!(
+            config.jobs.window > 2 * config.lanes.live_limit,
+            "the window ({}) must exceed twice the Live share ({})",
+            config.jobs.window,
+            config.lanes.live_limit,
+        );
         Self {
             lifecycle: PartLifecycle::new(config.lifecycle.clone()),
             client: ReplayClient::new(session_id),
