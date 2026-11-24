@@ -1,4 +1,165 @@
-# Clay design-settling PR — working ledger
+# claytxt lane ledger
+
+Status: living ledger of the claytxt lane (Clay, the kit, micros, daytxt apps, Pierre/CodeView, builds/mbx).
+Owner: Claude (claytxt manager); operator reviews and merges.
+Updated: 2026-11-24 (rewritten: stack rebuilt, accounting of operator requests 2026-11-03..24).
+
+Keep this head current. Update it in the same layer as the work it records. The dated sections below
+"History" are the original #79 design-settling ledger, kept for its decisions.
+
+## Where things are (2026-11-24)
+
+- **On main from this lane:** #79 (Clay collections/lifecycle/manifests), #80 (shell, kit, Settings), #81 (Android),
+  #82 (datum_core), #83 (mbx), #120. Nothing since 2026-11-17.
+- **Everything else is the claytxt stack** below. `feat/daytxt` (#216) stays a CI-only integration branch, never a
+  PR base; the stack's tip reproduces its tree. #212, #231 and #232 were merged into `feat/daytxt`, not main.
+- **Base:** the stack sits on the intxt stack tip (`stack/intxt-34-prlinks-split`, intxt #221, tip #290), which sits on
+  nodules' node stack (#105..#199, #233..#252, node-55 at 91fb13c0). Our hosts install intxt and need the node
+  APIs, so the stack cannot land before those two.
+- **Superseded PRs** (their content is in the stack; close once the stack is reviewed): #86, #88, #89, #90, #91,
+  #121, #132, #145, #153, #162, #169, #171, #174, #176, #206, #207, #208, #209, #210, #213, #214, #217, #218,
+  #219, #220, #222, #223, #224, #87, #129.
+- **Not ours / left alone:** #85 (big_repo/cabinet perf from the node branch), #173 (daybook_core test).
+
+## The stack (`stack/claytxt-NN-<slug>`, each PR based on the one below)
+
+Layers 01-36 are cut mechanically by path from `feat/daytxt` (ecb56b9c, CI-green), so each carries the final state
+of its paths and lists the original commits in its message. They are topical and need not build alone. Layers
+37+ replay branches that never reached `feat/daytxt`, one squashed commit each. Only the tip is greened.
+
+| Layer | PR | What |
+|---|---|---|
+| 01-build-manifests | #254 | build: workspace members, lockfiles and tool config for the claytxt crates |
+| 02-node-crate-fixes | #255 | fix: build-contract, guardrail and egress fixes in node-side crates that claytxt hosts need |
+| 03-clay-surface | #256 | feat(clay_surface): element commands, open data-* and the surface tree outline |
+| 04-clay-mdk | #257 | feat(clay_mdk): D57 endpoints, guest engine fixes and the micro stylesheet hook |
+| 05-clay-host | #258 | feat(clay_host,clay_guest_session): one requirement resolver and per-mount presentations |
+| 06-clay-runtimes | #259 | feat(clay_rt_*): wasi:http aliases, wasi:random and runtime fixes |
+| 07-clay-dioxus | #260 | feat(clay_dioxus): shadow-root mounts with adopted sheets for guest and built-in micros |
+| 08-clay-node | #261 | feat(clay_node): generic micro hosting on the node, with egress to dispatch.local |
+| 09-kit-styles | #262 | feat(clay_dioxus_kit): the styling contract's layers, ct tokens and the Tailwind bundle |
+| 10-kit-headless | #263 | feat(clay_dioxus_kit): headless primitives |
+| 11-kit-components | #264 | feat(clay_dioxus_kit): contract components (Button, Tabs, Card, PanelPage, Sheet, Drawer, ...) |
+| 12-drop-ui | #265 | refactor: delete the ui crate (its tokens and ScrubStrip moved into the kit) |
+| 13-pierre-core | #266 | feat(pierre_diffs): crate skeleton, types, diff model and JS-compat helpers |
+| 14-pierre-utils | #267 | feat(pierre_diffs): port of @pierre/diffs utils |
+| 15-pierre-highlights | #268 | feat(pierre_diffs): highlights and scanners |
+| 16-pierre-renderers | #269 | feat(pierre_diffs): renderers |
+| 17-pierre-managers | #270 | feat(pierre_diffs): managers |
+| 18-pierre-components | #271 | feat(pierre_diffs): components (FileDiff, virtualized hosts) and their upstream tests |
+| 19-pierre-oracle | #272 | test(pierre_diffs): differential oracle against upstream @pierre/diffs |
+| 20-pierre-parity | #273 | test(pierre_diffs): parity matrix, fake DOM hosts and test utilities |
+| 21-pierre-dioxus | #274 | feat(pierre_diffs_dioxus): the Pierre diff view as plain Dioxus in a shadow root |
+| 22-micro-shell | #275 | feat(micro_shell): the shell on kit components and a micro stylesheet |
+| 23-micro-settings | #276 | feat(micro_settings): settings on kit components |
+| 24-micros-small | #277 | refactor(micro_counter,sample,toolbar,layout): follow the styling contract |
+| 25-micro-lab | #278 | feat(micro_lab): the lab micro for experiments |
+| 26-micro-theme-lab | #279 | feat(micro_theme_lab): the theme lab as an end-user micro with live host apply |
+| 27-micro-review | #280 | feat(micro_review): the intxt review micro (intxt lane's feat/intxt-review-daytxt) and review_mock |
+| 28-daytxt-core | #281 | refactor: dayframe_composition becomes daytxt_core |
+| 29-daytxt-native | #282 | feat(daytxt_native,day_node): one host boot; the GUI host holds a node |
+| 30-daytxt-desktop | #283 | refactor: dayframe_desktop becomes daytxt_desktop; the package directory installs every micro |
+| 31-daytxt-mobile | #284 | refactor: dayframe_mobile becomes daytxt_mobile (WebView default, own node) |
+| 32-daytxt-web | #285 | refactor: dayframe_web becomes daytxt_web (strict CSP web shell) |
+| 33-showcase | #286 | feat(claytxt_showcase): page-per-component kit specimens (replaces dayframe_showcase) |
+| 34-day-cli | #287 | fix(day_cli): claytxt-side day_cli changes |
+| 35-docs-tooling | #288 | docs: styling contract, design language, skills, x scripts and README updates |
+| 36-lockfiles | #289 | chore: re-resolve the root and guest lockfiles on the intxt stack tip |
+| 38-codeview-c1-c3 | #292 | feat(pierre_diffs): port CodeView (C1–C3) |
+| 39-codeview-c4 | #293 | feat(pierre_diffs): CodeView C4, the DOM shell and sticky slab |
+| 40-codeview-c5 | #294 | feat(pierre_diffs): CodeView C5, the render pass |
+| 41-codeview-c6 | #295 | feat(pierre_diffs_dioxus): CodeView C6, the Dioxus host (CodeViewView) |
+| 42-codeview-page-scroll | #296 | feat(pierre_diffs_dioxus): CodeView in the page's scroller, top-file output, ArcIndex file nav |
+| 43-call-bytes | #297 | feat(clay_mdk): INTERIM Context::call_bytes for byte-answering node methods |
+| 44-nix-daytxt | #298 | build(nix): daytxt packages, guest vendor set and static web site as flake outputs |
+| 45-legacy-out-of-workspace | #299 | chore: take the legacy daybook/plug crates out of the Cargo workspaces and drop uniffi |
+| 46-link-perf | #300 | build: mold on aarch64 and no dependency debug info in dev |
+| 47-cranelift-cache-key | #301 | chore(deps): bump wasmtime and wcmp forks so cranelift caches across worktrees |
+| 48-agent-gui-loop | #302 | feat(daytxt_web): agent GUI loop, headless Playwright over the daytxt web shell |
+| 49-design-session-prep | #303 | docs: design session prep (open questions) |
+| 50-mbx-hit-rate | #304 | docs(scratch): why the mbx hit rate is low, and a build-timings logger |
+| 51-kotlin-catalogue | #305 | docs(scratch): catalogue of the Kotlin app (daybook_compose) and what replaces it |
+| 52-blitz-gap-log | #306 | docs(wiki): Blitz gap log |
+| 53-claytxt-design-docs | #307 | docs(scratch): claytxt lane design docs and ledger |
+| 54-tip-fixes | #308 | fix: stack tip fixes (kit bundle regenerated, day_cli on day_node's NodeDir) |
+| 55-ledger | (this PR) | docs(scratch): the claytxt ledger rewritten for the stack and the request accounting |
+
+## Accounting of operator requests (2026-11-03..24)
+
+Built from the raw chat on 2026-11-24 (83 requests: 23 on main, 23 done but unmerged, 19 partial, 11 not done,
+1 superseded, 6 unverified). The unmerged ones are all in the stack above. Open, most recent and strongest first:
+
+1. **Stack and ledger hygiene** (asked 11-18 and 11-23): done by this rewrite; keep layers small from here on.
+2. **CI improvements** (approved 11-19, never started): releases only on main, affected-crate tests, path
+   filters, nextest failure output; cache bucket choice is the operator's.
+3. **Land the stack** once intxt #221 and the node stack land.
+4. **Web components step 2:** mounts as `<ct-…>` custom elements, real `part` attributes, slots (design session).
+5. **CodeView parity:** bottom-lines blanking and white flashes on Wry, no syntax highlighting (S9 adapter not
+   wired), anti-blanking for the non-CodeView view.
+6. **Shell/lab defects:** drag released outside the window keeps dragging; unthemed "hide lab panel" list; lab
+   overflow does not scroll; lab micro faults on drag; "+" hover flicker; ScrubStrip activating on scrollbar release.
+7. **Kotlin app:** catalogue exists (layer 51); port-or-drop decisions are pending.
+8. **Preferences as datums (C1):** only a spike (`wip/claytxt/spike/c1-guest-shell`, `wip/claytxt/dirty/c1-spike`).
+9. **Phone viewer:** the panel does not scroll; slow "Loading" screen; release wasm builds on the phone.
+10. **Clay on the node:** design accepted 11-17; all code is in the stack, none on main.
+11. **TS micro runtime:** deferred to this week, after the node API; whether React/Solid is fast enough in
+    QuickJS-in-wasm is unmeasured; cartridge authoring has docs only.
+12. Smaller: BoltFFI spike (queued, never started); shell still depends on `micro_*` crates (built-ins should be
+    runtime-equivalent); typed props on publish; lazy-activation policy (deferred by the operator); a second
+    framework hosting a micro; WIT 0.5.0 bump and the claytxt wire-id rename.
+13. **NSIDs name Lexicons** (ADR 050 §2, #235; operator re-raised on #108): the clay half of
+    docs/scratch/nsid-audit.md items 1-5, i.e. `org.example.clay.*` collection contracts such as
+    `org.example.clay.shell.roots` and the dotted `clay.micro.install` / `clay.micro.bindings` tags, become
+    manifest-local keys or host-formed ids. Nodules does the node half above #252.
+14. **intxt citizenship (D76), the general mechanisms behind intxt's interim pieces:**
+    - `Context::call_bytes` (layer 43) goes away once a method can declare a `method_core::ByteBody` output and
+      `Context::call` streams it. Nodules owns the wire; the Clay half is ours, together with the waker-driven
+      render below.
+    - `ReviewConfig` (minted doc_cap/blob_cap) goes away once micros reach their granted `#drawers` through the
+      ADR 049 §6.2 domain handle on Cx.
+15. **Declarative shadow DOM for SSR:** intxt's web app (D79) renders the kit and Pierre under dioxus-ssr. The kit is
+    plain Dioxus already; the shadow mount needs a `<template shadowrootmode>` form. This is part of the web-components step.
+
+Questions still open for the operator:
+- Is a dev-dependency from `clay_mdk` to `clay_dioxus_kit` acceptable?
+- Where does the sysadmin e2e live now (it is skipped)?
+- The overnight 2026-11-18 calls on cartridge micros: `package_version` 0, replacement by name equality, the grants
+  handle source, load-failure policy, settings document exposure.
+- Which bucket backs the CI cache.
+
+## Standing decisions (summary; dates are when the operator ruled)
+
+- Clay: collections are plain maps, blind writes win, tombstones replicate as rows (11-03); no prefix grants,
+  write authority becomes a query later (11-04); Context shutdown is RAII (11-04); no dynamic dispatch unless
+  needed (11-06).
+- Micros: most are wasm, built-ins only for native resources (11-04, 11-06); web components are the presentation
+  protocol, and we embrace them fully (11-06, 11-10, 11-19); open `data-*` (11-10); micros reach the node over
+  WASI HTTP and say "datum" (11-12); TypeScript default with Rust first class, JS in wasm, no V8 spike (11-17);
+  partial replication stays (11-18); `claytxt` is the WIT namespace (11-19).
+- Styling: `--ct` tokens, stable part names, layers (host kit, micro, user), no inline styles, cross-framework
+  (11-17, 11-18); CSS prefix `ct` (11-17).
+- Names: the app is daytxt, the environment claytxt, the node "day node"; Dayframe is free (11-11, 11-18).
+  ArcIndex became ScrubStrip; D57 endpoints are method, callback and view (11-18).
+- Apps: desktop, Android and web (localhost node); desktop first and works-on-desktop means works-on-mobile
+  (11-18); Android renders in the system WebView (11-18); the desktop holds a node shared with the CLI (11-18).
+- Pierre: honest line-by-line port with a differential oracle (11-05); CodeView is the default PR view, in the
+  page's scroller (11-17); a generic virtualizer waits for a need (11-12).
+- Process: one linear stack of small draft PRs, mechanical splits fine, only the tip green, the operator merges
+  with their own tooling (11-17, 11-18, 11-23); push everything to origin, WIP included (11-23); never block on
+  Blitz (11-10, 11-17); never file on third-party repos (11-19); clippy only right before pushing, full suites on
+  CI (11-19); mbx keeps 10 GiB free and uses the rest (11-18).
+
+## Design debt on record
+
+- **Guest view wakes are opt-in** (11-19): a cross-executor delivery needs a manual `notify_views()`; the
+  direction is a render request in the waker. Details below.
+- **Web components: embrace fully, soon** (11-19). Details below.
+- **A view's stylesheet signal is written during render** (`use_mount_stylesheet`, layer 07): revisit with the
+  custom-element mounts.
+
+# History
+
+## The #79 design-settling ledger (2026-11-03..06)
 
 Status: Living ledger. Decisions are marked as decided; the in/out list is a proposal awaiting the operator.
 Owner: Claude (manager) with Sonnet subagents; operator reviews.
