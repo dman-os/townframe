@@ -243,7 +243,9 @@ mod tests {
                         contract::manifest(),
                         CollectionBindings::new([(
                             contract::SECTIONS_BINDING.to_owned(),
-                            BoundCollection::read(Nsid::literal(contract::SECTIONS)),
+                            BoundCollection::read(clay_mdk::CollectionId::minted_for(
+                                &Nsid::literal(contract::SECTIONS),
+                            )),
                         )]),
                         activate,
                     ),

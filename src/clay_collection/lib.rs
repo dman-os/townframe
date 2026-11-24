@@ -51,6 +51,7 @@ pub use replica::Replica;
 pub use source::Source;
 pub use types::AcquireError;
 pub use types::Change;
+pub use types::CollectionId;
 pub use types::Cursor;
 pub use types::MutationError;
 pub use types::OperationId;

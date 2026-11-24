@@ -78,7 +78,9 @@ async fn the_sample_section_lives_exactly_as_long_as_its_incarnation() {
                     manifest(),
                     CollectionBindings::new([(
                         SECTIONS_BINDING.to_owned(),
-                        BoundCollection::write(Nsid::literal(SECTIONS)),
+                        BoundCollection::write(clay_mdk::CollectionId::minted_for(&Nsid::literal(
+                            SECTIONS,
+                        ))),
                     )]),
                     activate,
                 ),

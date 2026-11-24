@@ -111,7 +111,7 @@ Built from the raw chat on 2026-11-24 (83 requests: 23 on main, 23 done but unme
     framework hosting a micro; WIT 0.5.0 bump and the claytxt wire-id rename.
 13. **NSIDs name Lexicons** (ADR 050 §2, #235; operator re-raised on #108): the clay half of
     docs/scratch/nsid-audit.md items 1-5, i.e. `org.example.clay.*` collection contracts such as
-    `org.example.clay.shell.roots` and the dotted `clay.micro.install` / `clay.micro.bindings` tags, become
+    `org.example.clay.shell.roots` and the dotted `clay.micro.install` / `clay.micro.bindings` tags (now `clay/micro-install` / `clay/micro-bindings`), become
     manifest-local keys or host-formed ids. Nodules does the node half above #252.
 14. **intxt citizenship (D76), the general mechanisms behind intxt's interim pieces:**
     - `Context::call_bytes` (layer 43) goes away once a method can declare a `method_core::ByteBody` output and
@@ -601,7 +601,7 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
 
 ## C5c: persisted enablement (2026-11-04)
 
-- Desired state is a document: `dayframe.installs` (branch `main`), tag `clay.micro.install`,
+- Desired state is a document: `dayframe.installs` (branch `main`), tag `clay/micro-install`,
   key_id = micro id, value `{ "enabled": bool, "package_version": u32 }`. Shape follows
   big_nodule's `NoduleInstall`; `package_version` is recorded, nothing gates on it yet.
 - `InstalledMicro.enabled_on_admission` (false in `new`): launchers set it true for the native
