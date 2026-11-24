@@ -83,8 +83,10 @@ type PrincipalOf = dyn Fn(&RequestContext, &TransportContext) -> Result<PeerKey,
 /// across an await: admission and the page read run on the store first, and the lock is taken
 /// only for the synchronous `update`, `resolve_round` and `close`.
 ///
-/// FIXME: nothing calls [`ReplayServer::sweep`] yet, so a forgotten session lives until the
-/// process ends. TTL sweeping needs a driver (a periodic task on the service's `StopToken`).
+/// Expired sessions are swept at every session update, before the update is counted against
+/// the per-client session cap: a client that reconnects without closing its old session (its
+/// transport died) never hits the cap on sessions that already expired, and no timer task is
+/// needed. Memory is bounded by the cap times the clients that updated within the TTL.
 pub struct ReplayService<S> {
     store: S,
     /// The summary and bucket calls: stateless, so one answers every call.
@@ -138,9 +140,10 @@ where
             .admission(&principal, &request.params)
             .await
             .expect(STORE_FAILED);
-        let updated = self
-            .server()
-            .update(&principal, &request.params, Instant::now(), admits)?;
+        let now = Instant::now();
+        let mut server = self.server();
+        server.sweep(now);
+        let updated = server.update(&principal, &request.params, now, admits)?;
         Ok(updated.into())
     }
 }

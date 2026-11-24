@@ -22,7 +22,9 @@ use crate::fingerprint::FingerprintSeed;
 use crate::part_store::PartStoreRead;
 use crate::part_store::bucket_summary::BucketSummary;
 use crate::replay::server::MAX_HOLD;
+use crate::replay::wire::CloseSession;
 use crate::replay::wire::SessionError;
+use crate::replay::wire::SessionId;
 use crate::replay::wire::SessionPage;
 use crate::replay::wire::SessionUpdated;
 use crate::rev::Rev;
@@ -176,6 +178,7 @@ where
             local: Arc::new(local),
             routes: default(),
             conn: None,
+            stale_session: None,
         };
         // Detached on purpose: the loop ends when the last handle drops its sender. Its only
         // failures are the ones that crash it (a failed table or local read, a bug), and the
@@ -282,6 +285,8 @@ struct Driver<C, B, K, S> {
     local: Arc<S>,
     routes: Routes,
     conn: Option<Conn<C, B, S>>,
+    /// The session of the connection last dropped, closed through the next one (law 6).
+    stale_session: Option<SessionId>,
 }
 
 impl<C, B, K, S> Driver<C, B, K, S>
@@ -416,13 +421,30 @@ where
         let objects: Vec<_> = self.routes.objects.iter().cloned().collect();
         let mut sync = PeerSync::new(self.config.machine(), Uuid::from_u128(rand::random()));
         sync.update(&added, &[], &objects, &[]);
+        let env = Arc::new(Env {
+            client,
+            backend: Arc::clone(&self.backend),
+            local: Arc::clone(&self.local),
+        });
+        // The peer holds the dropped connection's session until its TTL, and caps the sessions
+        // a client may hold, so a reconnect closes it through the new connection. Best effort:
+        // the old one's transport is usually what failed, and the peer sweeps expired sessions
+        // anyway, so a failed close only means waiting for the TTL.
+        if let Some(session_id) = self.stale_session.take() {
+            let env = Arc::clone(&env);
+            drop(n0_future::task::spawn(async move {
+                let outcome = env
+                    .client
+                    .close_replay_session(CloseSession { session_id })
+                    .await;
+                if !matches!(outcome, Ok(Ok(()))) {
+                    tracing::debug!(?outcome, "closing the replaced replay session failed");
+                }
+            }));
+        }
         self.conn = Some(Conn {
             sync,
-            env: Arc::new(Env {
-                client,
-                backend: Arc::clone(&self.backend),
-                local: Arc::clone(&self.local),
-            }),
+            env,
             calls: FuturesUnordered::new(),
             aborts: default(),
         });
@@ -434,6 +456,7 @@ where
         let Some(Conn { sync, aborts, .. }) = self.conn.take() else {
             return;
         };
+        self.stale_session = Some(sync.session_id());
         let mut cmds = vec![];
         sync.disconnect(&mut cmds);
         for cmd in cmds {

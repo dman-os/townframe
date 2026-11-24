@@ -40,7 +40,9 @@
 //!    cancelled and, the machine being gone, nothing is reported (ObjectJobs law 10); nothing
 //!    survives but persisted cursors, and every part is `Unsynced`. A new connection is a
 //!    fresh `PeerSync` with a fresh session id, given the current routes as additions, each
-//!    part with the cursor read from the table.
+//!    part with the cursor read from the table. The peer keeps the replaced session until its
+//!    TTL and caps the sessions a client holds, so the new connection closes the old session,
+//!    best effort (the peer also sweeps expired sessions on every update).
 //! 7. **Routes in are incremental**, as `PeerSync` law 1: the embedder sends added and removed
 //!    parts and objects. The driver keeps the current route set only to re-add it on a new
 //!    connection.

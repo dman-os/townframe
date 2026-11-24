@@ -1265,6 +1265,12 @@ impl PeerSync {
     }
 
     /// The last fact emitted for `part`; `None` for a part that is not wanted.
+    /// The replay session this machine opened; the driver closes it when the connection is
+    /// replaced.
+    pub(crate) fn session_id(&self) -> SessionId {
+        self.client.session_id()
+    }
+
     #[cfg(test)]
     pub(crate) fn synced(&self, part: &PartKey) -> Option<bool> {
         self.parts.get(part).copied()
