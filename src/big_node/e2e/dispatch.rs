@@ -17,6 +17,7 @@ use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::MintDispatchCapability;
 use big_nodule_core::protocol::NoduleRecord;
+use method_core::ByteBody;
 use method_core::Method;
 use service_utils_rs::ClientError;
 
@@ -348,5 +349,167 @@ async fn built_in_and_nodule_operations_share_one_router_and_one_admission() {
         Err(DispatchError::UnknownOperation)
     );
     assert!(call(&node, docs_reader, read_op, read_input).await.is_ok());
+    shutdown(node, stop).await;
+}
+
+/// A second actor under the operator, with a dispatch handle that admits `operations`: the
+/// handle is bound to it and it presents it under its own signer, so dispatch admission passes.
+async fn second_caller(node: &BigNode, operations: &[&str]) -> (big_cabinet_core::dmeta::Uuid7, Authorization) {
+    let opened = node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            big_cabinet_core::authority::OpenActor {
+                parent: node.authority.root,
+                path: "second".into(),
+                rights: Rights::all(),
+            },
+        )
+        .await
+        .unwrap();
+    let operator = Authorization::identity(node.authority.root);
+    let handle = node
+        .dispatch
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator.metadata(),
+            MintDispatchCapability {
+                scope: self::operations(operations),
+                rights: Rights::USE,
+                subject: Some(opened.actor.actor_id),
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    (
+        opened.actor.actor_id,
+        Authorization {
+            authority: handle,
+            signer: opened.capability,
+        },
+    )
+}
+
+/// One dispatch call whose answer may be bytes. `parameters` are the call's JSON, or the Lexicon
+/// parameters of a method whose body is `bytes`.
+async fn raw(
+    node: &BigNode,
+    authorization: Authorization,
+    operation: &str,
+    parameters: Value,
+    bytes: Option<ByteBody>,
+) -> Result<big_dispatch_core::Body, DispatchError> {
+    let invoke = match bytes {
+        Some(bytes) => big_dispatch_core::Invoke {
+            operation: operation.to_owned(),
+            parameters,
+            body: big_dispatch_core::Body::Bytes(bytes),
+            context: Default::default(),
+        },
+        None => big_dispatch_core::Invoke::json(operation, parameters, Default::default()),
+    };
+    node.dispatch
+        .client
+        .call_with(RequestContext::root(), authorization.metadata(), invoke)
+        .await
+        .map(|output| output.body)
+        .map_err(|error| match error {
+            ClientError::Method(error) => error,
+            ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
+        })
+}
+
+/// ADR 037 §2: a handle is bound to its holder in every domain, and a leaked id is a dead number
+/// under another actor's signer. Dispatch admits the second actor on its own handle, but the
+/// resource capability in the request body is another actor's, and the domain must refuse it.
+#[tokio::test]
+async fn a_body_capability_presented_by_an_actor_it_is_not_bound_to_is_refused() {
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let read_op = ReadDatums::XRPC.nsid;
+    let (read_blob, put_blob) = (
+        big_blobs_core::ReadBlob::XRPC.nsid,
+        big_blobs_core::PutBlob::XRPC.nsid,
+    );
+
+    let stored = create(&node, "held-note", json!({"$type": NOTE, "value": "a's"})).await;
+    let info = super::blobs::put_bytes(&node, b"a's blob").await;
+    let (second, caller) = second_caller(&node, &[read_op, read_blob, put_blob]).await;
+
+    let refused = |outcome: Result<big_dispatch_core::Body, DispatchError>, what: &str| match outcome {
+        Err(DispatchError::Provider { body, .. }) => {
+            assert!(
+                matches!(body["operationError"].as_str(), Some("Denied" | "Unauthorized")),
+                "{what}: refused, but as {body}"
+            );
+        }
+        other => panic!("{what}: another actor's handle must be refused, got {other:?}"),
+    };
+
+    // Docs: the capability is bound to the drawers actor, the presenter is the second actor.
+    let doc_read = capability(
+        &node,
+        DocScope {
+            read: DocScope::read_all([stored.doc_id.clone()]),
+            ..DocScope::default()
+        },
+    )
+    .await;
+    let read_input = |capability| {
+        serde_json::to_value(ReadDatums {
+            capability,
+            doc_id: stored.doc_id.clone(),
+            at: At::Current,
+            datums: Some(BTreeSet::from([key()])),
+            optimistic: false,
+        })
+        .unwrap()
+    };
+    refused(
+        raw(&node, caller, read_op, read_input(doc_read), None).await,
+        "docs read",
+    );
+
+    // Blobs: the capabilities are bound to the operator's actor.
+    let blob_read = super::blobs::read_cap(&node, &info.blob_id).await;
+    refused(
+        raw(
+            &node,
+            caller,
+            read_blob,
+            json!({"capability": blob_read, "blobId": info.blob_id}),
+            None,
+        )
+        .await,
+        "blobs read",
+    );
+    let blob_put = super::blobs::put_cap(&node).await;
+    refused(
+        raw(
+            &node,
+            caller,
+            put_blob,
+            json!({"capability": blob_put}),
+            Some(ByteBody::from_bytes(b"b's".to_vec())),
+        )
+        .await,
+        "blobs put",
+    );
+
+    // Controls: the same operations succeed under handles bound to the second actor, so the
+    // refusals above are the holder check and nothing else.
+    let own_read = super::blobs::read_cap_for(&node, &info.blob_id, Some(second)).await;
+    raw(
+        &node,
+        caller,
+        read_blob,
+        json!({"capability": own_read, "blobId": info.blob_id}),
+        None,
+    )
+    .await
+    .unwrap();
     shutdown(node, stop).await;
 }
