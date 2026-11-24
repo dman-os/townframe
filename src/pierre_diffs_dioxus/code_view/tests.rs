@@ -87,6 +87,8 @@ struct Shared {
     scroll_to: Rc<Cell<Option<Signal<Option<ScrollRequest>>>>>,
     /// How many times the page component's body ran.
     renders: Rc<Cell<usize>>,
+    /// What `on_top_file` was told, in order.
+    top_files: Rc<RefCell<Vec<String>>>,
 }
 
 impl PartialEq for Shared {
@@ -101,6 +103,7 @@ struct PageProps {
     files: Vec<CodeViewFile<Note>>,
     runtime: Runtime,
     environment: Environment,
+    scroll: ScrollMode,
 }
 
 #[component]
@@ -109,7 +112,7 @@ fn Page(props: PageProps) -> Element {
     props.shared.scroll_to.set(Some(scroll_to));
     let state = use_code_view(&CodeViewViewProps::<Note> {
         files: props.files.clone(),
-        height: format!("{VIEWPORT}px"),
+        scroll: props.scroll.clone(),
         runtime: props.runtime.clone(),
         environment: props.environment.clone(),
         diff_style: DiffStyle::Unified,
@@ -122,6 +125,10 @@ fn Page(props: PageProps) -> Element {
         highlighter: None,
         layout: None,
         scroll_to: scroll_to(),
+        on_top_file: Some(Callback::new({
+            let top_files = Rc::clone(&props.shared.top_files);
+            move |id| top_files.borrow_mut().push(id)
+        })),
     });
     props.shared.renders.set(props.shared.renders.get() + 1);
     *props.shared.state.borrow_mut() = Some(Rc::clone(&state));
@@ -146,6 +153,15 @@ impl Rig {
     }
 
     fn with(environment: Environment) -> Self {
+        Self::mounted_in(
+            environment,
+            ScrollMode::Own {
+                height: format!("{VIEWPORT}px"),
+            },
+        )
+    }
+
+    fn mounted_in(environment: Environment, scroll: ScrollMode) -> Self {
         let shared = Shared::default();
         let clock = Clock::default();
         let time = Rc::new(Cell::new(1000.0));
@@ -160,6 +176,7 @@ impl Rig {
                     now: PtrEq::new(Rc::new(move || now_time.get())),
                 },
                 environment,
+                scroll,
             },
         );
         let first = dom.rebuild_to_vec();
@@ -281,6 +298,23 @@ impl Rig {
     fn page(&self) -> String {
         dioxus_ssr::render(&self.dom)
     }
+}
+
+/// The vertical positions a scripted element was told to scroll to, in order.
+fn scroll_writes(element: &Scripted) -> Vec<f64> {
+    element
+        .log
+        .borrow()
+        .iter()
+        .filter_map(|entry| entry.strip_prefix("scroll 0 "))
+        .map(|rest| {
+            rest.split_whitespace()
+                .next()
+                .expect("a position")
+                .parse()
+                .expect("a number")
+        })
+        .collect()
 }
 
 #[test]
@@ -452,20 +486,7 @@ fn revealing_a_line_scrolls_the_root_to_it() {
         serial: 1,
     });
     rig.frames_until_idle();
-    let writes: Vec<f64> = rig
-        .root
-        .log
-        .borrow()
-        .iter()
-        .filter_map(|entry| entry.strip_prefix("scroll 0 "))
-        .map(|rest| {
-            rest.split_whitespace()
-                .next()
-                .expect("a position")
-                .parse()
-                .expect("a number")
-        })
-        .collect();
+    let writes = scroll_writes(&rig.root);
     let landed = *writes.last().expect("the reveal wrote a scroll position");
     // Line 120 is 119 rows of 20 px below the file's first row.
     assert!(
@@ -492,20 +513,7 @@ fn a_smooth_reveal_steps_one_spring_position_per_frame_on_the_embedders_clock() 
         serial: 1,
     });
     let frames = rig.frames_until_idle();
-    let writes: Vec<f64> = rig
-        .root
-        .log
-        .borrow()
-        .iter()
-        .filter_map(|entry| entry.strip_prefix("scroll 0 "))
-        .map(|rest| {
-            rest.split_whitespace()
-                .next()
-                .expect("a position")
-                .parse()
-                .expect("a number")
-        })
-        .collect();
+    let writes = scroll_writes(&rig.root);
     assert!(
         frames > 3 && writes.len() > 3,
         "{frames} frames, writes {writes:?}"
@@ -709,7 +717,9 @@ impl HostRig {
         let (host, slab) = dom.in_scope(ScopeId::ROOT, || {
             let slab = Signal::new(SlabStyle::default());
             let host = DioxusHost::new_code_view(
-                "100px",
+                &ScrollMode::Own {
+                    height: "100px".to_owned(),
+                },
                 clock.sleep(),
                 Rc::new(move || now_time.get()),
                 environment,
@@ -889,4 +899,294 @@ fn frames_wait_for_the_root_then_carry_the_embedders_clock_and_a_follow_up_is_pa
     assert_eq!(rig.clock.fire(0), Duration::from_millis(16));
     run_tasks(&mut rig.dom);
     assert_eq!(*stamps.borrow(), [40.0, 56.0]);
+}
+
+/// Where the viewer starts in the embedder's scroller: a heading's worth of content above it.
+const CONTENT_OFFSET: f64 = 150.0;
+const PAGE_VIEWPORT: f64 = 800.0;
+
+/// A viewer in an embedder's scroller: the scroller's events reach it through the handle, as the
+/// embedder's forwarding would deliver them, and its writes land on the scripted scroller.
+struct PageRig {
+    rig: Rig,
+    handle: ScrollRoot,
+    scroller: Rc<Scripted>,
+    offset: f64,
+    viewport: f64,
+}
+
+impl PageRig {
+    fn new() -> Self {
+        Self::at(CONTENT_OFFSET, PAGE_VIEWPORT)
+    }
+
+    /// A viewer whose top is `offset` below the top of the scroller's content, in a scroller
+    /// whose client box is `viewport` tall: what a document scroll proxy reports (the viewport's
+    /// size and the document's scroll), with the heading and tabs of a page above the viewer.
+    fn at(offset: f64, viewport: f64) -> Self {
+        let handle = ScrollRoot::default();
+        let rig = Rig::mounted_in(Environment::default(), ScrollMode::Embedder(handle.clone()));
+        let scroller = Rc::new(Scripted::default());
+        let viewer = Rc::new(Scripted::default());
+        // The viewer's top is `CONTENT_OFFSET` below the scroller's, which is not scrolled.
+        viewer.client_top.set(offset);
+        let mut page = Self {
+            rig,
+            handle,
+            scroller,
+            offset,
+            viewport,
+        };
+        let (handle, scroller) = (page.handle.clone(), Rc::clone(&page.scroller));
+        // What a webview reports once the page is up: the viewer's root and the scroller mounted,
+        // the scroller sized.
+        page.rig.deliver(|_| {
+            handle.viewer_mounted(Rc::new(MountedData::new(ScriptedElement(viewer))));
+            handle.mounted(Rc::new(MountedData::new(ScriptedElement(scroller))));
+            handle.resized(viewport, 400.0);
+        });
+        page
+    }
+
+    /// The scroller moved to `top`: its `scroll` event, forwarded.
+    fn scroll_to(&mut self, top: f64) {
+        self.scroller.offset.set((0.0, top));
+        let handle = self.handle.clone();
+        self.rig.deliver(|_| {
+            handle.scrolled(ScrollSample {
+                top,
+                left: 0.0,
+                scroll_height: self.offset + 1_000_000.0,
+                client_height: self.viewport,
+            });
+        });
+    }
+}
+
+#[test]
+fn a_viewer_in_the_embedders_scroller_reads_its_geometry_from_the_handle() {
+    let mut page = PageRig::new();
+    assert_eq!(
+        page.handle.offset(),
+        CONTENT_OFFSET,
+        "measured with client rects"
+    );
+    assert_eq!(page.rig.state.view.get_height(), PAGE_VIEWPORT);
+    assert_eq!(page.rig.shells().len(), 1);
+    page.scroll_to(CONTENT_OFFSET + 30_000.0);
+    page.rig.frames_until_idle();
+    // The viewer's own position is the scroller's less where the viewer starts.
+    assert_eq!(page.rig.state.view.get_scroll_top(), 30_000.0);
+    let rendered = page.rig.page();
+    assert!(
+        rendered.contains("f3_") && !rendered.contains("f0_1 = 1"),
+        "the window follows the scroller"
+    );
+    // The slab is written for the window, whichever element scrolls.
+    let slab = *page.rig.state.slab.peek();
+    assert!(slab.spacer_height.is_some_and(|height| height > 24_000.0));
+    assert!(slab.top.is_some() && slab.bottom.is_some());
+    // A viewer whose top is below the fold is at its own top.
+    page.scroll_to(40.0);
+    page.rig.frames_until_idle();
+    assert_eq!(page.rig.state.view.get_scroll_top(), 0.0);
+    assert!(page.rig.page().contains("f0_1 = 1"));
+    // The scroller resizing is the viewport resizing.
+    let handle = page.handle.clone();
+    page.rig.deliver(|_| handle.resized(500.0, 400.0));
+    assert_eq!(page.rig.state.view.get_height(), 500.0);
+}
+
+/// A viewer that mounts on a handle whose scroller is already live (the embedder switched views:
+/// the scroller and its events go on, the viewer is replaced) must read the handle's mount, size
+/// and scroll at once, and the viewer it replaces, dropped after the new one linked, must not
+/// take the new one's link with it.
+#[test]
+fn a_viewer_mounted_on_a_live_scroller_follows_it_after_the_old_viewer_drops() {
+    let mut old = PageRig::at(500.0, 720.0);
+    old.scroll_to(900.0);
+    let handle = old.handle.clone();
+    let scroller = Rc::clone(&old.scroller);
+    // The new viewer mounts before the old one is dropped, as a replaced component does.
+    let mut rig = Rig::mounted_in(Environment::default(), ScrollMode::Embedder(handle.clone()));
+    drop(old.rig);
+    let viewer = Rc::new(Scripted::default());
+    viewer.client_top.set(500.0 - 900.0);
+    rig.deliver(|_| handle.viewer_mounted(Rc::new(MountedData::new(ScriptedElement(viewer)))));
+    rig.frames_until_idle();
+    // Nothing happened on the scroller since the mount; the viewer already knows where it is.
+    assert_eq!(rig.state.view.get_height(), 720.0);
+    assert_eq!(rig.state.view.get_scroll_top(), 400.0);
+    // The document scrolls on: the new viewer follows.
+    scroller.offset.set((0.0, 5_500.0));
+    rig.deliver(|_| {
+        handle.scrolled(ScrollSample {
+            top: 5_500.0,
+            left: 0.0,
+            scroll_height: 500.0 + 1_000_000.0,
+            client_height: 720.0,
+        });
+    });
+    rig.frames_until_idle();
+    assert_eq!(rig.state.view.get_scroll_top(), 5_000.0);
+    assert!(!rig.page().contains("f0_1 = 1"), "the window left the top");
+}
+
+/// The document scroll proxy's shape: the viewer starts well down a page (heading, tabs and
+/// controls above it, more than half of a laptop viewport), and until the first scroll event
+/// the scroller has reported only its mount and its size.
+#[test]
+fn a_viewer_low_in_the_document_renders_its_visible_part_then_follows_the_document() {
+    let mut page = PageRig::at(500.0, 720.0);
+    assert_eq!(page.handle.offset(), 500.0);
+    assert_eq!(page.rig.state.view.get_height(), 720.0);
+    assert_eq!(page.rig.state.view.get_scroll_top(), 0.0);
+    page.rig.frames_until_idle();
+    let first = page.rig.page();
+    assert!(first.contains("f0_1 = 1"), "the top of the viewer renders");
+    // The document scrolls the viewer into view: its window grows to the viewport.
+    page.scroll_to(300.0);
+    page.rig.frames_until_idle();
+    assert_eq!(page.rig.state.view.get_scroll_top(), 0.0);
+    page.scroll_to(500.0 + 5_000.0);
+    page.rig.frames_until_idle();
+    assert_eq!(page.rig.state.view.get_scroll_top(), 5_000.0);
+    let rendered = page.rig.page();
+    assert!(!rendered.contains("f0_1 = 1"), "the window left the top");
+    assert!(!page.rig.shells().is_empty(), "something renders at the new position");
+    let slab = *page.rig.state.slab.peek();
+    assert!(slab.spacer_height.is_some_and(|height| height > 4_000.0), "{slab:?}");
+}
+
+#[test]
+fn the_root_in_the_embedders_scroller_is_no_scroller() {
+    let page = PageRig::new();
+    let rendered = page.rig.page();
+    assert!(!rendered.contains("overflow-y:auto"), "{rendered}");
+    assert!(rendered.contains("overflow-x:clip"), "{rendered}");
+    assert!(!rendered.contains("tabindex=\"0\""));
+    let listeners = &page.rig.listeners;
+    // Nothing on the viewer's own root scrolls: the handle forwards the scroller's `scroll`.
+    assert!(
+        !listeners.iter().any(|name| name == "scroll"),
+        "{listeners:?}"
+    );
+    // The root is measured (mounted and resized, for its place in the scroller) and still
+    // hears a person take over.
+    for expected in [
+        "mounted",
+        "resize",
+        "wheel",
+        "touchstart",
+        "pointerdown",
+        "keydown",
+    ] {
+        assert!(
+            listeners.iter().any(|name| name == expected),
+            "no {expected} listener in {listeners:?}"
+        );
+    }
+}
+
+#[test]
+fn a_reveal_scrolls_the_embedders_scroller_shifted_by_where_the_viewer_starts() {
+    let mut page = PageRig::new();
+    let top = page
+        .rig
+        .state
+        .view
+        .get_top_for_item("f2")
+        .expect("f2 is a file of the viewer");
+    page.rig.request(ScrollRequest {
+        target: CodeViewScrollTarget::Line(CodeViewLineScrollTarget {
+            id: "f2".to_owned(),
+            line_number: 120,
+            side: Some(SelectionSide::Additions),
+            align: Some(ScrollAlign::Start),
+            offset: None,
+            behavior: Some(CodeViewScrollBehavior::Instant),
+        }),
+        serial: 1,
+    });
+    page.rig.frames_until_idle();
+    let writes = scroll_writes(&page.scroller);
+    let landed = *writes.last().expect("the reveal wrote the scroller");
+    assert!(
+        (CONTENT_OFFSET + top + 119.0 * 20.0..=CONTENT_OFFSET + top + 119.0 * 20.0 + 150.0)
+            .contains(&landed),
+        "landed at {landed}, f2 starts at {top} in the viewer"
+    );
+    assert!(
+        page.rig
+            .root
+            .log
+            .borrow()
+            .iter()
+            .all(|entry| !entry.starts_with("scroll"))
+    );
+}
+
+#[test]
+fn nothing_is_written_before_the_embedders_scroller_has_mounted() {
+    let handle = ScrollRoot::default();
+    let mut rig = Rig::mounted_in(Environment::default(), ScrollMode::Embedder(handle.clone()));
+    rig.request(ScrollRequest::to_file(1, "f2"));
+    rig.frames_until_idle();
+    assert!(
+        rig.host().frames_pending() > 0,
+        "the frames wait for the scroller"
+    );
+    let scroller = Rc::new(Scripted::default());
+    rig.deliver(|_| {
+        handle.mounted(Rc::new(MountedData::new(ScriptedElement(Rc::clone(
+            &scroller,
+        )))));
+        handle.resized(PAGE_VIEWPORT, 400.0);
+    });
+    rig.frames_until_idle();
+    assert!(
+        !scroll_writes(&scroller).is_empty(),
+        "the request ran once it could write"
+    );
+}
+
+#[test]
+fn the_top_file_is_reported_when_a_scroll_or_a_reveal_changes_it() {
+    let mut rig = Rig::new();
+    rig.boot();
+    let told = |rig: &Rig| rig.shared.top_files.borrow().clone();
+    assert!(told(&rig).is_empty(), "nothing before the first scroll");
+    rig.scroll_to(30_000.0);
+    assert_eq!(told(&rig), ["f3"]);
+    rig.scroll_to(9_000.0);
+    assert_eq!(told(&rig), ["f3", "f1"]);
+    // Within one file, nothing new.
+    rig.scroll_to(9_500.0);
+    assert_eq!(told(&rig), ["f3", "f1"]);
+    // A reveal moves the scroller, whose `scroll` event the engine then raises.
+    rig.request(ScrollRequest {
+        target: CodeViewScrollTarget::Item(CodeViewItemScrollTarget {
+            id: "f4".to_owned(),
+            align: Some(ScrollAlign::Start),
+            offset: None,
+            behavior: Some(CodeViewScrollBehavior::Instant),
+        }),
+        serial: 1,
+    });
+    rig.frames_until_idle();
+    let landed = *scroll_writes(&rig.root)
+        .last()
+        .expect("the reveal wrote the root");
+    rig.scroll_to(landed);
+    assert_eq!(told(&rig).last().map(String::as_str), Some("f4"));
+}
+
+#[test]
+fn the_top_file_follows_a_viewer_in_the_embedders_scroller() {
+    let mut page = PageRig::new();
+    page.scroll_to(CONTENT_OFFSET + 30_000.0);
+    assert_eq!(page.rig.shared.top_files.borrow().as_slice(), ["f3"]);
+    // Scrolled above the viewer: its first file is at the top.
+    page.scroll_to(0.0);
+    assert_eq!(page.rig.shared.top_files.borrow().as_slice(), ["f3", "f0"]);
 }

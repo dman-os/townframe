@@ -6,7 +6,10 @@
 //!   a click on a line number selects it, shift-click or a drag extends the range, the gutter
 //!   utility button follows the hovered line or the selection, and a collapsed hunk's separator
 //!   expands on click.
-//! - PR #84: a real 599-file diff, one virtualized file at a time (see [`pr_diff`]).
+//! - PR #84: a real 599-file diff, all files in one `CodeViewView` that lays out in the page's own
+//!   scroller, with the file index (see [`pr_diff`]).
+//! - PR #84 (per file): the same diff one virtualized `FileDiffView` at a time, the honest-port
+//!   reference.
 
 mod pr_diff;
 
@@ -33,36 +36,41 @@ pub struct Note {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DiffsView {
+pub enum DiffsView {
     Specimens,
+    /// The PR in one `CodeViewView`, the default PR view.
     Pr84,
-    Pr84CodeView,
+    /// The PR one `FileDiffView` per file.
+    Pr84PerFile,
 }
 
 impl DiffsView {
-    const ALL: [Self; 3] = [Self::Specimens, Self::Pr84, Self::Pr84CodeView];
+    const ALL: [Self; 3] = [Self::Specimens, Self::Pr84, Self::Pr84PerFile];
 
     fn label(self) -> &'static str {
         match self {
             Self::Specimens => "Specimens",
             Self::Pr84 => "PR #84",
-            Self::Pr84CodeView => "PR #84 (CodeView)",
+            Self::Pr84PerFile => "PR #84 (per file)",
+        }
+    }
+
+    /// The view the lab opens: `DAYTXT_LAB_DIFFS_VIEW` (`specimens`, `pr84`, `pr84-per-file`)
+    /// or `?diffs_view=` names one, so a screenshot run needs no click.
+    pub fn initial() -> Self {
+        match crate::lab_setting("DAYTXT_LAB_DIFFS_VIEW", "diffs_view").as_deref() {
+            Some("specimens") => Self::Specimens,
+            Some("pr84-per-file") => Self::Pr84PerFile,
+            _ => Self::Pr84,
         }
     }
 }
 
-/// The tab: a view choice and the options bar over the chosen view. `DAYTXT_LAB_DIFFS_VIEW`
-/// (`pr84`, `pr84-code-view`) opens that view, so a screenshot run needs no click.
+/// The tab: a view choice and the options bar over the chosen view. The choice lives in the
+/// root (a context) because the root's section index gives way to the PR diff's file index.
 #[component]
 pub fn DiffsFoundation() -> Element {
-    let mut view =
-        use_signal(
-            || match crate::lab_setting("DAYTXT_LAB_DIFFS_VIEW", "diffs_view").as_deref() {
-                Some("pr84") => DiffsView::Pr84,
-                Some("pr84-code-view") => DiffsView::Pr84CodeView,
-                _ => DiffsView::Specimens,
-            },
-        );
+    let mut view = use_context::<Signal<DiffsView>>();
     // The options start where the specimens always ran: hover on both parts, selection and the
     // gutter utility on, unchanged lines expanded.
     let mut options = use_signal(|| DiffOptions {
@@ -145,8 +153,8 @@ pub fn DiffsFoundation() -> Element {
             }
             match view() {
                 DiffsView::Specimens => rsx! { Specimens { options: current, expand_unchanged: expand_unchanged(), virtualized } },
-                DiffsView::Pr84 => rsx! { pr_diff::PrView { options: current, virtualized } },
-                DiffsView::Pr84CodeView => rsx! { pr_diff::PrCodeView { options: current, virtualized } },
+                DiffsView::Pr84 => rsx! { pr_diff::PrCodeView { options: current, virtualized } },
+                DiffsView::Pr84PerFile => rsx! { pr_diff::PrView { options: current, virtualized } },
             }
         }
     }
@@ -302,11 +310,18 @@ fn Specimens(options: DiffOptions, expand_unchanged: bool, virtualized: Virtuali
 mod tests {
     use super::*;
 
+    /// The lab's root as far as the tab needs it: the view choice, on the specimens.
+    #[component]
+    fn Root() -> Element {
+        use_context_provider(|| Signal::new(DiffsView::Specimens));
+        rsx! { DiffsFoundation {} }
+    }
+
     // Dioxus turns a panicking render into an empty subtree, so the page being present at all is
     // the check that both fixtures apply and both layouts render.
     #[test]
     fn both_sample_diffs_render_with_the_annotation() {
-        let mut dom = VirtualDom::new(DiffsFoundation);
+        let mut dom = VirtualDom::new(Root);
         dom.rebuild_in_place();
         let page = dioxus_ssr::render(&dom);
         assert!(page.contains("data-diff-type=\"split\""));
