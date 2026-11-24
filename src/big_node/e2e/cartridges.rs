@@ -2042,6 +2042,46 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     shutdown(node, stop).await;
 }
 
+/// The nodules service registers in dispatch after the nodule service booted and reconciled
+/// (`BigNode::register_late_built_ins`), so the core nodule's optional requests for its reads
+/// were `noProvider` at boot. The nodule service follows the router's claims, so they resolve
+/// once it registers, and a status read after boot sees them so.
+#[tokio::test]
+async fn the_core_nodules_requests_for_nodules_methods_resolve_after_boot() {
+    use big_cartridges_core::protocol::AwaitCartridgeGrants;
+    use big_cartridges_core::protocol::ListCartridgeGrants;
+    use big_cartridges_core::protocol::ListCartridgeInstalls;
+    use method_core::Method;
+
+    let secrets = secrets().await;
+    let (node, stop, _) = boot_memory(&secrets).await;
+    let core = crate::core_cartridge::id(&node.cartridges.publisher);
+    let record = node
+        .nodules
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            big_nodule_core::protocol::GetNodule { cartridge_id: core },
+        )
+        .await
+        .unwrap();
+    for method in [
+        ListCartridgeGrants::XRPC.nsid,
+        AwaitCartridgeGrants::XRPC.nsid,
+        ListCartridgeInstalls::XRPC.nsid,
+    ] {
+        let status = &record.requests[method];
+        assert_eq!(status.unresolved, None, "{method}");
+        assert_eq!(
+            status.locked.as_ref().map(|locked| locked.provider.as_str()),
+            Some("builtin:nodules"),
+            "{method}"
+        );
+    }
+    shutdown(node, stop).await;
+}
+
 async fn listed_ids(node: &BigNode) -> Vec<big_cartridges_core::CartridgeId> {
     list(node)
         .await
