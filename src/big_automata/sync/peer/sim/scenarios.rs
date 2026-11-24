@@ -935,3 +935,58 @@ fn a_peer_that_lost_its_data_is_walked_from_zero_when_it_offers_a_walk() {
     assert!(members.contains(&obj(2)) && members.contains(&obj(3)));
     assert_eq!(sim.restarts.len(), 1);
 }
+
+/// An unminted restore keeps the generation, so the stale cursor (3) would stay stored until
+/// the part's first raise. The client crashes right after the restart decision, before it
+/// consumed anything, and the peer's head then passes the old cursor: resuming from the stale
+/// cursor would skip the rows the restored log stamped below it. The restart's eager write of
+/// cursor 0 prevents that.
+#[test]
+fn a_crash_right_after_an_unminted_restores_restart_does_not_resume_from_the_stale_cursor() {
+    let mut sim = Sim::new(Shape::small(), 14);
+    sim.remote.commit(vec![laws::grant(&[(0, 0)])]);
+    sim.member(0, 0);
+    sim.step(Op::Snapshot);
+    sim.member(1, 0);
+    sim.want(&[0]);
+    sim.quiesce();
+    let old = sim.local.persisted[&part(0)];
+    assert_eq!(old.rev, 3);
+
+    sim.lose_all();
+    assert!(sim.remote.restore(false));
+    sim.step(Op::Crash {
+        committed: 0,
+        close: false,
+    });
+    // the restart decision, and nothing else: no row is consumed before the crash
+    for _ in 0..20 {
+        if !sim.restarts.is_empty() {
+            break;
+        }
+        sim.deliver_all();
+    }
+    assert_eq!(sim.restarts.len(), 1, "the part restarted");
+    assert_eq!(
+        sim.local.persisted[&part(0)],
+        PeerCursor {
+            generation: old.generation,
+            rev: 0
+        },
+        "the stale cursor is replaced at the decision"
+    );
+    sim.step(Op::Crash {
+        committed: 0,
+        close: true,
+    });
+    // the restored log grows past the old cursor, with rows stamped below it
+    sim.member(2, 0);
+    sim.member(3, 0);
+    assert!(sim.remote.head() > old.rev);
+    sim.quiesce();
+    let members = sim.local_members(0);
+    assert!(
+        members.contains(&obj(2)) && members.contains(&obj(3)),
+        "{members:?}"
+    );
+}

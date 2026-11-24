@@ -295,8 +295,10 @@ impl Sim {
                     }
                 }
                 PeerCommand::PersistCursor { part, cursor } => {
+                    // the restart's write of cursor 0 (`PartLifecycle` laws 7 and 10) is the
+                    // one persist a walking part may make: 0 skips nothing
                     assert!(
-                        !self.sync.walking(&part),
+                        cursor.rev == 0 || !self.sync.walking(&part),
                         "law 9: {part} persisted at {cursor:?} while it is walking"
                     );
                     // the table keeps the last write; the machine only lowers a cursor within
