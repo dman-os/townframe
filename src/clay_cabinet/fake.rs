@@ -17,6 +17,7 @@
 
 use crate::CabinetDocs;
 use big_cabinet_core::DatumKey;
+use big_cabinet_core::DatumTag;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::doc::DatumEvent;
@@ -26,6 +27,7 @@ use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::ObservedDatum;
 use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::query::Anchor;
+use big_cabinet_core::query::IndexFacts;
 use big_cabinet_core::query::Predicate;
 use futures::future::BoxFuture;
 use std::collections::BTreeMap;
@@ -207,7 +209,7 @@ impl MemoryCabinet {
                     if names_tag {
                         move_in_or_out(&state, request, *revision, doc_id, &mut events);
                     } else if request.datums.selects(key)
-                        && matches(&state, &request.predicate, doc_id)
+                        && request.predicate.matches(&*state, doc_id)
                     {
                         events.push(DatumEvent::Datum {
                             revision: *revision,
@@ -286,7 +288,7 @@ fn move_in_or_out(
     doc_id: &DocId,
     events: &mut Vec<DatumEvent>,
 ) {
-    if !matches(state, &request.predicate, doc_id) {
+    if !request.predicate.matches(state, doc_id) {
         events.push(DatumEvent::Leave {
             revision,
             doc_id: doc_id.clone(),
@@ -324,24 +326,24 @@ fn observed(state: &State, doc_id: &DocId, key: &DatumKey) -> ObservedDatum {
     }
 }
 
-fn matches(state: &State, predicate: &Predicate, doc_id: &DocId) -> bool {
-    let rows = state.rows.get(doc_id);
-    match predicate {
-        Predicate::HasTag { tag } => {
-            rows.is_some_and(|rows| rows.keys().any(|key| key.tag() == tag))
-        }
-        Predicate::HasKey { key } => rows.is_some_and(|rows| rows.contains_key(key)),
-        Predicate::IsDoc { doc_id: only } => only == doc_id,
-        Predicate::InDrawer { drawer_id, .. } => state
-            .rosters
+impl IndexFacts for State {
+    fn has_key(&self, doc_id: &DocId, key: &DatumKey) -> bool {
+        self.rows
+            .get(doc_id)
+            .is_some_and(|rows| rows.contains_key(key))
+    }
+
+    fn has_tag(&self, doc_id: &DocId, tag: &DatumTag) -> bool {
+        self.rows
+            .get(doc_id)
+            .is_some_and(|rows| rows.keys().any(|key| key.tag() == tag))
+    }
+
+    /// The fake keeps flat rosters and no drawer nesting, so `transitive` changes nothing.
+    fn listed_in(&self, drawer_id: &DocId, doc_id: &DocId, _transitive: bool) -> bool {
+        self.rosters
             .get(drawer_id)
-            .is_some_and(|roster| roster.contains(doc_id)),
-        Predicate::HasReferenceTo { .. } => {
-            unimplemented!("the fake cabinet keeps no reference edges")
-        }
-        Predicate::And { clauses } => clauses.iter().all(|clause| matches(state, clause, doc_id)),
-        Predicate::Or { clauses } => clauses.iter().any(|clause| matches(state, clause, doc_id)),
-        Predicate::Not { inner } => !matches(state, inner, doc_id),
+            .is_some_and(|roster| roster.contains(doc_id))
     }
 }
 

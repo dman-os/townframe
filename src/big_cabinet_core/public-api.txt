@@ -4,6 +4,7 @@
 # exposed_external_crates: [automerge]
 
 impl Default for big_cabinet_core::dmeta::Uuid7
+impl Default for big_cabinet_core::query::conformance::Fixture
 impl Deserialize < 'de > for big_cabinet_core::authority::Rights
 impl Deserialize < 'de > for big_cabinet_core::dmeta::Bytes
 impl Deserialize < 'de > for big_cabinet_core::dmeta::Cid
@@ -33,6 +34,7 @@ impl FromStr for big_cabinet_core::reference::ActorUrl
 impl FromStr for big_cabinet_core::reference::DatumKey
 impl FromStr for big_cabinet_core::reference::DatumReference
 impl FromStr for big_cabinet_core::reference::Location
+impl IndexFacts for big_cabinet_core::query::conformance::Fixture
 impl Serialize for big_cabinet_core::authority::Rights
 impl Serialize for big_cabinet_core::dmeta::Bytes
 impl Serialize for big_cabinet_core::dmeta::Cid
@@ -93,6 +95,8 @@ pub big_cabinet_core::datum::operation::fn validate < 'a > (kind : OperationKind
 pub big_cabinet_core::dmeta::fn cid_of (bytes : & [u8]) -> Cid
 pub big_cabinet_core::drawer::protocol::fn drawer_object (access : Access , drawer : & DrawerId) -> String
 pub big_cabinet_core::drawer::protocol::fn drawer_placement (drawer : & DrawerId) -> String
+pub big_cabinet_core::query::conformance::fn cases () -> Vec < (& 'static str , Predicate , BTreeSet < DocId >) >
+pub big_cabinet_core::query::conformance::fn doc (byte : u8) -> DocId
 pub big_cabinet_core::reference::fn head_text (head : & ChangeHash) -> String
 pub big_cabinet_core::reference::fn parse_head (value : & str) -> Result < ChangeHash , ReferenceError >
 pub big_cabinet_core::reference::head_list::fn deserialize < 'de , D : Deserializer < 'de > > (deserializer : D ,) -> Result < Vec < ChangeHash > , D :: Error >
@@ -105,6 +109,8 @@ pub const big_cabinet_core::datum::lexicon::stability::DEPRECATED: & str
 pub const big_cabinet_core::datum::lexicon::stability::SINCE: & str
 pub const big_cabinet_core::datum::lexicon::stability::UNSTABLE: & str
 pub const big_cabinet_core::drawer::protocol::CREATE_DRAWER_OBJECT: & str
+pub const big_cabinet_core::query::conformance::BLOB: & str
+pub const big_cabinet_core::query::conformance::NOTE: & str
 pub const big_cabinet_core::reference::CANONICAL_REFERENCE_UNICODE_VERSION: (u64 , u64 , u64)
 pub const big_cabinet_core::reference::REFERENCE_SCHEME: & str
 pub const big_cabinet_core::reference::SELF_DOC: & str
@@ -214,9 +220,12 @@ pub impl big_cabinet_core::query::Anchor::fn drawer_id (& self) -> Option < & Do
 pub impl big_cabinet_core::query::DatumSelection::fn selects (& self , datum_key : & DatumKey) -> bool
 pub impl big_cabinet_core::query::DatumSelection::fn tags (& self) -> Option < & BTreeSet < DatumTag > >
 pub impl big_cabinet_core::query::Predicate::fn anchors (& self) -> Result < Vec < Anchor > , PredicateError >
+pub impl big_cabinet_core::query::Predicate::fn matches (& self , facts : & impl IndexFacts , doc_id : & DocId) -> bool
 pub impl big_cabinet_core::query::Predicate::fn sole_doc (& self) -> Option < & DocId >
 pub impl big_cabinet_core::query::Predicate::fn tags (& self) -> BTreeSet < DatumTag >
 pub impl big_cabinet_core::query::Predicate::fn uses_reference_edges (& self) -> bool
+pub impl big_cabinet_core::query::conformance::Fixture::fn new () -> Self
+pub impl big_cabinet_core::query::conformance::Fixture::fn universe (& self) -> BTreeSet < DocId >
 pub impl big_cabinet_core::reference::ActorUrl::fn new (node_key : MultibaseKey , path : impl Into < String >) -> Result < Self , ReferenceError >
 pub impl big_cabinet_core::reference::ActorUrl::fn node_key (& self) -> & MultibaseKey
 pub impl big_cabinet_core::reference::ActorUrl::fn parse (value : & str) -> Result < Self , ReferenceError >
@@ -257,6 +266,7 @@ pub mod big_cabinet_core::drawer
 pub mod big_cabinet_core::drawer::listing
 pub mod big_cabinet_core::drawer::protocol
 pub mod big_cabinet_core::query
+pub mod big_cabinet_core::query::conformance
 pub mod big_cabinet_core::reference
 pub mod big_cabinet_core::reference::head_list
 pub mod big_cabinet_core::schema_compat
@@ -366,6 +376,7 @@ pub struct big_cabinet_core::drawer::protocol::RevokeDrawer  { capability: CapId
 pub struct big_cabinet_core::drawer::protocol::RevokePrincipal  { capability: CapId, drawer_id: DrawerId, principal: Principal }
 pub struct big_cabinet_core::drawer::protocol::SetDrawerPolicy  { capability: CapId, drawer_id: DrawerId, mirror: bool }
 pub struct big_cabinet_core::drawer::protocol::SetDrawerSuccessor  { capability: CapId, drawer_id: DrawerId, successor: DrawerId }
+pub struct big_cabinet_core::query::conformance::Fixture  { entries: Vec < (DocId , DatumKey) >, rosters: BTreeMap < DocId , BTreeSet < DocId > >, children: BTreeMap < DocId , BTreeSet < DocId > > }
 pub struct big_cabinet_core::reference::ActorUrl  {  }
 pub struct big_cabinet_core::reference::DatumKey  {  }
 pub struct big_cabinet_core::reference::DatumPin  {  }
@@ -377,6 +388,7 @@ pub struct big_cabinet_core::schema_compat::CompatibilityReport  { json: Compati
 pub struct big_cabinet_core::schema_compat::Diagnostic  { path: String, reason: String }
 pub struct big_cabinet_core::schema_compat::SchemaBundle  { root: Value, definitions: BTreeMap < String , Value > }
 pub trait big_cabinet_core::doc::DatumStore { fn owns (key : & DatumKey) -> bool; fn hydrate (read : & DatumsRead) -> Self; fn diff (before : & Self , after : & Self) -> Result < DatumPatch , StoreError > }
+pub trait big_cabinet_core::query::IndexFacts { fn has_key (& self , doc_id : & DocId , key : & DatumKey) -> bool; fn has_tag (& self , doc_id : & DocId , tag : & DatumTag) -> bool; fn listed_in (& self , drawer_id : & DocId , doc_id : & DocId , transitive : bool) -> bool }
 pub type big_cabinet_core::drawer::protocol::DrawerId = DocId
 pub type big_cabinet_core::reference::DocId = ObjKey
 pub use big_cabinet_core::datum::codec :: Bytes

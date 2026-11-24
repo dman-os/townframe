@@ -61,6 +61,26 @@ pub enum Predicate {
     Not { inner: Box<Predicate> },
 }
 
+/// The index facts a predicate is evaluated over (ADR 054 §7): which datum keys a document
+/// carries and which drawers list it. These are exactly the facts the node's SQL reads from
+/// `datum_set_entries` and the drawer projection, so a store that can answer these three
+/// questions can evaluate any clause but `HasReferenceTo`.
+pub trait IndexFacts {
+    /// Whether `doc_id` carries a live datum under exactly `key`.
+    fn has_key(&self, doc_id: &DocId, key: &DatumKey) -> bool;
+    /// Whether `doc_id` carries a live datum of `tag`.
+    fn has_tag(&self, doc_id: &DocId, tag: &DatumTag) -> bool;
+    /// Whether the drawer `drawer_id` reaches `doc_id`. With `transitive: false` that is the
+    /// drawer's own roster; with `transitive: true` it also follows nested child drawers. The
+    /// walk is the implementor's because only it knows how the drawers nest: a store holding
+    /// flat rosters answers the same for both. Access levels are not a fact here, see
+    /// [`Predicate::matches`].
+    fn listed_in(&self, drawer_id: &DocId, doc_id: &DocId, transitive: bool) -> bool;
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod conformance;
+
 const fn transitive() -> bool {
     true
 }
@@ -186,6 +206,38 @@ impl Predicate {
         }
     }
 
+    /// Whether `doc_id` satisfies this predicate over `facts`.
+    ///
+    /// This is the in-memory interpretation of the contract the node compiles to SQL; the
+    /// `conformance` table runs the same cases through both so they cannot drift.
+    ///
+    /// `InDrawer` evaluates membership only. Its `at_least` is an authority attenuation (the
+    /// caller's own level on the drawer bounds it), and the evaluator holds no grants (ADR 054
+    /// §5), so `at_least` is ignored here and enforced by whoever holds the grants.
+    ///
+    /// # Panics
+    ///
+    /// On `HasReferenceTo`: [`IndexFacts`] carries no reference edges, because no in-memory
+    /// edge table exists yet.
+    pub fn matches(&self, facts: &impl IndexFacts, doc_id: &DocId) -> bool {
+        match self {
+            Self::HasTag { tag } => facts.has_tag(doc_id, tag),
+            Self::HasKey { key } => facts.has_key(doc_id, key),
+            Self::IsDoc { doc_id: only } => only == doc_id,
+            Self::InDrawer {
+                drawer_id,
+                transitive,
+                ..
+            } => facts.listed_in(drawer_id, doc_id, *transitive),
+            Self::HasReferenceTo { .. } => {
+                unimplemented!("no in-memory reference edge table to evaluate HasReferenceTo")
+            }
+            Self::And { clauses } => clauses.iter().all(|clause| clause.matches(facts, doc_id)),
+            Self::Or { clauses } => clauses.iter().any(|clause| clause.matches(facts, doc_id)),
+            Self::Not { inner } => !inner.matches(facts, doc_id),
+        }
+    }
+
     fn negates(&self) -> bool {
         match self {
             Self::Not { .. } => true,
@@ -296,6 +348,20 @@ mod tests {
 
     fn doc(byte: u8) -> DocId {
         DocId::new([byte; 32])
+    }
+
+    #[test]
+    fn the_evaluator_agrees_with_the_conformance_table() {
+        let facts = conformance::Fixture::new();
+        let universe = facts.universe();
+        for (name, predicate, expected) in conformance::cases() {
+            let matched: BTreeSet<DocId> = universe
+                .iter()
+                .filter(|doc_id| predicate.matches(&facts, doc_id))
+                .cloned()
+                .collect();
+            assert_eq!(matched, expected, "case {name}");
+        }
     }
 
     #[test]
