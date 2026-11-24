@@ -307,7 +307,9 @@ pub trait PartStoreWrite {
         parts: &[PartKey],
     ) -> impl Future<Output = Res<()>> + Send;
     /// Set objects' payloads. A changed payload re-stamps the object's member rows and promotes
-    /// its pending memberships; an unchanged one is a no-op.
+    /// its pending memberships; an unchanged one is a no-op. Unchanged means the same canonical
+    /// content (equal [`PayloadDigest`]), so `1` and `1.0` are the same payload and the stored
+    /// form is kept.
     fn set_payloads(
         &self,
         tx: &mut Self::Tx,
