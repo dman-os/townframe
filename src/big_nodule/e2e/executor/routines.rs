@@ -795,7 +795,7 @@ async fn a_drawer_a_routine_creates_is_owned_by_the_service_and_granted_to_the_c
     let create = |node: &Node, command: &str| {
         let caller = crate::egress::WorkloadCaller {
             signer: actor.capability,
-            missing_authority: executor.missing_authority(),
+            missing_authority: Some(executor.missing_authority()),
         };
         let handles = executor.routine_capabilities()[SETUP].clone();
         let mut headers = http::HeaderMap::new();
@@ -1339,7 +1339,7 @@ mod grant_requests {
         ) -> (http::StatusCode, serde_json::Value) {
             let caller = crate::egress::WorkloadCaller {
                 signer: self.actor_at(&id(ALPHA)).await.capability,
-                missing_authority: executor.missing_authority(),
+                missing_authority: Some(executor.missing_authority()),
             };
             let mut headers = http::HeaderMap::new();
             headers.insert(
@@ -1971,7 +1971,7 @@ mod grant_requests {
         ) -> Result<(), (http::StatusCode, serde_json::Value)> {
             let caller = crate::egress::WorkloadCaller {
                 signer: self.actor_at(&id(ALPHA)).await.capability,
-                missing_authority: executor.missing_authority(),
+                missing_authority: Some(executor.missing_authority()),
             };
             let mut headers = http::HeaderMap::new();
             headers.insert(
@@ -2153,7 +2153,7 @@ mod grant_requests {
 
         let caller = crate::egress::WorkloadCaller {
             signer: node.actor_at(&id(ALPHA)).await.capability,
-            missing_authority: executor.missing_authority(),
+            missing_authority: Some(executor.missing_authority()),
         };
         let (status, body) = crate::egress::authorize_net(
             Some(&caller),

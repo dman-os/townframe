@@ -139,24 +139,28 @@ impl HttpTransport for WasiHttp {
 
         let body = request.body;
         wit_bindgen::spawn_local(async move {
+            // The host closes the body stream when it refuses the request before reading it (an
+            // origin it does not serve, or a micro it gave no egress). The refusal is the answer
+            // `send` returns, so a stream that closed early ends the upload instead of crashing
+            // the guest.
             match body {
                 XrpcBody::Json(body) => {
-                    let remaining = body_tx.write_all(body).await;
-                    assert!(remaining.is_empty(), "outgoing body stream closed early");
+                    if !body_tx.write_all(body).await.is_empty() {
+                        return;
+                    }
                 }
                 XrpcBody::Bytes(mut body) => {
                     while let Some(chunk) = body.next().await {
                         let chunk = chunk.expect("a byte request body stream cannot fail");
-                        let remaining = body_tx.write_all(chunk.to_vec()).await;
-                        assert!(remaining.is_empty(), "outgoing body stream closed early");
+                        if !body_tx.write_all(chunk.to_vec()).await.is_empty() {
+                            return;
+                        }
                     }
                 }
             }
             drop(body_tx);
-            trailers_tx
-                .write(Ok(None))
-                .await
-                .expect("outgoing trailers receiver disappeared");
+            // A host that stopped reading the request has dropped the trailers future too.
+            let _undelivered = trailers_tx.write(Ok(None)).await;
         });
 
         let response = client::send(outgoing)

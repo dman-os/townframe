@@ -58,6 +58,7 @@ pub impl big_nodule_core::config::NoduleConfig::fn set_enabled (& mut self , cac
 pub impl big_nodule_core::config::NoduleConfig::fn set_route (& mut self , pattern : & str , provider : Option < String > ,) -> std :: result :: Result < () , InventoryError >
 pub impl big_nodule_core::config::NoduleConfig::fn uninstall (& mut self , cartridge_id : & CartridgeId) -> Result < () , InventoryError >
 pub impl big_nodule_core::config::NoduleEntry::fn is_empty (& self) -> bool
+pub impl big_nodule_core::config::ResolvedGrants::fn from_grants < 'a > (grants : impl IntoIterator < Item = (& 'a GrantKey , & 'a GrantBody) > ,) -> Result < Self , String >
 pub impl big_nodule_core::inventory::InstalledNodule::fn artifact_states (& self) -> BTreeMap < String , ArtifactState >
 pub impl big_nodule_core::inventory::InstalledNodule::fn readiness (& self) -> Readiness
 pub impl big_nodule_core::protocol::NoduleScope::fn covers (& self , other : & Self) -> bool

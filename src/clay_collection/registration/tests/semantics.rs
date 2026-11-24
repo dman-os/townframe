@@ -1,4 +1,3 @@
-
 use super::*;
 
 type Collection = RegistrationCollection<u32, &'static str>;

@@ -746,6 +746,21 @@ pub struct ResolvedGrants {
 }
 
 impl ResolvedGrants {
+    /// What `grants` give, as [`CartridgeConfig::resolve_grants`] resolves a document's: for a
+    /// holder that reads a cartridge's grants over the wire (`ListCartridgeGrants`) instead of
+    /// holding its config document, such as a micro host. A grant that states a value its kind
+    /// does not take, or an access level this build does not know, refuses the lot with the
+    /// reason.
+    pub fn from_grants<'a>(
+        grants: impl IntoIterator<Item = (&'a GrantKey, &'a GrantBody)>,
+    ) -> Result<Self, String> {
+        let mut resolved = Self::default();
+        for (grant, body) in grants {
+            resolved.apply(grant, body)?;
+        }
+        Ok(resolved)
+    }
+
     /// Adds one grant. Two grants of the same drawer or cartridge keep the wider access.
     fn apply(&mut self, grant: &GrantKey, body: &GrantBody) -> Result<(), String> {
         if !grant.accepts(body) {

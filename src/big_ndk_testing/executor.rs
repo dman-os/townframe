@@ -381,7 +381,7 @@ impl NoduleExecutor for NativeExecutor {
                 dispatch: self.dispatch.clone(),
                 caller: WorkloadCaller {
                     signer: spec.actor.capability,
-                    missing_authority: spec.missing_authority.clone(),
+                    missing_authority: Some(spec.missing_authority.clone()),
                 },
             },
         );

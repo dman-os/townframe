@@ -28,7 +28,7 @@ serde_json.workspace = true
 schemars = "1.2"
 thiserror.workspace = true
 bs58.workspace = true
-irpc.workspace = true
+irpc = { workspace = true, default-features = false, features = ["derive", "rpc", "spans"] }
 tracing.workspace = true
 
 [dev-dependencies]
