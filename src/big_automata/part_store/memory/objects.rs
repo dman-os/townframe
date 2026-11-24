@@ -125,7 +125,7 @@ impl State {
         let mut stamped = false;
         for (obj, payload, digest) in payloads {
             let old = self.objs.get(&obj);
-            if old.is_some_and(|row| row.payload == payload) {
+            if old.is_some_and(|row| row.digest == digest) {
                 continue;
             }
             let old_digest = old.map(|row| row.digest);

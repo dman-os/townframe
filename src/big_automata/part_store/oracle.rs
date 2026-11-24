@@ -138,7 +138,12 @@ impl PartOracle {
                 PartWrite::SetPayloads(payloads) => {
                     for (obj, payload) in payloads {
                         stamped |= self.step(rev, |oracle| {
-                            if oracle.payloads.get(&obj) == Some(&payload) {
+                            // unchanged means the same canonical content, as the digest sees it
+                            let digest = |payload: &ObjPayload| {
+                                PayloadDigest::of(payload)
+                                    .expect("generated payloads are canonical")
+                            };
+                            if oracle.payloads.get(&obj).map(digest) == Some(digest(&payload)) {
                                 return None;
                             }
                             oracle.payloads.insert(obj.clone(), payload);

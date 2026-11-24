@@ -72,7 +72,11 @@ pub use generators::part_ops;
 use generators::*;
 
 mod payloads;
-pub use payloads::*;
+pub use payloads::a_dropped_payload_is_gone;
+pub use payloads::a_partless_object_is_listed_until_its_payload_is_dropped;
+pub use payloads::dropping_is_atomic_with_its_transaction;
+pub use payloads::dropping_the_payload_of_a_member_is_a_caller_bug;
+pub use payloads::removing_then_dropping_in_one_transaction_is_valid;
 
 type Tx<B> = <<B as Backend>::Store as PartStoreWrite>::Tx;
 
@@ -1243,6 +1247,19 @@ pub async fn unchanged_writes_stamp_nothing<B: Backend>(backend: &B) -> Res<()> 
         None
     );
     assert_eq!(RevSource::latest_rev(&harness.store).await?, 1);
+    // Unchanged is judged by canonical content: `5.0` is the payload `5` is.
+    let as_payload = |value| PartWrite::SetPayloads(vec![(obj(0), value)]);
+    let stamped = harness
+        .commit(vec![as_payload(serde_json::json!(5))])
+        .await?;
+    assert_eq!(stamped, Some(2));
+    assert_eq!(
+        harness
+            .commit(vec![as_payload(serde_json::json!(5.0))])
+            .await?,
+        None,
+        "a payload equal in canonical form is unchanged"
+    );
     Ok(())
 }
 
