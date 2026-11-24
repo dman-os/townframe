@@ -1,6 +1,6 @@
 # Mobile
 
-Android composition root for Dayframe. Shared design tokens and components live in `../ui`.
+Android composition root for daytxt. Shared design tokens and components live in `../ui`.
 
 ```sh
 ../../../target/dioxus-cli/bin/dx serve \
