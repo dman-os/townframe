@@ -268,6 +268,12 @@ Round 1 as given (2026-11-19, CLI dogfood; proposals mine where marked):
   - intxt is VCS-agnostic and carries its own commits (commits documents and packs), so the viewer needs nothing from a forge to show them.
   - The forge identity proposal waits.
 - **D86 (2026-11-24, operator) Mutations live in the app; the web viewer only reads.** Review and anything else that changes an intxt belong in the desktop and phone app, never in the web viewer. Review on mobile this week means reading an intxt in the viewer.
+- **D87 (2026-11-24, operator) Guest faults and logs, by the numbers** (`guest-faults-and-logs.md`, accepted; claytxt and nodules reviewed it). Two layers:
+  - **User-facing:** the old progress repo's descendant, a service cartridges consume. Deferred; its nouns and verbs, and the string-allocation cost the operator flagged, are recorded in the doc.
+  - **Low-level, built now:** a rolling JSON-lines log file per process, panics logged and flushed, guest stdio captured per instance, a fault as a record with raw trap frames.
+  - **Shipped guests carry no DWARF:** it was ~94% of a micro (review 69.6 MB, 4.7 MB without it). Function names stay in, and the DWARF goes to a side file named by the package digest.
+  - **Who builds:** intxt builds the strip/split and the log file. claytxt builds the micro-side faults. nodules builds the cartridge side (#342, with a wash-runtime fork patch for per-workload stdio).
+- **D88 (2026-11-24, operator) The review micro's visuals wait for a design session with claytxt.** "Show changes" works end to end on the desktop, but it looks poor. No visual work on the micro until that session.
 
 ## For the ADRs
 
@@ -465,6 +471,11 @@ Round 1 as given (2026-11-19, CLI dogfood; proposals mine where marked):
 
 - **F29 (2026-11-12) A short id starting with `z` parsed as a drawer id.** `day x intxt` resolved a name as a full drawer id first. Drawer ids are `z` + base58 and short ids use jj's `z`–`k` alphabet, which base58 accepts, so a short id starting with `z` became a key of a few bytes, and `z` alone the empty key. Its access check sent the empty id to `big_repo`, whose hub failed its loop (`key is 0 bytes wide`, ~1 in 5 e2e runs: a one-intxt test has a one-letter short id, `z` 1 time in 16). Pinned with INSTR on mothership (stack: `package.rs` resolve → mintDocCapability scope → `reach` → policy refresh → `get_doc` → hub). Fixed on feat/intxt-impl 635b7369: only a 32-byte key is a drawer id. The hub dying on one malformed request id is the nodules lane's; they fix it at the request edge on -next (typed refusal, regression test).
 
+- **F30 (2026-11-24) The review micro never followed D70.** It still read the title and body from the drawer's own document, so every intxt made since 11-19 showed "its title is absent". Its fixture laid intxts out the pre-D70 way, so no test noticed. Fixed by b97763ff (stack/intxt-39-review-d70): the micro follows the index pointer, resolves `self` patch references against the index, and the fixture uses the D70 layout.
+- **F31 (2026-11-24) A micro fault was silent.** "Show changes" faulted the review micro: the shell refused CodeView's `contain` and `isolation` style properties. The panel said "Component withdrawn.", nothing was logged at any `RUST_LOG`, and the reason showed only under Settings → Micro lifecycle. It took over an hour to find over AT-SPI. claytxt-66 admits both properties and names a refused one; claytxt-67 logs `micro faulted`. This is what started D87.
+- **F32 (2026-11-24, claytxt) CI has not run the hermetic format checks since #76 (2026-10-29).** #76 removed the `nix-flake-check` hook, and checks.yml still claims it runs. Local `nix fmt` and `cargo fmt` rewrite hundreds of files; revert that churn until claytxt's proposed formatting layer lands.
+- **F33 (2026-11-24) `mbx gc` pruned live managed targets twice:** the restack worktree's, leaving a dangling `target` symlink, and the desktop worktree's while the app ran from it. `mbx clean` in the worktree resets the link.
+
 ## In flight
 
 Keep this section short: what's moving now and what's next. Move finished entries to `intxt-ledger-history.md`.
@@ -487,7 +498,13 @@ Keep this section short: what's moving now and what's next. Move finished entrie
   - Should `via` choose the node per request, or should a viewer node sync drawers first?
   - Should `add` record per-commit patches, or is the range patch enough?
   - Should one unreadable datum render a partial page, rather than a 502?
-- **The review micro's CodeView switch:** 3a675d3c on `feat/intxt-review-codeview`, carried by claytxt above their tip (C14).
+- **The review micro on the desktop (2026-11-24): works end to end, looks poor (D88).** Rehearsed on a fresh node (`/tmp/intxt-dog`): `github pull` of #322, intxt `k`, `review.json`; Layout → Review → the PR → the intxt → "Show changes" renders the patch in CodeView. Local layers on claytxt-67 (c5935126), none pushed:
+  - 39 b97763ff the D70 fix (F30);
+  - 40 dc057a97 guests ship without DWARF (D87);
+  - 41 eea77792 the log file (D87);
+  - A micro_review surface test was dropped: `SurfaceTree`'s `WriteMutations` path does not validate (only `apply` on wire batches does), and a first render has no rows. claytxt-69 (fd9153fa, #344) admits every batch the CodeView rig records through `SurfaceTree::apply`, which covers every CodeView consumer. It also found that a five-file first window is one ~266 KB batch, over the old 256 KiB limit, so any multi-file PR would have faulted; per-batch limits are now 16k mutations, 1 MiB and 512K work.
+  
+  Enabling Layout and then Review in Settings is a step the operator's "what to try" script needs.
 - **Recording Claude Code today, and what it lacks** (2026-11-24, from the code):
   - `day x intxt capture` handles every hook (SessionStart, Pre/PostToolUse, UserPromptSubmit, Stop, SubagentStop, SessionEnd) and imports transcripts with subagents.
   - It is not installed anywhere: hooks are added to `settings.json` by hand, and FDR 008's `record install` is unbuilt.
