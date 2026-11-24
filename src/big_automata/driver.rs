@@ -52,6 +52,17 @@
 //! 9. **Errors.** Transport errors are `Lost` outcomes, backend errors are `Failed` outcomes;
 //!    both retry inside the machine. Anything else is a bug and panics.
 //!
+//! # Runtimes
+//!
+//! The loop is spawned with `n0_future::task::spawn`, which is `tokio::spawn` natively (the
+//! future must be `Send`) and a `wasm-bindgen-futures` task in the browser (it need not be).
+//! The traits keep `+ Send` on their futures, like `BigSyncRpcClient`'s, so a browser backend
+//! whose futures hold JS handles cannot implement them as they stand. The way to lift that
+//! without target-dependent trait signatures is the one `service_client_core_rs` uses
+//! (`UnaryTransport`): drop `+ Send` from the three traits and have [`PeerDriver`] hand the
+//! loop future to the embedder instead of spawning it, so auto-trait leakage decides `Send`
+//! per concrete type. That also changes `BigSyncRpcClient`, so it is left as an open question.
+//!
 //! # The layer above: full sync across peers
 //!
 //! `wait_for_full_sync(pairs)` is the conjunction of the `Synced` facts of the asked
@@ -61,10 +72,11 @@
 //! # Testing
 //!
 //! The machine's logic is covered by its own laws and the whole-machine simulation. The driver
-//! adds: law tests over an in-process transport and a scripted backend (outcomes reported
-//! once, cancel reports `Cancelled`, cursor writes ordered, reconnect re-adds routes with their
-//! cursors, a subscriber never misses an edge), and an end-to-end run over `big_automata_iroh`
-//! on native and in the browser.
+//! adds: law tests (`tests`) over an in-process transport and a scripted backend on a paused
+//! clock (outcomes reported once, cancel reports `Cancelled`, cursor writes ordered, reconnect
+//! re-adds routes with their cursors, a subscriber never misses an edge, waiters resolve or
+//! report removal), and an end-to-end run over `big_automata_iroh` natively. The browser run
+//! is not written yet.
 
 use crate::interlude::*;
 
@@ -93,9 +105,10 @@ use crate::rev::Rev;
 /// backoff, so an implementation reports it and keeps no retry of its own. Both calls take a
 /// job they have seen before (replays repeat after a reconnect).
 ///
-/// The futures are `Send`, like [`BigSyncRpcClient`](crate::sync::rpc::BigSyncRpcClient)'s:
-/// natively the driver's loop is spawned. See the crate docs of the browser build for the
-/// consequence.
+/// The futures are `Send`, like [`BigSyncRpcClient`](crate::sync::rpc::BigSyncRpcClient)'s
+/// (ADR 039: no `FutureForm`), because natively the driver's loop is spawned with
+/// `tokio::spawn`. In the browser futures need not be `Send` and the bound is stricter than
+/// the runtime needs: see "Runtimes" in the module docs.
 pub trait SyncBackend: Send + Sync + 'static {
     /// Short and cancel-safe; never waits on bytes. `Done` lets the cursor pass the job,
     /// `Fetch` asks for [`fetch`](Self::fetch) first.
