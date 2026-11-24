@@ -779,3 +779,30 @@ fn law_5_memory_is_bounded_without_a_single_pull() {
     assert!(machine.buffered >= 2, "it did read ahead");
     assert!(!machine.walk_done());
 }
+
+/// Found by the `PeerSync` simulation: a member added to a bucket after it was listed displaces
+/// an older one onto the page after the `len` entries the listing counted. The walk stopped at
+/// `len`, the older member was never synced, and the part upgraded without it, for good (its
+/// row is below the handover cursor, so the tail never delivers it). The page's `next_after`,
+/// not the listing's `len`, says where the bucket ends.
+#[test]
+fn law_4_a_bucket_that_grew_since_it_was_listed_is_read_to_the_end_the_peer_says() {
+    let (mut machine, _) = root_machine(2, 8, 8);
+    let mut out = vec![];
+    machine.on_obj_page(root_page(0..2, true), &mut out);
+    assert_eq!(
+        leaf_requests(&out),
+        vec![Some(harness::obj(1))],
+        "the bucket was listed with 2 entries and continues past them"
+    );
+    assert!(!machine.walk_done());
+    let mut out = vec![];
+    machine.on_obj_page(root_page(2..3, false), &mut out);
+    machine.pull(usize::MAX, &mut out);
+    assert_eq!(
+        deltas(&out).len(),
+        3,
+        "every entry of both pages is emitted"
+    );
+    assert!(machine.walk_done());
+}

@@ -258,8 +258,10 @@ impl BucketMachine {
             }
             state.leaf_seen += page.entries.len() as u64;
             state.leaf_inflight = false;
-            state.leaf_exhausted =
-                page.next_after.is_none() || state.leaf_seen >= state.summary.len as u64;
+            // The page says whether the bucket continues. The listing's `len` only sizes the
+            // read-ahead: it is as old as the list call, and a bucket that grew since pushes
+            // an older member onto a later page, which a count of entries would never read.
+            state.leaf_exhausted = page.next_after.is_none();
             state.leaf_after = page.next_after;
             self.buffered += page.entries.len();
             state.pending_objs.extend(page.entries);
