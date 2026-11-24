@@ -1287,6 +1287,7 @@ mod admission_tests {
                 .unwrap(),
             );
             cartridge.micro = Some(MicroContribution {
+                uses: Default::default(),
                 component: "micro".into(),
                 schema: "org.example.clay.micro".into(),
                 description: Default::default(),

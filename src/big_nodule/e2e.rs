@@ -575,7 +575,7 @@ async fn grant_drawer(
             RequestContext::root(),
             Authorization::identity(grantor.capability).metadata(),
             MintDrawerCapability {
- capability: None,
+                capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
                     create: false,
@@ -631,7 +631,7 @@ async fn boot_nodules(
             RequestContext::root(),
             Authorization::identity(authority.root).metadata(),
             MintBlobsCapability {
- capability: None,
+                capability: None,
                 scope: BlobsScope {
                     put: true,
                     ..Default::default()
@@ -672,7 +672,7 @@ async fn boot_nodules(
                 RequestContext::root(),
                 Authorization::identity(authority.root).metadata(),
                 MintDocCapability {
- capability: None,
+                    capability: None,
                     scope: DocScope {
                         drawers: BTreeMap::from([(
                             shared_config_drawer.clone(),
@@ -693,7 +693,7 @@ async fn boot_nodules(
                 RequestContext::root(),
                 Authorization::identity(authority.root).metadata(),
                 MintBlobsCapability {
- capability: None,
+                    capability: None,
                     scope: BlobsScope {
                         put: true,
                         ..Default::default()
@@ -888,7 +888,7 @@ impl Node {
                 RequestContext::root(),
                 Authorization::identity(self.drawers_actor.capability).metadata(),
                 MintDocCapability {
- capability: None,
+                    capability: None,
                     scope: DocScope {
                         write: std::collections::BTreeMap::from([(
                             config_doc.clone(),
@@ -933,7 +933,7 @@ impl Node {
                 RequestContext::root(),
                 self.operator().metadata(),
                 MintDocCapability {
- capability: None,
+                    capability: None,
                     scope: DocScope {
                         write: std::collections::BTreeMap::from([(
                             doc_id.clone(),
@@ -1060,7 +1060,7 @@ impl Node {
                 RequestContext::root(),
                 self.operator().metadata(),
                 MintBlobsCapability {
- capability: None,
+                    capability: None,
                     scope: BlobsScope {
                         put: true,
                         ..Default::default()
@@ -1187,7 +1187,7 @@ impl Node {
                 RequestContext::root(),
                 self.operator().metadata(),
                 MintDocCapability {
- capability: None,
+                    capability: None,
                     scope: DocScope {
                         read: DocScope::read_all([doc_id.clone()]),
                         ..DocScope::default()
@@ -1396,7 +1396,10 @@ impl Node {
                     parent: self.nodules_actor.capability,
                     path: format!(
                         "{NODULES_PATH}/{}",
-                        crate::store::actor_segment(cartridge_id)
+                        big_nodule_core::actor_segment(
+                            &cartridge_id.name,
+                            &cartridge_id.to_string()
+                        )
                     ),
                     rights: Rights::USE | Rights::NARROW,
                 },
@@ -1833,7 +1836,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
                 RequestContext::root(),
                 Authorization::identity(actor.capability).metadata(),
                 MintDocCapability {
- capability: None,
+                    capability: None,
                     scope: DocScope {
                         create: BTreeSet::from([placement.clone()]),
                         ..DocScope::default()
@@ -1874,7 +1877,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
             RequestContext::root(),
             Authorization::identity(actor.capability).metadata(),
             MintDocCapability {
- capability: None,
+                capability: None,
                 scope: DocScope {
                     create: BTreeSet::from([placement.clone()]),
                     ..DocScope::default()
@@ -1944,7 +1947,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
             RequestContext::root(),
             Authorization::identity(actor.capability).metadata(),
             MintDocCapability {
- capability: None,
+                capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([receipt.doc_id.clone()]),
                     ..DocScope::default()
@@ -2120,6 +2123,7 @@ fn cartridge_with_micro(id: &str, version: &str) -> FixtureCartridge {
     let mut cartridge = cartridge(id, version, true);
     cartridge.with_wasm("micro", b"micro component");
     cartridge.micro = Some(MicroContribution {
+        uses: Default::default(),
         component: "micro".into(),
         schema: "org.example.clay.micro".into(),
         description: Default::default(),

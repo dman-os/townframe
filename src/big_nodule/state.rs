@@ -2957,7 +2957,7 @@ impl Stores {
                     path: format!(
                         "{}/{}",
                         self.parent_path,
-                        store::actor_segment(cartridge_id)
+                        big_nodule_core::actor_segment(&cartridge_id.name, &cartridge_id.to_string())
                     ),
                     rights: Rights::USE,
                 },

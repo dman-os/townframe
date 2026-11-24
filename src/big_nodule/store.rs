@@ -85,15 +85,6 @@ pub(crate) async fn migrate(database: &Database) -> Result<(), NodulesError> {
         .map_err(storage)
 }
 
-/// The one path segment a cartridge's actor lives at below the nodules actor. A cartridge id cannot be
-/// the segment itself: it holds `/` and `:`, and an actor segment is only ASCII letters, digits,
-/// `-`, `_` and `.`. The name keeps it readable in actor URLs and the 128-bit blake3 prefix of
-/// the full id keeps it unique across namespaces, so the segment is derived and never stored.
-pub(crate) fn actor_segment(cartridge_id: &CartridgeId) -> String {
-    let digest = blake3::hash(cartridge_id.to_string().as_bytes()).to_hex();
-    format!("{}-{}", cartridge_id.name, &digest.as_str()[..32])
-}
-
 pub(crate) async fn actors(database: &Database) -> Result<Vec<ActorRow>, NodulesError> {
     let transaction = database.begin_read().await.map_err(storage)?;
     let rows = sqlite::actors(&transaction).await.map_err(storage)?;

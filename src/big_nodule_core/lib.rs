@@ -53,6 +53,18 @@ pub mod providers;
 
 pub const AUTHORITY: &str = "org.example.daybook";
 
+/// The one path segment an id's actor lives at below its parent actor: a cartridge's below
+/// `nodules` (`name` its name, `id` its `<did>/<name>` text), and a cartridge's and each of its
+/// micros' below `micros` (a micro's `id` is `<cartridge id>/micro/<name>`). An id cannot be the
+/// segment itself: it holds `/` and `:`, and an actor segment is only ASCII letters, digits, `-`,
+/// `_` and `.`. The name keeps it readable in actor URLs and the 128-bit blake3 prefix of the full
+/// id keeps it unique across namespaces, so the segment is derived and never stored. The node and
+/// the micros nodule both derive it, so it lives here, in a crate a wasm guest builds.
+pub fn actor_segment(name: &str, id: &str) -> String {
+    let digest = blake3::hash(id.as_bytes()).to_hex();
+    format!("{name}-{}", &digest.as_str()[..32])
+}
+
 /// A method permbind projected into the provider-resolution surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
