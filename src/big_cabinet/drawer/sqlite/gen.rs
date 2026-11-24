@@ -157,11 +157,6 @@ pub async fn get_op(db: &impl crate::sqlite_rs_alias::QueryExecutor, command_id:
     set.optional()
 }
 
-pub const PURGE_DONE_OPS_SQL: &str = include_str!("queries/purge_done_ops.sql");
-pub async fn purge_done_ops(db: &impl crate::sqlite_rs_alias::Executor, cutoff: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(PURGE_DONE_OPS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cutoff)]).await
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadLocalRow {
     pub role: String,
@@ -198,6 +193,11 @@ pub const META_DOCS_SQL: &str = include_str!("queries/meta_docs.sql");
 pub async fn meta_docs(db: &impl crate::sqlite_rs_alias::QueryExecutor, drawer_id: String) -> SqlResult<Vec<MetaDocsRow>> {
     let set = db.query(META_DOCS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id)]).await?;
     set.all()
+}
+
+pub const PURGE_DONE_OPS_SQL: &str = include_str!("queries/purge_done_ops.sql");
+pub async fn purge_done_ops(db: &impl crate::sqlite_rs_alias::Executor, cutoff: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(PURGE_DONE_OPS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cutoff)]).await
 }
 
 pub const PUT_CHILD_SQL: &str = include_str!("queries/put_child.sql");
