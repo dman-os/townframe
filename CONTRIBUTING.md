@@ -57,7 +57,7 @@ cargo x plug build-oci --plug-root ./src/plug_test_manifest/
 Two targets describe one product, not two products:
 
 - **Host** (`wasm32-unknown-unknown`): the browser-side modules —
-  `dayframe_web`, `clay_rt_wcmp_web`. They run the polyfill engine (`wcmp`) on the
+  `daytxt_web`, `clay_rt_wcmp_web`. They run the polyfill engine (`wcmp`) on the
   page's own `WebAssembly`. No WASI.
 - **Guest** (`wasm32-wasip3`): micro components (`micro_counter`, `clay_mdk`
   examples) that both engines instantiate. rustc emits a component directly (no
@@ -68,7 +68,7 @@ Native is the third lane: the same guest crates' host-side tests
 (`clay_rt_wasmtime`, `clay_rt_wcmp_wasmi`) drive the prepared components under
 nextest. Feature unification must stay isolated per target: guest builds and
 matrix checks pass `--config resolver.feature-unification="selected"`.
-`x/check-dayframe.ts --prepare-only` rebuilds and exports `DAYFRAME_*_COMPONENT`
+`x/check-daytxt.ts --prepare-only` rebuilds and exports `DAYTXT_*_COMPONENT`
 paths for tests and the web shell.
 
 ## Rust target contracts
