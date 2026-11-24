@@ -888,7 +888,7 @@ async fn a_node_installs_its_core_cartridge_at_boot_and_a_reboot_keeps_the_insta
             })
             .collect()
     };
-    let expected = |nsids: &[&str]| nsids.map(str::to_owned).into_iter().collect();
+    let expected = |nsids: &[&str]| nsids.iter().copied().map(str::to_owned).collect();
     assert_eq!(
         named(true),
         expected(&[
