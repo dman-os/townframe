@@ -2520,6 +2520,33 @@ mod core_like {
             )
             .await
             .expect("the child reads with the handle narrowed onto it");
+        // The handle is bound to the child alone (ADR 037 §2): the parent, whose own actor
+        // capability signs the call, presents the child's narrowed handle and is refused. The
+        // refusal is the holder check on the body capability, not a missing right.
+        let parent_refused = node
+            .docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization {
+                    authority: narrowed_cap,
+                    signer: actor,
+                }
+                .metadata(),
+                ReadDatums {
+                    capability: narrowed_cap,
+                    doc_id: node.install_of(CORE).await.config_doc,
+                    at: At::Current,
+                    datums: Some(BTreeSet::new()),
+                    optimistic: false,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{parent_refused:?}").contains("Unauthorized"),
+            "{parent_refused:?}"
+        );
         // A path that is not one segment under the presenting actor is refused: a sibling, the
         // `nodules` subtree, an ancestor.
         for path in ["sibling", "nodules/alpha", "", "micros/child/grandchild"] {
