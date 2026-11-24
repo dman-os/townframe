@@ -1723,9 +1723,7 @@ async fn a_wasm_guest_materializes_blobs_into_its_working_mount() {
         runtime.ephemeral(&[]).unwrap(),
         big_repo::Storage::memory(&runtime).unwrap(),
     );
-    cfg.blob_storage = big_blobs::Storage::filesystem(store.clone())
-        .await
-        .unwrap();
+    cfg.blob_storage = big_blobs::Storage::filesystem(store.clone()).await.unwrap();
     let (node, stop) = BigNode::boot(cfg).await.unwrap();
     assert_eq!(std::fs::read_dir(&mounts).unwrap().count(), 0);
 
@@ -1749,7 +1747,11 @@ async fn a_wasm_guest_materializes_blobs_into_its_working_mount() {
     };
 
     // 40 000 octets is a file in the store, and a few is inline in the store's database.
-    let sum = |bytes: &[u8]| bytes.iter().fold(0u64, |sum, octet| sum + u64::from(*octet));
+    let sum = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .fold(0u64, |sum, octet| sum + u64::from(*octet))
+    };
     let large: Vec<u8> = (0..40_000).map(|index| (index % 251) as u8).collect();
     let small = b"inline in the store's database".to_vec();
     let outside = b"no handle reaches this".to_vec();
@@ -1834,7 +1836,10 @@ async fn a_wasm_guest_materializes_blobs_into_its_working_mount() {
         readfile(&small_path, false).await,
         json!({ "found": true, "length": small.len(), "sum": sum(&small) })
     );
-    assert_eq!(std::fs::metadata(mount.join(&small_name)).unwrap().nlink(), 1);
+    assert_eq!(
+        std::fs::metadata(mount.join(&small_name)).unwrap().nlink(),
+        1
+    );
 
     // A handle reaches only the blobs it names, and a blob that no handle reaches is no file.
     let (status, denied) = materialize(large_handle, &outside_info.blob_id).await;
