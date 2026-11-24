@@ -14,6 +14,7 @@ use cssparser::RuleBodyItemParser;
 use cssparser::RuleBodyParser;
 use cssparser::StyleSheetParser;
 use cssparser::Token;
+use std::borrow::Cow;
 
 /// Functions whose arguments are resolved to a URL and fetched. `url()` itself is a token of its
 /// own (`UnquotedUrl`) or a function named `url` when its argument is quoted. `image()` and
@@ -227,19 +228,21 @@ impl<'i> DeclarationParser<'i> for Sanitizer {
 /// the render path and the pairs are borrowed from `text`.
 pub(crate) fn check_inline_declarations(
     text: &str,
-    check: impl FnMut(&str, &str) -> Result<(), &'static str>,
-) -> Result<(), &'static str> {
+    check: impl FnMut(&str, &str) -> Result<(), Cow<'static, str>>,
+) -> Result<(), Cow<'static, str>> {
     struct Inline<F>(F);
-    impl<'i, F: FnMut(&str, &str) -> Result<(), &'static str>> DeclarationParser<'i> for Inline<F> {
+    impl<'i, F: FnMut(&str, &str) -> Result<(), Cow<'static, str>>> DeclarationParser<'i>
+        for Inline<F>
+    {
         type Declaration = ();
-        type Error = &'static str;
+        type Error = Cow<'static, str>;
 
         fn parse_value(
             &mut self,
             name: CowRcStr<'i>,
             input: &mut Parser<'i>,
             _declaration_start: &ParserState,
-        ) -> Result<(), ParseError<&'static str>> {
+        ) -> Result<(), ParseError<Cow<'static, str>>> {
             input.skip_whitespace();
             let start = input.position();
             if fetches(input) {
@@ -257,15 +260,15 @@ pub(crate) fn check_inline_declarations(
     impl<'i, F> AtRuleParser<'i> for Inline<F> {
         type Prelude = ();
         type AtRule = ();
-        type Error = &'static str;
+        type Error = Cow<'static, str>;
     }
     impl<'i, F> QualifiedRuleParser<'i> for Inline<F> {
         type Prelude = ();
         type QualifiedRule = ();
-        type Error = &'static str;
+        type Error = Cow<'static, str>;
     }
-    impl<'i, F: FnMut(&str, &str) -> Result<(), &'static str>>
-        RuleBodyItemParser<'i, (), &'static str> for Inline<F>
+    impl<'i, F: FnMut(&str, &str) -> Result<(), Cow<'static, str>>>
+        RuleBodyItemParser<'i, (), Cow<'static, str>> for Inline<F>
     {
         fn parse_declarations(&self) -> bool {
             true
@@ -281,7 +284,7 @@ pub(crate) fn check_inline_declarations(
         if let Err((error, _, _)) = item {
             return Err(match error.kind {
                 ParseErrorKind::Custom(reason) => reason,
-                _ => "style attribute is not a list of declarations",
+                _ => "style attribute is not a list of declarations".into(),
             });
         }
     }
