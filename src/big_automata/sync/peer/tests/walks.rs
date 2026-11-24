@@ -86,7 +86,7 @@ fn law_9_a_walking_part_persists_nothing_while_its_tail_applies() {
 fn law_10_walks_share_the_window_in_turn() {
     let mut rig = Rig::new();
     rig.sync
-        .update(&[(part(1), 0), (part(2), 0)], &[], &[], &[]);
+        .update(&[(part(1), None), (part(2), None)], &[], &[], &[]);
     let asked = rig.flush();
     let decided = rig.decide(&asked, &[(1, walk_summary(10)), (2, walk_summary(10))]);
     let lists = decided.lists();

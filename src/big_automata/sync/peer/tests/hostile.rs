@@ -89,7 +89,7 @@ fn law_3_a_page_the_client_rejects_fails_the_round() {
 fn law_3_a_dropped_route_is_skipped_for_that_route_only() {
     let mut rig = Rig::new();
     rig.sync
-        .update(&[(part(1), 0), (part(2), 0)], &[], &[], &[]);
+        .update(&[(part(1), None), (part(2), None)], &[], &[], &[]);
     let asked = rig.flush();
     let decided = rig.decide(&asked, &[(1, cursor_summary(0)), (2, cursor_summary(0))]);
     let (call, _, page) = rig.ack(&decided).only_round();

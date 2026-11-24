@@ -18,6 +18,7 @@ use crate::part_store::laws::part;
 use crate::part_store::laws::principal;
 use crate::part_store::laws::set;
 use crate::part_store::memory::MemoryPartStore;
+use crate::sync::PeerCursor;
 
 /// Law 1: route changes, outcomes and timers all reach the machine through the one loop, so a
 /// storm of them leaves exactly the final routes wanted (the machine's own fact recomputation
@@ -172,11 +173,21 @@ struct SlowFirst {
 }
 
 impl PeerCursors for SlowFirst {
-    async fn read(&self, peer: &PeerKey, backend: &str, parts: &[PartKey]) -> Res<Vec<u64>> {
+    async fn read(
+        &self,
+        peer: &PeerKey,
+        backend: &str,
+        parts: &[PartKey],
+    ) -> Res<Vec<Option<PeerCursor>>> {
         self.table.read(peer, backend, parts).await
     }
 
-    async fn write(&self, peer: &PeerKey, backend: &str, writes: &[(PartKey, u64)]) -> Res<()> {
+    async fn write(
+        &self,
+        peer: &PeerKey,
+        backend: &str,
+        writes: &[(PartKey, PeerCursor)],
+    ) -> Res<()> {
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         n0_future::time::sleep(Duration::from_secs(8u64.saturating_sub(call))).await;
         self.table.write(peer, backend, writes).await
@@ -222,11 +233,16 @@ async fn law_5_cursor_writes_land_in_order_and_never_go_back() {
             .expect("a change");
         n0_future::time::sleep(Duration::from_millis(500)).await;
     }
-    until(|| table.get(&config.peer, "memory", &part(1)) == head).await;
+    until(|| {
+        table
+            .get(&config.peer, "memory", &part(1))
+            .is_some_and(|cursor| cursor.rev == head)
+    })
+    .await;
     let written: Vec<u64> = table
         .written()
         .into_iter()
-        .map(|(_, cursor)| cursor)
+        .map(|(_, cursor)| cursor.rev)
         .collect();
     assert!(written.len() >= 2, "{written:?}");
     assert!(written.is_sorted(), "a cursor went back: {written:?}");

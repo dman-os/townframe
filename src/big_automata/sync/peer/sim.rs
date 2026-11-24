@@ -68,6 +68,7 @@ use proptest::prelude::*;
 use super::*;
 
 use crate::fingerprint::FingerprintSeed;
+use crate::part_store::Generation;
 use crate::part_store::laws;
 use crate::part_store::laws::obj;
 use crate::part_store::laws::part;
@@ -165,6 +166,17 @@ struct Sim {
     seeds: u64,
     /// Every round the machine sent: its lane and row limit.
     pub rounds: Vec<(Lane, u32)>,
+    /// Every restart the machine reported (`PartLifecycle` law 10).
+    pub restarts: Vec<Restart>,
+}
+
+/// A part started over from cursor 0, as `PeerCommand::Restarted` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Restart {
+    part: PartKey,
+    held: PeerCursor,
+    peer_generation: Generation,
+    peer_latest: Rev,
 }
 
 impl Sim {
@@ -189,6 +201,7 @@ impl Sim {
             session: 1,
             seeds: 0,
             rounds: vec![],
+            restarts: vec![],
         }
     }
 
@@ -273,11 +286,42 @@ impl Sim {
                 PeerCommand::PersistCursor { part, cursor } => {
                     assert!(
                         !self.sync.walking(&part),
-                        "law 9: {part} persisted at {cursor} while it is walking"
+                        "law 9: {part} persisted at {cursor:?} while it is walking"
                     );
-                    let held = self.local.persisted.get(&part).copied().unwrap_or(0);
-                    assert!(cursor >= held, "{part} persisted at {cursor} after {held}");
+                    // the table's rule: a cursor only advances within its generation, and
+                    // another generation replaces the stored one
+                    if let Some(held) = self.local.persisted.get(&part)
+                        && held.generation == cursor.generation
+                    {
+                        assert!(
+                            cursor.rev >= held.rev,
+                            "{part} persisted at {cursor:?} after {held:?}"
+                        );
+                    }
                     self.local.persisted.insert(part, cursor);
+                }
+                PeerCommand::Restarted {
+                    part,
+                    held,
+                    peer_generation,
+                    peer_latest,
+                } => {
+                    assert!(
+                        held.generation != peer_generation || peer_latest < held.rev,
+                        "{part} restarted though {held:?} is a position in the peer's log \
+                         (generation {peer_generation}, latest {peer_latest})"
+                    );
+                    assert_eq!(
+                        peer_generation,
+                        self.remote.generation(),
+                        "{part} restarted on a generation that is not the peer's"
+                    );
+                    self.restarts.push(Restart {
+                        part,
+                        held,
+                        peer_generation,
+                        peer_latest,
+                    });
                 }
                 PeerCommand::Synced { part } => {
                     assert!(

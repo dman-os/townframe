@@ -56,7 +56,7 @@ fn a_removal_found_by_a_walk_survives_a_crash_before_it_settles() {
     sim.member(1, 0);
     sim.want(&[0]);
     sim.quiesce();
-    let held = sim.local.persisted[&part(0)];
+    let held = sim.local.persisted[&part(0)].rev;
     assert_eq!(sim.local_members(0), [obj(0), obj(1)].into());
 
     // the peer removes object 0, and we restart into a summary that says "far behind"
@@ -81,7 +81,7 @@ fn a_removal_found_by_a_walk_survives_a_crash_before_it_settles() {
     assert!(removal_in_flight(&sim), "the walk found the removal");
     assert!(sim.sync.walking(&part(0)));
     assert_eq!(
-        sim.local.persisted[&part(0)],
+        sim.local.persisted[&part(0)].rev,
         held,
         "nothing persists mid-walk"
     );
@@ -442,7 +442,11 @@ fn a_removal_of_a_member_applied_above_the_persisted_cursor_arrives_after_a_cras
     }
     assert!(fetching(&sim));
     assert!(
-        sim.local.persisted.get(&part(0)).copied().unwrap_or(0) < sim.remote.head(),
+        sim.local
+            .persisted
+            .get(&part(0))
+            .map_or(0, |cursor| cursor.rev)
+            < sim.remote.head(),
         "the long fetch holds the cursor below the member"
     );
 
@@ -772,7 +776,11 @@ fn persistently_failing_objects_do_not_stop_other_parts_and_hold_only_their_own_
         sim.local_members(0).is_empty(),
         "the failing objects cannot be applied"
     );
-    let held = sim.local.persisted.get(&part(0)).copied().unwrap_or(0);
+    let held = sim
+        .local
+        .persisted
+        .get(&part(0))
+        .map_or(0, |cursor| cursor.rev);
     assert!(
         held <= before,
         "part 0's cursor {held} passed the failing objects (written after {before})"
@@ -783,5 +791,5 @@ fn persistently_failing_objects_do_not_stop_other_parts_and_hold_only_their_own_
     sim.quiesce();
     assert_eq!(sim.local_members(0), (0..3).map(obj).collect());
     assert_eq!(sim.local_members(1), healthy);
-    assert!(sim.local.persisted[&part(0)] > before);
+    assert!(sim.local.persisted[&part(0)].rev > before);
 }

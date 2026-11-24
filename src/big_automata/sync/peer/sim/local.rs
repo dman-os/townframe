@@ -20,7 +20,7 @@ use crate::part_store::PartStoreRead;
 use crate::part_store::laws;
 use crate::part_store::memory::MemoryPartStore;
 use crate::part_store::oracle::PartWrite;
-use crate::rev::Rev;
+use crate::sync::PeerCursor;
 use crate::sync::object_jobs::ObjJob;
 use crate::sync::object_jobs::Outcome;
 use crate::sync::object_jobs::Settle;
@@ -71,7 +71,7 @@ pub(super) enum Step {
 pub(super) struct Local {
     pub store: MemoryPartStore,
     /// What the embedder persisted per part; survives crashes.
-    pub persisted: BTreeMap<PartKey, Rev>,
+    pub persisted: BTreeMap<PartKey, PeerCursor>,
     pub calls: BTreeMap<CallId, Flight>,
     /// Scenario overrides: the next settlement and fetch length are not drawn.
     pub force_settle: Option<Settle>,

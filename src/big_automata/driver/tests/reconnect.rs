@@ -23,7 +23,11 @@ async fn law_6_a_new_connection_resumes_from_the_persisted_cursors() {
     rig.synced(1).await;
     rig.synced(2).await;
     let first_session = rig.peer.updates()[0].session_id;
-    let persisted = rig.cursors.get(&rig.peer_key(), "memory", &part(1));
+    let persisted = rig
+        .cursors
+        .get(&rig.peer_key(), "memory", &part(1))
+        .expect("the part persisted a cursor")
+        .rev;
     assert!(persisted > 0);
 
     rig.driver.disconnect();
