@@ -249,6 +249,12 @@ pub enum NodulesError {
     Rejected(String),
     #[error("nodule for cartridge `{0}` is not installed")]
     UnknownCartridge(CartridgeId),
+    /// See [`CartridgesError::CoreCartridge`].
+    #[error(
+        "cartridge `{0}` is the node's core cartridge; the node installs, enables and grants it \
+         as its build declares"
+    )]
+    CoreCartridge(CartridgeId),
 }
 
 /// Inventory refusals cross the wire as text: the caller gets the reason, not the
@@ -289,6 +295,7 @@ impl From<NodulesError> for CartridgesError {
             NodulesError::Storage(message) => Self::Storage(message),
             NodulesError::Rejected(reason) => Self::Rejected(reason),
             NodulesError::UnknownCartridge(id) => Self::UnknownCartridge(id),
+            NodulesError::CoreCartridge(id) => Self::CoreCartridge(id),
         }
     }
 }

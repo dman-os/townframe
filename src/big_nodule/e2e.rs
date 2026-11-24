@@ -656,9 +656,20 @@ async fn boot_nodules(
         executor,
         schemas: Arc::clone(schemas),
         allow_slot_takeover,
+        core_cartridge: core_cartridge(),
         sql: (**sql).clone(),
     })
     .await
+}
+
+/// The cartridge these nodes treat as their core cartridge: a fixture id, so a test can publish
+/// versions of it as the example namespace. (A real node's is under its own publisher DID and
+/// is installed by `big_node` at boot.)
+fn core_cartridge() -> crate::CoreCartridge {
+    crate::CoreCartridge {
+        id: big_cartridges_core::test_support::cartridge_id("core"),
+        version: "1.0.0".parse().unwrap(),
+    }
 }
 
 impl Node {
@@ -1403,6 +1414,93 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
         .await
         .unwrap();
     assert!(!schema.enabled);
+    node.shutdown().await;
+}
+
+/// The core cartridge's install is the node's (ADR 053 §3 item 5): only the version the node's
+/// build carries installs, so a person cannot move it to another, and once installed it cannot be
+/// uninstalled, disabled, granted or cleared, by the operator either.
+#[tokio::test]
+async fn the_core_cartridge_installs_only_at_its_build_version_and_its_install_cannot_change() {
+    let node = node().await;
+    let operator = node.operator();
+    let core = core_cartridge();
+    let version = |label: &str| {
+        let mut cartridge =
+            FixtureCartridge::new(Cartridge::new(core.id.clone(), label.parse().unwrap()));
+        cartridge.nodule = Some(Default::default());
+        cartridge
+    };
+    let refused = CartridgesError::CoreCartridge(core.id.clone());
+
+    node.install_cartridge(operator, version("1.0.0"))
+        .await
+        .unwrap();
+    // Installing the build's version again is the node's idempotent boot step.
+    node.install_cartridge(operator, version("1.0.0"))
+        .await
+        .unwrap();
+    assert_eq!(
+        node.install_cartridge(operator, version("1.0.1"))
+            .await
+            .map(|_| ()),
+        Err(refused.clone())
+    );
+    assert_eq!(
+        node.call(
+            operator,
+            SetCartridgeEnabled {
+                cartridge_id: core.id.clone(),
+                component: Component::Nodule,
+                enabled: false,
+            },
+        )
+        .await
+        .map(|_| ()),
+        Err(refused.clone())
+    );
+    assert_eq!(
+        node.set_grant(
+            operator,
+            &core.id.to_string(),
+            GrantKey::Drawer(node.drawers.local().present_id.clone()),
+            None
+        )
+        .await,
+        Err(refused.clone())
+    );
+    assert_eq!(
+        node.call(
+            operator,
+            ClearCartridgeConfig {
+                cartridge_id: core.id.clone(),
+            }
+        )
+        .await,
+        Err(refused.clone())
+    );
+    assert_eq!(
+        node.call(
+            operator,
+            UninstallCartridge {
+                cartridge_id: core.id.clone(),
+            }
+        )
+        .await,
+        Err(refused)
+    );
+    let installs = node
+        .call(operator, ListCartridgeInstalls {})
+        .await
+        .unwrap()
+        .installs;
+    assert_eq!(
+        installs
+            .iter()
+            .map(|record| &record.cartridge_id)
+            .collect::<Vec<_>>(),
+        vec![&core.id]
+    );
     node.shutdown().await;
 }
 

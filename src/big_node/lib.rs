@@ -1,16 +1,17 @@
 #![recursion_limit = "256"]
 
 mod blob_boot;
+pub mod core_cartridge;
 #[cfg(any(test, feature = "test-support"))]
 mod fixture;
 mod info;
 mod listeners;
 pub mod peers;
 
-pub use info::GET_NODE_INFO;
-pub use info::GetNodeInfo;
 pub use info::ConfigDrawer;
 pub use info::ConfigDrawerRole;
+pub use info::GET_NODE_INFO;
+pub use info::GetNodeInfo;
 pub use info::NodeDrawers;
 pub use info::NodeInfo;
 pub use info::NodeInfoError;
@@ -528,6 +529,7 @@ impl BigNode {
                 fd_clients: None,
                 peers: None,
             };
+            node.ensure_core_cartridge().await?;
             node.attach(attachments, &mut stop).await?;
             Ok(node)
         })
@@ -977,6 +979,7 @@ where
         executor: Some(Arc::clone(&executor)),
         schemas,
         allow_slot_takeover,
+        core_cartridge: core_cartridge::pin(&cartridges.publisher),
         sql,
     })
     .await?;

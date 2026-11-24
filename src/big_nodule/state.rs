@@ -161,6 +161,8 @@ pub(crate) struct Stores {
     pub(crate) schemas: Arc<SchemaRepo>,
     /// `NodulesConfig::allow_slot_takeover`.
     pub(crate) allow_slot_takeover: bool,
+    /// `NodulesConfig::core_cartridge`.
+    pub(crate) core_cartridge: crate::CoreCartridge,
 }
 
 impl Stores {
@@ -1603,6 +1605,13 @@ impl State {
             && !(scope.admit && scope.cartridges.contains(&resolved.cartridge.id))
         {
             return Err(NodulesError::Denied);
+        }
+        // The core cartridge is installed at the version the node's build carries and no other,
+        // so installing that version again is the node's own idempotent boot step and any other
+        // version is refused (ADR 053 §3 item 5).
+        let core = &self.stores.core_cartridge;
+        if resolved.cartridge.id == core.id && resolved.cartridge.version != core.version {
+            return Err(NodulesError::CoreCartridge(core.id.clone()));
         }
         let cartridge_id = resolved.cartridge.id.clone();
         let doc = match self.config_doc(&cartridge_id).await? {

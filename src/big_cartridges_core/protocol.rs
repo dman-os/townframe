@@ -436,6 +436,14 @@ pub enum CartridgesError {
         id: CartridgeId,
         version: Box<Version>,
     },
+    /// The core cartridge is the node's own (ADR 053): the node installs it at the version its
+    /// build carries and keeps it enabled with the grants that build declares. Installing another
+    /// version of it, uninstalling or disabling it, and changing its grants or config are refused.
+    #[error(
+        "cartridge `{0}` is the node's core cartridge; the node installs, enables and grants it \
+         as its build declares"
+    )]
+    CoreCartridge(CartridgeId),
 }
 
 service_method!(MintCartridgesCapability => Capability, CartridgesError, procedure("org.example.daybook.cartridges.mintCartridgesCapability"));

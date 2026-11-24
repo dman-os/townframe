@@ -186,7 +186,17 @@ pub struct NodulesConfig {
     /// Fixed at boot: with it off, `setNoduleDevTakeover` refuses to set one and a takeover datum
     /// found in the config document is not honored, so the slot is refused.
     pub allow_slot_takeover: bool,
+    /// The node's core cartridge (ADR 053), which the node itself installs at boot: a person's
+    /// install of any other version of it, and every change to its install, is refused.
+    pub core_cartridge: CoreCartridge,
     pub sql: Database,
+}
+
+/// The id of the node's core cartridge and the version the node's build carries (ADR 053).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreCartridge {
+    pub id: CartridgeId,
+    pub version: big_cartridges_core::Version,
 }
 
 /// The hosted surface: it settles who the caller is and what they may touch, then hands the
@@ -196,6 +206,9 @@ pub struct NoduleService {
     /// The authority service, for the two methods a cartridge's own actor presents a dispatch
     /// handle to (see [`Self::presenter`]).
     authority: Client<AuthorityProtocol>,
+    /// The core cartridge's id: its install is the node's, so the methods that change an install
+    /// refuse it (ADR 053 §3 item 5).
+    core: CartridgeId,
     state: state::Handle,
 }
 
@@ -517,6 +530,14 @@ impl NoduleService {
         }
     }
 
+    /// Refuses a change to the core cartridge's install, which only the node makes.
+    fn refuse_core(&self, cartridge_id: &CartridgeId) -> Res<()> {
+        if *cartridge_id == self.core {
+            return Err(NodulesError::CoreCartridge(cartridge_id.clone()));
+        }
+        Ok(())
+    }
+
     fn require_manage(
         &self,
         caller: &Invocation<NoduleScope>,
@@ -583,6 +604,7 @@ impl NoduleService {
     ) -> Res<CartridgeInstallRecord> {
         let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.cartridge_id)?;
+        self.refuse_core(&params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::SetEnabled {
@@ -603,6 +625,7 @@ impl NoduleService {
     ) -> Res<()> {
         let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.cartridge_id)?;
+        self.refuse_core(&params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::SetGrant {
@@ -624,6 +647,7 @@ impl NoduleService {
     ) -> Res<()> {
         let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.cartridge_id)?;
+        self.refuse_core(&params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::ClearConfig {
@@ -642,6 +666,7 @@ impl NoduleService {
     ) -> Res<()> {
         let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.cartridge_id)?;
+        self.refuse_core(&params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::Uninstall {
@@ -977,6 +1002,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         executor: config.executor,
         schemas: config.schemas,
         allow_slot_takeover: config.allow_slot_takeover,
+        core_cartridge: config.core_cartridge.clone(),
     })
     .await
     {
@@ -989,6 +1015,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
     let service = Arc::new(NoduleService {
         capabilities,
         authority,
+        core: config.core_cartridge.id,
         state,
     });
     let (host, host_stop) = Host::new(Arc::clone(&service));
