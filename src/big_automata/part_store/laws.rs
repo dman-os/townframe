@@ -65,6 +65,7 @@ use crate::rev::laws::limits;
 
 mod generators;
 pub use generators::part_ops;
+pub use generators::part_writes;
 use generators::*;
 
 type Tx<B> = <<B as Backend>::Store as PartStoreWrite>::Tx;

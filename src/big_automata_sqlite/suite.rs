@@ -19,6 +19,7 @@ use crate::*;
 mod bench;
 mod crash;
 mod cursors;
+mod invariants;
 mod plans;
 
 pub(crate) type Store = SqlitePartStore<Database>;

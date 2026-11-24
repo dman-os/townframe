@@ -184,3 +184,35 @@ fn every_statement_is_served_by_an_index() -> Res<()> {
         Ok(())
     })
 }
+
+/// The objects that are members of no part are a range of a partial index, not a scan of the
+/// objects: the read the payload-dropping trait will add rests on it.
+#[test]
+fn part_less_objects_are_a_partial_index_range() -> Res<()> {
+    block_on(async {
+        let db = RUNTIME.ephemeral(MIGRATIONS)?;
+        db.migrate().await?;
+        let plan = db
+            .query(
+                "EXPLAIN QUERY PLAN
+                 SELECT obj_key
+                   FROM big_automata_objs
+                  WHERE part_count = 0
+                  ORDER BY obj_key",
+                (),
+            )
+            .await?;
+        let details = plan
+            .rows
+            .iter()
+            .map(|row| row.get::<String>("detail"))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(
+            details
+                .iter()
+                .all(|detail| detail.contains("big_automata_objs_partless")),
+            "{details:?}"
+        );
+        Ok(())
+    })
+}
