@@ -17,6 +17,8 @@ mod specimens;
 mod tests;
 
 pub use foundations::ColorFoundation;
+pub use foundations::Foundation;
+pub use foundations::FoundationPage;
 pub use foundations::FoundationSection;
 pub use foundations::TokenFoundations;
 pub use specimens::jump_to;

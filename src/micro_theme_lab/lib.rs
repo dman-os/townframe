@@ -26,9 +26,9 @@ use clay_dioxus_specimens::AppBarSpecimens;
 use clay_dioxus_specimens::ButtonSpecimens;
 use clay_dioxus_specimens::CardSpecimens;
 use clay_dioxus_specimens::ChipSpecimens;
-use clay_dioxus_specimens::ColorFoundation;
 use clay_dioxus_specimens::DrawerSpecimens;
-use clay_dioxus_specimens::FoundationSection;
+use clay_dioxus_specimens::Foundation;
+use clay_dioxus_specimens::FoundationPage;
 use clay_dioxus_specimens::ListDetailsSpecimens;
 use clay_dioxus_specimens::ListRowSpecimens;
 use clay_dioxus_specimens::NavButtonSpecimens;
@@ -38,7 +38,6 @@ use clay_dioxus_specimens::SectionsSpecimens;
 use clay_dioxus_specimens::SeparatorSpecimens;
 use clay_dioxus_specimens::SheetSpecimens;
 use clay_dioxus_specimens::TabsSpecimens;
-use clay_dioxus_specimens::TokenFoundations;
 use clay_mdk::Capability;
 use clay_mdk::Context;
 use clay_mdk::Error;
@@ -156,6 +155,15 @@ fn view(host: Host) -> Element {
         }
     };
 
+    // What the canvas shows, and the width it is framed at; both belong to this mount.
+    let selection = use_signal(|| Selection::Foundation(Foundation::Colour));
+    let frame = use_signal(|| Frame::Fill);
+    // The pages' sections register their mounted handles here (`FoundationSection`), and the
+    // Tabs and ScrubStrip pages read the renderer. A micro renders under a browser engine on
+    // every host that adopts its shadow root (Wry, the web build); Blitz never shapes this.
+    use_context_provider(|| Signal::new(BTreeMap::<String, Rc<MountedData>>::new()));
+    use_context_provider(|| Renderer::Browser);
+
     page(
         leading,
         rsx! {
@@ -163,59 +171,62 @@ fn view(host: Host) -> Element {
             // this mount alone. It follows the lab's own rules in the one stylesheet a micro has.
             Stylesheet { css: format!("{STYLES}\n{preview_css}") }
             div { class: "ct-theme-lab",
-                section { "data-part": "editor", "aria-label": "Theme CSS",
-                    label { "data-part": "heading", r#for: "theme-css", "Theme CSS" }
-                    textarea {
-                        id: "theme-css",
-                        "data-part": "field",
-                        spellcheck: "false",
-                        rows: "14",
-                        value: "{text}",
-                        oninput: move |event| {
-                            draft.set(Some(event.value()));
-                            status.set(Status::Idle);
-                        },
-                    }
-                    div { "data-part": "actions",
-                        Button {
-                            variant: ButtonVariant::Outline,
-                            label: "Apply theme".to_owned(),
-                            disabled: !dirty || applying(),
-                            onclick: apply,
-                            "Apply"
-                        }
-                        Button {
-                            variant: ButtonVariant::Outline,
-                            label: "Revert to the applied theme".to_owned(),
-                            disabled: !dirty,
-                            onclick: move |()| {
-                                draft.set(None);
+                Navigator { selection }
+                Canvas { selection: selection(), frame }
+                aside { "data-part": "inspector", "aria-label": "Inspector",
+                    section { "data-part": "editor", "aria-label": "Theme CSS",
+                        label { "data-part": "heading", r#for: "theme-css", "Theme CSS" }
+                        textarea {
+                            id: "theme-css",
+                            "data-part": "field",
+                            spellcheck: "false",
+                            rows: "14",
+                            value: "{text}",
+                            oninput: move |event| {
+                                draft.set(Some(event.value()));
                                 status.set(Status::Idle);
                             },
-                            "Revert"
                         }
-                        label { "data-part": "toggle",
-                            input {
-                                r#type: "checkbox",
-                                checked: preview(),
-                                onchange: move |event| {
-                                    preview.set(event.checked());
-                                },
+                        div { "data-part": "actions",
+                            Button {
+                                variant: ButtonVariant::Outline,
+                                label: "Apply theme".to_owned(),
+                                disabled: !dirty || applying(),
+                                onclick: apply,
+                                "Apply"
                             }
-                            "Preview the draft here"
+                            Button {
+                                variant: ButtonVariant::Outline,
+                                label: "Revert to the applied theme".to_owned(),
+                                disabled: !dirty,
+                                onclick: move |()| {
+                                    draft.set(None);
+                                    status.set(Status::Idle);
+                                },
+                                "Revert"
+                            }
+                            label { "data-part": "toggle",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: preview(),
+                                    onchange: move |event| {
+                                        preview.set(event.checked());
+                                    },
+                                }
+                                "Preview the draft here"
+                            }
                         }
-                    }
-                    match status() {
-                        Status::Idle => rsx! {},
-                        Status::Applied => rsx! {
-                            Alert { status: Tone::Success, "Applied to the whole app." }
-                        },
-                        Status::Failed(reason) => rsx! {
-                            Alert { status: Tone::Danger, "Not applied: {reason}" }
-                        },
+                        match status() {
+                            Status::Idle => rsx! {},
+                            Status::Applied => rsx! {
+                                Alert { status: Tone::Success, "Applied to the whole app." }
+                            },
+                            Status::Failed(reason) => rsx! {
+                                Alert { status: Tone::Danger, "Not applied: {reason}" }
+                            },
+                        }
                     }
                 }
-                Board {}
             }
         },
     )
@@ -229,11 +240,18 @@ fn page(leading: Element, body: Element) -> Element {
     }
 }
 
-/// One page of the specimen board: the foundations, or one kit component's specimens.
+/// What the canvas shows: one entry of the navigator.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BoardPage {
-    Foundations,
-    Colours,
+enum Selection {
+    /// The stylesheet stack. One sheet today, the theme the lab edits.
+    Sheets,
+    Foundation(Foundation),
+    Component(Component),
+}
+
+/// The kit components the board has a specimen page for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Component {
     Button,
     Card,
     Alert,
@@ -251,31 +269,27 @@ enum BoardPage {
     ScrubStrip,
 }
 
-impl BoardPage {
-    const ALL: [BoardPage; 17] = [
-        Self::Foundations,
-        Self::Colours,
+impl Component {
+    const ALL: [Component; 15] = [
+        Self::AppBar,
+        Self::Alert,
         Self::Button,
         Self::Card,
-        Self::Alert,
         Self::Chip,
-        Self::Tabs,
-        Self::Separator,
-        Self::AppBar,
-        Self::NavButton,
-        Self::ListRow,
-        Self::ListDetails,
-        Self::PanelPage,
-        Self::Sections,
-        Self::Sheet,
         Self::Drawer,
+        Self::ListDetails,
+        Self::ListRow,
+        Self::NavButton,
+        Self::PanelPage,
         Self::ScrubStrip,
+        Self::Sections,
+        Self::Separator,
+        Self::Sheet,
+        Self::Tabs,
     ];
 
     fn title(self) -> &'static str {
         match self {
-            Self::Foundations => "Foundations",
-            Self::Colours => "Colours",
             Self::Button => "Button",
             Self::Card => "Card",
             Self::Alert => "Alert",
@@ -296,17 +310,6 @@ impl BoardPage {
 
     fn render(self) -> Element {
         match self {
-            Self::Foundations => rsx! { TokenFoundations {} },
-            Self::Colours => rsx! {
-                FoundationSection {
-                    id: "colours".to_owned(),
-                    title: "Colour roles".to_owned(),
-                    description: "Every semantic colour role, painted from its live custom property: \
-                        a theme that sets a role changes its swatch here."
-                        .to_owned(),
-                    ColorFoundation {}
-                }
-            },
             Self::Button => rsx! { ButtonSpecimens {} },
             Self::Card => rsx! { CardSpecimens {} },
             Self::Alert => rsx! { AlertSpecimens {} },
@@ -321,39 +324,118 @@ impl BoardPage {
             Self::Sections => rsx! { SectionsSpecimens {} },
             Self::Sheet => rsx! { SheetSpecimens {} },
             Self::Drawer => rsx! { DrawerSpecimens {} },
-            // The strip sizes itself to a viewport; the board gives it a fixed one, as the
+            // The strip sizes itself to a viewport; the canvas gives it a fixed one, as the
             // showcase does, since a micro does not know its mount's size yet.
             Self::ScrubStrip => rsx! { ScrubStripSpecimens { viewport: (720.0, 860.0) } },
         }
     }
 }
 
-/// The specimen board: the foundation pages and every kit component's specimen page, from
-/// `clay_dioxus_specimens`, the same pages the showcase shows. It renders inside the lab's mount,
-/// so the draft previewing as the lab's stylesheet restyles every cell before anything is
-/// applied. One page at a time: the whole board in one render would be one oversized batch.
+/// The width the canvas renders at: the whole pane, or one of the kit's width classes, so a
+/// sheet is judged at phone, tablet and desktop widths without resizing the window.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Frame {
+    Fill,
+    Compact,
+    Medium,
+    Expanded,
+}
+
+impl Frame {
+    const ALL: [Frame; 4] = [Self::Fill, Self::Compact, Self::Medium, Self::Expanded];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Fill => "Fill",
+            Self::Compact => "Compact · 390",
+            Self::Medium => "Medium · 700",
+            Self::Expanded => "Expanded · 960",
+        }
+    }
+
+    /// The frame's width in CSS pixels, or `None` to fill the pane.
+    fn width_px(self) -> Option<u32> {
+        match self {
+            Self::Fill => None,
+            Self::Compact => Some(390),
+            Self::Medium => Some(700),
+            Self::Expanded => Some(960),
+        }
+    }
+}
+
+/// The navigator: every section of the lab, grouped as the stack, the foundations and the
+/// components. One entry is current; the canvas shows it.
 #[component]
-fn Board() -> Element {
-    // The pages' sections register their mounted handles here (`FoundationSection`), and the
-    // Tabs and ScrubStrip pages read the renderer. A micro renders under a browser engine on
-    // every host that adopts its shadow root (Wry, the web build); Blitz never shapes this.
-    use_context_provider(|| Signal::new(BTreeMap::<String, Rc<MountedData>>::new()));
-    use_context_provider(|| Renderer::Browser);
-    let mut page = use_signal(|| BoardPage::Foundations);
+fn Navigator(selection: Signal<Selection>) -> Element {
+    let mut selection = selection;
+    let entry = move |title: &'static str, target: Selection| {
+        rsx! {
+            Button {
+                key: "{title}",
+                variant: ButtonVariant::Ghost,
+                current: selection() == target,
+                onclick: move |()| selection.set(target),
+                "{title}"
+            }
+        }
+    };
     rsx! {
-        section { "data-part": "board", "aria-label": "Specimen board",
-            nav { "data-part": "index", "aria-label": "Board pages",
-                for each in BoardPage::ALL {
+        nav { "data-part": "navigator", "aria-label": "Theme lab sections",
+            h2 { "data-part": "group", "Sheets" }
+            {entry("Your theme", Selection::Sheets)}
+            h2 { "data-part": "group", "Tokens" }
+            for foundation in Foundation::ALL {
+                {entry(foundation.title(), Selection::Foundation(foundation))}
+            }
+            h2 { "data-part": "group", "Components" }
+            for component in Component::ALL {
+                {entry(component.title(), Selection::Component(component))}
+            }
+        }
+    }
+}
+
+/// The canvas: the toolbar, then the current section inside the chosen frame. It renders inside
+/// the lab's mount, so the draft previewing as the lab's stylesheet restyles every cell before
+/// anything is applied. One section at a time: everything in one render would be one oversized
+/// batch.
+#[component]
+fn Canvas(selection: Selection, frame: Signal<Frame>) -> Element {
+    let mut frame = frame;
+    let width = frame()
+        .width_px()
+        .map(|px| format!("max-width:{px}px;"))
+        .unwrap_or_default();
+    rsx! {
+        main { "data-part": "canvas",
+            div { "data-part": "toolbar", role: "toolbar", "aria-label": "Canvas",
+                span { "data-part": "label", "Width" }
+                for each in Frame::ALL {
                     Button {
                         key: "{each.title()}",
-                        variant: ButtonVariant::Ghost,
-                        current: page() == each,
-                        onclick: move |()| page.set(each),
+                        variant: ButtonVariant::Outline,
+                        pressed: Some(frame() == each),
+                        onclick: move |()| frame.set(each),
                         "{each.title()}"
                     }
                 }
             }
-            div { "data-part": "page", {page().render()} }
+            div { "data-part": "frame", style: "{width}",
+                match selection {
+                    Selection::Sheets => rsx! {
+                        section { "data-part": "sheets",
+                            h2 { "Sheets" }
+                            p {
+                                "One sheet today: your theme, edited in the inspector. Installed themes "
+                                "and your own sheets stacked in order come with the stylesheet stack."
+                            }
+                        }
+                    },
+                    Selection::Foundation(foundation) => rsx! { FoundationPage { foundation } },
+                    Selection::Component(component) => component.render(),
+                }
+            }
         }
     }
 }

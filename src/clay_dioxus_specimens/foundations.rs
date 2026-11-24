@@ -8,39 +8,106 @@ use dioxus::prelude::*;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+/// One design-language foundation, shown as one section of live tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Foundation {
+    Colour,
+    Typography,
+    Spacing,
+    Shape,
+    Surfaces,
+    States,
+}
+
+impl Foundation {
+    pub const ALL: [Foundation; 6] = [
+        Self::Colour,
+        Self::Typography,
+        Self::Spacing,
+        Self::Shape,
+        Self::Surfaces,
+        Self::States,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Colour => "Colour roles",
+            Self::Typography => "Typography",
+            Self::Spacing => "Spacing grid",
+            Self::Shape => "Shape & borders",
+            Self::Surfaces => "Surfaces & elevation",
+            Self::States => "Interaction states",
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Colour => "colour",
+            Self::Typography => "typography",
+            Self::Spacing => "spacing",
+            Self::Shape => "shape",
+            Self::Surfaces => "surfaces",
+            Self::States => "states",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Colour => {
+                "Every semantic colour role, painted from its live custom property: a sheet that \
+                 sets a role changes its swatch here."
+            }
+            Self::Typography => {
+                "Type tokens establish hierarchy, rhythm, and readable long-form content before \
+                 components add decoration."
+            }
+            Self::Spacing => {
+                "Spacing uses Tailwind's native utilities, driven by the single claytxt spacing unit."
+            }
+            Self::Shape => {
+                "Radius and border tokens provide the shared geometry for controls, cards, surfaces, \
+                 and focused states."
+            }
+            Self::Surfaces => {
+                "Surface roles and shadows describe how content separates from the canvas without \
+                 relying on arbitrary colors."
+            }
+            Self::States => {
+                "States are shown as deliberate specimens so themes can be evaluated for focus, \
+                 selection, feedback, and disabled legibility."
+            }
+        }
+    }
+}
+
+/// One foundation's section.
+#[component]
+pub fn FoundationPage(foundation: Foundation) -> Element {
+    rsx! {
+        FoundationSection {
+            id: foundation.id().to_owned(),
+            title: foundation.title().to_owned(),
+            description: foundation.description().to_owned(),
+            match foundation {
+                Foundation::Colour => rsx! { ColorFoundation {} },
+                Foundation::Typography => rsx! { TypographyFoundation {} },
+                Foundation::Spacing => rsx! { SpacingFoundation {} },
+                Foundation::Shape => rsx! { ShapeFoundation {} },
+                Foundation::Surfaces => rsx! { SurfaceFoundation {} },
+                Foundation::States => rsx! { StateFoundation {} },
+            }
+        }
+    }
+}
+
+/// Every foundation but colour, in order: the showcase's Tokens tab (its Colors tab shows the
+/// Material scheme instead).
 #[component]
 pub fn TokenFoundations() -> Element {
     rsx! {
-                FoundationSection {
-                    id: "typography".to_string(),
-                    title: "Typography".to_string(),
-                    description: "Type tokens establish hierarchy, rhythm, and readable long-form content before components add decoration.".to_string(),
-                    TypographyFoundation {}
-                }
-                FoundationSection {
-                    id: "spacing".to_string(),
-                    title: "Spacing grid".to_string(),
-                    description: "Spacing uses Tailwind's native utilities, driven by the single claytxt spacing unit.",
-                    SpacingFoundation {}
-                }
-                FoundationSection {
-                    id: "shape".to_string(),
-                    title: "Shape & borders".to_string(),
-                    description: "Radius and border tokens provide the shared geometry for controls, cards, surfaces, and focused states.".to_string(),
-                    ShapeFoundation {}
-                }
-                FoundationSection {
-                    id: "surfaces".to_string(),
-                    title: "Surfaces & elevation".to_string(),
-                    description: "Surface roles and shadows describe how content separates from the canvas without relying on arbitrary colors.".to_string(),
-                    SurfaceFoundation {}
-                }
-                FoundationSection {
-                    id: "states".to_string(),
-                    title: "Interaction states".to_string(),
-                    description: "States are shown as deliberate specimens so themes can be evaluated for focus, selection, feedback, and disabled legibility.".to_string(),
-                    StateFoundation {}
-                }
+        for foundation in Foundation::ALL.into_iter().filter(|foundation| *foundation != Foundation::Colour) {
+            FoundationPage { key: "{foundation.id()}", foundation }
+        }
     }
 }
 
@@ -353,24 +420,33 @@ pub fn ColorFoundation() -> Element {
     }
 }
 
+/// One colour role: a chip painted with the role, and its name and property beneath on the
+/// surface, so every role reads the same way whatever its colour. A role with an `on-` pair shows
+/// the pair as an "Aa" sample on the chip, which is how the two are meant to be used.
 #[component]
 fn ColorSwatch(name: &'static str) -> Element {
-    let text = match name.strip_prefix("on-") {
-        Some(base) => base.to_string(),
-        None if SEMANTIC_COLORS
-            .iter()
-            .any(|each| each.strip_prefix("on-") == Some(name)) =>
-        {
-            format!("on-{name}")
-        }
-        None => "text".to_string(),
-    };
+    let on = format!("on-{name}");
+    let paired = SEMANTIC_COLORS.contains(&on.as_str());
     rsx! {
-        div {
-            class: "min-h-18 box-border rounded-lg p-3",
-            style: "background:var(--ct-color-{name}); color:var(--ct-color-{text});",
-            div { class: "font-medium", "{name}" }
-            code { class: "mt-1 block text-sm opacity-80", "--ct-color-{name}" }
+        figure { class: "m-0 flex flex-col gap-2",
+            // Geometry inline with the colour: these utilities are not all in the kit's generated
+            // Tailwind, and the chip must keep its size whether or not it carries a sample.
+            div {
+                style: format!(
+                    "box-sizing:border-box; display:flex; align-items:center; justify-content:center; \
+                     height:4rem; border:var(--ct-dimension-border-width-thin) solid var(--ct-color-border); \
+                     border-radius:var(--ct-dimension-radius-lg); font-size:var(--ct-dimension-font-size-lg); \
+                     background:var(--ct-color-{name});{}",
+                    if paired { format!(" color:var(--ct-color-{on});") } else { String::new() },
+                ),
+                if paired {
+                    "Aa"
+                }
+            }
+            figcaption {
+                div { class: "font-medium text-foreground", "{name}" }
+                code { class: "block text-sm text-foreground-muted", "--ct-color-{name}" }
+            }
         }
     }
 }
