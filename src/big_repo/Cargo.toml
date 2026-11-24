@@ -89,4 +89,5 @@ secrets_rs = { workspace = true, features = ["test-support"] }
 
 #
 # misc
+ciborium.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
