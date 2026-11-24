@@ -24,7 +24,6 @@ use proptest::prelude::*;
 use super::Store;
 use super::config;
 use crate::interlude::*;
-use crate::*;
 
 /// Keys on both sides of the inline/heap boundary and where length order and byte order
 /// disagree (`[1]` sorts before `[0, 0]`).
