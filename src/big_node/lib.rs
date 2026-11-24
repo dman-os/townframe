@@ -262,9 +262,6 @@ pub struct BigNode {
     pub blobs: big_blobs::Blobs,
     pub blob_workers: big_blobs::workers::BlobWorkers,
     pub nodules_actor: OpenedActor,
-    /// The micros runtime's subsystem actor, which the core cartridge's nodule acts as (ADR 052
-    /// §2): each micro's actor is `micros/<cartridge>/<micro>` under it.
-    pub micros_actor: OpenedActor,
     pub cartridges_actor: OpenedActor,
     pub dispatch_actor: OpenedActor,
     pub indexes: Arc<Indexes>,
@@ -401,19 +398,6 @@ impl BigNode {
             let (docs_actor, docs_namespace) = open_actor(&authority, "documents").await?;
             let (drawers_actor, drawers_namespace) = open_actor(&authority, "drawers").await?;
             let (nodules_actor, nodules_namespace) = open_actor(&authority, "nodules").await?;
-            // No namespace: the micros nodule mints through the services' own namespaces, as
-            // every nodule does, so only the actor is opened.
-            let micros_actor = authority
-                .client
-                .call(
-                    RequestContext::root(),
-                    OpenActor {
-                        parent: authority.root,
-                        path: "micros".into(),
-                        rights: Rights::all(),
-                    },
-                )
-                .await?;
             let (cartridges_actor, cartridges_namespace) =
                 open_actor(&authority, "cartridges").await?;
             let (dispatch_actor, dispatch_namespace) = open_actor(&authority, "dispatch").await?;
@@ -502,7 +486,6 @@ impl BigNode {
                 &drawers,
                 &drawers_actor,
                 &nodules_actor,
-                &micros_actor,
                 nodules_namespace,
                 &dispatch,
                 nodule_dispatch_authority,
@@ -529,7 +512,6 @@ impl BigNode {
                 blobs,
                 blob_workers,
                 nodules_actor,
-                micros_actor,
                 cartridges_actor,
                 dispatch_actor,
                 indexes,
@@ -881,7 +863,6 @@ async fn boot_nodules<Host, Hosting>(
     drawers: &Drawers,
     drawers_actor: &OpenedActor,
     nodules_actor: &OpenedActor,
-    micros_actor: &OpenedActor,
     namespace: Namespace,
     dispatch: &Dispatch,
     dispatch_authority: CapId,
@@ -975,6 +956,21 @@ where
         )
         .await?
         .capability_id;
+    // The micros runtime's subsystem actor, beside `nodules`: the core cartridge's nodule acts as
+    // it (ADR 052 §2), so each micro's actor, `micros/<cartridge>/<micro>`, is in its own
+    // subtree. No namespace: the micros nodule mints through the services' own namespaces, as
+    // every nodule does.
+    let micros_actor = authority
+        .client
+        .call(
+            RequestContext::root(),
+            OpenActor {
+                parent: authority.root,
+                path: "micros".into(),
+                rights: Rights::all(),
+            },
+        )
+        .await?;
     let (nodules, nodules_stop) = big_nodule::boot(NodulesConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
@@ -998,7 +994,7 @@ where
         executor: Some(Arc::clone(&executor)),
         schemas,
         allow_slot_takeover,
-        core_cartridge: core_cartridge::pin(&cartridges.publisher, micros_actor.clone()),
+        core_cartridge: core_cartridge::pin(&cartridges.publisher, micros_actor),
         sql,
     })
     .await?;
