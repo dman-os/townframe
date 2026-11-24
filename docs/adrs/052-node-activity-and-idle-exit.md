@@ -1,6 +1,6 @@
 # ADR 052: Node activity and idle exit
 
-**Status:** Proposed (intxt lane, 2026-11-24), from the operator's ask for a TTL on auto-started servers. To be reviewed with the operator and nodules, who own most of the work sources below.
+**Status:** Accepted (operator, 2026-11-24), from the operator's ask for a TTL on auto-started servers. Proposed by the intxt lane the same day. Its number collides with `052-the-node-hosts-micros` and is fixed when it lands. Open questions 1–3 stay open; their defaults are what this ADR states.
 
 **Related:**
 - [ADR 033: what a node is](033-what-a-node-is.md) (the node directory, its lock and socket, the background server)
