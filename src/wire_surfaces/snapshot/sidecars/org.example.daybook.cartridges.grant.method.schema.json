@@ -3,7 +3,7 @@
     "MethodGrant": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,
-      "description": "`org.example.daybook.cartridges.grant.method/<nsid>`: the cartridge may invoke the one\noperation through dispatch.",
+      "description": "`org.example.daybook.cartridges.grant.method/<nsid>`: the cartridge may invoke the one\nmethod through dispatch.",
       "properties": {
         "empty": {
           "description": "A member with nothing to say states `true` (the empty-member convention).",
