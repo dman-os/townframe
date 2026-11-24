@@ -116,9 +116,15 @@ fn parse_cli(args: Vec<std::ffi::OsString>) -> Result<Cli, clap::Error> {
     }
 }
 
-/// The command line of `intxt`, for the help and errors of [`parse_cli`].
+// The command line of `intxt`, for the help and errors of [`parse_cli`]. A plain comment: clap
+// would show a doc comment as the program's description.
 #[derive(Debug, clap::Parser)]
-#[clap(name = "intxt", version, styles = CLAP_STYLE)]
+#[clap(
+    name = "intxt",
+    version,
+    about = "intxt: what was done, why, and how to review it",
+    styles = CLAP_STYLE
+)]
 struct IntxtCli {
     /// The node's directory
     #[arg(long = "node", global = true, env = "DAY_NODE", value_name = "DIR")]
