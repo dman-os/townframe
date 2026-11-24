@@ -145,6 +145,10 @@ There is no drawer-level interest. A mirrored drawer already streams from every 
   the mirrored ones. The meta group carries the descriptor and roster, never member content, so a known drawer's
   roster stays live and `docs.roster` stays current. Mirroring still adds the docs and sensitive groups, and with them
   member content. This is assumed cheap enough; measure it on a node that knows many drawers.
+- A drawer known only by its id learns its meta group from its descriptor-bearing doc, and today's roster is inline
+  on that doc. So a known drawer's descriptor doc is pulled too, as a mirrored drawer's already is. For a self-doc
+  drawer that doc is its whole content. That is acceptable: it is one doc the node was granted, and remembering a
+  drawer is an explicit act (`rememberDrawer`), not a side effect of a query.
 
 ## 6. Use cases
 
