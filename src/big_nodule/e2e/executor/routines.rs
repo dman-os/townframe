@@ -2520,19 +2520,19 @@ mod core_like {
             )
             .await
             .expect("the child reads with the handle narrowed onto it");
-        // The handle is bound to the child alone (ADR 037 §2): the parent, whose own actor
-        // capability signs the call, presents the child's narrowed handle and is refused. The
-        // refusal is the holder check on the body capability, not a missing right.
+        // The handle is bound to the child alone (ADR 037 §2). Dispatch forwards its caller's
+        // credential, so the parent's routine presents the child's narrowed handle in a body
+        // under its own dispatch handle and actor signer (`core_auth`): the presenter is the
+        // parent, the handle's subject is the child, and the domain refuses it. A credential
+        // naming the narrowed handle as its own `authority` is the other branch of
+        // `DomainCapabilities::resolve` (a service signing through a handle it minted) and
+        // is not what a nodule's call carries.
         let parent_refused = node
             .docs
             .client
             .call_with(
                 RequestContext::root(),
-                Authorization {
-                    authority: narrowed_cap,
-                    signer: actor,
-                }
-                .metadata(),
+                core_auth.metadata(),
                 ReadDatums {
                     capability: narrowed_cap,
                     doc_id: node.install_of(CORE).await.config_doc,
