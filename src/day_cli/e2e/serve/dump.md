@@ -3,7 +3,8 @@
 `day dump` is a debug view: every subcommand reads through existing node methods as the operator
 and prints pretty JSON. A drawer is itself a document, so `dump doc <drawer>` shows its
 descriptor datum, and `dump drawer` shows its view, its roster and the datums of the documents in
-it.
+it. `dump node` lists the node's own drawers (present, originated and the config drawers, each
+with its role) next to the known ones.
 
 ```console
 $ day node init
@@ -25,6 +26,14 @@ $ sh -c 'drawer=$(cat "$DAY_NODE/drawer-id"); "$DAY" dump doc "$drawer" | grep -
 
 $ sh -c '"$DAY" dump node | grep -c "\"mirror\": true"'
 1
+
+$ sh -c '"$DAY" dump node | grep -o "^ *\"\(present\|originated\|known drawers\|node config\|cartridge registry\|cartridge config\)\"$" | tr -d " " | sort'
+"cartridgeconfig"
+"cartridgeregistry"
+"knowndrawers"
+"nodeconfig"
+"originated"
+"present"
 
 $ day dump carts
 {

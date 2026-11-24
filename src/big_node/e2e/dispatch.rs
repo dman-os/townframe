@@ -170,6 +170,53 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
 }
 
 #[tokio::test]
+async fn get_node_info_reports_the_drawers_the_node_booted_with() {
+    let secrets = secrets().await;
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let (node, stop) = BigNode::boot(config(
+        Arc::clone(&secrets),
+        runtime.ephemeral(&[]).unwrap(),
+        big_repo::Storage::memory(&runtime).unwrap(),
+    ))
+    .await
+    .unwrap();
+    let output = node
+        .dispatch
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
+            big_dispatch_core::Invoke::json(crate::GET_NODE_INFO, json!({}), Default::default()),
+        )
+        .await
+        .unwrap();
+    let info: crate::NodeInfo = serde_json::from_value(output.body.into_json()).unwrap();
+
+    let local = node.drawers.local();
+    assert_eq!(info.drawers.present, local.present_id);
+    assert_eq!(info.drawers.originated, local.originated_id);
+    let reported: BTreeMap<_, _> = info
+        .drawers
+        .config
+        .iter()
+        .map(|drawer| (drawer.role.as_str(), drawer.drawer_id.clone()))
+        .collect();
+    assert_eq!(
+        reported,
+        BTreeMap::from([
+            ("known drawers", local.known_drawers_id),
+            ("node config", local.config_id),
+            ("cartridge registry", node.registry_drawer.clone()),
+            (
+                "cartridge config",
+                node.nodules.shared_config_drawer.clone()
+            ),
+        ])
+    );
+    stop.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn built_in_and_nodule_operations_share_one_router_and_one_admission() {
     let bytes = guest_bytes();
     let secrets = secrets().await;
