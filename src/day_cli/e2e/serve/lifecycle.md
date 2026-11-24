@@ -33,9 +33,9 @@ nodules   0 enabled of 0
 services  not exposed by the node
 peers     none attached (the server's node.json has no peers section)
 
-$ day exec --get org.example.daybook.nodules.listNodules
+$ day exec --get org.example.daybook.cartridges.listCartridgeGrantRequests
 {
-  "nodules": []
+  "requests": []
 }
 
 $ day node stop
