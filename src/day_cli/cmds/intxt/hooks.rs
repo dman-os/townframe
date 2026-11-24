@@ -95,16 +95,6 @@ fn settings_path(user: bool) -> Res<PathBuf> {
     }
 }
 
-fn on_path(name: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|dir| {
-            std::fs::metadata(dir.join(name))
-                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        })
-    })
-}
-
 pub(super) fn run(user: bool, dry_run: bool) -> Res<ExitCode> {
     let path = settings_path(user)?;
     let mut settings = match std::fs::read(&path) {
@@ -139,10 +129,17 @@ pub(super) fn run(user: bool, dry_run: bool) -> Res<ExitCode> {
             }
         }
     }
-    if !on_path("intxt") {
-        println!(
-            "`intxt` is not on your PATH, and the hooks call it. Make it a link to `day`:\n  ln -s \"$(command -v day)\" ~/.local/bin/intxt"
-        );
+    // `intxt` is what the hooks call; `day-intxt` is what makes `day intxt` work (a `day` plugin).
+    let on_path = std::env::var_os("PATH").unwrap_or_default();
+    for (name, why) in [
+        ("intxt", "the hooks call it"),
+        ("day-intxt", "`day intxt` runs it"),
+    ] {
+        if super::super::plugin::find_on_path(name, &on_path).is_none() {
+            println!(
+                "`{name}` is not on your PATH, and {why}. Make it a link to `day`:\n  ln -s \"$(command -v day)\" ~/.local/bin/{name}"
+            );
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

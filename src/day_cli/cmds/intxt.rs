@@ -15,7 +15,7 @@
 //! hook is kept, an identical entry is not added twice, and an older `day x intxt capture` entry
 //! is updated in place. Malformed JSON is an error that names the file, and the file is
 //! never overwritten. The hooks call `intxt`, the name `day` answers to when linked as `intxt`
-//! (`ln -s "$(command -v day)" ~/.local/bin/intxt`); the install says so when `intxt` is not on
+//! (`ln -s "$(command -v day)" ~/.local/bin/intxt`; `day-intxt` likewise makes `day intxt` work); the install says so when either is not on
 //! the `PATH`. Add `--node <dir>` (or set `DAY_NODE`) to a hook's command to name the node, and
 //! `"timeout"` to a hook if a recording can take long. The command needs the node's daemon (`day
 //! node start`) and fails fast without one: booting the node in each hook's process would take
