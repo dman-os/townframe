@@ -911,6 +911,15 @@ fn hostile_attribute_values_and_removed_names_fault_the_presentation() {
             "{name} {namespace:?} {value:?}"
         );
     }
+    // A raw style string refused for its property names the property, so a micro author sees
+    // which declaration to fix.
+    let batch = set_attribute_batch("style", None, text("height:1px; unknown-prop: 1"));
+    assert_eq!(
+        assert_terminal(&batch, true),
+        PresentationError::Unsupported(
+            "style property `unknown-prop` is not in the vocabulary".into()
+        )
+    );
 }
 
 #[test]
@@ -947,6 +956,14 @@ fn benign_link_and_style_values_are_admitted() {
             text("--diffs-annotation-min-height:0px; height: 120px"),
         ),
         ("style", None, text("overflow-anchor:none")),
+        // CodeView's scroller, sticky slab and file buffers (pierre_diffs code_view.rs, shell.rs,
+        // file_diff/nodes.rs).
+        (
+            "style",
+            None,
+            text("contain: layout style inline-size; isolation: isolate;"),
+        ),
+        ("style", None, text("contain: strict;")),
         (
             "style",
             None,

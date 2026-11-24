@@ -14,6 +14,7 @@ use dioxus_core::ListenerCallback;
 use dioxus_core::Template;
 use dioxus_core_template::RuntimeTemplateBuilder;
 use dioxus_html::PlatformEventData;
+use std::borrow::Cow;
 
 /// The host-drawn box around every guest presentation. `contain: layout paint` makes the box the
 /// containing block for absolutely and fixed positioned descendants (so a guest `position: fixed`
@@ -254,7 +255,10 @@ pub(crate) fn static_attribute(
             "font", "font-family", "font-size", "font-weight", "font-style", "line-height",
             "text-align", "text-decoration", "text-overflow", "white-space", "word-break",
             "cursor", "pointer-events", "touch-action", "user-select", "opacity", "visibility", "box-sizing",
-            "box-shadow", "transform", "transform-origin", "transition", "object-fit"
+            "box-shadow", "transform", "transform-origin", "transition", "object-fit",
+            // Containment and stacking only narrow what an element's layout and paint can
+            // reach; the Pierre CodeView port sets both on its scroller, slab and buffers.
+            "contain", "isolation"
         ],
         Some("http://www.w3.org/1999/xlink") => Some("http://www.w3.org/1999/xlink") => ["href"]
     ))
@@ -271,14 +275,14 @@ const XLINK_NAMESPACE: &str = "http://www.w3.org/1999/xlink";
 /// vocabulary at all.
 ///
 /// A removal (`None`, `false`) is always admitted. The checks are single byte-scans over the
-/// value with a fixed token list; nothing here allocates.
+/// value with a fixed token list; only a refusal that names what it refused allocates.
 pub(crate) fn attribute_value_policy(
     tag: &str,
     element_namespace: Option<&str>,
     name: &str,
     namespace: Option<&str>,
     value: &AttributeValue,
-) -> Result<(), &'static str> {
+) -> Result<(), Cow<'static, str>> {
     let text = match value {
         AttributeValue::None | AttributeValue::Boolean(false) => return Ok(()),
         AttributeValue::Text(text) => text.as_str(),
@@ -287,7 +291,7 @@ pub(crate) fn attribute_value_policy(
             // attributes whose meaning is a scheme or an autofill token.
             return match (name, namespace) {
                 ("href" | "autocomplete", None | Some(XLINK_NAMESPACE)) => {
-                    Err("non-text value for a restricted attribute")
+                    Err("non-text value for a restricted attribute".into())
                 }
                 _ => Ok(()),
             };
@@ -301,12 +305,12 @@ pub(crate) fn attribute_value_policy(
             if tag == "use" && element_namespace == Some(SVG_NAMESPACE) =>
         {
             if text.len() < 2 || !text.starts_with('#') {
-                return Err("svg use href must be a same-document fragment");
+                return Err("svg use href must be a same-document fragment".into());
             }
         }
         // `xlink:href` exists for `<use>` only; on any other element it would be an unchecked
         // second spelling of `href`.
-        ("href", Some(XLINK_NAMESPACE)) => return Err("xlink:href is only for svg use"),
+        ("href", Some(XLINK_NAMESPACE)) => return Err("xlink:href is only for svg use".into()),
         // Links carry an absolute http, https or mailto target and nothing else. The prefix test
         // runs at byte 0 (browsers strip leading C0 controls and spaces before reading the
         // scheme) and control characters anywhere are refused (tab and newline are stripped from
@@ -318,19 +322,19 @@ pub(crate) fn attribute_value_policy(
                     .is_some_and(|head| head.eq_ignore_ascii_case(scheme.as_bytes()))
             });
             if !scheme_ok || text.bytes().any(|byte| byte.is_ascii_control()) {
-                return Err("href must be an http, https or mailto url");
+                return Err("href must be an http, https or mailto url".into());
             }
         }
         // Any autofill token other than `off` invites a password manager to fill a guest field.
         ("autocomplete", None) => {
             if text != "off" {
-                return Err("autocomplete must be off");
+                return Err("autocomplete must be off".into());
             }
         }
         // SVG paint and clip references accept `url()`, which fetches.
         ("fill" | "stroke" | "clip-path", None) => {
             if css_value_is_forbidden(text, &["url("]) {
-                return Err("svg paint value carries a url");
+                return Err("svg paint value carries a url".into());
             }
         }
         (_, Some("style")) => style_value_policy(text)?,
@@ -348,9 +352,9 @@ pub(crate) fn attribute_value_policy(
                 // CSS property names are ASCII case-insensitive; only a name that isn't already
                 // lowercase pays for a copy.
                 let property = if property.bytes().any(|byte| byte.is_ascii_uppercase()) {
-                    std::borrow::Cow::Owned(property.to_ascii_lowercase())
+                    Cow::Owned(property.to_ascii_lowercase())
                 } else {
-                    std::borrow::Cow::Borrowed(property)
+                    Cow::Borrowed(property)
                 };
                 let admitted = property.starts_with("--")
                     || matches!(
@@ -358,9 +362,12 @@ pub(crate) fn attribute_value_policy(
                         Ok(Some(_))
                     );
                 if !admitted {
-                    return Err("style property is not in the vocabulary");
+                    // The refusal names the property: it is the one thing a micro author needs to fix it.
+                    return Err(
+                        format!("style property `{property}` is not in the vocabulary").into(),
+                    );
                 }
-                style_value_policy(value)
+                Ok(style_value_policy(value)?)
             })?
         }
         _ => {}
