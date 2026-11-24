@@ -76,7 +76,10 @@ fn page_root(props: PageProps) -> Element {
 fn every_page_is_admitted_by_a_clay_surface() {
     let pages: [(&str, PageFn); 17] = [
         ("foundations", || rsx! { crate::TokenFoundations {} }),
-        ("colours", || rsx! { crate::ColorFoundation {} }),
+        (
+            "colours",
+            || rsx! { crate::FoundationPage { foundation: crate::Foundation::Colour } },
+        ),
         ("button", || rsx! { crate::ButtonSpecimens {} }),
         ("card", || rsx! { crate::CardSpecimens {} }),
         ("alert", || rsx! { crate::AlertSpecimens {} }),

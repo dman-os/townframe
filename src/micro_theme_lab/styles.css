@@ -54,21 +54,52 @@
   min-height: var(--ct-dimension-target-coarse);
 }
 
-/* The specimen board: an index of pages, then the selected page on the canvas role. */
-.ct-theme-lab [data-part="board"] {
+/*
+ * Three panes: the navigator, the canvas and the inspector (the sheet editor). Stacked on a
+ * phone, navigator beside canvas on a tablet, all three side by side on a desktop.
+ */
+.ct-theme-lab [data-part="navigator"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ct-dimension-spacing-1);
+}
+
+/* Entries read as a list, so they align to the start rather than centring like buttons. */
+.ct-theme-lab [data-part="navigator"] .ct-button {
+  justify-content: flex-start;
+  text-align: start;
+}
+
+.ct-theme-lab [data-part="group"] {
+  flex-basis: 100%;
+  margin: var(--ct-dimension-spacing-3) 0 var(--ct-dimension-spacing-1);
+  color: var(--ct-color-text-muted);
+  font-size: var(--ct-dimension-font-size-sm);
+  font-weight: var(--ct-font-weight-semibold);
+}
+
+.ct-theme-lab [data-part="canvas"] {
   display: flex;
   flex-direction: column;
   gap: var(--ct-dimension-spacing-3);
   min-width: 0;
 }
 
-.ct-theme-lab [data-part="index"] {
+.ct-theme-lab [data-part="toolbar"] {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--ct-dimension-spacing-1);
+  align-items: center;
+  gap: var(--ct-dimension-spacing-2);
 }
 
-.ct-theme-lab [data-part="page"] {
+.ct-theme-lab [data-part="label"] {
+  color: var(--ct-color-text-muted);
+  font-size: var(--ct-dimension-font-size-sm);
+}
+
+.ct-theme-lab [data-part="frame"] {
+  box-sizing: border-box;
+  width: 100%;
   min-width: 0;
   padding: 0 var(--ct-dimension-spacing-4) var(--ct-dimension-spacing-4);
   border: var(--ct-dimension-border-width-thin) solid var(--ct-color-border);
@@ -77,15 +108,42 @@
   color: var(--ct-color-text);
 }
 
-/* Side by side once there is room for both: the editor stays in view while the board scrolls. */
-@media (min-width: 64rem) {
+.ct-theme-lab [data-part="sheets"] > p {
+  max-width: 40rem;
+  color: var(--ct-color-text-muted);
+}
+
+@media (min-width: 48rem) {
   .ct-theme-lab {
     display: grid;
-    grid-template-columns: minmax(20rem, 28rem) minmax(0, 1fr);
+    grid-template-columns: 12rem minmax(0, 1fr);
     align-items: start;
   }
 
-  .ct-theme-lab [data-part="editor"] {
+  .ct-theme-lab [data-part="navigator"] {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    grid-row: span 2;
+    position: sticky;
+    top: var(--ct-dimension-spacing-4);
+  }
+
+  .ct-theme-lab [data-part="inspector"] {
+    grid-column: 2;
+  }
+}
+
+@media (min-width: 80rem) {
+  .ct-theme-lab {
+    grid-template-columns: 12rem minmax(0, 1fr) minmax(20rem, 26rem);
+  }
+
+  .ct-theme-lab [data-part="navigator"] {
+    grid-row: auto;
+  }
+
+  .ct-theme-lab [data-part="inspector"] {
+    grid-column: 3;
     position: sticky;
     top: var(--ct-dimension-spacing-4);
   }
