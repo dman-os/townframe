@@ -34,24 +34,30 @@
 //! 4. **A part the answer does not decide is retried.** A part missing from the answer or
 //!    answered `Unknown` becomes `Unanswered` and re-enters the queue after backoff. A failed
 //!    call returns all its still-`Deciding` parts to `Unanswered`. A `TooManyParts { cap }`
-//!    refusal lowers `max_parts` to `cap` for the session and re-queues the parts at once,
-//!    without backoff: the refusal is about the request, not the parts.
+//!    refusal lowers `max_parts` to `cap` (at least 1) for the session and re-queues the
+//!    parts at once, without backoff: the refusal is about the request, not the parts. A
+//!    refusal that cannot lower the cap counts as a failed call, so a peer repeating it
+//!    backs off instead of looping.
 //! 5. **Backoff is per peer decision lane**: from `min_backoff`, doubling, capped at
 //!    `max_backoff`; reset by an answer that decides at least one part. One call carries
 //!    every due `Unanswered` part, so a refused part never holds a decidable neighbour back
-//!    beyond one call.
+//!    beyond one call. Backoff gates only `Unanswered` parts: a newly added part goes out in
+//!    the next call regardless. An outcome that sends a part back to `Unanswered` climbs the
+//!    ladder; the deadline is set at the next `flush`. A part re-queued from `Unanswered`
+//!    queues by its new age; one re-queued by `TooManyParts` keeps its age.
 //! 6. **`Deciding → Cursor { from }`** emits `StartCursor { part, from }`, where `from` is
 //!    the cursor we advertised in the call. **`Deciding → Walking`** emits
-//!    `StartWalk { part, strat }` and sets the part's handover cursor to the summary's
-//!    `latest`: the walk reads state no older than the summary, and the cursor tail runs
-//!    concurrently from `latest`.
+//!    `StartWalk { part, strat }` and sets the part's handover cursor to the larger of the
+//!    summary's `latest` and the cursor we already hold: the walk reads state no older than
+//!    the summary, and the cursor tail runs concurrently from there. (A peer whose `latest`
+//!    is below what we hold rewound its log; that recovery is not this machine's.)
 //! 7. **While `Walking`, the part's cursor is held.** The parent reports the tail's applied
 //!    watermark with `applied(part, cursor)`; this machine raises the held handover cursor
 //!    but emits no `PersistCursor` for a walking part. Persisting before the walk's work
 //!    settled would let a crash skip what the walk found, for good: the next session resumes
 //!    by cursor and never re-walks.
 //! 8. **Upgrade happens once, and only when told.** `upgrade(part)` is valid only for a
-//!    `Walking` part; the parent sends it when the walk reports done **and** no object work
+//!    `Walking` part (anything else is a caller bug and panics); the parent sends it when the walk reports done **and** no object work
 //!    for the part is outstanding (adds and removals alike). It emits `PersistCursor` with the
 //!    held handover cursor and moves the part to `Cursor`. In `Cursor`, every `applied`
 //!    emits `PersistCursor` when it raises the cursor; the cursor never goes back.
