@@ -17,6 +17,9 @@ clay_host = { workspace = true }
 clay_store = { workspace = true }
 clay_surface = { workspace = true }
 futures.workspace = true
+bytes.workspace = true
+http.workspace = true
+http-body-util = "0.1"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "sync"] }
 ciborium = { workspace = true }
