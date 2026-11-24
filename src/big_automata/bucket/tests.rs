@@ -2,6 +2,7 @@
 //! machines pulling from a responder's memory part store.
 
 mod harness;
+mod walk;
 
 use super::*;
 
@@ -28,7 +29,7 @@ fn calc_working_level_never_exceeds_remote_depth() {
 }
 
 /// The working level is the shallowest whose child buckets each hold at most
-/// `ACTIVE_SYNC_JOB_TARGET` members, so each level is reached in turn as the part grows by
+/// `BUFFER_TARGET` members, so each level is reached in turn as the part grows by
 /// `ARITY`, at the boundaries on both sides.
 ///
 /// The port as copied compared the child width only on its first step and the working level's
@@ -37,7 +38,7 @@ fn calc_working_level_never_exceeds_remote_depth() {
 /// `calc_working_level(16_400, 4)` was 2.
 #[test]
 fn calc_working_level_reaches_every_level() {
-    let target = u64::from(BucketMachine::ACTIVE_SYNC_JOB_TARGET);
+    let target = u64::from(BucketMachine::BUFFER_TARGET);
     let arity = u64::from(BuckId::ARITY);
     let depth = BuckId::MAX_LEVEL;
     assert_eq!(calc_working_level(target * arity, depth), 0);
@@ -197,14 +198,23 @@ fn filter_objects_compares_payloads_by_stored_digest() {
         )])
     };
     let deltas = |bucks| {
-        futures::executor::block_on(filter_objects(part(), bucks, seed, &store))
-            .expect("the memory store reads infallibly")
-            .remove(&BuckId::ROOT)
-            .expect("the bucket was asked for")
-            .entries
-            .into_iter()
-            .map(|entry| (entry.obj_key, entry.delta))
-            .collect::<Vec<_>>()
+        futures::executor::block_on(filter_objects(
+            part(),
+            vec![LeafBucketRequest {
+                buck_id: BuckId::ROOT,
+                after: None,
+            }],
+            bucks,
+            seed,
+            &store,
+        ))
+        .expect("the memory store reads infallibly")
+        .remove(&BuckId::ROOT)
+        .expect("the bucket was asked for")
+        .entries
+        .into_iter()
+        .map(|entry| (entry.obj_key, entry.delta))
+        .collect::<Vec<_>>()
     };
 
     assert_eq!(deltas(leaf(digest)), vec![], "same content");
@@ -493,7 +503,7 @@ fn a_pending_membership_misses_a_removal_its_payload_overtakes() -> Res<()> {
     .map(drop)
 }
 
-/// A part past `ACTIVE_SYNC_JOB_TARGET * ARITY` members is walked below the root, and the
+/// A part past `BUFFER_TARGET * ARITY` members is walked below the root, and the
 /// requester's agreeing buckets are pruned by their summaries: only the members of the dirty
 /// buckets at the working level are leafed, and the listing pages through the levels once
 /// plus a relisting per handoff.
