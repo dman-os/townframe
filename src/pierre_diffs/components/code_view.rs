@@ -36,6 +36,8 @@ mod scroll;
 mod shell;
 pub mod state;
 
+pub use shell::SlabNodes;
+
 #[cfg(test)]
 mod element_pooling_upstream_tests;
 #[cfg(test)]

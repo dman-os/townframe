@@ -190,7 +190,7 @@ fn measure_frame(host: &Rc<DioxusHost>) {
             pre_width: pre_rect.size.width,
             content,
             content_client_top: content_rect.origin.y,
-            content_offset: geometry.top_in_content(&host.document, host.container, content),
+            content_offset: geometry.top_in_content(&host.document, host.container(), content),
             scroll_top,
             margins,
         });
@@ -219,7 +219,7 @@ impl InteractionHost for DioxusHost {
         let scroll_top = self.scroll_top();
         match geometry.element_at(
             &self.document,
-            self.container,
+            self.container(),
             pre,
             frame,
             scroll_top,

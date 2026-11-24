@@ -12,18 +12,23 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use dioxus::core::AttributeValue;
+use dioxus::html::FocusData;
+use dioxus::html::KeyboardData;
 use dioxus::html::MountedData;
 use dioxus::html::MouseData;
 use dioxus::html::PlatformEventData;
 use dioxus::html::PointerData;
 use dioxus::html::ResizeData;
 use dioxus::html::ScrollData;
+use dioxus::html::TouchData;
 use dioxus::html::VisibleData;
+use dioxus::html::WheelData;
 use dioxus::html::input_data::MouseButton;
 use dioxus::html::point_interaction::InteractionLocation;
 use dioxus::html::point_interaction::ModifiersInteraction;
 use dioxus::html::point_interaction::PointerInteraction;
 use dioxus::prelude::*;
+use pierre_diffs::components::code_view::CodeView;
 use pierre_diffs::components::virtualizer::InstanceRef;
 use pierre_diffs::components::virtualizer::IntersectionEntry;
 use pierre_diffs::components::virtualizer::ResizeEntry;
@@ -40,6 +45,7 @@ use pierre_diffs::managers::scroll_sync_manager::ScrollSyncManager;
 
 use crate::geometry::ScrollSample;
 use crate::host::DioxusHost;
+use crate::slot::SlotContent;
 
 /// Where the events of one view go: its host cache and, on a virtualized view, the managers that
 /// observe through it. A static view's dispatch records sizes and `MountedData` for the pointer's
@@ -47,6 +53,8 @@ use crate::host::DioxusHost;
 pub(crate) struct Dispatch {
     pub(crate) host: Rc<DioxusHost>,
     pub(crate) managers: Option<ObservingManagers>,
+    /// The viewer a code view's events are delivered to; `managers` is `None` there.
+    pub(crate) code_view: Option<CodeViewManagers>,
     /// The resize and visibility entries of the frame in progress, waiting for their drain.
     pub(crate) batch: RefCell<Batch>,
 }
@@ -66,6 +74,45 @@ pub(crate) struct ObservingManagers {
     pub(crate) virtualizer: Rc<Virtualizer<DioxusHost>>,
     pub(crate) scroll_sync: Rc<ScrollSyncManager<DioxusHost>>,
     pub(crate) instance: InstanceRef,
+}
+
+/// What a code view's events do to its viewer; implemented by `CodeView` over this host, so
+/// `Dispatch` need not know the annotation type.
+pub(crate) trait ShellEvents {
+    /// The root's `scroll` event.
+    fn handle_scroll(&self);
+    /// The root's `wheel`, `touchstart`, `pointerdown` and `keydown`: a person took over.
+    fn clear_pending_scroll(&self);
+    /// One delivery of the viewer's resize observer.
+    fn handle_resize(&self, entries: &[ResizeObserverEntry<NodeKey>]);
+    /// The scroll sync manager of the item a split column's scroll event came from.
+    fn scroll_sync_of(&self, node: NodeKey) -> Option<Rc<ScrollSyncManager<DioxusHost>>>;
+}
+
+impl<A: Clone + PartialEq + 'static> ShellEvents for CodeView<DioxusHost, SlotContent, A> {
+    fn handle_scroll(&self) {
+        CodeView::handle_scroll(self);
+    }
+
+    fn clear_pending_scroll(&self) {
+        CodeView::clear_pending_scroll(self);
+    }
+
+    fn handle_resize(&self, entries: &[ResizeObserverEntry<NodeKey>]) {
+        CodeView::handle_resize(self, entries);
+    }
+
+    fn scroll_sync_of(&self, node: NodeKey) -> Option<Rc<ScrollSyncManager<DioxusHost>>> {
+        self.scroll_sync_manager_of(node)
+    }
+}
+
+/// The managers a code view's resize and scroll events are delivered to: the hub of the rows'
+/// observed sizes, and the viewer (see [`ShellEvents`]). There are no visibility events: the
+/// viewer renders by scroll position.
+pub(crate) struct CodeViewManagers {
+    pub(crate) hub: Rc<ResizeObserverHub<DioxusHost>>,
+    pub(crate) events: Rc<dyn ShellEvents>,
 }
 
 impl Dispatch {
@@ -104,7 +151,7 @@ impl Dispatch {
         // runs. The cache still feeds the hit-test and the tops the scroll fix reads, as
         // `getBoundingClientRect` would upstream.
         let is_separator = host_document(&self.host).has_attribute(node, "data-separator");
-        if self.managers.is_none() || is_separator {
+        if (self.managers.is_none() && self.code_view.is_none()) || is_separator {
             self.host.flush_frames();
             return;
         }
@@ -116,7 +163,7 @@ impl Dispatch {
             // appeared asks for the pass that reads it (a no-op unless it has something to
             // reconcile).
             batch.height_changed |=
-                previous != Some(border_height) && node != self.host.container();
+                previous != Some(border_height) && !self.host.is_container(node);
         }
         self.schedule_drain();
     }
@@ -156,6 +203,10 @@ impl Dispatch {
             scheduled: _,
         } = std::mem::take(&mut *self.batch.borrow_mut());
         let document = host_document(&self.host);
+        if let Some(code_view) = &self.code_view {
+            self.drain_code_view(code_view, resizes);
+            return;
+        }
         let managers = self.managers();
         // A row freed by a render between its event and this tick is dropped here too.
         let resizes: Vec<_> = resizes
@@ -198,20 +249,75 @@ impl Dispatch {
         self.host.flush_frames();
     }
 
-    pub(crate) fn scrolled(&self, node: NodeKey, sample: ScrollSample) {
-        self.host.record_scroll(node, sample);
-        match self.host.scroll_side(node) {
-            Some(None) => self.managers().virtualizer.handle_element_scroll(),
-            Some(Some(ScrollSide::Deletions)) => {
-                self.managers().scroll_sync.handle_deletions_scroll();
+    /// The code view's drain: the entries of the frame go to the hub of the rows' observed sizes,
+    /// then the ones of the nodes the viewer's own observer watches go to the viewer in one
+    /// delivery (two observers upstream, and the viewer's reads what the first recorded).
+    fn drain_code_view(&self, code_view: &CodeViewManagers, resizes: Vec<(NodeKey, f64, f64)>) {
+        let document = host_document(&self.host);
+        // A row freed by a pass between its event and this tick is dropped here too.
+        let entries: Vec<_> = resizes
+            .into_iter()
+            .filter(|(node, ..)| document.exists(*node))
+            .map(|(node, height, width)| ResizeObserverEntry {
+                target: node,
+                border_box_block_size: height,
+                content_box_inline_size: width,
+            })
+            .collect();
+        if !entries.is_empty() {
+            code_view.hub.handle_shared_resize_entries(&entries);
+            let observed: Vec<_> = entries
+                .into_iter()
+                .filter(|entry| {
+                    self.host
+                        .code_view()
+                        .is_some_and(|code_view| code_view.observes_shell(entry.target))
+                })
+                .collect();
+            if !observed.is_empty() {
+                code_view.events.handle_resize(&observed);
             }
-            Some(Some(ScrollSide::Additions)) => {
-                self.managers().scroll_sync.handle_additions_scroll();
-            }
-            // The listener was removed while the event was in flight.
-            None => {}
         }
         self.host.flush_frames();
+    }
+
+    pub(crate) fn scrolled(&self, node: NodeKey, sample: ScrollSample) {
+        self.host.record_scroll(node, sample);
+        match (self.host.scroll_side(node), &self.code_view) {
+            (Some(None), Some(code_view)) => code_view.events.handle_scroll(),
+            (Some(None), None) => self.managers().virtualizer.handle_element_scroll(),
+            (Some(Some(side)), None) => {
+                let scroll_sync = &self.managers().scroll_sync;
+                match side {
+                    ScrollSide::Deletions => scroll_sync.handle_deletions_scroll(),
+                    ScrollSide::Additions => scroll_sync.handle_additions_scroll(),
+                }
+            }
+            // Each item has its own manager, found by the column's place in the tree.
+            (Some(Some(side)), Some(code_view)) => {
+                let scroll_sync = code_view
+                    .events
+                    .scroll_sync_of(node)
+                    .expect("a registered column belongs to a rendered item");
+                match side {
+                    ScrollSide::Deletions => scroll_sync.handle_deletions_scroll(),
+                    ScrollSide::Additions => scroll_sync.handle_additions_scroll(),
+                }
+            }
+            // The listener was removed while the event was in flight.
+            (None, _) => {}
+        }
+        self.host.flush_frames();
+    }
+
+    /// A person's input on the root (`wheel`, `touchstart`, `pointerdown`, `keydown`) ends a
+    /// programmatic scroll. It queues no frame, so it ends no dispatch.
+    pub(crate) fn took_over(&self) {
+        self.code_view
+            .as_ref()
+            .expect("only a code view's root carries these listeners")
+            .events
+            .clear_pending_scroll();
     }
 
     /// The listener attributes of `node`, for the renderer to add to the element.
@@ -251,6 +357,45 @@ impl Dispatch {
                         client_height: f64::from(data.client_height()),
                     },
                 );
+            }));
+        }
+        let code_view = self.host.code_view();
+        if code_view.is_some_and(|code_view| code_view.wants_shell_listeners(node)) {
+            // Upstream's passive root listeners: `wheel`, `touchstart`, `pointerdown` (the
+            // scrollbar belongs to the root, and some webviews do not raise it) and `keydown`.
+            let dispatch = Rc::clone(self);
+            attributes.push(listener("onwheel", move |_: WheelData| {
+                dispatch.took_over()
+            }));
+            let dispatch = Rc::clone(self);
+            attributes.push(listener("ontouchstart", move |_: TouchData| {
+                dispatch.took_over();
+            }));
+            let dispatch = Rc::clone(self);
+            attributes.push(listener("onpointerdown", move |_: PointerData| {
+                dispatch.took_over();
+            }));
+            let dispatch = Rc::clone(self);
+            attributes.push(listener("onkeydown", move |_: KeyboardData| {
+                dispatch.took_over();
+            }));
+        }
+        if code_view.is_some_and(|code_view| code_view.is_shell(host_document(&self.host), node)) {
+            let dispatch = Rc::clone(self);
+            attributes.push(listener("onfocusin", move |_: FocusData| {
+                dispatch
+                    .host
+                    .code_view()
+                    .expect("only a code view's shells carry these listeners")
+                    .record_focus(node, true);
+            }));
+            let dispatch = Rc::clone(self);
+            attributes.push(listener("onfocusout", move |_: FocusData| {
+                dispatch
+                    .host
+                    .code_view()
+                    .expect("only a code view's shells carry these listeners")
+                    .record_focus(node, false);
             }));
         }
         // Scroll commands and client rects go through `MountedData`, which exists only from

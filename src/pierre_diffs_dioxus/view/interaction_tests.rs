@@ -540,7 +540,13 @@ fn drag_rig() -> (Rig, [f64; 2]) {
     let mut rig = Rig::new(pair(8, &[7]), true, true, true);
     let host = Rc::clone(&rig.view.host);
     let scroller = host.scroller().expect("a scrolling host");
-    let (root, content, container) = (scroller.root, scroller.content, host.container());
+    let (root, content, container) = (
+        scroller.root,
+        scroller
+            .content
+            .expect("a diff host's scroller has a content wrapper"),
+        host.container(),
+    );
     let (pre, column) = (rig.pre(), rig.query("data-content", None)[0]);
     let height = match &rig.view.engine {
         Engine::Virtualized { instance, .. } => instance.get_virtualized_height(),
@@ -882,7 +888,13 @@ fn assert_every_row_is_hit_where_the_layout_puts_it(split: bool, virtualized: bo
     let header_top = 10.0;
     let header_height = 44.0;
     if let Some(scroller) = host.scroller() {
-        let (root, content, container) = (scroller.root, scroller.content, host.container());
+        let (root, content, container) = (
+            scroller.root,
+            scroller
+                .content
+                .expect("a diff host's scroller has a content wrapper"),
+            host.container(),
+        );
         let content_height = match &rig.view.engine {
             Engine::Virtualized { instance, .. } => instance.get_virtualized_height(),
             Engine::Static(_) => unreachable!("a virtualized view"),

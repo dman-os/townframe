@@ -32,6 +32,10 @@
 // * `validateRenderedItemHeight` (a dev-only `console.error`),
 //   `window.__INSTANCE`, `window.__TOGGLE` and `CodeView.__STOP` are not ported
 //   (dropped.psv). `reset`'s editor and slot-coordinator arms are DROP.
+// * `slab_nodes` and `scroll_sync_manager_of` are not upstream (C6): a host that
+//   renders the slab on its own path has to know which nodes it is
+//   (`SlabNodes`), and a host with one scroll listener registry has to find
+//   the item whose `ScrollSyncManager` a column's scroll event belongs to.
 // * Arena discipline: a node the shell is done with (an unpooled item shell, a
 //   torn-down host, the container after `cleanUp`) is `discard`ed; the
 //   `Document` frees by owner.
@@ -54,12 +58,22 @@ use crate::constants::CODE_VIEW_FOOTER_ATTRIBUTE;
 use crate::constants::CODE_VIEW_HEADER_ATTRIBUTE;
 use crate::document::NodeKey;
 use crate::managers::resize_manager::ResizeObserverEntry;
+use crate::managers::scroll_sync_manager::ScrollSyncManager;
 use crate::types::layout::RenderWindow;
 use crate::types::layout::VirtualWindowSpecs;
 
 const DEFAULT_SCROLL_INTERACTION_RESTORE_DELAY_MS: u32 = 120;
 const SUB_PIXEL_TOLERANCE: f64 = 1.0;
 const SCROLLING_CODE_OVERFLOW_FIX_VARIABLE: &str = "--diffs-overflow-override";
+
+/// The container, the slab's spacer (`stickyOffset`) and the slab (`stickyContainer`) of the
+/// viewer's DOM: `root > [container > [spacer, slab > shell*]]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlabNodes {
+    pub container: NodeKey,
+    pub spacer: NodeKey,
+    pub slab: NodeKey,
+}
 
 /// `'header' | 'footer'`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,6 +511,46 @@ where
         let mut state = self.state.borrow_mut();
         state.root = None;
         state.container = None;
+    }
+
+    /// The three nodes the slab's per-frame writes address (`write_container_height`,
+    /// `write_slab_spacer`, `write_slab_sticky`), which a host that renders them on their own
+    /// path needs to know before the first pass. `None` after `clean_up`.
+    pub fn slab_nodes(&self) -> Option<SlabNodes> {
+        Some(SlabNodes {
+            container: self.state.borrow().container?,
+            spacer: self.sticky_offset,
+            slab: self.sticky_container,
+        })
+    }
+
+    /// The scroll sync manager of the rendered item whose shell holds `element`. Every item's
+    /// `FileDiff` owns a manager and registers its split columns' listeners through the one
+    /// host, which cannot tell the managers apart: it asks which item a scroll event's node
+    /// belongs to.
+    pub fn scroll_sync_manager_of(
+        &self,
+        element: NodeKey,
+    ) -> Option<Rc<ScrollSyncManager<Host>>> {
+        let (first_index, last_index) = {
+            let state = self.state.borrow();
+            (
+                state.render_state.first_index,
+                state.render_state.last_index,
+            )
+        };
+        if first_index == -1 {
+            return None;
+        }
+        let document = self.document();
+        (first_index..=last_index).find_map(|index| {
+            let item = self.state.borrow().items.get(index as usize).cloned()?;
+            let item = item.borrow();
+            let shell = item.element?;
+            document
+                .is_attached(element, shell)
+                .then(|| Rc::clone(item.instance().file_diff().scroll_sync_manager()))
+        })
     }
 
     /// `subscribeToScroll(listener)`: the returned closure unsubscribes.
