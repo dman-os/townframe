@@ -190,6 +190,23 @@ Items are open unless noted; verify against the stack before starting.
 - **Next features:** land the dpaths datum and its semantics (from `feat/dpaths`, no FUSE or materialization), then the query language for permbinds: a permbind carries an ADR 025 predicate (drawers holding docs tagged X, docs under a dpath) and the consent UI shows it. Needs a dpath predicate and index, a drawer-level predicate form, and an ADR before building.
 - **The header catalog** the operator asked for (#252 follow-ups) is not built yet; it is owed.
 
+### Dependencies and substitution (operator, 2026-11-24, after the catalogue #345)
+
+- **Requiring every dependency through a substitutable NSID was premature** (it amends ADR 028 §4; an ADR follows, with end-user cartridge authoring, next week). Its likely motive was patching or replacing a whole cartridge, which is a separate subsystem from configuring one resource.
+- **Default: a dependency names the cartridge it depends on.** Substitution has two use cases so far:
+  - **Hooks:** dev takeover and routes as a hook system, usually a proxy or middleware over methods.
+  - **Whole-cartridge replacement:** an explicit local action, like Cargo's `[patch]`, through which dependents of the original reach the replacement.
+- **Local state and collections:** no per-resource substitution. They are the owner's, reached by naming the owner, and replaced only by replacing the whole cartridge. Open: can a cartridge depend on another's local state while the owner is not enabled?
+- **Grants on replacement:** they don't carry over automatically. The replacement UX asks, at replacement time, what carries over.
+- **Byte-level artifact reuse:** dropped. Blobs are deduplicated by hash already, and no signature layer is needed.
+- **Co-provision:** deferred until the replacement use cases are worked out.
+- **Lexicon substitution:** open. When several unrelated cartridges refer to the same Lexicon and one is substituted, what about incompatibilities?
+- **NSIDs:** an NSID names a Lexicon, nothing else (ADR 050 §2). Non-schema names (permbind keys, bindings, slots) get local names.
+- **ADR 051 accepted, and `#hosted` parked**, as recorded above.
+- **Identity work:** the identity-to-drawer-grant design is in progress (`docs/scratch/identity-drawer-grants.md`, node-93). Its requirements: method-agnostic DIDs (AT Protocol on a PDS, maybe a keyhive-backed DID later); resolving a DID to the principals that act for it; a group per context instead of one public device list (metadata privacy); offline granting through contact cards and prekeys.
+- **Public reads redefined:** there's no anonymous or Public-agent path. "Public" means the relay hosting the viewer has read access, and the viewer is an ordinary client of that relay, with its own identity through ADR 043 pairing.
+- **Security:** body capabilities weren't holder-checked (ADR 037 §2). Fixed in #348.
+
 ## Open questions for the operator
 
 - **Stable core id:** one reserved id on every node whose provenance is the node binary (the registry accepts it only from the binary), so cartridges depend on it through `dependencies` and resolve Lexicons through them; changes #333's per-node id.
