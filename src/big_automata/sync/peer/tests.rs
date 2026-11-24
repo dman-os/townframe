@@ -4,7 +4,9 @@
 
 use super::*;
 
+use crate::part_store::Generation;
 use crate::replay::wire::Verdict;
+use crate::sync::PeerCursor;
 use crate::sync::bucket::PartObjDelta;
 
 mod calls;

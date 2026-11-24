@@ -9,6 +9,7 @@ fn part(seed: u8) -> PartKey {
 
 fn summary(latest_cursor: Rev, dirty_total: u64) -> PartSummary {
     PartSummary {
+        generation: Generation::default(),
         latest_cursor,
         member_count: 1,
         deepest_bucket_level: BuckId::MAX_LEVEL,
@@ -20,13 +21,12 @@ fn summary(latest_cursor: Rev, dirty_total: u64) -> PartSummary {
 }
 
 /// Decide one part, default mode `CursorAndBucket` unless `mode` names one.
-fn decide_one(summary: PartSummary, stored: Rev, mode: Option<AllowedStrat>) -> PeerPartStrat {
+fn decide_one(summary: PartSummary, mode: Option<AllowedStrat>) -> PeerPartStrat {
     let key = part(1);
     let modes = mode.map(|mode| (key.clone(), mode)).into_iter().collect();
     decide_peer_strat(
         &Set::from([key.clone()]),
         &Map::from([(key.clone(), summary)]),
-        &Map::from([(key.clone(), stored)]),
         &modes,
         AllowedStrat::CursorAndBucket,
     )
@@ -39,9 +39,9 @@ fn decide_one(summary: PartSummary, stored: Rev, mode: Option<AllowedStrat>) -> 
 #[test]
 fn large_cursor_gap_with_small_dirty_count_stays_on_cursor() {
     assert_eq!(
-        decide_one(summary(100_000, 1), 0, None),
+        decide_one(summary(100_000, 1), None),
         PeerPartStrat::Cursor {
-            from: 0,
+            generation: Generation::default(),
             latest: 100_000
         }
     );
@@ -56,8 +56,9 @@ fn small_cursor_gap_with_large_dirty_count_walks_buckets() {
         access_changes: 100,
     };
     assert_eq!(
-        decide_one(sum, 10, None),
+        decide_one(sum, None),
         PeerPartStrat::BucketWalk {
+            generation: Generation::default(),
             working_level: 0,
             remote_depth: BuckId::MAX_LEVEL,
             remote_len: 1,
@@ -71,29 +72,15 @@ fn small_cursor_gap_with_large_dirty_count_walks_buckets() {
 fn dirty_threshold_is_inclusive_and_counts_access_changes() {
     let at = BucketMachine::BUCKET_DIRTY_THRESHOLD;
     assert!(matches!(
-        decide_one(summary(5, at), 0, None),
+        decide_one(summary(5, at), None),
         PeerPartStrat::Cursor { .. }
     ));
     let mut over = summary(5, at);
     over.dirty.access_changes = 1;
     assert!(matches!(
-        decide_one(over, 0, None),
+        decide_one(over, None),
         PeerPartStrat::BucketWalk { .. }
     ));
-}
-
-/// A part without a stored cursor replays from 0.
-#[test]
-fn missing_stored_cursor_replays_from_zero() {
-    let key = part(1);
-    let decided = decide_peer_strat(
-        &Set::from([key.clone()]),
-        &Map::from([(key.clone(), summary(9, 0))]),
-        &Map::new(),
-        &Map::new(),
-        AllowedStrat::CursorAndBucket,
-    );
-    assert_eq!(decided[&key], PeerPartStrat::Cursor { from: 0, latest: 9 });
 }
 
 /// The walk's working level follows the part's size and depth.
@@ -107,7 +94,7 @@ fn walk_carries_the_working_level_of_the_summary() {
         remote_depth,
         remote_len,
         ..
-    } = decide_one(sum, 0, None)
+    } = decide_one(sum, None)
     else {
         panic!("expected a walk");
     };
@@ -132,7 +119,6 @@ fn per_part_mode_overrides_the_default() {
     let decided = decide_peer_strat(
         &Set::from([key.clone(), other.clone()]),
         &sums,
-        &Map::new(),
         &Map::from([(key.clone(), AllowedStrat::Cursor)]),
         AllowedStrat::CursorAndBucket,
     );
@@ -150,13 +136,12 @@ fn a_refused_part_of_a_batch_leaves_the_readable_part_decided() {
         &Set::from([readable.clone(), refused.clone()]),
         &Map::from([(readable.clone(), summary(100, 1))]),
         &Map::new(),
-        &Map::new(),
         AllowedStrat::Cursor,
     );
     assert_eq!(
         decided[&readable],
         PeerPartStrat::Cursor {
-            from: 0,
+            generation: Generation::default(),
             latest: 100
         }
     );
@@ -165,6 +150,7 @@ fn a_refused_part_of_a_batch_leaves_the_readable_part_decided() {
 
 fn any_summary() -> impl Strategy<Value = PartSummary> {
     (
+        0..3u128,
         any::<Rev>(),
         any::<u64>(),
         any::<u8>(),
@@ -173,6 +159,7 @@ fn any_summary() -> impl Strategy<Value = PartSummary> {
     )
         .prop_map(
             |(
+                generation,
                 latest_cursor,
                 member_count,
                 deepest_bucket_level,
@@ -180,6 +167,7 @@ fn any_summary() -> impl Strategy<Value = PartSummary> {
                 access_changes,
             )| {
                 PartSummary {
+                    generation: Generation(Uuid::from_u128(generation)),
                     latest_cursor,
                     member_count,
                     deepest_bucket_level,
@@ -198,15 +186,12 @@ proptest! {
         // Seeds 0..8 are asked of the peer, and the peer answers a subset of seeds 0..12.
         asked in proptest::collection::btree_set(0u8..8, 0..8),
         answered in proptest::collection::btree_map(0u8..12, any_summary(), 0..12),
-        stored in proptest::collection::btree_map(0u8..12, any::<Rev>(), 0..12),
         cursor_only in proptest::collection::btree_set(0u8..12, 0..12),
         default_cursor_only in any::<bool>(),
     ) {
         let parts: Set<PartKey> = asked.iter().map(|seed| part(*seed)).collect();
         let summaries: Map<PartKey, PartSummary> =
             answered.iter().map(|(seed, sum)| (part(*seed), *sum)).collect();
-        let cursors: Map<PartKey, Rev> =
-            stored.iter().map(|(seed, cursor)| (part(*seed), *cursor)).collect();
         let modes: Map<PartKey, AllowedStrat> = cursor_only
             .iter()
             .map(|seed| (part(*seed), AllowedStrat::Cursor))
@@ -216,7 +201,7 @@ proptest! {
         } else {
             AllowedStrat::CursorAndBucket
         };
-        let decided = decide_peer_strat(&parts, &summaries, &cursors, &modes, default_mode);
+        let decided = decide_peer_strat(&parts, &summaries, &modes, default_mode);
         prop_assert_eq!(decided.len(), parts.len());
         for part_key in &parts {
             let strat = decided[part_key];
@@ -231,11 +216,12 @@ proptest! {
             };
             match strat {
                 PeerPartStrat::Unknown => prop_assert!(false, "answered part decided Unknown"),
-                PeerPartStrat::Cursor { from, latest } => {
-                    prop_assert_eq!(from, cursors.get(part_key).copied().unwrap_or(0));
+                PeerPartStrat::Cursor { generation, latest } => {
+                    prop_assert_eq!(generation, sum.generation);
                     prop_assert_eq!(latest, sum.latest_cursor);
                 }
-                PeerPartStrat::BucketWalk { latest, .. } => {
+                PeerPartStrat::BucketWalk { generation, latest, .. } => {
+                    prop_assert_eq!(generation, sum.generation);
                     // (1) CursorOnly never walks
                     prop_assert!(!forced);
                     // (3) the handover point is the summary's latest cursor
@@ -251,6 +237,7 @@ proptest! {
 fn a_peer_without_buckets_stays_on_the_cursor() {
     let part = PartKey::new(&[1]);
     let summary = PartSummary {
+        generation: Generation::default(),
         latest_cursor: 9,
         member_count: 100_000,
         deepest_bucket_level: 0,
@@ -263,11 +250,10 @@ fn a_peer_without_buckets_stays_on_the_cursor() {
         &[part.clone()].into(),
         &[(part.clone(), summary)].into(),
         &default(),
-        &default(),
         AllowedStrat::CursorAndBucket,
     );
     assert!(matches!(
         decided[&part],
-        PeerPartStrat::Cursor { from: 0, latest: 9 }
+        PeerPartStrat::Cursor { latest: 9, .. }
     ));
 }

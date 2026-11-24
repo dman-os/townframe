@@ -15,6 +15,7 @@ use crate::interlude::*;
 use crate::okv::memory::OkvTable;
 use crate::part_store::AccessLevel;
 use crate::part_store::AuthorizedPage;
+use crate::part_store::Generation;
 use crate::part_store::LeafEntry;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
@@ -43,17 +44,21 @@ mod objects;
 strike! {
     /// The state behind the lock. The log is the truth for membership and access; `members`
     /// and `buckets` are indexes over it, written by the same functions that write the log.
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct State {
+        /// The store's [`Generation`]; every summary carries it.
+        generation: Generation,
         /// `Member` and `Access` rows, stamped with the global cursor.
         log: OkvTable<LogKey, LogEntry>,
-        objs: BTreeMap<ObjKey, struct ObjRow {
+        objs: BTreeMap<ObjKey,
+            #[derive(Clone)]
+            struct ObjRow {
             payload: ObjPayload,
             /// Computed when the payload was written.
             digest: PayloadDigest,
         }>,
         parts: BTreeMap<PartKey,
-            #[derive(Default)]
+            #[derive(Default, Clone)]
             struct PartRow {
                 /// The rev of the part's latest member row; 0 for none. Access rows do not move
                 /// it (see `PartSummary::latest_cursor`).
@@ -81,10 +86,15 @@ pub struct MemoryPartStore {
 }
 
 impl Default for MemoryPartStore {
+    /// A new, empty store with a freshly minted generation.
     fn default() -> Self {
         let (wakeups, _) = watch::channel(0);
+        let state = State {
+            generation: Generation::mint(),
+            ..default()
+        };
         Self {
-            state: Arc::new(surelock::mutex::Mutex::new(default())),
+            state: Arc::new(surelock::mutex::Mutex::new(state)),
             wakeups,
         }
     }
@@ -116,6 +126,19 @@ impl MemoryPartStore {
         MemoryPartTx {
             store: self.clone(),
             staged: default(),
+        }
+    }
+
+    /// A copy of the store that shares nothing with it, the generation included: the files of a
+    /// backup. Restoring one is replacing the store with it; call
+    /// [`mint_generation`](PartStoreWrite::mint_generation) on the restored store to tell its
+    /// peers that the log went back.
+    pub fn snapshot(&self) -> Self {
+        let state = self.with_state(State::clone);
+        let (wakeups, _) = watch::channel(state.log.rev());
+        Self {
+            state: Arc::new(surelock::mutex::Mutex::new(state)),
+            wakeups,
         }
     }
 
@@ -256,6 +279,15 @@ impl PartStoreWrite for MemoryPartStore {
         std::future::ready(Ok(()))
     }
 
+    fn mint_generation(&self) -> impl Future<Output = Res<Generation>> + Send {
+        let minted = Generation::mint();
+        surelock::key::lock_scope(|key| {
+            let (mut state, _key) = key.lock(&self.state);
+            state.generation = minted;
+        });
+        std::future::ready(Ok(minted))
+    }
+
     fn grant_access(
         &self,
         tx: &mut MemoryPartTx,
@@ -358,6 +390,10 @@ impl PartStoreServe for MemoryPartStore {
     /// The log's own watch: the one [`RevSource::watch`] hands out.
     fn watch(&self) -> RevWatch {
         RevWatch::new(self.wakeups.subscribe())
+    }
+
+    fn generation(&self) -> impl Future<Output = Res<Generation>> + Send {
+        std::future::ready(Ok(self.with_state(|state| state.generation)))
     }
 
     /// Decides every route and copies the rows and their payloads out in one critical section,

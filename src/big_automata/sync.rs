@@ -28,7 +28,9 @@
 //! 1. **Incremental routes.** The embedder changes routes only by `update(added_parts,
 //!    removed_parts, added_objects, removed_objects)`; nothing diffs sets. Adding a wanted
 //!    route or removing an unwanted one is a no-op. A part is added with the cursor persisted
-//!    for it (the driver reads it).
+//!    for it and the peer generation that cursor is a position in (the driver reads both;
+//!    `None` for a part never seen). A decision that finds another generation restarts the
+//!    part from 0 (`PartLifecycle` law 10) and reports it as `PeerCommand::Restarted`.
 //! 2. **One call-id space.** Every outward call (summary, session update, round, bucket list,
 //!    bucket leaf, record, fetch) gets a fresh id from one counter, and its outcome comes back
 //!    under that id. An outcome for an id not in flight (stale, duplicated, or from before a
@@ -111,6 +113,18 @@
 //! part is `synced`, and the local store holds the peer's readable view of it (soundness of
 //! `Synced`: whenever it is emitted, the local view matches the peer's view at that cursor).
 //! Lane latency and throughput as in [`crate::replay::lanes`].
+
+use crate::part_store::Generation;
+use crate::rev::Rev;
+
+/// How far a client has consumed a peer's part, and in which of the peer's [generations](Generation)
+/// that position is. A rev means nothing under another generation, so the two are
+/// persisted and compared together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCursor {
+    pub generation: Generation,
+    pub rev: Rev,
+}
 
 pub(crate) mod bucket;
 pub(crate) mod cursor;

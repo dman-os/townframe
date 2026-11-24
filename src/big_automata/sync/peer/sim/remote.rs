@@ -13,8 +13,10 @@ use futures::executor::block_on;
 use crate::interlude::*;
 
 use crate::fingerprint::FingerprintSeed;
+use crate::part_store::Generation;
 use crate::part_store::ObjPayload;
 use crate::part_store::PartStoreServe;
+use crate::part_store::PartStoreWrite;
 use crate::part_store::PartSummary;
 use crate::part_store::bucket_summary::BucketSummary;
 use crate::part_store::laws;
@@ -82,6 +84,24 @@ pub(super) struct Remote {
     pub walk_bias: bool,
     /// The most parts one summary call may name.
     pub summary_cap: usize,
+    /// A backup of the peer taken by [`Self::snapshot`]: its files, generation included.
+    saved: Option<Saved>,
+    /// An unminted restore happened: a cursor above the head is a stale one of the old log,
+    /// which the part's restart replaces, not a bug.
+    pub unminted: bool,
+    /// Members the peer had in a part before it lost its data or went back to a backup, and
+    /// that the new log does not mention: a pull-only client keeps them, because nothing
+    /// removes a row the peer has no tombstone for.
+    ghosts: BTreeMap<PartKey, BTreeSet<ObjKey>>,
+}
+
+/// A copy of everything that is the peer's data, as a backup holds it.
+struct Saved {
+    store: MemoryPartStore,
+    oracle: PartOracle,
+    views: BTreeMap<Rev, View>,
+    row_rev: BTreeMap<(ObjKey, PartKey), Rev>,
+    payloads: BTreeMap<ObjKey, Option<ObjPayload>>,
 }
 
 impl Remote {
@@ -89,24 +109,134 @@ impl Remote {
         let store = MemoryPartStore::default();
         Self {
             responder: Responder::new(store.clone(), Expired),
+            oracle: PartOracle::with_generation(block_on(store.generation()).unwrap()),
             store,
-            oracle: default(),
             server: default(),
             parts: parts.to_vec(),
-            views: [(
-                0,
-                View {
-                    members: parts.iter().map(|part| (part.clone(), default())).collect(),
-                    readable: default(),
-                },
-            )]
-            .into(),
+            views: Self::blank_views(parts),
             row_rev: default(),
             objs: objs.to_vec(),
             payloads: default(),
             walk_bias: false,
             summary_cap,
+            saved: None,
+            unminted: false,
+            ghosts: default(),
         }
+    }
+
+    fn blank_views(parts: &[PartKey]) -> BTreeMap<Rev, View> {
+        [(
+            0,
+            View {
+                members: parts.iter().map(|part| (part.clone(), default())).collect(),
+                readable: default(),
+            },
+        )]
+        .into()
+    }
+
+    pub(super) fn generation(&self) -> Generation {
+        block_on(self.store.generation()).unwrap()
+    }
+
+    /// The peer's server restarts around `store`: its sessions are gone and its responder
+    /// serves the new files.
+    fn serve(&mut self, store: MemoryPartStore) {
+        self.responder = Responder::new(store.clone(), Expired);
+        self.store = store;
+        self.server = default();
+    }
+
+    /// Remember the members the peer is about to stop having.
+    fn leave_ghosts(&mut self) {
+        for (obj, part) in self.oracle.live_members() {
+            self.ghosts.entry(part).or_default().insert(obj);
+        }
+    }
+
+    /// The peer loses its data: a new store, empty, with a new generation, and no memory of
+    /// the old log.
+    pub(super) fn lose_data(&mut self) {
+        self.leave_ghosts();
+        let store = MemoryPartStore::default();
+        self.oracle = PartOracle::with_generation(block_on(store.generation()).unwrap());
+        self.views = Self::blank_views(&self.parts);
+        self.row_rev = default();
+        self.payloads = default();
+        self.serve(store);
+    }
+
+    /// Take a backup of the peer's files, replacing the last one.
+    pub(super) fn snapshot(&mut self) {
+        self.saved = Some(Saved {
+            store: self.store.snapshot(),
+            oracle: self.oracle.clone(),
+            views: self.views.clone(),
+            row_rev: self.row_rev.clone(),
+            payloads: self.payloads.clone(),
+        });
+    }
+
+    /// The head of the backup, if one was taken.
+    pub(super) fn saved_head(&self) -> Option<Rev> {
+        self.saved.as_ref().map(|saved| saved.oracle.latest_rev())
+    }
+
+    /// The generation of the backup's files, if one was taken.
+    pub(super) fn saved_generation(&self) -> Option<Generation> {
+        self.saved.as_ref().map(|saved| saved.oracle.generation())
+    }
+
+    /// Restore the backup's files over the peer's, which brings back the generation they were
+    /// taken under; `mint` then tells the store (the operator's step after a restore). Returns
+    /// false when there is no backup. The backup stays for another restore.
+    pub(super) fn restore(&mut self, mint: bool) -> bool {
+        let Some(saved) = &self.saved else {
+            return false;
+        };
+        let (store, oracle) = (saved.store.snapshot(), saved.oracle.clone());
+        let (views, row_rev, payloads) = (
+            saved.views.clone(),
+            saved.row_rev.clone(),
+            saved.payloads.clone(),
+        );
+        self.leave_ghosts();
+        self.oracle = oracle;
+        self.views = views;
+        self.row_rev = row_rev;
+        self.payloads = payloads;
+        self.serve(store);
+        self.unminted |= !mint;
+        if mint {
+            let minted = block_on(self.store.mint_generation()).unwrap();
+            self.oracle.set_generation(minted);
+        }
+        true
+    }
+
+    /// Whether `local` is what a client that pulled from this peer holds of `part`, given
+    /// `expected`, the members the peer's log says it has: all of them, and beyond them only
+    /// ghosts of a previous log that this log has no row for.
+    pub(super) fn holds(
+        &self,
+        part: &PartKey,
+        local: &BTreeSet<ObjKey>,
+        expected: &BTreeSet<ObjKey>,
+    ) -> bool {
+        expected.is_subset(local)
+            && local
+                .difference(expected)
+                .all(|obj| self.is_ghost(part, obj))
+    }
+
+    /// A member of an earlier log that this one has no row for.
+    pub(super) fn is_ghost(&self, part: &PartKey, obj: &ObjKey) -> bool {
+        self.row_rev(obj, part) == 0
+            && self
+                .ghosts
+                .get(part)
+                .is_some_and(|ghosts| ghosts.contains(obj))
     }
 
     pub(super) fn head(&self) -> Rev {

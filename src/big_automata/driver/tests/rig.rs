@@ -497,7 +497,7 @@ impl Rig {
         Self::start(facts, scripted, local, backend, cursors, config)
     }
 
-    fn start(
+    pub(super) fn start(
         facts: Facts,
         peer: ScriptedPeer,
         local: MemoryPartStore,

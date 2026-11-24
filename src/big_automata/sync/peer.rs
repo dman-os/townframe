@@ -44,6 +44,7 @@ use std::collections::BTreeSet;
 
 use crate::AllowedStrat;
 use crate::kit::scheduler::Instant;
+use crate::part_store::Generation;
 use crate::part_store::PartSummary;
 use crate::part_store::bucket_summary::BucketSummary;
 use crate::replay::client::ReplayClient;
@@ -65,6 +66,7 @@ use crate::replay::wire::TargetId;
 use crate::replay::wire::UpdateSession;
 use crate::replay::wire::Verdict;
 use crate::rev::Rev;
+use crate::sync::PeerCursor;
 use crate::sync::bucket::BucketMachine;
 use crate::sync::bucket::BucketMachineCommand;
 use crate::sync::bucket::BucketObjLeafPage;
@@ -178,10 +180,20 @@ pub(crate) enum PeerCommand {
     Cancel {
         call: CallId,
     },
-    /// Write `cursor` as the cursor consumed from this peer for `part`.
+    /// Write `cursor` as the cursor consumed from this peer for `part`. It carries the peer's
+    /// generation, which replaces a stored cursor of another generation.
     PersistCursor {
         part: PartKey,
-        cursor: Rev,
+        cursor: PeerCursor,
+    },
+    /// The part starts over from cursor 0 (`PartLifecycle` law 10): the peer is on
+    /// `peer_generation`, with its log ending at `peer_latest`, and no longer the one `held`
+    /// was stored under, or has fewer rows than `held` consumed. For the embedder to log.
+    Restarted {
+        part: PartKey,
+        held: PeerCursor,
+        peer_generation: Generation,
+        peer_latest: Rev,
     },
     Synced {
         part: PartKey,
@@ -431,7 +443,7 @@ impl PeerSync {
     /// persisted for it.
     pub(crate) fn update(
         &mut self,
-        added_parts: &[(PartKey, Rev)],
+        added_parts: &[(PartKey, Option<PeerCursor>)],
         removed_parts: &[PartKey],
         added_objects: &[ObjKey],
         removed_objects: &[ObjKey],
@@ -439,7 +451,7 @@ impl PeerSync {
         for part in removed_parts {
             let mut cmds = vec![];
             self.lifecycle.remove(part, &mut cmds);
-            self.lifecycle_commands(cmds, None);
+            self.lifecycle_commands(cmds);
             if self.parts.remove(part) == Some(true) {
                 self.outbox
                     .push(PeerCommand::Unsynced { part: part.clone() });
@@ -490,13 +502,8 @@ impl PeerSync {
         self.touched.insert(part);
     }
 
-    /// Route what the lifecycle decided. `advertised` is the call a decision answers: a walk
-    /// lists changes since the cursor that call advertised.
-    fn lifecycle_commands(
-        &mut self,
-        cmds: Vec<LifecycleCommand>,
-        advertised: Option<&Map<PartKey, Rev>>,
-    ) {
+    /// Route what the lifecycle decided.
+    fn lifecycle_commands(&mut self, cmds: Vec<LifecycleCommand>) {
         for cmd in cmds {
             match cmd {
                 LifecycleCommand::Decide { call, parts } => {
@@ -512,7 +519,18 @@ impl PeerSync {
                     });
                     self.touched.insert(part);
                 }
-                LifecycleCommand::StartWalk { part, strat } => {
+                LifecycleCommand::Restart {
+                    part,
+                    held,
+                    peer_generation,
+                    peer_latest,
+                } => self.outbox.push(PeerCommand::Restarted {
+                    part,
+                    held,
+                    peer_generation,
+                    peer_latest,
+                }),
+                LifecycleCommand::StartWalk { part, strat, since } => {
                     let PeerPartStrat::BucketWalk {
                         remote_depth,
                         remote_len,
@@ -521,7 +539,6 @@ impl PeerSync {
                     else {
                         unreachable!("a walk starts on a bucket decision");
                     };
-                    let since = advertised.expect("only an answer starts a walk")[&part];
                     self.client.want(Route::Part {
                         part_key: part.clone(),
                     });
@@ -563,7 +580,6 @@ impl PeerSync {
                 DecideOutcome::Answered(decide_peer_strat(
                     &asked,
                     &summaries,
-                    &parts,
                     &default(),
                     self.config.strat,
                 ))
@@ -573,7 +589,7 @@ impl PeerSync {
         };
         let mut cmds = vec![];
         self.lifecycle.decided(sub, outcome, &mut cmds);
-        self.lifecycle_commands(cmds, Some(&parts));
+        self.lifecycle_commands(cmds);
     }
 
     pub(crate) fn update_replied(
@@ -868,7 +884,7 @@ impl PeerSync {
                     self.touched.insert(part_key.clone());
                     let mut cmds = vec![];
                     self.lifecycle.applied(&part_key, cursor, &mut cmds);
-                    self.lifecycle_commands(cmds, None);
+                    self.lifecycle_commands(cmds);
                 }
             }
         }
@@ -1108,7 +1124,7 @@ impl PeerSync {
             self.walk_retry.retain(|(walk_part, _)| *walk_part != part);
             let mut cmds = vec![];
             self.lifecycle.upgrade(&part, &mut cmds);
-            self.lifecycle_commands(cmds, None);
+            self.lifecycle_commands(cmds);
             self.touched.insert(part);
         }
     }
@@ -1122,7 +1138,7 @@ impl PeerSync {
 
         let mut cmds = vec![];
         self.lifecycle.flush(now, &mut cmds);
-        self.lifecycle_commands(cmds, None);
+        self.lifecycle_commands(cmds);
 
         if self.blocked_pacer.open(now) && self.client.blocked().next().is_some() {
             self.client.retry_blocked();

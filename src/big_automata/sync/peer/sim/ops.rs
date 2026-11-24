@@ -63,9 +63,31 @@ pub(super) enum Op {
     Poison(u8),
     /// The peer's summaries claim every part is far behind, so the machine walks.
     Bias(bool),
+    /// The peer loses its data and comes back with a new, empty store (a new generation). The
+    /// peer restarted, so the client reconnects.
+    DataLoss,
+    /// An admin takes a backup of the peer's files.
+    Snapshot,
+    /// The peer's files are replaced by the backup's (a no-op without one), and the operator
+    /// mints a new generation. The peer restarted, so the client reconnects.
+    RestoreMinted,
+    /// As `RestoreMinted`, but the operator forgot to mint: the files keep the generation they
+    /// had. Only issued while the log going back is observable by every cursor in that
+    /// generation (the backup's head is below each of them), and drains before any later
+    /// write: the part restarts when its decision sees a head below its cursor, and a client
+    /// that has not decided by the time the peer's head passes the cursor again cannot tell
+    /// the restored log from the one it knew. Not in the random mix for that reason (a crash
+    /// of a client that has persisted nothing since could land there); the scenarios issue it.
+    RestoreUnminted,
 }
 
 impl Sim {
+    /// The peer restarted, so the connection dropped and the client connects again, with
+    /// nothing but its persisted cursors and local store.
+    fn reconnect(&mut self) {
+        self.crash(0, false);
+    }
+
     fn crash(&mut self, committed: u8, close: bool) {
         for (at, call) in self
             .local
@@ -86,20 +108,16 @@ impl Sim {
         self.relist.clear();
         self.mirror.clear();
         self.walked.clear();
+        self.rewound.clear();
         if close {
             self.remote.close(self.sync.client.session_id());
         }
         self.session += 1;
         self.sync = PeerSync::new(self.shape.config.clone(), Uuid::from_u128(self.session));
-        let parts: Vec<(PartKey, Rev)> = self
+        let parts: Vec<(PartKey, Option<PeerCursor>)> = self
             .wanted_parts
             .iter()
-            .map(|part| {
-                (
-                    part.clone(),
-                    self.local.persisted.get(part).copied().unwrap_or(0),
-                )
-            })
+            .map(|part| (part.clone(), self.local.persisted.get(part).copied()))
             .collect();
         let objs: Vec<ObjKey> = self.wanted_objs.iter().cloned().collect();
         self.input(|s| s.update(&parts, &[], &objs, &[]));
@@ -170,10 +188,10 @@ impl Sim {
                     |mask: u8, count: u8| (0..count).filter(move |at| (mask >> at) & 1 == 1);
                 let removed_parts: Vec<PartKey> =
                     picked(rem_parts, parts).map(laws::part).collect();
-                let added_parts: Vec<(PartKey, Rev)> = picked(add_parts, parts)
+                let added_parts: Vec<(PartKey, Option<PeerCursor>)> = picked(add_parts, parts)
                     .map(|at| {
                         let part = laws::part(at);
-                        let cursor = self.local.persisted.get(&part).copied().unwrap_or(0);
+                        let cursor = self.local.persisted.get(&part).copied();
                         (part, cursor)
                     })
                     .collect();
@@ -182,6 +200,7 @@ impl Sim {
                 for part in &removed_parts {
                     self.wanted_parts.remove(part);
                     self.walked.remove(part);
+                    self.rewound.remove(part);
                 }
                 self.wanted_parts
                     .extend(added_parts.iter().map(|(part, _)| part.clone()));
@@ -238,6 +257,38 @@ impl Sim {
             }
             Op::Crash { committed, close } => self.crash(committed, close),
             Op::Bias(on) => self.remote.walk_bias = on,
+            Op::DataLoss => {
+                self.lose_all();
+                self.remote.lose_data();
+                self.reconnect();
+            }
+            Op::Snapshot => self.remote.snapshot(),
+            Op::RestoreMinted => {
+                self.lose_all();
+                if self.remote.restore(true) {
+                    self.reconnect();
+                }
+            }
+            Op::RestoreUnminted => {
+                // Every cursor in the backup's generation must be above its head: that is the
+                // restore this protection can see.
+                let observable = self.remote.saved_head().is_some_and(|head| {
+                    self.local.persisted.values().all(|cursor| {
+                        Some(cursor.generation) != self.remote.saved_generation()
+                            || cursor.rev > head
+                    })
+                });
+                if observable {
+                    self.lose_all();
+                    self.remote.restore(false);
+                    self.reconnect();
+                    // No write may reach the peer before the client has decided from fresh
+                    // summaries: a decision after one could find the log grown past the
+                    // cursor, which no unminted restore can be told from a live log.
+                    self.local.poisoned.clear();
+                    self.quiesce();
+                }
+            }
             Op::Poison(mask) => {
                 self.local.poisoned = (0..objs)
                     .filter(|at| (mask >> at) & 1 == 1)
@@ -284,6 +335,9 @@ fn op() -> impl Strategy<Value = Op> {
         1 => Just(Op::Restart),
         1 => (any::<u8>(), any::<bool>()).prop_map(|(committed, close)| Op::Crash { committed, close }),
         1 => any::<bool>().prop_map(Op::Bias),
+        1 => Just(Op::DataLoss),
+        2 => Just(Op::Snapshot),
+        1 => Just(Op::RestoreMinted),
         2 => any::<u8>().prop_map(Op::Poison),
     ]
 }

@@ -36,7 +36,7 @@
 //!    first, and flushes after every batch of inputs.
 //! 5. **Cursor persistence keeps order and may lag.** `PersistCursor` writes to the peer-cursor
 //!    table may be batched, but a part's writes land in the order issued and a cursor never
-//!    goes back. Losing the latest writes in a crash is safe: the part replays from an older
+//!    goes back, except by a restart of the part (`PartLifecycle` law 10). Losing the latest writes in a crash is safe: the part replays from an older
 //!    cursor, and backends are idempotent.
 //! 6. **Connections.** Losing the connection disconnects the machine: every call in flight is
 //!    cancelled and, the machine being gone, nothing is reported (ObjectJobs law 10); nothing
@@ -93,6 +93,8 @@ mod facts;
 #[cfg(any(test, feature = "test-support"))]
 pub mod memory;
 mod run;
+#[cfg(any(test, feature = "test-support"))]
+pub mod table_laws;
 #[cfg(test)]
 mod tests;
 
@@ -108,6 +110,7 @@ pub use run::PeerDriver;
 pub use run::RouteUpdate;
 
 use crate::rev::Rev;
+use crate::sync::PeerCursor;
 
 /// The backend the driver syncs into: the cut of the backend contract in
 /// [`object_jobs`](crate::sync::object_jobs). A failure is retried by the machine on its
@@ -133,26 +136,32 @@ pub trait SyncBackend {
     fn fetch(&self, job: ObjJob) -> impl Future<Output = Res<()>>;
 }
 
-/// The cursor each (peer, backend, part) has been consumed to. A small table the driver
-/// owns, not the part store: its keys carry the backend.
+/// The cursor each (peer, backend, part) has been consumed to, with the peer's generation it
+/// is a position in. A small table the driver owns, not the part store: its keys carry the
+/// backend.
 ///
-/// An implementation applies the entries of a write in order and a cursor only advances: a
-/// lower one than stored is ignored (as `PartStoreRead::set_peer_part_cursors`). It may
-/// coalesce entries of one write for the same part. A failure is not retried: it crashes the
-/// driver.
+/// An implementation applies the entries of a write in order and **the last write wins**: it
+/// does not compare revs. The driver issues a part's writes in order (law 5) and the machine
+/// only lowers a cursor by restarting the part (`PartLifecycle` law 10), when the peer's
+/// generation changed or a restore went unminted and its log ends below the cursor: that
+/// part's next write is a lower rev, maybe in the stored generation, and must replace the
+/// stored one. It may coalesce entries of one write for the same part. A failure is not
+/// retried: it crashes the driver. [`table_laws`] states this as checks any implementation
+/// runs.
 pub trait PeerCursors {
-    /// The cursor persisted for each part, in the order asked; 0 for a part never written.
+    /// The cursor persisted for each part, in the order asked; `None` for a part never
+    /// written.
     fn read(
         &self,
         peer: &PeerKey,
         backend: &str,
         parts: &[PartKey],
-    ) -> impl Future<Output = Res<Vec<Rev>>>;
+    ) -> impl Future<Output = Res<Vec<Option<PeerCursor>>>>;
 
     fn write(
         &self,
         peer: &PeerKey,
         backend: &str,
-        writes: &[(PartKey, Rev)],
+        writes: &[(PartKey, PeerCursor)],
     ) -> impl Future<Output = Res<()>>;
 }

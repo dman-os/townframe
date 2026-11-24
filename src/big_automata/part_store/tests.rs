@@ -48,6 +48,11 @@ fn collapse_and_tombstones() -> Res<()> {
 }
 
 #[test]
+fn generations_identify_the_log() -> Res<()> {
+    block_on(laws::generations_identify_the_log(&Memory))
+}
+
+#[test]
 fn pending_goes_live_once() -> Res<()> {
     block_on(laws::pending_goes_live_once(&Memory))
 }

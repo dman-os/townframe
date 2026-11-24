@@ -11,6 +11,7 @@ struct OPart {
     phase: Phase,
     /// The call a `Deciding` part is under; `None` while it waits for one.
     call: Option<CallId>,
+    generation: Option<Generation>,
     cursor: Rev,
     /// Queue age: smaller is older.
     queued_at: u64,
@@ -35,11 +36,11 @@ pub(super) struct Oracle {
     failures: u32,
     gate: OGate,
     last_flush: Option<Instant>,
-    persisted: Map<PartKey, Rev>,
+    persisted: Map<PartKey, PeerCursor>,
 }
 
 impl Oracle {
-    pub(super) fn new(config: Config, persisted: Map<PartKey, Rev>) -> Self {
+    pub(super) fn new(config: Config, persisted: Map<PartKey, PeerCursor>) -> Self {
         Self {
             max_parts: config.max_parts,
             config,
@@ -70,7 +71,7 @@ impl Oracle {
         self.find(part).map(|p| p.cursor)
     }
 
-    pub(super) fn persisted(&self, part: &PartKey) -> Option<Rev> {
+    pub(super) fn persisted(&self, part: &PartKey) -> Option<PeerCursor> {
         self.persisted.get(part).copied()
     }
 
@@ -97,7 +98,7 @@ impl Oracle {
         found.into_iter().map(|p| p.part.clone()).collect()
     }
 
-    pub(super) fn add(&mut self, part: PartKey, cursor: Rev) {
+    pub(super) fn add(&mut self, part: PartKey, cursor: Option<PeerCursor>) {
         if self.find(&part).is_some() {
             return;
         }
@@ -106,7 +107,8 @@ impl Oracle {
             part,
             phase: Phase::Deciding,
             call: None,
-            cursor,
+            generation: cursor.map(|cursor| cursor.generation),
+            cursor: cursor.map_or(0, |cursor| cursor.rev),
             queued_at: self.clock,
         });
     }
@@ -162,7 +164,7 @@ impl Oracle {
                             refused += 1;
                         }
                         Some(strat) => {
-                            cmds.push(self.start(&part, *strat));
+                            cmds.extend(self.start(&part, *strat));
                             decided += 1;
                         }
                     }
@@ -201,27 +203,57 @@ impl Oracle {
         p.queued_at = clock;
     }
 
-    fn start(&mut self, part: &PartKey, strat: PeerPartStrat) -> LifecycleCommand {
+    fn start(&mut self, part: &PartKey, strat: PeerPartStrat) -> Vec<LifecycleCommand> {
         let p = self.find_mut(part).expect("member");
         p.call = None;
+        let (peer_generation, latest) = match strat {
+            PeerPartStrat::Cursor { generation, latest }
+            | PeerPartStrat::BucketWalk {
+                generation, latest, ..
+            } => (generation, latest),
+            PeerPartStrat::Unknown => unreachable!("not an answer"),
+        };
+        let mut cmds = vec![];
+        // The held cursor is a position in the generation it was stored under, and in a log
+        // that reaches at least that far. A part never seen holds neither.
+        let restart = match p.generation {
+            Some(held) => held != peer_generation || latest < p.cursor,
+            None => false,
+        };
+        if restart {
+            cmds.push(LifecycleCommand::Restart {
+                part: part.clone(),
+                held: PeerCursor {
+                    generation: p.generation.expect("restart has a generation"),
+                    rev: p.cursor,
+                },
+                peer_generation,
+                peer_latest: latest,
+            });
+            p.cursor = 0;
+        }
+        p.generation = Some(peer_generation);
         match strat {
             PeerPartStrat::Cursor { .. } => {
                 p.phase = Phase::Cursor;
-                LifecycleCommand::StartCursor {
+                cmds.push(LifecycleCommand::StartCursor {
                     part: part.clone(),
                     from: p.cursor,
-                }
+                });
             }
-            PeerPartStrat::BucketWalk { latest, .. } => {
+            PeerPartStrat::BucketWalk { .. } => {
                 p.phase = Phase::Walking;
+                let since = p.cursor;
                 p.cursor = p.cursor.max(latest);
-                LifecycleCommand::StartWalk {
+                cmds.push(LifecycleCommand::StartWalk {
                     part: part.clone(),
                     strat,
-                }
+                    since,
+                });
             }
             PeerPartStrat::Unknown => unreachable!("not an answer"),
         }
+        cmds
     }
 
     pub(super) fn applied(&mut self, part: &PartKey, cursor: Rev) -> Vec<LifecycleCommand> {
@@ -235,10 +267,14 @@ impl Oracle {
             }
             Phase::Cursor if cursor > p.cursor => {
                 p.cursor = cursor;
-                self.persisted.insert(part.clone(), cursor);
+                let held = PeerCursor {
+                    generation: p.generation.expect("a decided part has a generation"),
+                    rev: cursor,
+                };
+                self.persisted.insert(part.clone(), held);
                 vec![LifecycleCommand::PersistCursor {
                     part: part.clone(),
-                    cursor,
+                    cursor: held,
                 }]
             }
             _ => vec![],
@@ -249,11 +285,14 @@ impl Oracle {
         let p = self.find_mut(part).expect("upgrade of a wanted part");
         assert_eq!(p.phase, Phase::Walking);
         p.phase = Phase::Cursor;
-        let cursor = p.cursor;
-        self.persisted.insert(part.clone(), cursor);
+        let held = PeerCursor {
+            generation: p.generation.expect("a decided part has a generation"),
+            rev: p.cursor,
+        };
+        self.persisted.insert(part.clone(), held);
         vec![LifecycleCommand::PersistCursor {
             part: part.clone(),
-            cursor,
+            cursor: held,
         }]
     }
 
