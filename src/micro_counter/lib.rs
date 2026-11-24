@@ -4,12 +4,15 @@
 //! current value and an `increment` call, which the toolbar's Increment button performs.
 //! [`clay_mdk::export_micro!`] exports it as the `micro-client` guest on wasm32-wasip3 and as
 //! the native `ACTIVATE` entry everywhere else; nothing here names a backend.
+use clay_dioxus_kit::Button;
+use clay_dioxus_kit::ButtonVariant;
 use clay_mdk::Context;
 use clay_mdk::Error;
 use clay_mdk::Facet;
 use clay_mdk::FacetState;
 use clay_mdk::Operation;
 use clay_mdk::OperationStatus;
+use clay_mdk::hooks::Stylesheet;
 use clay_mdk::hooks::use_facet;
 use dioxus::prelude::*;
 use micro_counter_manifest::COUNT;
@@ -107,11 +110,18 @@ async fn activate(context: Context) -> Result<(), Error> {
 
 clay_mdk::export_micro!(activate, micro_counter_manifest::manifest);
 
-/// The counter's model and view in one root-scope render: its hooks are shared by every surface
-/// the host mounts this presentation into (see [`Context::publish_component`]).
+/// The counter's own stylesheet: the layout of its parts, which the kit has no component for. It
+/// names no colour, so a theme restyles the counter through the kit's tokens and parts.
+const STYLES: &str = include_str!("styles.css");
+
+/// Bumped whenever the standalone count changes. A global signal lives in its `VirtualDom`, so
+/// every mount of the `view` presentation subscribes to the same one.
+static STANDALONE_COUNTED: GlobalSignal<u64> = Signal::global(|| 0);
+
+/// The counter's model and view in one render: `render` runs in a component scope of its own for
+/// each mount (see [`Context::publish`]), so the signals here belong to one surface.
 fn view(counter: Counter) -> Element {
-    let mut rerender = use_signal(|| 0_u64);
-    let _: u64 = rerender();
+    let _: u64 = STANDALONE_COUNTED();
     let mut operation = use_signal(|| None::<Operation>);
     let mut error = use_signal(|| None::<String>);
     let snapshot = counter.facet.as_ref().map(use_facet);
@@ -122,14 +132,16 @@ fn view(counter: Counter) -> Element {
     let increment = counter.clone();
     let document = counter.facet.clone().zip(snapshot);
     rsx! {
-        div { class: "flex flex-col gap-4",
-            button {
-                class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                "aria-label": "Increment Wasm counter",
+        div { class: "ct-counter",
+            Stylesheet { css: STYLES }
+            Button {
+                variant: ButtonVariant::Outline,
+                label: "Increment Wasm counter".to_owned(),
                 disabled: matches!(value, FacetState::Loading),
-                onclick: move |_| match increment.increment() {
-                    // A standalone count has no document to notify the view of it changing.
-                    Ok(None) => rerender += 1,
+                onclick: move |()| match increment.increment() {
+                    // A standalone count has no document to notify the view of it changing, so
+                    // the global tells every mount of this presentation to re-read it.
+                    Ok(None) => *STANDALONE_COUNTED.write() += 1,
                     Ok(Some(submitted)) => {
                         operation.set(Some(submitted));
                         error.set(None);
@@ -156,10 +168,10 @@ fn view(counter: Counter) -> Element {
                 if let Some(error) = error() {
                     p { role: "status", "{error}" }
                 }
-                button {
-                    class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                    "aria-label": "Refresh Wasm counter",
-                    onclick: move |_| {
+                Button {
+                    variant: ButtonVariant::Outline,
+                    label: "Refresh Wasm counter".to_owned(),
+                    onclick: move |()| {
                         error.set(facet.refresh().err().map(|failure| format!("Refresh failed: {failure}")));
                     },
                     "Refresh counter"

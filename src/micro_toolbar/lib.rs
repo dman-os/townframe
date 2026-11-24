@@ -5,10 +5,14 @@
 //! starts one (ADR 031 §13).
 pub use micro_toolbar_manifest as contract;
 
+/// The toolbar's own stylesheet: the layout of its parts, which the kit has no component for.
+const STYLES: &str = include_str!("styles.css");
+
 use clay_mdk::Capability;
 use clay_mdk::Collection;
 use clay_mdk::Context;
 use clay_mdk::Error;
+use clay_mdk::hooks::Stylesheet;
 use clay_mdk::hooks::use_ref_status;
 use clay_mdk::hooks::use_rows;
 use contract::Button;
@@ -25,7 +29,7 @@ pub async fn activate(context: Context) -> Result<(), Error> {
     Ok(())
 }
 
-/// The toolbar's model and view in one root-scope render. A press calls the button's attachment
+/// The toolbar's model and view in one render. A press calls the button's link
 /// (empty request, empty response); the redeemed call holds its provider live until it returns,
 /// and a failure is shown, not swallowed.
 fn view(buttons: &Collection<String, Button>) -> Element {
@@ -34,15 +38,16 @@ fn view(buttons: &Collection<String, Button>) -> Element {
     let pending = use_signal(BTreeSet::<String>::new);
     let failure = use_signal(|| None::<String>);
     rsx! {
-        div { class: "flex flex-col gap-2", role: "toolbar", "aria-label": "Toolbar",
-            div { class: "flex flex-wrap gap-2",
+        div { class: "ct-toolbar", role: "toolbar", "aria-label": "Toolbar",
+            Stylesheet { css: STYLES }
+            div { "data-part": "buttons",
                 for row in rows.iter() {
                     ToolbarButton {
                         key: "{row.key}",
                         id: row.key.clone(),
                         label: row.value.label.clone(),
                         icon: row.value.icon.clone(),
-                        action: row.attachments[row.value.action.index()].clone(),
+                        action: row.links[row.value.action.index()].clone(),
                         pending,
                         failure,
                     }
@@ -73,14 +78,23 @@ fn ToolbarButton(
         Some(reason) => format!("{label} (unavailable: {reason})"),
         None => label.clone(),
     };
+    let disabled = blocked.is_some() || pending.read().contains(&id);
     rsx! {
+        // The kit's `Button` is not used here: a button that says why it is unavailable carries
+        // `aria-description`, which is native-only (not in the guest wire vocabulary a kit
+        // component is held to), so the toolbar emits the button vocabulary of the styling contract
+        // (`ct-button`, `data-variant`, `data-part="label"`) itself and takes the kit's skin.
         button {
-            class: "rounded-md border border-border px-4 py-2 focus-visible:outline disabled:opacity-50",
+            class: "ct-button",
+            r#type: "button",
+            "data-variant": "outline",
+            "data-size": "md",
+            "data-disabled": disabled.then_some(""),
+            "data-icon": "{icon}",
             "aria-label": "{label}",
             "aria-description": blocked.map(|reason| format!("Unavailable: {reason}")),
             title: "{label_text}",
-            "data-icon": "{icon}",
-            disabled: blocked.is_some() || pending.read().contains(&id),
+            disabled,
             onclick: move |_| {
                 let id = id.clone();
                 let action = action.clone();
@@ -93,7 +107,7 @@ fn ToolbarButton(
                     pending.write().remove(&id);
                 });
             },
-            "{label}"
+            span { "data-part": "label", "{label}" }
         }
     }
 }
