@@ -589,15 +589,16 @@ mod tests {
         let mut claims = router.follow_claims();
         assert!(!claims.has_changed().unwrap());
 
-        router.register("p", ops(&["x.a"]), ready()).unwrap();
-        router.register("q", ops(&["x.b"]), ready()).unwrap();
+        let state = ready();
+        router.register("p", ops(&["x.a"]), state.clone()).unwrap();
+        router.register("q", ops(&["x.b"]), state.clone()).unwrap();
         // A burst is one pending change to the follower, which then reads the claims as they are.
         assert!(claims.has_changed().unwrap());
         assert_eq!(*claims.borrow_and_update(), 2);
         assert!(!claims.has_changed().unwrap());
 
         // Registering what is already registered swaps nothing, and routes are not claims.
-        router.register("p", ops(&["x.a"]), ready()).unwrap();
+        router.register("p", ops(&["x.a"]), state).unwrap();
         router.set_routes(BTreeMap::from([(
             "x.a".to_owned(),
             Route::Provider("p".to_owned()),
