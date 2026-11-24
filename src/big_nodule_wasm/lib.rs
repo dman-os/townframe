@@ -428,6 +428,88 @@ impl WasmExecutor {
         self.remove_mount(&running.workload_id).await;
     }
 
+    /// Registers a component's signer, stdio pipes and working mount, then starts its workload,
+    /// and answers the workload's id. A failed start leaves none of the registrations behind.
+    async fn start_component(
+        &self,
+        spec: &HandlerSpec,
+        key: &str,
+        component_bytes: Vec<u8>,
+    ) -> wash_runtime::wasmtime::anyhow::Result<String> {
+        let workload_id = format!("nodule/{}/{}/{}", spec.cartridge_id, spec.revision, key);
+        self.signers.lock().expect("signers lock").insert(
+            workload_id.clone(),
+            WorkloadCaller {
+                signer: spec.actor.capability,
+                missing_authority: spec.missing_authority.clone(),
+            },
+        );
+        // The host asks for the workload's stdio while starting it, so the pipes exist first.
+        self.pipes.lock().expect("pipes lock").insert(
+            workload_id.clone(),
+            Arc::new(stdio::WorkloadPipes::new(&spec.cartridge_id)),
+        );
+        // And it opens the workload's volumes then, so the mount exists first too.
+        let mount = self
+            .blobs
+            .working_mounts()
+            .create()
+            .await
+            .expect("creating a working mount");
+        let mount_dir = mount
+            .dir()
+            .to_str()
+            .expect("a working mount's path is UTF-8 because wash volumes are strings")
+            .to_owned();
+        self.mounts
+            .lock()
+            .expect("mounts lock")
+            .insert(workload_id.clone(), mount);
+        let started = self
+            .host
+            .workload_start(WorkloadStartRequest {
+                workload_id: workload_id.clone(),
+                workload: Workload {
+                    namespace: spec.cartridge_id.to_string(),
+                    name: format!("{}-{key}", spec.revision),
+                    annotations: Default::default(),
+                    service: None,
+                    components: vec![Component {
+                        name: key.to_owned(),
+                        bytes: component_bytes.into(),
+                        pool_size: 0,
+                        local_resources: LocalResources {
+                            volume_mounts: vec![VolumeMount {
+                                name: "work".to_owned(),
+                                mount_path: WORKING_MOUNT.to_owned(),
+                                read_only: false,
+                            }],
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }],
+                    host_interfaces: vec![WitInterface::from("wasi:http/handler@0.3.0")],
+                    volumes: vec![Volume {
+                        name: "work".to_owned(),
+                        volume_type: VolumeType::HostPath(HostPathVolume {
+                            local_path: mount_dir,
+                        }),
+                    }],
+                },
+            })
+            .await;
+        if let Err(error) = started {
+            self.signers
+                .lock()
+                .expect("signers lock")
+                .remove(&workload_id);
+            self.pipes.lock().expect("pipes lock").remove(&workload_id);
+            self.remove_mount(&workload_id).await;
+            return Err(error);
+        }
+        Ok(workload_id)
+    }
+
     /// Removes a workload's working mount, after its instances are gone or never started. A file
     /// the guest still had open keeps reading until closed.
     async fn remove_mount(&self, workload_id: &str) {
@@ -516,86 +598,21 @@ impl NoduleExecutor for WasmExecutor {
 
         let mut components = BTreeMap::new();
         for (key, (artifact, component_bytes)) in bytes {
-            let workload_id = format!("nodule/{}/{}/{}", spec.cartridge_id, spec.revision, key);
-            self.signers.lock().expect("signers lock").insert(
-                workload_id.clone(),
-                WorkloadCaller {
-                    signer: spec.actor.capability,
-                    missing_authority: spec.missing_authority.clone(),
-                },
-            );
-            // The host asks for the workload's stdio while starting it, so the pipes exist first.
-            self.pipes.lock().expect("pipes lock").insert(
-                workload_id.clone(),
-                Arc::new(stdio::WorkloadPipes::new(&spec.cartridge_id)),
-            );
-            // And it opens the workload's volumes then, so the mount exists first too.
-            let mount = self
-                .blobs
-                .working_mounts()
-                .create()
-                .await
-                .expect("creating a working mount");
-            let mount_dir = mount
-                .dir()
-                .to_str()
-                .expect("a working mount's path is UTF-8 because wash volumes are strings")
-                .to_owned();
-            self.mounts
-                .lock()
-                .expect("mounts lock")
-                .insert(workload_id.clone(), mount);
-            let started = self
-                .host
-                .workload_start(WorkloadStartRequest {
-                    workload_id: workload_id.clone(),
-                    workload: Workload {
-                        namespace: spec.cartridge_id.to_string(),
-                        name: format!("{}-{key}", spec.revision),
-                        annotations: Default::default(),
-                        service: None,
-                        components: vec![Component {
-                            name: key.clone(),
-                            bytes: component_bytes.into(),
-                            pool_size: 0,
-                            local_resources: LocalResources {
-                                volume_mounts: vec![VolumeMount {
-                                    name: "work".to_owned(),
-                                    mount_path: WORKING_MOUNT.to_owned(),
-                                    read_only: false,
-                                }],
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }],
-                        host_interfaces: vec![WitInterface::from("wasi:http/handler@0.3.0")],
-                        volumes: vec![Volume {
-                            name: "work".to_owned(),
-                            volume_type: VolumeType::HostPath(HostPathVolume {
-                                local_path: mount_dir,
-                            }),
-                        }],
-                    },
-                })
-                .await;
-            if let Err(error) = started {
-                self.signers
-                    .lock()
-                    .expect("signers lock")
-                    .remove(&workload_id);
-                self.pipes.lock().expect("pipes lock").remove(&workload_id);
-                self.remove_mount(&workload_id).await;
-                for component in components.values() {
-                    self.stop_workload(component).await;
+            let workload_id = match self.start_component(spec, &key, component_bytes).await {
+                Ok(workload_id) => workload_id,
+                Err(error) => {
+                    for component in components.values() {
+                        self.stop_workload(component).await;
+                    }
+                    tracing::warn!(
+                        cartridge = %spec.cartridge_id,
+                        revision = %spec.revision,
+                        component = key,
+                        "nodule component workload failed to start: {error:#}"
+                    );
+                    return Hosted::NotReady(Readiness::ExecutorUnavailable);
                 }
-                tracing::warn!(
-                    cartridge = %spec.cartridge_id,
-                    revision = %spec.revision,
-                    component = key,
-                    "nodule component workload failed to start: {error:#}"
-                );
-                return Hosted::NotReady(Readiness::ExecutorUnavailable);
-            }
+            };
             self.arrivals
                 .lock()
                 .expect("arrivals lock")
