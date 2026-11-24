@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+/* The contract's layers (docs/design-language/styling-contract.md), lowest first. They are declared
+   after Tailwind's own so a `user` rule outranks a utility. `reset` and `tokens` are filled by
+   the imports below, `kit` by the component skins, `user` by the end user's theme at run time. */
+@layer reset, tokens, kit, user;
+
+@import "./styles/material.css";
+@import "./styles/reset.css";
+@import "./styles/tokens.generated.css";
+@import "./styles/tokens.css";
+@import "./styles/kit/button.css" layer(kit);
+@import "./styles/kit/tabs.css" layer(kit);
+@import "./styles/kit/card.css" layer(kit);
+@import "./styles/kit/separator.css" layer(kit);
+@import "./styles/kit/alert.css" layer(kit);
+@import "./styles/kit/chip.css" layer(kit);
+@import "./styles/kit/scrub_strip.css" layer(kit);
+@import "./styles/kit/list_details.css" layer(kit);
+@import "./styles/kit/sections.css" layer(kit);
+@import "./styles/kit/overlay.css" layer(kit);
+@import "./styles/kit/drawer.css" layer(kit);
+@import "./styles/kit/sheet.css" layer(kit);
+@import "./styles/kit/panel_page.css" layer(kit);
+@import "./styles/kit/list_row.css" layer(kit);
+@import "./styles/kit/app_bar.css" layer(kit);
+@import "./styles/kit/nav_button.css" layer(kit);
+
+/* Tailwind scans the whole repository; a WIT interface name in the nodule crates reads as an
+   arbitrary property and would emit an invalid rule. */
+@source not inline("[wasi:http/handler@0.3.0]");
