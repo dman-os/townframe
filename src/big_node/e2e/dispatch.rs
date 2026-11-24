@@ -152,6 +152,7 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
             ),
             (cartridge_methods::ListCartridgeGrants::XRPC.nsid, true),
             (cartridge_methods::AwaitCartridgeGrants::XRPC.nsid, true),
+            (cartridge_methods::ResolveCartridgePin::XRPC.nsid, true),
             (nodule_methods::SetNoduleDevTakeover::XRPC.nsid, true),
             (nodule_methods::ListNodules::XRPC.nsid, false),
             (nodule_methods::MintNoduleCapability::XRPC.nsid, false),
@@ -551,7 +552,7 @@ async fn a_body_capability_presented_by_an_actor_it_is_not_bound_to_is_refused()
             RequestContext::root(),
             Authorization::identity(node.authority.root).metadata(),
             MintDocCapability {
- capability: None,
+                capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([stored.doc_id.clone()]),
                     ..DocScope::default()

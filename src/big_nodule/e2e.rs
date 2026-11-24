@@ -734,6 +734,7 @@ async fn boot_nodules(
             grants: core_grants,
         },
         sql: (**sql).clone(),
+        granted: cartridges.granted.clone(),
     })
     .await
 }

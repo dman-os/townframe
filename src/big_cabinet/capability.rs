@@ -23,8 +23,55 @@ use service_utils_rs::ClientError;
 use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::Weak;
 
 type Error = ClientError<AuthorityServiceError>;
+
+/// Who presents a call whose credential is not one of this domain's handles.
+pub enum Presenter {
+    /// The operator, presenting its root capability.
+    Operator,
+    /// An actor holding a handle bound to it, which for a call through dispatch is a nodule's
+    /// actor presenting the handle dispatch minted for it.
+    Actor(Uuid7),
+}
+
+/// Whether the cartridge `actor` runs for holds a privileged grant of exactly `method` from the
+/// node itself (a boot grant, never one written to a config document). The nodule service
+/// answers it, because it holds the grants and knows which actor runs which cartridge.
+pub trait PrivilegedGrants: Send + Sync {
+    fn holds<'a>(&'a self, actor: Uuid7, method: &'a str) -> futures::future::BoxFuture<'a, bool>;
+}
+
+/// The nodule service's [`PrivilegedGrants`], bound after it boots, for a service that boots
+/// before it (the cartridges registry the nodule service installs from) and so cannot hold it.
+/// Held weakly: the nodule service stops first and owns its own lifetime.
+#[derive(Clone, Default)]
+pub struct GrantedMethods(Arc<Mutex<Option<Weak<dyn PrivilegedGrants>>>>);
+
+impl GrantedMethods {
+    /// Binds the nodule service, replacing an earlier one: a service restarted in place (a test's
+    /// reboot of it) binds again.
+    pub fn bind(&self, holder: Weak<dyn PrivilegedGrants>) {
+        *self.0.lock().expect("the grants binding lock") = Some(holder);
+    }
+
+    async fn holds(&self, actor: Uuid7, method: &str) -> bool {
+        let holder = self
+            .0
+            .lock()
+            .expect("the grants binding lock")
+            .as_ref()
+            .and_then(Weak::upgrade);
+        match holder {
+            Some(holder) => holder.holds(actor, method).await,
+            // Before the nodule service is up, or after it stopped, nobody holds a grant.
+            None => false,
+        }
+    }
+}
 
 /// The object a domain capability carries. Who the handle is bound to is not part of it: that
 /// is the capability's `subject`, which the authority records and enforces.
@@ -326,6 +373,57 @@ impl DomainCapabilities {
                     .map_err(|error| ClientError::Method(AuthorityServiceError::Context(error)))?;
                 self.source(context, authorization).await
             }
+        }
+    }
+
+    /// Who presents `authorization` when it is not one of this domain's handles: the operator,
+    /// or the actor a handle (a nodule's dispatch handle, as dispatch forwards it) is bound to,
+    /// accepted only when the signer is bound to that same actor (holder binding, ADR 037), the
+    /// check dispatch itself ran before admitting the call.
+    pub async fn presenter(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+    ) -> Result<Presenter, Error> {
+        let resolved = self
+            .authority
+            .call(
+                context.child(),
+                ResolveAuthority {
+                    capability: authorization.authority,
+                },
+            )
+            .await?;
+        if resolved.is_operator_root() {
+            return Ok(Presenter::Operator);
+        }
+        let actor = resolved
+            .actor
+            .map(|actor| actor.actor_id)
+            .or(resolved.capability.subject)
+            .ok_or(ClientError::Method(AuthorityServiceError::Unauthorized))?;
+        let signer = self.inspect(context, authorization.signer).await?;
+        if !signer.rights.contains(Rights::USE) || signer.subject != Some(actor) {
+            return Err(ClientError::Method(AuthorityServiceError::Unauthorized));
+        }
+        Ok(Presenter::Actor(actor))
+    }
+
+    /// Admits a presenter that is not a handle of this domain to read through the privileged
+    /// `method`: the operator, or an actor whose cartridge holds a privileged boot grant of
+    /// exactly that method (see [`PrivilegedGrants`]). A privileged method trusts a privileged
+    /// grant of itself and no other, and nothing here names a cartridge.
+    pub async fn admit_privileged(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        granted: &GrantedMethods,
+        method: &str,
+    ) -> Result<(), Error> {
+        match self.presenter(context, authorization).await? {
+            Presenter::Operator => Ok(()),
+            Presenter::Actor(actor) if granted.holds(actor, method).await => Ok(()),
+            Presenter::Actor(_) => Err(ClientError::Method(AuthorityServiceError::Unauthorized)),
         }
     }
 

@@ -123,7 +123,7 @@ async fn mint_capability(node: &BigNode, minter: Authorization, scope: DocScope)
             RequestContext::root(),
             minter.metadata(),
             MintDocCapability {
- capability: None,
+                capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: None,

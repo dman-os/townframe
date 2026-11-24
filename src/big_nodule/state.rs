@@ -721,7 +721,7 @@ async fn mint_missing_handles(
                     context.child(),
                     authorization.metadata(),
                     MintDocCapability {
- capability: None,
+                        capability: None,
                         scope: scope.clone(),
                         rights: handle_rights(),
                         subject: Some(actor.actor.actor_id),
@@ -747,7 +747,7 @@ async fn mint_missing_handles(
                     context.child(),
                     Authorization::identity(delegators.signer).metadata(),
                     MintDrawerCapability {
- capability: None,
+                        capability: None,
                         scope: scope.clone(),
                         rights: handle_rights(),
                         subject: Some(actor.actor.actor_id),
@@ -779,7 +779,7 @@ async fn mint_missing_handles(
                     }
                     .metadata(),
                     big_blobs_core::MintBlobsCapability {
- capability: None,
+                        capability: None,
                         scope: scope.clone(),
                         rights: handle_rights(),
                         subject: Some(actor.actor.actor_id),
@@ -2957,7 +2957,10 @@ impl Stores {
                     path: format!(
                         "{}/{}",
                         self.parent_path,
-                        big_nodule_core::actor_segment(&cartridge_id.name, &cartridge_id.to_string())
+                        big_nodule_core::actor_segment(
+                            &cartridge_id.name,
+                            &cartridge_id.to_string()
+                        )
                     ),
                     rights: Rights::USE,
                 },
@@ -3064,7 +3067,7 @@ impl Stores {
                 context.child(),
                 authorization.metadata(),
                 MintDrawerCapability {
- capability: None,
+                    capability: None,
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
                         create: false,
@@ -3099,7 +3102,7 @@ impl Stores {
                 context.child(),
                 Authorization::identity(self.parent.capability).metadata(),
                 MintDrawerCapability {
- capability: None,
+                    capability: None,
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
                         create: false,
@@ -3142,7 +3145,7 @@ impl Stores {
                 context.child(),
                 Authorization::identity(self.parent.capability).metadata(),
                 MintDrawerCapability {
- capability: None,
+                    capability: None,
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
                         create: false,

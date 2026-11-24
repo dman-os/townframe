@@ -49,6 +49,7 @@ use big_cartridges_core::protocol::GetCartridgeVersion;
 use big_cartridges_core::protocol::ListCartridgeGrants;
 use big_cartridges_core::protocol::ListCartridgeInstalls;
 use big_cartridges_core::protocol::PublishCartridgeVersion;
+use big_cartridges_core::protocol::ResolveCartridgePin;
 use big_cartridges_core::protocol::StageCartridgeVersion;
 use big_cartridges_core::registry::version_key;
 use big_cartridges_core::registry::version_pin;
@@ -60,7 +61,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 /// The core cartridge version this build carries.
-pub const VERSION: &str = "0.2.0";
+pub const VERSION: &str = "0.3.0";
 
 /// `<publisher>/core`, where `publisher` is the node's publisher DID.
 pub fn id(publisher: &str) -> CartridgeId {
@@ -79,12 +80,12 @@ pub fn id(publisher: &str) -> CartridgeId {
 /// nodule at `ProviderMissing` through boot. The nodule service reconciles when the provider
 /// registers, so the optional requests resolve then. Either way the grant below is what admits a call.
 ///
-/// The grants of the three reads are privileged, because the service answers a nodule an
+/// The grants of the four reads are privileged, because the service answers a nodule an
 /// unscoped read of every cartridge only on a privileged grant of that very method
 /// (`NoduleService::read_scope`). `listCartridgeInstalls` is not a privileged method for dispatch
 /// (a scoped management handle may list the installs it manages), but a nodule's unscoped answer
 /// is the same node bookkeeping the other two read, so it is held to the same rule.
-fn methods() -> [(XrpcMethod, Necessity, bool); 6] {
+fn methods() -> [(XrpcMethod, Necessity, bool); 7] {
     [
         (OpenActor::XRPC, Necessity::Required, false),
         (AttenuateCapability::XRPC, Necessity::Required, false),
@@ -92,6 +93,10 @@ fn methods() -> [(XrpcMethod, Necessity, bool); 6] {
         (ListCartridgeGrants::XRPC, Necessity::Optional, true),
         (AwaitCartridgeGrants::XRPC, Necessity::Optional, true),
         (ListCartridgeInstalls::XRPC, Necessity::Optional, true),
+        // Served by the registry, which boots before the nodule service, so its provider is
+        // there when the core nodule reconciles. It reads the envelope an install pins, which is
+        // where a micro's `uses` and the permbinds they name are declared.
+        (ResolveCartridgePin::XRPC, Necessity::Required, true),
     ]
 }
 
@@ -258,7 +263,7 @@ impl BigNode {
                         RequestContext::root(),
                         operator.metadata(),
                         MintBlobsCapability {
- capability: None,
+                            capability: None,
                             scope: BlobsScope {
                                 put: true,
                                 ..Default::default()
@@ -329,7 +334,7 @@ impl BigNode {
                 RequestContext::root(),
                 operator.metadata(),
                 MintDocCapability {
- capability: None,
+                    capability: None,
                     scope: DocScope {
                         read: DocScope::read_all([doc_id.clone()]),
                         ..Default::default()
@@ -382,7 +387,7 @@ mod tests {
                 big_cartridges_core::Digest::of(&content).to_string()
             ),
             (
-                "0.2.0",
+                "0.3.0",
                 "zAY9PkRdrcWxNCzNJ3sMTy2mrh6NVCPWEpmcbVMns7Pm1".to_owned()
             ),
         );

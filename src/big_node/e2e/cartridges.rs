@@ -888,18 +888,19 @@ async fn a_node_installs_its_core_cartridge_at_boot_and_a_reboot_keeps_the_insta
             })
             .collect()
     };
-    let expected = |nsids: [&str; 3]| nsids.map(str::to_owned).into_iter().collect();
+    let expected = |nsids: &[&str]| nsids.map(str::to_owned).into_iter().collect();
     assert_eq!(
         named(true),
-        expected([
+        expected(&[
             "org.example.daybook.cartridges.awaitCartridgeGrants",
             "org.example.daybook.cartridges.listCartridgeGrants",
             "org.example.daybook.cartridges.listCartridgeInstalls",
+            "org.example.daybook.cartridges.resolveCartridgePin",
         ])
     );
     assert_eq!(
         named(false),
-        expected([
+        expected(&[
             "org.example.daybook.authority.attenuateCapability",
             "org.example.daybook.authority.openActor",
             "org.example.daybook.authority.retractCapability",
@@ -1817,7 +1818,7 @@ pub(super) async fn import_document(
             RequestContext::root(),
             operator(node).metadata(),
             MintDocCapability {
- capability: None,
+                capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([doc_id.clone()]),
                     ..DocScope::default()
@@ -1836,7 +1837,7 @@ pub(super) async fn import_document(
             RequestContext::root(),
             operator(node).metadata(),
             MintDrawerCapability {
- capability: None,
+                capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Read)]),
                     create: false,

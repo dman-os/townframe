@@ -385,7 +385,7 @@ impl Cluster {
                 RequestContext::root(),
                 Authorization::identity(node.drawers_actor.capability).metadata(),
                 MintDrawerCapability {
- capability: None,
+                    capability: None,
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(
                             node.drawers.local().known_drawers_id,

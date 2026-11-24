@@ -22,6 +22,7 @@ pub(super) fn core_grants() -> BTreeMap<GrantKey, GrantBody> {
     use big_cabinet_core::authority::RetractCapability;
     use big_cartridges_core::protocol::AwaitCartridgeGrants;
     use big_cartridges_core::protocol::ListCartridgeGrants;
+    use big_cartridges_core::protocol::ResolveCartridgePin;
     [
         (OpenActor::XRPC, false),
         (AttenuateCapability::XRPC, false),
@@ -29,6 +30,7 @@ pub(super) fn core_grants() -> BTreeMap<GrantKey, GrantBody> {
         (ListCartridgeGrants::XRPC, true),
         (AwaitCartridgeGrants::XRPC, true),
         (ListCartridgeInstalls::XRPC, true),
+        (ResolveCartridgePin::XRPC, true),
     ]
     .into_iter()
     .map(|(method, privileged)| {
