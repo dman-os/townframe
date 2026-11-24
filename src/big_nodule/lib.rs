@@ -246,9 +246,6 @@ impl PrivilegedGrants for NoduleService {
 /// work to the state task that owns the reconciled inventory.
 pub struct NoduleService {
     capabilities: DomainCapabilities,
-    /// The authority service, for the two methods a cartridge's own actor presents a dispatch
-    /// handle to (see [`Self::presenter`]).
-    authority: Client<AuthorityProtocol>,
     /// The core cartridge's id: its install is the node's, so the methods that change an install
     /// refuse it (ADR 053 §3 item 5).
     core: CartridgeId,
@@ -1070,7 +1067,6 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
     )
     .await
     .map_err(store_error)?;
-    let authority = config.authority.clone();
     let capabilities =
         DomainCapabilities::new(config.authority.clone(), config.namespace, SCOPE_PREFIX);
     let domain_stop = capabilities.stop_token();
@@ -1106,7 +1102,6 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
     };
     let service = Arc::new(NoduleService {
         capabilities,
-        authority,
         core: config.core_cartridge.id,
         state,
     });
