@@ -261,7 +261,7 @@ pub mod big_cabinet_core::reference
 pub mod big_cabinet_core::reference::head_list
 pub mod big_cabinet_core::schema_compat
 pub struct big_cabinet_core::authority::Actor  { actor_id: Uuid7, url: String, public_key: MultibaseKey, certificate: Bytes, parent_actor_id: Option < Uuid7 > }
-pub struct big_cabinet_core::authority::AttenuateCapability  { capability: CapId, rights: Rights }
+pub struct big_cabinet_core::authority::AttenuateCapability  { capability: CapId, rights: Rights, subject: Option < Uuid7 > }
 pub struct big_cabinet_core::authority::Authorization  { authority: CapId, signer: CapId }
 pub struct big_cabinet_core::authority::CapId  {  }
 pub struct big_cabinet_core::authority::Capability  { capability_id: CapId, object: String, rights: Rights, issuer_id: Uuid7, subject: Option < Uuid7 > }
