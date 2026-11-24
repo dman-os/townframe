@@ -24,6 +24,10 @@
 //! | incremental bucket summaries equal a recompute | every check |
 //! | part summaries (member count, dirt) equal a count over the oracle's log | every check, [`dirty_count_counts_log_rows`] |
 //! | bucket reads, summaries and object states follow current access, revocation mid-walk included | [`revocation_hides_the_parts_buckets`], every check |
+//! | a dropped payload is no longer served or observable; dropping nothing is a no-op | [`a_dropped_payload_is_gone`] |
+//! | dropping the payload of a live member is a caller bug and panics; remove-then-drop in one transaction is valid | [`dropping_the_payload_of_a_member_is_a_caller_bug`], [`removing_then_dropping_in_one_transaction_is_valid`] |
+//! | a part-less object is listed, in key order, until its payload is dropped | [`a_partless_object_is_listed_until_its_payload_is_dropped`], every check |
+//! | dropping is a batch of its transaction | [`dropping_is_atomic_with_its_transaction`], [`differential`] |
 //! | a transaction is atomic: nothing before commit, everything after, nothing on rollback | [`writes_are_atomic`] |
 //! | a write that changes nothing stamps nothing | [`unchanged_writes_stamp_nothing`] |
 //! | all of the above over generated sequences, authorized reads by random principals included | [`differential`] |
@@ -67,6 +71,9 @@ mod generators;
 pub use generators::part_ops;
 use generators::*;
 
+mod payloads;
+pub use payloads::*;
+
 type Tx<B> = <<B as Backend>::Store as PartStoreWrite>::Tx;
 
 /// What a backend supplies to run the laws.
@@ -93,6 +100,7 @@ use universe::OBJS;
 use universe::PARTS;
 use universe::PRINCIPALS;
 pub use universe::add;
+pub use universe::drop_payloads;
 pub use universe::grant;
 pub use universe::obj;
 pub use universe::part;
@@ -208,6 +216,21 @@ impl<B: Backend> Harness<B> {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
+        for limit in [1, 2, usize::MAX] {
+            let mut after: Option<ObjKey> = None;
+            loop {
+                let page = store.partless_objects(limit, after.as_ref()).await?;
+                assert_eq!(
+                    page,
+                    oracle.partless_objects(limit, after.as_ref()),
+                    "part-less objects, {limit} at a time after {after:?}"
+                );
+                match page.last() {
+                    Some(last) if page.len() == limit => after = Some(last.clone()),
+                    _ => break,
+                }
+            }
+        }
         for part in &parts {
             assert_eq!(store.member_count(part).await?, oracle.member_count(part));
             // Incremental summaries against a recompute.
@@ -1263,10 +1286,15 @@ pub async fn differential<B: Backend>(backend: &B, ops: Vec<PartOp>) -> Res<()> 
     let mut harness = Harness::open(backend).await?;
     for op in ops {
         match op {
+            // generated drops of members' payloads are caller bugs (law 2): not issued
             PartOp::Commit(writes) => {
+                let writes = harness.oracle.without_member_drops(writes);
                 harness.commit(writes).await?;
             }
-            PartOp::Rollback(writes) => harness.rollback(writes).await?,
+            PartOp::Rollback(writes) => {
+                let writes = harness.oracle.without_member_drops(writes);
+                harness.rollback(writes).await?
+            }
             PartOp::Read {
                 selector,
                 after,
