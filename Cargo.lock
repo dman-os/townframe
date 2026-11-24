@@ -4200,6 +4200,7 @@ dependencies = [
  "directories",
  "futures",
  "http",
+ "insta",
  "intxt_capture",
  "intxt_core",
  "libc",

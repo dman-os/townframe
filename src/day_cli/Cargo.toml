@@ -80,4 +80,5 @@ secrets_rs = { workspace = true, features = ["test-support"] }
 #
 # misc
 trycmd = "1.2.1"
+insta = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
