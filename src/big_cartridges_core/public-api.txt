@@ -36,6 +36,7 @@ pub big_cartridges_core::test_support::fn cartridge_id (name : & str) -> Cartrid
 pub big_cartridges_core::test_support::fn sign_as_example (cartridge : Cartridge) -> Cartridge
 pub big_cartridges_core::test_support::fn sign_with_seed (mut cartridge : Cartridge , seed : & [u8 ; 32]) -> Cartridge
 pub const big_cartridges_core::AUTHORITY: & str
+pub const big_cartridges_core::CLAY_MICRO_MANIFEST_SCHEMA: & str
 pub const big_cartridges_core::config::CONFIG_AUTHORITY: & str
 pub const big_cartridges_core::registry::ARTIFACT_SLOT_PREFIX: & str
 pub const big_cartridges_core::registry::COMPONENT_TAG: & str
@@ -105,7 +106,7 @@ pub mod big_cartridges_core::test_support
 pub struct big_cartridges_core::Cartridge  { id: CartridgeId, version: Version, authority: Option < String >, name: Option < String >, description: Option < String >, short_name: Option < String >, categories: Vec < String >, theme_color: Option < String >, icons: Vec < ImageResource >, screenshots: Vec < ImageResource >, dependencies: BTreeMap < CartridgeId , VersionReq >, lexicons: BTreeMap < Nsid , DatumPin >, sidecars: BTreeMap < Nsid , DatumPin >, components: BTreeMap < String , DatumPin >, permbinds: BTreeMap < String , Permbind >, settings: BTreeSet < Nsid >, nodule: Option < Nodule >, micro: Option < MicroContribution >, signature: Option < signature :: CartridgeSignature >, extra: Extra }
 pub struct big_cartridges_core::CartridgeId  { namespace: String, name: String }
 pub struct big_cartridges_core::InvalidCartridgeId  { 0: String }
-pub struct big_cartridges_core::MicroContribution  { component: String, schema: String, description: IndexMap < String , serde_json :: Value >, extra: Extra }
+pub struct big_cartridges_core::MicroContribution  { component: String, schema: String, description: IndexMap < String , serde_json :: Value >, uses: BTreeMap < String , RoutineUse >, extra: Extra }
 pub struct big_cartridges_core::ResolvedCartridge  { cartridge: Cartridge, lexicons: BTreeMap < Nsid , IndexMap < String , serde_json :: Value > >, sidecars: BTreeMap < Nsid , IndexMap < String , serde_json :: Value > >, components: BTreeMap < String , Component > }
 pub struct big_cartridges_core::Version  { 0: semver :: Version }
 pub struct big_cartridges_core::VersionReq  { 0: semver :: VersionReq }
