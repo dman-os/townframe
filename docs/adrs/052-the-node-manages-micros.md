@@ -111,7 +111,11 @@ is `privileged`, because it mints under a caller-named issuer namespace. Two cha
    methods (ADR 047, ADR 049 §3), a **runtime permbind** because what it reaches is the node's own bookkeeping, not
    another cartridge's collection. It is granted once, at install of the core cartridge, by the node (ADR 053 §3), not by
    a person: the person cannot be asked about the cartridge that asks about the person's cartridges. The permbind covers
-   reads only. Nothing in it lets the nodule write a grant.
+   reads only. Nothing in it lets the nodule write a grant. As built: the node holds the core cartridge's method grants for
+   the boot (`CoreCartridge::grants`, seeded as "only this time" grants that no document stores), marked
+   `GrantBody::privileged` for the three reads. A privileged method trusts a privileged grant of exactly that method held
+   by the presenting nodule's cartridge (`NoduleService::read_scope`), and the nodule service's dispatch handle may carry
+   the privilege bit only because the grants that set it are the node's own.
 3. **Lazy re-mint.** Nodules are request handlers, not long-lived, so `micros.awaitHandles` itself long-polls the grant
    feed and re-mints when it moves (§3). There is no background follower, so nothing in the node has to keep a nodule
    alive.

@@ -985,7 +985,7 @@ impl State {
         )
         .await?;
         let (installs, installs_rx) = watch::channel(Vec::new());
-        let (grant_requests, requests_rx, grants_rx) = GrantRequests::new();
+        let (grant_requests, requests_rx, grants_rx) = GrantRequests::new(&stores.core_cartridge);
 
         let mut state = Self {
             stores,
@@ -2871,8 +2871,8 @@ impl Stores {
     }
 
     /// The actor `cartridge_id`'s nodule acts as. The core cartridge's nodule is the micros
-    /// runtime (ADR 052 §2), so it acts as the `micros` subsystem actor the node opened beside
-    /// `nodules`, and the micro actors it opens (`micros/<cartridge>/<micro>`) are its own
+    /// runtime (ADR 052 §2), so it acts as the `micros` subsystem actor the node opened under
+    /// `nodules`, and the micro actors it opens (`nodules/micros/<cartridge>/<micro>`) are its own
     /// subtree. Every other nodule's actor is `nodules/<cartridge segment>`, opened here (a path
     /// that exists opens to the same actor).
     async fn open_actor(

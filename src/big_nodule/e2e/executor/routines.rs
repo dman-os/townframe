@@ -1642,7 +1642,12 @@ mod grant_requests {
         );
         assert!(node.pending().await.is_empty());
         let granted = node
-            .call(node.operator(), ListCartridgeGrants::default())
+            .call(
+                node.operator(),
+                ListCartridgeGrants {
+                    cartridge_id: Some(id(ALPHA)),
+                },
+            )
             .await
             .unwrap()
             .grants;
@@ -1734,7 +1739,12 @@ mod grant_requests {
                 "{answer:?}"
             );
             let listed = node
-                .call(node.operator(), ListCartridgeGrants::default())
+                .call(
+                    node.operator(),
+                    ListCartridgeGrants {
+                        cartridge_id: Some(id(ALPHA)),
+                    },
+                )
                 .await
                 .unwrap()
                 .grants;
@@ -2291,4 +2301,336 @@ async fn every_routine_is_delivered_its_nodules_actor_capability() {
     .await;
     assert_eq!(actor_of(PING), actor);
     node.shutdown().await;
+}
+
+/// The node's core cartridge as the actor of ADR 052 sees it: a nodule acting as the `micros`
+/// subsystem actor, whose routine uses the methods it opens actors and reads other cartridges
+/// with, and which the node (not a person) grants them as `installs::core_grants` does. The
+/// fixture's methods are optional requests because the nodule service's own methods are
+/// registered after it boots (see `BigNode::register_late_built_ins`).
+mod core_like {
+    use super::*;
+    use big_cabinet_core::authority::AttenuateCapability;
+    use big_cabinet_core::authority::OpenActor;
+    use big_cartridges_core::protocol::AwaitCartridgeGrants;
+    use big_cartridges_core::protocol::CartridgesError;
+    use big_cartridges_core::protocol::ListCartridgeGrants;
+    use big_cartridges_core::protocol::ListCartridgeInstalls;
+    use big_dispatch::ServiceProvider;
+    use method_core::Method;
+
+    const CORE: &str = example_cartridge!("core");
+    const TICK: &str = "org.example.core.tick";
+
+    fn open_actor() -> &'static str {
+        OpenActor::XRPC.nsid
+    }
+
+    fn attenuate() -> &'static str {
+        AttenuateCapability::XRPC.nsid
+    }
+
+    fn list_grants() -> &'static str {
+        ListCartridgeGrants::XRPC.nsid
+    }
+
+    fn await_grants() -> &'static str {
+        AwaitCartridgeGrants::XRPC.nsid
+    }
+
+    fn list_installs() -> &'static str {
+        ListCartridgeInstalls::XRPC.nsid
+    }
+
+    /// A cartridge whose one routine `routine` uses each of `methods`.
+    fn using(
+        name: &str,
+        version: &str,
+        routine: &str,
+        methods: &[&'static str],
+    ) -> FixtureCartridge {
+        let mut cartridge = with_requests(
+            init_cartridge(name, version, &[routine], &[], &[]),
+            methods
+                .iter()
+                .map(|method| necessity(method, Necessity::Optional))
+                .collect(),
+        );
+        for method in methods {
+            uses(&mut cartridge, routine, method, RoutineUse::default());
+        }
+        cartridge
+    }
+
+    /// A node with the authority and nodule services served through dispatch as `big_node`
+    /// serves them, and the core-like cartridge installed. Returns the executor's view of
+    /// the core routine's handles (its last `ensure` is the core nodule's, until another is
+    /// admitted).
+    async fn core_node() -> (
+        Node,
+        Arc<FakeExecutor>,
+        crate::executor::RoutineCapabilities,
+    ) {
+        let executor = FakeExecutor::hosting(Arc::new(Echo::default()), true);
+        let node =
+            crate::e2e::node_with(Some(Arc::clone(&executor) as Arc<dyn NoduleExecutor>)).await;
+        ServiceProvider::default()
+            .serve(&node.authority.client)
+            .register(&node.dispatch.router, "builtin:authority");
+        ServiceProvider::default()
+            .serve(&node.nodules.client)
+            .register(&node.dispatch.router, "builtin:nodules");
+        node.admit(
+            node.operator(),
+            using(
+                "core",
+                crate::e2e::installs::CORE_VERSION,
+                TICK,
+                &[
+                    open_actor(),
+                    attenuate(),
+                    list_grants(),
+                    await_grants(),
+                    list_installs(),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+        let held = executor.routine_capabilities_of(&id(CORE))[TICK].clone();
+        (node, executor, held)
+    }
+
+    /// `alpha`, a plain nodule granted `methods` as any cartridge is, with the handles it holds.
+    async fn plain_nodule(
+        node: &Node,
+        executor: &FakeExecutor,
+        methods: &[&'static str],
+    ) -> crate::executor::RoutineCapabilities {
+        node.admit(node.operator(), using("alpha", "1.0.0", PING, methods))
+            .await
+            .unwrap();
+        node.set_methods(
+            ALPHA,
+            DispatchScope {
+                operations: methods.iter().map(|method| (*method).to_owned()).collect(),
+                ..Default::default()
+            },
+        )
+        .await;
+        node.set_enabled(ALPHA, true).await;
+        executor.routine_capabilities_of(&id(ALPHA))[PING].clone()
+    }
+
+    fn as_routine(held: &crate::executor::RoutineCapabilities) -> Authorization {
+        Authorization {
+            authority: held.dispatch.expect("the routine holds a dispatch handle"),
+            signer: held
+                .actor
+                .expect("the routine is told its actor capability"),
+        }
+    }
+
+    async fn shut_down(node: Node) {
+        node.dispatch.router.unbind("builtin:authority");
+        node.dispatch.router.unbind("builtin:nodules");
+        node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_nodule_is_told_its_actor_capability_which_opens_children_only_with_the_right_to() {
+        let (node, executor, core) = core_node().await;
+        let core_auth = as_routine(&core);
+        let actor = core.actor.unwrap();
+        let inspected = node
+            .authority
+            .client
+            .call(
+                RequestContext::root(),
+                InspectCapability { capability: actor },
+            )
+            .await
+            .unwrap();
+        // It is the identity capability of the nodule's own actor, the `micros` actor, with the
+        // rights it was opened with.
+        assert_eq!(
+            inspected.subject,
+            Some(node.micros_actor_id().await),
+            "the capability is the actor's own"
+        );
+        assert_eq!(inspected.rights, Rights::all());
+
+        // Presented as `parent` through dispatch, signed as the same actor (ADR 037's holder
+        // binding), it opens a child, and `attenuateCapability { subject }` narrows it onto it.
+        let child = node
+            .invoke(
+                core_auth,
+                open_actor(),
+                json!({ "parent": actor, "path": "nodules/micros/child", "rights": ["use"] }),
+            )
+            .await
+            .unwrap();
+        let child_id = child["actorId"].clone();
+        assert!(child_id.is_string(), "{child}");
+        let narrowed = node
+            .invoke(
+                core_auth,
+                attenuate(),
+                json!({ "capability": actor, "rights": ["use"], "subject": child_id }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(narrowed["subject"], child_id, "{narrowed}");
+        assert_eq!(narrowed["rights"], json!(["use"]));
+
+        // A path that is not one segment under the presenting actor is refused: a sibling, the
+        // `nodules` subtree, an ancestor.
+        for path in [
+            "sibling",
+            "nodules/alpha",
+            "",
+            "nodules/micros/child/grandchild",
+        ] {
+            let refused = node
+                .invoke(
+                    core_auth,
+                    open_actor(),
+                    json!({ "parent": actor, "path": path, "rights": ["use"] }),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{refused:?}").contains("InvalidActorPath"),
+                "`{path}`: {refused:?}"
+            );
+        }
+
+        // Every nodule is told its actor capability, but it carries the rights its actor was
+        // opened with: a plain nodule's is `use` alone, which opens nothing.
+        let plain = plain_nodule(&node, &executor, &[open_actor()]).await;
+        assert_ne!(plain.actor, core.actor);
+        let refused = node
+            .invoke(
+                as_routine(&plain),
+                open_actor(),
+                json!({ "parent": plain.actor, "path": "nodules/alpha/child", "rights": ["use"] }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{refused:?}").contains("Unauthorized"),
+            "{refused:?}"
+        );
+        shut_down(node).await;
+    }
+
+    #[tokio::test]
+    async fn a_nodule_reads_other_cartridges_through_dispatch_only_on_a_privileged_grant_of_that_method()
+     {
+        let (node, executor, core) = core_node().await;
+        let core_auth = as_routine(&core);
+        let plain = plain_nodule(&node, &executor, &[list_grants(), list_installs()]).await;
+        let plain_auth = as_routine(&plain);
+
+        // The core-like routine reads another cartridge's grants, its installs, and waits on
+        // its grants, all as a nodule through dispatch.
+        let grants = node
+            .invoke(core_auth, list_grants(), json!({ "cartridgeId": ALPHA }))
+            .await
+            .unwrap();
+        let listed = grants["grants"].as_array().unwrap();
+        assert!(
+            !listed.is_empty()
+                && listed
+                    .iter()
+                    .all(|grant| grant["cartridgeId"] == json!(ALPHA)),
+            "{grants}"
+        );
+        let installs = node
+            .invoke(core_auth, list_installs(), json!({}))
+            .await
+            .unwrap();
+        let installed: Vec<&str> = installs["installs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|install| install["cartridgeId"].as_str().unwrap())
+            .collect();
+        assert!(
+            installed.contains(&ALPHA) && installed.contains(&CORE),
+            "{installs}"
+        );
+        let awaited = node
+            .invoke(
+                core_auth,
+                await_grants(),
+                json!({ "cartridgeId": ALPHA, "holdMs": 0 }),
+            )
+            .await
+            .unwrap();
+        assert!(awaited["revision"].is_string(), "{awaited}");
+
+        // A plain nodule granted the very same methods is refused: the grant states no
+        // privilege, so its handle does not reach a privileged method, and dispatch says so.
+        assert_eq!(
+            node.invoke(plain_auth, list_grants(), json!({ "cartridgeId": ALPHA }))
+                .await,
+            Err(DispatchError::Denied)
+        );
+        // The installs read is no privileged method, so dispatch lets the call through and the
+        // service refuses it.
+        let refused = node
+            .invoke(plain_auth, list_installs(), json!({}))
+            .await
+            .unwrap_err();
+        assert!(format!("{refused:?}").contains("Denied"), "{refused:?}");
+        // Dispatch is not the only guard: the service itself refuses a nodule whose cartridge
+        // holds no privileged grant of the method, handed the handle directly.
+        assert!(matches!(
+            node.call(
+                plain_auth,
+                ListCartridgeGrants {
+                    cartridge_id: Some(id(ALPHA)),
+                },
+            )
+            .await,
+            Err(CartridgesError::Denied)
+        ));
+        assert!(matches!(
+            node.call(plain_auth, ListCartridgeInstalls {}).await,
+            Err(CartridgesError::Denied)
+        ));
+        shut_down(node).await;
+    }
+
+    /// The rule is "a privileged method trusts a privileged grant for exactly that method", not
+    /// "the core cartridge may read": with the grant of one read gone from what the node makes
+    /// its core cartridge at boot, the core routine's handle still reads grants, and the
+    /// service refuses it the installs whatever else it holds.
+    #[tokio::test]
+    async fn a_privileged_grant_trusts_exactly_its_method() {
+        let (mut node, executor, _) = core_node().await;
+        node.core_grants
+            .remove(&GrantKey::Method(list_installs().to_owned()));
+        node.dispatch.router.unbind("builtin:nodules");
+        node.restart_nodules().await.unwrap();
+        ServiceProvider::default()
+            .serve(&node.nodules.client)
+            .register(&node.dispatch.router, "builtin:nodules");
+        let core_auth = as_routine(&executor.routine_capabilities_of(&id(CORE))[TICK]);
+
+        node.call(
+            core_auth,
+            ListCartridgeGrants {
+                cartridge_id: Some(id(CORE)),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            node.call(core_auth, ListCartridgeInstalls {}).await,
+            Err(CartridgesError::Denied)
+        ));
+        shut_down(node).await;
+    }
 }

@@ -956,17 +956,20 @@ where
         )
         .await?
         .capability_id;
-    // The micros runtime's subsystem actor, beside `nodules`: the core cartridge's nodule acts as
-    // it (ADR 052 §2), so each micro's actor, `micros/<cartridge>/<micro>`, is in its own
-    // subtree. No namespace: the micros nodule mints through the services' own namespaces, as
+    // The micros runtime's subsystem actor, a child of `nodules`: the core cartridge's nodule acts
+    // as it (ADR 052 §2), so each micro's actor, `nodules/micros/<cartridge>/<micro>`, is in its
+    // own subtree. It is under `nodules`, not beside it, because the service mints every
+    // nodule's handles from delegator handles bound to its own actor, and an introduction may
+    // only name a descendant of the delegator's subject: a sibling's handles would be refused as
+    // an `Escalation`. No namespace: the micros nodule mints through the services' own namespaces, as
     // every nodule does.
     let micros_actor = authority
         .client
         .call(
             RequestContext::root(),
             OpenActor {
-                parent: authority.root,
-                path: "micros".into(),
+                parent: nodules_actor.capability,
+                path: "nodules/micros".into(),
                 rights: Rights::all(),
             },
         )
@@ -1031,11 +1034,15 @@ async fn boot_dispatch(
             RequestContext::root(),
             Authorization::identity(authority.root).metadata(),
             MintDispatchCapability {
-                // Every method that is not privileged: a nodule's method grants are narrowed
-                // from this scope, so no grant reaches a method that manages nodules or mints
-                // authority (`XrpcMethod::privileged`), however it is configured.
+                // Every method: a nodule's method grants are narrowed from this scope. The
+                // privilege bit is the most a handle minted from it can carry, and a handle
+                // carries it only when its cartridge's grants say so (`GrantBody::privileged`),
+                // which only the node writes, for its core cartridge, for the boot. A person's
+                // grant, however it is configured, never reaches a method that manages nodules
+                // or mints authority (`XrpcMethod::privileged`).
                 scope: DispatchScope {
                     authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
+                    privileged: true,
                     ..Default::default()
                 },
                 rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
