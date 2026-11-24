@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// The app's data directory: `$XDG_DATA_HOME/daytxt` (falling back to `~/.local/share`).
-fn data_directory() -> Option<PathBuf> {
+pub(crate) fn data_directory() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| {

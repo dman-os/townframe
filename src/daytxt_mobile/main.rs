@@ -74,6 +74,7 @@ mod android {
         // Android has no `$HOME` or XDG cache for Wasmtime to find, so without this every process
         // start recompiles every guest (6.5 s for a debug counter on a ZTE 8050). The artifacts
         // are regenerable, so they sit under the internal data dir and go with the app.
+        daytxt_native::setup_logging(&data_directory);
         daytxt_native::set_component_cache_directory(data_directory.join("component-cache"));
         dioxus::LaunchBuilder::mobile().launch(App);
     }

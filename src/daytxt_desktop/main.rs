@@ -9,6 +9,10 @@ mod e2e;
 /// Wry unless `DAYTXT_RENDERER=blitz` picks the Blitz launcher, which the `blitz` feature
 /// compiles in next to it. Both launchers live in one binary so the feature stays additive.
 fn main() {
+    daytxt_native::setup_logging(
+        &composition::data_directory()
+            .expect("no XDG_DATA_HOME or HOME to place the app's files under"),
+    );
     match std::env::var("DAYTXT_RENDERER").as_deref() {
         Err(std::env::VarError::NotPresent) | Ok("wry") => wry::launch(),
         #[cfg(feature = "blitz")]

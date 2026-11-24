@@ -32,12 +32,33 @@ pub(crate) fn eyre_hook_builder() -> color_eyre::config::HookBuilder {
 }
 
 pub fn setup_tracing() -> Res<()> {
-    setup_tracing_at("info")
+    setup_tracing_at("info", None)
 }
 
+/// Where a process keeps its rolling log (docs/scratch/guest-faults-and-logs.md §1): JSON lines,
+/// one file a day, `<directory>/<prefix>.<YYYY-MM-DD>.jsonl`, the newest [`LOG_FILES_KEPT`] kept.
+/// The file takes the same filter as stderr, so it holds what a watched run would have shown;
+/// `DAY_LOG_FILE=off` turns it off (tests, CI).
+#[derive(Debug, Clone)]
+pub struct LogFile {
+    pub directory: std::path::PathBuf,
+    pub prefix: &'static str,
+}
+
+/// Days of log a process keeps: the rolling writer deletes older files as it rotates.
+pub const LOG_FILES_KEPT: usize = 7;
+
+/// The log file's writer guard: dropping it flushes what the writer's worker still holds. `main`
+/// cannot hold it, because the panic hook ends the process with `exit`, which runs no
+/// destructors; the hook takes it out of here and drops it before exiting.
+#[cfg(not(target_arch = "wasm32"))]
+static LOG_FILE_GUARD: std::sync::Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> =
+    std::sync::Mutex::new(None);
+
 /// [`setup_tracing`] with `default_level` as the level of everything the dependency overrides
-/// below do not name. An explicit `RUST_LOG` still replaces the whole default.
-pub fn setup_tracing_at(default_level: &str) -> Res<()> {
+/// below do not name, and with `file` as the process's log file. An explicit `RUST_LOG` still
+/// replaces the whole default.
+pub fn setup_tracing_at(default_level: &str, file: Option<LogFile>) -> Res<()> {
     let default_filter = &format!(
         "{default_level},ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn"
     );
@@ -68,6 +89,39 @@ pub fn setup_tracing_at(default_level: &str) -> Res<()> {
     #[cfg(target_os = "android")]
     let registry = registry.with(tracing_android::layer("org.example.daybook")?);
 
+    #[cfg(not(target_arch = "wasm32"))]
+    let registry = {
+        let file = file.filter(|_| std::env::var("DAY_LOG_FILE").as_deref() != Ok("off"));
+        let layer = match file {
+            Some(LogFile { directory, prefix }) => {
+                let appender = tracing_appender::rolling::RollingFileAppender::builder()
+                    .rotation(tracing_appender::rolling::Rotation::DAILY)
+                    .filename_prefix(prefix)
+                    .filename_suffix("jsonl")
+                    .max_log_files(LOG_FILES_KEPT)
+                    .build(&directory)
+                    .wrap_err_with(|| {
+                        format!("opening the log directory {}", directory.display())
+                    })?;
+                // Writes leave the logging thread for the writer's worker, so an event costs a
+                // channel send, not a file write.
+                let (writer, guard) = tracing_appender::non_blocking(appender);
+                *LOG_FILE_GUARD.lock().unwrap() = Some(guard);
+                Some(
+                    ::tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_writer(writer)
+                        .with_ansi(false),
+                )
+            }
+            None => None,
+        };
+        registry.with(layer)
+    };
+    // A wasm32 process has no file system to log to.
+    #[cfg(target_arch = "wasm32")]
+    drop(file);
+
     registry.try_init().map_err(|err| ferr!(err))?;
 
     // color_eyre::install()?;
@@ -75,6 +129,16 @@ pub fn setup_tracing_at(default_level: &str) -> Res<()> {
     std::panic::set_hook(Box::new(move |panic_info| {
         let report = eyre_panic_hook.panic_report(panic_info);
         println!("{report}");
+        // The panic is an event too, so the log file has it, and the file is flushed before the
+        // exit below, which runs no destructors.
+        ::tracing::error!(target: "panic", "{report}");
+        #[cfg(not(target_arch = "wasm32"))]
+        drop(
+            LOG_FILE_GUARD
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take(),
+        );
 
         // - Tokio does not exit the process when a task panics, so we define a custom
         //   panic hook to implement this behaviour.
