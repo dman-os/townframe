@@ -591,7 +591,7 @@ mod tests {
         };
         assert_eq!(args, os(&["intxt", "install"]));
         assert!(matches!(
-            parse(&["node", "run"]),
+            parse(&["node", "status"]),
             StaticCommands::Node { .. }
         ));
     }

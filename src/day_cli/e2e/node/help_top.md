@@ -13,7 +13,7 @@ Commands:
   drawers      Share drawers with other nodes [alias: drawer]
   grants       What cartridges may reach, and the requests they make for more [alias: grant]
   dump         Raw debug view of what the node holds, as JSON
-  exec         Execute an operation through the node's dispatch router and print the JSON answer [alias: x]
+  exec         Run a method or a cartridge's command, through the node's dispatch router [alias: x]
   completions  Generate shell completions
   help         Print this message or the help of the given subcommand(s)
 

@@ -34,7 +34,7 @@ pub(super) async fn with_intxt_node(body: impl AsyncFnOnce(&tempfile::TempDir, &
     use big_dispatch_core::Readiness;
     use utils_rs::prelude::FutureExt;
 
-    let (tmp, dir) = new_node();
+    let (tmp, dir) = new_node().await;
 
     let wasm_path = guest_path();
     let wasm = std::fs::read(&wasm_path).unwrap_or_else(|error| {
@@ -150,7 +150,7 @@ pub(super) async fn day_x(
     input: serde_json::Value,
 ) -> serde_json::Value {
     let reply = client
-        .call(nsid, method_core::HttpMethod::Post, &input)
+        .call_untyped(nsid, method_core::HttpMethod::Post, &input)
         .await
         .unwrap();
     assert!(reply.is_success(), "{nsid} answered {reply:?}");
@@ -1589,7 +1589,7 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
 /// that starts one, without booting the node.
 #[tokio::test(flavor = "multi_thread")]
 async fn capture_refuses_without_a_daemon() {
-    let (_tmp, dir) = new_node();
+    let (_tmp, dir) = new_node().await;
     let error = crate::cmds::intxt::require_daemon(&dir).await.unwrap_err();
     assert!(format!("{error:#}").contains("day node start"), "{error:#}");
 }
@@ -1899,7 +1899,7 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
         let github_drawer: DocId = state["drawer"].as_str().unwrap().parse().unwrap();
         let info = crate::cmds::status::node_info(client).await.unwrap();
         let minted = client
-            .call(
+            .call_untyped(
                 MintDrawerCapability::XRPC.nsid,
                 MintDrawerCapability::XRPC.method,
                 &serde_json::to_value(MintDrawerCapability {
@@ -1918,7 +1918,7 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
         let capability: big_cabinet_core::authority::CapId =
             serde_json::from_value(minted.body["capabilityId"].clone()).unwrap();
         let listed = client
-            .call(
+            .call_untyped(
                 ListKnownDrawers::XRPC.nsid,
                 ListKnownDrawers::XRPC.method,
                 &serde_json::to_value(ListKnownDrawers { capability }).unwrap(),
