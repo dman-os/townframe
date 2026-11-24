@@ -14,6 +14,7 @@ mod ephemeral;
 mod fragmentation;
 mod freeze;
 mod harness;
+mod keyhive_ingest;
 mod keyhive_rpc;
 mod ladder;
 mod notifications;
