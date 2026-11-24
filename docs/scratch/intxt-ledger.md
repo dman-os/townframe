@@ -237,6 +237,10 @@ Round 1 as given (2026-11-19, CLI dogfood; proposals mine where marked):
   - Open: how a platform and a product share one CLI. Prior art:
     - multicall by argv[0] (busybox, rustup's proxies);
     - plugins found on PATH (`git-<x>`, `cargo-<x>`, `kubectl-<x>`, `gh` extensions, docker CLI plugins).
+- **D84 (2026-11-24, operator) `day` takes CLI plugins from PATH, git style.**
+  - `day <name>` execs `day-<name>` when `<name>` isn't a built-in, and built-ins always win.
+  - intxt is the first plugin: argv[0] `intxt` or `day-intxt` behaves as `day x intxt`, so a symlink serves both `day intxt` and `intxt` now. Later `day-intxt` becomes its own binary on nodules' SDK, with no change for users. Being built on stack/intxt-35.
+  - Open with nodules: the desktop refuses a node that `day` already holds, because the GUI hosts micros in-process on the booted node and attaching isn't built. The options are attach over the socket, a holder handoff, or the node as its own long-lived service (D83's shape).
 
 ## For the ADRs
 
