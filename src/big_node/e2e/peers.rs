@@ -372,41 +372,29 @@ async fn a_known_drawers_roster_streams_without_mirroring_it() {
     doc_synced(&mut events, &owner_key, &drawer).await;
 
     let after = create_in(&owner, &drawer, "doc-after", "after").await;
-    // The roster is read from the reader's own projection. Every roster change on the owner is a
-    // change of the drawer's descriptor doc, which reaches the reader as a DocSynced. Until the
-    // descriptor is projected and keyhive admits the reader, minting the capability is denied.
-    loop {
-        let capability = reader
-            .drawers
-            .client
-            .call_with(
-                RequestContext::root(),
-                Authorization::identity(reader.drawers_actor.capability).metadata(),
-                MintDrawerCapability {
-                    scope: DrawerScope {
-                        drawers: BTreeMap::from([(drawer.clone(), Access::Read)]),
-                        create: false,
-                    },
-                    rights: Rights::USE,
-                    subject: None,
-                },
-            )
-            .await;
-        if let Ok(capability) = capability {
-            let view = reader
-                .drawers
-                .client
-                .call(
-                    RequestContext::root(),
-                    big_cabinet_core::drawer::protocol::GetDrawer {
-                        capability: capability.capability_id,
-                        drawer_id: drawer.clone(),
-                    },
-                )
-                .await;
-            if view.is_ok_and(|view| view.docs.contains_key(&after)) {
-                break;
+    // The roster is inline on the drawer's descriptor doc, so the reader has the new roster when
+    // its copy of that doc has the owner's heads. Every roster change on the owner reaches the
+    // reader as a DocSynced of that doc.
+    let heads = |node: &BigNode| {
+        let drawer = drawer.clone();
+        let repo = node.repo.clone();
+        async move {
+            match repo.get_doc(&drawer).await.unwrap() {
+                big_repo::DocLookup::Ready(handle) => handle
+                    .with_document_read(|doc| {
+                        let mut heads = doc.get_heads();
+                        heads.sort();
+                        heads
+                    })
+                    .await,
+                _ => Vec::new(),
             }
+        }
+    };
+    let owned = heads(&owner).await;
+    loop {
+        if heads(&reader).await == owned {
+            break;
         }
         match events.recv().await {
             Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
