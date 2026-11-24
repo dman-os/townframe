@@ -908,14 +908,14 @@ fn closing_a_binding_cycle_is_an_invariant_failure() {
 fn declared_collections_outlive_grants_and_issue_full_prefix_authority() {
     let registry =
         CollectionRegistry::<Arc<Mutex<Vec<u8>>>>::new(ReplicaId::from_bytes([1; ReplicaId::LEN]));
-    let sections = clay_collection::Nsid::literal("org.example.test.sections");
-    let missing = clay_collection::CollectionId::minted_for(&clay_collection::Nsid::literal(
+    let sections = clay_collection::LexRef::literal("org.example.test.sections");
+    let missing = clay_collection::CollectionId::minted_for(&clay_collection::LexRef::literal(
         "org.example.test.missing",
     ));
     let contract = CollectionContract {
         id: sections.clone(),
-        key_schema: clay_collection::Nsid::literal("org.example.test.sectionKey"),
-        value_schema: clay_collection::Nsid::literal("org.example.test.section"),
+        key_schema: clay_collection::LexRef::literal("org.example.test.sectionKey"),
+        value_schema: clay_collection::LexRef::literal("org.example.test.section"),
     };
     let collection = Arc::new(Mutex::new(vec![1]));
     let sections_id = registry

@@ -23,7 +23,7 @@ use clay_mdk::LinkDeclaration;
 use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
-use clay_mdk::Nsid;
+use clay_mdk::LexRef;
 use clay_mdk::Request;
 use clay_mdk::Sidecar;
 use dioxus::prelude::*;
@@ -52,7 +52,7 @@ fn manifest() -> MicroManifest {
         collection_contracts: vec![],
         collection_requests: vec![Request {
             binding: SECTIONS_BINDING.into(),
-            contract: Nsid::literal(micro_settings_manifest::SECTIONS),
+            contract: LexRef::literal(micro_settings_manifest::SECTIONS),
             access: Some(Access::Write),
             necessity: Necessity::Required,
             resolution: BindingResolution::Configured,

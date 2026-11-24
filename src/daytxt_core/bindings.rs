@@ -19,7 +19,7 @@ use clay_mdk::CollectionId;
 use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
-use clay_mdk::Nsid;
+use clay_mdk::LexRef;
 use clay_mdk::Request;
 use serde::Deserialize;
 use serde::Serialize;
@@ -45,7 +45,7 @@ pub(crate) fn bindings_route(micro: &MicroId) -> FacetRoute {
 pub(crate) struct BindingGrant {
     pub collection: CollectionId,
     /// The contract NSID the request named when it was granted.
-    pub contract: Nsid,
+    pub contract: LexRef,
     pub access: Access,
 }
 
@@ -103,24 +103,24 @@ impl BindingsDatum {
 /// The declared collections by the contract they implement. A contract may later have several
 /// declared instances; today the host mints one instance per contract.
 #[derive(Default)]
-pub(crate) struct DeclaredCollections(BTreeMap<Nsid, BTreeSet<CollectionId>>);
+pub(crate) struct DeclaredCollections(BTreeMap<LexRef, BTreeSet<CollectionId>>);
 
 impl DeclaredCollections {
-    pub fn declare(&mut self, contract: &Nsid, collection: &CollectionId) {
+    pub fn declare(&mut self, contract: &LexRef, collection: &CollectionId) {
         self.0
             .entry(contract.clone())
             .or_default()
             .insert(collection.clone());
     }
 
-    fn implements(&self, contract: &Nsid, collection: &CollectionId) -> bool {
+    fn implements(&self, contract: &LexRef, collection: &CollectionId) -> bool {
         self.0
             .get(contract)
             .is_some_and(|collections| collections.contains(collection))
     }
 
     /// The one collection implementing `contract`, when there is exactly one.
-    fn sole(&self, contract: &Nsid) -> Option<&CollectionId> {
+    fn sole(&self, contract: &LexRef) -> Option<&CollectionId> {
         let mut collections = self.0.get(contract)?.iter();
         match (collections.next(), collections.next()) {
             (Some(only), None) => Some(only),
@@ -211,8 +211,8 @@ mod tests {
         }
     }
 
-    fn nsid(name: &str) -> Nsid {
-        Nsid::literal(&format!("org.example.test.{name}"))
+    fn nsid(name: &str) -> LexRef {
+        LexRef::literal(&format!("org.example.test.{name}"))
     }
 
     fn cid(name: &str) -> CollectionId {

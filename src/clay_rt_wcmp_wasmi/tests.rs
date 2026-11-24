@@ -100,12 +100,10 @@ fn mouse_data_json() -> String {
 /// manifest has to declare.
 fn counter_context() -> InitialContext {
     use clay_collection::Nsid;
+    use clay_guest_session::capabilities::Contract;
     use clay_guest_session::capabilities::DeclaredPublication;
-    use clay_guest_session::capabilities::PublicationKind;
-    use clay_guest_session::capabilities::presentation_component;
     let presentation = || DeclaredPublication {
-        kind: PublicationKind::Presentation,
-        contract: presentation_component(),
+        contract: Contract::Presentation,
     };
     InitialContext {
         publications: std::collections::BTreeMap::from([
@@ -114,15 +112,13 @@ fn counter_context() -> InitialContext {
             (
                 "count".to_owned(),
                 DeclaredPublication {
-                    kind: PublicationKind::Call,
-                    contract: Nsid::literal("org.example.dayframe.counter.count"),
+                    contract: Contract::Call(Nsid::literal("org.example.dayframe.counter.count")),
                 },
             ),
             (
                 "increment".to_owned(),
                 DeclaredPublication {
-                    kind: PublicationKind::Call,
-                    contract: Nsid::literal("org.example.dayframe.toolbar.action"),
+                    contract: Contract::Call(Nsid::literal("org.example.dayframe.toolbar.action")),
                 },
             ),
         ]),
@@ -1707,7 +1703,7 @@ async fn writer_rejects_fabricated_attachment_indices_and_accepts_only_attached_
     };
     assert_eq!(
         attached.contract(),
-        &clay_guest_session::capabilities::presentation_component()
+        &clay_guest_session::capabilities::Contract::Presentation
     );
     writer
         .delete(vec![1], WriteBasis::Observed(version))

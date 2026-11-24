@@ -11,20 +11,34 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+pub use clay_collection::LexRef;
 pub use clay_collection::Nsid;
 use serde::Deserialize;
 use serde::Serialize;
 
 /// The NSID of the manifest format (ADR 028 §4): the `schema` of a plug's micro contribution
 /// (`org.example.daybook.plug.micro`). A manifest carries no version of its own: a breaking
-/// change to the format is a new NSID.
+/// change to the format is a new NSID. [`MANIFEST_LEXICON`] is the Lexicon document it names,
+/// whose `main` is the manifest and whose `methodEndpoint`, `callbackEndpoint` and
+/// `viewEndpoint` defs are the `$type`s of [`Endpoint`].
 pub const MANIFEST_NSID: &str = "org.example.clay.micro.manifest";
 
-/// The declared registration collection a shell reads its roots from: micros register a
+/// The Lexicon document of [`MANIFEST_NSID`] (`lexicons/org.example.clay.micro.manifest.json`).
+/// It is hand-authored beside the Rust types, which are the wire's other half; the
+/// `manifest_lexicon` test admits it and checks a built manifest against it.
+pub const MANIFEST_LEXICON: &str = include_str!("lexicons/org.example.clay.micro.manifest.json");
+
+/// The Lexicon document of the collections the runtime defines for shells
+/// (`lexicons/org.example.clay.shell.json`): the [`SHELL_ROOTS`] token and its key and value defs.
+pub const SHELL_LEXICON: &str = include_str!("lexicons/org.example.clay.shell.json");
+
+/// The declared registration collection a shell reads its roots from, `nsid#def` of the `roots`
+/// token in [`SHELL_LEXICON`] (its row key and value are the sibling `rootKey` and `root` defs):
+/// micros register a
 /// [`crate::host::RootRow`] (usually as a manifest-declared row) and the shell redeems the
 /// presentation each one attaches. It lives with the manifest vocabulary, not in `host`, because
 /// a guest micro's manifest names it in a request and a guest cannot link `host`.
-pub const SHELL_ROOTS: &str = "org.example.clay.shell.roots";
+pub const SHELL_ROOTS: &str = "org.example.clay.shell#roots";
 
 /// The namespace the stand-in loaders and native built-ins install micros under, until Clay runs
 /// on the node and the node's own DID takes its place (`big_cartridges`' importer maps a sidecar
@@ -395,7 +409,7 @@ impl<'de> Deserialize<'de> for Endpoint {
 #[serde(rename_all = "camelCase")]
 pub struct Request {
     pub binding: String,
-    pub contract: Nsid,
+    pub contract: LexRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<Access>,
     /// A required binding that resolves to nothing keeps the micro from starting. Omitted
@@ -439,11 +453,11 @@ pub struct ConfigurationRequest {
 /// them.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CollectionContract {
-    pub id: Nsid,
-    pub selector_schema: Nsid,
-    pub key_schema: Nsid,
-    pub value_schema: Nsid,
-    pub write_context_schema: Option<Nsid>,
+    pub id: LexRef,
+    pub selector_schema: LexRef,
+    pub key_schema: LexRef,
+    pub value_schema: LexRef,
+    pub write_context_schema: Option<LexRef>,
     pub offered: Vec<CollectionCapability>,
 }
 
@@ -543,8 +557,8 @@ impl Sidecar {
             return Err(format!("package id {:?} is not a plug name", self.id));
         }
         self.manifest.validate()?;
-        let owned = |nsid: &Nsid, what: &str| match &self.authority {
-            Some(authority) if nsid.is_under(authority) => Ok(()),
+        let owned = |nsid: &LexRef, what: &str| match &self.authority {
+            Some(authority) if nsid.nsid().is_under(authority) => Ok(()),
             Some(authority) => Err(format!(
                 "{what} {nsid} is outside the package's authority {authority}"
             )),
@@ -553,7 +567,7 @@ impl Sidecar {
             )),
         };
         let manifest = &self.manifest;
-        let owned_or_requested = |nsid: &Nsid, what: &str| {
+        let owned_or_requested = |nsid: &LexRef, what: &str| {
             let requested = manifest
                 .requires
                 .iter()

@@ -129,9 +129,12 @@ Built from the raw chat on 2026-11-24 (83 requests: 23 on main, 23 done but unme
     Layer 59 did items 4 and 5: collection instance ids are a host-minted `CollectionId` (same text, so stored
     datums read), and the tags became `clay/micro-install` and `clay/micro-bindings`. The rename means install and
     binding facets written under the old tags are no longer read (a desktop falls back to its defaults once).
-    Items 1-3 need a Clay cartridge Lexicon first (ADR 050 lists it as unbuilt): `org.example.clay.shell.roots` and
-    the test contracts become `nsid#def` tokens there, `org.example.clay.micro.manifest` gets a Lexicon doc, and
-    `org.example.clay.presentationComponent`, a runtime kind, becomes an enum on the wire.
+    Layer 77 did items 1-3: `datum_core::LexRef` (`nsid#def`, bare = `main`) types collection contracts, schemas and
+    requests; `org.example.clay.shell#roots` is a token in the `org.example.clay.shell` Lexicon (with `rootKey` and
+    `root` siblings), `org.example.clay.micro.manifest` has its Lexicon document, both under `src/clay_mdk/lexicons/`
+    and admitted by the datum compiler in `clay_mdk`'s tests; `presentationComponent` is `Contract::Presentation`,
+    and a stored endpoint writes it as CBOR null where a call writes its NSID text. Stored presentation endpoints
+    under the old text, and collection ids minted from `org.example.clay.shell.roots`, do not carry over.
 14. **intxt citizenship (D76), the general mechanisms behind intxt's interim pieces:**
     - `Context::call_bytes` (layer 43) goes away once a method can declare a `method_core::ByteBody` output and
       `Context::call` streams it. Nodules owns the wire; the Clay half is ours, together with the waker-driven

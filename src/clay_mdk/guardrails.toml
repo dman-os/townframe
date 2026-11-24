@@ -2,6 +2,7 @@ version = 1
 role = "interface"
 dependency_reason = "claytxt microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
 allowed_dependencies = [
+    "big_cabinet_core",
     "big_ndk",
     "clay_collection",
     "clay_dioxus",

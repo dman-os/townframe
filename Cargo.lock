@@ -2701,6 +2701,7 @@ dependencies = [
 name = "clay_mdk"
 version = "0.1.0"
 dependencies = [
+ "big_cabinet_core",
  "big_ndk",
  "blake3",
  "blitz-dom",

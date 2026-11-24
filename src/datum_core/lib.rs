@@ -22,6 +22,7 @@ pub use member::is_nsid;
 pub use member::is_nsid_authority;
 pub use member::str_eq;
 pub use nsid::InvalidNsid;
+pub use nsid::LexRef;
 pub use nsid::Nsid;
 pub use shape::DatumShape;
 pub use shape::Openness;

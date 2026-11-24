@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use clay_collection::CollectionId;
-use clay_collection::Nsid;
+use clay_collection::LexRef;
 use clay_collection::ReplicaId;
 use clay_collection::WriterId;
 
@@ -22,15 +22,15 @@ use crate::supervisor::MicroId;
 /// The registry only names the schemas; the collection's own contract interprets them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollectionContract {
-    pub id: Nsid,
-    pub key_schema: Nsid,
-    pub value_schema: Nsid,
+    pub id: LexRef,
+    pub key_schema: LexRef,
+    pub value_schema: LexRef,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DeclareError {
     #[error("collection {0} is already declared")]
-    AlreadyDeclared(Nsid),
+    AlreadyDeclared(LexRef),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]

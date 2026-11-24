@@ -50,6 +50,7 @@ use clay_mdk::Context;
 use clay_mdk::Endpoint;
 use clay_mdk::Entrypoints;
 use clay_mdk::Error;
+use clay_mdk::LexRef;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
 use clay_mdk::Nsid;
@@ -86,7 +87,7 @@ pub fn manifest() -> MicroManifest {
         requires: ["presentation", "service", "peer"]
             .map(|binding| Request {
                 binding: binding.into(),
-                contract: Nsid::literal(&format!("org.example.clay.test.context.{binding}")),
+                contract: LexRef::literal(&format!("org.example.clay.test.context.{binding}")),
                 access: None,
                 necessity: Necessity::Optional,
                 resolution: BindingResolution::Configured,
@@ -97,7 +98,7 @@ pub fn manifest() -> MicroManifest {
         collection_contracts: vec![],
         collection_requests: vec![Request {
             binding: "feed".into(),
-            contract: Nsid::literal("org.example.clay.test.context.feed"),
+            contract: LexRef::literal("org.example.clay.test.context#feed"),
             access: Some(Access::Write),
             necessity: Necessity::Required,
             resolution: BindingResolution::Configured,
@@ -241,7 +242,7 @@ fn publish_retention(
 struct Feed;
 
 impl CollectionDecl for Feed {
-    const NSID: &'static str = "org.example.clay.test.context.feed";
+    const NSID: &'static str = "org.example.clay.test.context#feed";
     type Key = String;
     type Value = String;
 }

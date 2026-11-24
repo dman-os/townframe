@@ -82,12 +82,10 @@ async fn redeem(
 /// manifest has to declare.
 fn counter_context() -> InitialContext {
     use clay_collection::Nsid;
+    use clay_guest_session::capabilities::Contract;
     use clay_guest_session::capabilities::DeclaredPublication;
-    use clay_guest_session::capabilities::PublicationKind;
-    use clay_guest_session::capabilities::presentation_component;
     let presentation = || DeclaredPublication {
-        kind: PublicationKind::Presentation,
-        contract: presentation_component(),
+        contract: Contract::Presentation,
     };
     InitialContext {
         publications: BTreeMap::from([
@@ -96,15 +94,13 @@ fn counter_context() -> InitialContext {
             (
                 "count".to_owned(),
                 DeclaredPublication {
-                    kind: PublicationKind::Call,
-                    contract: Nsid::literal("org.example.dayframe.counter.count"),
+                    contract: Contract::Call(Nsid::literal("org.example.dayframe.counter.count")),
                 },
             ),
             (
                 "increment".to_owned(),
                 DeclaredPublication {
-                    kind: PublicationKind::Call,
-                    contract: Nsid::literal("org.example.dayframe.toolbar.action"),
+                    contract: Contract::Call(Nsid::literal("org.example.dayframe.toolbar.action")),
                 },
             ),
         ]),
@@ -1020,7 +1016,8 @@ fn ingress_budget_rejects_oversized_batches_before_conversion() {
     let full_texts = clay_surface::SurfaceTree::<ComponentRef>::MAX_BATCH_BYTES
         / (clay_surface::SurfaceTree::<ComponentRef>::MAX_STRING_BYTES + mutation_bytes);
     let final_text_bytes = clay_surface::SurfaceTree::<ComponentRef>::MAX_BATCH_BYTES
-        - full_texts * (clay_surface::SurfaceTree::<ComponentRef>::MAX_STRING_BYTES + mutation_bytes)
+        - full_texts
+            * (clay_surface::SurfaceTree::<ComponentRef>::MAX_STRING_BYTES + mutation_bytes)
         - mutation_bytes
         + 1;
     assert!(final_text_bytes <= clay_surface::SurfaceTree::<ComponentRef>::MAX_STRING_BYTES);

@@ -7,7 +7,8 @@ use clay_host::ConfiguredMicro;
 use clay_host::Host;
 use clay_host::MicroState;
 use clay_host::Supervisor;
-use clay_mdk::Nsid;
+use clay_mdk::LexRef;
+
 use clay_mdk::host::BoundCollection;
 use clay_mdk::host::CollectionBindings;
 use clay_mdk::host::CollectionRegistry;
@@ -53,9 +54,11 @@ async fn the_sample_section_lives_exactly_as_long_as_its_incarnation() {
                 .collections
                 .declare(
                     CollectionContract {
-                        id: Nsid::literal(SECTIONS),
-                        key_schema: Nsid::literal(micro_settings_manifest::SECTION_KEY_SCHEMA),
-                        value_schema: Nsid::literal(micro_settings_manifest::SECTION_VALUE_SCHEMA),
+                        id: LexRef::literal(SECTIONS),
+                        key_schema: LexRef::literal(micro_settings_manifest::SECTION_KEY_SCHEMA),
+                        value_schema: LexRef::literal(
+                            micro_settings_manifest::SECTION_VALUE_SCHEMA,
+                        ),
                     },
                     sections.clone(),
                 )
@@ -78,9 +81,9 @@ async fn the_sample_section_lives_exactly_as_long_as_its_incarnation() {
                     manifest(),
                     CollectionBindings::new([(
                         SECTIONS_BINDING.to_owned(),
-                        BoundCollection::write(clay_mdk::CollectionId::minted_for(&Nsid::literal(
-                            SECTIONS,
-                        ))),
+                        BoundCollection::write(clay_mdk::CollectionId::minted_for(
+                            &LexRef::literal(SECTIONS),
+                        )),
                     )]),
                     activate,
                 ),

@@ -10,7 +10,7 @@ use clay_host::Requirement;
 use clay_mdk::Endpoint;
 use clay_mdk::MicroId;
 use clay_mdk::Necessity as Declared;
-use clay_mdk::Nsid;
+use clay_mdk::LexRef;
 use std::collections::BTreeMap;
 
 /// Every installed micro's `requires` resolved against `installed`, in catalog order and by
@@ -84,8 +84,13 @@ pub(crate) fn resolve(
 }
 
 /// Each installed micro's endpoint that serves `contract`: a method under it, a view
-/// implementing it.
-fn suppliers<'a>(installed: &'a [InstalledMicro], contract: &Nsid) -> Vec<(&'a MicroId, &'a str)> {
+/// implementing it. A method or a view is named by its Lexicon's NSID alone, so a reference to
+/// a def other than `main` (a collection token, say) has no supplier among the endpoints.
+fn suppliers<'a>(installed: &'a [InstalledMicro], contract: &LexRef) -> Vec<(&'a MicroId, &'a str)> {
+    if !contract.is_main() {
+        return Vec::new();
+    }
+    let contract = contract.nsid();
     installed
         .iter()
         .flat_map(|micro| {

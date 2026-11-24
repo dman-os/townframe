@@ -155,7 +155,7 @@ impl World {
         &self,
         recipient: &CapabilitySession,
         publication: &str,
-        contract: Nsid,
+        contract: Contract,
     ) -> CapabilityRef {
         recipient
             .mint_lazy(&PublicationEndpoint {
@@ -201,7 +201,7 @@ impl World {
 async fn reading_a_lazy_status_never_starts_the_provider() {
     let world = World::new();
     let recipient = world.recipient("recipient");
-    let reference = world.lazy(&recipient, "echo", echo_contract());
+    let reference = world.lazy(&recipient, "echo", Contract::Call(echo_contract()));
     world
         .driven(async {
             for _ in 0..4 {
@@ -216,7 +216,7 @@ async fn reading_a_lazy_status_never_starts_the_provider() {
         .mint_lazy(&PublicationEndpoint {
             micro: MicroId::new("nobody"),
             publication: "echo".to_owned(),
-            contract: echo_contract(),
+            contract: Contract::Call(echo_contract()),
         })
         .unwrap();
     assert_eq!(unknown.status(), RefStatus::Unavailable);
@@ -237,10 +237,10 @@ async fn concurrent_lazy_calls_and_redemptions_from_three_recipients_initialize_
         world.recipient("third"),
     );
     let (a, b) = (
-        world.lazy(&first, "echo", echo_contract()),
-        world.lazy(&second, "echo", echo_contract()),
+        world.lazy(&first, "echo", Contract::Call(echo_contract())),
+        world.lazy(&second, "echo", Contract::Call(echo_contract())),
     );
-    let view = world.lazy(&third, "view", presentation_component());
+    let view = world.lazy(&third, "view", Contract::Presentation);
     let (from_a, from_b, redeemed, ()) = world
         .driven(async {
             tokio::join!(
@@ -266,7 +266,7 @@ async fn a_lazy_call_holds_the_provider_only_for_the_call() {
     let world = World::new();
     world.script.gate_call.store(true, Ordering::SeqCst);
     let recipient = world.recipient("recipient");
-    let reference = world.lazy(&recipient, "echo", echo_contract());
+    let reference = world.lazy(&recipient, "echo", Contract::Call(echo_contract()));
     world
         .driven(async {
             let (response, ()) = tokio::join!(reference.call(b"ping".to_vec()), async {
@@ -287,8 +287,8 @@ async fn a_lazy_call_holds_the_provider_only_for_the_call() {
 async fn retained_proxies_keep_the_provider_live_until_dropped() {
     let world = World::new();
     let recipient = world.recipient("recipient");
-    let echo = world.lazy(&recipient, "echo", echo_contract());
-    let view = world.lazy(&recipient, "view", presentation_component());
+    let echo = world.lazy(&recipient, "echo", Contract::Call(echo_contract()));
+    let view = world.lazy(&recipient, "view", Contract::Presentation);
     world
         .driven(async {
             let binding = echo.retain_call().await.unwrap();
@@ -342,7 +342,7 @@ async fn a_lazy_ref_used_while_the_provider_closes_gets_a_fresh_incarnation() {
     let world = World::new();
     world.script.gate_close.store(true, Ordering::SeqCst);
     let recipient = world.recipient("recipient");
-    let reference = world.lazy(&recipient, "echo", echo_contract());
+    let reference = world.lazy(&recipient, "echo", Contract::Call(echo_contract()));
     let activator = world.supervisor.activator();
     world
         .driven(async {
@@ -366,7 +366,7 @@ async fn a_wrong_contract_use_fails_without_activating_the_provider() {
     let world = World::new();
     let recipient = world.recipient("recipient");
     // The endpoint promises a call; asking for a presentation is refused before activation.
-    let reference = world.lazy(&recipient, "echo", echo_contract());
+    let reference = world.lazy(&recipient, "echo", Contract::Call(echo_contract()));
     world
         .driven(async {
             assert_eq!(
@@ -384,7 +384,7 @@ async fn a_wrong_contract_use_fails_without_activating_the_provider() {
 async fn an_endpoint_naming_no_publication_is_unavailable() {
     let world = World::new();
     let recipient = world.recipient("recipient");
-    let reference = world.lazy(&recipient, "absent", echo_contract());
+    let reference = world.lazy(&recipient, "absent", Contract::Call(echo_contract()));
     world
         .driven(async {
             assert_eq!(
@@ -412,7 +412,7 @@ async fn an_endpoint_attachment_mints_a_lazy_reference_that_stores_back_as_the_e
     let attachment = RowAttachment::Endpoint(PublicationEndpoint {
         micro: provider(),
         publication: "echo".to_owned(),
-        contract: echo_contract(),
+        contract: Contract::Call(echo_contract()),
     });
     let reference = recipient.mint_attachment(&attachment).unwrap();
     assert_eq!(reference.attachment(), attachment);
@@ -517,7 +517,7 @@ async fn incarnations_retaining_each_others_calls_close_once_no_outside_lease_re
                     .mint_lazy(&PublicationEndpoint {
                         micro: MicroId::new(target),
                         publication: "echo".to_owned(),
-                        contract: echo_contract(),
+                        contract: Contract::Call(echo_contract()),
                     })
                     .unwrap();
                 let binding = reference.retain_call().await.unwrap();

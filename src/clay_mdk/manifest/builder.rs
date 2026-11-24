@@ -116,7 +116,7 @@ impl ManifestBuilder {
     pub fn requires(mut self, binding: &str, contract: &str, necessity: Necessity) -> Self {
         self.manifest.requires.push(Request {
             binding: binding.into(),
-            contract: Nsid::literal(contract),
+            contract: LexRef::literal(contract),
             access: None,
             necessity,
             resolution: BindingResolution::Configured,
@@ -146,10 +146,10 @@ impl ManifestBuilder {
     /// Declare the collection contract `C`, which this package owns.
     pub fn declares<C: DeclaredCollection>(mut self) -> Self {
         self.manifest.collection_contracts.push(CollectionContract {
-            id: Nsid::literal(C::NSID),
-            selector_schema: Nsid::literal(C::SELECTOR_SCHEMA),
-            key_schema: Nsid::literal(C::KEY_SCHEMA),
-            value_schema: Nsid::literal(C::VALUE_SCHEMA),
+            id: LexRef::literal(C::NSID),
+            selector_schema: LexRef::literal(C::SELECTOR_SCHEMA),
+            key_schema: LexRef::literal(C::KEY_SCHEMA),
+            value_schema: LexRef::literal(C::VALUE_SCHEMA),
             write_context_schema: None,
             offered: C::OFFERED.to_vec(),
         });
@@ -174,7 +174,7 @@ impl ManifestBuilder {
     ) -> Self {
         self.manifest.collection_requests.push(Request {
             binding: binding.into(),
-            contract: Nsid::literal(C::NSID),
+            contract: LexRef::literal(C::NSID),
             access: Some(access),
             necessity,
             resolution: BindingResolution::Configured,

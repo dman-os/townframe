@@ -533,9 +533,13 @@ declares outside its authority. A declared contract may still name a selector, k
 write-context schema outside the authority when the package requests that schema (a request whose
 `contract` is the schema NSID): referencing someone else's schema is exactly what a request is
 for. The sidecar `id` is the plug *name* (`dayframe.counter`); the micro id adds the installer's
-namespace (§1). NSIDs the runtime itself defines (`org.example.clay.*`: the
-presentation-component contract, `org.example.clay.shell.roots`) are requested by micros and
-satisfied by the runtime, never declared by one. Dayframe's micros use `org.example.dayframe.<micro>`
+namespace (§1). What the runtime itself defines is requested by micros and satisfied by the
+runtime, never declared by one: the `org.example.clay.shell` Lexicon's collection tokens
+(`org.example.clay.shell#roots`, a `nsid#def` reference, ADR 050 §2) and its row key and value
+defs. The presentation component is not an NSID at all: a publication's contract is a
+`Contract` (`Presentation`, or `Call(nsid)`), because every presentation shares one WIT
+interface and no provider can substitute for it. The format's own Lexicon is the document
+`org.example.clay.micro.manifest` (`clay_mdk::MANIFEST_LEXICON`). Dayframe's micros use `org.example.dayframe.<micro>`
 as authority and prefix.
 
 ### 12. Contract declarations

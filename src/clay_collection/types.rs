@@ -12,7 +12,7 @@ pub struct CollectionId(String);
 
 impl CollectionId {
     /// Mint the id of the instance the host declares for `contract`.
-    pub fn minted_for(contract: &crate::Nsid) -> Self {
+    pub fn minted_for(contract: &crate::LexRef) -> Self {
         Self(contract.as_str().to_owned())
     }
 

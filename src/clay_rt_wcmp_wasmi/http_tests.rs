@@ -1,8 +1,7 @@
 use super::WcmpPackage;
 use super::WcmpRuntime;
+use clay_guest_session::capabilities::Contract;
 use clay_guest_session::capabilities::DeclaredPublication;
-use clay_guest_session::capabilities::PublicationKind;
-use clay_guest_session::capabilities::presentation_component;
 use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_host::MicroId;
@@ -53,8 +52,7 @@ async fn every_outgoing_http_request_is_refused_as_denied() {
         publications: BTreeMap::from([(
             "view".to_owned(),
             DeclaredPublication {
-                kind: PublicationKind::Presentation,
-                contract: presentation_component(),
+                contract: Contract::Presentation,
             },
         )]),
         micro: Some(MicroId::new("dispatch-fixture")),

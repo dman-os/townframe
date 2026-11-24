@@ -34,14 +34,24 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 
-/// The one contract every Presentation publication has (ADR 031 §5): the shared
-/// presentation-component contract the runtime itself defines. A Call can never have it, so a
-/// contract alone tells a redeemer which kind to expect.
-pub fn presentation_component() -> Nsid {
-    static CONTRACT: OnceLock<Nsid> = OnceLock::new();
-    CONTRACT
-        .get_or_init(|| Nsid::literal("org.example.clay.presentationComponent"))
-        .clone()
+/// What a publication promises its redeemer (ADR 031 §5). A call is keyed by the NSID of the
+/// Lexicon of its request and response, which many providers may implement. A presentation is
+/// a runtime kind, not a schema: every presentation shares the WIT interface of a presentation
+/// component, so no NSID stands for it and a call's NSID can never be mistaken for it.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Contract {
+    Presentation,
+    Call(Nsid),
+}
+
+impl Contract {
+    /// The kind of publication that can promise this contract.
+    pub fn kind(&self) -> PublicationKind {
+        match self {
+            Self::Presentation => PublicationKind::Presentation,
+            Self::Call(_) => PublicationKind::Call,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,8 +196,7 @@ impl Drop for InFlightCall {
 /// name must be (ADR 031 §8).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeclaredPublication {
-    pub kind: PublicationKind,
-    pub contract: Nsid,
+    pub contract: Contract,
 }
 
 /// Check what an incarnation's `initialize` returned against what its manifest declares, and
@@ -206,11 +215,11 @@ pub fn admit_publications(
             ));
         };
         let publication = lease.publication();
-        if publication.kind() != declaration.kind {
+        if publication.kind() != declaration.contract.kind() {
             return Err(format!(
                 "guest published {name:?} as {:?}, but its manifest declares {:?}",
                 publication.kind(),
-                declaration.kind
+                declaration.contract.kind()
             ));
         }
         if *publication.contract() != declaration.contract {
@@ -233,7 +242,7 @@ pub fn admit_publications(
 pub struct PublicationEndpoint {
     pub micro: MicroId,
     pub publication: String,
-    pub contract: Nsid,
+    pub contract: Contract,
 }
 
 /// What one collection-value attachment slot holds. A bound attachment names a live
@@ -272,7 +281,7 @@ enum Behavior {
 struct PublicationInner {
     id: u64,
     name: String,
-    contract: Nsid,
+    contract: Contract,
     behavior: Behavior,
     host: Host,
     /// The publishing incarnation. Until it commits initialization the publication is staged
@@ -335,7 +344,7 @@ impl CapabilityPublication {
     pub fn id(&self) -> u64 {
         self.inner.id
     }
-    pub fn contract(&self) -> &Nsid {
+    pub fn contract(&self) -> &Contract {
         &self.inner.contract
     }
     pub fn name(&self) -> &str {
@@ -538,29 +547,26 @@ impl CapabilitySession {
     ) -> Result<PublishedCapability, CapabilityFailure> {
         self.publish(
             name,
-            presentation_component(),
+            Contract::Presentation,
             Behavior::Presentation(component),
         )
     }
 
-    /// Publish a call named `name` under `contract` that `target` serves inside this
-    /// incarnation. The presentation contract is reserved for presentations.
+    /// Publish a call named `name` under the Lexicon `contract` that `target` serves inside
+    /// this incarnation.
     pub fn publish_call(
         &self,
         name: &str,
         contract: Nsid,
         target: Arc<dyn CallTarget>,
     ) -> Result<PublishedCapability, CapabilityFailure> {
-        if contract == presentation_component() {
-            return Err(CapabilityFailure::ContractMismatch);
-        }
-        self.publish(name, contract, Behavior::Call(target))
+        self.publish(name, Contract::Call(contract), Behavior::Call(target))
     }
 
     fn publish(
         &self,
         name: &str,
-        contract: Nsid,
+        contract: Contract,
         behavior: Behavior,
     ) -> Result<PublishedCapability, CapabilityFailure> {
         self.state.check()?;
@@ -788,10 +794,7 @@ impl CapabilityRef {
                 Err(CapabilityFailure::ContractMismatch)
             }
             Target::Bound(publication) => Ok((publication.clone(), None)),
-            Target::Lazy(endpoint, _)
-                if (endpoint.contract == presentation_component())
-                    != (kind == PublicationKind::Presentation) =>
-            {
+            Target::Lazy(endpoint, _) if endpoint.contract.kind() != kind => {
                 Err(CapabilityFailure::ContractMismatch)
             }
             Target::Lazy(endpoint, activator) => {
