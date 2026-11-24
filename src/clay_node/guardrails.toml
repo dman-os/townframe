@@ -1,0 +1,37 @@
+version = 1
+role = "runtime"
+dependency_reason = "A native Clay host's node-holding composition: it boots the host's own big_node from its data directory, gives each Wasmtime micro its own actor, minted handles and a dispatch egress, and follows the cartridges that contribute micros (Clay on the node sections 1 to 5)."
+allowed_dependencies = [
+    "big_blobs_core",
+    "big_cabinet",
+    "big_cabinet_core",
+    "big_cartridges_core",
+    "big_dispatch",
+    "big_dispatch_core",
+    "big_node",
+    "big_nodule",
+    "big_nodule_core",
+    "clay_guest_session",
+    "clay_host",
+    "clay_rt_wasmtime",
+    "clay_surface",
+    "day_node",
+    "intxt_core",
+    "method_core",
+    "secrets_rs",
+    "service_client_core_rs",
+    "service_client_native_rs",
+    "service_core_rs",
+    "service_utils_rs",
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]
+features = ["test-support"]
