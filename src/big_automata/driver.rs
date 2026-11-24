@@ -82,6 +82,8 @@ use crate::interlude::*;
 
 mod facts;
 #[cfg(any(test, feature = "test-support"))]
+pub mod cursor_laws;
+#[cfg(any(test, feature = "test-support"))]
 pub mod memory;
 mod run;
 #[cfg(test)]

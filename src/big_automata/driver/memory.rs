@@ -148,3 +148,47 @@ impl SyncBackend for MemoryBackend {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use futures::executor::block_on;
+
+    use super::*;
+    use crate::driver::cursor_laws::CursorBackend;
+    use crate::driver::cursor_laws::{self};
+
+    struct Memory;
+
+    #[async_trait]
+    impl CursorBackend for Memory {
+        type Cursors = MemoryPeerCursors;
+        async fn open(&self) -> Res<MemoryPeerCursors> {
+            Ok(default())
+        }
+    }
+
+    #[test]
+    fn unknown_parts_read_zero() -> Res<()> {
+        block_on(cursor_laws::unknown_parts_read_zero(&Memory))
+    }
+    #[test]
+    fn writes_read_back_in_asked_order() -> Res<()> {
+        block_on(cursor_laws::writes_read_back_in_asked_order(&Memory))
+    }
+    #[test]
+    fn cursors_never_lower() -> Res<()> {
+        block_on(cursor_laws::cursors_never_lower(&Memory))
+    }
+    #[test]
+    fn repeats_coalesce_to_the_highest() -> Res<()> {
+        block_on(cursor_laws::repeats_coalesce_to_the_highest(&Memory))
+    }
+    #[test]
+    fn cursors_are_scoped() -> Res<()> {
+        block_on(cursor_laws::cursors_are_scoped(&Memory))
+    }
+    #[test]
+    fn empty_calls_are_fine() -> Res<()> {
+        block_on(cursor_laws::empty_calls_are_fine(&Memory))
+    }
+}
