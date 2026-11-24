@@ -1,4 +1,4 @@
-//! Shared Dayframe composition: a catalog-driven composition root, its lifecycle controls, and
+//! Shared daytxt composition: a catalog-driven composition root, its lifecycle controls, and
 //! the `Application` shell UI. The root names no micro: launchers (desktop, web) hand it every
 //! installed micro as an [`InstalledMicro`], a manifest plus its static configuration and the
 //! engine-specific factory for it. Engine-specific guest factories (Wasmtime on desktop, `wcmp`
@@ -10,14 +10,16 @@
 //! are a Settings section ([`lifecycle`]).
 //!
 //! The catalog is explicit configuration, not a heuristic: each entry says whether the
-//! supervisor starts the micro eagerly, which provider satisfies each of its requirements, and
-//! which declared collections it may read or write. The root declares the collections the
-//! manifests name and installs every manifest-declared row into the declaring micro's
+//! supervisor starts the micro eagerly, and the manifests say which declared collections a
+//! micro may read or write and what it requires of other micros, which the root resolves over
+//! the catalog by NSID ([`requirements`]). The root declares the collections the manifests name
+//! and installs every manifest-declared row into the declaring micro's
 //! manifest installation scope (ADR 031 §4), so rows are visible while their micro is stopped.
 //! There is no supervisor reconfiguration yet: enablement and startup are fixed by the catalog
 //! except for the enable/disable/retry controls of the lifecycle section.
 mod bindings;
 pub mod lifecycle;
+mod requirements;
 
 use bindings::BindingsDatum;
 use bindings::DeclaredCollections;
@@ -40,7 +42,6 @@ use clay_host::Instance;
 use clay_host::LocalFuture;
 use clay_host::MicroId as SupervisorId;
 use clay_host::MicroState;
-use clay_host::Requirement;
 use clay_host::Supervisor;
 use clay_mdk::hooks::use_rows;
 use clay_mdk::hooks::PresentationSlot;
@@ -96,8 +97,6 @@ pub struct InstalledMicro {
     pub enabled_on_admission: bool,
     /// Offered no enable/disable controls: the shell cannot run without it.
     pub locked: bool,
-    /// Local requirement binding -> the provider's publication that satisfies it.
-    pub requirements: BTreeMap<String, Requirement>,
     /// Builds the supervisor factory from the micro's installed id (so a factory cannot be
     /// built under another id than the one the catalog keys the micro by), the root's resources and the micro's collection
     /// bindings. The bindings handle is the composition's: it resolves the manifest's
@@ -111,54 +110,8 @@ pub type FactoryBuilder = Box<
 >;
 
 impl InstalledMicro {
-    /// Satisfy every requirement of this micro from `provider`, whose package is `offered`:
-    /// each binds the provider's publication of the same name. A catalog convention that
-    /// spares each launcher spelling the same table out; a micro whose requirements come from
-    /// several providers sets `requirements` itself.
-    ///
-    /// A requirement the provider cannot satisfy is refused: it names no publication of the
-    /// provider, or the provider's call publication implements another contract NSID than the
-    /// one required. A presentation publication declares no contract on the wire (every
-    /// presentation shares the reserved presentation-component contract), so a requirement of
-    /// one is checked by name only.
-    pub fn satisfied_by(
-        mut self,
-        provider: &MicroId,
-        offered: &clay_mdk::Sidecar,
-    ) -> Result<Self, String> {
-        for request in &self.sidecar.manifest.requires {
-            let publication = offered
-                .manifest
-                .publications
-                .iter()
-                .find(|publication| publication.name == request.binding)
-                .ok_or_else(|| {
-                    format!(
-                        "{} requires {:?}, which {provider} does not publish",
-                        self.id, request.binding
-                    )
-                })?;
-            match &publication.contract {
-                Some(contract) if *contract != request.contract => {
-                    return Err(format!(
-                        "{} requires {:?} under {}, but {provider} publishes it under {contract}",
-                        self.id, request.binding, request.contract
-                    ));
-                }
-                _ => {}
-            }
-            self.requirements.insert(
-                request.binding.clone(),
-                Requirement {
-                    provider: SupervisorId::from(provider),
-                    publication: request.binding.clone(),
-                },
-            );
-        }
-        Ok(self)
-    }
-
-    /// An on-demand, unlocked micro with no requirements, admitted disabled.
+    /// An on-demand, unlocked micro, admitted disabled. Its requirements resolve against the
+    /// rest of the catalog when the composition is built (see [`requirements`]).
     pub fn new(
         id: MicroId,
         sidecar: clay_mdk::Sidecar,
@@ -171,7 +124,6 @@ impl InstalledMicro {
             eager: false,
             enabled_on_admission: false,
             locked: false,
-            requirements: BTreeMap::new(),
             factory: Box::new(factory),
         }
     }
@@ -369,6 +321,17 @@ async fn reconcile_installs(
     }
 }
 
+/// The branch of every configuration document.
+pub const CONFIG_BRANCH: &str = "main";
+
+/// The document that holds the configuration datums a micro reads through its `binding`: a
+/// manifest request names facets by tag and never the document (ADR 028 §4), and the composition
+/// picks one per binding. A host that writes a micro's configuration (an install) addresses it
+/// here.
+pub fn config_document(binding: &str) -> String {
+    format!("{binding}-config")
+}
+
 /// Runtime for one composition: the host, the supervisor over the catalog, and the shell's
 /// mirror of the declared `shell.roots` collection.
 #[derive(Clone)]
@@ -521,6 +484,10 @@ impl CompositionRuntime {
                 }
             })
             .collect();
+        // What each micro requires of the others resolves over the admitted catalog. A
+        // requirement several micros serve is an installation error and left unsupplied.
+        let (requirements, supply_errors) = requirements::resolve(&installed);
+        errors.extend(supply_errors);
         // A declared collection's id is its contract's id today (see `DeclaredCollections`).
         let mut declared_collections = DeclaredCollections::default();
 
@@ -541,8 +508,8 @@ impl CompositionRuntime {
             for request in &micro.sidecar.manifest.configuration_requests {
                 documents.mock_documents().bind_config(
                     request.binding.clone(),
-                    format!("{}-config", request.binding),
-                    "main".into(),
+                    config_document(&request.binding),
+                    CONFIG_BRANCH.into(),
                 );
             }
             for contract in &micro.sidecar.manifest.collection_contracts {
@@ -591,7 +558,9 @@ impl CompositionRuntime {
         let mut managed = Vec::new();
         let mut locked = BTreeSet::new();
         let mut configured = Vec::new();
-        for (micro, resolution) in installed.into_iter().zip(resolutions) {
+        for ((micro, resolution), requirements) in
+            installed.into_iter().zip(resolutions).zip(requirements)
+        {
             let identity = micro.id.clone();
             micros.push(identity.clone());
             collection_requests.insert(
@@ -607,7 +576,7 @@ impl CompositionRuntime {
                 enabled: enabled_at_boot.get(&identity).copied().unwrap_or(true),
                 identity: SupervisorId::from(&identity),
                 eager: micro.eager,
-                requirements: micro.requirements,
+                requirements,
                 unresolved_bindings: resolution.unresolved.clone(),
                 factory: (micro.factory)(identity.clone(), resources.clone(), bindings.clone()),
             });
@@ -901,7 +870,7 @@ pub fn Application(runtime: Signal<CompositionRuntime>, host: HostInputs) -> Ele
                     "aria-label": "{row.value.title}",
                     style: "width:100%;height:100%;min-width:0;min-height:0",
                     PresentationSlot {
-                        reference: row.attachments[row.value.content.index()].clone(),
+                        reference: row.links[row.value.content.index()].clone(),
                     }
                 }
             }

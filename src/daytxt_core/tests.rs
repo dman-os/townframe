@@ -3,13 +3,14 @@ use clay_collection::Stamped;
 use clay_dioxus::NativeComponents;
 use clay_guest_session::capabilities::RowAttachment;
 use clay_host::StartError;
-use clay_mdk::host::factory;
 use clay_mdk::Capability;
 use clay_mdk::CollectionDecl;
 use clay_mdk::ComponentDecl;
+use clay_mdk::Endpoint;
 use clay_mdk::Error;
-use micro_settings_manifest::Section;
+use clay_mdk::host::factory;
 use micro_settings_manifest::SECTIONS;
+use micro_settings_manifest::Section;
 use std::cell::RefCell;
 use std::future::Future;
 
@@ -116,72 +117,86 @@ fn settings_micro(activations: Rc<std::cell::Cell<usize>>) -> InstalledMicro {
                 )
             },
         )
-        .satisfied_by(
-            &id(micro_shell_manifest::ID),
-            &micro_shell_manifest::sidecar(),
-        )
-        .unwrap()
     }
 }
 
-fn unactivated_settings() -> InstalledMicro {
-    InstalledMicro::new(
-        id(micro_settings_manifest::ID),
-        micro_settings_manifest::sidecar(),
-        |_, _, _| unreachable!("a refused provider never builds the factory"),
-    )
+/// A catalog entry whose factory is never built, for tests of what resolves over the catalog.
+fn unbuilt(id: MicroId, sidecar: clay_mdk::Sidecar) -> InstalledMicro {
+    InstalledMicro::new(id, sidecar, |_, _, _| {
+        unreachable!("requirement resolution builds no factory")
+    })
 }
 
 #[test]
-fn a_provider_publishing_a_requirement_under_another_contract_is_refused() {
-    let mut shell = micro_shell_manifest::sidecar();
-    shell
-        .manifest
-        .publications
-        .iter_mut()
-        .find(|publication| publication.name == micro_shell_manifest::OPENED)
-        .unwrap()
-        .contract = Some(Nsid::literal("org.example.test.somethingElse"));
-    let error = unactivated_settings()
-        .satisfied_by(&id(micro_shell_manifest::ID), &shell)
-        .err()
-        .unwrap();
-    assert!(
-        error.contains(micro_shell_manifest::OPENED_CONTRACT)
-            && error.contains("org.example.test.somethingElse"),
-        "{error}"
-    );
-}
-
-#[test]
-fn a_provider_without_the_required_publication_is_refused() {
-    let mut shell = micro_shell_manifest::sidecar();
-    shell
-        .manifest
-        .publications
-        .retain(|publication| publication.name != micro_shell_manifest::NAV_BUTTON);
-    let error = unactivated_settings()
-        .satisfied_by(&id(micro_shell_manifest::ID), &shell)
-        .err()
-        .unwrap();
-    assert!(error.contains(micro_shell_manifest::NAV_BUTTON), "{error}");
-}
-
-#[test]
-fn the_shell_satisfies_what_settings_requires() {
-    let micro = unactivated_settings()
-        .satisfied_by(
-            &id(micro_shell_manifest::ID),
-            &micro_shell_manifest::sidecar(),
-        )
-        .unwrap();
+fn the_shell_supplies_what_settings_requires_under_its_endpoint_names() {
+    let (resolved, errors) = requirements::resolve(&[
+        unbuilt(
+            id(micro_shell_manifest::ID),
+            micro_shell_manifest::sidecar(),
+        ),
+        unbuilt(
+            id(micro_settings_manifest::ID),
+            micro_settings_manifest::sidecar(),
+        ),
+    ]);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(resolved[0].is_empty());
+    let shell = Some(SupervisorId::from(&id(micro_shell_manifest::ID)));
     assert_eq!(
-        micro.requirements.keys().collect::<Vec<_>>(),
+        resolved[1]
+            .iter()
+            .map(|(binding, requirement)| {
+                (
+                    binding.as_str(),
+                    requirement.provider.clone(),
+                    requirement.publication.as_str(),
+                )
+            })
+            .collect::<Vec<_>>(),
         [
-            micro_shell_manifest::NAV_BUTTON,
-            micro_shell_manifest::OPENED
+            (
+                micro_shell_manifest::NAV_BUTTON,
+                shell.clone(),
+                micro_shell_manifest::NAV_BUTTON
+            ),
+            (
+                micro_shell_manifest::OPENED,
+                shell,
+                micro_shell_manifest::OPENED
+            ),
         ]
     );
+}
+
+/// What Settings requires of a shell that serves it under another endpoint name, or under no
+/// NSID it asks for, resolves by NSID: the name is the provider's business.
+#[test]
+fn a_requirement_resolves_by_nsid_whatever_the_provider_names_the_endpoint() {
+    let mut shell = micro_shell_manifest::sidecar();
+    let opened = shell
+        .manifest
+        .endpoints
+        .remove(micro_shell_manifest::OPENED)
+        .unwrap();
+    shell.manifest.endpoints.insert("which-row".into(), opened);
+    shell.manifest.endpoints.insert(
+        micro_shell_manifest::NAV_BUTTON.into(),
+        Endpoint::View { implements: None },
+    );
+    let (resolved, errors) = requirements::resolve(&[
+        unbuilt(id(micro_shell_manifest::ID), shell),
+        unbuilt(
+            id(micro_settings_manifest::ID),
+            micro_settings_manifest::sidecar(),
+        ),
+    ]);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(
+        resolved[1][micro_shell_manifest::OPENED].publication,
+        "which-row"
+    );
+    // The nav button no longer implements its contract, so nothing supplies it.
+    assert_eq!(resolved[1][micro_shell_manifest::NAV_BUTTON].provider, None);
 }
 
 /// The shell (eager), Settings (on demand) and Sample (eager) as the desktop links them, plus a
@@ -344,11 +359,13 @@ async fn manifest_rows_are_installed_before_anything_runs() {
         [RowAttachment::Endpoint(endpoint)] if endpoint.micro == supervised(COUNTER) && endpoint.publication == "view"
     ));
     // The sample writes its row at runtime, so nothing exists for it yet.
-    assert!(runtime
-        .collection(&sections())
-        .unwrap()
-        .get(&cbor_key(micro_sample::ID))
-        .is_none());
+    assert!(
+        runtime
+            .collection(&sections())
+            .unwrap()
+            .get(&cbor_key(micro_sample::ID))
+            .is_none()
+    );
     runtime.host.close();
 }
 
@@ -370,7 +387,7 @@ async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
         let root = &runtime.roots.rows().unwrap()[0];
         assert_eq!(root.key, micro_shell_manifest::ID);
         assert_eq!(root.value.title, "Shell");
-        let view = root.attachments[root.value.content.index()]
+        let view = root.links[root.value.content.index()]
             .redeem_presentation()
             .await
             .unwrap();
@@ -389,7 +406,7 @@ async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
         let rows = sections.rows().unwrap();
         let counter = rows.iter().find(|row| row.key == COUNTER).unwrap();
         assert_eq!(runtime.state(&id(COUNTER)), MicroState::Idle);
-        let detail = counter.attachments[counter.value.detail.index()]
+        let detail = counter.links[counter.value.detail.index()]
             .redeem_presentation()
             .await
             .unwrap();
@@ -398,7 +415,7 @@ async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
         settle(&runtime, || runtime.state(&id(COUNTER)) == MicroState::Idle).await;
         // The runtime-written sample row is bound, so it needs no activation to mount.
         let sample = rows.iter().find(|row| row.key == micro_sample::ID).unwrap();
-        assert!(sample.attachments[0].redeem_presentation().await.is_ok());
+        assert!(sample.links[0].redeem_presentation().await.is_ok());
     })
     .await;
 }
@@ -446,7 +463,7 @@ async fn a_disabled_micro_keeps_its_row_but_cannot_be_redeemed_until_enabled() {
         supervisor.disable(&supervised(COUNTER)).await.unwrap();
         let rows = sections.rows().unwrap();
         let counter = rows.iter().find(|row| row.key == COUNTER).unwrap();
-        let reference = &counter.attachments[0];
+        let reference = &counter.links[0];
         assert_eq!(
             reference.redeem_presentation().await.err(),
             Some(Error::Unavailable)
@@ -471,7 +488,7 @@ async fn an_unfetchable_guest_faults_alone_until_retried() {
         let rows = sections.rows().unwrap();
         let counter = rows.iter().find(|row| row.key == COUNTER).unwrap();
         assert_eq!(
-            counter.attachments[0].redeem_presentation().await.err(),
+            counter.links[0].redeem_presentation().await.err(),
             Some(Error::Unavailable)
         );
         assert!(matches!(
@@ -488,7 +505,7 @@ async fn an_unfetchable_guest_faults_alone_until_retried() {
         ));
         supervisor.retry(&supervised(COUNTER));
         assert_eq!(runtime.state(&id(COUNTER)), MicroState::Idle);
-        assert!(counter.attachments[0].redeem_presentation().await.is_err());
+        assert!(counter.links[0].redeem_presentation().await.is_err());
         assert!(matches!(
             runtime.state(&id(COUNTER)),
             MicroState::Faulted(_)
@@ -570,12 +587,12 @@ async fn a_reboot_over_the_same_sqlite_file_keeps_manifest_row_stamps() {
             let store = clay_store::SqliteStore::open(sqlite.database(
                 &path,
                 &[],
-                "_dayframe_composition_test_unused",
+                "_daytxt_core_test_unused",
             ))
             .await
             .unwrap();
             let mut sidecar = micro_counter_manifest::sidecar();
-            sidecar.manifest.contributions[0].payload["title"] = title.into();
+            sidecar.manifest.contributions[0].value["title"] = title.into();
             let runtime = CompositionRuntime::new(
                 Arc::new(store),
                 catalog(InstalledMicro::new(
@@ -826,7 +843,7 @@ fn probe_sidecar(
         1,
         clay_mdk::MicroManifest {
             entrypoints: clay_mdk::Entrypoints::micro_client(),
-            publications: vec![],
+            endpoints: BTreeMap::new(),
             requires: vec![],
             configuration_requests: vec![],
             collection_contracts: contracts
@@ -1121,7 +1138,7 @@ async fn counter_slot(runtime: &CompositionRuntime) -> (VirtualDom, clay_surface
         slot_app,
         SlotApp {
             components: runtime.components.clone(),
-            reference: counter.attachments[counter.value.detail.index()].clone(),
+            reference: counter.links[counter.value.detail.index()].clone(),
         },
     );
     let mut tree = clay_surface::SurfaceTree::new();
@@ -1286,6 +1303,18 @@ async fn call_publication<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     name: &str,
     request: &Req,
 ) -> Resp {
+    try_call_publication(runtime, micro, name, request)
+        .await
+        .unwrap()
+}
+
+/// [`call_publication`] for a call the provider may reject: the rejection is the `Err`.
+async fn try_call_publication<Req: Serialize, Resp: serde::de::DeserializeOwned>(
+    runtime: &CompositionRuntime,
+    micro: &str,
+    name: &str,
+    request: &Req,
+) -> Result<Resp, String> {
     let lease = runtime
         .supervisor
         .acquire(&supervised(micro), name)
@@ -1301,10 +1330,13 @@ async fn call_publication<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     .unwrap();
     let mut bytes = Vec::new();
     ciborium::into_writer(request, &mut bytes).unwrap();
-    let response = reference.call(bytes).await.unwrap();
+    let response = reference
+        .call(bytes)
+        .await
+        .map_err(|error| format!("{error:?}"));
     drop((reference, lease));
     runtime.host.close_instance(&recipient).unwrap();
-    ciborium::from_reader(response.as_slice()).unwrap()
+    response.map(|response| ciborium::from_reader(response.as_slice()).unwrap())
 }
 
 // The counter's Increment button is a manifest-declared row whose action is a lazy endpoint:
@@ -1355,7 +1387,7 @@ async fn the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press
             .find(|row| row.key == micro_toolbar_manifest::ID)
             .unwrap();
         assert_eq!(panel.value.sockets, [micro_shell_manifest::Socket::Sidebar]);
-        let toolbar = panel.attachments[panel.value.content.index()].clone();
+        let toolbar = panel.links[panel.value.content.index()].clone();
         let mut dom = VirtualDom::new_with_props(
             slot_app,
             SlotApp {
@@ -1389,7 +1421,7 @@ async fn the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press
         assert_eq!(button.key, micro_counter_manifest::INCREMENT);
         assert_eq!(button.value.label, "Increment");
         assert_eq!(button.value.icon, "plus");
-        let action = &button.attachments[button.value.action.index()];
+        let action = &button.links[button.value.action.index()];
         assert_eq!(action.status(), clay_mdk::RefStatus::Dormant);
         assert_eq!(runtime.state(&id(COUNTER)), MicroState::Idle);
         assert_eq!(activations.get(), 0);
@@ -1420,11 +1452,11 @@ async fn the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press
 const SOURCES: &str = "org.example.test.editor.sources";
 
 /// One completion-source row: when the typed text starts with `trigger`, the provider the
-/// `provider` attachment names is asked for candidates.
+/// `provider` link names is asked for candidates.
 #[derive(Serialize, Deserialize)]
 struct Source {
     trigger: String,
-    provider: clay_mdk::Attachment,
+    provider: clay_mdk::Link,
 }
 
 fn editor_sidecar() -> clay_mdk::Sidecar {
@@ -1440,12 +1472,15 @@ fn editor_sidecar() -> clay_mdk::Sidecar {
             min_revision: None,
         }],
     );
-    sidecar.manifest.publications = ["complete", "focus", "blur"]
+    sidecar.manifest.endpoints = ["complete", "focus", "blur"]
         .into_iter()
-        .map(|name| clay_mdk::PublicationDeclaration {
-            name: name.into(),
-            kind: clay_mdk::PublicationKind::Call,
-            contract: Some(Nsid::literal(&format!("org.example.test.editor.{name}"))),
+        .map(|name| {
+            (
+                name.into(),
+                Endpoint::Method {
+                    nsid: Nsid::literal(&format!("org.example.test.editor.{name}")),
+                },
+            )
         })
         .collect();
     sidecar
@@ -1478,7 +1513,7 @@ fn editor() -> InstalledMicro {
                             sources.bootstrapped().await;
                             for row in sources.rows()?.iter() {
                                 if typed.starts_with(&row.value.trigger) {
-                                    let provider = &row.attachments[row.value.provider.index()];
+                                    let provider = &row.links[row.value.provider.index()];
                                     let binding = provider.retain_call().await?;
                                     retained
                                         .borrow_mut()
@@ -1511,7 +1546,7 @@ fn editor() -> InstalledMicro {
                                         binding.call::<String, Vec<String>>(&typed).await?
                                     }
                                     None => {
-                                        let provider = &row.attachments[row.value.provider.index()];
+                                        let provider = &row.links[row.value.provider.index()];
                                         provider.call::<String, Vec<String>>(&typed).await?
                                     }
                                 });
@@ -1543,11 +1578,13 @@ fn provider(name: &'static str, trigger: &'static str) -> (InstalledMicro, Serve
         1,
         clay_mdk::MicroManifest {
             entrypoints: clay_mdk::Entrypoints::micro_client(),
-            publications: vec![clay_mdk::PublicationDeclaration {
-                name: "complete".into(),
-                kind: clay_mdk::PublicationKind::Call,
-                contract: Some(Nsid::literal(&format!("{authority}.complete"))),
-            }],
+            endpoints: [(
+                "complete".into(),
+                Endpoint::Callback {
+                    implements: Nsid::literal(&format!("{authority}.complete")),
+                },
+            )]
+            .into(),
             requires: vec![],
             configuration_requests: vec![],
             collection_contracts: vec![],
@@ -1563,13 +1600,13 @@ fn provider(name: &'static str, trigger: &'static str) -> (InstalledMicro, Serve
                 id: "source".into(),
                 binding: "sources".into(),
                 key: name.into(),
-                payload: serde_json::json!({
+                value: serde_json::json!({
                     "trigger": trigger,
-                    "provider": { "$attachment": 0 },
+                    "provider": { "$link": 0 },
                 }),
-                attachments: vec![clay_mdk::AttachmentDeclaration {
+                links: vec![clay_mdk::LinkDeclaration {
                     index: 0,
-                    publication: "complete".into(),
+                    endpoint: "complete".into(),
                 }],
             }],
             extra: BTreeMap::new(),
@@ -1754,6 +1791,9 @@ struct FrameApp {
 /// serving the composition (the scenario serves it).
 fn frame_app(props: FrameApp) -> Element {
     use_context_provider(|| props.components.clone());
+    // Blitz's way of carrying a mount's stylesheet: a light-DOM `<style>` the recording tree
+    // exposes as text, where a browser mount keeps it in an attribute.
+    use_context_provider(|| clay_mdk::host::LightDomStylesheets);
     let width = use_signal(|| props.width).into();
     let height = use_signal(|| 800.0).into();
     let insets = use_signal(Insets::default).into();
@@ -1786,11 +1826,7 @@ async fn slot_lacks(dom: &mut VirtualDom, tree: &mut clay_surface::SurfaceTree, 
 fn sheet_micro() -> InstalledMicro {
     let manifest = clay_mdk::MicroManifest {
         entrypoints: clay_mdk::Entrypoints::micro_client(),
-        publications: vec![clay_mdk::PublicationDeclaration {
-            name: "page".into(),
-            kind: clay_mdk::PublicationKind::Presentation,
-            contract: None,
-        }],
+        endpoints: [("page".into(), Endpoint::View { implements: None })].into(),
         requires: vec![],
         configuration_requests: vec![],
         collection_contracts: vec![],
@@ -1806,14 +1842,14 @@ fn sheet_micro() -> InstalledMicro {
             id: "panel".into(),
             binding: "panels".into(),
             key: "tests.sheet".into(),
-            payload: serde_json::json!({
+            value: serde_json::json!({
                 "title": "Pick a color",
                 "sockets": ["sheet"],
-                "content": { "$attachment": 0 },
+                "content": { "$link": 0 },
             }),
-            attachments: vec![clay_mdk::AttachmentDeclaration {
+            links: vec![clay_mdk::LinkDeclaration {
                 index: 0,
-                publication: "page".into(),
+                endpoint: "page".into(),
             }],
         }],
         extra: BTreeMap::new(),
@@ -1865,7 +1901,7 @@ async fn home_opens_settings_then_a_section_and_back_unwinds_to_home() {
             frame_app,
             FrameApp {
                 components: runtime.components.clone(),
-                reference: root.attachments[root.value.content.index()].clone(),
+                reference: root.links[root.value.content.index()].clone(),
                 width: 400.0,
             },
         );
@@ -1959,6 +1995,86 @@ async fn home_opens_settings_then_a_section_and_back_unwinds_to_home() {
             "Settings started once for the whole visit"
         );
 
+        drop(dom);
+    })
+    .await;
+}
+
+// The theme is applied through the shell's `set-theme` call: the frame puts it in the host
+// document in `@layer user` live, `get-theme` reads it back, and CSS that could make the host
+// fetch anything is rejected before anything is stored or applied.
+#[tokio::test(flavor = "current_thread")]
+async fn a_theme_set_through_the_shell_is_applied_live_and_a_fetching_one_is_refused() {
+    use micro_shell_manifest::ThemeSheet;
+    let runtime = memory_runtime(stub_counter()).await;
+    let shell = micro_shell_manifest::ID;
+    served(&runtime, async {
+        let mut roots = runtime.roots.clone();
+        while runtime.roots.rows().unwrap().is_empty() {
+            roots.changed().await.unwrap();
+        }
+        let rows = runtime.roots.rows().unwrap();
+        let root = rows.iter().find(|row| row.key == shell).unwrap();
+        let mut dom = VirtualDom::new_with_props(
+            frame_app,
+            FrameApp {
+                components: runtime.components.clone(),
+                reference: root.links[root.value.content.index()].clone(),
+                width: 400.0,
+            },
+        );
+        let mut tree = clay_surface::SurfaceTree::new();
+        dom.rebuild(&mut tree);
+        slot_shows(&mut dom, &mut tree, "Home").await;
+        assert!(!tree.text_content().contains("theme-probe"));
+
+        let sheet = |css: &str| ThemeSheet { css: css.into() };
+        let theme = sheet(".theme-probe { color: red; }");
+        call_publication::<_, ()>(&runtime, shell, micro_shell_manifest::SET_THEME, &theme).await;
+        slot_shows(&mut dom, &mut tree, "@layer user").await;
+        assert!(tree.text_content().contains(".theme-probe"));
+        assert_eq!(
+            call_publication::<_, ThemeSheet>(
+                &runtime,
+                shell,
+                micro_shell_manifest::GET_THEME,
+                &()
+            )
+            .await,
+            theme
+        );
+
+        // Refused, not repaired: the applied theme stays what it was.
+        let fetching = sheet(".theme-probe { background: url(https://evil.example/x.png); }");
+        let refusal = try_call_publication::<_, ()>(
+            &runtime,
+            shell,
+            micro_shell_manifest::SET_THEME,
+            &fetching,
+        )
+        .await
+        .expect_err("a theme that fetches is rejected");
+        assert!(refusal.contains("url("), "{refusal}");
+        assert_eq!(
+            call_publication::<_, ThemeSheet>(
+                &runtime,
+                shell,
+                micro_shell_manifest::GET_THEME,
+                &()
+            )
+            .await,
+            theme
+        );
+
+        // The empty theme removes the layer again.
+        call_publication::<_, ()>(
+            &runtime,
+            shell,
+            micro_shell_manifest::SET_THEME,
+            &ThemeSheet::default(),
+        )
+        .await;
+        slot_lacks(&mut dom, &mut tree, "@layer user").await;
         drop(dom);
     })
     .await;
