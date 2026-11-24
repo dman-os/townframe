@@ -78,6 +78,7 @@ data-encoding.workspace = true
 
 #
 # crypto
+blake3.workspace = true
 rand.workspace = true
 
 #

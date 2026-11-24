@@ -3794,6 +3794,7 @@ dependencies = [
  "big_node",
  "big_nodule_core",
  "big_repo",
+ "blake3",
  "clap",
  "clap-markdown",
  "clap_complete",
