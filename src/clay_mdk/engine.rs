@@ -11,6 +11,7 @@ use clay_guest_session::InitialContext;
 use clay_guest_session::capabilities::CapabilityPublication;
 use clay_guest_session::capabilities::DeclaredPublication;
 use clay_guest_session::capabilities::PublicationKind;
+use clay_guest_session::egress::DispatchEgress;
 use clay_host::Activator;
 use clay_host::ComponentRef;
 use clay_host::Factory;
@@ -28,7 +29,7 @@ use tokio::task::JoinHandle;
 use crate::manifest::MicroManifest;
 use crate::native::CollectionBindings;
 use crate::native::Resources;
-use crate::native::declared_publications;
+use crate::native::declared_endpoints;
 use crate::native::grant_configs;
 
 /// The outcome of starting one incarnation: its runtime and the driver future that runs it.
@@ -76,6 +77,7 @@ struct GuestFactory<E: Engine> {
     declared: BTreeMap<String, DeclaredPublication>,
     bindings: CollectionBindings,
     package: PackageSource<E>,
+    egress: Option<Arc<dyn DispatchEgress>>,
 }
 
 pub(crate) fn factory<E: Engine>(
@@ -84,8 +86,9 @@ pub(crate) fn factory<E: Engine>(
     manifest: MicroManifest,
     bindings: CollectionBindings,
     package: PackageSource<E>,
+    egress: Option<Arc<dyn DispatchEgress>>,
 ) -> Rc<dyn Factory<CapabilityPublication>> {
-    let declared = declared_publications(&manifest);
+    let declared = declared_endpoints(&manifest);
     Rc::new(GuestFactory::<E> {
         resources,
         micro: (&micro).into(),
@@ -93,6 +96,7 @@ pub(crate) fn factory<E: Engine>(
         declared,
         bindings,
         package,
+        egress,
     })
 }
 
@@ -138,6 +142,7 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
         let declared = self.declared.clone();
         let bindings = self.bindings.snapshot();
         let package = Rc::clone(&self.package);
+        let egress = self.egress.clone();
         Box::pin(async move {
             let package = package().await?;
             // Guests see their collections by the manifest's binding names, never by id.
@@ -170,6 +175,7 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
                 publications: declared,
                 micro: Some(micro),
                 activator: Some(activator),
+                egress,
                 ..InitialContext::default()
             };
             let (runtime, driver) = E::initialize(host, instance.clone(), package, context).await?;
