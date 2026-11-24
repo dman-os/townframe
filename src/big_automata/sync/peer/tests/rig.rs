@@ -50,6 +50,7 @@ pub(super) fn obj_route(n: u8) -> Route {
 /// A summary that makes the peer's part a cursor catch-up.
 pub(super) fn cursor_summary(latest: Rev) -> PartSummary {
     PartSummary {
+        generation: Generation::default(),
         latest_cursor: latest,
         member_count: 3,
         deepest_bucket_level: 1,
@@ -64,6 +65,7 @@ pub(super) fn cursor_summary(latest: Rev) -> PartSummary {
 /// small, so the walk is one root bucket at level 0.
 pub(super) fn walk_summary(latest: Rev) -> PartSummary {
     PartSummary {
+        generation: Generation::default(),
         latest_cursor: latest,
         member_count: 3,
         deepest_bucket_level: 1,
@@ -192,7 +194,7 @@ impl Cmds {
 
     pub(super) fn persists(&self) -> Vec<(PartKey, Rev)> {
         self.pick(|cmd| match cmd {
-            PeerCommand::PersistCursor { part, cursor } => Some((part.clone(), *cursor)),
+            PeerCommand::PersistCursor { part, cursor } => Some((part.clone(), cursor.rev)),
             _ => None,
         })
     }
@@ -253,7 +255,11 @@ impl Rig {
 
     /// Want `n` at `cursor`, and flush.
     pub(super) fn add_part(&mut self, n: u8, cursor: Rev) -> Cmds {
-        self.sync.update(&[(part(n), cursor)], &[], &[], &[]);
+        let held = (cursor > 0).then_some(PeerCursor {
+            generation: Generation::default(),
+            rev: cursor,
+        });
+        self.sync.update(&[(part(n), held)], &[], &[], &[]);
         self.flush()
     }
 

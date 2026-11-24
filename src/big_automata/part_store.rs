@@ -50,6 +50,25 @@
 //!    (a payload set after the drop in the same transaction survives; a membership added after
 //!    the drop is pending).
 //!
+//! # Generation laws
+//!
+//! A store has a [`Generation`], the identity of its log, which a client's cursor is a position
+//! in: a peer that kept its identity but not its data (a recreated store, a restore from an older
+//! backup) would otherwise have its clients resume from cursors that mean nothing on the new
+//! log, silently missing the rows stamped below them.
+//!
+//! 1. **A store has a generation from its creation**, minted then, so plain data loss needs no
+//!    operator action: no two stores share one, and it is never [`Generation::default`].
+//! 2. **It is stable.** Writes, rollbacks and reads do not change it, and neither does a
+//!    restart of the store over the same files.
+//! 3. **Minting changes it and nothing else.** [`PartStoreWrite::mint_generation`] gives a
+//!    generation the store never had, and stamps no rev, wakes no watch and changes no row. A
+//!    restore from a backup brings back the backup's files, generation included, so the
+//!    operator mints after one: the store cannot tell a restored file from a live one.
+//! 4. **Every part summary carries the current generation**, a mint included from the next
+//!    answer on ([`PartSummary::generation`]); a client compares it with the one its cursor was
+//!    stored under (`PartLifecycle` law 10).
+//!
 //! Three traits, one per audience: [`PartStoreWrite`] for the embedder that owns the data,
 //! [`PartStoreRead`] for the sync client, [`PartStoreServe`] for the responder (which assembles
 //! pages, sessions and budgets on top; none of that is here).
@@ -211,10 +230,41 @@ pub struct ObjState {
     pub parts: BTreeSet<PartKey>,
 }
 
+/// The identity of a store's log: minted when the store is created and again by
+/// [`PartStoreWrite::mint_generation`]. A cursor is a position in one generation's log; a
+/// client holding a cursor of another generation knows nothing about where it stands in this
+/// one.
+///
+/// Generations cover data loss, a peer that keeps its identity but not its data (a lost or
+/// recreated store, a restore from an older backup). A new store gets a new generation by being
+/// created. A restore brings back the files of the old one, with the old generation, so only
+/// the operator can tell the store: [`PartStoreWrite::mint_generation`] after a restore.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct Generation(pub Uuid);
+
+impl Generation {
+    pub fn mint() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl std::fmt::Display for Generation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
 /// A part as a principal sees it from a cursor: what a peer decides its sync strategy on. It is
 /// also the wire answer of the summary call.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartSummary {
+    /// The generation of the store that answers: the log that `latest_cursor` and the dirt
+    /// counts are positions in. A client compares it with the generation of the cursor it
+    /// holds.
+    pub generation: Generation,
     /// The rev of the part's latest member row. The cursor strat resumes from it, and a bucket
     /// walk hands over to the cursor strat at it: the walk reads state no older than this
     /// summary, so replaying from here may repeat rows but never skips one. Access rows do not
@@ -337,6 +387,11 @@ pub trait PartStoreWrite {
         tx: &mut Self::Tx,
         objs: &[ObjKey],
     ) -> impl Future<Output = Res<()>> + Send;
+    /// Mint a new [generation](Generation) for the store and return it. An admin operation, not
+    /// part of a transaction: it takes effect at once and durably, and changes no log row, so
+    /// it stamps nothing. Run it after restoring the store from a backup, whose files carry the
+    /// generation they had; a store cannot tell a restored file from a live one by itself.
+    fn mint_generation(&self) -> impl Future<Output = Res<Generation>> + Send;
     /// Grant principals access to parts, `(part, principal, level)`.
     fn grant_access(
         &self,
@@ -402,6 +457,8 @@ pub trait PartStoreServe {
     /// A handle on the latest committed rev, moved from the commit path after the commit is
     /// visible to reads (as [`RevSource::watch`](crate::rev::RevSource::watch)).
     fn watch(&self) -> RevWatch;
+    /// The store's current [generation](Generation): the one every [`PartSummary`] carries.
+    fn generation(&self) -> impl Future<Output = Res<Generation>> + Send;
     /// The log rows `principal` may read on `routes` in `(after, until]`, with each route's
     /// verdict and the payloads of the rows' objects, into `page`.
     ///

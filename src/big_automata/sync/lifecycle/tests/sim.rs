@@ -11,8 +11,9 @@ const PARTS: u8 = 4;
 
 #[derive(Debug, Clone)]
 pub(in crate::sync::lifecycle::tests) enum Spec {
-    Cursor(Rev),
-    Walk(Rev),
+    /// The peer's generation (0 or 1) and its latest.
+    Cursor(u8, Rev),
+    Walk(u8, Rev),
     Unknown,
 }
 
@@ -58,8 +59,8 @@ pub(in crate::sync::lifecycle::tests) enum Op {
 
 pub(in crate::sync::lifecycle::tests) fn op() -> impl Strategy<Value = Op> {
     let spec = prop_oneof![
-        2 => (0u64..8).prop_map(Spec::Cursor),
-        2 => (0u64..8).prop_map(Spec::Walk),
+        2 => (0u8..2, 0u64..8).prop_map(|(generation, latest)| Spec::Cursor(generation, latest)),
+        2 => (0u8..2, 0u64..8).prop_map(|(generation, latest)| Spec::Walk(generation, latest)),
         1 => Just(Spec::Unknown),
     ];
     let reply = prop_oneof![
@@ -88,11 +89,14 @@ pub(in crate::sync::lifecycle::tests) struct Sim {
     now: Instant,
     config: Config,
     /// The persisted cursors, written from the commands the machine emitted.
-    store: Map<PartKey, Rev>,
+    store: Map<PartKey, PeerCursor>,
     /// The call the driver has open, from the `Decide` it executed.
     open: Option<CallId>,
     /// Parts retired since their last add.
     retired: Set<PartKey>,
+    /// Parts restarted since their last persist: their next persist may be below the stored
+    /// cursor, even in the same generation (law 10).
+    rewound: Set<PartKey>,
 }
 
 impl Sim {
@@ -102,10 +106,20 @@ impl Sim {
             min_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(3),
         };
-        let store: Map<PartKey, Rev> = [3, 0, 5, 2]
+        // part 1 was never seen; the others hold a cursor of generation 0
+        let store: Map<PartKey, PeerCursor> = [3, 0, 5, 2]
             .into_iter()
             .enumerate()
-            .map(|(p, cursor)| (part(p as u8), cursor))
+            .filter(|(p, _)| *p != 1)
+            .map(|(p, rev)| {
+                (
+                    part(p as u8),
+                    PeerCursor {
+                        generation: generation(0),
+                        rev,
+                    },
+                )
+            })
             .collect();
         Self {
             lc: PartLifecycle::new(config.clone()),
@@ -115,6 +129,7 @@ impl Sim {
             store,
             open: None,
             retired: default(),
+            rewound: default(),
         }
     }
 
@@ -135,7 +150,7 @@ impl Sim {
         let mut decidable = vec![];
         match &op {
             Op::Add { part: p } => {
-                let cursor = self.store.get(&part(*p)).copied().unwrap_or(0);
+                let cursor = self.store.get(&part(*p)).copied();
                 if before[*p as usize].is_none() {
                     self.retired.remove(&part(*p));
                 }
@@ -162,11 +177,8 @@ impl Sim {
                             .enumerate()
                             .filter_map(|(p, spec)| {
                                 let strat = match spec.as_ref()? {
-                                    Spec::Cursor(latest) => PeerPartStrat::Cursor {
-                                        from: 99,
-                                        latest: *latest,
-                                    },
-                                    Spec::Walk(latest) => walk_strat(*latest),
+                                    Spec::Cursor(n, latest) => cursor_in((*n).into(), *latest),
+                                    Spec::Walk(n, latest) => walk_in((*n).into(), *latest),
                                     Spec::Unknown => PeerPartStrat::Unknown,
                                 };
                                 Some((part(p as u8), strat))
@@ -216,7 +228,7 @@ impl Sim {
         op: &Op,
         out: &[LifecycleCommand],
         before: &[Option<Phase>],
-        store_before: &Map<PartKey, Rev>,
+        store_before: &Map<PartKey, PeerCursor>,
         decidable: &[PartKey],
     ) {
         let phase_of = |p: &PartKey| before[(p.as_bytes()[0] - 100) as usize];
@@ -237,6 +249,16 @@ impl Sim {
                         "{op:?}: over the cap"
                     );
                 }
+                LifecycleCommand::Restart { part: p, held, .. } => {
+                    assert!(decidable.contains(p), "{op:?}: decided an undecidable part");
+                    assert_eq!(phase_of(p), Some(Phase::Deciding));
+                    assert_eq!(
+                        store_before.get(p),
+                        Some(held),
+                        "{op:?}: restarted from a cursor not stored"
+                    );
+                    self.rewound.insert(p.clone());
+                }
                 LifecycleCommand::StartCursor { part: p, .. }
                 | LifecycleCommand::StartWalk { part: p, .. } => {
                     assert!(decidable.contains(p), "{op:?}: decided an undecidable part");
@@ -255,10 +277,16 @@ impl Sim {
                         Op::Upgrade { .. } => assert_eq!(phase_of(p), Some(Phase::Walking)),
                         _ => panic!("{op:?}: a persist from nowhere"),
                     }
-                    assert!(
-                        *cursor >= store_before[p],
-                        "{op:?}: the persisted cursor went back"
-                    );
+                    if let Some(held) = store_before.get(p)
+                        && held.generation == cursor.generation
+                        && !self.rewound.contains(p)
+                    {
+                        assert!(
+                            cursor.rev >= held.rev,
+                            "{op:?}: the persisted cursor went back"
+                        );
+                    }
+                    self.rewound.remove(p);
                     self.store.insert(p.clone(), *cursor);
                 }
                 LifecycleCommand::Retire { part: p } => {
@@ -268,6 +296,7 @@ impl Sim {
                     );
                     assert_eq!(self.lc.phase(p), None);
                     assert!(self.retired.insert(p.clone()), "{op:?}: retired twice");
+                    self.rewound.remove(p);
                 }
             }
         }
@@ -289,6 +318,8 @@ impl Sim {
             );
             let i = p as usize;
             let started = |phase| matches!(phase, Some(Phase::Walking | Phase::Cursor));
+            // A restart is the one way a held cursor goes back (law 10): the part was
+            // `Deciding` before it, so it is not judged here.
             if started(before[i]) && started(self.lc.phase(&key)) {
                 assert!(
                     self.lc.cursor(&key) >= cursors_before[i],

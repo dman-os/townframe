@@ -27,6 +27,7 @@ use crate::replay::wire::SessionId;
 use crate::replay::wire::SessionPage;
 use crate::replay::wire::SessionUpdated;
 use crate::rev::Rev;
+use crate::sync::PeerCursor;
 use crate::sync::bucket::BucketMachine;
 use crate::sync::bucket::BucketObjLeafPage;
 use crate::sync::bucket::FilteredBuckets;
@@ -383,14 +384,14 @@ where
         }
     }
 
-    /// The cursor persisted for each part. A table that answers a different number of
-    /// cursors than asked is broken.
+    /// The cursor persisted for each part, `None` for one never seen. A table that answers a
+    /// different number of cursors than asked is broken.
     /// Borrows the table and the config alone: the whole driver is not `Sync`.
     async fn cursors_of(
         cursors: &K,
         config: &DriverConfig,
         parts: &[PartKey],
-    ) -> Vec<(PartKey, Rev)> {
+    ) -> Vec<(PartKey, Option<PeerCursor>)> {
         if parts.is_empty() {
             return vec![];
         }
@@ -532,6 +533,21 @@ where
             match cmd {
                 PeerCommand::Cancel { call } => conn.aborts[&call].abort(),
                 PeerCommand::PersistCursor { part, cursor } => persists.push((part, cursor)),
+                PeerCommand::Restarted {
+                    part,
+                    held,
+                    peer_generation,
+                    peer_latest,
+                } => tracing::warn!(
+                    peer = %self.config.peer,
+                    %part,
+                    stored_generation = %held.generation,
+                    stored_cursor = held.rev,
+                    peer_generation = %peer_generation,
+                    peer_latest,
+                    "the peer's log is not the one our cursor is in (data loss or an unminted \
+                     restore); the part restarts from cursor 0"
+                ),
                 // An edge of a part whose route was removed since is stale: the removal
                 // already published `Removed`.
                 PeerCommand::Synced { part } => {

@@ -18,6 +18,7 @@
 //! | an object route follows the object's readable parts and carries only their rows | [`object_routes_follow_the_readable_parts`] |
 //! | an authorized read of the empty window decides every verdict and reads no row | [`an_empty_window_reads_verdicts_only`], every check, [`differential`] |
 //! | an authorized read carries, from its snapshot, one payload per object with a live row in it, and no other | [`authorized_reads_carry_their_payloads`], every check, [`differential`] |
+//! | a store has a generation from its creation, stable across writes and reads, new after a mint, and carried by every summary | [`generations_identify_the_log`], every check, [`differential`] |
 //! | the responder's rev and watch follow commits like the log's | every commit and rollback |
 //! | an authorized read equals the oracle's filter of current access | every check, every authorized read in [`differential`] |
 //! | a route delivers every removal above its bound, whatever the membership's `added_at` | [`removals_reach_every_route_above_its_bound`], every route read in [`differential`] |
@@ -44,6 +45,7 @@ use crate::okv::laws::Bytes;
 use crate::okv::oracle::Oracle;
 use crate::part_store::AccessLevel;
 use crate::part_store::AuthorizedPage;
+use crate::part_store::Generation;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
@@ -138,13 +140,32 @@ impl<B: Backend> Harness<B> {
             "a fresh store has stamped nothing"
         );
         assert_eq!(PartStoreServe::latest_rev(&store).await?, 0);
+        let generation = store.generation().await?;
+        assert_ne!(
+            generation,
+            Generation::default(),
+            "a new store mints its generation"
+        );
         Ok(Self {
             backend: backend.clone(),
             store,
             watch,
             serve_watch,
-            oracle: default(),
+            oracle: PartOracle::with_generation(generation),
         })
+    }
+
+    /// Mint a new generation, which must differ from the last and change nothing else.
+    pub async fn mint_generation(&mut self) -> Res<Generation> {
+        let before = self.oracle.generation();
+        let minted = self.store.mint_generation().await?;
+        assert_ne!(minted, before, "a mint gives the generation it replaced");
+        assert_ne!(minted, Generation::default());
+        self.oracle.set_generation(minted);
+        // The log is untouched: no rev, no wake-up, no row (`check` compares all of them).
+        self.check_revs().await?;
+        self.check().await?;
+        Ok(minted)
     }
 
     /// Commit `writes` in one transaction, mirror it into the oracle, and check everything.
@@ -202,6 +223,7 @@ impl<B: Backend> Harness<B> {
         let principals = (0..PRINCIPALS).map(principal).collect::<Vec<_>>();
         let latest = oracle.latest_rev();
 
+        assert_eq!(store.generation().await?, oracle.generation(), "generation");
         assert_eq!(
             store.obj_states(&objs).await?,
             objs.iter()
@@ -1096,6 +1118,7 @@ pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
         .commit(vec![remove(&[(1, 0)]), revoke(&[(0, 1)])])
         .await?;
     harness.commit(vec![grant(&[(0, 2)])]).await?;
+    let generation = harness.oracle.generation();
     let summaries = |principal_index| {
         let store = harness.store.clone();
         async move {
@@ -1107,6 +1130,7 @@ pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
     };
     let summary = |member_changes, access_changes| {
         Some(crate::part_store::PartSummary {
+            generation,
             latest_cursor: 3,
             member_count: 1,
             deepest_bucket_level: BuckId::MAX_LEVEL,
@@ -1121,6 +1145,57 @@ pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
         vec![summary(2, 1), summary(1, 1), summary(0, 0)]
     );
     assert_eq!(summaries(1).await?, vec![None, None, None], "revoked");
+    Ok(())
+}
+
+/// A store has a generation from its creation, and no two stores share one. It is stable across
+/// writes, rollbacks and reads; [`mint_generation`](PartStoreWrite::mint_generation) replaces
+/// it with another and changes nothing else (the log, the revs and the watches stay put); and
+/// every part summary carries the current one, a mint included.
+pub async fn generations_identify_the_log<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    let other = Harness::open(backend).await?;
+    let first = harness.oracle.generation();
+    assert_ne!(
+        first,
+        other.oracle.generation(),
+        "two stores, one generation"
+    );
+
+    let summarize = |harness: &Harness<B>| {
+        let store = harness.store.clone();
+        async move {
+            store
+                .part_summaries(&principal(0), &[(part(0), 0)])
+                .await
+                .map(|mut summaries| summaries.remove(0).expect("the part is readable"))
+        }
+    };
+    harness
+        .commit(vec![set(&[(0, 1)]), add(&[(0, 0)]), grant(&[(0, 0)])])
+        .await?;
+    harness
+        .rollback(vec![set(&[(1, 1)]), add(&[(1, 0)])])
+        .await?;
+    harness.commit(vec![remove(&[(0, 0)])]).await?;
+    assert_eq!(harness.store.generation().await?, first, "writes keep it");
+    assert_eq!(summarize(&harness).await?.generation, first);
+
+    let second = harness.mint_generation().await?;
+    assert_ne!(second, first);
+    assert_eq!(harness.store.generation().await?, second);
+    assert_eq!(summarize(&harness).await?.generation, second);
+    // The log carries on from where it was, under the new generation.
+    harness.commit(vec![set(&[(0, 2)]), add(&[(0, 0)])]).await?;
+    assert_eq!(harness.store.generation().await?, second);
+    assert_eq!(summarize(&harness).await?.generation, second);
+    let third = harness.mint_generation().await?;
+    assert!(
+        third != second && third != first,
+        "a mint repeated an old generation"
+    );
+    // The other store never moved.
+    assert_eq!(other.store.generation().await?, other.oracle.generation());
     Ok(())
 }
 
@@ -1270,6 +1345,8 @@ strike! {
     pub enum PartOp {
         Commit(Vec<PartWrite>),
         Rollback(Vec<PartWrite>),
+        /// An admin mint of a new generation.
+        MintGeneration,
         /// A log read; `after` and `until` are fractions (of 256) of the stamped revs.
         Read {
             selector: LogSelector,
@@ -1312,6 +1389,9 @@ pub async fn differential<B: Backend>(backend: &B, ops: Vec<PartOp>) -> Res<()> 
             PartOp::Rollback(writes) => {
                 let writes = harness.oracle.without_member_drops(writes);
                 harness.rollback(writes).await?
+            }
+            PartOp::MintGeneration => {
+                harness.mint_generation().await?;
             }
             PartOp::Read {
                 selector,

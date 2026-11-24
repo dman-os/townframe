@@ -93,18 +93,24 @@ impl Sim {
     /// the local membership is the peer's membership at the cursor; a row stamped after the
     /// cursor is the replay's to deliver, so it is not judged.
     fn check_persisted(&self) {
-        for (part, cursor) in &self.local.persisted {
+        for (part, persisted) in &self.local.persisted {
+            // A cursor of another generation is a position in a log the peer no longer has:
+            // the part restarts when it is next decided, and the cursor says nothing now.
+            if persisted.generation != self.remote.generation() {
+                continue;
+            }
+            let cursor = &persisted.rev;
             assert!(
-                *cursor <= self.remote.head(),
+                *cursor <= self.remote.head() || self.remote.unminted,
                 "{part} persisted at {cursor}, past the peer's head"
             );
             let local = self.local.members(part);
             let remote = self.remote.view_at(*cursor).members[part].clone();
             for obj in (0..self.shape.objs).map(obj) {
                 if self.remote.row_rev(&obj, part) <= *cursor {
-                    assert_eq!(
-                        local.contains(&obj),
-                        remote.contains(&obj),
+                    assert!(
+                        local.contains(&obj) == remote.contains(&obj)
+                            || (local.contains(&obj) && self.remote.is_ghost(part, &obj)),
                         "{part} persisted at {cursor} (head {}) but the local store disagrees about \
                          {obj}: a crash now loses it for good. local {local:?}, the peer's at \
                          the cursor {remote:?}, {obj}'s row was last stamped at {}, walked {}",
@@ -129,7 +135,7 @@ impl Sim {
             view.readable.contains(part),
             "Synced({part}) at {at}, where the peer did not let us read it"
         );
-        if local == view.members[part].clone() {
+        if self.remote.holds(part, &local, &view.members[part]) {
             self.walked.remove(part);
             return;
         }
@@ -139,7 +145,7 @@ impl Sim {
                     .remote
                     .views_from(at)
                     .any(|later| later.readable.contains(part)
-                        && later.members[part].clone() == local),
+                        && self.remote.holds(part, &local, &later.members[part])),
             "Synced({part}) at {at} with local members {local:?}, the peer's readable members \
              then were {:?}",
             view.members[part]
@@ -291,10 +297,12 @@ impl Sim {
         let view = self.remote.view_at(head);
         for part in &self.wanted_parts {
             if view.readable.contains(part) {
-                assert_eq!(
+                assert!(
+                    self.remote
+                        .holds(part, &self.local.members(part), &view.members[part]),
+                    "{part} is Synced and its local members {:?} are not the peer's {:?}",
                     self.local.members(part),
-                    view.members[part].clone(),
-                    "{part} is Synced and its local members are not the peer's"
+                    view.members[part]
                 );
             }
         }

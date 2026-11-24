@@ -16,15 +16,41 @@ pub(super) fn config() -> Config {
     }
 }
 
+/// The peer's generation number `n`; tests that do not care about generations use 0.
+fn generation(n: u128) -> Generation {
+    Generation(Uuid::from_u128(n))
+}
+
+/// The cursor a part holds after consuming `rev` of generation 0; `None` for 0, a part never
+/// seen.
+fn held(rev: Rev) -> Option<PeerCursor> {
+    (rev > 0).then(|| PeerCursor {
+        generation: generation(0),
+        rev,
+    })
+}
+
 fn cursor_strat(latest: Rev) -> PeerPartStrat {
-    PeerPartStrat::Cursor { from: 0, latest }
+    cursor_in(0, latest)
 }
 
 fn walk_strat(latest: Rev) -> PeerPartStrat {
+    walk_in(0, latest)
+}
+
+fn walk_in(n: u128, latest: Rev) -> PeerPartStrat {
     PeerPartStrat::BucketWalk {
+        generation: generation(n),
         working_level: 1,
         remote_depth: 2,
         remote_len: 100,
+        latest,
+    }
+}
+
+fn cursor_in(n: u128, latest: Rev) -> PeerPartStrat {
+    PeerPartStrat::Cursor {
+        generation: generation(n),
         latest,
     }
 }
@@ -50,8 +76,9 @@ impl Rig {
         }
     }
 
+    /// Want part `p`, holding `cursor` of generation 0 (0: never seen).
     fn add(&mut self, p: u8, cursor: Rev) {
-        self.lc.add(part(p), cursor);
+        self.lc.add(part(p), held(cursor));
     }
 
     fn remove(&mut self, p: u8) -> Vec<LifecycleCommand> {
@@ -125,7 +152,7 @@ fn persists(cmds: &[LifecycleCommand]) -> Vec<(u8, Rev)> {
     cmds.iter()
         .filter_map(|cmd| match cmd {
             LifecycleCommand::PersistCursor { part, cursor } => {
-                Some((part.as_bytes()[0] - 100, *cursor))
+                Some((part.as_bytes()[0] - 100, cursor.rev))
             }
             _ => None,
         })
@@ -594,17 +621,8 @@ fn law_6_a_cursor_decision_starts_from_the_cursor_we_advertised() {
         panic!()
     };
     assert_eq!(parts[&part(1)], 4);
-    // the peer's own `from` and `latest` do not matter
-    let out = rig.decided(
-        call,
-        answered(&[(
-            1,
-            PeerPartStrat::Cursor {
-                from: 1,
-                latest: 99,
-            },
-        )]),
-    );
+    // the peer's `latest` does not move where the replay starts
+    let out = rig.decided(call, answered(&[(1, cursor_strat(99))]));
     assert_eq!(
         out,
         [LifecycleCommand::StartCursor {
@@ -624,7 +642,8 @@ fn law_6_a_walk_decision_starts_the_walk_and_holds_the_summary_latest() {
         out,
         [LifecycleCommand::StartWalk {
             part: part(1),
-            strat: walk_strat(7)
+            strat: walk_strat(7),
+            since: 2
         }]
     );
     assert_eq!(rig.lc.cursor(&part(1)), Some(7));
@@ -636,9 +655,175 @@ fn law_6_a_walk_never_holds_a_cursor_below_the_one_we_already_persisted() {
     let mut rig = Rig::new();
     rig.add(1, 6);
     let (call, _) = rig.decide();
-    rig.decided(call, answered(&[(1, walk_strat(3))]));
+    rig.decided(call, answered(&[(1, walk_strat(6))]));
     assert_eq!(rig.lc.cursor(&part(1)), Some(6));
     assert_eq!(persists(&rig.upgrade(1)), [(1, 6)]);
+}
+
+// Law 10
+
+/// A part holding `rev` of generation 0, decided from a summary `strat`: the commands.
+fn decide_held(rev: Rev, strat: PeerPartStrat) -> (Rig, Vec<LifecycleCommand>) {
+    let mut rig = Rig::new();
+    rig.add(1, rev);
+    let (call, _) = rig.decide();
+    let out = rig.decided(call, answered(&[(1, strat)]));
+    (rig, out)
+}
+
+#[test]
+fn law_10_a_matching_generation_resumes_from_the_cursor() {
+    // latest above, and equal to, the held cursor
+    for latest in [9, 5] {
+        let (rig, out) = decide_held(5, cursor_in(0, latest));
+        assert_eq!(
+            out,
+            [LifecycleCommand::StartCursor {
+                part: part(1),
+                from: 5
+            }]
+        );
+        assert_eq!(rig.lc.cursor(&part(1)), Some(5));
+    }
+    let (rig, out) = decide_held(5, walk_in(0, 9));
+    assert_eq!(
+        out,
+        [LifecycleCommand::StartWalk {
+            part: part(1),
+            strat: walk_in(0, 9),
+            since: 5
+        }]
+    );
+    assert_eq!(rig.lc.cursor(&part(1)), Some(9));
+}
+
+#[test]
+fn law_10_another_generation_restarts_from_zero() {
+    let (rig, out) = decide_held(5, cursor_in(1, 9));
+    assert_eq!(
+        out,
+        [
+            LifecycleCommand::Restart {
+                part: part(1),
+                held: PeerCursor {
+                    generation: generation(0),
+                    rev: 5
+                },
+                peer_generation: generation(1),
+                peer_latest: 9
+            },
+            LifecycleCommand::StartCursor {
+                part: part(1),
+                from: 0
+            }
+        ]
+    );
+    assert_eq!(rig.lc.cursor(&part(1)), Some(0));
+    // a walk lists everything, and hands over at the summary's latest
+    let (rig, out) = decide_held(5, walk_in(1, 9));
+    assert_eq!(
+        out[1],
+        LifecycleCommand::StartWalk {
+            part: part(1),
+            strat: walk_in(1, 9),
+            since: 0
+        }
+    );
+    assert!(matches!(out[0], LifecycleCommand::Restart { .. }));
+    assert_eq!(rig.lc.cursor(&part(1)), Some(9));
+}
+
+#[test]
+fn law_10_a_latest_below_the_cursor_restarts_from_zero() {
+    let (rig, out) = decide_held(5, cursor_in(0, 4));
+    assert_eq!(
+        out,
+        [
+            LifecycleCommand::Restart {
+                part: part(1),
+                held: PeerCursor {
+                    generation: generation(0),
+                    rev: 5
+                },
+                peer_generation: generation(0),
+                peer_latest: 4
+            },
+            LifecycleCommand::StartCursor {
+                part: part(1),
+                from: 0
+            }
+        ]
+    );
+    assert_eq!(rig.lc.cursor(&part(1)), Some(0));
+    let (_, out) = decide_held(5, walk_in(0, 4));
+    assert!(matches!(
+        out[..],
+        [
+            LifecycleCommand::Restart { .. },
+            LifecycleCommand::StartWalk { since: 0, .. }
+        ]
+    ));
+}
+
+#[test]
+fn law_10_the_persisted_cursor_after_a_restart_carries_the_new_generation() {
+    let new = |rev| PeerCursor {
+        generation: generation(1),
+        rev,
+    };
+    let (mut rig, _) = decide_held(5, cursor_in(1, 9));
+    let out = rig.applied(1, 3);
+    assert_eq!(
+        out,
+        [LifecycleCommand::PersistCursor {
+            part: part(1),
+            cursor: new(3)
+        }],
+        "a cursor below the old one persists: it is a position in another log"
+    );
+    // through a walk, at the upgrade
+    let (mut rig, _) = decide_held(5, walk_in(1, 9));
+    assert!(rig.applied(1, 11).is_empty());
+    assert_eq!(
+        rig.upgrade(1),
+        [LifecycleCommand::PersistCursor {
+            part: part(1),
+            cursor: new(11)
+        }]
+    );
+    // a part that resumed keeps persisting its generation
+    let (mut rig, _) = decide_held(5, cursor_in(0, 9));
+    assert_eq!(
+        rig.applied(1, 6),
+        [LifecycleCommand::PersistCursor {
+            part: part(1),
+            cursor: PeerCursor {
+                generation: generation(0),
+                rev: 6
+            }
+        }]
+    );
+}
+
+#[test]
+fn law_10_a_part_never_seen_adopts_the_peers_generation_without_a_restart() {
+    for strat in [cursor_in(7, 3), walk_in(7, 3)] {
+        let (mut rig, out) = decide_held(0, strat);
+        assert!(
+            !out.iter()
+                .any(|cmd| matches!(cmd, LifecycleCommand::Restart { .. })),
+            "{out:?}"
+        );
+        let out = if matches!(strat, PeerPartStrat::Cursor { .. }) {
+            rig.applied(1, 5)
+        } else {
+            rig.upgrade(1)
+        };
+        assert!(matches!(
+            out[..],
+            [LifecycleCommand::PersistCursor { cursor, .. }] if cursor.generation == generation(7)
+        ));
+    }
 }
 
 // Law 7
@@ -800,8 +985,8 @@ mod prop {
             Op::Answer {
                 call: sim::CallPick::Current,
                 reply: sim::Reply::Parts(vec![
-                    Some(sim::Spec::Walk(5)),
-                    Some(sim::Spec::Cursor(2)),
+                    Some(sim::Spec::Walk(0, 5)),
+                    Some(sim::Spec::Cursor(1, 2)),
                     None,
                     None,
                 ]),

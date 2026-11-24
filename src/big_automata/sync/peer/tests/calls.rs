@@ -9,7 +9,7 @@ fn law_2_every_kind_of_call_draws_from_one_counter() {
     let mut rig = Rig::new();
     let mut ids = vec![];
     rig.sync
-        .update(&[(part(1), 0), (part(2), 0)], &[], &[], &[]);
+        .update(&[(part(1), None), (part(2), None)], &[], &[], &[]);
     let asked = rig.flush();
     ids.push(asked.summaries()[0].0);
     let decided = rig.decide(&asked, &[(1, walk_summary(10)), (2, cursor_summary(0))]);

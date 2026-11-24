@@ -11,6 +11,7 @@ use std::num::NonZeroUsize;
 use crate::interlude::*;
 use crate::part_store::AccessLevel;
 use crate::part_store::AuthorizedPage;
+use crate::part_store::Generation;
 use crate::part_store::LeafEntry;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
@@ -49,6 +50,9 @@ strike! {
 
 #[derive(Debug, Clone, Default)]
 pub struct PartOracle {
+    /// What the store under test minted: the oracle cannot predict a random id, only follow it
+    /// ([`Self::set_generation`]) and answer that every summary carries it.
+    generation: Generation,
     rev: Rev,
     parts: BTreeSet<PartKey>,
     payloads: BTreeMap<ObjKey, ObjPayload>,
@@ -60,6 +64,22 @@ pub struct PartOracle {
 }
 
 impl PartOracle {
+    /// An empty oracle for a store that minted `generation` at its creation.
+    pub fn with_generation(generation: Generation) -> Self {
+        Self {
+            generation,
+            ..default()
+        }
+    }
+
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+
+    pub fn set_generation(&mut self, generation: Generation) {
+        self.generation = generation;
+    }
+
     pub fn latest_rev(&self) -> Rev {
         self.rev
     }
@@ -456,6 +476,7 @@ impl PartOracle {
             principal: principal.clone(),
         };
         self.permits(principal, part).then(|| PartSummary {
+            generation: self.generation,
             latest_cursor: self
                 .member_rows(part)
                 .map(|(_, rev, _)| rev)
