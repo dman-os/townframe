@@ -177,18 +177,26 @@ Items are open unless noted; verify against the stack before starting.
 - Not offering node-local methods to other nodes at all (ADR 042 §3 only refuses at call time): mount them only on local transports' routers vs one router filtering by origin; ties into a "list providers/methods" operation and network exposure.
 - Shelved to this week: the atmosphere border and dpaths (above).
 
+### Operator review session (2026-11-24, deep work)
+
+- **ADR 052:** the six proposals stand (trial of the micros nodule in the core cartridge with lazy re-mint, the runtime permbind, the guest-egress listener, `handles` returning the micro's actor, one daytxt cartridge for built-in micros, the typed client as a `day_node` module). The operator wants the point made explicit: most `big_*` crates except the cabinet, blobs and nodules should become cartridges, and the micros nodule is the pilot. The runtime changes it needs are few and general (a nodule learns its own actor capability; the node writes a preinstalled cartridge's grants; privileged reads trust a privileged grant). The real limit is that nodules are request handlers: anything that must observe (sync policy, sister mirroring, processors, index workers) waits for a long-lived nodule mode or tasks/wflow.
+- **ADR 053:** go ahead; the bootstrap rule (admission reads the binary) is accepted. What the operator cares about most is the core cartridge as a **nameable dependency target** through the standard mechanism (`dependencies`, Lexicon resolution), not the provided-library special case. The per-node id built in #333 conflicts with that (see open question below).
+- **ADR 051:** accepted; build it next. Revocation is per **mount** and immediate: a new open fails with "not found" (already modeled); files already open keep reading until closed (no new error model, the same as a container volume). Routines and long-running instances are treated alike. Defaults as proposed (`private`; micros' collections public).
+- **Guest faults and logs:** keep it simple and mechanical; another layer comes on top later. Cartridge side landed as #342 (stdio tails stay node-side, out of the 502 body).
+- **ADR 047 amendments:** lineage accepted; fork grant narrowing dropped; `localState` lives in ADR 051; `#hosted` folds into the system-cartridge design (open question below). Keep the permbind vocabulary small.
+- **CLI:** Ctrl-C exits 130 for commands and 0 for a foreground server; `--version` comes from shadow-rs. No deployed nodes: no back-compat, so the v1 seed migration is cut.
+- **Sharp edges (#249):** as recommended (ids on `UnrelatedHistory`/`Conflict`, keep `CommandId`, location/backtrace only under RUST_BACKTRACE).
+- **Node-local methods:** mounted only on local transports' routers.
+- **Next features:** land the dpaths datum and its semantics (from `feat/dpaths`, no FUSE or materialization), then the query language for permbinds: a permbind carries an ADR 025 predicate (drawers holding docs tagged X, docs under a dpath) and the consent UI shows it. Needs a dpath predicate and index, a drawer-level predicate form, and an ADR before building.
+- **The header catalog** the operator asked for (#252 follow-ups) is not built yet; it is owed.
+
 ## Open questions for the operator
 
-They will come back to these.
-
-- **ADR 051:** are micros' collections public by construction, and does revocation reach a running instance?
-- **CLI:** Ctrl-C exit codes (130 for commands, 0 for a foreground server), and dropping the build time from `--version`.
-- **Cut the v1 seed migration?**
-- **Sisters and grants (ADR 038, D56):** a grant datum syncs through the shared config drawer but the node-local grant to each node's service actor does not; who grants it on a sister?
-- **Sharp-edges (#249):** ids on `UnrelatedHistory` and `Conflict` (recommended yes); keep the `CommandId` name (recommended); location/backtrace only under RUST_BACKTRACE.
-- **The atmosphere border (shelved):** run the spaces experiment and review draft ADR 048 (three tiers, inward direction).
-- **Not offering node-local methods** (see Deferred).
-- **Remote readers over TCP (intxt C16/C18):** a sturdyref (a durable bearer handle) for the web viewer, or an admitted viewer actor that authenticates its channel and holds a durable grant? The nodules lane recommends the actor, plus C17's anonymous public reads.
+- **Stable core id:** one reserved id on every node whose provenance is the node binary (the registry accepts it only from the binary), so cartridges depend on it through `dependencies` and resolve Lexicons through them; changes #333's per-node id.
+- **System cartridges:** generalize the core special cases into "the build preinstalls N cartridges, the node writes their grants, each may name a subsystem actor", with privileged methods trusting a privileged grant instead of only the operator root.
+- **Remote readers over TCP (intxt C16/C18):** explained 2026-11-24 (a web viewer reading drawers over HTTP, its handles dying at restart); recommendation: an admitted viewer actor with a durable grant plus anonymous reads of Public drawers, not a sturdyref. Not yet decided.
+- **Sisters and grants (ADR 038):** only the relay orientation is built; sister re-granting is not. It cannot be a nodule (it observes); the operator wants to discuss it with processors and tasks.
+- **The atmosphere border (shelved):** ADR 048, dpaths' FUSE side and the spaces experiment wait for the lanes' talk.
 
 ## Archive index
 
