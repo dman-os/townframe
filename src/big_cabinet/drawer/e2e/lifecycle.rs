@@ -523,6 +523,19 @@ async fn long_test_mirrored_cost_by_known_drawers() {
         );
         answer
     };
+    // Where the per-call time goes: the known list's read against the projection's one query.
+    let started = std::time::Instant::now();
+    let entries = node.core().known_entries(&context).await.unwrap();
+    let list = started.elapsed();
+    let started = std::time::Instant::now();
+    let projected = node.core().state.drawers().await.unwrap();
+    println!(
+        "COST mirrored parts known={known} known_entries={:?} ({} entries) projection_query={:?} ({} records)",
+        list,
+        entries.len(),
+        started.elapsed(),
+        projected.len(),
+    );
     let answer = median_wall("projected").await;
     assert_eq!(answer.groups.len(), known + 2 * mirrored_count);
     assert_eq!(answer.docs.len(), 0);
