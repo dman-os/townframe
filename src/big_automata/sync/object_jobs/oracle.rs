@@ -54,7 +54,8 @@ pub(super) struct Oracle {
     seq: u64,
     pairs: Vec<OPair>,
     rows: Vec<Row>,
-    routes: Vec<(ObjKey, u64, Stage)>,
+    /// Object, seq, stage and the newest content want's payload.
+    routes: Vec<(ObjKey, u64, Stage, Option<ObjPayload>)>,
     expected: Vec<Settlement>,
 }
 
@@ -128,7 +129,8 @@ impl Oracle {
         match (on, live) {
             (true, None) => {
                 self.seq += 1;
-                self.routes.push((obj.clone(), self.seq, Stage::Fresh));
+                self.routes
+                    .push((obj.clone(), self.seq, Stage::Fresh, None));
                 None
             }
             (false, Some(at)) => Some(self.routes.remove(at).1),
@@ -136,11 +138,19 @@ impl Oracle {
         }
     }
 
+    /// A content want: the route is replaced by a fresh one carrying `payload`.
+    pub(super) fn content(&mut self, obj: &ObjKey, payload: ObjPayload) {
+        self.routes.retain(|(o, ..)| o != obj);
+        self.seq += 1;
+        self.routes
+            .push((obj.clone(), self.seq, Stage::Fresh, Some(payload)));
+    }
+
     pub(super) fn route_seq(&self, obj: &ObjKey) -> Option<u64> {
         self.routes
             .iter()
             .find(|(o, ..)| o == obj)
-            .map(|(_, seq, _)| *seq)
+            .map(|(_, seq, ..)| *seq)
     }
 
     pub(super) fn retire(&mut self, part: &PartKey) {
@@ -249,8 +259,8 @@ impl Oracle {
         let route = self
             .routes
             .iter()
-            .find(|(o, _, st)| o == obj && *st == stage)
-            .map(|(_, seq, _)| *seq);
+            .find(|(o, _, st, _)| o == obj && *st == stage)
+            .map(|(_, seq, ..)| *seq);
         if mine.is_empty() && route.is_none() {
             return None;
         }
@@ -270,6 +280,12 @@ impl Oracle {
             .map(|p| match &p.want {
                 Want::Present { payload } => payload.clone(),
                 Want::Absent => unreachable!(),
+            })
+            .or_else(|| {
+                self.routes
+                    .iter()
+                    .find(|(o, _, st, _)| o == obj && *st == stage)
+                    .and_then(|(.., payload)| payload.clone())
             });
         let job = ObjJob {
             obj: obj.clone(),
@@ -299,7 +315,7 @@ impl Oracle {
         unsettled.extend(
             self.routes
                 .iter()
-                .filter(|(_, _, st)| *st != Stage::Settled)
+                .filter(|(_, _, st, _)| *st != Stage::Settled)
                 .map(|(o, ..)| o),
         );
         unsettled.sort();
@@ -320,6 +336,9 @@ impl Oracle {
     pub(super) fn quiet(&self) -> bool {
         self.pairs.is_empty()
             && self.rows.is_empty()
-            && self.routes.iter().all(|(_, _, st)| *st == Stage::Settled)
+            && self
+                .routes
+                .iter()
+                .all(|(_, _, st, _)| *st == Stage::Settled)
     }
 }

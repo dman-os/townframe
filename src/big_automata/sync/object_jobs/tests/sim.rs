@@ -33,6 +33,11 @@ pub(in crate::sync::object_jobs::tests) enum Op {
         obj: u8,
         on: bool,
     },
+    /// An object route's event: a content want with this payload hint.
+    Content {
+        obj: u8,
+        payload: u8,
+    },
     Retire {
         part: u8,
     },
@@ -57,6 +62,7 @@ pub(in crate::sync::object_jobs::tests) fn op() -> impl Strategy<Value = Op> {
         6 => (0u8..3, 0u8..3, proptest::option::of(0u8..3), proptest::option::weighted(0.7, 1u8..=8))
             .prop_map(|(obj, part, present, cursor)| Op::Want { obj, part, present, cursor }),
         1 => (0u8..3, any::<bool>()).prop_map(|(obj, on)| Op::Route { obj, on }),
+        1 => (0u8..3, 0u8..3).prop_map(|(obj, payload)| Op::Content { obj, payload }),
         1 => (0u8..3).prop_map(|part| Op::Retire { part }),
         3 => (0u8..4).prop_map(|secs| Op::Flush { secs }),
         6 => (any::<usize>(), how).prop_map(|(pick, how)| Op::Finish { pick, how }),
@@ -107,13 +113,21 @@ impl Sim {
             Op::Route { obj: o, on } => {
                 let old = self.oracle.set_route(&obj(o), on);
                 self.jobs.set_object_route(obj(o), on);
-                if let Some(old) = old {
+                // turning the route off takes the content want away from every fetch it justified
+                if old.is_some() {
                     for call in self.calls.values_mut() {
-                        call.contradicted |= call.kind == CallKind::Fetch
+                        if call.kind == CallKind::Fetch
                             && call.obj == obj(o)
-                            && call.snap.route == Some(old);
+                            && call.snap.route.take().is_some()
+                        {
+                            call.contradicted = true;
+                        }
                     }
                 }
+            }
+            Op::Content { obj: o, payload } => {
+                self.oracle.content(&obj(o), serde_json::json!(payload));
+                self.jobs.want_content(obj(o), serde_json::json!(payload));
             }
             Op::Retire { part: p } => {
                 for call in self.calls.values_mut() {
@@ -227,7 +241,7 @@ impl Sim {
 
     /// The fetch the oracle says is only kept alive by a live object route.
     fn route_keeps(&self, call: &SimCall) -> bool {
-        call.snap.route.is_some() && call.snap.route == self.oracle.route_seq(&call.obj)
+        call.snap.route.is_some() && self.oracle.route_seq(&call.obj).is_some()
     }
 
     fn flush(&mut self) -> usize {

@@ -30,7 +30,8 @@
 //!
 //! - **Want**: per (object, part), the membership the peer's replay or bucket walk says the
 //!   object should have: `Present` with a payload hint, or `Absent`, and the cursor that said so
-//!   (`None` for a bucket walk). An object route adds a content want with no part.
+//!   (`None` for a bucket walk). An object route's event adds a **content want**: the object's
+//!   content, with the event's payload hint and no part ([`ObjectJobs::want_content`]).
 //! - **Snapshot**: the wants a call was issued for, with their cursors.
 //! - **In flight**: a call from issue until its terminal event (succeeded, failed, stale or
 //!   cancelled). Cancellation drops the call's future, so the cancelled event follows promptly;
@@ -57,8 +58,11 @@
 //!    settles when a job leaving that part at a cursor `>= c` settles: `record` answered `Done`,
 //!    or the `fetch` after a `Fetch` succeeded. A removal at 1 superseded by an add at 2 settles
 //!    both when the add settles. Settlements go to the cursor machine as `(JobKey, cursor)` for
-//!    each cursor it still owes, and bucket-walk upserts to the bucket machine as
-//!    `on_obj_sync_completed`. Retiring a part drops its unsettled cursors; the cursor machine's
+//!    each cursor it still owes, and bucket-origin wants (upserts and removals alike) as
+//!    `Settlement::Bucket`, which only tells the parent that one more bucket-origin want of the
+//!    part is met (the parent upgrades a walk through [`ObjectJobs::part_outstanding`], not
+//!    through these). A content want owes no cursor and reports nothing: it is met when its
+//!    call settles. Retiring a part drops its unsettled cursors; the cursor machine's
 //!    `remove_part` releases them on its side.
 //! 7. **Bounded work.** Unsettled jobs count against a receive window `W` that gates the next
 //!    replay round, so a part with a million objects is recorded at most `W` ahead of what has
@@ -68,7 +72,14 @@
 //!    starts at 2s, doubles and is capped (a minute by default). Merging new wants keeps the
 //!    backoff; only a success resets it.
 //! 9. **Object routes keep content alive.** While the object is routed directly, a content want
-//!    with no part stays, so removing the object's last part does not cancel its fetch.
+//!    with no part stays, so removing the object's last part does not cancel its fetch. An
+//!    object route's event is [`ObjectJobs::want_content`]: it replaces the route's content want
+//!    with a fresh one carrying the event's payload (newest arrival wins), so a change at the
+//!    peer is fetched again even after the previous content want settled, and creates the
+//!    route if the object has none. A content want merges like any other: while its object's
+//!    fetch runs it waits for the terminal event and does not cancel the fetch (it contradicts
+//!    nothing). The job it makes has no parts; its payload is the newest part want's hint, or
+//!    the route's when no part want is in the job.
 //! 10. **The connection's end ends everything.** On disconnect or peer removal every call in
 //!     flight is cancelled, nothing is reported, and nothing is kept. The next session replays
 //!     from the applied cursor.
@@ -116,10 +127,10 @@ use crate::interlude::*;
 
 use std::collections::BTreeMap;
 
-use crate::sync::cursor::JobKey;
+use crate::kit::scheduler::Instant;
 use crate::part_store::ObjPayload;
 use crate::rev::Rev;
-use crate::kit::scheduler::Instant;
+use crate::sync::cursor::JobKey;
 
 #[cfg(test)]
 mod oracle;
@@ -186,8 +197,9 @@ pub(crate) enum Settlement {
     /// `Sync(obj)` for a settled `Present` want's cursor, `RemoveFromPart(obj)` for an
     /// `Absent` want's. Sent once per cursor, when every part that owed it has settled.
     Cursor { job: JobKey, cursor: Rev },
-    /// A settled bucket-origin want of either kind, `Present` or `Absent`: the bucket machine
-    /// tracks its upserts and its removals alike.
+    /// A settled bucket-origin want of either kind, `Present` or `Absent`. Nothing tracks these
+    /// per walk any more: the parent upgrades a walk through `part_outstanding`, and only
+    /// consumes this to know that the part's debt moved.
     Bucket { part: PartKey, obj: ObjKey },
 }
 
@@ -251,6 +263,8 @@ struct Owed {
 struct Route {
     version: u64,
     status: Status,
+    /// The newest content want's payload hint; `None` for a route set with no event yet.
+    payload: Option<ObjPayload>,
 }
 
 /// What a call was issued for: per part the want version it covered and whether it adds.
@@ -390,6 +404,9 @@ impl ObjState {
         }
         if let Some(route) = self.route.as_ref().filter(|route| route.status == status) {
             snapshot.route = Some(route.version);
+            if job.payload.is_none() {
+                job.payload = route.payload.clone();
+            }
         }
         (!snapshot.parts.is_empty() || snapshot.route.is_some()).then_some((job, snapshot))
     }
@@ -481,11 +498,8 @@ impl ObjState {
         let Some((_, flight)) = &self.fetch.flight else {
             return false;
         };
-        let route_keeps = flight.snapshot.route.is_some_and(|version| {
-            self.route
-                .as_ref()
-                .is_some_and(|route| route.version == version)
-        });
+        // A newer content want replaces the route's version but keeps its content wanted.
+        let route_keeps = flight.snapshot.route.is_some() && self.route.is_some();
         flight.contradicted && !flight.cancel_sent && !route_keeps
     }
 }
@@ -574,6 +588,17 @@ impl ObjectJobs {
             .insert(part, version);
     }
 
+    /// An object route's event: `obj`'s content changed at the peer, with `payload` as the hint.
+    /// It replaces the route's content want (law 9), creating the route if there is none.
+    pub(crate) fn want_content(&mut self, obj: ObjKey, payload: ObjPayload) {
+        let version = self.next_version();
+        self.objs.entry(obj).or_default().route = Some(Route {
+            version,
+            status: Status::Fresh,
+            payload: Some(payload),
+        });
+    }
+
     pub(crate) fn set_object_route(&mut self, obj: ObjKey, routed: bool) {
         if routed {
             let version = self.next_version();
@@ -581,16 +606,19 @@ impl ObjectJobs {
             state.route.get_or_insert(Route {
                 version,
                 status: Status::Fresh,
+                payload: None,
             });
             return;
         }
         let Some(state) = self.objs.get_mut(&obj) else {
             return;
         };
-        if let Some(route) = state.route.take()
+        // The fetch no longer has a route behind it: a route set again later is a new want.
+        if state.route.take().is_some()
             && let Some((_, flight)) = &mut state.fetch.flight
+            && flight.snapshot.route.take().is_some()
         {
-            flight.contradicted |= flight.snapshot.route == Some(route.version);
+            flight.contradicted = true;
         }
         if state.is_idle() {
             self.objs.remove(&obj);

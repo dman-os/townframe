@@ -267,7 +267,10 @@ fn law_4_an_add_on_a_part_the_fetch_removes_from_cancels_it() {
     rig.cursor(1, 2, present(2), 2);
     let cmds = rig.flush();
     assert_eq!(cancels(&cmds), [fetch]);
-    assert!(records(&cmds).is_empty(), "the add waits for the cancelled event");
+    assert!(
+        records(&cmds).is_empty(),
+        "the add waits for the cancelled event"
+    );
     rig.jobs.fetch_ended(fetch, Outcome::Cancelled);
     let (_, job) = rig.record();
     assert_eq!(job.add, [part(2)]);
@@ -560,6 +563,89 @@ fn an_object_route_alone_issues_a_job_without_part_or_payload() {
     rig.jobs.record_ended(record, DONE);
     assert!(rig.flush().is_empty());
     assert_eq!(rig.jobs.room(), 4, "a met route is not an unsettled want");
+}
+
+#[test]
+fn law_9_a_content_want_carries_its_payload_and_owes_no_cursor() {
+    let mut rig = Rig::new();
+    rig.jobs.want_content(obj(1), serde_json::json!(7));
+    let (record, job) = rig.record();
+    assert_eq!(
+        (job.add.len(), job.remove.len(), job.payload),
+        (0, 0, Some(serde_json::json!(7)))
+    );
+    rig.jobs.record_ended(record, FETCH);
+    let (fetch, job) = rig.fetch();
+    assert_eq!(
+        job.payload,
+        Some(serde_json::json!(7)),
+        "the fetch carries it too"
+    );
+    assert_eq!(
+        rig.jobs.room(),
+        3,
+        "an unmet content want holds a window slot"
+    );
+    rig.jobs.fetch_ended(fetch, Outcome::Succeeded(()));
+    assert!(settled(&rig.flush()).is_empty(), "no cursor was owed");
+    assert_eq!(rig.jobs.room(), 4);
+}
+
+#[test]
+fn law_9_a_newer_content_want_replaces_a_settled_one() {
+    let mut rig = Rig::new();
+    rig.jobs.want_content(obj(1), serde_json::json!(1));
+    let (record, _) = rig.record();
+    rig.jobs.record_ended(record, DONE);
+    assert!(rig.flush().is_empty());
+    rig.jobs.want_content(obj(1), serde_json::json!(2));
+    let (_, job) = rig.record();
+    assert_eq!(job.payload, Some(serde_json::json!(2)));
+}
+
+#[test]
+fn law_9_a_content_want_merges_beside_a_running_fetch_without_cancelling_it() {
+    let mut rig = Rig::new();
+    rig.jobs.want_content(obj(1), serde_json::json!(1));
+    let (record, _) = rig.record();
+    rig.jobs.record_ended(record, FETCH);
+    let (fetch, _) = rig.fetch();
+    rig.jobs.want_content(obj(1), serde_json::json!(2));
+    let cmds = rig.flush();
+    assert!(
+        cancels(&cmds).is_empty(),
+        "newer content contradicts nothing"
+    );
+    assert_eq!(records(&cmds)[0].1.payload, Some(serde_json::json!(2)));
+    rig.jobs.fetch_ended(fetch, Outcome::Succeeded(()));
+    assert_eq!(
+        rig.jobs.room(),
+        3,
+        "the fetch covered the older want only; the newer one is still owed"
+    );
+}
+
+#[test]
+fn law_9_a_part_wants_hint_outranks_the_routes_in_a_shared_job() {
+    let mut rig = Rig::new();
+    rig.jobs.want_content(obj(1), serde_json::json!("route"));
+    rig.cursor(1, 1, present(5), 5);
+    let (_, job) = rig.record();
+    assert_eq!(job.add, [part(1)]);
+    assert_eq!(job.payload, Some(serde_json::json!(5)));
+}
+
+#[test]
+fn law_9_a_content_want_keeps_a_fetch_alive_when_the_last_part_goes() {
+    let mut rig = Rig::new();
+    rig.jobs.want_content(obj(1), serde_json::json!(9));
+    let fetch = fetching(&mut rig, 1, 1);
+    rig.cursor(1, 1, Want::Absent, 2);
+    assert!(
+        cancels(&rig.flush()).is_empty(),
+        "the route's content still wants the bytes"
+    );
+    rig.jobs.fetch_ended(fetch, Outcome::Succeeded(()));
 }
 
 #[test]
