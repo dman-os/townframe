@@ -32,6 +32,7 @@ use crate::interlude::*;
 
 use clap::builder::styling::AnsiColor;
 use clap::*;
+use std::ffi::OsString;
 
 mod client;
 mod cmds;
@@ -144,9 +145,7 @@ fn run() -> Res<ExitCode> {
 fn parse_cli(args: Vec<std::ffi::OsString>) -> Result<Cli, clap::Error> {
     let (rewritten, invoked_as_intxt) = multicall(args.clone());
     match (Cli::try_parse_from(rewritten), invoked_as_intxt) {
-        (Err(day_error), true) => Err(IntxtCli::try_parse_from(args)
-            .err()
-            .unwrap_or(day_error)),
+        (Err(day_error), true) => Err(IntxtCli::try_parse_from(args).err().unwrap_or(day_error)),
         (parsed, _) => parsed,
     }
 }
@@ -233,6 +232,20 @@ fn try_static_cli(parsed: Result<Cli, clap::Error>) -> Res<StaticCliResult> {
 }
 
 async fn static_cli(cli: Cli) -> Res<ExitCode> {
+    if let StaticCommands::Plugin(args) = &cli.command {
+        // On success the plugin replaces this process; only a missing plugin returns.
+        cmds::plugin::exec(args).await?;
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::InvalidSubcommand,
+                format!(
+                    "unrecognized subcommand '{name}', and no `day-{name}` executable was found on PATH",
+                    name = args[0].to_string_lossy()
+                ),
+            )
+            .print()?;
+        return Ok(ExitCode::from(2));
+    }
     if let StaticCommands::Exec {
         nsid: None,
         command: None,
@@ -270,7 +283,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     }
 
     match cli.command {
-        StaticCommands::Completions { .. } => unreachable!(),
+        StaticCommands::Completions { .. } | StaticCommands::Plugin(_) => unreachable!(),
         #[cfg(feature = "docs")]
         StaticCommands::Docs { .. } => unreachable!("handled before the node is looked up"),
         StaticCommands::Node { command } => cmds::node::run(command).await,
@@ -327,6 +340,7 @@ terminal unless NO_COLOR is set.";
     name = "day",
     version,
     long_version = build::CLAP_LONG_VERSION,
+    allow_external_subcommands = true,
     about,
     after_long_help = EXIT_CODES,
     styles = CLAP_STYLE
@@ -416,6 +430,10 @@ enum StaticCommands {
         #[clap(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// `day <name> <args…>` runs the plugin `day-<name>` found on `PATH`, with the node's
+    /// directory as `DAY_NODE`. Only a name no subcommand above has comes here.
+    #[clap(external_subcommand)]
+    Plugin(Vec<OsString>),
 }
 
 /// The commands of `day x`, one per cartridge.
@@ -561,7 +579,14 @@ mod tests {
     }
 
     #[test]
-    fn intxt_is_no_top_level_command() {
-        assert!(Cli::try_parse_from(["day", "intxt", "install"]).is_err());
+    fn intxt_is_no_built_in_but_a_plugin_name_and_built_ins_win() {
+        let StaticCommands::Plugin(args) = parse(&["intxt", "install"]) else {
+            panic!("`day intxt` is the plugin `day-intxt`, not a built-in");
+        };
+        assert_eq!(args, os(&["intxt", "install"]));
+        assert!(matches!(
+            parse(&["node", "run"]),
+            StaticCommands::Node { .. }
+        ));
     }
 }
