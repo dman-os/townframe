@@ -108,7 +108,6 @@ async fn node() -> Node {
     let (dispatch, dispatch_stop) = big_dispatch::boot(DispatchConfig {
         authority: authority.client.clone(),
         namespace,
-        operator: authority.service.operator_uuid(),
     });
     dispatch
         .router

@@ -209,17 +209,17 @@ impl NodeComposition {
                     installs,
                     serve,
                 } = config;
-                prepare_settings(&root, &bootstrap)?;
+                let dir = NodeDir::new(root);
+                prepare_settings(&dir, &bootstrap).await?;
                 // The holder takes the node's lock as `day` does, so `day` and any other host
                 // find the directory held instead of booting the same storage a second time.
                 // A serving host (desktop) holds the lock with its socket, which `day` reaches;
                 // one with no second process (Android) holds it unserved and is its own only
                 // client, through its dispatch client. Either way another holder is a failure
                 // here: attaching to it as a client is not built.
-                let dir = NodeDir::new(root);
                 let lock = match serve {
-                    true => dir.try_lock(LockRole::Daemon)?,
-                    false => dir.try_lock_unserved(LockRole::Daemon)?,
+                    true => dir.try_lock(LockRole::Serve)?,
+                    false => dir.try_lock_unserved(LockRole::Serve)?,
                 };
                 let lock = lock.map_err(|held| {
                     ferr!(
@@ -227,7 +227,7 @@ impl NodeComposition {
                         dir.root().display()
                     )
                 })?;
-                let booted = Booted::boot(&dir, lock, LockRole::Daemon, schemas).await?;
+                let booted = Booted::boot(&dir, lock, LockRole::Serve, schemas).await?;
                 let minting = Minting::of(booted.node());
                 match install_all(&minting, installs).await {
                     Ok(installed) => Ok((booted, installed, minting)),
@@ -402,19 +402,22 @@ impl HttpTransport for OperatorTransport {
     }
 }
 
-/// Creates the node if `root` holds none, makes sure it attaches the peers service (a phone that
-/// is never dialed by a laptop can't sync), and records `bootstrap`.
-fn prepare_settings(root: &Path, bootstrap: &[String]) -> Res<()> {
-    if !NodeSettings::exists(root) {
-        NodeSettings::create(root)?;
+/// Creates the node if `dir` holds none (its identity seed goes to the keyring), makes sure it
+/// attaches the peers service (a phone that is never dialed by a laptop can't sync), and records
+/// `bootstrap`. The update migrates a version 1 node first, so its seed reaches the keyring
+/// before `node.json` is rewritten without it.
+async fn prepare_settings(dir: &NodeDir, bootstrap: &[String]) -> Res<()> {
+    if !NodeSettings::exists(dir.root()) {
+        dir.init().await?;
     }
-    NodeSettings::update(root, |settings| {
+    dir.update_settings(|settings| {
         let peers = settings.peers.get_or_insert_with(default);
         for ticket in bootstrap {
             peers.add_bootstrap(ticket)?;
         }
         Ok(())
     })
+    .await
 }
 
 /// The node's service clients and the identities the composition mints with, cloned out of the

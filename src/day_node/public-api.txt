@@ -5,18 +5,20 @@
 
 pub impl day_node::HeldNode::async fn boot (root : & Path , settings : & NodeSettings , listeners : Listeners , attach_peers : bool , schemas : Arc < big_cabinet :: SchemaRepo > ,) -> Res < Self >
 pub impl day_node::HeldNode::async fn stop (self) -> Res < () >
-pub impl day_node::NodeSettings::fn create (root : & Path) -> Res < Self >
+pub impl day_node::NodeSettings::async fn create (root : & Path) -> Res < Self >
+pub impl day_node::NodeSettings::async fn migrate (root : & Path , _lock : & NodeLock) -> Res < () >
+pub impl day_node::NodeSettings::async fn seed (& self , secrets : & SecretStore) -> Res < [u8 ; 32] >
 pub impl day_node::NodeSettings::fn exists (root : & Path) -> bool
 pub impl day_node::NodeSettings::fn load (root : & Path) -> Res < Self >
 pub impl day_node::NodeSettings::fn node_id (& self) -> String
-pub impl day_node::NodeSettings::fn seed (& self) -> [u8 ; 32]
-pub impl day_node::NodeSettings::fn update < T > (root : & Path , change : impl FnOnce (& mut Self) -> Res < T >) -> Res < T >
 pub impl day_node::NodeSettings::fn via_keys (& self) -> Res < Vec < big_cabinet_core :: dmeta :: MultibaseKey > >
 pub impl day_node::PeerSettings::fn add_bootstrap (& mut self , ticket : & str) -> Res < bool >
 pub impl day_node::PeerSettings::fn peers_config (& self , relay : bool) -> Res < big_node :: peers :: PeersConfig >
+pub struct day_node::BlobSettings  { upload_hold_grace_secs: Option < u64 > }
 pub struct day_node::DevSettings  { allow_slot_takeover: bool }
 pub struct day_node::HeldNode  { node: BigNode }
-pub struct day_node::NodeSettings  { peers: Option < PeerSettings >, relay: bool, dev: DevSettings }
+pub struct day_node::NetSettings  { allow_host_loopback: bool }
+pub struct day_node::NodeSettings  { peers: Option < PeerSettings >, relay: bool, dev: DevSettings, net: NetSettings, blobs: BlobSettings }
 pub struct day_node::PeerSettings  { bootstrap: Vec < String >, loopback_only: bool, listen_port: Option < u16 > }
 pub use day_node::holder :: Attached
 pub use day_node::holder :: Booted
