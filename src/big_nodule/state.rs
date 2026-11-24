@@ -3052,14 +3052,16 @@ impl Stores {
             .map_err(drawers_error)
     }
 
-    /// Grants `drawer_id` to the service's own actor at Admin, durably, with a capability minted
-    /// on `authorization`'s authority: the capability only proves the granter's right to delegate
-    /// and is retracted at once, as the grant is a standing one that does not depend on it.
-    async fn grant_to_service(
+    /// Grants `drawer_id` to `subject`, a subsystem actor of this node (the service's own, or
+    /// `micros`), at Admin, durably, with a capability minted on `authorization`'s authority: the
+    /// capability only proves the granter's right to delegate and is retracted at once, as the
+    /// grant is a standing one that does not depend on it.
+    async fn grant_to_actor(
         &self,
         context: &RequestContext,
         authorization: Authorization,
         drawer_id: &DrawerId,
+        subject: Uuid7,
     ) -> Res<()> {
         let capability = self
             .drawers
@@ -3084,7 +3086,7 @@ impl Stores {
                 context,
                 capability,
                 drawer_id,
-                self.parent.actor.actor_id,
+                subject,
                 DrawerAccess::Admin,
                 true,
             )
@@ -3093,14 +3095,20 @@ impl Stores {
         granted
     }
 
-    /// Withdraws the service's own actor's standing grant on `drawer_id`, which a
-    /// capability minted from the actor's own authority (it holds Admin there) is enough for.
-    async fn revoke_from_service(&self, context: &RequestContext, drawer_id: &DrawerId) -> Res<()> {
+    /// Withdraws `actor`'s standing grant on `drawer_id`, which a capability minted from the
+    /// actor's own authority (it holds Admin there) is enough for. `actor` is the service's own
+    /// actor or `micros`, with the identity capability `capability`.
+    async fn revoke_from_actor(
+        &self,
+        context: &RequestContext,
+        drawer_id: &DrawerId,
+        actor: &OpenedActor,
+    ) -> Res<()> {
         let capability = self
             .drawers
             .call_with(
                 context.child(),
-                Authorization::identity(self.parent.capability).metadata(),
+                Authorization::identity(actor.capability).metadata(),
                 MintDrawerCapability {
                     capability: None,
                     scope: DrawerScope {
@@ -3121,7 +3129,7 @@ impl Stores {
                 RevokeDrawer {
                     capability,
                     drawer_id: drawer_id.clone(),
-                    subject_id: self.parent.actor.actor_id,
+                    subject_id: actor.actor.actor_id,
                 },
             )
             .await
