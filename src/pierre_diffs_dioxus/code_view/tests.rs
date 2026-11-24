@@ -145,6 +145,48 @@ struct Rig {
     time: Rc<Cell<f64>>,
     /// Every event listener Dioxus was told to attach, by name.
     listeners: Vec<String>,
+    /// Every batch the view emits, admitted the way Clay admits a micro's batch.
+    surface: clay_surface::SurfaceTree,
+}
+
+/// One Dioxus edit as the wire edit a micro would send for it. The rig's renders carry text,
+/// numbers, booleans and removals only; anything else is a new kind of value this mapping must
+/// learn.
+fn wire_edit(edit: &Mutation) -> clay_surface::Mutation {
+    use clay_surface::AttributeValue as Wire;
+    use clay_surface::Mutation as W;
+    let id =
+        |id: &dioxus::core::ElementId| u32::try_from(id.raw()).expect("element ids fit the wire");
+    let count = |m: &usize| u32::try_from(*m).expect("counts fit the wire");
+    match edit {
+        Mutation::PushId { id: element } => W::PushId(id(element)),
+        Mutation::SetId { id: element } => W::SetId(id(element)),
+        Mutation::Child { index } => W::Child(count(index)),
+        Mutation::Pop => W::Pop,
+        Mutation::CreateElement { tag, ns } => W::CreateElement((tag.clone(), ns.clone())),
+        Mutation::CreateText { value } => W::CreateText(value.clone()),
+        Mutation::Clone => W::CloneNode,
+        Mutation::AppendChildren { m } => W::AppendChildren(count(m)),
+        Mutation::ReplaceWith { m } => W::ReplaceWith(count(m)),
+        Mutation::InsertAfter { m } => W::InsertAfter(count(m)),
+        Mutation::InsertBefore { m } => W::InsertBefore(count(m)),
+        Mutation::SetAttribute { name, ns, value } => W::SetAttribute((
+            name.clone(),
+            ns.clone(),
+            match value {
+                AttributeValue::Text(text) => Wire::Text(text.clone()),
+                AttributeValue::Float(float) => Wire::Float(*float),
+                AttributeValue::Int(int) => Wire::Int(*int),
+                AttributeValue::Bool(bool) => Wire::Boolean(*bool),
+                AttributeValue::None => Wire::None,
+                other => panic!("no wire form for attribute value {other:?}"),
+            },
+        )),
+        Mutation::SetText { value } => W::SetText(value.clone()),
+        Mutation::NewEventListener { name } => W::AddEventListener(name.clone()),
+        Mutation::RemoveEventListener { name } => W::RemoveEventListener(name.clone()),
+        Mutation::Remove => W::Remove,
+    }
 }
 
 impl Rig {
@@ -189,17 +231,30 @@ impl Rig {
             clock,
             time,
             listeners: Vec::new(),
+            surface: clay_surface::SurfaceTree::new(),
         };
         rig.record(&first.edits);
         rig
     }
 
+    /// Notes the listeners a batch attaches, and admits the batch into a Clay surface: the
+    /// review and lab micros ship this view, and Clay refuses a batch whose element, attribute or
+    /// style property is outside its vocabulary. The first rows, with their `contain` and
+    /// `isolation`, only arrive after mount and measurement, so a first render alone never
+    /// reaches what Clay checks; every rig test does.
     fn record(&mut self, edits: &[Mutation]) {
         self.listeners
             .extend(edits.iter().filter_map(|mutation| match mutation {
                 Mutation::NewEventListener { name, .. } => Some(name.to_string()),
                 _ => None,
             }));
+        if edits.is_empty() {
+            return;
+        }
+        let batch: Vec<clay_surface::Mutation> = edits.iter().map(wire_edit).collect();
+        if let Err(error) = self.surface.apply(&batch) {
+            panic!("Clay refused a CodeView batch: {error}");
+        }
     }
 
     fn host(&self) -> &Rc<DioxusHost> {

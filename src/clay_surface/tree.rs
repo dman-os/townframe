@@ -110,8 +110,12 @@ impl<C: Clone> SurfaceTree<C> {
         &self.stylesheet
     }
 
-    pub const MAX_BATCH_MUTATIONS: usize = 4096;
-    pub const MAX_BATCH_BYTES: usize = 256 * 1024;
+    // A batch is one render's edits. The wire has no templates, so a subtree costs one edit per
+    // element, attribute, push and pop, and each edit is charged its in-memory size on top of
+    // its strings: CodeView's first window over five files is ~2,900 edits and ~266 KB. These
+    // bound what one hostile batch can make the host hold, with room for a heavy view.
+    pub const MAX_BATCH_MUTATIONS: usize = 16 * 1024;
+    pub const MAX_BATCH_BYTES: usize = 1024 * 1024;
     pub const MAX_STRING_BYTES: usize = 64 * 1024;
     pub const MAX_NODE_SLOTS: usize = 8192;
     pub const MAX_ELEMENT_ID: NodeId = 8191;
@@ -120,7 +124,7 @@ impl<C: Clone> SurfaceTree<C> {
     pub const MAX_RETAINED_BYTES: usize = 1024 * 1024;
     pub const MAX_ATTRIBUTES_PER_NODE: usize = 64;
     pub const MAX_LISTENERS_PER_NODE: usize = 32;
-    pub const MAX_BATCH_WORK: usize = 128 * 1024;
+    pub const MAX_BATCH_WORK: usize = 512 * 1024;
     pub const MAX_DATA_ATTRIBUTE_NAMES: usize = 512;
     pub const MAX_CUSTOM_ELEMENT_NAMES: usize = 64;
 
