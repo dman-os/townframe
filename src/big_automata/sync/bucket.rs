@@ -551,7 +551,6 @@ pub struct BucketObjLeafPage {
 /// or pending.
 pub async fn filter_objects<S: PartStoreRead>(
     part_key: PartKey,
-    requests: Vec<LeafBucketRequest>,
     bucks: Map<BuckId, RawLeafBucketPage>,
     seed: FingerprintSeed,
     part_store: &S,
@@ -575,10 +574,6 @@ pub async fn filter_objects<S: PartStoreRead>(
     let states = part_store.obj_states(&objs).await?;
     let states = objs.into_iter().zip(states).collect::<Map<_, _>>();
 
-    let mut afters = requests
-        .into_iter()
-        .map(|req| (req.buck_id, req.after))
-        .collect::<Map<_, _>>();
     let mut out = Map::new();
     for (buck_id, page) in bucks {
         let empty = local_empty[&buck_id];
@@ -619,9 +614,7 @@ pub async fn filter_objects<S: PartStoreRead>(
         out.insert(
             buck_id,
             BucketObjLeafPage {
-                after: afters
-                    .remove(&buck_id)
-                    .expect("every page answers a requested bucket"),
+                after: page.after,
                 entries,
                 next_after: page.next_after,
             },

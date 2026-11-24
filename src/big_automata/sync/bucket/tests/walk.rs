@@ -468,7 +468,6 @@ impl Rig {
             BucketMachineCommand::LeafBuckets { since, buckets, .. } => {
                 let seed = FingerprintSeed::new(self.seeds, 0x5eed);
                 self.seeds += 1;
-                let requests = buckets.clone();
                 let pages = self
                     .responder
                     .leaf_buckets(LeafBucketsRequest {
@@ -480,9 +479,7 @@ impl Rig {
                     })
                     .await?
                     .expect("the part is readable");
-                let pages =
-                    filter_objects(self.part.clone(), requests, pages, seed, &self.requester)
-                        .await?;
+                let pages = filter_objects(self.part.clone(), pages, seed, &self.requester).await?;
                 self.delivered.push(pages.clone());
                 self.machine.on_obj_page(pages, &mut self.out);
             }

@@ -189,6 +189,7 @@ fn filter_objects_compares_payloads_by_stored_digest() {
         Map::from([(
             BuckId::ROOT,
             RawLeafBucketPage {
+                after: None,
                 entries: vec![BucketObjPageEntry {
                     obj_key: obj.clone(),
                     fp: Some(BucketObjPageEntry::fingerprint(&seed, &obj, digest)),
@@ -198,23 +199,14 @@ fn filter_objects_compares_payloads_by_stored_digest() {
         )])
     };
     let deltas = |bucks| {
-        futures::executor::block_on(filter_objects(
-            part(),
-            vec![LeafBucketRequest {
-                buck_id: BuckId::ROOT,
-                after: None,
-            }],
-            bucks,
-            seed,
-            &store,
-        ))
-        .expect("the memory store reads infallibly")
-        .remove(&BuckId::ROOT)
-        .expect("the bucket was asked for")
-        .entries
-        .into_iter()
-        .map(|entry| (entry.obj_key, entry.delta))
-        .collect::<Vec<_>>()
+        futures::executor::block_on(filter_objects(part(), bucks, seed, &store))
+            .expect("the memory store reads infallibly")
+            .remove(&BuckId::ROOT)
+            .expect("the bucket was asked for")
+            .entries
+            .into_iter()
+            .map(|entry| (entry.obj_key, entry.delta))
+            .collect::<Vec<_>>()
     };
 
     assert_eq!(deltas(leaf(digest)), vec![], "same content");
@@ -302,7 +294,7 @@ fn walk_converges(scenario: harness::Scenario) -> Res<harness::Driver<MemoryPart
             let applied = driver.applied.get(part).copied().unwrap_or_default();
             let walk = driver.walks[part];
             if readable.contains(part) {
-                assert_converged(&driver.requester, &driver.responder.store, part).await?;
+                assert_converged(&driver.requester, driver.responder.store(), part).await?;
                 assert_eq!(traffic.list_requests, 1, "{part}: {walk:?}");
                 if divergence.root_agrees {
                     assert_eq!(walk, Walk::Clean, "{part}: agreeing roots need no walk");
@@ -576,7 +568,7 @@ fn a_large_part_walks_only_its_dirty_buckets() -> Res<()> {
             Responder::new(responder_store, BucketMachine::LEAF_BUCKET_LIMIT_HINT),
         );
         driver.run(std::slice::from_ref(&part)).await?;
-        assert_converged(&driver.requester, &driver.responder.store, &part).await?;
+        assert_converged(&driver.requester, driver.responder.store(), &part).await?;
         assert_eq!(driver.walks[&part], Walk::Walked { working_level });
         assert_eq!(
             driver.applied[&part],

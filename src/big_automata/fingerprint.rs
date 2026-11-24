@@ -91,7 +91,7 @@ impl<'de> serde::Deserialize<'de> for FingerprintSeed {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct SeedVisitor;
 
-        impl serde::de::Visitor<'_> for SeedVisitor {
+        impl<'de> serde::de::Visitor<'de> for SeedVisitor {
             type Value = FingerprintSeed;
 
             fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -116,6 +116,19 @@ impl<'de> serde::Deserialize<'de> for FingerprintSeed {
                         .expect("checked length"),
                 );
                 Ok(FingerprintSeed::new(key0, key1))
+            }
+
+            // Text formats (the XRPC wire's JSON) have no byte strings and carry the 16 bytes
+            // as a sequence of numbers.
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut bytes = Vec::with_capacity(16);
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                self.visit_bytes(&bytes)
             }
         }
 
