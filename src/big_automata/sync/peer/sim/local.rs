@@ -5,7 +5,8 @@
 //! has a payload) and answers `Done`, which also copies the payload (the record did the whole
 //! work), or `Fetch`. `fetch` copies the payload after a number of progress steps, some very
 //! long, and honours `Cancel`. The payload copied is the peer's current one, as a real fetch
-//! of the bytes would get. A call applies all or nothing.
+//! of the bytes would get. A call applies all or nothing. A poisoned object's calls always
+//! fail, which a case uses to make a failure persistent.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -77,6 +78,12 @@ pub(super) struct Local {
     pub force_steps: Option<u32>,
     /// Scenario override: every record answers this.
     pub settle_always: Option<Settle>,
+    /// Objects whose every call fails, even a quiet drain's, until they are cleared: a backend
+    /// that cannot apply them (a local policy rejection while membership has not arrived).
+    pub poisoned: BTreeSet<ObjKey>,
+    /// Objects a call of which has failed since the machine started: they may be backing off
+    /// outside the receive window (law 7 of ObjectJobs), so their retries may exceed it.
+    pub failed: BTreeSet<ObjKey>,
     objs: Vec<ObjKey>,
     rng: u64,
 }
@@ -90,6 +97,8 @@ impl Local {
             force_settle: None,
             force_steps: None,
             settle_always: None,
+            poisoned: default(),
+            failed: default(),
             objs: (0..objs).map(laws::obj).collect(),
             rng: seed,
         }
@@ -157,10 +166,11 @@ impl Local {
         );
     }
 
-    /// Whether a job moves the payload: any job that adds, and a content job (no parts at
-    /// all). A removal alone does not.
+    /// Whether a job moves the payload: any job that adds, a content job (no parts at all),
+    /// and a removal that carries the object route's payload hint (the route's content want
+    /// shares the job). A removal alone does not.
     fn wants_payload(job: &ObjJob) -> bool {
-        !job.add.is_empty() || job.remove.is_empty()
+        job.payload.is_some() || job.add.is_empty() && job.remove.is_empty()
     }
 
     fn write(&self, writes: Vec<PartWrite>) {
@@ -209,7 +219,8 @@ impl Local {
         finish: bool,
     ) -> Step {
         let raced = self.calls[&call].cancelled() && self.roll(3) == 0;
-        let fails = !finish && self.roll(8) == 0;
+        let random_failure = !finish && self.roll(8) == 0;
+        let fails = random_failure || self.poisoned.contains(&self.calls[&call].job().obj);
         let cancelled = self.calls[&call].cancelled() && !raced;
         let settle = self
             .force_settle
@@ -228,6 +239,7 @@ impl Local {
                     let outcome = if cancelled {
                         Outcome::Cancelled
                     } else {
+                        self.failed.insert(job.obj.clone());
                         Outcome::Failed
                     };
                     self.calls.remove(&call);
@@ -244,6 +256,7 @@ impl Local {
                     let outcome = if cancelled {
                         Outcome::Cancelled
                     } else {
+                        self.failed.insert(job.obj.clone());
                         Outcome::Failed
                     };
                     self.calls.remove(&call);

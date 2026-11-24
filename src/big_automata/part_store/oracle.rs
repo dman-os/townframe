@@ -41,6 +41,7 @@ strike! {
         SetPayloads(Vec<(ObjKey, ObjPayload)>),
         AddMembers(Vec<(ObjKey, PartKey)>),
         RemoveMembers(Vec<(ObjKey, PartKey)>),
+        DropPayloads(Vec<ObjKey>),
         GrantAccess(Vec<(PartKey, PeerKey, AccessLevel)>),
         RevokeAccess(Vec<(PartKey, PeerKey)>),
     }
@@ -162,6 +163,23 @@ impl PartOracle {
                         });
                     }
                 }
+                PartWrite::DropPayloads(objs) => {
+                    for obj in objs {
+                        // no payload to drop; a stamp is never the result: a part-less object
+                        // has no live row
+                        stamped |= self.step(rev, |oracle| {
+                            if oracle.payloads.contains_key(&obj) {
+                                assert!(
+                                    oracle.live_parts_of(&obj).is_empty(),
+                                    "dropped the payload of {obj}, which is still a live member \
+                                     of a part: remove it from every part first"
+                                );
+                                oracle.payloads.remove(&obj);
+                            }
+                            None
+                        });
+                    }
+                }
                 PartWrite::GrantAccess(grants) => {
                     for (part, principal, level) in grants {
                         stamped |= self.step(rev, |oracle| {
@@ -211,6 +229,41 @@ impl PartOracle {
                 })
             }
         }
+    }
+
+    /// Objects with a payload and no live member row, after `after`, at most `limit`.
+    pub fn partless_objects(&self, limit: usize, after: Option<&ObjKey>) -> Vec<ObjKey> {
+        self.payloads
+            .keys()
+            .filter(|obj| after.is_none_or(|after| *obj > after))
+            .filter(|obj| self.live_parts_of(obj).is_empty())
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// `writes` with the drops that would be a caller bug removed (law 2): an object that
+    /// holds a payload and is still a member when its drop comes, in the transaction's order.
+    pub fn without_member_drops(&self, writes: Vec<PartWrite>) -> Vec<PartWrite> {
+        let mut probe = self.clone();
+        writes
+            .into_iter()
+            .map(|write| {
+                let write = match write {
+                    PartWrite::DropPayloads(objs) => PartWrite::DropPayloads(
+                        objs.into_iter()
+                            .filter(|obj| {
+                                !probe.payloads.contains_key(obj)
+                                    || probe.live_parts_of(obj).is_empty()
+                            })
+                            .collect(),
+                    ),
+                    other => other,
+                };
+                probe.commit(vec![write.clone()]);
+                write
+            })
+            .collect()
     }
 
     /// The object's state cut down to the live parts `principal` may read; `None` without one.

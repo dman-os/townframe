@@ -591,3 +591,197 @@ fn a_multi_object_commit_on_a_cursor_part_syncs_only_with_every_object() {
     assert_eq!(sim.local_members(0), all);
     assert_eq!(sim.sync.synced(&part(0)), Some(true));
 }
+
+/// Found at 4000 proptest cases once law 7 exempted backing-off objects from the window: the
+/// quiet drain judged the jobs idle by `room()` while an object still waited out its backoff.
+#[test]
+fn regression_routed_content_is_converged_after_a_failure_backoff_outside_the_window() {
+    let w = |kind, obj, part, val| Op::Write {
+        kind,
+        obj,
+        part,
+        val,
+    };
+    let routes = |add_parts, add_objs| Op::Routes {
+        add_parts,
+        rem_parts: 0,
+        add_objs,
+        rem_objs: 0,
+    };
+    let batch = |kind, obj, part, more| Op::Batch {
+        kind,
+        obj,
+        part,
+        val: 0,
+        more,
+    };
+    run(
+        vec![
+            Op::Access(176),
+            Op::Access(54),
+            routes(0, 1),
+            batch(42, 52, 0, 0),
+            routes(1, 2),
+            Op::Access(134),
+            Op::Access(143),
+            w(0, 34, 0, 0),
+            Op::Access(44),
+            Op::Access(8),
+            Op::Access(17),
+            w(106, 32, 63, 0),
+            Op::Access(188),
+            Op::Crash {
+                committed: 0,
+                close: false,
+            },
+            Op::Deliver(5),
+            w(0, 0, 0, 0),
+            Op::Deliver(19),
+            Op::Deliver(55),
+            Op::Backend(0),
+            Op::Deliver(157),
+            w(24, 105, 0, 0),
+            Op::Backend(0),
+            Op::Sweep,
+            Op::Duplicate(9),
+            Op::Deliver(253),
+            batch(0, 191, 1, 77),
+            Op::Access(163),
+            Op::Deliver(84),
+            Op::Deliver(8),
+            Op::Drop(86),
+            Op::Hostile { kind: 0, pick: 0 },
+            Op::Duplicate(3),
+            Op::Deliver(188),
+            batch(0, 0, 112, 22),
+            Op::Deliver(7),
+            Op::Deliver(27),
+            Op::Deliver(53),
+            Op::Access(135),
+            Op::Deliver(0),
+            Op::Deliver(0),
+            Op::Deliver(0),
+            Op::Deliver(0),
+            Op::Deliver(0),
+            Op::Deliver(0),
+            Op::Deliver(0),
+            Op::Backend(0),
+        ],
+        1494554001155084478,
+    );
+}
+
+/// Found at 4000 proptest cases with persistent failures (the shrunk case).
+#[test]
+fn regression_a_contradicted_fetch_of_a_persistently_failing_object() {
+    let routes = |add_parts, add_objs| Op::Routes {
+        add_parts,
+        rem_parts: 0,
+        add_objs,
+        rem_objs: 0,
+    };
+    let w = |kind, obj, part| Op::Write {
+        kind,
+        obj,
+        part,
+        val: 0,
+    };
+    let batch = |obj, part, more| Op::Batch {
+        kind: 0,
+        obj,
+        part,
+        val: 0,
+        more,
+    };
+    run(
+        vec![
+            Op::Access(92),
+            Op::Poison(50),
+            routes(4, 2),
+            Op::Deliver(2),
+            Op::Deliver(92),
+            batch(144, 16, 162),
+            Op::Deliver(29),
+            Op::Access(19),
+            Op::Access(79),
+            Op::Advance(0),
+            Op::Deliver(8),
+            w(180, 89, 0),
+            Op::Deliver(0),
+            Op::Deliver(0),
+            Op::Deliver(0),
+            w(0, 0, 0),
+            Op::Deliver(0),
+            Op::Deliver(7),
+            w(0, 0, 0),
+            batch(211, 64, 251),
+            Op::Deliver(0),
+            Op::Backend(0),
+            routes(0, 0),
+            Op::Access(175),
+            batch(124, 52, 122),
+            Op::Deliver(0),
+            routes(4, 0),
+            Op::Deliver(20),
+        ],
+        0,
+    );
+}
+
+/// Law 7 of ObjectJobs, through the whole machine: as many persistently failing objects as the
+/// window holds back off outside it, so the peer's other objects keep flowing and their part
+/// converges, while the part holding the failing objects keeps its cursor below them. When the
+/// failure ends, everything converges.
+#[test]
+fn persistently_failing_objects_do_not_stop_other_parts_and_hold_only_their_own_cursor() {
+    let mut shape = Shape::small();
+    shape.parts = 2;
+    shape.objs = 6;
+    shape.obj_routes = 0;
+    assert_eq!(
+        shape.config.jobs.window, 3,
+        "the failing objects below fill the window"
+    );
+    let mut sim = Sim::new(shape, 11);
+    sim.remote.commit(vec![laws::grant(&[(0, 0)])]);
+    sim.remote.commit(vec![laws::grant(&[(1, 0)])]);
+    sim.want(&[0, 1]);
+    sim.quiesce();
+
+    let before = sim.remote.head();
+    sim.step(Op::Poison(0b000111));
+    sim.members(&[0, 1, 2], 0);
+    sim.members(&[3, 4, 5], 1);
+    let healthy: BTreeSet<ObjKey> = (3..6).map(obj).collect();
+    for _ in 0..200 {
+        sim.cycle();
+        if sim.local_members(1) == healthy {
+            break;
+        }
+    }
+    assert_eq!(
+        sim.local_members(1),
+        healthy,
+        "the failing objects pinned the window: {}",
+        sim.dump()
+    );
+    for _ in 0..30 {
+        sim.cycle();
+    }
+    assert!(
+        sim.local_members(0).is_empty(),
+        "the failing objects cannot be applied"
+    );
+    let held = sim.local.persisted.get(&part(0)).copied().unwrap_or(0);
+    assert!(
+        held <= before,
+        "part 0's cursor {held} passed the failing objects (written after {before})"
+    );
+    assert_ne!(sim.sync.synced(&part(0)), Some(true));
+
+    sim.step(Op::Poison(0));
+    sim.quiesce();
+    assert_eq!(sim.local_members(0), (0..3).map(obj).collect());
+    assert_eq!(sim.local_members(1), healthy);
+    assert!(sim.local.persisted[&part(0)] > before);
+}

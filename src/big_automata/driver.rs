@@ -114,6 +114,13 @@ use crate::rev::Rev;
 /// backoff, so an implementation reports it and keeps no retry of its own. Both calls take a
 /// job they have seen before (replays repeat after a reconnect).
 ///
+/// A job that keeps failing waits out its backoff outside the receive window (law 7 of
+/// `ObjectJobs`), so it does not stop the peer's other objects, but it still owes its cursors:
+/// its part's cursor does not advance past it. Cursor liveness is therefore the backend's
+/// responsibility. A backend that cannot apply something yet (a local policy that needs
+/// membership which has not arrived, say) should accept and park it, answering `Done`; one that
+/// fails forever holds that part's cursor forever.
+///
 /// The futures carry no `Send` bound, like [`BigSyncRpcClient`](crate::sync::rpc::BigSyncRpcClient)'s
 /// (ADR 039: no `FutureForm`): the embedder spawns the driver's loop, so the concrete types
 /// decide whether it is `Send`. See "Runtimes" in the module docs.
