@@ -136,6 +136,7 @@ With `--bg` the node is served by a background server instead, and the command r
 ###### **Options:**
 
 * `--bg` — Serve from a background server and return once it is serving
+* `--idle-exit <DURATION>` — Stop by itself once the node has been idle this long, such as `10m` or `1h 30m`: no client connected and no work in progress (ADR 052). Without it the server runs until `day node stop`
 
 
 

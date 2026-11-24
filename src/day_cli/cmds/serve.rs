@@ -15,18 +15,21 @@ use day_node::NodeDir;
 use day_node::SocketState;
 
 use std::future::Future;
+use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
 
 /// What the foreground server prints, once, when it is serving. `start --bg` waits for this line.
 const READY_PREFIX: &str = "listening on ";
 
 /// Boots the node with its socket attached (and its peers service, when `node.json` configures
-/// one) and serves until `shutdown` resolves, then stops it. `ready` is called once, when the
-/// socket accepts connections, with the booted node.
+/// one) and serves until `shutdown` resolves, or, with `idle_exit`, until the node has been idle
+/// that long ([`exit_when_idle`]), then stops it. `ready` is called once, when the socket accepts
+/// connections, with the booted node.
 pub async fn serve(
     dir: &NodeDir,
     ready: impl FnOnce(&Booted) -> Res<()>,
     shutdown: impl Future<Output = ()>,
+    idle_exit: Option<Duration>,
 ) -> Res<()> {
     let lock = loop {
         match dir.try_lock(LockRole::Serve)? {
@@ -46,9 +49,17 @@ pub async fn serve(
     };
     dir.ensure_run_dir()?;
     let booted = Booted::boot(dir, lock, LockRole::Serve, crate::client::empty_schemas()?).await?;
-    let served = ready(&booted);
+    let mut served = ready(&booted);
     if served.is_ok() {
-        shutdown.await;
+        match idle_exit {
+            None => shutdown.await,
+            Some(period) => {
+                tokio::select! {
+                    () = shutdown => {}
+                    idled = exit_when_idle(&booted, period) => served = idled,
+                }
+            }
+        }
     }
     // Stopped whether or not readiness could be announced, so a failure never leaves the
     // socket behind.
@@ -56,18 +67,47 @@ pub async fn serve(
     served
 }
 
+/// Waits until the node has been idle for `period` (ADR 052 §2), then stops accepting before it
+/// returns, so the node stops with nobody mid-call (§4). The Unix and descriptor listeners close
+/// and remove their socket files first; a client that connected just before holds the node, and
+/// it is served and waited for. A client that comes after finds no socket and starts a server
+/// again. The TCP listener has no separate close: a node that serves TCP is one that should not
+/// idle out (a relay), and its listener closes when the node stops.
+async fn exit_when_idle(booted: &Booted, period: Duration) -> Res<()> {
+    let node = booted.node();
+    node.activity.idle_for(period).await;
+    tracing::info!(?period, "the node was idle for its idle period; stopping");
+    if let Some(clients) = &node.unix_clients {
+        clients.close_listener().await?;
+    }
+    if let Some(clients) = &node.fd_clients {
+        clients.close_listener().await?;
+    }
+    node.activity.idle_for(Duration::ZERO).await;
+    Ok(())
+}
+
+/// `--idle-exit`'s value: a non-negative duration such as `10m`, `1h 30m` or ISO 8601's `PT10M`.
+pub fn parse_idle_exit(text: &str) -> Result<Duration, String> {
+    let duration = text
+        .parse::<jiff::SignedDuration>()
+        .map_err(|error| format!("not a duration: {error}"))?;
+    Duration::try_from(duration).map_err(|_| format!("{text} is negative"))
+}
+
 /// `day node start`: serves the node on its socket in the foreground until SIGTERM or Ctrl-C, or
-/// with `bg` spawns that as a background process and returns once it is serving.
-pub async fn start(bg: bool) -> Res<ExitCode> {
+/// with `bg` spawns that as a background process and returns once it is serving. With
+/// `idle_exit`, the server also stops by itself once the node has been idle that long.
+pub async fn start(bg: bool, idle_exit: Option<Duration>) -> Res<ExitCode> {
     let conf = lazy::config().await?;
     if bg {
-        start_background(&conf.node_dir).await
+        start_background(&conf.node_dir, idle_exit).await
     } else {
-        run_foreground(&conf.node_dir).await
+        run_foreground(&conf.node_dir, idle_exit).await
     }
 }
 
-async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
+async fn run_foreground(dir: &NodeDir, idle_exit: Option<Duration>) -> Res<ExitCode> {
     use tokio::signal::unix::SignalKind;
     use tokio::signal::unix::signal;
     // Registered before the node boots, so a stop that arrives while it is booting is held for
@@ -94,6 +134,7 @@ async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
                 _ = interrupt.recv() => {}
             }
         },
+        idle_exit,
     )
     .await?;
     Ok(ExitCode::SUCCESS)
@@ -113,7 +154,10 @@ pub(crate) enum Background {
 /// Callers racing here (parallel hooks) each spawn a server, and the node lock admits one: a
 /// spawned server that exits before its readiness line because another holds the node to serve
 /// is the race lost, which is [`Background::Running`] once the winner is serving.
-pub(crate) async fn ensure_background(dir: &NodeDir) -> Res<Background> {
+pub(crate) async fn ensure_background(
+    dir: &NodeDir,
+    idle_exit: Option<Duration>,
+) -> Res<Background> {
     // A command that has the node open is not the server: wait for it to finish, then start serving.
     // A server that is still booting is awaited, so nobody is told about one that is not serving.
     if let Err(held) = dir.try_lock(LockRole::Command)? {
@@ -141,6 +185,7 @@ pub(crate) async fn ensure_background(dir: &NodeDir) -> Res<Background> {
         .arg("--node")
         .arg(dir.root())
         .args(["node", "start"])
+        .args(idle_exit.map(|period| format!("--idle-exit={}s", period.as_secs())))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(log)
@@ -181,11 +226,12 @@ pub(crate) async fn ensure_background(dir: &NodeDir) -> Res<Background> {
     Ok(Background::Started { pid, socket })
 }
 
-async fn start_background(dir: &NodeDir) -> Res<ExitCode> {
-    match ensure_background(dir).await? {
-        Background::Started { pid, socket } => {
-            writeln!(out(), "node serving in the background (pid {pid}) on {socket}")?
-        }
+async fn start_background(dir: &NodeDir, idle_exit: Option<Duration>) -> Res<ExitCode> {
+    match ensure_background(dir, idle_exit).await? {
+        Background::Started { pid, socket } => writeln!(
+            out(),
+            "node serving in the background (pid {pid}) on {socket}"
+        )?,
         Background::Running => writeln!(
             out(),
             "a server is already running on {}",

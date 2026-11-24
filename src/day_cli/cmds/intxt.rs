@@ -17,9 +17,10 @@
 //! never overwritten. The hooks call `intxt`, the name `day` answers to when linked as `intxt`
 //! (`ln -s "$(command -v day)" ~/.local/bin/intxt`; `day-intxt` likewise makes `day intxt` work); the install says so when either is not on
 //! the `PATH`. Add `--node <dir>` (or set `DAY_NODE`) to a hook's command to name the node, and
-//! `"timeout"` to a hook if a recording can take long. The command needs the node's server (`day
-//! node start --bg`) and fails fast without one: booting the node in each hook's process would take
-//! seconds, and parallel tool calls run parallel hooks. The configuration's shape was checked
+//! `"timeout"` to a hook if a recording can take long. The command runs against the node's server, and
+//! starts one in the background when none is serving, which stops by itself after ten idle
+//! minutes (ADR 052): booting the node in each hook's process would be paid on every hook, and
+//! parallel tool calls run parallel hooks. The configuration's shape was checked
 //! against Claude Code's hooks documentation (code.claude.com/docs/en/hooks).
 //!
 //! # git's `post-rewrite` hook
@@ -743,8 +744,12 @@ async fn with_packaging_exit(
     .await
 }
 
+/// How long a server capture started stays up with nothing to do (ADR 052 §3).
+const CAPTURE_IDLE_EXIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// Capture runs against the node's server only, and starts one in the background when none is
-/// serving (as `day node start --bg` does); it stays up until `day node stop`. Booting the node in
+/// serving (as `day node start --bg` does), which stops by itself after [`CAPTURE_IDLE_EXIT`]
+/// idle. Booting the node in
 /// the hook's own process instead would be paid on every hook, and parallel tool calls run
 /// parallel hooks, of which only one process can hold the node. The socket is probed, not
 /// connected to through [`NodeClient`], which would boot the node in this process. Nothing is
@@ -753,7 +758,7 @@ pub(crate) async fn ensure_server(dir: &day_node::NodeDir) -> Res<()> {
     if dir.probe_socket().await? == day_node::SocketState::Live {
         return Ok(());
     }
-    crate::cmds::serve::ensure_background(dir).await?;
+    crate::cmds::serve::ensure_background(dir, Some(CAPTURE_IDLE_EXIT)).await?;
     Ok(())
 }
 
