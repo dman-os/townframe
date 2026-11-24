@@ -4,7 +4,7 @@ Scope: The claytxt lane's stack, decisions and the request accounting.
 
 Status: living ledger of the claytxt lane (Clay, the kit, micros, daytxt apps, Pierre/CodeView, builds/mbx).
 Owner: Claude (claytxt manager); operator reviews and merges.
-Updated: 2026-11-24 (rewritten: stack rebuilt, accounting of operator requests 2026-11-03..24).
+Updated: 2026-11-24 (layers 56-62: CI fixed and scoped, NSID clay half, the micro clock; rewritten earlier the same day)
 
 Keep this head current. Update it in the same layer as the work it records. The dated sections below
 "History" are the original #79 design-settling ledger, kept for its decisions.
@@ -84,7 +84,14 @@ of its paths and lists the original commits in its message. They are topical and
 | 52-blitz-gap-log | #306 | docs(wiki): Blitz gap log |
 | 53-claytxt-design-docs | #307 | docs(scratch): claytxt lane design docs and ledger |
 | 54-tip-fixes | #308 | fix: stack tip fixes (kit bundle regenerated, day_cli on day_node's NodeDir) |
-| 55-ledger | (this PR) | docs(scratch): the claytxt ledger rewritten for the stack and the request accounting |
+| 55-ledger | #309 | docs(scratch): the claytxt ledger rewritten for the stack and the request accounting |
+| 56-review-blobs | #313 | fix(daytxt_native,clay_node,micro_review): the review micro decodes its config and reads patches through call_bytes |
+| 57-ci-fixes | #314 | fix: CI on the stack tip (doc metadata, guardrails, pierre budgets, the wit-deps hash) |
+| 58-ci-scope | #315 | ci: scope PR checks to what changed |
+| 59-nsid-clay | #316 | refactor(clay): owned identifiers stop posing as NSIDs (ADR 050 §2) |
+| 60-cx-clock | #317 | feat(clay_mdk): Context::sleep and Context::now for micros |
+| 61-wit-deps-stale-hash | #318 | build(nix): the wit-deps FOD name carries its inputs' digest, so a stale hash fails at once |
+| 62-ledger-docs | #319 | docs(scratch): ledger update and the web components step 2 note |
 
 ## Accounting of operator requests (2026-11-03..24)
 
@@ -92,8 +99,10 @@ Built from the raw chat on 2026-11-24 (83 requests: 23 on main, 23 done but unme
 1 superseded, 6 unverified). The unmerged ones are all in the stack above. Open, most recent and strongest first:
 
 1. **Stack and ledger hygiene** (asked 11-18 and 11-23): done by this rewrite; keep layers small from here on.
-2. **CI improvements** (approved 11-19, never started): releases only on main, affected-crate tests, path
-   filters, nextest failure output; cache bucket choice is the operator's.
+2. **CI improvements** (approved 11-19): path-scoped jobs over `origin/main...HEAD` and nextest final failure output
+   are in (layer 58); the tip was greened (layer 57). Open: releases only on main, and which bucket backs the cache
+   (the operator's call); Magic Nix Cache throttling (HTTP 418) still fails runs at random and masked a stale
+   wit-deps hash for days.
 3. **Land the stack** once intxt #221 and the node stack land.
 4. **Web components step 2:** mounts as `<ct-…>` custom elements, real `part` attributes, slots (design session).
 5. **CodeView parity:** bottom-lines blanking and white flashes on Wry, no syntax highlighting (S9 adapter not
@@ -111,16 +120,39 @@ Built from the raw chat on 2026-11-24 (83 requests: 23 on main, 23 done but unme
     framework hosting a micro; WIT 0.5.0 bump and the claytxt wire-id rename.
 13. **NSIDs name Lexicons** (ADR 050 §2, #235; operator re-raised on #108): the clay half of
     docs/scratch/nsid-audit.md items 1-5, i.e. `org.example.clay.*` collection contracts such as
-    `org.example.clay.shell.roots` and the dotted `clay.micro.install` / `clay.micro.bindings` tags (now `clay/micro-install` / `clay/micro-bindings`), become
+    `org.example.clay.shell.roots` and the dotted `clay.micro.install` / `clay.micro.bindings` tags, become
     manifest-local keys or host-formed ids. Nodules does the node half above #252.
+    Layer 59 did items 4 and 5: collection instance ids are a host-minted `CollectionId` (same text, so stored
+    datums read), and the tags became `clay/micro-install` and `clay/micro-bindings`. The rename means install and
+    binding facets written under the old tags are no longer read (a desktop falls back to its defaults once).
+    Items 1-3 need a Clay cartridge Lexicon first (ADR 050 lists it as unbuilt): `org.example.clay.shell.roots` and
+    the test contracts become `nsid#def` tokens there, `org.example.clay.micro.manifest` gets a Lexicon doc, and
+    `org.example.clay.presentationComponent`, a runtime kind, becomes an enum on the wire.
 14. **intxt citizenship (D76), the general mechanisms behind intxt's interim pieces:**
     - `Context::call_bytes` (layer 43) goes away once a method can declare a `method_core::ByteBody` output and
       `Context::call` streams it. Nodules owns the wire; the Clay half is ours, together with the waker-driven
       render below.
     - `ReviewConfig` (minted doc_cap/blob_cap) goes away once micros reach their granted `#drawers` through the
       ADR 049 §6.2 domain handle on Cx.
+    - Patch blobs: layer 56 mints an empty `blobCap` so the review config decodes. Before that, a config without
+      one left the micro Unconfigured. The real scope is nodules' `BlobsScope { drawers }` (#244, node-67),
+      checked at read time against the drawer's blob inventory. When the stack is based on node-76, mint
+      `{ drawers: intxtDrawers }`, grant `blobs.read`, and intxt wires `read_blob`.
+    - A clock for micros (asked by intxt for CodeView's pacing): layer 60 adds `Context::sleep` and `Context::now`.
+      In a guest the wait runs on an incarnation-owned task that calls `notify_views()` when it ends, the same
+      manual wake `call_bytes` needs (design debt below). intxt's CodeView switch goes on top of layer 60.
 15. **Declarative shadow DOM for SSR:** intxt's web app (D79) renders the kit and Pierre under dioxus-ssr. The kit is
     plain Dioxus already; the shadow mount needs a `<template shadowrootmode>` form. This is part of the web-components step.
+    The design note for the pairing is docs/scratch/web-components-step2.md.
+16. **Micro installs move onto the node** (agreed with nodules on 11-24; their ADR 049 §6.1/050 amendment awaits
+    operator sign-off). A node `micros` service, isomorphic with nodules, does the actor creation, mints and
+    config. The GUI attaches as a client (`micros.attach { cartridgeId }`, `micros.awaitHandles`), in-process or
+    over the socket, so the desktop runs while `day` holds the node. A daytxt cartridge declares every micro
+    the app ships, and INTERIM_GRANTS goes. review.json disappears once the §6.2 handle and `{drawers}` blobs are
+    under us. Mounts never block on the poll. Our part: move clay_node's install side out after sign-off.
+    Update (11-24 night): the `micros` service is a nodule in a core cartridge (ADR 053) that opens micro actors
+    under its own cartridge actor (node-78); the GUI contract is unchanged. The node SDK builds on our `day_node`
+    crate. The node-76 restack conflicts in `day_node` with nodules #239 and #250 (`day_cli/context.rs`).
 
 Questions still open for the operator:
 - Is a dev-dependency from `clay_mdk` to `clay_dioxus_kit` acceptable?
@@ -128,6 +160,9 @@ Questions still open for the operator:
 - The overnight 2026-11-18 calls on cartridge micros: `package_version` 0, replacement by name equality, the grants
   handle source, load-failure policy, settings document exposure.
 - Which bucket backs the CI cache.
+- The pierre_diffs budget exemptions (layer 57, `ARCHITECTURAL_EXCEPTION`s) and the DioxusHost ceiling cut to 67.
+- Closing the superseded PRs listed above once the stack is reviewed.
+- Sign-off on nodules' ADR 052/053 (micros on the node), which gates item 16.
 
 ## Standing decisions (summary; dates are when the operator ruled)
 
