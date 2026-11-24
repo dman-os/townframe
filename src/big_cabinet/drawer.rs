@@ -734,7 +734,10 @@ impl Core {
             context,
             self.issuer,
             DocScope {
-                write: [drawer.clone()].into(),
+                write: std::collections::BTreeMap::from([(
+                    drawer.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..Default::default()
             },
             |Authorization {
@@ -837,7 +840,7 @@ impl Core {
                 context,
                 self.issuer,
                 DocScope {
-                    read: [doc.clone()].into(),
+                    read: DocScope::read_all([doc.clone()]),
                     ..Default::default()
                 },
                 |Authorization {
@@ -927,6 +930,10 @@ impl Core {
         context: &RequestContext,
         drawer_id: &DrawerId,
     ) -> Result<Option<DrawerRecord>, DrawersError> {
+        // A request names the drawer by an id that is not looked up in the projection first
+        // (`GetDrawer`, `RememberDrawer`, successors): refuse a non-document-width id here rather
+        // than letting discovery read a document it can never have.
+        DocsError::ensure_doc_id(drawer_id).map_err(DrawersError::Docs)?;
         if let Some(record) = self.state.drawer(drawer_id).await? {
             return Ok(Some(record));
         }
@@ -947,7 +954,7 @@ impl Core {
                     context,
                     self.issuer,
                     DocScope {
-                        read: [drawer_id.clone()].into(),
+                        read: DocScope::read_all([drawer_id.clone()]),
                         ..Default::default()
                     },
                     |Authorization {

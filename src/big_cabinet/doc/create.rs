@@ -27,6 +27,10 @@ impl DocsService {
             },
         )
         .await?;
+        let kinds = Self::create_kinds(&caller.authority, &params.placement);
+        if params.datums.keys().any(|key| !kinds.allows(key)) {
+            return Err(DocsError::Denied);
+        }
         let instr_authorized = instr_start.elapsed(); // INSTR
         let owner_id = caller.originating_actor;
         let request_digest = digest(&(

@@ -167,14 +167,16 @@ impl DocAccess for LedgerAccess {
                     "drawers are not configured on this repository".into(),
                 ));
             }
+            let write_docs: BTreeSet<_> = scope.write.keys().cloned().collect();
             let objects: Vec<_> = scope
                 .read
-                .union(&scope.write)
+                .keys()
+                .chain(write_docs.iter())
                 .map(|document| Self::object(AccessRequest::Read(document)))
                 .chain(
                     scope
                         .write
-                        .iter()
+                        .keys()
                         .map(|document| Self::object(AccessRequest::Write(document))),
                 )
                 .chain(
@@ -260,6 +262,9 @@ impl DocsService {
         if !caller.rights.contains(Rights::NARROW) || !request.rights.is_subset_of(caller.rights) {
             return Err(DocsError::Denied);
         }
+        // The scope is client-supplied and the Identity path hands it to the access policy
+        // without a per-document `authorize`, so its ids are checked once here.
+        request.scope.ensure_doc_ids()?;
         let dependencies = match &caller.authority {
             DomainAuthority::Identity(actor) => self
                 .access
@@ -267,13 +272,27 @@ impl DocsService {
                 .await
                 .map_err(super::access_error)?,
             DomainAuthority::Scoped(scope) => {
-                for doc in request.scope.read.union(&request.scope.write) {
+                let write_docs: BTreeSet<_> = request.scope.write.keys().cloned().collect();
+                for doc in &write_docs {
                     self.authorize(context, &caller.authority, AccessRequest::Read(doc))
                         .await?;
                 }
-                for doc in &request.scope.write {
-                    self.authorize(context, &caller.authority, AccessRequest::Write(doc))
+                // A document the caller reaches through a drawer is held at every kind, so
+                // the kinds a narrower handle names are checked against what the caller
+                // holds of it, not against the documents its scope lists.
+                for (doc, requested) in &request.scope.read {
+                    let held = self.authorize_read(context, &caller.authority, doc).await?;
+                    if !held.covers(requested) {
+                        return Err(DocsError::Denied);
+                    }
+                }
+                for (doc, requested) in &request.scope.write {
+                    let held = self
+                        .authorize_write(context, &caller.authority, doc)
                         .await?;
+                    if !held.covers(requested) {
+                        return Err(DocsError::Denied);
+                    }
                 }
                 for placement in &request.scope.create {
                     self.authorize(
@@ -284,7 +303,12 @@ impl DocsService {
                     .await?;
                 }
                 for (drawer, needed) in &request.scope.drawers {
-                    if scope.drawers.get(drawer) < Some(needed) {
+                    // Access and kinds are both held: a minted reach never widens either.
+                    if !scope
+                        .drawers
+                        .get(drawer)
+                        .is_some_and(|held| held.covers(needed))
+                    {
                         return Err(DocsError::Denied);
                     }
                 }
@@ -324,6 +348,7 @@ impl service_utils_rs::Handler<MintDocCapability> for DocsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use big_cabinet_core::doc::DrawerReach;
     use big_cabinet_core::drawer::DrawerAccess;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -379,6 +404,22 @@ mod tests {
         }
     }
 
+    /// The documents `reach` admits, without the kinds.
+    async fn allowed_docs(
+        policy: &dyn DocAccess,
+        context: &RequestContext,
+        authority: &DomainAuthority<DocScope>,
+        documents: &BTreeSet<DocId>,
+        needed: DrawerAccess,
+    ) -> Result<BTreeSet<DocId>, DocsError> {
+        Ok(
+            DocsService::reach(policy, context, authority, documents, needed)
+                .await?
+                .into_keys()
+                .collect(),
+        )
+    }
+
     #[tokio::test]
     async fn scoped_document_filter_batches_only_unresolved_candidates() {
         let [
@@ -395,6 +436,10 @@ mod tests {
             (first.clone(), DrawerAccess::Read),
             (second.clone(), DrawerAccess::Write),
         ]);
+        let reaches: BTreeMap<_, _> = drawers
+            .iter()
+            .map(|(drawer, access)| (drawer.clone(), DrawerReach::all_kinds(*access)))
+            .collect();
         let mut policy = BoundedAccess {
             drawers: drawers.clone(),
             documents: BTreeSet::from([member.clone(), relay.clone(), denied.clone()]),
@@ -405,24 +450,29 @@ mod tests {
             calls: AtomicUsize::new(0),
         };
         let mut scope = DocScope {
-            read: BTreeSet::from([read.clone()]),
-            write: BTreeSet::from([write.clone()]),
-            drawers,
+            read: DocScope::read_all([read.clone()]),
+            write: std::collections::BTreeMap::from([(
+                write.clone(),
+                big_cabinet_core::doc::DatumKinds::All,
+            )]),
+            drawers: reaches,
             ..Default::default()
         };
-        scope.drawers.insert(relay_root, DrawerAccess::Relay);
+        scope
+            .drawers
+            .insert(relay_root, DrawerReach::all_kinds(DrawerAccess::Relay));
         let authority = DomainAuthority::Scoped(scope);
         let context = RequestContext::root();
         let direct = BTreeSet::from([read.clone(), write.clone()]);
         assert_eq!(
-            DocsService::allowed_docs(&policy, &context, &authority, &direct, DrawerAccess::Read)
+            allowed_docs(&policy, &context, &authority, &direct, DrawerAccess::Read)
                 .await
                 .unwrap(),
             direct,
         );
         let writable = BTreeSet::from([write.clone()]);
         assert_eq!(
-            DocsService::allowed_docs(
+            allowed_docs(
                 &policy,
                 &context,
                 &authority,
@@ -437,7 +487,7 @@ mod tests {
         let candidates =
             BTreeSet::from([read.clone(), write.clone(), member.clone(), relay, denied]);
         assert_eq!(
-            DocsService::allowed_docs(
+            allowed_docs(
                 &policy,
                 &context,
                 &authority,
@@ -450,7 +500,7 @@ mod tests {
         );
         assert_eq!(policy.calls.load(Ordering::SeqCst), 1);
         assert!(matches!(
-            DocsService::allowed_docs(
+            allowed_docs(
                 &policy,
                 &context,
                 &DomainAuthority::Identity(Uuid7::new()),
@@ -470,7 +520,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            DocsService::allowed_docs(
+            allowed_docs(
                 &policy,
                 &context,
                 &authority,
@@ -483,13 +533,17 @@ mod tests {
         );
         assert_eq!(policy.calls.load(Ordering::SeqCst), 2);
         let read_only = DomainAuthority::Scoped(DocScope {
-            read: BTreeSet::from([read]),
-            write: writable.clone(),
-            drawers: BTreeMap::from([(first, DrawerAccess::Read)]),
+            read: DocScope::read_all([read]),
+            write: writable
+                .clone()
+                .into_iter()
+                .map(|doc| (doc, big_cabinet_core::doc::DatumKinds::All))
+                .collect(),
+            drawers: BTreeMap::from([(first, DrawerReach::all_kinds(DrawerAccess::Read))]),
             ..Default::default()
         });
         assert_eq!(
-            DocsService::allowed_docs(
+            allowed_docs(
                 &policy,
                 &context,
                 &read_only,
@@ -502,7 +556,7 @@ mod tests {
         );
         let empty_candidates = BTreeSet::new();
         assert!(
-            DocsService::allowed_docs(
+            allowed_docs(
                 &policy,
                 &context,
                 &authority,

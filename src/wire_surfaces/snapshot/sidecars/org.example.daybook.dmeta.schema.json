@@ -1,0 +1,150 @@
+{
+  "$defs": {
+    "ActorMetadata": {
+      "additionalProperties": true,
+      "properties": {
+        "actorUrl": {
+          "type": "string"
+        },
+        "createdAt": {
+          "default": [],
+          "description": "Every timestamp at which a concurrent write first introduced this binding. These are\nunsigned display metadata: neither the earliest value nor the set's size establishes which\nbinding is authoritative. The UUID, key, URL, and certificate are the binding.",
+          "items": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "delegation": {
+          "additionalProperties": false,
+          "properties": {
+            "$bytes": {
+              "contentEncoding": "base64",
+              "type": "string"
+            }
+          },
+          "required": [
+            "$bytes"
+          ],
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-automerge": "bytes"
+        },
+        "pubkey": {
+          "$ref": "#/$defs/MultibaseKey"
+        }
+      },
+      "required": [
+        "pubkey",
+        "actorUrl"
+      ],
+      "type": "object"
+    },
+    "DatumMetadata": {
+      "additionalProperties": true,
+      "description": "What dmeta records about one datum slot.\n\n`signatures` is a **current competing set**, not an append-only audit index: a write replaces\nthe entries it observed at its base heads with its own, and concurrent writers can leave several.\nThe list is the shape of that set because a signature has no identity independent of its own\nbytes — keying a map on a hash of the entry would store the derivation beside its inputs. Which\nentries a write replaces is decided by the repository against the heads it wrote from; this type\nonly holds the result. Timestamps help display history. They are not signed, and they establish\nneither identity nor authorization.",
+      "properties": {
+        "deletedAt": {
+          "items": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "signatures": {
+          "default": [],
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "$bytes": {
+                "contentEncoding": "base64",
+                "type": "string"
+              }
+            },
+            "required": [
+              "$bytes"
+            ],
+            "type": "object",
+            "x-automerge": "bytes"
+          },
+          "type": "array"
+        },
+        "updatedAt": {
+          "default": [],
+          "items": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "uuids": {
+          "additionalProperties": false,
+          "default": {},
+          "description": "The aliases bound to this datum, each mapped to `true`: a set stored as a map so that\nconcurrent insertions merge by key. A binding is immutable once written, and the entry\ncarries no datum key to rebind. Concurrent creators of the datum each create this entry, so\nAutomerge keeps several copies and shows one; every reader unions `uuids` across all of\nthem rather than reading the visible copy.",
+          "patternProperties": {
+            "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "deletedAt"
+      ],
+      "type": "object"
+    },
+    "Dmeta": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "The compact provenance datum. Maps are ordered so snapshots and derived evidence are stable.\n\nA datum's aliases live under the datum itself, in [`DatumMetadata::uuids`] (ADR 020, the dmeta\ncut, item 5), so finding them is a read of that one entry rather than a scan of an index the\ndocument grows by one binding per datum. Nothing looks a datum up by alias; a claim signs its\n`(key, uuid)` pair, so an alias that also appears under another key cannot be taken for this\none. The chosen alias for a signature is the lexicographically smallest one in the union of\n`uuids` across every concurrent copy of the datum's entry, as visible in the writing\ntransaction.",
+      "properties": {
+        "actors": {
+          "additionalProperties": false,
+          "default": {},
+          "patternProperties": {
+            "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$": {
+              "$ref": "#/$defs/ActorMetadata"
+            }
+          },
+          "type": "object"
+        },
+        "createdAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "datums": {
+          "additionalProperties": {
+            "$ref": "#/$defs/DatumMetadata"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "docUuids": {
+          "additionalProperties": false,
+          "default": {},
+          "description": "Which document each `docUuid` names. A normal branch carries its origin's changes, and with\nthem the origin's signature entries and this index's bindings for the origin; merging back\nbrings the branch's bindings along. A signature's claim names the document it was made on,\nand this index is how the entry that carries no document id is tied to that claim.",
+          "patternProperties": {
+            "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "createdAt"
+      ],
+      "title": "Dmeta",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.dmeta"
+    },
+    "MultibaseKey": {
+      "type": "string"
+    }
+  },
+  "$ref": "#/$defs/Dmeta",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

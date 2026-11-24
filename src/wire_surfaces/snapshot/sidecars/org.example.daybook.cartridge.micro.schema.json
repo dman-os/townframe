@@ -1,0 +1,31 @@
+{
+  "$defs": {
+    "MicroContribution": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.cartridge.micro`: the package's one GUI contribution. It has no key of its own:\nthe micro's identity is the cartridge id it is installed as.\n\n`component` is the key of the [`Artifact`] holding the micro's wasm component; it is the one\nmember the catalog and the host loader read, so it is typed and [`Cartridge::validate`] checks\nthe artifact exists. `schema` is the id of the manifest format `description` conforms to, and\n`description` is Clay's manifest minus the members the envelope already states (`id`,\n`package_version`). Clay's runtime owns that manifest's interpretation, so the catalog carries\nit as an open object and does not depend on Clay's crates.",
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "description": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "schema": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "schema",
+        "description"
+      ],
+      "title": "MicroContribution",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridge.micro"
+    }
+  },
+  "$ref": "#/$defs/MicroContribution",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

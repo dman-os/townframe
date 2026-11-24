@@ -359,7 +359,7 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
         );
     }
     let doc_scope = DocScope {
-        read: [doc.clone()].into(),
+        read: DocScope::read_all([doc.clone()]),
         ..Default::default()
     };
     let mut drawer_caps = Vec::new();
@@ -923,11 +923,14 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
         .unwrap();
     let scopes = [
         DocScope {
-            read: [doc.clone()].into(),
+            read: DocScope::read_all([doc.clone()]),
             ..Default::default()
         },
         DocScope {
-            write: [doc.clone()].into(),
+            write: std::collections::BTreeMap::from([(
+                doc.clone(),
+                big_cabinet_core::doc::DatumKinds::All,
+            )]),
             ..Default::default()
         },
         DocScope {
@@ -935,7 +938,11 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
             ..Default::default()
         },
         DocScope {
-            drawers: [(drawer.clone(), Access::Write)].into(),
+            drawers: [(
+                drawer.clone(),
+                big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+            )]
+            .into(),
             ..Default::default()
         },
     ];
@@ -1150,7 +1157,7 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
         ..Default::default()
     };
     let doc_scope = DocScope {
-        read: [doc.clone()].into(),
+        read: DocScope::read_all([doc.clone()]),
         ..Default::default()
     };
     let drawer_cap = node.mint_drawer(&bob, drawer_scope.clone()).await.unwrap();
@@ -1606,7 +1613,10 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
             &context,
             caller.via,
             DocScope {
-                write: [doc.clone()].into(),
+                write: std::collections::BTreeMap::from([(
+                    doc.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..Default::default()
             },
             |authorization| {

@@ -1434,8 +1434,10 @@ dependencies = [
  "iroh",
  "iroh-blobs",
  "irpc",
+ "method_core",
  "proptest",
  "rand 0.9.5",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "service_client_native_rs",
@@ -1597,9 +1599,11 @@ name = "big_dispatch"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "big_cabinet",
  "big_cabinet_core",
  "big_dispatch_core",
+ "bytes",
  "futures",
  "http",
  "irpc",
@@ -1614,6 +1618,7 @@ dependencies = [
  "sqlite_rs",
  "thiserror 2.0.21",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -1636,6 +1641,7 @@ dependencies = [
 name = "big_ndk"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures",
  "getrandom 0.3.4",
  "http",
@@ -1699,6 +1705,7 @@ dependencies = [
  "big_repo",
  "big_sync",
  "big_sync_core",
+ "bytes",
  "data-encoding",
  "futures",
  "iroh",
@@ -1708,6 +1715,7 @@ dependencies = [
  "method_core",
  "method_lexicon",
  "rand 0.9.5",
+ "rustix 1.1.6",
  "secrets_rs",
  "serde",
  "serde_json",
@@ -1727,21 +1735,25 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "automerge",
+ "big_blobs",
  "big_blobs_core",
  "big_cabinet",
  "big_cabinet_core",
+ "big_cartridges",
  "big_cartridges_core",
  "big_dispatch",
  "big_dispatch_core",
  "big_nodule_core",
  "big_repo",
  "blake3",
+ "bytes",
  "futures",
  "http",
  "indexmap 2.14.2",
  "irpc",
  "keyring-core",
  "method_core",
+ "method_lexicon",
  "secrets_rs",
  "serde",
  "serde_json",
@@ -1792,8 +1804,11 @@ dependencies = [
  "big_sync_core",
  "blake3",
  "bytes",
+ "futures",
+ "http-body",
  "http-body-util",
  "hyper",
+ "method_core",
  "serde",
  "serde_json",
  "service_client_native_rs",
@@ -2806,6 +2821,7 @@ name = "clay_collection"
 version = "0.1.0"
 dependencies = [
  "clay_store",
+ "datum_core",
  "proptest",
  "serde",
  "serde_json",
@@ -4169,9 +4185,12 @@ name = "day_cli"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "big_blobs_core",
  "big_cabinet",
  "big_cabinet_core",
+ "big_cartridges_core",
  "big_dispatch",
+ "big_dispatch_core",
  "big_node",
  "big_nodule_core",
  "big_repo",
@@ -4179,7 +4198,10 @@ dependencies = [
  "clap_complete",
  "data-encoding",
  "directories",
+ "futures",
  "http",
+ "intxt_capture",
+ "intxt_core",
  "libc",
  "method_core",
  "rand 0.9.5",
@@ -4188,10 +4210,13 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "service_client_core_rs",
  "service_utils_rs",
+ "short_ids",
  "sqlite_rs",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tower",
  "tracing",
  "trycmd",
@@ -8142,6 +8167,69 @@ dependencies = [
 ]
 
 [[package]]
+name = "intxt_capture"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet_core",
+ "blake3",
+ "intxt_core",
+ "jiff",
+ "serde",
+ "serde_json",
+ "similar 2.7.0",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "intxt_core"
+version = "0.1.0"
+dependencies = [
+ "automerge",
+ "big_blobs_core",
+ "big_cabinet_core",
+ "big_cartridges_core",
+ "big_nodule_core",
+ "blake3",
+ "indexmap 2.14.2",
+ "jiff",
+ "macros",
+ "method_core",
+ "method_lexicon",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "service_client_core_rs",
+ "service_core_rs",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "intxt_nodule"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "big_blobs_core",
+ "big_cabinet_core",
+ "big_dispatch",
+ "big_dispatch_core",
+ "big_ndk",
+ "big_ndk_testing",
+ "http",
+ "intxt_capture",
+ "intxt_core",
+ "method_core",
+ "serde",
+ "serde_json",
+ "service_client_core_rs",
+ "service_utils_rs",
+ "tempfile",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "inventory"
 version = "0.3.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9558,6 +9646,7 @@ dependencies = [
 name = "method_core"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures",
  "schemars 1.2.3",
  "serde",
@@ -9576,6 +9665,8 @@ dependencies = [
  "big_nodule_core",
  "insta",
  "method_core",
+ "schemars 1.2.3",
+ "serde",
  "serde_json",
  "service_core_rs",
  "thiserror 2.0.21",
@@ -14275,6 +14366,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "http",
+ "http-body",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -14288,6 +14380,7 @@ dependencies = [
  "service_client_core_rs",
  "service_core_rs",
  "sha1",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "uuid",
@@ -14305,6 +14398,8 @@ dependencies = [
  "method_core",
  "opentelemetry",
  "opentelemetry_sdk",
+ "rustix 1.1.6",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -14434,6 +14529,14 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "short_ids"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "signal-hook"
@@ -15694,6 +15797,8 @@ name = "test_nodule_handlers"
 version = "0.1.0"
 dependencies = [
  "big_ndk",
+ "bytes",
+ "futures",
  "http",
  "method_core",
  "serde",
@@ -19734,6 +19839,20 @@ checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
 dependencies = [
  "bitflags 2.13.2",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "wire_surfaces"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet",
+ "big_cabinet_core",
+ "big_node",
+ "clap",
+ "method_lexicon",
+ "serde_json",
+ "tempfile",
+ "utils_rs",
 ]
 
 [[package]]

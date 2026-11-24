@@ -1,0 +1,12 @@
+# Loading an earlier session: the agent replays its history before it answers `session/load`,
+# and the replay is not recorded. Then a new prompt, whose connection dies mid-turn.
+> {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1}}
+< {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}
+> {"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"sess_old","cwd":"/work/repo","mcpServers":[]}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_old","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"an old prompt"}}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_old","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"an old answer"}}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_old","update":{"sessionUpdate":"tool_call","toolCallId":"old_1","title":"old","kind":"read","status":"completed"}}}
+< {"jsonrpc":"2.0","id":1,"result":null}
+> {"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"sess_old","prompt":[{"type":"text","text":"continue"}]}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_old","update":{"sessionUpdate":"agent_message_chunk","messageId":"m1","content":{"type":"text","text":"Sure, "}}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_old","update":{"sessionUpdate":"agent_message_chunk","messageId":"m1","content":{"type":"text","text":"continuing."}}}}

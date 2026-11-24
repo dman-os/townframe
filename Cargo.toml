@@ -17,6 +17,9 @@ members = [
   "./src/big_ndk_testing/",
   "./src/big_blobs/",
   "./src/big_blobs_core/",
+  "./src/intxt_core/",
+  "./src/intxt_nodule/",
+  "./src/intxt_capture/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
@@ -36,6 +39,7 @@ members = [
   "./src/plug_dayledger_manifest",
   "./src/secrets_rs",
   "./src/method_core/",
+  "./src/short_ids",
   "./src/method_lexicon/",
   "./src/service_core_rs/",
   "./src/service_client_core_rs/",
@@ -50,6 +54,7 @@ members = [
   "./src/wflow_sdk",
   "./src/wflow_tokio/",
   "./src/xtask",
+  "./src/wire_surfaces",
   "./src/clay_surface",
   "./src/clay_host",
   "./src/clay_docs",
@@ -102,6 +107,7 @@ license = ""
 repository = ""
 
 [workspace.dependencies]
+rustix = { version = "1.1.6", features = ["fs", "net"] }
 getrandom = { version = "0.4" }
 getrandom03 = { package = "getrandom", version = "0.3" }
 #
@@ -115,6 +121,7 @@ am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 secrets_rs = { path = "./src/secrets_rs" }
 method_core = { path = "./src/method_core", default-features = false }
+short_ids = { path = "./src/short_ids" }
 service_core_rs = { path = "./src/service_core_rs", default-features = false }
 service_client_core_rs = { path = "./src/service_client_core_rs", default-features = false }
 service_client_native_rs = { path = "./src/service_client_native_rs", default-features = false }
@@ -137,6 +144,8 @@ big_cabinet = { path = "./src/big_cabinet/" }
 big_cabinet_core = { path = "./src/big_cabinet_core/", default-features = false }
 big_blobs = { path = "./src/big_blobs/" }
 big_blobs_core = { path = "./src/big_blobs_core/" }
+intxt_capture = { path = "./src/intxt_capture" }
+intxt_core = { path = "./src/intxt_core" }
 macros = { path = "./src/macros/" }
 method_lexicon = { path = "./src/method_lexicon/" }
 big_cartridges = { path = "./src/big_cartridges/" }
@@ -146,6 +155,7 @@ big_nodule_core = { path = "./src/big_nodule_core/", default-features = false }
 big_nodule = { path = "./src/big_nodule/" }
 big_nodule_wasm = { path = "./src/big_nodule_wasm/" }
 big_ndk = { path = "./src/big_ndk/" }
+big_ndk_testing = { path = "./src/big_ndk_testing/" }
 test_nodule_handlers = { path = "./src/test_nodule_handlers/" }
 big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
@@ -407,6 +417,36 @@ blitz-traits = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2c
 
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
+
+# The service crates build at opt-level 1 in dev so LLVM reuses a stack slot once its value is
+# dead. At opt-level 0 every awaited temporary and every match arm of an async fn's poll frame
+# gets its own slot, so in-process service hops (dispatch → drawers → docs → authority) piled
+# up frames of hundreds of KB: creating a drawer at boot peaked at 1.18 MB of a 2 MiB thread,
+# and 0.33 MB at opt-level 1.
+[profile.dev.package.service_utils_rs]
+opt-level = 1
+[profile.dev.package.service_client_core_rs]
+opt-level = 1
+[profile.dev.package.service_client_native_rs]
+opt-level = 1
+[profile.dev.package.big_blobs]
+opt-level = 1
+[profile.dev.package.big_cabinet]
+opt-level = 1
+[profile.dev.package.big_cartridges]
+opt-level = 1
+[profile.dev.package.big_dispatch]
+opt-level = 1
+[profile.dev.package.big_node]
+opt-level = 1
+[profile.dev.package.big_nodule]
+opt-level = 1
+[profile.dev.package.big_repo]
+opt-level = 1
+[profile.dev.package.big_sync]
+opt-level = 1
+[profile.dev.package.day_cli]
+opt-level = 1
 
 # Keep the application debuggable while optimizing the native UI hot path in dev.
 # These overrides apply to desktop/native builds only; the app and shared UI remain
