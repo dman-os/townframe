@@ -137,9 +137,14 @@ impl PermbindDrawers {
     }
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "WASM manifest members carry their typed component metadata inline"
+// The variant is under clippy's size threshold with wasm32's 4-byte `usize`, so the expectation only
+// holds on 64-bit targets.
+#[cfg_attr(
+    target_pointer_width = "64",
+    expect(
+        clippy::large_enum_variant,
+        reason = "WASM manifest members carry their typed component metadata inline"
+    )
 )]
 #[macros::datum]
 #[derive(Debug, Clone, PartialEq)]
