@@ -66,6 +66,8 @@ use service_utils_rs::ResponseEnvelope;
 use service_utils_rs::StopToken;
 use std::sync::Arc;
 use std::time::Duration;
+use utils_rs::activity::Activity;
+use utils_rs::activity::HoldKind;
 
 /// The prefix of every capability object this domain mints; the scope follows it as JSON.
 const SCOPE_PREFIX: &str = "DispatchService/scope/v1/";
@@ -75,15 +77,18 @@ const SCOPE_PREFIX: &str = "DispatchService/scope/v1/";
 pub const MAX_JSON_BODY_OCTETS: u64 = 16 * 1024 * 1024;
 
 /// What the embedder hands the service: the authority it verifies and mints capabilities
-/// through, the operations namespace it mints in.
+/// through, the operations namespace it mints in, and the node's activity every call in flight
+/// holds (ADR 052 §1).
 pub struct DispatchConfig {
     pub authority: Client<AuthorityProtocol>,
     pub namespace: Namespace,
+    pub activity: Activity,
 }
 
 pub struct DispatchService {
     capabilities: DomainCapabilities,
     router: Arc<Router>,
+    activity: Activity,
 }
 
 type Res<T> = std::result::Result<T, DispatchError>;
@@ -142,6 +147,12 @@ impl DispatchService {
         authorization: Authorization,
         params: Invoke,
     ) -> Res<InvokeOutput> {
+        // Every call, whatever its transport (socket listener, in-process client, a nodule's
+        // egress), is handled by this method, so this is the one place `Call` is held: from
+        // arrival to the answer, covering verification, admission and the provider's run, and
+        // released on every exit, early returns and cancellation included, by the guard's drop.
+        // The label is static so a call allocates nothing for it.
+        let _call = self.activity.hold(HoldKind::Call, "dispatch call");
         // The caller's request budget. Like gRPC, which answers `DEADLINE_EXCEEDED` for a call whose deadline has already passed
         // without running the handler, an elapsed budget fails here, before admission, lookup
         // and readiness: no admission work is spent on it and the answer reveals nothing about
@@ -495,6 +506,7 @@ pub fn boot(config: DispatchConfig) -> (Dispatch, StopToken) {
     let service = Arc::new(DispatchService {
         capabilities,
         router: Arc::clone(&router),
+        activity: config.activity,
     });
     let (host, host_stop) = Host::new(service);
     let client = Client::new(Transport::direct(DispatchBinding::new(Arc::clone(&host))));

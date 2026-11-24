@@ -3,7 +3,6 @@
 //! plain HTTP, since a nodule's operations have no Rust request type.
 
 use super::cartridges::operator;
-use utils_rs::activity::HoldKind;
 use super::dispatch::narrowed;
 use super::dispatch::operations;
 use super::nodule_wasm::Spec;
@@ -48,6 +47,7 @@ use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 use tokio::io::Interest;
 use tokio::net::UnixStream;
+use utils_rs::activity::HoldKind;
 
 pub(super) const MAX_RESPONSE: usize = 1 << 20;
 

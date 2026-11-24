@@ -41,6 +41,8 @@ use service_utils_rs::StopToken;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
+use utils_rs::activity::Activity;
+use utils_rs::activity::HoldKind;
 
 const ECHO: &str = "org.example.echo.ping";
 
@@ -94,6 +96,7 @@ struct Harness {
     authority_stop: StopToken,
     dispatch: Dispatch,
     dispatch_stop: StopToken,
+    activity: Activity,
 }
 
 async fn harness() -> Harness {
@@ -124,15 +127,18 @@ async fn harness() -> Harness {
         .open_namespace(actor.actor.actor_id)
         .await
         .expect("dispatch namespace");
+    let activity = Activity::new();
     let (dispatch, dispatch_stop) = crate::boot(DispatchConfig {
         authority: authority.client.clone(),
         namespace,
+        activity: activity.clone(),
     });
     Harness {
         authority,
         authority_stop,
         dispatch,
         dispatch_stop,
+        activity,
     }
 }
 
@@ -432,6 +438,41 @@ async fn an_elapsed_budget_fails_before_the_provider_and_a_running_call_is_cut_o
             .await
             .is_ok()
     );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_call_in_flight_holds_the_activity_until_it_answers_however_it_ends() {
+    let h = harness().await;
+    let echo = h.register_echo();
+    let operator = h.operator();
+    let held = || {
+        h.activity
+            .snapshot()
+            .holds
+            .into_iter()
+            .map(|hold| (hold.kind, hold.label))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(held(), Vec::new());
+
+    // The provider is parked on its gate, so the call is observably in flight.
+    let call = h.invoke(operator, ECHO, json!({ "wait": true }));
+    let observe = async {
+        echo.started.notified().await;
+        assert_eq!(held(), vec![(HoldKind::Call, "dispatch call".to_owned())]);
+        echo.release.notify_one();
+    };
+    let (answer, ()) = tokio::join!(call, observe);
+    assert!(answer.is_ok());
+    assert_eq!(held(), Vec::new(), "the hold outlived the answered call");
+
+    // A call refused before it reaches any provider releases too.
+    let unknown = h
+        .invoke(operator, "org.example.echo.absent", json!({}))
+        .await;
+    assert!(unknown.is_err());
+    assert_eq!(held(), Vec::new(), "the hold outlived the refused call");
     h.shutdown().await;
 }
 

@@ -361,7 +361,6 @@ impl BigNode {
         let mut stop = StopToken::default();
         let attachments = Attachments::of(&config);
         // Boxed: booting every service inline makes this future large enough (in debug builds); a caller awaiting it, such as a test that reboots a node, overflows its stack.
-
         let boot: Res<Self> = Box::pin(async {
             let schemas = Arc::new(
                 config
@@ -421,7 +420,6 @@ impl BigNode {
             stop.stages.push(Stage::Service(docs_stop));
             let drawers = start_drawers(provider, &docs, &mut stop).await?;
             // The blob workers are configured with the drawers they maintain blobs for, so the registry is created (or found) before they start; the registry reads artifact bytes from the blob service and keeps them pinned through the workers, so it boots after both and stops before dispatch and nodules.
-
             let (blob_workers, registry_drawer) = blob_boot::boot(
                 config.sql.clone(),
                 &blobs,
@@ -448,8 +446,10 @@ impl BigNode {
                 &mut stop,
             )
             .await?;
+            let activity = utils_rs::activity::Activity::new();
             let (dispatch, nodule_dispatch_authority) = boot_dispatch(
                 &authority,
+                activity.clone(),
                 nodules_actor.actor.actor_id,
                 dispatch_namespace,
                 &mut stop,
@@ -503,7 +503,7 @@ impl BigNode {
                 #[cfg(unix)]
                 fd_clients: None,
                 peers: None,
-                activity: utils_rs::activity::Activity::new(),
+                activity,
             };
             node.attach(attachments, &mut stop).await?;
             Ok(node)
@@ -973,11 +973,15 @@ where
 /// to that nodule). `scope` is the most any nodule can be granted. It is retracted once the nodule
 /// service has stopped, which also kills the handles minted from it.
 ///
+/// `activity` is the node's one instance, created before dispatch boots and stored in `BigNode`:
+/// dispatch holds it (`HoldKind::Call`) for every call in flight, so it has to exist first.
+///
 /// The retraction only matters within a live process: the authority's capability ledger is in
 /// memory and starts empty every boot, so after a crash nothing of the previous boot's authority
 /// survives and there is nothing to sweep.
 async fn boot_dispatch(
     authority: &Authority,
+    activity: utils_rs::activity::Activity,
     nodules_actor: Uuid7,
     namespace: Namespace,
     stop: &mut StopToken,
@@ -985,6 +989,7 @@ async fn boot_dispatch(
     let (dispatch, dispatch_stop) = big_dispatch::boot(DispatchConfig {
         authority: authority.client.clone(),
         namespace,
+        activity,
     });
     stop.stages.push(Stage::Service(dispatch_stop));
     let capability = dispatch
