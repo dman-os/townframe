@@ -92,6 +92,8 @@ use crate::sync::strategy::PeerPartStrat;
 use crate::sync::strategy::decide_peer_strat;
 
 #[cfg(test)]
+mod sim;
+#[cfg(test)]
 mod tests;
 
 /// The one id space of every outward call (law 2).
