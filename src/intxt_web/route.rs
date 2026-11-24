@@ -12,9 +12,9 @@ use big_cabinet_core::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
 use dioxus::prelude::*;
 
-/// The kit's compiled stylesheet (the dayframe UI's Tailwind bundle, which holds the kit's classes
-/// and tokens), served as is.
-const STYLESHEET: &str = include_str!("../ui/assets/tailwind.css");
+/// The viewer's own stylesheet, served as is. Its colours are the kit's semantic tokens by name
+/// (see the file), so no kit bundle is loaded.
+const STYLESHEET: &str = include_str!("intxt_web.css");
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Route {
@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn routes_parse_to_the_page_they_name() {
         assert_eq!(Route::parse("/"), Ok(Route::Index));
-        assert_eq!(Route::parse("/assets/tailwind.css"), Ok(Route::Stylesheet));
+        assert_eq!(Route::parse("/assets/intxt_web.css"), Ok(Route::Stylesheet));
         assert_eq!(
             Route::parse(&format!("/i/{DRAWER}")),
             Ok(Route::Intxt {
@@ -264,10 +264,11 @@ mod tests {
         assert_eq!(fixture("/i/z11111111111111111111111111111119").status, 404);
         assert_eq!(fixture("/nope").status, 404);
         assert_eq!(down(&id).status, 502);
-        assert_eq!(
-            fixture("/assets/tailwind.css").content_type,
-            "text/css; charset=utf-8"
-        );
+        let stylesheet = fixture("/assets/intxt_web.css");
+        assert_eq!(stylesheet.content_type, "text/css; charset=utf-8");
+        // The page links the stylesheet it is served, which answers both color schemes.
+        assert!(fixture(&id).body.contains("href=\"/assets/intxt_web.css\""));
+        assert!(stylesheet.body.contains("prefers-color-scheme: dark"));
     }
 
     #[test]

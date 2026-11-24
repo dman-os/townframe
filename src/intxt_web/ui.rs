@@ -12,35 +12,10 @@ use crate::view::EntryView;
 use crate::view::IntxtView;
 use crate::view::PrLinksView;
 use crate::view::ThreadView;
-use clay_dioxus_kit::AppBar;
 use dioxus::prelude::*;
 
-/// Where the server serves the kit's stylesheet.
-pub const STYLESHEET_PATH: &str = "/assets/tailwind.css";
-
-// Layout the kit's compiled stylesheet has no utility for. Colours stay on the kit's tokens.
-const PAGE_STYLE: &str = "\
-.intxt-page{max-width:48rem;margin:0 auto;padding:0 1rem 3rem}\
-.intxt-page ul,.intxt-page ol{padding:0;list-style:none}\
-.intxt-page li{padding:.5rem 0}\
-.intxt-page h2{font-size:1.125rem;font-weight:600;margin:1.5rem 0 .5rem}\
-.intxt-markdown p{margin:.5rem 0}\
-.intxt-markdown pre{overflow-x:auto}\
-.intxt-page code,.intxt-page pre{font-family:ui-monospace,monospace;font-size:.875em}\
-.intxt-commit{margin:.5rem 0}\
-.intxt-commit-message{white-space:pre-wrap;margin:.25rem 0}\
-.intxt-diff{overflow-x:auto;border:1px solid var(--df-color-border,#ccc);padding:.5rem 0;margin:.5rem 0}\
-.intxt-diff span{display:block;padding:0 .75rem;white-space:pre}\
-.diff-file{font-weight:600}\
-.diff-hunk{background:rgba(127,127,255,.15)}\
-.diff-added{background:rgba(46,160,67,.2)}\
-.diff-removed{background:rgba(248,81,73,.2)}\
-.intxt-muted{font-size:.875rem}\
-.intxt-thread{border-left:2px solid var(--df-color-border,#ccc);padding-left:.75rem;margin:1rem 0}\
-.intxt-comment{margin:.5rem 0}\
-.intxt-comment p{margin:.25rem 0;white-space:pre-wrap}\
-.intxt-quote{border-left:2px solid var(--df-color-border,#ccc);margin:.25rem 0;padding-left:.5rem}\
-.intxt-page a{color:inherit}";
+/// Where the server serves the viewer's stylesheet (`intxt_web.css`, embedded by `route`).
+pub const STYLESHEET_PATH: &str = "/assets/intxt_web.css";
 
 /// The head and body of a document. The `<html>` element is written by `route::render`, because
 /// `html` is also the name of the element module inside rsx.
@@ -55,9 +30,18 @@ pub fn Document(title: String, children: Element) -> Element {
             }
             title { "{title}" }
             link { rel: "stylesheet", href: STYLESHEET_PATH }
-            style { dangerous_inner_html: PAGE_STYLE }
         }
-        body { class: "bg-canvas text-text", {children} }
+        body { {children} }
+    }
+}
+
+/// The sticky top bar: the page's one `h1`.
+#[component]
+fn TopBar(title: String) -> Element {
+    rsx! {
+        header { class: "intxt-bar",
+            h1 { "{title}" }
+        }
     }
 }
 
@@ -65,9 +49,9 @@ pub fn Document(title: String, children: Element) -> Element {
 pub fn IntxtPage(view: IntxtView) -> Element {
     rsx! {
         div { class: "intxt-page",
-            AppBar { title: view.title.clone() }
+            TopBar { title: view.title.clone() }
             main {
-                p { class: "intxt-muted text-text-muted",
+                p { class: "intxt-muted intxt-small",
                     "drawer "
                     code { "{view.drawer}" }
                 }
@@ -77,7 +61,7 @@ pub fn IntxtPage(view: IntxtView) -> Element {
                 section { aria_labelledby: "entries",
                     h2 { id: "entries", "Entries" }
                     if view.entries.is_empty() {
-                        p { class: "text-text-muted", "Nothing included yet." }
+                        p { class: "intxt-muted", "Nothing included yet." }
                     }
                     ul {
                         for entry in view.entries.iter().cloned() {
@@ -88,7 +72,7 @@ pub fn IntxtPage(view: IntxtView) -> Element {
                 section { aria_labelledby: "comments",
                     h2 { id: "comments", "Comments" }
                     if view.threads.is_empty() {
-                        p { class: "text-text-muted", "No comments." }
+                        p { class: "intxt-muted", "No comments." }
                     }
                     for thread in view.threads.iter().cloned() {
                         Thread { thread }
@@ -138,7 +122,7 @@ fn Markdown(source: String) -> Element {
 fn Commit(commit: CommitView) -> Element {
     rsx! {
         div { class: "intxt-commit",
-            p { class: "intxt-muted text-text-muted",
+            p { class: "intxt-muted intxt-small",
                 code { "{commit.sha.get(..12).unwrap_or(&commit.sha)}" }
                 " {commit.author}, {commit.date}"
             }
@@ -158,7 +142,7 @@ fn DiffBlock(diff: Diff) -> Element {
             }
         }
         if diff.omitted_octets > 0 {
-            p { class: "intxt-muted text-text-muted",
+            p { class: "intxt-muted intxt-small",
                 "The diff is cut here: {diff.omitted_octets} more octets are not shown."
             }
         }
@@ -169,10 +153,10 @@ fn DiffBlock(diff: Diff) -> Element {
 fn RefList(refs: Vec<EntryRef>) -> Element {
     rsx! {
         if !refs.is_empty() {
-            dl { class: "intxt-muted text-text-muted",
+            dl { class: "intxt-refs intxt-muted intxt-small",
                 for entry in refs {
-                    dt { style: "display:inline", "{entry.name} " }
-                    dd { style: "display:inline;margin:0 .75rem 0 0", code { "{entry.value}" } }
+                    dt { "{entry.name} " }
+                    dd { code { "{entry.value}" } }
                 }
             }
         }
@@ -183,7 +167,7 @@ fn RefList(refs: Vec<EntryRef>) -> Element {
 fn PrLinks(links: PrLinksView) -> Element {
     rsx! {
         if !links.intxts.is_empty() {
-            p { class: "intxt-muted text-text-muted", "This pull request's intxts" }
+            p { class: "intxt-muted intxt-small", "This pull request's intxts" }
             ul {
                 for link in links.intxts {
                     li {
@@ -197,7 +181,7 @@ fn PrLinks(links: PrLinksView) -> Element {
             }
         }
         if let Some(problem) = &links.malformed {
-            p { class: "intxt-muted text-text-muted", "{problem}" }
+            p { class: "intxt-muted intxt-small", "{problem}" }
         }
     }
 }
@@ -221,12 +205,12 @@ fn Comment(comment: CommentView) -> Element {
             p {
                 strong { "{comment.author}" }
                 if let Some(generator) = &comment.generator {
-                    span { class: "text-text-muted", " via {generator}" }
+                    span { class: "intxt-muted", " via {generator}" }
                 }
-                span { class: "text-text-muted", " ({comment.motivation})" }
+                span { class: "intxt-muted", " ({comment.motivation})" }
             }
             for target in comment.targets {
-                p { class: "intxt-muted text-text-muted",
+                p { class: "intxt-muted intxt-small",
                     "on "
                     code { "{target.label}" }
                 }
@@ -244,7 +228,7 @@ fn Comment(comment: CommentView) -> Element {
 pub fn IndexPage(origin: Origin) -> Element {
     rsx! {
         div { class: "intxt-page",
-            AppBar { title: "intxt".to_owned() }
+            TopBar { title: "intxt".to_owned() }
             main {
                 p {
                     "A read-only viewer of intxts, served at "
@@ -275,7 +259,7 @@ pub fn IndexPage(origin: Origin) -> Element {
 pub fn ErrorPage(status: u16, message: String) -> Element {
     rsx! {
         div { class: "intxt-page",
-            AppBar { title: format!("{status}") }
+            TopBar { title: format!("{status}") }
             main {
                 p { "{message}" }
                 p { a { href: "/", "intxt viewer" } }

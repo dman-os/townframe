@@ -15,7 +15,6 @@ wit-bindgen = { version = "0.62.0", features = ["async-spawn", "futures-stream",
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "html", "hooks", "signals"] }
 dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
-clay_dioxus_kit = { path = "../clay_dioxus_kit" }
 intxt_core = { path = "../intxt_core" }
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
 big_blobs_core = { path = "../big_blobs_core" }
