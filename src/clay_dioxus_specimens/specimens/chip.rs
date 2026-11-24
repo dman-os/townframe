@@ -1,5 +1,5 @@
-use super::Row;
 use crate::foundations::FoundationSection;
+use crate::specimens::Row;
 use clay_dioxus_kit::Chip;
 use clay_dioxus_kit::ChipVariant;
 use clay_dioxus_kit::Status;
@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 /// `Chip`: static labels in both variants and every status, filter chips that toggle, and tags
 /// that can be removed.
 #[component]
-pub(crate) fn ChipSpecimens() -> Element {
+pub fn ChipSpecimens() -> Element {
     let mut filters = use_signal(|| [true, false, false]);
     let mut tags = use_signal(|| vec!["rust", "dioxus", "css"]);
     rsx! {

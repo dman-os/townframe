@@ -1,5 +1,5 @@
-use super::Row;
 use crate::foundations::FoundationSection;
+use crate::specimens::Row;
 use clay_dioxus_kit::Button;
 use clay_dioxus_kit::ButtonSize;
 use clay_dioxus_kit::ButtonVariant;
@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 /// `Button`: every variant at every size, the states a static page can show, and a toggle.
 /// Hover, press and focus are pseudo-classes: point at the cells and press Tab.
 #[component]
-pub(crate) fn ButtonSpecimens() -> Element {
+pub fn ButtonSpecimens() -> Element {
     let mut bold = use_signal(|| false);
     let mut italic = use_signal(|| true);
     rsx! {

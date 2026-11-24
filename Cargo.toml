@@ -82,6 +82,7 @@ members = [
   "./src/micro_theme_lab",
   "./src/review_mock",
   "./src/clay_dioxus_kit",
+  "./src/clay_dioxus_specimens",
   "./src/dioxus_storm",
   "./src/daytxt_core",
   "./src/daytxt_native",
@@ -178,6 +179,7 @@ clay_surface = { path = "./src/clay_surface" }
 clay_dioxus = { path = "./src/clay_dioxus" }
 pierre_diffs = { path = "./src/pierre_diffs" }
 clay_dioxus_kit = { path = "./src/clay_dioxus_kit" }
+clay_dioxus_specimens = { path = "./src/clay_dioxus_specimens" }
 pierre_diffs_dioxus = { path = "./src/pierre_diffs_dioxus" }
 dioxus_storm = { path = "./src/dioxus_storm" }
 clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }

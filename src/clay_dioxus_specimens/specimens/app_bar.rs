@@ -1,7 +1,7 @@
-use super::Frame;
-use super::COMPACT_PX;
-use super::EXPANDED_PX;
 use crate::foundations::FoundationSection;
+use crate::specimens::Frame;
+use crate::specimens::COMPACT_PX;
+use crate::specimens::EXPANDED_PX;
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::Button;
 use clay_dioxus_kit::ButtonVariant;
@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 
 /// `AppBar`: the panel's top strip, with every slot, with none, and with a title too long to fit.
 #[component]
-pub(crate) fn AppBarSpecimens() -> Element {
+pub fn AppBarSpecimens() -> Element {
     rsx! {
         FoundationSection {
             id: "app-bar-slots".to_string(),

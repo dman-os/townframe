@@ -1,7 +1,7 @@
-use super::Frame;
-use super::COMPACT_PX;
-use super::EXPANDED_PX;
 use crate::foundations::FoundationSection;
+use crate::specimens::Frame;
+use crate::specimens::COMPACT_PX;
+use crate::specimens::EXPANDED_PX;
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::NavButton;
 use clay_dioxus_kit::NavButtonMode;
@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 
 /// `PanelPage`: the bar stays where it is while a body taller than the frame scrolls under it.
 #[component]
-pub(crate) fn PanelPageSpecimens() -> Element {
+pub fn PanelPageSpecimens() -> Element {
     rsx! {
         FoundationSection {
             id: "panel-page-scroll".to_string(),

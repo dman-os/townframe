@@ -1,12 +1,12 @@
-use super::Row;
 use crate::foundations::FoundationSection;
+use crate::specimens::Row;
 use clay_dioxus_kit::NavButton;
 use clay_dioxus_kit::NavButtonMode;
 use dioxus::prelude::*;
 
 /// `NavButton`: the one control with two meanings, back and open-sidebar.
 #[component]
-pub(crate) fn NavButtonSpecimens() -> Element {
+pub fn NavButtonSpecimens() -> Element {
     let mut presses = use_signal(|| 0u32);
     rsx! {
         FoundationSection {

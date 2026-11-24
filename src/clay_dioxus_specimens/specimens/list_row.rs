@@ -1,6 +1,6 @@
-use super::Frame;
-use super::EXPANDED_PX;
 use crate::foundations::FoundationSection;
+use crate::specimens::Frame;
+use crate::specimens::EXPANDED_PX;
 use clay_dioxus_kit::ListDetails;
 use clay_dioxus_kit::ListRow;
 use clay_dioxus_kit::SizeRule;
@@ -13,7 +13,7 @@ const ROWS: [&str; 4] = ["Appearance", "Sync", "Micros", "About"];
 /// `ListRow`: an openable row of a list, shown in the list of a `ListDetails` (the row opens
 /// itself through the scaffold, so it cannot be mounted outside one).
 #[component]
-pub(crate) fn ListRowSpecimens() -> Element {
+pub fn ListRowSpecimens() -> Element {
     let mut open = use_signal(|| Some("Sync".to_owned()));
     let mut weights = use_signal(|| vec![1.0, 2.0]);
     rsx! {
