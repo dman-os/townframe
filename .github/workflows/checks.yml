@@ -270,6 +270,14 @@ jobs:
           # stopped answering and lost the job and its logs (#178, #184, #199). A failure's output still
           # reaches the JUnit artifact; rerun a test locally with RUST_LOG_TEST=debug for more.
           RUST_LOG_TEST: info
+          # The four-node iroh stress test (`long_af_test_iroh_sync_randomized_four_node_stress_converges`)
+          # settles each phase by waiting for network rest with no bound of its own, so a
+          # non-converging run sits until nextest's 480 s kill and then retries 3 more times, which
+          # on 2026-11-24 ran the job into its 120 minute limit (run 45418721047) with nothing in the
+          # log naming why. A bound makes the settle observe the cluster, fail with the stuck
+          # documents and keep the repositories; a healthy phase settles well inside it (the whole
+          # test took 134 s on a slow runner).
+          DAYB_STRESS_DIAGNOSTIC_TIMEOUT_SECS: 150
           # Record every captured stdout/stderr stream so a failed job can attach the full test
           # output as an artifact instead of relying on a truncated CI log.
           NEXTEST_EXPERIMENTAL_RECORD: 1
