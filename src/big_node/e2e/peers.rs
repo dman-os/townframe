@@ -372,40 +372,41 @@ async fn a_known_drawers_roster_streams_without_mirroring_it() {
     doc_synced(&mut events, &owner_key, &drawer).await;
 
     let after = create_in(&owner, &drawer, "doc-after", "after").await;
-    let capability = reader
-        .drawers
-        .client
-        .call_with(
-            RequestContext::root(),
-            Authorization::identity(reader.drawers_actor.capability).metadata(),
-            MintDrawerCapability {
-                scope: DrawerScope {
-                    drawers: BTreeMap::from([(drawer.clone(), Access::Read)]),
-                    create: false,
-                },
-                rights: Rights::USE,
-                subject: None,
-            },
-        )
-        .await
-        .unwrap()
-        .capability_id;
     // The roster is read from the reader's own projection. Every roster change on the owner is a
-    // change of the drawer's descriptor doc, which reaches the reader as a DocSynced.
+    // change of the drawer's descriptor doc, which reaches the reader as a DocSynced. Until the
+    // descriptor is projected and keyhive admits the reader, minting the capability is denied.
     loop {
-        let view = reader
+        let capability = reader
             .drawers
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
-                big_cabinet_core::drawer::protocol::GetDrawer {
-                    capability: capability.clone(),
-                    drawer_id: drawer.clone(),
+                Authorization::identity(reader.drawers_actor.capability).metadata(),
+                MintDrawerCapability {
+                    scope: DrawerScope {
+                        drawers: BTreeMap::from([(drawer.clone(), Access::Read)]),
+                        create: false,
+                    },
+                    rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await;
-        if view.is_ok_and(|view| view.docs.contains_key(&after)) {
-            break;
+        if let Ok(capability) = capability {
+            let view = reader
+                .drawers
+                .client
+                .call(
+                    RequestContext::root(),
+                    big_cabinet_core::drawer::protocol::GetDrawer {
+                        capability: capability.capability_id,
+                        drawer_id: drawer.clone(),
+                    },
+                )
+                .await;
+            if view.is_ok_and(|view| view.docs.contains_key(&after)) {
+                break;
+            }
         }
         match events.recv().await {
             Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
