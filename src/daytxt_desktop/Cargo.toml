@@ -1,18 +1,18 @@
 [package]
-name = "dayframe_desktop"
+name = "daytxt_desktop"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "dayframe_desktop"
+name = "daytxt_desktop"
 path = "main.rs"
 
 [dependencies]
 #
 # internal
-ui = { workspace = true }
-dayframe_composition = { workspace = true }
-dayframe_native = { workspace = true }
+daytxt_core = { workspace = true }
+daytxt_native = { workspace = true }
+day_node = { workspace = true }
 clay_docs = { workspace = true }
 clay_dioxus = { workspace = true }
 clay_host = { workspace = true }
@@ -34,6 +34,7 @@ daybook_types = { workspace = true }
 dioxus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
 dioxus-native = { workspace = true, features = ["scrollbars"], optional = true }
 anyrender = { version = "0.13.0", optional = true }
 anyrender_vello = { version = "0.14.0", optional = true }
@@ -47,13 +48,13 @@ accesskit_xplat = { version = "0.2.1", optional = true }
 [features]
 default = ["desktop"]
 # The shipping renderer: the shell in a system webview (Wry).
-desktop = ["dioxus/desktop"]
-# Blitz, opt-in and additive: compiled in next to Wry, launched by `DAYFRAME_RENDERER=blitz`
-# (`x/dayframe.ts desktop --native` sets both).
+desktop = ["dioxus/desktop", "daytxt_native/wry"]
+# Blitz, opt-in and additive: compiled in next to Wry, launched by `DAYTXT_RENDERER=blitz`
+# (`x/daytxt.ts desktop --native` sets both).
 blitz = [
     "dioxus/native",
     "dep:dioxus-native",
-    "dayframe_native/blitz",
+    "daytxt_native/blitz",
     "dep:anyrender",
     "dep:anyrender_vello",
     "dep:anyrender_vello_cpu",
@@ -65,6 +66,7 @@ blitz = [
 #
 # internal
 micro_layout_manifest = { workspace = true }
+micro_lab_manifest = { workspace = true }
 clay_guest_session = { workspace = true }
 clay_surface = { workspace = true }
 clay_rt_wcmp = { workspace = true }
@@ -87,6 +89,5 @@ dioxus-core.workspace = true
 dioxus-html.workspace = true
 dioxus-native-dom.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
-
 [lints]
 workspace = true
