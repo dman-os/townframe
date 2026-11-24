@@ -55,7 +55,7 @@ impl Store for MemoryPartStore {
 }
 
 /// The requester's cursor on the responder: a fresh peer has seen nothing.
-const SINCE: Rev = 0;
+pub const SINCE: Rev = 0;
 /// Machine commands one walk may take before it is declared not to terminate. Far above what
 /// any generated walk needs: each object costs at most a sync and a share of a leaf page.
 const STEP_CAP: usize = 100_000;
@@ -332,6 +332,38 @@ impl<S: Store> Responder<S> {
     }
 }
 
+/// The listing loop of the strategy decision and of a `ListBuckets` command: list, filter
+/// against the local summaries, relist past a page with nothing dirty at the working
+/// level. `None` when the responder refuses the part; otherwise the dirty buckets at the
+/// working level, empty when the listing is done.
+pub async fn list_dirty<S: Store>(
+    responder: &mut Responder<S>,
+    requester: &S,
+    part: &PartKey,
+    mut offset: BuckId,
+    working_level: BuckLevel,
+) -> Res<Option<Vec<BucketSummary>>> {
+    loop {
+        let listed = responder
+            .changed_buckets(GetChangedBucketsRequest {
+                part_key: part.clone(),
+                offset,
+                to_level: working_level,
+                since: SINCE,
+                limit_hint: BucketMachine::GET_BUCKET_LIMIT_HINT,
+            })
+            .await?;
+        let Ok(listed) = listed else {
+            return Ok(None);
+        };
+        match filter_buckets(part.clone(), working_level, listed, requester).await? {
+            FilteredBuckets::Relist(next) => offset = next,
+            FilteredBuckets::Done => return Ok(Some(default())),
+            FilteredBuckets::Handoff(dirty) => return Ok(Some(dirty)),
+        }
+    }
+}
+
 /// How the requester's walk of one part went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Walk {
@@ -339,7 +371,7 @@ pub enum Walk {
     Refused,
     /// The strategy decision's listing found nothing to walk: no machine was built.
     Clean,
-    /// A machine walked the part at this working level and upgraded to the cursor.
+    /// A machine walked the part at this working level to `walk_done`.
     Walked { working_level: BuckLevel },
 }
 
@@ -355,6 +387,9 @@ pub struct Driver<S> {
     pub requester: S,
     pub responder: Responder<S>,
     seeds: u64,
+    /// What the requester's jobs admit per part at once: the budget of each pull, less the
+    /// object deltas of the part still queued.
+    pub room: usize,
     pub walks: BTreeMap<PartKey, Walk>,
     pub applied: BTreeMap<PartKey, Applied>,
 }
@@ -365,46 +400,32 @@ impl<S: Store> Driver<S> {
             requester,
             responder,
             seeds: 0,
+            room: 8,
             walks: default(),
             applied: default(),
         }
     }
 
-    /// The listing loop of the strategy decision and of a `ListBuckets` command: list, filter
-    /// against the local summaries, relist past a page with nothing dirty at the working
-    /// level. `None` when the responder refuses the part; otherwise the dirty buckets at the
-    /// working level, empty when the listing is done.
+    /// See [`list_dirty`].
     async fn list(
         &mut self,
         part: &PartKey,
-        mut offset: BuckId,
+        offset: BuckId,
         working_level: BuckLevel,
     ) -> Res<Option<Vec<BucketSummary>>> {
-        loop {
-            let listed = self
-                .responder
-                .changed_buckets(GetChangedBucketsRequest {
-                    part_key: part.clone(),
-                    offset,
-                    to_level: working_level,
-                    since: SINCE,
-                    limit_hint: BucketMachine::GET_BUCKET_LIMIT_HINT,
-                })
-                .await?;
-            let Ok(listed) = listed else {
-                return Ok(None);
-            };
-            match filter_buckets(part.clone(), working_level, listed, &self.requester).await? {
-                FilteredBuckets::Relist(next) => offset = next,
-                FilteredBuckets::Done => return Ok(Some(default())),
-                FilteredBuckets::Handoff(dirty) => return Ok(Some(dirty)),
-            }
-        }
+        list_dirty(
+            &mut self.responder,
+            &self.requester,
+            part,
+            offset,
+            working_level,
+        )
+        .await
     }
 
     /// Walk every part to quiescence, the machines' commands interleaved in one queue in the
     /// order they were issued. Panics when a walk does not terminate, or stalls with a machine
-    /// that never upgraded.
+    /// that never finished.
     pub async fn run(&mut self, parts: &[PartKey]) -> Res<()> {
         let mut machines = BTreeMap::<PartKey, BucketMachine>::new();
         let mut queue = VecDeque::<(PartKey, BucketMachineCommand)>::new();
@@ -426,6 +447,7 @@ impl<S: Store> Driver<S> {
             let mut machine =
                 BucketMachine::new(part.clone(), BuckId::MAX_LEVEL, remote_size, SINCE);
             machine.on_bucket_page(dirty, &mut out);
+            machine.pull(self.room, &mut out);
             queue.extend(out.drain(..).map(|cmd| (part.clone(), cmd)));
             machines.insert(part.clone(), machine);
             self.walks
@@ -461,6 +483,7 @@ impl<S: Store> Driver<S> {
                     assert_eq!((part_key, since), (part.clone(), SINCE));
                     let seed = FingerprintSeed::new(self.seeds, 0x5eed);
                     self.seeds += 1;
+                    let requests = buckets.clone();
                     let pages = self
                         .responder
                         .leaf_buckets(LeafBucketsRequest {
@@ -472,7 +495,9 @@ impl<S: Store> Driver<S> {
                         })
                         .await?
                         .expect("the part stays readable");
-                    let pages = filter_objects(part.clone(), pages, seed, &self.requester).await?;
+                    let pages =
+                        filter_objects(part.clone(), requests, pages, seed, &self.requester)
+                            .await?;
                     machine.on_obj_page(pages, &mut out);
                 }
                 BucketMachineCommand::SyncObj {
@@ -495,7 +520,6 @@ impl<S: Store> Driver<S> {
                         .await?;
                     tx.commit();
                     self.applied.entry(part.clone()).or_default().syncs += 1;
-                    machine.on_obj_sync_completed(&obj_key, &mut out);
                 }
                 BucketMachineCommand::RemoveObjFromParts { obj_key, part_key } => {
                     assert_eq!(part_key, part);
@@ -506,12 +530,35 @@ impl<S: Store> Driver<S> {
                     tx.commit();
                     self.applied.entry(part.clone()).or_default().removes += 1;
                 }
-                BucketMachineCommand::UpgradeToCursor { part_key } => {
-                    assert_eq!(part_key, part);
-                    machines.remove(&part);
-                }
             }
+            // The caller's side of the contract: pull what the room allows, and upgrade the
+            // part once the walk is done and none of its jobs is outstanding.
+            let outstanding = queue
+                .iter()
+                .filter(|(queued, cmd)| {
+                    *queued == part
+                        && matches!(
+                            cmd,
+                            BucketMachineCommand::SyncObj { .. }
+                                | BucketMachineCommand::RemoveObjFromParts { .. }
+                        )
+                })
+                .count();
+            // The command just applied is no longer outstanding; the ones queued still are.
+            machine.pull(self.room.saturating_sub(outstanding), &mut out);
             queue.extend(out.drain(..).map(|cmd| (part.clone(), cmd)));
+            if machine.walk_done()
+                && !queue.iter().any(|(queued, cmd)| {
+                    *queued == part
+                        && matches!(
+                            cmd,
+                            BucketMachineCommand::SyncObj { .. }
+                                | BucketMachineCommand::RemoveObjFromParts { .. }
+                        )
+                })
+            {
+                machines.remove(&part);
+            }
         }
         assert!(
             machines.is_empty(),
@@ -539,7 +586,7 @@ pub struct Divergence {
 
 /// A store's members of `part` with their digests (`None` when dead), as the inspector reads
 /// them; none for a part no object was added to.
-async fn leaves<S: Store>(store: &S, part: &PartKey) -> Res<Vec<LeafEntry>> {
+pub async fn leaves<S: Store>(store: &S, part: &PartKey) -> Res<Vec<LeafEntry>> {
     Ok(store
         .bucket_leaves(&inspector(), part, &[(BuckId::ROOT, None)], 0, usize::MAX)
         .await?
@@ -548,7 +595,7 @@ async fn leaves<S: Store>(store: &S, part: &PartKey) -> Res<Vec<LeafEntry>> {
 }
 
 /// Whether the requester holds `obj` live in `part` with `digest`.
-fn holds(state: Option<&ObjState>, part: &PartKey, digest: PayloadDigest) -> bool {
+pub fn holds(state: Option<&ObjState>, part: &PartKey, digest: PayloadDigest) -> bool {
     state.is_some_and(|state| {
         state
             .content
