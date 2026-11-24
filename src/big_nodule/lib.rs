@@ -903,6 +903,8 @@ pub type NodulesHandler = Arc<NoduleService>;
 pub struct Nodules {
     pub host: Arc<Host<NodulesHandler>>,
     pub client: Client<NodulesProtocol>,
+    /// The drawer the service created (or found) for the cartridge config documents.
+    pub shared_config_drawer: DrawerId,
 }
 
 /// Boot the nodule service on `config.sql`, load its config datum store on `config.config_drawer`,
@@ -966,7 +968,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         cartridges_authorization: config.cartridges_authorization,
         blobs: config.blobs,
         blobs_capability: config.blobs_capability,
-        shared_config_drawer: config.shared_config_drawer,
+        shared_config_drawer: config.shared_config_drawer.clone(),
         parent: config.actor,
         parent_path: config.actor_path,
         dispatch: config.dispatch,
@@ -992,7 +994,11 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
     let (host, host_stop) = Host::new(Arc::clone(&service));
     let client = Client::new(Transport::direct(NodulesBinding::new(Arc::clone(&host))));
     Ok((
-        Nodules { host, client },
+        Nodules {
+            host,
+            client,
+            shared_config_drawer: config.shared_config_drawer,
+        },
         host_stop
             .then(state_stop)
             .then(store_stop)
