@@ -13,7 +13,8 @@ path = "lib.rs"
 #
 # internal
 utils_rs.workspace = true
-
+#
+# external
 serde.workspace = true
 wit-bindgen = { workspace = true, features = ["async", "macros", "realloc"] }
 
@@ -26,6 +27,7 @@ members = [
     "../plug_dayledger_routines",
     "../test_wflows",
     "../test_nodule_guest",
+    "../intxt_nodule_guest",
     "../clay_rt_wcmp_web",
     "../intxt_nodule_guest",
 ]
@@ -57,7 +59,8 @@ daybook_pdk = { path = "../daybook_pdk", default-features = false }
 wflow_sdk = { path = "../wflow_sdk", default-features = false }
 daybook_core = { path = "../daybook_core", default-features = false }
 sqlite_rs = { path = "../sqlite_rs", default-features = false }
-
+#
+# external
 wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "da35a9b4e4cc71dacb57323b906093f9e18e78b6" }
 wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "da35a9b4e4cc71dacb57323b906093f9e18e78b6" }
 automerge = "0.11.0"

@@ -94,4 +94,5 @@ big_blobs_core.workspace = true
 #
 # misc
 trycmd = "1.2.1"
+insta = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

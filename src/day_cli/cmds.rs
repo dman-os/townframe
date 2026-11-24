@@ -9,5 +9,6 @@ pub mod init;
 pub mod intxt;
 pub mod node;
 pub mod peers;
+pub mod plugin;
 pub mod serve;
 pub mod status;
