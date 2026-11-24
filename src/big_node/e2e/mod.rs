@@ -35,6 +35,7 @@ mod dispatch;
 mod harness;
 mod ladder;
 mod listeners;
+mod micros;
 mod many_nodes;
 mod network;
 mod nodule_wasm;
