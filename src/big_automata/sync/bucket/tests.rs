@@ -163,7 +163,7 @@ fn filter_objects_compares_payloads_by_stored_digest() {
     use crate::part_store::PartStoreWrite;
     use crate::part_store::PayloadDigest;
     use crate::part_store::memory::MemoryPartStore;
-    use crate::rpc::bucket::BucketObjPageEntry;
+    use crate::sync::rpc::bucket::BucketObjPageEntry;
 
     let store = MemoryPartStore::default();
     let obj = ObjKey::new(&[7]);

@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 use crate::part_store::PartStoreRead;
 use crate::rev::Rev;
-use crate::rpc::BigSyncRpcClient;
+use crate::sync::rpc::BigSyncRpcClient;
 use crate::tasks::TaskCtx;
 use crate::tasks::TaskResultDeets;
 

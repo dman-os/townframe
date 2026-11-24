@@ -4,27 +4,27 @@
 
 use super::*;
 
-use crate::part_lifecycle::oracle::Oracle;
+use crate::sync::lifecycle::oracle::Oracle;
 use proptest::prelude::*;
 
 const PARTS: u8 = 4;
 
 #[derive(Debug, Clone)]
-pub(in crate::part_lifecycle::tests) enum Spec {
+pub(in crate::sync::lifecycle::tests) enum Spec {
     Cursor(Rev),
     Walk(Rev),
     Unknown,
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::part_lifecycle::tests) enum CallPick {
+pub(in crate::sync::lifecycle::tests) enum CallPick {
     Current,
     /// An older call id: `issued - k`, which for 0 is the newest call.
     Past(u8),
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::part_lifecycle::tests) enum Reply {
+pub(in crate::sync::lifecycle::tests) enum Reply {
     /// An answer: per part (by index) an entry or none.
     Parts(Vec<Option<Spec>>),
     TooMany(usize),
@@ -32,7 +32,7 @@ pub(in crate::part_lifecycle::tests) enum Reply {
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::part_lifecycle::tests) enum Op {
+pub(in crate::sync::lifecycle::tests) enum Op {
     Add {
         part: u8,
     },
@@ -56,7 +56,7 @@ pub(in crate::part_lifecycle::tests) enum Op {
     },
 }
 
-pub(in crate::part_lifecycle::tests) fn op() -> impl Strategy<Value = Op> {
+pub(in crate::sync::lifecycle::tests) fn op() -> impl Strategy<Value = Op> {
     let spec = prop_oneof![
         2 => (0u64..8).prop_map(Spec::Cursor),
         2 => (0u64..8).prop_map(Spec::Walk),
@@ -82,7 +82,7 @@ pub(in crate::part_lifecycle::tests) fn op() -> impl Strategy<Value = Op> {
     ]
 }
 
-pub(in crate::part_lifecycle::tests) struct Sim {
+pub(in crate::sync::lifecycle::tests) struct Sim {
     lc: PartLifecycle,
     oracle: Oracle,
     now: Instant,
@@ -96,7 +96,7 @@ pub(in crate::part_lifecycle::tests) struct Sim {
 }
 
 impl Sim {
-    pub(in crate::part_lifecycle::tests) fn new(max_parts: usize) -> Self {
+    pub(in crate::sync::lifecycle::tests) fn new(max_parts: usize) -> Self {
         let config = Config {
             max_parts,
             min_backoff: Duration::from_secs(1),
@@ -126,7 +126,7 @@ impl Sim {
         (0..PARTS).map(|p| self.lc.cursor(&part(p))).collect()
     }
 
-    pub(in crate::part_lifecycle::tests) fn step(&mut self, op: Op) {
+    pub(in crate::sync::lifecycle::tests) fn step(&mut self, op: Op) {
         let before = self.phases();
         let cursors_before = self.cursors();
         let store_before = self.store.clone();

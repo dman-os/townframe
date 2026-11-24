@@ -3,14 +3,14 @@
 
 use super::*;
 
-use crate::object_jobs::oracle::OSnap;
-use crate::object_jobs::oracle::Oracle;
-use crate::object_jobs::oracle::Stage;
+use crate::sync::object_jobs::oracle::OSnap;
+use crate::sync::object_jobs::oracle::Oracle;
+use crate::sync::object_jobs::oracle::Stage;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy)]
-pub(in crate::object_jobs::tests) enum How {
+pub(in crate::sync::object_jobs::tests) enum How {
     Done,
     Fetch,
     /// A fetch's success
@@ -20,7 +20,7 @@ pub(in crate::object_jobs::tests) enum How {
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::object_jobs::tests) enum Op {
+pub(in crate::sync::object_jobs::tests) enum Op {
     Want {
         obj: u8,
         part: u8,
@@ -45,7 +45,7 @@ pub(in crate::object_jobs::tests) enum Op {
     },
 }
 
-pub(in crate::object_jobs::tests) fn op() -> impl Strategy<Value = Op> {
+pub(in crate::sync::object_jobs::tests) fn op() -> impl Strategy<Value = Op> {
     let how = prop_oneof![
         Just(How::Done),
         Just(How::Fetch),
@@ -71,7 +71,7 @@ struct SimCall {
     contradicted: bool,
 }
 
-pub(in crate::object_jobs::tests) struct Sim {
+pub(in crate::sync::object_jobs::tests) struct Sim {
     jobs: ObjectJobs,
     oracle: Oracle,
     now: Instant,
@@ -82,7 +82,7 @@ pub(in crate::object_jobs::tests) struct Sim {
 }
 
 impl Sim {
-    pub(in crate::object_jobs::tests) fn new() -> Self {
+    pub(in crate::sync::object_jobs::tests) fn new() -> Self {
         let config = config();
         Self {
             oracle: Oracle::new(config.window),
@@ -94,7 +94,7 @@ impl Sim {
         }
     }
 
-    pub(in crate::object_jobs::tests) fn step(&mut self, op: Op) {
+    pub(in crate::sync::object_jobs::tests) fn step(&mut self, op: Op) {
         match op {
             Op::Want {
                 obj: o,
@@ -340,7 +340,7 @@ impl Sim {
     }
 
     /// Answer everything with success until nothing moves, then check that all is settled.
-    pub(in crate::object_jobs::tests) fn drain(&mut self) {
+    pub(in crate::sync::object_jobs::tests) fn drain(&mut self) {
         for _ in 0..200 {
             self.now += Duration::from_secs(10);
             let issued = self.flush();

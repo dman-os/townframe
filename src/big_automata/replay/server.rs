@@ -31,7 +31,7 @@ use crate::replay::wire::UpdateSession;
 use crate::replay::wire::Verdict;
 use crate::rev::Limits;
 use crate::rev::Rev;
-use crate::scheduler::Instant;
+use crate::kit::scheduler::Instant;
 
 #[cfg(test)]
 mod tests;

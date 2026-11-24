@@ -4,14 +4,14 @@ use crate::AllowedStrat;
 use crate::part_store::PartStoreRead;
 use crate::part_store::bucket_summary::BucketSummary;
 use crate::rev::Rev;
-use crate::rpc::BigSyncRpcClient;
-use crate::rpc::RpcError;
-use crate::rpc::bucket::GetChangedBucketsError;
-use crate::rpc::bucket::GetChangedBucketsRequest;
-use crate::rpc::summary::PeerPartStratSummary;
-use crate::rpc::summary::PeerPartSummary;
-use crate::rpc::summary::PeerPartsSummaryError;
-use crate::rpc::summary::PeerPartsSummaryRequest;
+use crate::sync::rpc::BigSyncRpcClient;
+use crate::sync::rpc::RpcError;
+use crate::sync::rpc::bucket::GetChangedBucketsError;
+use crate::sync::rpc::bucket::GetChangedBucketsRequest;
+use crate::sync::rpc::summary::PeerPartStratSummary;
+use crate::sync::rpc::summary::PeerPartSummary;
+use crate::sync::rpc::summary::PeerPartsSummaryError;
+use crate::sync::rpc::summary::PeerPartsSummaryRequest;
 use crate::tasks::TaskCtx;
 use crate::tasks::TaskResultDeets;
 
@@ -216,7 +216,7 @@ impl DecidePeerStrategyTask {
                                 since: last_peer_cursor,
                             })
                             .await??;
-                        let filtered = crate::bucket::filter_buckets(
+                        let filtered = crate::sync::bucket::filter_buckets(
                             part_key.clone(),
                             working_level,
                             buckets,
@@ -224,17 +224,17 @@ impl DecidePeerStrategyTask {
                         )
                         .await;
                         let strat = match filtered {
-                            crate::bucket::FilteredBuckets::Relist(buck_id) => {
+                            crate::sync::bucket::FilteredBuckets::Relist(buck_id) => {
                                 offset = buck_id;
                                 continue;
                             }
-                            crate::bucket::FilteredBuckets::Done => {
+                            crate::sync::bucket::FilteredBuckets::Done => {
                                 PeerPartStratDecision::Cursor(CursorStrat {
                                     latest_cursor: last_peer_cursor,
                                     last_cursor: last_peer_cursor,
                                 })
                             }
-                            crate::bucket::FilteredBuckets::Handoff(buckets) => {
+                            crate::sync::bucket::FilteredBuckets::Handoff(buckets) => {
                                 PeerPartStratDecision::Bucket(BucketStrat {
                                     latest_cursor: last_peer_cursor,
                                     initial_filtered_buckets: buckets,

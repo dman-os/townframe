@@ -41,7 +41,7 @@ use crate::part_store::oracle::PartOracle;
 use crate::part_store::oracle::PartWrite;
 use crate::rev::Limits;
 use crate::rev::Rev;
-use crate::scheduler::Instant;
+use crate::kit::scheduler::Instant;
 
 /// Routes 0..4 are parts 0..4, 4..6 objects 4 and 5.
 const ROUTES: u8 = 6;

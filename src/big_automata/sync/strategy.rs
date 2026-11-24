@@ -3,8 +3,8 @@
 //! settle a [`PeerPartStrat::BucketWalk`] on cursor replay when the walk finds nothing dirty.
 
 use crate::AllowedStrat;
-use crate::bucket::BucketMachine;
-use crate::bucket::calc_working_level;
+use crate::sync::bucket::BucketMachine;
+use crate::sync::bucket::calc_working_level;
 use crate::interlude::*;
 use crate::part_store::PartSummary;
 use crate::rev::Rev;

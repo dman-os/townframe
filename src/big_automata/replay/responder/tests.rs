@@ -28,7 +28,7 @@ use crate::replay::wire::SessionId;
 use crate::replay::wire::SessionUpdated;
 use crate::replay::wire::TargetId;
 use crate::replay::wire::Verdict;
-use crate::scheduler::Instant;
+use crate::kit::scheduler::Instant;
 
 /// A timer whose sleeps end only when the test says so.
 #[derive(Clone, Default)]

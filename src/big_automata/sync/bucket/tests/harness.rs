@@ -12,13 +12,13 @@ use std::collections::VecDeque;
 
 use proptest::prelude::*;
 
-use crate::bucket::BucketMachine;
-use crate::bucket::BucketMachineCommand;
-use crate::bucket::FilteredBuckets;
-use crate::bucket::calc_working_level;
-use crate::bucket::filter_buckets;
-use crate::bucket::filter_objects;
-use crate::bucket::summaries_agree;
+use crate::sync::bucket::BucketMachine;
+use crate::sync::bucket::BucketMachineCommand;
+use crate::sync::bucket::FilteredBuckets;
+use crate::sync::bucket::calc_working_level;
+use crate::sync::bucket::filter_buckets;
+use crate::sync::bucket::filter_objects;
+use crate::sync::bucket::summaries_agree;
 use crate::fingerprint::FingerprintSeed;
 use crate::interlude::*;
 use crate::part_store::AccessLevel;
@@ -33,14 +33,14 @@ use crate::part_store::bucket_summary::BucketSummary;
 use crate::part_store::memory::MemoryPartStore;
 use crate::part_store::memory::MemoryPartTx;
 use crate::rev::Rev;
-use crate::rpc::bucket::BucketObjPageEntry;
-use crate::rpc::bucket::GetChangedBucketsError;
-use crate::rpc::bucket::GetChangedBucketsRequest;
-use crate::rpc::bucket::LeafBucketPage;
-use crate::rpc::bucket::LeafBucketRequest;
-use crate::rpc::bucket::LeafBucketsError;
-use crate::rpc::bucket::LeafBucketsRequest;
-use crate::rpc::bucket::LeafBucketsResponse;
+use crate::sync::rpc::bucket::BucketObjPageEntry;
+use crate::sync::rpc::bucket::GetChangedBucketsError;
+use crate::sync::rpc::bucket::GetChangedBucketsRequest;
+use crate::sync::rpc::bucket::LeafBucketPage;
+use crate::sync::rpc::bucket::LeafBucketRequest;
+use crate::sync::rpc::bucket::LeafBucketsError;
+use crate::sync::rpc::bucket::LeafBucketsRequest;
+use crate::sync::rpc::bucket::LeafBucketsResponse;
 
 /// Each side's store as the harness reaches it: through the part store traits, plus the memory
 /// store's own `begin`.

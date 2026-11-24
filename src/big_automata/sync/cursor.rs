@@ -44,7 +44,7 @@ use crate::interlude::*;
 
 use crate::part_store::ObjPayload;
 use crate::rev::Rev;
-use crate::watermark::WatermarkMachine;
+use crate::kit::watermark::WatermarkMachine;
 
 strike! {
     pub enum CursorEvent {

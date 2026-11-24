@@ -95,8 +95,8 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use crate::rev::Rev;
-use crate::scheduler::Instant;
-use crate::strategy::PeerPartStrat;
+use crate::kit::scheduler::Instant;
+use crate::sync::strategy::PeerPartStrat;
 
 #[cfg(test)]
 mod oracle;

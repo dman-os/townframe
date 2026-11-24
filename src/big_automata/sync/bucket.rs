@@ -44,9 +44,9 @@ use crate::part_store::ObjState;
 use crate::part_store::PartStoreRead;
 use crate::part_store::bucket_summary::BucketSummary;
 use crate::rev::Rev;
-use crate::rpc::bucket::BucketObjPageEntry as RawLeafBucketEntry;
-use crate::rpc::bucket::LeafBucketPage as RawLeafBucketPage;
-use crate::rpc::bucket::LeafBucketRequest;
+use crate::sync::rpc::bucket::BucketObjPageEntry as RawLeafBucketEntry;
+use crate::sync::rpc::bucket::LeafBucketPage as RawLeafBucketPage;
+use crate::sync::rpc::bucket::LeafBucketRequest;
 use std::collections::VecDeque;
 
 structstruck::strike! {

@@ -5,11 +5,11 @@ use decide_peer_strat::*;
 mod set_peer_part_cursor;
 use set_peer_part_cursor::*;
 
-use crate::mpsc;
+use crate::kit::mpsc;
 use crate::part_store::ObjPayload;
 use crate::part_store::PartStoreRead;
-use crate::rpc::BigSyncRpcClient;
-use crate::scheduler::TaskId;
+use crate::sync::rpc::BigSyncRpcClient;
+use crate::kit::scheduler::TaskId;
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug)]]

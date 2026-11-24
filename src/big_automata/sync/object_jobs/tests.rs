@@ -2,8 +2,8 @@
 
 use super::*;
 
-use crate::cursor::JobKey::RemoveFromPart;
-use crate::cursor::JobKey::Sync;
+use crate::sync::cursor::JobKey::RemoveFromPart;
+use crate::sync::cursor::JobKey::Sync;
 
 mod sim;
 

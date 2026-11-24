@@ -10,12 +10,12 @@
 //!
 //! | Sub-machine | Owns |
 //! | --- | --- |
-//! | [`PartLifecycle`](crate::part_lifecycle) | each part's phase and the summary calls; the persisted cursor |
+//! | [`PartLifecycle`](crate::sync::lifecycle) | each part's phase and the summary calls; the persisted cursor |
 //! | [`ReplayClient`](crate::replay::client) | the replay session, route ids, update requests |
-//! | [`Lanes`](crate::lanes) | which routes each round names, and holds |
-//! | [`CursorSyncMachine`](crate::cursor) | per-part applied cursors over replay events |
-//! | [`BucketMachine`](crate::bucket), one per walking part | the walk: list, leaf, deltas |
-//! | [`ObjectJobs`](crate::object_jobs) | every per-object backend call, its retries and settlements |
+//! | [`Lanes`](crate::replay::lanes) | which routes each round names, and holds |
+//! | [`CursorSyncMachine`](crate::sync::cursor) | per-part applied cursors over replay events |
+//! | [`BucketMachine`](crate::sync::bucket), one per walking part | the walk: list, leaf, deltas |
+//! | [`ObjectJobs`](crate::sync::object_jobs) | every per-object backend call, its retries and settlements |
 //!
 //! No sub-machine calls another or holds a copy of another's state. This machine's own state
 //! is only the routing glue: the call table, the route sets, object routes' session cursors
@@ -100,4 +100,17 @@
 //! Checked after every step: laws 2, 3, 9, 12, 13. Checked after a quiet drain: every wanted
 //! part is `synced`, and the local store holds the peer's readable view of it (soundness of
 //! `Synced`: whenever it is emitted, the local view matches the peer's view at that cursor).
-//! Lane latency and throughput as in [`crate::lanes`].
+//! Lane latency and throughput as in [`crate::replay::lanes`].
+
+pub(crate) mod bucket;
+pub(crate) mod cursor;
+pub(crate) mod lifecycle;
+pub(crate) mod object_jobs;
+pub(crate) mod rpc;
+pub(crate) mod strategy;
+// FIXME(port): the old multi-peer stats and task bodies, disabled with `cfg(any())`; the
+// stats are replaced by law 13, the task bodies become the driver's I/O.
+#[cfg(any())]
+mod stat;
+#[cfg(any())]
+mod tasks;

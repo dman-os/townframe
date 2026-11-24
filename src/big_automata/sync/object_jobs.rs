@@ -116,10 +116,10 @@ use crate::interlude::*;
 
 use std::collections::BTreeMap;
 
-use crate::cursor::JobKey;
+use crate::sync::cursor::JobKey;
 use crate::part_store::ObjPayload;
 use crate::rev::Rev;
-use crate::scheduler::Instant;
+use crate::kit::scheduler::Instant;
 
 #[cfg(test)]
 mod oracle;

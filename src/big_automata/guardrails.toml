@@ -14,20 +14,11 @@ features = ["automerge"]
 required_features = []
 default_features = true
 
-# Baseline debt present when the crate first got a guardrail contract (2026-11-18). The two
-# function-length items sit in `cfg(any())`-disabled port code.
+# Baseline debt present when the crate first got a guardrail contract (2026-11-18). The
+# function-length item sits in `cfg(any())`-disabled port code.
 [[exemptions]]
 code = "ERROR_FN_LENGTH"
-path = "src/big_automata/peer.rs"
-symbol = "module::BigSyncMachine::handle_set_peer_strat"
-ceiling = 168
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: copied from big_sync_core with the port, disabled until it compiles"
-reference = "docs/scratch/big-automata-port-ledger.md"
-
-[[exemptions]]
-code = "ERROR_FN_LENGTH"
-path = "src/big_automata/tasks/decide_peer_strat.rs"
+path = "src/big_automata/sync/tasks/decide_peer_strat.rs"
 symbol = "module::DecidePeerStrategyTask::run_run"
 ceiling = 181
 class = "LEGACY_DEBT"

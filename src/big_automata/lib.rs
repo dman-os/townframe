@@ -12,44 +12,27 @@ pub use ids::ObjKey;
 pub use ids::PartKey;
 pub use ids::PeerKey;
 
-mod bucket;
-mod cursor;
 mod fingerprint;
 mod ids;
-mod mpsc;
-mod object_jobs;
+mod kit;
 pub mod okv;
-mod outbox;
-mod part_lifecycle;
 pub mod part_store;
-// FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
-#[cfg(any())]
-mod peer;
 pub mod replay;
 pub mod rev;
-mod rpc;
-mod scheduler;
-pub mod strategy;
-// FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
-#[cfg(any())]
-mod stat;
-// FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
-#[cfg(any())]
-mod tasks;
+mod sync;
 mod utils;
-mod watermark;
 
 use crate::interlude::*;
 
 // FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
 #[cfg(any())]
-use scheduler::TaskId;
+use kit::scheduler::TaskId;
 #[cfg(any())]
-use scheduler::TaskSeed;
+use kit::scheduler::TaskSeed;
 #[cfg(any())]
-use tasks::MachineTask;
+use sync::tasks::MachineTask;
 #[cfg(any())]
-use tasks::SyncTask;
+use sync::tasks::SyncTask;
 
 #[derive(Default, Debug, Clone, Copy)]
 pub enum AllowedStrat {
@@ -114,8 +97,8 @@ strike! {
 }
 
 // FIXME(port): becomes an injected clock with big_repo's `Clock` shape when the machine is
-// ported; its instant is the web-safe `scheduler::Instant`.
-pub type Clock = Box<dyn Fn() -> scheduler::Instant>;
+// ported; its instant is the web-safe `kit::scheduler::Instant`.
+pub type Clock = Box<dyn Fn() -> kit::scheduler::Instant>;
 
 // FIXME(port): disabled until peer/stat/tasks land
 #[cfg(any())]

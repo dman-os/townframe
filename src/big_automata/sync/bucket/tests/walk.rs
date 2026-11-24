@@ -18,7 +18,7 @@ use super::harness::Scenario;
 use super::*;
 use crate::part_store::PartStoreRead;
 use crate::part_store::memory::MemoryPartStore;
-use crate::rpc::bucket::LeafBucketsRequest;
+use crate::sync::rpc::bucket::LeafBucketsRequest;
 
 /// A delta as the oracle names it: the object, and whether it is a removal.
 type Delta = (ObjKey, bool);
