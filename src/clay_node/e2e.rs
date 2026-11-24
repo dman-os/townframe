@@ -417,6 +417,7 @@ async fn a_micro_reads_documents_only_from_its_granted_drawers() {
             // The shape the review micro's install takes: its methods, its drawers and a config
             // datum naming them, to which the composition adds the capability.
             config: Some(InstallConfig {
+                blob_cap: false,
                 tag: "org.example.test.config".to_owned(),
                 key: "main".to_owned(),
                 value: serde_json::Map::from_iter([(

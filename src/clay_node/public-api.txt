@@ -22,7 +22,7 @@ pub impl clay_node::NodeComposition::fn handles_changed (& self , micro : & str)
 pub impl clay_node::NodeComposition::fn node (& self) -> & big_node :: BigNode
 pub impl clay_node::NodeComposition::fn operator_transport (& self) -> OperatorTransport
 pub mod clay_node::test_support
-pub struct clay_node::InstallConfig  { tag: String, key: String, value: serde_json :: Map < String , serde_json :: Value > }
+pub struct clay_node::InstallConfig  { tag: String, key: String, value: serde_json :: Map < String , serde_json :: Value >, blob_cap: bool }
 pub struct clay_node::MicroInstall  { micro: String, methods: BTreeSet < String >, drawers: Vec < (DrawerId , DrawerAccess) >, config: Option < InstallConfig > }
 pub struct clay_node::NodeComposition  {  }
 pub struct clay_node::NodeConfig  { root: PathBuf, bootstrap: Vec < String >, schemas: Arc < big_cabinet :: SchemaRepo >, installs: Vec < MicroInstall >, serve: bool }
