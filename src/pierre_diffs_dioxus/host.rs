@@ -351,7 +351,14 @@ impl DioxusHost {
         // A code view's passes write the root's scroll position through `MountedData`, which
         // exists from `onmounted` on: its frames wait for the root, and its `onmounted` handler
         // ends in this flush.
-        if self.code_view.is_some() && !self.mounted.borrow().contains_key(&self.scroller_root()) {
+        // The view lifts the gate for the one pass it runs ahead of the mount
+        // (`CodeViewHostState::run_ahead_of_mount`).
+        if self
+            .code_view
+            .as_ref()
+            .is_some_and(|code_view| !code_view.ahead_of_mount.get())
+            && !self.mounted.borrow().contains_key(&self.scroller_root())
+        {
             return;
         }
         let pending = {
@@ -665,7 +672,16 @@ impl VirtualizerHost for DioxusHost {
         match geometry.measured_size(*element) {
             Some(size) => size,
             None if client_height > 0.0 => client_height,
-            None => geometry.height(&self.document, *element),
+            None => match geometry.height(&self.document, *element) {
+                // The scroller before the platform has measured it and with no pixel height of
+                // its own to read (`100%`, `80vh`): a browser's first layout would already know
+                // it, so answer the embedder's estimate instead of an empty viewport.
+                height if height <= 0.0 && *element == self.scroller_root() => self
+                    .code_view
+                    .as_ref()
+                    .map_or(height, |code_view| code_view.initial_viewport_height),
+                height => height,
+            },
         }
     }
 

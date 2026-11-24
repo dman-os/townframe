@@ -115,6 +115,7 @@ fn Page(props: PageProps) -> Element {
         scroll: props.scroll.clone(),
         runtime: props.runtime.clone(),
         environment: props.environment.clone(),
+        initial_viewport_height: DEFAULT_INITIAL_VIEWPORT_HEIGHT,
         diff_style: DiffStyle::Unified,
         expand_unchanged: true,
         render_annotation: Some(Callback::new(|slot: FileAnnotation<Note>| {
@@ -315,6 +316,38 @@ fn scroll_writes(element: &Scripted) -> Vec<f64> {
                 .expect("a number")
         })
         .collect()
+}
+
+/// Server-side rendering (and any headless render) delivers no `onmounted`, no `onresize` and
+/// runs no task: the first render is the only one. The rows must be in it, from the estimated
+/// item heights and the initial viewport height, whether the scroller's CSS height is a pixel
+/// length the host can read or not.
+#[test]
+fn the_first_render_holds_the_rows_before_any_measurement() {
+    for height in ["600px", "100%"] {
+        let rig = Rig::mounted_in(
+            Environment::default(),
+            ScrollMode::Own {
+                height: height.to_owned(),
+            },
+        );
+        let page = rig.page();
+        assert!(
+            page.contains("f0_1 = 1"),
+            "no rows in the first render at height {height}: {}",
+            &page[..page.len().min(600)]
+        );
+        assert!(
+            !page.contains("f4_1 = 1"),
+            "{height}: the window is not every file"
+        );
+        // The scaffolding already has the layout's heights.
+        let slab = *rig.state.slab.peek();
+        assert!(
+            slab.container_height.is_some_and(|h| h > 8000.0),
+            "{height}"
+        );
+    }
 }
 
 #[test]
@@ -723,6 +756,7 @@ impl HostRig {
                 clock.sleep(),
                 Rc::new(move || now_time.get()),
                 environment,
+                0.0,
                 slab,
                 20.0,
             );
@@ -1053,9 +1087,15 @@ fn a_viewer_low_in_the_document_renders_its_visible_part_then_follows_the_docume
     assert_eq!(page.rig.state.view.get_scroll_top(), 5_000.0);
     let rendered = page.rig.page();
     assert!(!rendered.contains("f0_1 = 1"), "the window left the top");
-    assert!(!page.rig.shells().is_empty(), "something renders at the new position");
+    assert!(
+        !page.rig.shells().is_empty(),
+        "something renders at the new position"
+    );
     let slab = *page.rig.state.slab.peek();
-    assert!(slab.spacer_height.is_some_and(|height| height > 4_000.0), "{slab:?}");
+    assert!(
+        slab.spacer_height.is_some_and(|height| height > 4_000.0),
+        "{slab:?}"
+    );
 }
 
 #[test]

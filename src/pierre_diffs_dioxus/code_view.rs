@@ -242,6 +242,9 @@ pub struct Runtime {
     pub now: PtrEq<dyn Fn() -> f64>,
 }
 
+/// `CodeViewViewProps::initial_viewport_height`'s default: a laptop-sized panel.
+pub const DEFAULT_INITIAL_VIEWPORT_HEIGHT: f64 = 720.0;
+
 #[derive(Props, Clone, PartialEq)]
 pub struct CodeViewViewProps<A: Clone + PartialEq + 'static> {
     /// Every file, in order.
@@ -253,6 +256,13 @@ pub struct CodeViewViewProps<A: Clone + PartialEq + 'static> {
     /// desktop.
     #[props(default)]
     pub environment: Environment,
+    /// The scroller's height in CSS pixels until the platform reports a real one: what a browser
+    /// answers synchronously on a first layout (`getBoundingClientRect().height`) and standard
+    /// Dioxus only delivers later, through `onresize`. It sizes the first render's window (the
+    /// rows a headless or server-side render holds), is read when the view mounts, and stops
+    /// mattering the moment the platform measures the scroller. Default 720.
+    #[props(default = DEFAULT_INITIAL_VIEWPORT_HEIGHT)]
+    pub initial_viewport_height: f64,
     /// Unified or split; Pierre's default is split.
     #[props(default = DiffStyle::Split)]
     pub diff_style: DiffStyle,
@@ -351,6 +361,8 @@ struct Applied<A> {
     height: Option<String>,
     environment: Environment,
     scroll_to: Option<ScrollRequest>,
+    /// Whether the first pass has been run ahead of the mount (see `sync`).
+    rendered: bool,
 }
 
 struct State<A: Clone + PartialEq + 'static> {
@@ -388,6 +400,7 @@ impl<A: Clone + PartialEq + 'static> State<A> {
             Rc::clone(&props.runtime.sleep.0),
             Rc::clone(&props.runtime.now.0),
             props.environment.clone(),
+            props.initial_viewport_height,
             slab,
             compute_virtual_file_metrics(PartialVirtualFileMetrics::default()).line_height,
         );
@@ -455,6 +468,7 @@ impl<A: Clone + PartialEq + 'static> State<A> {
             },
             environment: props.environment.clone(),
             scroll_to: None,
+            rendered: false,
         }));
         let on_top_file: Rc<RefCell<Option<Callback<String>>>> = Rc::default();
         let unsubscribe = view.subscribe_to_scroll(top_file_listener(
@@ -548,6 +562,19 @@ impl<A: Clone + PartialEq + 'static> State<A> {
             if let Some(request) = &props.scroll_to {
                 self.view.scroll_to(&request.target);
             }
+        }
+        // The first pass cannot wait for the platform. In a browser `setup` and the first
+        // `requestAnimationFrame` run with the root already laid out; here the frame gate waits
+        // for `onmounted`, which a server-side or headless render never delivers, and the first
+        // render would be the empty scaffold for good. So the pass that the files queued runs
+        // now, over the initial viewport height (`CodeViewHostState::initial_viewport_height`),
+        // while `syncing` is still set: the render that follows reads the document, so these
+        // edits need no signal. Passes it queues itself wait for the root as before. A scroll
+        // request is left to the mounted root: it writes the root's scroll position, which
+        // needs the root's `MountedData`.
+        if !applied.rendered && applied.scroll_to.is_none() && !applied.files.is_empty() {
+            applied.rendered = true;
+            self.shell().run_ahead_of_mount(|| self.host.flush_frames());
         }
         self.syncing.set(false);
         // What the pass queued runs on a frame, not on this render.

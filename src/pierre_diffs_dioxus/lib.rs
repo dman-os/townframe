@@ -31,6 +31,7 @@ mod view;
 pub use code_view::CodeViewFile;
 pub use code_view::CodeViewView;
 pub use code_view::CodeViewViewProps;
+pub use code_view::DEFAULT_INITIAL_VIEWPORT_HEIGHT;
 pub use code_view::FileAnnotation;
 pub use code_view::Runtime;
 pub use code_view::ScrollMode;

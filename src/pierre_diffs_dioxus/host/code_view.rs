@@ -115,6 +115,11 @@ pub(crate) struct CodeViewHostState {
     pub(crate) slab: Signal<SlabStyle>,
     nodes: Cell<Option<SlabNodes>>,
     environment: RefCell<Environment>,
+    /// The scroller's height until anything reports one (see `initial_viewport_height` on the
+    /// view's props).
+    pub(super) initial_viewport_height: f64,
+    /// Set while `run_ahead_of_mount` runs: the frame gate (`flush_frames`) is lifted.
+    pub(super) ahead_of_mount: Cell<bool>,
     pub(super) now: Rc<dyn Fn() -> f64>,
     random: Cell<u64>,
     /// The nodes the viewer's resize observer watches: the slab, the root, the header and footer
@@ -148,6 +153,16 @@ impl CodeViewHostState {
         ]
         .into_iter()
         .find_map(|(wrapper, role)| (wrapper == node).then_some(role))
+    }
+
+    /// Runs `flush` (a frame flush) with the mount gate lifted: what a browser does by running
+    /// the first animation frame whether or not anything was mounted. Only for a pass that
+    /// writes no scroll position (the caller checks), because that needs the root's
+    /// `MountedData`.
+    pub(crate) fn run_ahead_of_mount(&self, flush: impl FnOnce()) {
+        self.ahead_of_mount.set(true);
+        flush();
+        self.ahead_of_mount.set(false);
     }
 
     /// The embedder's scroller, in `ScrollMode::Embedder`.
@@ -229,6 +244,7 @@ impl DioxusHost {
         sleep: Rc<dyn Fn(Duration) -> SleepFuture>,
         now: Rc<dyn Fn() -> f64>,
         environment: Environment,
+        initial_viewport_height: f64,
         slab: Signal<SlabStyle>,
         line_height: f64,
     ) -> Rc<Self> {
@@ -236,11 +252,7 @@ impl DioxusHost {
         let root = document.create_element("div");
         match scroll {
             ScrollMode::Own { height } => {
-                document.set_attribute(
-                    root,
-                    "style",
-                    &format!("overflow-y:auto;height:{height};"),
-                );
+                document.set_attribute(root, "style", &format!("overflow-y:auto;height:{height};"));
                 // A scroll container the keyboard can reach (the viewer would make it a
                 // script-only tab stop): without one its arrow and page keys do nothing.
                 document.set_attribute(root, "tabindex", "0");
@@ -268,6 +280,8 @@ impl DioxusHost {
                 slab,
                 nodes: Cell::new(None),
                 environment: RefCell::new(environment),
+                initial_viewport_height,
+                ahead_of_mount: Cell::new(false),
                 now,
                 random: Cell::new(0x9E37_79B9_7F4A_7C15),
                 shell_observed: RefCell::default(),
