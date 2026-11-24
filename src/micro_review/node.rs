@@ -9,10 +9,11 @@ use big_cabinet_core::authority::CapId;
 use clay_mdk::ClientError;
 use clay_mdk::Context;
 use clay_mdk::FacetState;
+use futures::StreamExt;
 use method_core::Unary;
 use micro_review_manifest::ReviewConfig;
-use futures::StreamExt;
 use std::future::Future;
+use std::time::Duration;
 
 /// The most octets [`NodeCalls::read_blob`] collects: capture writes no patch blob larger than
 /// 8 MiB (`MAX_PATCH_BYTES` in `day x intxt`), and records a larger change as having no patch.
@@ -119,6 +120,14 @@ pub trait NodeCalls: Clone + PartialEq + 'static {
     /// and so no `Unary` method can carry one.
     fn read_blob(&self, input: ReadBlob) -> impl Future<Output = Result<Vec<u8>, CallError>>;
 
+    /// Resolves after `duration` on the node's monotonic clock: the timer the diff view paces its
+    /// frames on (a micro has none of its own).
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()>;
+
+    /// The node's monotonic clock, [`Self::sleep`]'s: only differences between readings mean
+    /// anything.
+    fn now(&self) -> Duration;
+
     /// Where to read, and the capability to read with.
     fn configuration(&self) -> Result<Configuration, CallError>;
 }
@@ -175,6 +184,14 @@ impl NodeCalls for ContextNode {
             octets.extend_from_slice(&chunk);
         }
         Ok(octets)
+    }
+
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> {
+        self.context.sleep(duration)
+    }
+
+    fn now(&self) -> Duration {
+        self.context.now()
     }
 
     fn configuration(&self) -> Result<Configuration, CallError> {
