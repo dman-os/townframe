@@ -171,6 +171,9 @@
         },
         "schema": {
           "type": "string"
+        },
+        "uses": {
+          "type": "unknown"
         }
       },
       "required": [
