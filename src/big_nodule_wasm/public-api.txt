@@ -8,4 +8,7 @@ impl OutgoingHandler for big_nodule_wasm::Egress
 impl Provider for big_nodule_wasm::WasmProvider
 impl Router for big_nodule_wasm::Sealed
 pub big_nodule_wasm::async fn boot (blobs : Arc < BlobService > , dispatch : Client < DispatchProtocol > , allow_host_loopback : bool ,) -> Res < (Arc < WasmExecutor > , StopToken) >
+pub enum big_nodule_wasm::FaultKind { # [doc = " The guest trapped: a panic, an `unreachable`, an out-of-bounds access and the like."] Trap, # [doc = " The host failed to run the guest (no workload bound, an instance that stopped, a body"] # [doc = " that failed to arrive), with nothing of the guest's to show."] Host }
+pub struct big_nodule_wasm::FaultFrame  { func_index: u32, func_name: Option < String >, module_offset: Option < usize > }
+pub struct big_nodule_wasm::GuestFault  { kind: FaultKind, message: String, component_hash: BlobId, frames: Vec < FaultFrame >, stdout_tail: String, stderr_tail: String }
 pub struct big_nodule_wasm::WasmExecutor  {  }
