@@ -219,9 +219,6 @@ _: {
         # file
         # patchelf
         # binutils
-        appimage-run
-        v4l-utils
-        libv4l
       ];
 
       devTools = with pkgs; [
@@ -250,8 +247,6 @@ _: {
         # did an llm strip comments?
         # go
         # (pkgs.android-studio.withSdk androidSdkOnly.androidsdk)
-        v4l-utils
-        libv4l
         gh
       ];
 
@@ -347,8 +342,7 @@ _: {
               wasmBindgenCli
             ];
           shellHook = ''
-            # bindgen (v4l2-sys-mit under daybook_ffi's nokhwa) searches the host's LLVM installs
-            # when LIBCLANG_PATH is unset, and a GitHub runner's /usr/lib/llvm-* libclang cannot
+            # bindgen searches the host's LLVM installs when LIBCLANG_PATH is unset, and a GitHub runner's /usr/lib/llvm-* libclang cannot
             # load inside this shell (it misses the host libstdc++). Point it at the flake's.
             export LIBCLANG_PATH="${pkgs.lib.getLib pkgs.llvmPackages.libclang}/lib"
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''

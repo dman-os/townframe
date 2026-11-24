@@ -13,7 +13,7 @@
 //! ```
 //!
 //! A `Database` handle is just configuration: creating one must not pay
-//! the per-database pool/thread cost noted in `daybook_core::local_state`.
+//! the per-database pool/thread cost.
 //! Execution happens on the runtime's shared blocking workers; connections
 //! exist only while a database is in use, plus an idle grace period.
 //!
