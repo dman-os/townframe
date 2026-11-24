@@ -86,14 +86,14 @@
           "sha256-yiNdFaKGLzjZxvh9GqdQ9QlUy1Bb3bxvyDKDg2BfmvM=";
         ${git "iroh-blobs" "b3d641036c807b30d9fc62fd22a83801a38386d3"} =
           "sha256-9S3fDD2eMHVECWvnX32I+RnPUNd2lRp3S6+TPZRBYGw=";
-        ${git "wasmtime" "a24366c874177c2beecd96c7dfae6754c847d361"} =
-          "sha256-T8q2cJyQXhaci4vadjjpC+IaoVkoPFO7W7WV3o8/h3k=";
+        ${git "wasmtime" "38daa7ef0db706828c6fdfd87302fe00212db084"} =
+          "sha256-XMnN2fcCym3pYd2ReATK/TjytsRGjQWVVsCJZWtB+9M=";
         ${git "blitz" "ffaf2bd0518a2cf7571c43f08327bd580b1871ca"} =
           "sha256-RK6XcHOCVl4qmlMnWl7q1bB27ynukmPxwx0j+5+MZhc=";
         ${git "subduction" "5f418129c5188750a34847d2624ace583c192c59"} =
           "sha256-4cvvJQol5wkeVJmW8wzUy7S8Qsdl8PYyH1y/K/eIjRU=";
-        ${git "wasm-component-model-polyfill" "da35a9b4e4cc71dacb57323b906093f9e18e78b6"} =
-          "sha256-S+xSm+6zSdsYo6ReFJoT29rT2DT/VXYxCUVvnExajaw=";
+        ${git "wasm-component-model-polyfill" "2a8d11a01d6630fabcca1730423e7103b4466d41"} =
+          "sha256-Vqp3Je39JmnoRkBLmNTL3m6VmkcSsLBzV3UFKF1OVNI=";
         ${git "keyhive" "a84137d1f2bdd81cc6c883253a534cc3f0380b5e"} =
           "sha256-8Iok2MexAWnGFov2D+6jC+GsMhDLfOPlufYDRMLz9Ls=";
       };
@@ -179,7 +179,7 @@
         outputHashes = lib.getAttrs [
           (git "autosurgeon" "6a1df66f667667f1d14bc2272c4d426815de66b8")
           (git "dioxus" "49e05de24022388ee0e36802edf59897dbe41db3")
-          (git "wasm-component-model-polyfill" "da35a9b4e4cc71dacb57323b906093f9e18e78b6")
+          (git "wasm-component-model-polyfill" "2a8d11a01d6630fabcca1730423e7103b4466d41")
         ] outputHashes;
       };
 
