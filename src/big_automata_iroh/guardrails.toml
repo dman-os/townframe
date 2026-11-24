@@ -1,12 +1,13 @@
 version = 1
 role = "runtime"
-dependency_reason = "Hosts the big_automata replay protocol as a service: the part store is served by big_automata, and the service stack of service_utils_rs and its native client carry the calls."
+dependency_reason = "Binds the big_automata replay and sync protocols onto the service stack: the calling half (PeerRpcClient) rides the typed client core and its iroh transport and builds for the browser, and the serving half (the serve feature) hosts the part store on service_utils_rs and its native client."
 allowed_dependencies = [
     "big_automata",
     "method_core",
     "service_client_core_rs",
     "service_client_iroh_rs",
     "service_client_native_rs",
+    "service_core_rs",
     "service_utils_rs",
     "utils_rs",
 ]
@@ -18,3 +19,9 @@ default_features = true
 features = []
 
 [builds.native]
+
+# The calling half only: the serving half sits on the native host stack (`serve` feature).
+[builds.wasm32-unknown-unknown]
+features = []
+required_features = []
+default_features = false
