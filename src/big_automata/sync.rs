@@ -112,6 +112,18 @@
 //! `Synced`: whenever it is emitted, the local view matches the peer's view at that cursor).
 //! Lane latency and throughput as in [`crate::replay::lanes`].
 
+use crate::part_store::Generation;
+use crate::rev::Rev;
+
+/// How far a client has consumed a peer's part, and in which of the peer's [generations](Generation)
+/// that position is. A rev means nothing under another generation, so the two are
+/// persisted and compared together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCursor {
+    pub generation: Generation,
+    pub rev: Rev,
+}
+
 pub(crate) mod bucket;
 pub(crate) mod cursor;
 pub(crate) mod lifecycle;

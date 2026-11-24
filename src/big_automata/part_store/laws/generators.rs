@@ -58,6 +58,7 @@ pub fn part_ops() -> impl Strategy<Value = Vec<PartOp>> {
     let op = prop_oneof![
         4 => part_writes().prop_map(PartOp::Commit),
         1 => part_writes().prop_map(PartOp::Rollback),
+        1 => Just(PartOp::MintGeneration),
         2 => (any_selector(), any::<u8>(), any::<u8>(), any_limits()).prop_map(
             |(selector, after, until, limits)| PartOp::Read { selector, after, until, limits }
         ),

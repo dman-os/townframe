@@ -61,6 +61,7 @@ impl Default for MemoryDb {
 /// One table's committed rows. A plain value inside its owner's locked state: no lock, no
 /// sharing. [`MemoryDb`] embeds these, and so can any store that keeps a revisioned table
 /// beside its own state under one lock (the memory part store's log).
+#[derive(Clone)]
 pub(crate) struct OkvTable<K, V> {
     rev: Rev,
     /// The rows, grouped by the rev that wrote them: a read walks this in `(rev, key)` order

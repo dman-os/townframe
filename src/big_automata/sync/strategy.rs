@@ -3,21 +3,26 @@
 //! settle a [`PeerPartStrat::BucketWalk`] on cursor replay when the walk finds nothing dirty.
 
 use crate::AllowedStrat;
-use crate::sync::bucket::BucketMachine;
-use crate::sync::bucket::calc_working_level;
 use crate::interlude::*;
+use crate::part_store::Generation;
 use crate::part_store::PartSummary;
 use crate::rev::Rev;
+use crate::sync::bucket::BucketMachine;
+use crate::sync::bucket::calc_working_level;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerPartStrat {
-    /// Replay the peer's log from `from`, the cursor we hold for it, up to `latest`.
-    Cursor { from: Rev, latest: Rev },
+    /// Replay the peer's log up to `latest`, the summary's `latest_cursor`, from the cursor
+    /// the part lifecycle holds. The peer's `generation` rides along for the lifecycle to
+    /// compare with the one its cursor was stored under; this decision does not know the
+    /// cursor, so it cannot say where the replay starts.
+    Cursor { generation: Generation, latest: Rev },
     /// Walk the buckets down to `working_level`, then hand over to cursor replay at `latest`,
     /// the summary's `latest_cursor`: the walk reads state no older than the summary, so
     /// replaying from there may repeat rows but never skips one. The walk lists changes since
-    /// the cursor we hold, which the caller already has.
+    /// the cursor the part lifecycle holds (`StartWalk::since`), 0 after a restart.
     BucketWalk {
+        generation: Generation,
         working_level: BuckLevel,
         remote_depth: BuckLevel,
         remote_len: u64,
@@ -30,14 +35,13 @@ pub enum PeerPartStrat {
 
 /// Decide every part of `parts` from the peer's `summaries`.
 ///
-/// - `cursors` is what we hold per part for this peer; a part without an entry has consumed
-///   nothing, so replays from 0. The peer counted `dirty` against the cursor we advertised, so
-///   the caller must pass the cursors it advertised.
+/// - The peer counted `dirty` against the cursor we advertised, which this decision does not
+///   see: the part lifecycle owns the cursor and decides where a part resumes (or restarts,
+///   when the peer's generation changed).
 /// - `modes` overrides `default_mode` per part. [`AllowedStrat::Cursor`] forces cursor replay.
 pub fn decide_peer_strat(
     parts: &Set<PartKey>,
     summaries: &Map<PartKey, PartSummary>,
-    cursors: &Map<PartKey, Rev>,
     modes: &Map<PartKey, AllowedStrat>,
     default_mode: AllowedStrat,
 ) -> Map<PartKey, PeerPartStrat> {
@@ -47,9 +51,8 @@ pub fn decide_peer_strat(
             let Some(summary) = summaries.get(part_key) else {
                 return (part_key.clone(), PeerPartStrat::Unknown);
             };
-            let from = cursors.get(part_key).copied().unwrap_or(0);
             let cursor = PeerPartStrat::Cursor {
-                from,
+                generation: summary.generation,
                 latest: summary.latest_cursor,
             };
             let mode = modes.get(part_key).copied().unwrap_or(default_mode);
@@ -69,6 +72,7 @@ pub fn decide_peer_strat(
                 cursor
             } else {
                 PeerPartStrat::BucketWalk {
+                    generation: summary.generation,
                     working_level: calc_working_level(
                         summary.member_count,
                         summary.deepest_bucket_level,

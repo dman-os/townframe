@@ -14,13 +14,13 @@ use crate::part_store::PartStoreRead;
 use crate::part_store::laws;
 use crate::part_store::memory::MemoryPartStore;
 use crate::part_store::oracle::PartWrite;
-use crate::rev::Rev;
+use crate::sync::PeerCursor;
 
 #[derive(Default)]
 struct Table {
-    cursors: BTreeMap<(PeerKey, String, PartKey), Rev>,
+    cursors: BTreeMap<(PeerKey, String, PartKey), PeerCursor>,
     /// Every entry ever written, in the order received.
-    log: Vec<(PartKey, Rev)>,
+    log: Vec<(PartKey, PeerCursor)>,
 }
 
 /// A [`PeerCursors`] in memory. Cloning shares the table, so a test keeps a handle to read
@@ -32,41 +32,62 @@ pub struct MemoryPeerCursors {
 
 impl MemoryPeerCursors {
     /// Every entry written, in the order the driver issued it: what law 5 is judged on. The
-    /// table itself ignores an entry below the stored cursor, so the stored cursors alone
-    /// would hide a write that went backwards.
-    pub fn written(&self) -> Vec<(PartKey, Rev)> {
+    /// table itself ignores an entry below the stored cursor of its generation, so the stored
+    /// cursors alone would hide a write that went backwards.
+    pub fn written(&self) -> Vec<(PartKey, PeerCursor)> {
         self.table.lock().expect("table lock poisoned").log.clone()
     }
 
     /// The stored cursor of `part`.
-    pub fn get(&self, peer: &PeerKey, backend: &str, part: &PartKey) -> Rev {
+    pub fn get(&self, peer: &PeerKey, backend: &str, part: &PartKey) -> Option<PeerCursor> {
         self.table
             .lock()
             .expect("table lock poisoned")
             .cursors
             .get(&(peer.clone(), backend.to_owned(), part.clone()))
             .copied()
-            .unwrap_or(0)
     }
 }
 
 impl PeerCursors for MemoryPeerCursors {
-    async fn read(&self, peer: &PeerKey, backend: &str, parts: &[PartKey]) -> Res<Vec<Rev>> {
+    async fn read(
+        &self,
+        peer: &PeerKey,
+        backend: &str,
+        parts: &[PartKey],
+    ) -> Res<Vec<Option<PeerCursor>>> {
         Ok(parts
             .iter()
             .map(|part| self.get(peer, backend, part))
             .collect())
     }
 
-    async fn write(&self, peer: &PeerKey, backend: &str, writes: &[(PartKey, Rev)]) -> Res<()> {
+    async fn write(
+        &self,
+        peer: &PeerKey,
+        backend: &str,
+        writes: &[(PartKey, PeerCursor)],
+    ) -> Res<()> {
         let mut table = self.table.lock().expect("table lock poisoned");
         for (part, cursor) in writes {
             table.log.push((part.clone(), *cursor));
-            let stored = table
+            match table
                 .cursors
                 .entry((peer.clone(), backend.to_owned(), part.clone()))
-                .or_default();
-            *stored = (*stored).max(*cursor);
+            {
+                std::collections::btree_map::Entry::Occupied(mut stored)
+                    if stored.get().generation == cursor.generation =>
+                {
+                    stored.get_mut().rev = stored.get().rev.max(cursor.rev);
+                }
+                // Another generation than the stored one: the peer's log is a new one.
+                std::collections::btree_map::Entry::Occupied(mut stored) => {
+                    stored.insert(*cursor);
+                }
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(*cursor);
+                }
+            }
         }
         Ok(())
     }

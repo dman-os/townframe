@@ -46,11 +46,11 @@
 //!    ladder; the deadline is set at the next `flush`. A part re-queued from `Unanswered`
 //!    queues by its new age; one re-queued by `TooManyParts` keeps its age.
 //! 6. **`Deciding → Cursor { from }`** emits `StartCursor { part, from }`, where `from` is
-//!    the cursor we advertised in the call. **`Deciding → Walking`** emits
-//!    `StartWalk { part, strat }` and sets the part's handover cursor to the larger of the
-//!    summary's `latest` and the cursor we already hold: the walk reads state no older than
-//!    the summary, and the cursor tail runs concurrently from there. (A peer whose `latest`
-//!    is below what we hold rewound its log; that recovery is not this machine's.)
+//!    the cursor we hold (the one advertised in the call, unless law 10 restarted the part).
+//!    **`Deciding → Walking`** emits `StartWalk { part, strat, since }`, where `since` is that
+//!    same cursor, and sets the part's handover cursor to the larger of the summary's `latest`
+//!    and the cursor we hold: the walk reads state no older than the summary, and the cursor
+//!    tail runs concurrently from there.
 //! 7. **While `Walking`, the part's cursor is held.** The parent reports the tail's applied
 //!    watermark with `applied(part, cursor)`; this machine raises the held handover cursor
 //!    but emits no `PersistCursor` for a walking part. Persisting before the walk's work
@@ -63,6 +63,27 @@
 //!    emits `PersistCursor` when it raises the cursor; the cursor never goes back.
 //! 9. **Disconnect clears everything.** The machine is per connection; nothing but the
 //!    persisted cursors survives it.
+//! 10. **A cursor belongs to the generation it was stored under** (the peer's
+//!     [`Generation`](crate::part_store::Generation)). A part is added with `Option<PeerCursor>`:
+//!     `None` is a part never seen, which holds cursor 0 and no generation. The decision
+//!     compares the summary's generation with the held one, and the summary's `latest` with
+//!     the held cursor. The part **resumes** from the held cursor when the generations match
+//!     and `latest` is not below it, or when none is held (the part adopts the summary's
+//!     generation, nothing was consumed). Otherwise the peer lost or replaced its data (a
+//!     recreated store, a backup restored without a mint) and a rev we hold means nothing on
+//!     its new log, where rows between its head and our old cursor would be missed for good.
+//!     The part **restarts**: the held cursor becomes 0 (so the cursor tail replays the whole
+//!     log, or the walk lists everything and reconciles against the local part), the part
+//!     takes the summary's generation, and a `Restart` command (carrying the old cursor with
+//!     its generation, and the summary's generation and `latest`) comes before
+//!     `StartCursor`/`StartWalk` for the embedder to log. Every `PersistCursor` carries the
+//!     part's current generation, so the first persist after a restart writes the new one; a
+//!     crash before it leaves the old generation stored and the next connection restarts
+//!     again, which is idempotent.
+//!     Checked once per decision, never mid-connection: a generation change while connected
+//!     means the peer restarted, which loses the replay session (its next update or round
+//!     fails) and forces a reconnect, whose parts all decide again from fresh summaries. So
+//!     the decision's summary is the only place a changed generation can first show.
 //!
 //! # Costs
 //!
@@ -94,8 +115,10 @@ use crate::interlude::*;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use crate::rev::Rev;
 use crate::kit::scheduler::Instant;
+use crate::part_store::Generation;
+use crate::rev::Rev;
+use crate::sync::PeerCursor;
 use crate::sync::strategy::PeerPartStrat;
 
 #[cfg(test)]
@@ -119,17 +142,28 @@ pub(crate) enum LifecycleCommand {
         call: CallId,
         parts: Map<PartKey, Rev>,
     },
+    /// Law 10: the part's decision found the peer on another generation, or behind the cursor
+    /// we hold, and the part starts over from cursor 0. `held` is what we had; the peer is now
+    /// on `peer_generation` and its log ends at `peer_latest`.
+    Restart {
+        part: PartKey,
+        held: PeerCursor,
+        peer_generation: Generation,
+        peer_latest: Rev,
+    },
     StartCursor {
         part: PartKey,
         from: Rev,
     },
+    /// Walk the part's buckets. `since` is the cursor the walk lists changes from.
     StartWalk {
         part: PartKey,
         strat: PeerPartStrat,
+        since: Rev,
     },
     PersistCursor {
         part: PartKey,
-        cursor: Rev,
+        cursor: PeerCursor,
     },
     Retire {
         part: PartKey,
@@ -175,6 +209,9 @@ enum State {
 #[derive(Debug)]
 struct Part {
     state: State,
+    /// The generation `cursor` was stored under; `None` for a part never seen, whose cursor is
+    /// 0. Set from the summary when the part starts (law 10).
+    generation: Option<Generation>,
     /// Queued and unanswered: the cursor we advertise. `Walking`: the held handover cursor.
     /// `Cursor`: the persisted cursor.
     cursor: Rev,
@@ -208,6 +245,16 @@ pub(crate) struct PartLifecycle {
     last_flush: Option<Instant>,
 }
 
+impl Part {
+    /// The held cursor with its generation: only for a part that has been decided.
+    fn held(&self) -> PeerCursor {
+        PeerCursor {
+            generation: self.generation.expect("a decided part has a generation"),
+            rev: self.cursor,
+        }
+    }
+}
+
 impl PartLifecycle {
     pub(crate) fn new(config: Config) -> Self {
         assert!(config.max_parts > 0, "a call must be able to name a part");
@@ -226,9 +273,9 @@ impl PartLifecycle {
         }
     }
 
-    /// Want `part`. `cursor` is the persisted cursor we hold for it (0 if none). A part that is
-    /// already wanted is left alone.
-    pub(crate) fn add(&mut self, part: PartKey, cursor: Rev) {
+    /// Want `part`. `cursor` is the persisted cursor we hold for it, `None` for a part never
+    /// seen. A part that is already wanted is left alone.
+    pub(crate) fn add(&mut self, part: PartKey, cursor: Option<PeerCursor>) {
         if self.parts.contains_key(&part) {
             return;
         }
@@ -238,7 +285,8 @@ impl PartLifecycle {
             part,
             Part {
                 state: State::Queued,
-                cursor,
+                generation: cursor.map(|cursor| cursor.generation),
+                cursor: cursor.map_or(0, |cursor| cursor.rev),
                 seq: self.seq,
             },
         );
@@ -339,7 +387,7 @@ impl PartLifecycle {
                 p.cursor = cursor;
                 out.push(LifecycleCommand::PersistCursor {
                     part: part.clone(),
-                    cursor,
+                    cursor: p.held(),
                 });
             }
             // A report from a previous incarnation of the part, or one that raises nothing.
@@ -362,7 +410,7 @@ impl PartLifecycle {
         p.state = State::Cursor;
         out.push(LifecycleCommand::PersistCursor {
             part: part.clone(),
-            cursor: p.cursor,
+            cursor: p.held(),
         });
     }
 
@@ -451,6 +499,26 @@ impl PartLifecycle {
 
     fn start(&mut self, part: PartKey, strat: PeerPartStrat, out: &mut Vec<LifecycleCommand>) {
         let p = self.parts.get_mut(&part).expect("live part");
+        let (peer_generation, latest) = match strat {
+            PeerPartStrat::Cursor { generation, latest }
+            | PeerPartStrat::BucketWalk {
+                generation, latest, ..
+            } => (generation, latest),
+            PeerPartStrat::Unknown => unreachable!("an unknown strat decides nothing"),
+        };
+        // Law 10. A part never seen holds cursor 0 and has nothing to lose.
+        if let Some(generation) = p.generation
+            && (generation != peer_generation || latest < p.cursor)
+        {
+            out.push(LifecycleCommand::Restart {
+                part: part.clone(),
+                held: p.held(),
+                peer_generation,
+                peer_latest: latest,
+            });
+            p.cursor = 0;
+        }
+        p.generation = Some(peer_generation);
         match strat {
             PeerPartStrat::Cursor { .. } => {
                 p.state = State::Cursor;
@@ -459,12 +527,13 @@ impl PartLifecycle {
                     from: p.cursor,
                 });
             }
-            PeerPartStrat::BucketWalk { latest, .. } => {
-                // The tail replays from `latest`; a cursor we already hold beyond it is never
-                // given back (law 8: the persisted cursor does not go back).
+            PeerPartStrat::BucketWalk { .. } => {
+                let since = p.cursor;
+                // The tail replays from `latest`. The cursor we hold is at most `latest` here:
+                // one beyond it restarted the part above (law 10).
                 p.state = State::Walking;
                 p.cursor = p.cursor.max(latest);
-                out.push(LifecycleCommand::StartWalk { part, strat });
+                out.push(LifecycleCommand::StartWalk { part, strat, since });
             }
             PeerPartStrat::Unknown => unreachable!("an unknown strat decides nothing"),
         }

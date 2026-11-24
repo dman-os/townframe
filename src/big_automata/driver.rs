@@ -93,6 +93,8 @@ mod facts;
 #[cfg(any(test, feature = "test-support"))]
 pub mod memory;
 mod run;
+#[cfg(any(test, feature = "test-support"))]
+pub mod table_laws;
 #[cfg(test)]
 mod tests;
 
@@ -108,6 +110,7 @@ pub use run::PeerDriver;
 pub use run::RouteUpdate;
 
 use crate::rev::Rev;
+use crate::sync::PeerCursor;
 
 /// The backend the driver syncs into: the cut of the backend contract in
 /// [`object_jobs`](crate::sync::object_jobs). A failure is retried by the machine on its
@@ -133,26 +136,30 @@ pub trait SyncBackend {
     fn fetch(&self, job: ObjJob) -> impl Future<Output = Res<()>>;
 }
 
-/// The cursor each (peer, backend, part) has been consumed to. A small table the driver
-/// owns, not the part store: its keys carry the backend.
+/// The cursor each (peer, backend, part) has been consumed to, with the peer's generation it
+/// is a position in. A small table the driver owns, not the part store: its keys carry the
+/// backend.
 ///
-/// An implementation applies the entries of a write in order and a cursor only advances: a
-/// lower one than stored is ignored (as `PartStoreRead::set_peer_part_cursors`). It may
-/// coalesce entries of one write for the same part. A failure is not retried: it crashes the
-/// driver.
+/// An implementation applies the entries of a write in order. Within one generation a cursor
+/// only advances: a lower rev than stored is ignored. An entry of another generation than the
+/// stored one replaces it whatever its rev, because the peer's log is a different one now and
+/// the driver restarts the part from 0 (`PartLifecycle` law 10). It may coalesce entries of
+/// one write for the same part. A failure is not retried: it crashes the driver.
+/// [`table_laws`] states this as checks any implementation runs.
 pub trait PeerCursors {
-    /// The cursor persisted for each part, in the order asked; 0 for a part never written.
+    /// The cursor persisted for each part, in the order asked; `None` for a part never
+    /// written.
     fn read(
         &self,
         peer: &PeerKey,
         backend: &str,
         parts: &[PartKey],
-    ) -> impl Future<Output = Res<Vec<Rev>>>;
+    ) -> impl Future<Output = Res<Vec<Option<PeerCursor>>>>;
 
     fn write(
         &self,
         peer: &PeerKey,
         backend: &str,
-        writes: &[(PartKey, Rev)],
+        writes: &[(PartKey, PeerCursor)],
     ) -> impl Future<Output = Res<()>>;
 }
