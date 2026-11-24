@@ -32,8 +32,8 @@ use crate::transcript::TranscriptImporter;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::datum::DatumMember;
 use intxt_core::capture::Batch;
-use intxt_core::capture::CauseBackfill;
 use intxt_core::capture::Cause;
+use intxt_core::capture::CauseBackfill;
 use intxt_core::capture::Op;
 use intxt_core::capture::RecordedIds;
 use intxt_core::capture::RewritePair;
@@ -983,7 +983,8 @@ fn prepare_worktree(
     let Observed {
         worktrees,
         batches,
-        withheld,
+        // Dropped, see below.
+        withheld: _,
     } = observe_worktrees(
         &event,
         None,
@@ -997,8 +998,13 @@ fn prepare_worktree(
             ..Reported::default()
         },
     )?;
-    // No call, so no cause to withhold.
-    assert!(withheld.is_empty(), "a sessionless window withheld a cause");
+    // This observation has no call of its own, but it is not outside every window: a session's
+    // tool call that is open in the worktree (an agent's `git commit --amend` fires the
+    // `post-rewrite` hook inside its Bash call) is the only window open across the moves, and the
+    // observation names it as their cause. Its turn is unknown when the transcript has not shown
+    // the call yet, and there is no session here to resolve it from or to remember the withheld
+    // cause in, so those ops stay uncaused; the call's own post hook finds nothing left to record
+    // for them. Nothing is lost but the cause's backfill.
     Ok(Prepared {
         batch: Batch {
             session: SessionBatch {
