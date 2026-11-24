@@ -148,6 +148,12 @@ async fn law_4_the_loop_wakes_at_the_machines_deadline() {
         retried >= backoff,
         "{retried:?} with one failure: retried too soon"
     );
+    // The held `Live` round would wake the loop only after its 15s hold: a retry earlier than
+    // that was woken by the machine's own deadline.
+    assert!(
+        retried < Duration::from_secs(10),
+        "{retried:?} with one failure: the loop slept past the deadline"
+    );
 }
 
 /// A table whose first writes are the slowest, so writes that overlapped would land out of
