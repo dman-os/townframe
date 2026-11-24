@@ -32,15 +32,15 @@
 //!   over its `townframe:sqlite` connection. There is no browser build: `sqlite_rs` has none.
 
 mod interlude {
-    pub use std::collections::BTreeMap;
-    pub use std::collections::BTreeSet;
-    pub use std::sync::Arc;
+    pub(crate) use std::collections::BTreeMap;
+    pub(crate) use std::collections::BTreeSet;
+    pub(crate) use std::sync::Arc;
 
-    pub use big_automata::BuckId;
-    pub use big_automata::ObjKey;
-    pub use big_automata::PartKey;
-    pub use big_automata::PeerKey;
-    pub use utils_rs::prelude::*;
+    pub(crate) use big_automata::BuckId;
+    pub(crate) use big_automata::ObjKey;
+    pub(crate) use big_automata::PartKey;
+    pub(crate) use big_automata::PeerKey;
+    pub(crate) use utils_rs::prelude::*;
 }
 
 use sqlite_rs as sqlite_rs_alias;

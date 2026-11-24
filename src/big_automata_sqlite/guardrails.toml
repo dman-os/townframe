@@ -14,3 +14,6 @@ default_features = true
 features = []
 required_features = []
 default_features = true
+
+[migrations]
+"src/big_automata_sqlite/sqlite/migrations/001_init.sql" = "0c7fb3db46351680378d2cefcf0c7273118bf67a8d545e428f8f88ca4d6f677c"
