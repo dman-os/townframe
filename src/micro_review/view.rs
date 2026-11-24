@@ -38,9 +38,14 @@ use clay_dioxus_kit::Status;
 use clay_mdk::hooks::Stylesheet;
 use dioxus::prelude::*;
 use intxt_core::work::PullState;
-use pierre_diffs_dioxus::DiffInput;
+use pierre_diffs_dioxus::CodeViewFile;
+use pierre_diffs_dioxus::CodeViewView;
 use pierre_diffs_dioxus::DiffStyle;
-use pierre_diffs_dioxus::FileDiffView;
+use pierre_diffs_dioxus::PtrEq;
+use pierre_diffs_dioxus::Runtime;
+use pierre_diffs_dioxus::ScrollMode;
+use std::rc::Rc;
+use std::time::Duration;
 
 /// The micro's own stylesheet: what the kit has no component or token for (the page's rhythm,
 /// text roles, wrapping and the rows that open something). It is the micro's unlayered sheet
@@ -471,24 +476,100 @@ fn PatchLoader<C: NodeCalls>(source: PatchSource, node: C) -> Element {
     }
     match (*patch.read()).clone() {
         None | Some(None) => rsx! { Loading { what: "changes" } },
-        Some(Some(Ok(patch))) => rsx! { Patch { patch } },
+        Some(Some(Ok(patch))) => rsx! { Patch { patch, node } },
         Some(Some(Err(error))) => rsx! { Failed { error } },
     }
 }
 
-/// A unified patch in the diff view, view-only: no annotations and no selection yet. The patch
-/// is parsed once per mount (the view compares a parsed diff by identity), so an entry keys it.
+/// The diff's own scroller: a virtualizer needs a bound, and the micro has no page scroller of
+/// its own to forward (`ScrollMode::Embedder`).
+const DIFF_HEIGHT: &str = "60vh";
+
+/// A git patch in the multi-file code view, view-only: no annotations and no selection yet. The
+/// patch is parsed once per mount, every file of it (the view compares each file's diff by
+/// identity), so an entry keys it. A patch that does not parse, or has no file in it (an empty
+/// diff), is the failure alert, never an empty view.
 #[component]
-fn Patch(patch: String) -> Element {
-    let input = use_hook(|| DiffInput::from_patch(&patch).map_err(|error| error.to_string()));
-    match input {
-        Ok(input) => rsx! {
+fn Patch<C: NodeCalls>(patch: String, node: C) -> Element {
+    let files = use_hook(|| CodeViewFile::<()>::from_patch(&patch).map_err(|error| error.message));
+    // The view paces its frames on the node's timer and clock: a micro has neither of its own.
+    // Built once, since the view compares the sleep function by identity and a new one would
+    // remount it.
+    let runtime = use_hook(|| {
+        let sleeper = node.clone();
+        Runtime {
+            sleep: PtrEq::new(Rc::new(move |duration: Duration| {
+                let sleeper = sleeper.clone();
+                Box::pin(async move { sleeper.sleep(duration).await })
+            })),
+            now: PtrEq::new(Rc::new(move || node.now().as_secs_f64() * 1000.0)),
+        }
+    });
+    match files {
+        Ok(files) => rsx! {
             div { "data-part": "diff",
-                FileDiffView::<()> { input, diff_style: DiffStyle::Unified }
+                CodeViewView::<()> {
+                    files,
+                    scroll: ScrollMode::Own {
+                        height: DIFF_HEIGHT.to_owned(),
+                    },
+                    runtime,
+                    diff_style: DiffStyle::Unified,
+                }
             }
         },
         Err(problem) => {
             rsx! { Failure { heading: "The patch cannot be read", detail: problem } }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::Fixture;
+    use crate::fixture::SAMPLE_PATCH;
+
+    #[derive(Props, Clone, PartialEq)]
+    struct Page {
+        patch: String,
+    }
+
+    /// `Patch` over a fixture node, rendered once.
+    fn render(patch: &str) -> String {
+        let mut dom = VirtualDom::new_with_props(
+            |page: Page| {
+                rsx! {
+                    Patch { patch: page.patch, node: Fixture::empty() }
+                }
+            },
+            Page {
+                patch: patch.to_owned(),
+            },
+        );
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn a_patch_renders_as_a_code_view() {
+        let html = render(SAMPLE_PATCH);
+        assert!(html.contains("data-part=\"diff\""), "{html}");
+        assert!(!html.contains("The patch cannot be read"), "{html}");
+        // The code view's own scroller (`ScrollMode::Own`) with its slab inside. The files'
+        // rows are not there yet: the viewer mounts them from the scroller's measured
+        // geometry, which a first render has none of.
+        assert!(
+            html.contains("overflow-y:auto;height:60vh;overflow-anchor:none"),
+            "{html}"
+        );
+        assert!(html.contains("position:sticky"), "{html}");
+    }
+
+    #[test]
+    fn an_empty_patch_is_the_failure_alert_not_an_empty_view() {
+        let html = render("");
+        assert!(html.contains("The patch cannot be read"), "{html}");
+        assert!(!html.contains("data-part=\"diff\""), "{html}");
     }
 }
