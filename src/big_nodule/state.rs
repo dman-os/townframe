@@ -895,7 +895,11 @@ async fn apply_nodule_capabilities(
                 routine_key.clone(),
                 routines
                     .get(routine_key)
-                    .map(|applied| applied.handles.clone())
+                    .map(|applied| RoutineCapabilities {
+                        actor: Some(actor.capability),
+                        ..applied.handles.clone()
+                    })
+                    // A failed mint leaves the routine with nothing, its actor included.
                     .unwrap_or_default(),
             )
         })
