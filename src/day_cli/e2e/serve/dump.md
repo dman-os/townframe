@@ -40,7 +40,50 @@ $ sh -c '"$DAY" dump carts | grep -c "^ *\"cartridgeId\": \"did:key:[^\"]*/core\
 
 $ day dump grants
 {
-  "grants": []
+  "grants": [
+    {
+      "cartridgeId": "did:key:[..]/core",
+      "grant": "method:org.example.daybook.authority.attenuateCapability",
+      "thisBoot": true,
+      "value": {}
+    },
+    {
+      "cartridgeId": "did:key:[..]/core",
+      "grant": "method:org.example.daybook.authority.openActor",
+      "thisBoot": true,
+      "value": {}
+    },
+    {
+      "cartridgeId": "did:key:[..]/core",
+      "grant": "method:org.example.daybook.authority.retractCapability",
+      "thisBoot": true,
+      "value": {}
+    },
+    {
+      "cartridgeId": "did:key:[..]/core",
+      "grant": "method:org.example.daybook.cartridges.awaitCartridgeGrants",
+      "thisBoot": true,
+      "value": {
+        "privileged": true
+      }
+    },
+    {
+      "cartridgeId": "did:key:[..]/core",
+      "grant": "method:org.example.daybook.cartridges.listCartridgeGrants",
+      "thisBoot": true,
+      "value": {
+        "privileged": true
+      }
+    },
+    {
+      "cartridgeId": "did:key:[..]/core",
+      "grant": "method:org.example.daybook.cartridges.listCartridgeInstalls",
+      "thisBoot": true,
+      "value": {
+        "privileged": true
+      }
+    }
+  ]
 }
 
 $ day dump doc nonsense
