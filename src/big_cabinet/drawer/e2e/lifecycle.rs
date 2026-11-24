@@ -479,6 +479,67 @@ async fn the_mirror_query_names_what_the_known_list_wants() {
     node.stop().await;
 }
 
+/// The cost of one `mirrored()` ask on a node that knows many drawers, few of them mirrored
+/// (ADR 054 section 5 asks for it measured). `mirrored()` is re-asked on every drawer projection
+/// change and per connected peer, and walks every known entry with one `ensure_drawer` each, so
+/// the number of known drawers is the variable. Run in release with output shown:
+///
+/// ```text
+/// BIG_CABINET_KNOWN=1000 cargo nextest run --release -p big_cabinet --no-capture -E 'test(long_test_mirrored_cost)'
+/// ```
+///
+/// Reports `COST` lines: wall per call (median of five), and the size of the answer. Wall time is
+/// reported only; the answer's sizes are asserted since they are counted work.
+#[tokio::test]
+async fn long_test_mirrored_cost_by_known_drawers() {
+    let known: usize = std::env::var("BIG_CABINET_KNOWN")
+        .ok()
+        .map_or(10, |value| value.parse().unwrap());
+    let mirrored_count = known / 50 + 1;
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let context = RequestContext::root();
+    let drawers = node.drawers.as_ref().unwrap();
+    for ordinal in 0..known {
+        let drawer = node.collection(&alice, &format!("drawer-{ordinal}")).await;
+        node.remember(&node.drawers_actor, &drawer, ordinal < mirrored_count)
+            .await;
+    }
+    let median_wall = async |label: &str| {
+        let mut walls = Vec::new();
+        let mut answer = Mirrored::default();
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            answer = drawers.mirrored(&context).await.unwrap();
+            walls.push(started.elapsed());
+        }
+        walls.sort();
+        println!(
+            "COST mirrored {label} known={known} mirrored={mirrored_count} groups={} docs={} wall_p50={:?} wall_per_known={:?}",
+            answer.groups.len(),
+            answer.docs.len(),
+            walls[2],
+            walls[2] / u32::try_from(known.max(1)).unwrap(),
+        );
+        answer
+    };
+    let answer = median_wall("projected").await;
+    assert_eq!(answer.groups.len(), known + 2 * mirrored_count);
+    assert_eq!(answer.docs.len(), known);
+
+    // Known by id only: each ask runs a discovery read of a doc this node does not have.
+    for ordinal in 0..known {
+        let mut id = [0; 32];
+        id[..8].copy_from_slice(&u64::try_from(ordinal + 1).unwrap().to_be_bytes());
+        node.remember(&node.drawers_actor, &DrawerId::new(id), false)
+            .await;
+    }
+    let answer = median_wall("plus_absent").await;
+    assert_eq!(answer.groups.len(), known + 2 * mirrored_count);
+    assert_eq!(answer.docs.len(), 2 * known);
+    node.stop().await;
+}
+
 #[tokio::test]
 async fn the_known_drawers_list_is_explicit_and_survives_restart() {
     let mut node = Node::boot().await;
