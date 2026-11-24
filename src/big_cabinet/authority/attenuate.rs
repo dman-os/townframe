@@ -1,4 +1,5 @@
-//! AttenuateCapability: derive a narrower capability over the same object.
+//! AttenuateCapability: derive a narrower capability over the same object, optionally
+//! introduced to one of the holder's own descendants.
 
 use super::*;
 
@@ -10,13 +11,20 @@ impl cap::State {
         let held = cap::walk(self, &request.capability)?;
         held.require(Rights::NARROW)?;
         held.bound(request.rights)?;
+        let mut dependencies = vec![request.capability];
+        let subject = match request.subject {
+            Some(named) if held.cap.subject != Some(named) => {
+                Some(self.introduce(&held, named, &mut dependencies)?)
+            }
+            _ => held.cap.subject,
+        };
         let child = self.child(
             held.cap.object.clone(),
             request.rights,
             held.cap.issuer,
             held.cap.kind,
-            held.cap.subject,
-            [request.capability],
+            subject,
+            dependencies,
         )?;
         let capability = child.wire();
         self.insert(child);

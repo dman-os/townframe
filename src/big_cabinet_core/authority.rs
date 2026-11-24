@@ -408,6 +408,12 @@ pub enum AuthorityServiceError {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// Open (or reopen) the child actor at `path` under the actor `parent` is the identity
+/// capability of. Unprivileged, because it can reach only the parent's own children: `parent`
+/// must be an identity capability carrying `MINT_CHILD` (`UnrecognizedActor` or `Unauthorized`),
+/// `path` must be the parent actor's path plus exactly one segment (`InvalidActorPath`, which
+/// is what keeps siblings, ancestors and unrelated actors out of reach), and `rights` must be a
+/// subset of the parent's (`Escalation`).
 pub struct OpenActor {
     pub parent: CapId,
     pub path: String,
@@ -444,6 +450,13 @@ pub struct MintCapability {
 pub struct AttenuateCapability {
     pub capability: CapId,
     pub rights: Rights,
+    /// The actor the narrowed handle is bound to, with the same meaning and rule as
+    /// [`MintCapability::subject`]: `None` keeps the held handle's subject, and a `Some` that
+    /// differs is an introduction, which needs `Rights::DELEGATE` on the held handle and a live
+    /// strict descendant of its subject (else `Escalation`). It is the unprivileged way to hand
+    /// a descendant a narrowed handle to the very object already held: the object and namespace
+    /// are the held handle's own, so nothing foreign can be named.
+    pub subject: Option<Uuid7>,
 }
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,14 +480,24 @@ pub struct SignDatumClaim {
     pub claim: DatumClaim,
 }
 
-// `mintCapability` mints under the caller-named issuer namespace with a free-form object, and
-// `openActor` brings a new principal into being: neither is narrowed from a presented handle, so
-// both are privileged. `attenuateCapability` only derives a narrower child of the held handle and
-// `retractCapability` only retracts descendants of the `via` handle (`may_retract`), so a nodule
-// may use them on its own handles.
+// `mintCapability` mints under the caller-named issuer namespace with a free-form object, which
+// is not narrowed from a presented handle, so it is privileged: whoever holds a namespace handle
+// could otherwise name any object in it. Privilege is a static property of the method and the
+// handler never sees the caller's scope, so the unprivileged path to a narrowed handle for a
+// descendant is `attenuateCapability`, whose `subject` introduces it: object and namespace stay
+// the held handle's own.
+//
+// `openActor` is not privileged. Its parent handle must be an actor's identity capability with
+// `MINT_CHILD`, and the new actor is that handle's subject's own child: its path must be the
+// subject's path plus one segment (`InvalidActorPath` otherwise), so a sibling, an ancestor and
+// an unrelated actor are unreachable. Its rights are bounded by the parent handle
+// (`Escalation`), and the handle is minted in the authority's own actors namespace with a
+// fixed object, so the caller names neither. A nodule that holds an identity capability may
+// therefore open actors under its own actor, which is how a micros nodule gives each micro its
+// own actor. `retractCapability` only retracts descendants of the `via` handle (`may_retract`).
 method_core::methods! {
     error = AuthorityServiceError, nsid_prefix = "org.example.daybook.authority.";
-    OpenActor => OpenedActor, procedure, "openActor", privileged;
+    OpenActor => OpenedActor, procedure, "openActor";
     ResolveActor => Actor, query, "resolveActor";
     ResolveAuthority => ResolvedAuthority, query, "resolveAuthority";
     MintCapability => Capability, procedure, "mintCapability", privileged;

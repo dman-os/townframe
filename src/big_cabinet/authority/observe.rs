@@ -168,6 +168,7 @@ mod tests {
                 AttenuateCapability {
                     capability: authority.root,
                     rights: Rights::NARROW,
+                    subject: None,
                 },
             )
             .await
@@ -179,6 +180,7 @@ mod tests {
                 AttenuateCapability {
                     capability: authority.root,
                     rights: Rights::all(),
+                    subject: None,
                 },
             )
             .await
@@ -190,6 +192,7 @@ mod tests {
                 AttenuateCapability {
                     capability: ancestor.capability_id,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await

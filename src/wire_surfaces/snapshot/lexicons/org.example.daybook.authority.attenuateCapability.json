@@ -1,6 +1,9 @@
 {
   "defs": {
     "AttenuateCapability": {
+      "nullable": [
+        "subject"
+      ],
       "properties": {
         "capability": {
           "type": "string"
@@ -8,6 +11,9 @@
         "rights": {
           "ref": "#Rights",
           "type": "ref"
+        },
+        "subject": {
+          "type": "string"
         }
       },
       "required": [
