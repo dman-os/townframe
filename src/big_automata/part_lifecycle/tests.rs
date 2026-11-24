@@ -285,6 +285,29 @@ fn law_2_a_part_the_cap_leaves_out_goes_in_a_later_call_not_a_latch() {
     assert!((0..4).all(|p| rig.phase(p) == Some(Phase::Cursor)));
 }
 
+#[test]
+fn law_2_oldest_queued_first_holds_across_new_and_retried_parts() {
+    let mut rig = Rig::with(Config {
+        max_parts: 1,
+        ..config()
+    });
+    rig.add(1, 0);
+    rig.add(2, 0);
+    let (call, named) = rig.decide();
+    assert_eq!(named, [1]);
+    rig.decided(call, answered(&[]));
+    // part 1 is backed off; the older queued part 2 goes first and its decision opens the lane
+    let (call, named) = rig.decide();
+    assert_eq!(named, [2]);
+    rig.decided(call, answered(&[(2, cursor_strat(1))]));
+    rig.add(3, 0);
+    assert_eq!(
+        rig.decide().1,
+        [1],
+        "part 1 has waited longer than the new part 3"
+    );
+}
+
 // Law 3
 
 #[test]
@@ -455,6 +478,28 @@ fn law_4_a_refusal_that_cannot_lower_the_cap_backs_off_instead_of_spinning() {
     rig.decided(call, DecideOutcome::TooManyParts { cap: 5 });
     assert_eq!(rig.phase(1), Some(Phase::Unanswered));
     assert!(rig.flush().is_empty());
+}
+
+#[test]
+fn law_4_a_too_many_parts_refusal_leaves_the_lanes_backoff_alone() {
+    let mut rig = Rig::new();
+    rig.add(0, 0);
+    rig.add(1, 0);
+    let (call, _) = rig.decide();
+    rig.decided(call, DecideOutcome::TooManyParts { cap: 1 });
+    // two empty answers climb the ladder to 2s then 4s; the refusal before them added no rung
+    for expected in [[0], [1]] {
+        let (call, named) = rig.decide();
+        assert_eq!(named, expected);
+        rig.decided(call, answered(&[]));
+    }
+    rig.flush();
+    let due = rig.lc.next_due().expect("both parts back off");
+    assert_eq!(
+        (due - rig.now).as_secs(),
+        4,
+        "the refusal did not climb the ladder"
+    );
 }
 
 // Law 5
