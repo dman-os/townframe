@@ -37,8 +37,7 @@ pub impl big_cabinet::authority::AuthorityService::fn root_cap (& self) -> CapId
 pub impl big_cabinet::authority::AuthorityService::fn sign_as_node (& self , domain : & [u8] , payload : & [u8]) -> [u8 ; 64]
 pub impl big_cabinet::authority::DomainAuthority < S >::fn holder (& self) -> Option < Holder >
 pub impl big_cabinet::capability::DomainCapabilities::async fn mint < S : Serialize > (& self , context : & RequestContext , caller : & Invocation < S > , subject : Option < Uuid7 > , scope : S , rights : Rights , dependencies : Vec < CapId > ,) -> Result < Capability , Error >
-pub impl big_cabinet::capability::DomainCapabilities::async fn resolve < S : DeserializeOwned > (& self , context : & RequestContext , capability : CapId ,) -> Result < Invocation < S > , Error >
-pub impl big_cabinet::capability::DomainCapabilities::async fn resolve_signed < S : DeserializeOwned > (& self , context : & RequestContext , capability : CapId , signer : CapId ,) -> Result < Invocation < S > , Error >
+pub impl big_cabinet::capability::DomainCapabilities::async fn resolve < S : DeserializeOwned > (& self , context : & RequestContext , metadata : & HttpMetadata , capability : CapId ,) -> Result < Invocation < S > , Error >
 pub impl big_cabinet::capability::DomainCapabilities::async fn retract (& self , context : & RequestContext , capability : CapId) -> Result < () , Error >
 pub impl big_cabinet::capability::DomainCapabilities::async fn source < S : DeserializeOwned > (& self , context : & RequestContext , authorization : Authorization ,) -> Result < Invocation < S > , Error >
 pub impl big_cabinet::capability::DomainCapabilities::fn new (authority : Client < AuthorityProtocol > , namespace : Namespace , prefix : & 'static str ,) -> Self
