@@ -1,4 +1,4 @@
-//! `day x intxt record [--] <agent command…>`: a transparent stdio proxy that records an ACP
+//! `day x intxt record acp -- <agent command…>`: a transparent stdio proxy that records an ACP
 //! session (FDR 008, "Session recording"). An ACP client (an editor) launches this command in
 //! place of the agent; it spawns the agent, forwards the client's stdin to the agent and the
 //! agent's stdout to the client byte for byte, passes the agent's stderr through, and tees what
