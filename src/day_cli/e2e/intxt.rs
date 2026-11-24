@@ -1814,7 +1814,25 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
         assert_eq!(block.intxts.len(), 1, "{printed}");
         assert_eq!(block.intxts[0].reference.via(), reference.via(), "{printed}");
         assert_eq!(block.intxts[0].title.as_deref(), Some("Port the sync"));
-        let description = block.write_into("Part of the port.\n").unwrap();
+        // With a viewer configured, `pr-block` leads with the viewer link and `show` prints it;
+        // the block still reads and splits the same.
+        let viewing = Packaging::new(client, tmp.path(), &node_root).viewing_at(Some("https://v.example"));
+        let url = generic::Intxt::viewer_url("https://v.example", &reference);
+        let mut linked = Vec::new();
+        viewing.pr_block(&mut linked, &[drawer.to_string()]).await.unwrap();
+        let linked = String::from_utf8(linked).unwrap();
+        assert!(linked.starts_with("<!-- intxt:viewer -->"), "{linked}");
+        assert!(linked.contains(&format!("({url})")), "{linked}");
+        assert_eq!(generic::PrLinks::read(&linked).unwrap(), block);
+        assert_eq!(generic::PrLinks::split(&linked).unwrap().0, "");
+        let mut shown = Vec::new();
+        viewing.show(&mut shown, Some(&drawer.to_string())).await.unwrap();
+        let shown = String::from_utf8(shown).unwrap();
+        assert!(shown.contains(&format!("view: {url}\n")), "{shown}");
+        let mut plain = Vec::new();
+        packaging.show(&mut plain, Some(&drawer.to_string())).await.unwrap();
+        assert!(!String::from_utf8(plain).unwrap().contains("view:"));
+        let description = block.write_into("Part of the port.\n", None).unwrap();
         let answer = |title: &str, updated_at: &str| {
             json!({
                 "title": title, "state": "open", "merged_at": null,

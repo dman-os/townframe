@@ -227,6 +227,8 @@ pub enum IntxtCommands {
     /// Show what an intxt holds: its commits, jj changes, tracked refs and sessions
     ///
     /// Each entry has a short id, the shortest prefix that is unique among the intxt's entries.
+    /// With `DAY_INTXT_VIEWER` set to a web viewer's base URL, a `view:` line gives the intxt's
+    /// page there.
     #[command(after_long_help = "Examples:\n  day x intxt show qx")]
     Show {
         /// The intxt: its short id, or its full drawer id. Default: the one this worktree is on
@@ -318,8 +320,9 @@ pub enum IntxtCommands {
     ///
     /// Prints a collapsed `<details>` holding a JSON code block (`org.example.intxt.prLinks`) with
     /// each intxt's `dtxt:doc:` reference (hinting at this node and the peers it syncs with), title
-    /// and tracked refs, to paste at the end of the description. Default: the intxt this worktree
-    /// is on. Reading a PR with `day x intxt github pull` finds the intxts it names there.
+    /// and tracked refs, to paste at the end of the description. With `DAY_INTXT_VIEWER` set to a
+    /// web viewer's base URL, a line of Markdown links to each intxt's viewer page leads it, for a
+    /// reader on a phone. Default: the intxt this worktree is on. Reading a PR with `day x intxt github pull` finds the intxts it names there.
     #[command(after_long_help = "Examples:\n  day x intxt pr-block\n  day x intxt pr-block qx qy")]
     PrBlock {
         /// The intxts: short ids, or full drawer ids. Default: the one this worktree is on
@@ -738,7 +741,8 @@ async fn with_packaging_exit(
     let participant = participant::Detected::from_process(config.node_dir.root())?;
     verb(
         &package::Packaging::new(&client, &cwd, config.node_dir.root())
-            .participating_as(participant),
+            .participating_as(participant)
+            .viewing_at(config.cli_config.viewer_url.as_deref()),
     )
     .await
 }

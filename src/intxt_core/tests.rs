@@ -375,7 +375,7 @@ fn the_pr_block_keeps_the_reference_with_its_via_hint() {
             node(7)
         )
     );
-    let read = generic::PrLinks::read(&links.block()).unwrap();
+    let read = generic::PrLinks::read(&links.block(None)).unwrap();
     assert_eq!(read, links);
     assert_eq!(read.intxts[0].reference.via(), [node(3), node(7)]);
     assert_eq!(read.intxts[1].reference.via(), []);
@@ -415,21 +415,26 @@ fn the_pr_block_reader_agrees_with_the_golden_vectors() {
             case.name
         );
         // Writing the links back leaves a description that reads the same and writes the same.
-        let written = read.write_into(&case.description).unwrap();
+        let written = read.write_into(&case.description, None).unwrap();
         assert_eq!(
             serde_json::to_value(generic::PrLinks::read(&written).unwrap()).unwrap(),
             serde_json::to_value(&read).unwrap(),
             "{}",
             case.name
         );
-        assert_eq!(read.write_into(&written).unwrap(), written, "{}", case.name);
+        assert_eq!(
+            read.write_into(&written, None).unwrap(),
+            written,
+            "{}",
+            case.name
+        );
     }
 }
 
 #[test]
 fn splitting_a_description_removes_the_block_and_the_blank_lines_that_framed_it() {
     let links = sample_links();
-    let block = links.block();
+    let block = links.block(None);
     let cases = [
         // After the text, between two texts, before the text, alone, and absent.
         (format!("Intro.\n\n{block}\n"), "Intro."),
@@ -456,20 +461,20 @@ fn splitting_a_description_removes_the_block_and_the_blank_lines_that_framed_it(
 #[test]
 fn the_pr_block_writer_inserts_replaces_and_is_idempotent() {
     let links = sample_links();
-    let block = links.block();
+    let block = links.block(None);
     assert!(block.starts_with("<details>\n<summary>intxt</summary>\n\n```json\n{"));
     assert!(block.ends_with("}\n```\n\n</details>"));
     assert!(block.contains("\"$type\": \"org.example.intxt.prLinks\""));
 
     // Into an empty description: the block alone.
-    assert_eq!(links.write_into("").unwrap(), block);
+    assert_eq!(links.write_into("", None).unwrap(), block);
 
     // After existing text: that text stays as it was, set off by a blank line.
     let text = "Splits the parser.\n\n- one\n- two\n";
-    let inserted = links.write_into(text).unwrap();
+    let inserted = links.write_into(text, None).unwrap();
     assert_eq!(inserted, format!("{text}\n{block}"));
     assert_eq!(
-        links.write_into("No newline at the end").unwrap(),
+        links.write_into("No newline at the end", None).unwrap(),
         format!("No newline at the end\n\n{block}")
     );
 
@@ -478,26 +483,26 @@ fn the_pr_block_writer_inserts_replaces_and_is_idempotent() {
     let mut newer = links.clone();
     newer.intxts.pop();
     newer.intxts[0].title = Some("renamed".into());
-    let replaced = newer.write_into(&before).unwrap();
+    let replaced = newer.write_into(&before, None).unwrap();
     assert_eq!(
         replaced,
-        format!("Intro.\n\n{}\n\nFooter.\n", newer.block())
+        format!("Intro.\n\n{}\n\nFooter.\n", newer.block(None))
     );
     assert_eq!(generic::PrLinks::read(&replaced).unwrap(), newer);
 
     // Idempotent: writing the same links again returns the same text, with LF and CRLF alike.
-    assert_eq!(links.write_into(&inserted).unwrap(), inserted);
-    assert_eq!(newer.write_into(&replaced).unwrap(), replaced);
+    assert_eq!(links.write_into(&inserted, None).unwrap(), inserted);
+    assert_eq!(newer.write_into(&replaced, None).unwrap(), replaced);
     let crlf = text.replace('\n', "\r\n");
-    let once = links.write_into(&crlf).unwrap();
+    let once = links.write_into(&crlf, None).unwrap();
     assert!(!once.replace("\r\n", "").contains('\n'), "{once:?}");
-    assert_eq!(links.write_into(&once).unwrap(), once);
+    assert_eq!(links.write_into(&once, None).unwrap(), once);
     assert_eq!(generic::PrLinks::read(&once).unwrap(), links);
 
     // A malformed block is not replaced silently.
     let broken =
         "<details>\n\n```json\n{\"$type\": \"org.example.intxt.prLinks\"\n```\n\n</details>";
-    assert!(links.write_into(broken).is_err());
+    assert!(links.write_into(broken, None).is_err());
 
     // Carried fields round trip: the block's extras come back on write.
     let carried = format!(
@@ -511,9 +516,75 @@ fn the_pr_block_writer_inserts_replaces_and_is_idempotent() {
     let read = generic::PrLinks::read(&carried).unwrap();
     assert_eq!(read.extra["tickets"], json!(["T-1"]));
     assert_eq!(read.intxts[0].extra["note"], json!(1));
-    let rewritten = read.write_into(&carried).unwrap();
+    let rewritten = read.write_into(&carried, None).unwrap();
     assert_eq!(generic::PrLinks::read(&rewritten).unwrap(), read);
     assert!(rewritten.contains("\"tickets\"") && rewritten.contains("\"note\""));
+}
+
+/// The viewer URL is `<base>/i/<drawer>` with the `via` hint percent-encoded, and the block with a
+/// viewer base leads with one Markdown line of links that the reader and splitter treat as part
+/// of the block: it is stripped, read through, and replaced rather than duplicated.
+#[test]
+fn the_viewer_line_links_each_intxt_and_belongs_to_the_block() {
+    let links = sample_links();
+    assert_eq!(
+        generic::Intxt::viewer_url("https://v.example/", &links.intxts[0].reference),
+        format!(
+            "https://v.example/i/z11111111111111111111111111111111?via={}%7C{}",
+            node(3),
+            node(7)
+        )
+    );
+    assert_eq!(
+        generic::Intxt::viewer_url("https://v.example", &links.intxts[1].reference),
+        "https://v.example/i/z11111111111111111111111111111112"
+    );
+
+    let base = "https://v.example";
+    let block = links.block(Some(base));
+    let (line, details) = block.split_once("\n\n").unwrap();
+    assert_eq!(details, links.block(None));
+    assert_eq!(
+        line,
+        format!(
+            "<!-- intxt:viewer -->Read on the web: \
+             [intxt: commits live with the intxt](https://v.example/i/z11111111111111111111111111111111?via={}%7C{}) \
+             · [z11111111111111111111111111111112](https://v.example/i/z11111111111111111111111111111112)",
+            node(3),
+            node(7)
+        )
+    );
+
+    // Reading is unaffected, and splitting removes the line with the block.
+    assert_eq!(generic::PrLinks::read(&block).unwrap(), links);
+    let described = format!("Intro.\n\n{block}\n\nFooter.\n");
+    let (text, read) = generic::PrLinks::split(&described).unwrap();
+    assert_eq!(text, "Intro.\n\nFooter.\n");
+    assert_eq!(read, links);
+
+    // Writing replaces the line and the block together, with or without a viewer, in LF or CRLF.
+    assert_eq!(links.write_into(&described, Some(base)).unwrap(), described);
+    let without = links.write_into(&described, None).unwrap();
+    assert_eq!(
+        without,
+        format!("Intro.\n\n{}\n\nFooter.\n", links.block(None))
+    );
+    assert_eq!(links.write_into(&without, Some(base)).unwrap(), described);
+    let once = links.write_into("Intro.\r\n", Some(base)).unwrap();
+    assert_eq!(links.write_into(&once, Some(base)).unwrap(), once);
+    assert_eq!(generic::PrLinks::split(&once).unwrap().0, "Intro.");
+
+    // No intxts, no line; a title's brackets cannot end the link text.
+    assert_eq!(
+        generic::PrLinks::default().block(Some(base)),
+        generic::PrLinks::default().block(None)
+    );
+    let mut odd = sample_links();
+    odd.intxts[1].title = Some("a [b]\nc".into());
+    assert!(
+        odd.block(Some(base))
+            .contains("[a \\[b\\] c](https://v.example/i/")
+    );
 }
 
 /// Carrying is not operating: a peer's future fields and vocabulary values survive the whole

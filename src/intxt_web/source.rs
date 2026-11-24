@@ -224,7 +224,7 @@ fn fixture() -> IntxtView {
     .unwrap();
     let pull: GithubPull = serde_json::from_value(json!({
         "title": "Splits the reference parser",
-        "body": format!("Splits the parser.\n\n{}", links.block()),
+        "body": format!("Splits the parser.\n\n{}", links.block(None)),
         "state": "merged", "head": "feat/refs", "base": "main",
         "headSha": "4c1f0a", "baseSha": "9a0e11",
         "updatedAt": "2026-11-17T10:00:00Z", "url": "https://github.com/o/r/pull/12"

@@ -201,6 +201,9 @@ pub(crate) struct Packaging<'a> {
     /// Who the review verbs write as and read the inbox of: the operator unless the CLI detected
     /// an agent ([`Packaging::participating_as`]).
     pub(super) participant: super::participant::Detected,
+    /// The base URL of the web viewer ([`Packaging::viewing_at`]); `show` and `pr-block` link it
+    /// when there is one.
+    pub(super) viewer: Option<&'a str>,
 }
 
 /// An intxt as `show` and `add` read it: its title and its entries in body order.
@@ -339,7 +342,15 @@ impl<'a> Packaging<'a> {
             cwd,
             node_dir,
             participant: super::participant::Detected::operator(),
+            viewer: None,
         }
+    }
+
+    /// The same verbs linking the intxt web viewer served at `base` (`CliConfig::viewer_url`):
+    /// `show` prints the intxt's viewer URL and `pr-block` leads with a line linking it.
+    pub(crate) fn viewing_at(mut self, base: Option<&'a str>) -> Self {
+        self.viewer = base;
+        self
     }
 
     /// The same verbs as the participant `detected` names rather than the operator: what a
@@ -1477,7 +1488,15 @@ impl<'a> Packaging<'a> {
             writeln!(out, "{description}")?;
         }
         // The text that names this intxt on any node, for a PR description or a commit message.
-        writeln!(out, "link: {}", self.reference(&drawer)?)?;
+        let reference = self.reference(&drawer)?;
+        writeln!(out, "link: {reference}")?;
+        if let Some(base) = self.viewer {
+            writeln!(
+                out,
+                "view: {}",
+                generic::Intxt::viewer_url(base, &reference)
+            )?;
+        }
         let mut commits = Vec::new();
         let mut changes = Vec::new();
         let mut refs = Vec::new();
@@ -1587,7 +1606,7 @@ impl<'a> Packaging<'a> {
             }
             links.intxts.push(link);
         }
-        writeln!(out, "{}", links.block())?;
+        writeln!(out, "{}", links.block(self.viewer))?;
         Ok(())
     }
 
