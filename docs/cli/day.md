@@ -408,7 +408,7 @@ Raw debug view of what the node holds, as JSON
 
 ###### **Subcommands:**
 
-* `node` — Everything: node info, installed cartridges and their grants, and every known drawer with its documents and their datums
+* `node` — Everything: node info, installed cartridges and their grants, and every drawer the node holds, uses or knows (with its role) with its documents and their datums
 * `drawer` — One drawer: its descriptor, members, documents and their datums
 * `doc` — One document's datums, or one datum by key
 * `grants` — What cartridges may do: every grant of every cartridge
@@ -418,7 +418,7 @@ Raw debug view of what the node holds, as JSON
 
 ## `day dump node`
 
-Everything: node info, installed cartridges and their grants, and every known drawer with its documents and their datums
+Everything: node info, installed cartridges and their grants, and every drawer the node holds, uses or knows (with its role) with its documents and their datums
 
 **Usage:** `day dump node`
 
