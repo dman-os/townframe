@@ -13,6 +13,9 @@
 mod foundations;
 mod specimens;
 
+#[cfg(test)]
+mod tests;
+
 pub use foundations::ColorFoundation;
 pub use foundations::FoundationSection;
 pub use foundations::TokenFoundations;

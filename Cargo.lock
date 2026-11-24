@@ -2646,7 +2646,9 @@ name = "clay_dioxus_specimens"
 version = "0.1.0"
 dependencies = [
  "clay_dioxus_kit",
+ "clay_surface",
  "dioxus",
+ "dioxus-core",
 ]
 
 [[package]]
