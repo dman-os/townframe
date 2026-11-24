@@ -306,6 +306,10 @@
         },
         {
           "name": "UnknownVersion"
+        },
+        {
+          "description": "The core cartridge is the node's own (ADR 053): the node installs it at the version its\nbuild carries and keeps it enabled with the grants that build declares. Installing another\nversion of it, uninstalling or disabling it, and changing its grants or config are refused.",
+          "name": "CoreCartridge"
         }
       ],
       "input": {
