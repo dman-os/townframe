@@ -258,3 +258,123 @@ for a second pass.
 9. **Which part of ATSMS did you have in mind?** I found and read the three specs above. If you recall a specific
    proposal (the repository has a `proposals/` folder I did not open), name it and I will read it. Recommend a short
    second pass on Signal's Sesame and Matrix cross-signing, since both concern device lists with privacy.
+
+## Keyhive, concretely: what leaks and who must be told
+
+The operator asked seven questions that the earlier sections answered from design docs. These answers are from source:
+keyhive at `/run/media/asdf/p3N/repos/keyhive` (`keyhive_core/src/...`), the sync protocol in `../subduction`
+(`subduction_keyhive/src/protocol.rs`), and our `src/big_repo`. "Not established" means I could not settle it from code.
+
+**1. Is there a contact card for a group? What does a group's id reveal?**
+No group card exists. A `ContactCard` wraps one `KeyOp`, a prekey operation signed by an individual
+(`keyhive_core/src/contact_card.rs:12`), and `Keyhive::contact_card` returns the local individual's (`keyhive.rs`, the
+accessor just above `receive_contact_card` at `:515`). A group is identified by a key and a delegation graph
+(`principal/group.rs:68-86`: `id_or_indie`, `members`, `state`). The id alone reveals nothing, because it is a public key. Whoever
+holds the group's *delegation ops* can enumerate its members: `Group::members()` lists every delegate, and
+`Agent::pick_individual_prekeys` walks them down to individuals (`principal/agent.rs:171-205`). Nested groups flatten in
+that walk, so nesting hides nothing. Holding the id without the ops is not enough to do anything: `Keyhive::add_member`
+looks the agent up by id and fails if it is not held (`keyhive.rs:716-719`).
+
+**2. To grant a group access to a document, does the granter learn every member device?**
+Yes, and so does every later reader. At grant time `pick_individual_prekeys` returns a prekey for every individual
+reachable through the group, and fails with `MissingPrekeys` if any is absent (`agent.rs:171-205`; `peer.rs:62`). Those
+individuals become leaves of the document's CGKA tree through `add_cgka_members_from_prekeys` (`keyhive.rs:~700`, in
+`add_member_with_manual_content`). Afterwards the server hands every reader the CGKA ops, the group's delegations and each reachable
+member's prekey ops: `events_for_agent` is the union of `membership_ops_for_agent`, `reachable_prekey_ops_for_agent`
+and `cgka_ops_reachable_by_agent` (`keyhive.rs:1546-1570`, `1758-1830`), and a reader reaches the document so it
+receives all three. A device added to the group later is seated by any reader that holds the tree
+(`reconcile_doc_readers`, `keyhive.rs:750-766`), so readers learn it as soon as they sync the group. The operator's
+worry is justified: **a malicious or compromised granter learns every device in the group you hand them**, at the moment
+of the grant, and learns new ones as they join. What they cannot learn is devices outside that group. So the grantee
+chooses what to expose by choosing which group to present, which is the per-context design of section 3.
+
+**3. Relays.**
+A relay holding the drawer must hold the group's delegations too, or it cannot serve the group's devices. It computes
+membership by walking the graph (`Membered::transitive_members`, `principal/membered.rs:101`), and a delegation
+naming a group the relay has not heard of does not apply: it parks with `UnknownAgent`, which `is_missing_dependency`
+reports as true (`keyhive.rs:2264-2268`, `:3878`). The relay also receives what any reachable agent receives:
+membership ops, prekey ops and CGKA ops (the same functions as question 2, and keyhive's own threat model: a
+`Relay` holder "sees ... the membership graph", `design/threat_model.md`, A1 and T8). Keyhive has no "ask the relay to
+reveal" request. A granter who is a member simply receives the group's ops and members' prekey ops when it syncs,
+because they are reachable from the drawer. In `big_repo`, the dispatcher sends only payload-free change hints
+to peers whose visibility covers an event, and wakes *every* connected peer except the source for contact-card prekey
+ops (`src/big_repo/runtime2/keyhive_dispatcher.rs:12-19`, the "broadcast-like audience"). The events themselves move in
+`handle_sync_request`, which serves what `get_events_for_peer_pair` computes for that peer's identity
+(`protocol.rs:895-960`, `:1415-1460`). A peer the server does not know gets `RequestContactCard` instead (`:918-927`).
+
+**4. Must a delegation be broadcast? Can a device present the grant later?**
+Not broadcast. Keyhive has no broadcast: an op reaches a peer only when that peer syncs and the server finds the op
+reachable for it. So the delegation (drawer to group) can live only at the drawer's relay. Three things then limit the
+operator's model of "devices become known when one asks":
+
+- *Membership can arrive late.* A device that connects, becomes known through its contact card, and brings its group's
+  ops lets the parked delegation apply. `handle_sync_ops` ingests events from the sender without a membership check
+  that I could find (`protocol.rs:1210-1260`). Whether our relay policy adds one is ADR 005 §2 (refuse unknown peers),
+  which is a design, and I did not trace it in code. Not established.
+- *Decryption cannot arrive late without a reader.* A device must be a CGKA leaf to decrypt, and a leaf is added from
+  its prekey by someone who holds the tree and reads the document. A `Relay`-only server holds no tree
+  (`design/convergent_capabilities.md:92`: `Relay` is excluded from the tree). So the device receives nothing
+  readable until the granter, or another reader, comes online and seats it (`reconcile_doc_readers`).
+- *Someone has to know the group at grant time.* `add_member` needs the group held locally (question 1), and a group is
+  built from a delegation head (`group.rs:~95`), so the granter holds at least the founding member. Keyhive does promote
+  an individual to a group when a delegation names it as subject (`keyhive.rs`, `promote_individual_to_group`, called
+  from `receive_delegation`), and I did not establish whether that allows a group with members the granter never sees.
+  Not established.
+
+So with keyhive as built, **the granter learns the grantee's devices when it seats them, not necessarily at grant time**,
+and a device is never usable before some reader has seated it. "Present the grant when it asks" works for membership
+and cannot work for decryption.
+
+**5. Unlinkability across two accounts.**
+Confirmed. A `Keyhive` holds exactly one local individual (`keyhive.rs:116`, `active: Arc<Mutex<Active<..>>>`), and
+`BigRepo` exposes one card (`src/big_repo/lib.rs:646`). It also treats the iroh peer key and the keyhive individual as
+the same 32 bytes (`lib.rs:658-660`, `KeyhivePeerId::from_bytes(peer_id.to_bytes32()?)`). A device in two accounts'
+groups is therefore one individual in both, visible to every co-member of both drawers and to any relay that holds
+both. Separate individuals would need separate `Keyhive` instances, which means separate `BigRepo`s with separate
+identity seeds. ADR 006 notes that booting a `BigRepo` with another seed is structurally possible, but each would be
+its own repo, store and transport identity, and the node does not run several. Not a feature today.
+
+**6. Discovery today.**
+Confirmed from `src/day_cli/cmds/drawers.rs:31-37` and `src/big_cabinet/drawer/known.rs:1-8`: being made a member lets
+a node read a drawer, but nothing is fetched until it mirrors it (`day drawers remember <id>`), and remembering is
+"bookkeeping, not membership". The id arrives out of band and no inbox exists. One caveat I did not trace: the
+keyhive *graph* sync between members is not gated by mirroring in anything I read, so the node's keyhive may already hold
+the membership ops. What is certain is that no user-visible record appears. For the ticket, intxt's `dtxt:doc:<drawer>?via=…`
+links are not in this tree (the only `via` in `src` is on blob URLs, `src/big_blobs_core/url.rs:84`, and ADR 035
+supersedes it), so I take the shape from the operator's description and from the existing peer ticket (`day peers add
+<ticket>`). **Proposed minimal invite ticket:**
+
+| Field | Why |
+|---|---|
+| Drawer id | What to remember and mirror. |
+| One or more `via` entries: node key and addresses | Where to connect. Same shape as the peer ticket, so accepting a ticket is `peers add` plus `remember`. |
+| Granter's node key | Who invited, and a signature by it over the other fields, so the recipient can tell a real invite from a forged one. |
+| Expiry | A ticket exposes addresses, so bound its life. |
+| Optional label | A name for the human, never trusted. |
+
+It carries **no** device list, no group members and no access level beyond a display hint: the real access is the keyhive
+membership, and the ticket grants nothing (it is not authority, ADR 043 §7). Discovery stays out of the node: the
+ticket travels by messaging, and the node only accepts one a person hands it, so there is no inbox to spam.
+
+**7. ATSMS "inbox".**
+The specs I read do describe one, in the `at.atsms.inbox` record: "a per-DID singleton ... with an ordered list of
+`https:` endpoints for inbound delivery" (`spec/identity-devices.md`). Messages, including a bootstrap invitation, are sealed to a device's published
+prekey (`sealed-asym`) and pushed anonymously to a mailbox keyed by `{did}/{deviceFingerprint}`; the owner fetches them
+with an authenticated request (`spec/atsms-integration.md`, `spec/sealed-sender.md`). Conversation addresses travel
+inside signed group frames, not in public records. I did not find a distinct "you were added" notification in what I
+read, and I read these through a summarising tool. So: the mechanism exists and is the same shape as our ticket, with
+the difference that ATSMS publishes the inbox endpoint publicly in the PDS and we would hand the person a ticket instead.
+
+### What this means for the design
+
+1. **A granter always learns the devices of the group it is given.** Keyhive offers no way around it, because a CGKA leaf is an
+   individual. Privacy comes from the grantee presenting a group that holds only the devices they will expose, which is
+   the per-context group of section 3. Say this plainly in the person-facing grant UI.
+2. **"Present the grant later" is not available for decryption.** Plan for the granter (or another reader) to seat devices
+   as they appear, via `reconcile_doc_readers`, and treat an unseated device as "invited, not yet readable".
+3. **Persona unlinkability needs separate keyhive instances.** Do not promise it. Per-context groups hide the other
+   devices, not a shared one.
+4. **Make the invite ticket the first discovery step**, with the fields above, and keep it outside the node's data
+   path. It also fixes today's `UnknownPeer` friction, because it carries the `via` addresses.
+5. **Check the two open points before building:** whether our relay policy gates ingest by membership
+   (`protocol.rs:1210-1260`), and whether a group can be created whose members the granter never sees.
