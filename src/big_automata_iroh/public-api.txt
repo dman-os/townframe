@@ -3,10 +3,16 @@
 # configuration: {"target":"x86_64-unknown-linux-gnu","default_features":true,"features":[]}
 # exposed_external_crates: []
 
+impl BigSyncRpcClient for big_automata_iroh::PeerRpcClient
 impl Handler < CloseSession > for big_automata_iroh::ReplayService < S >
+impl Handler < GetChangedBucketsRequest > for big_automata_iroh::ReplayService < S >
+impl Handler < LeafBucketsRequest > for big_automata_iroh::ReplayService < S >
 impl Handler < PageSession > for big_automata_iroh::ReplayService < S >
+impl Handler < PartSummariesRequest > for big_automata_iroh::ReplayService < S >
 impl Handler < UpdateSession > for big_automata_iroh::ReplayService < S >
 impl Timer for big_automata_iroh::TokioTimer
-pub big_automata_iroh::fn boot < S > (store : S , principal_of : impl Fn (& RequestContext , & TransportContext) -> Result < PeerKey , SessionError > + Send + Sync + 'static ,) -> (Replay < S > , StopToken) where S : PartStoreServe + Clone + Send + Sync + 'static ,
-pub struct big_automata_iroh::Replay< S >  { service: Arc < ReplayService < S > >, host: Arc < Host < Arc < ReplayService < S > > > >, client: Client < ReplayProtocol > }
+pub big_automata_iroh::fn boot < S > (store : S , principal_of : impl Fn (& RequestContext , & TransportContext) -> Result < PeerKey , ContextError > + Send + Sync + 'static ,) -> (Replay < S > , StopToken) where S : PartStoreServe + Clone + Send + Sync + 'static ,
+pub impl big_automata_iroh::PeerRpcClient::fn new (replay : Client < ReplayProtocol > , rpc : Client < SyncRpcProtocol >) -> Self
+pub struct big_automata_iroh::PeerRpcClient  {  }
+pub struct big_automata_iroh::Replay< S >  { service: Arc < ReplayService < S > >, host: Arc < Host < Arc < ReplayService < S > > > >, client: Client < ReplayProtocol >, rpc_client: Client < SyncRpcProtocol > }
 pub struct big_automata_iroh::ReplayService< S >  {  }
