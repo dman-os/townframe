@@ -6,8 +6,9 @@
 //! reason to merge them was the multi-peer stat machine, which is now a layer above. A peer with
 //! two backends has two drivers and two replay sessions.
 //!
-//! Runtime-agnostic: it spawns and sleeps through `n0_future`, so the same driver runs under
-//! tokio and in the browser (`wasm32-unknown-unknown`). No tokio type appears in its API.
+//! Runtime-agnostic: it sleeps through `n0_future` and spawns nothing (see "Runtimes"), so the
+//! same driver runs under tokio and in the browser (`wasm32-unknown-unknown`). No tokio type
+//! appears in its API.
 //!
 //! # Boundaries
 //!
@@ -21,8 +22,9 @@
 //! # Laws
 //!
 //! 1. **One loop owns the machine.** Every input (route change, call outcome, timer) reaches
-//!    `PeerSync` from one task, one at a time; the machine is never borrowed across an await.
-//!    Calls run as their own futures and report back through the loop.
+//!    `PeerSync` from one future, the loop [`PeerDriver::start`] returns for the embedder to
+//!    spawn, one input at a time; the machine is never borrowed across an await. Calls are
+//!    futures polled inside that loop, not tasks, and report back through it.
 //! 2. **Every command is executed once, and every call's outcome is reported once**: an
 //!    answer, `Lost` for a transport failure, or `Cancelled` for a cancelled backend call. A
 //!    `Cancel` drops the call's future; the outcome is still reported (as `Cancelled`) so the
@@ -56,14 +58,19 @@
 //!
 //! # Runtimes
 //!
-//! The loop is spawned with `n0_future::task::spawn`, which is `tokio::spawn` natively (the
-//! future must be `Send`) and a `wasm-bindgen-futures` task in the browser (it need not be).
-//! The traits keep `+ Send` on their futures, like `BigSyncRpcClient`'s, so a browser backend
-//! whose futures hold JS handles cannot implement them as they stand. The way to lift that
-//! without target-dependent trait signatures is the one `service_client_core_rs` uses
-//! (`UnaryTransport`): drop `+ Send` from the three traits and have [`PeerDriver`] hand the
-//! loop future to the embedder instead of spawning it, so auto-trait leakage decides `Send`
-//! per concrete type. That also changes `BigSyncRpcClient`, so it is left as an open question.
+//! [`PeerDriver::start`] spawns nothing: it returns the handle and the loop future, and the
+//! embedder spawns that future on its runtime (`tokio::spawn` natively,
+//! `wasm_bindgen_futures::spawn_local` in the browser). The same holds for the calls inside the
+//! loop and the closes of replaced sessions: they are polled by the loop in sets whose future
+//! types are inferred, never boxed as `dyn Future`.
+//!
+//! The traits the driver is generic over ([`SyncBackend`], [`PeerCursors`],
+//! [`BigSyncRpcClient`](crate::sync::rpc::BigSyncRpcClient)) put no `Send` bound on their
+//! futures, and the driver puts none on its type parameters. Whether the loop future is `Send`
+//! is then auto-trait leakage from the embedder's concrete types, as for
+//! `service_client_core_rs`'s `UnaryTransport`: natively the embedder's types are `Send` and
+//! its `tokio::spawn` compiles; a browser backend whose futures hold JS handles is not `Send`
+//! and is spawned locally. No trait signature depends on the target.
 //!
 //! # The layer above: full sync across peers
 //!
@@ -77,8 +84,8 @@
 //! adds: law tests (`tests`) over an in-process transport and a scripted backend on a paused
 //! clock (outcomes reported once, cancel reports `Cancelled`, cursor writes ordered, reconnect
 //! re-adds routes with their cursors, a subscriber never misses an edge, waiters resolve or
-//! report removal), and an end-to-end run over `big_automata_iroh` natively. The browser run
-//! is not written yet.
+//! report removal), and an end-to-end run over `big_automata_iroh` natively. A browser run
+//! is not part of this crate's tests: see `big_automata_iroh`.
 
 use crate::interlude::*;
 
@@ -107,17 +114,16 @@ use crate::rev::Rev;
 /// backoff, so an implementation reports it and keeps no retry of its own. Both calls take a
 /// job they have seen before (replays repeat after a reconnect).
 ///
-/// The futures are `Send`, like [`BigSyncRpcClient`](crate::sync::rpc::BigSyncRpcClient)'s
-/// (ADR 039: no `FutureForm`), because natively the driver's loop is spawned with
-/// `tokio::spawn`. In the browser futures need not be `Send` and the bound is stricter than
-/// the runtime needs: see "Runtimes" in the module docs.
-pub trait SyncBackend: Send + Sync + 'static {
+/// The futures carry no `Send` bound, like [`BigSyncRpcClient`](crate::sync::rpc::BigSyncRpcClient)'s
+/// (ADR 039: no `FutureForm`): the embedder spawns the driver's loop, so the concrete types
+/// decide whether it is `Send`. See "Runtimes" in the module docs.
+pub trait SyncBackend {
     /// Short and cancel-safe; never waits on bytes. `Done` lets the cursor pass the job,
     /// `Fetch` asks for [`fetch`](Self::fetch) first.
-    fn record(&self, job: ObjJob) -> impl Future<Output = Res<Settle>> + Send;
+    fn record(&self, job: ObjJob) -> impl Future<Output = Res<Settle>>;
 
     /// May be long. Cancel-safe: the driver drops the future to cancel it. Idempotent.
-    fn fetch(&self, job: ObjJob) -> impl Future<Output = Res<()>> + Send;
+    fn fetch(&self, job: ObjJob) -> impl Future<Output = Res<()>>;
 }
 
 /// The cursor each (peer, backend, part) has been consumed to. A small table the driver
@@ -127,19 +133,19 @@ pub trait SyncBackend: Send + Sync + 'static {
 /// lower one than stored is ignored (as `PartStoreRead::set_peer_part_cursors`). It may
 /// coalesce entries of one write for the same part. A failure is not retried: it crashes the
 /// driver.
-pub trait PeerCursors: Send + Sync + 'static {
+pub trait PeerCursors {
     /// The cursor persisted for each part, in the order asked; 0 for a part never written.
     fn read(
         &self,
         peer: &PeerKey,
         backend: &str,
         parts: &[PartKey],
-    ) -> impl Future<Output = Res<Vec<Rev>>> + Send;
+    ) -> impl Future<Output = Res<Vec<Rev>>>;
 
     fn write(
         &self,
         peer: &PeerKey,
         backend: &str,
         writes: &[(PartKey, Rev)],
-    ) -> impl Future<Output = Res<()>> + Send;
+    ) -> impl Future<Output = Res<()>>;
 }

@@ -4,9 +4,13 @@ use super::rig::*;
 use crate::driver::DriverConfig;
 use crate::driver::Fact;
 use crate::driver::Facts;
+use crate::driver::ObjJob;
 use crate::driver::PeerCursors;
 use crate::driver::PeerDriver;
 use crate::driver::RouteUpdate;
+use crate::driver::Settle;
+use crate::driver::SyncBackend;
+use crate::driver::memory::MemoryBackend;
 use crate::driver::memory::MemoryPeerCursors;
 use crate::interlude::*;
 use crate::part_store::laws::obj;
@@ -188,7 +192,7 @@ async fn law_5_cursor_writes_land_in_order_and_never_go_back() {
     let local = MemoryPartStore::default();
     let backend = ScriptedBackend::new(local.clone(), peer.store().clone());
     let config = DriverConfig::new(principal(LOCAL_PEER), "memory");
-    let driver = PeerDriver::spawn(
+    let (driver, driver_loop) = PeerDriver::start(
         config.clone(),
         clock(),
         Facts::new(),
@@ -199,6 +203,7 @@ async fn law_5_cursor_writes_land_in_order_and_never_go_back() {
         },
         local,
     );
+    tokio::spawn(driver_loop);
     peer.publish(1, &[1], 1).await;
     driver
         .update_routes(RouteUpdate {
@@ -226,4 +231,62 @@ async fn law_5_cursor_writes_land_in_order_and_never_go_back() {
     assert!(written.len() >= 2, "{written:?}");
     assert!(written.is_sorted(), "a cursor went back: {written:?}");
     assert_eq!(*written.last().unwrap(), head);
+}
+
+/// A backend whose futures are not `Send`: it holds an `Rc` across an await, as a browser
+/// backend holding a JS handle would.
+struct LocalBackend(MemoryBackend);
+
+impl SyncBackend for LocalBackend {
+    async fn record(&self, job: ObjJob) -> Res<Settle> {
+        let held = std::rc::Rc::new(());
+        tokio::task::yield_now().await;
+        let settle = self.0.record(job).await;
+        drop(held);
+        settle
+    }
+
+    async fn fetch(&self, job: ObjJob) -> Res<()> {
+        let held = std::rc::Rc::new(());
+        tokio::task::yield_now().await;
+        let fetched = self.0.fetch(job).await;
+        drop(held);
+        fetched
+    }
+}
+
+/// The traits put no `Send` bound on the embedder's futures and the driver hands its loop over
+/// unspawned, so a backend that is not `Send` runs the loop on a local executor and reaches
+/// `Synced` with the payload landed (the browser's situation: `spawn_local`).
+#[tokio::test(start_paused = true)]
+async fn law_1_the_loop_runs_locally_over_a_backend_that_is_not_send() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let peer = ScriptedPeer::new();
+            let local = MemoryPartStore::default();
+            let facts = Facts::new();
+            let config = DriverConfig::new(principal(LOCAL_PEER), "memory");
+            let (driver, driver_loop) = PeerDriver::start(
+                config.clone(),
+                clock(),
+                facts.clone(),
+                LocalBackend(MemoryBackend::new(local.clone(), peer.store().clone())),
+                MemoryPeerCursors::default(),
+                local.clone(),
+            );
+            tokio::task::spawn_local(driver_loop);
+            peer.publish(1, &[1], 10).await;
+            driver
+                .update_routes(RouteUpdate {
+                    added_parts: vec![part(1)],
+                    ..default()
+                })
+                .await;
+            driver.connect(peer.clone());
+            let synced = facts.wait_for_full_sync([(config.peer.clone(), part(1))]);
+            assert_eq!(within(synced).await, Ok(()));
+            let members = Rig::members(&local, 1, 1).await;
+            assert_eq!(members.len(), 1, "the object landed: {members:?}");
+        })
+        .await;
 }

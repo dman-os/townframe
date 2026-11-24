@@ -10,7 +10,6 @@ use futures::StreamExt;
 use futures::future::AbortHandle;
 use futures::future::abortable;
 use futures::stream::FuturesUnordered;
-use n0_future::boxed::BoxFuture;
 
 use super::Fact;
 use super::Facts;
@@ -148,25 +147,31 @@ impl<C> Clone for PeerDriver<C> {
 
 impl<C> PeerDriver<C>
 where
-    C: BigSyncRpcClient + Send + Sync + 'static,
+    C: BigSyncRpcClient,
 {
-    /// Start the loop. Spawns through [`n0_future::task::spawn`]: on a native host this runs
-    /// inside a tokio runtime, in the browser it is a `wasm-bindgen-futures` task.
+    /// The handle of a driver and its loop. The loop is a future the embedder spawns on its
+    /// runtime (`tokio::spawn` natively, `wasm_bindgen_futures::spawn_local` in the browser);
+    /// nothing runs until it is polled. The future is `Send` exactly when the embedder's
+    /// client, backend, cursors and store are, because nothing in it is type-erased: natively
+    /// it can go to a multi-threaded runtime, and a browser embedder whose futures hold JS
+    /// handles spawns it locally.
     ///
-    /// The driver is idle until [`connect`](Self::connect). `local` is the part store the
-    /// backend writes: bucket walks filter the peer's listings against it.
-    pub fn spawn<B, K, S>(
+    /// The loop ends, with a `Removed` fact for each part, when the last handle drops; a
+    /// panic in it is a bug, which the embedder's spawn must surface (the process panic hook
+    /// natively). The driver is idle until [`connect`](Self::connect). `local` is the part
+    /// store the backend writes: bucket walks filter the peer's listings against it.
+    pub fn start<B, K, S>(
         config: DriverConfig,
         clock: Clock,
         facts: Facts,
         backend: B,
         cursors: K,
         local: S,
-    ) -> Self
+    ) -> (Self, impl Future<Output = ()> + use<C, B, K, S>)
     where
         B: SyncBackend,
         K: PeerCursors,
-        S: PartStoreRead + Send + Sync + 'static,
+        S: PartStoreRead,
     {
         let (inputs, receiver) = async_channel::unbounded();
         let driver = Driver {
@@ -180,11 +185,7 @@ where
             conn: None,
             stale_session: None,
         };
-        // Detached on purpose: the loop ends when the last handle drops its sender. Its only
-        // failures are the ones that crash it (a failed table or local read, a bug), and the
-        // process panic hook surfaces a panic.
-        drop(n0_future::task::spawn(driver.run(receiver)));
-        Self { inputs }
+        (Self { inputs }, driver.run(receiver))
     }
 
     fn send(&self, input: Input<C>) {
@@ -260,19 +261,21 @@ struct Env<C, B, S> {
     local: Arc<S>,
 }
 
-/// One connection: the machine and the calls it has in flight. The calls are futures in this
-/// loop's own set, so nothing runs while the loop is not polled and dropping the connection
-/// cancels them all.
+/// One connection: the machine and the means to cancel the calls it has in flight. The calls
+/// are futures in the loop's own set (a local of [`Driver::run`], so their type is the
+/// compiler's and the loop future stays `Send` exactly when they are): nothing runs while the
+/// loop is not polled, and the loop clears the set whenever it drops the connection.
 struct Conn<C, B, S> {
     sync: PeerSync,
     env: Arc<Env<C, B, S>>,
-    calls: FuturesUnordered<BoxFuture<(CallId, Done)>>,
     aborts: BTreeMap<CallId, AbortHandle>,
 }
 
 enum Event<C> {
     Input(Option<Input<C>>),
     Done(CallId, Done),
+    /// A best-effort close of a replaced session ended.
+    Closed,
     Timer,
 }
 
@@ -291,22 +294,41 @@ struct Driver<C, B, K, S> {
 
 impl<C, B, K, S> Driver<C, B, K, S>
 where
-    C: BigSyncRpcClient + Send + Sync + 'static,
+    C: BigSyncRpcClient,
     B: SyncBackend,
     K: PeerCursors,
-    S: PartStoreRead + Send + Sync + 'static,
+    S: PartStoreRead,
 {
     /// Law 1: every input reaches the machine from here, one at a time, and the machine is
     /// never borrowed across an await.
+    ///
+    /// `calls` holds the futures of the connection's calls in flight and `closes` the best-effort
+    /// closes of replaced sessions. Both are locals so that their future types are inferred
+    /// rather than boxed (a boxed `dyn Future` would be `!Send` and so would this loop).
     async fn run(mut self, inputs: async_channel::Receiver<Input<C>>) {
+        let mut calls = FuturesUnordered::new();
+        let mut closes = FuturesUnordered::new();
         loop {
-            self.flush().await;
-            match self.next_event(&inputs).await {
-                Event::Input(Some(input)) => self.input(input).await,
+            calls.extend(self.flush().await);
+            match self.next_event(&inputs, &mut calls, &mut closes).await {
+                Event::Input(Some(Input::Routes(update, applied))) => {
+                    self.update_routes(update).await;
+                    // the caller may have stopped waiting: the update stands either way
+                    applied.try_send(()).ok();
+                }
+                Event::Input(Some(Input::Connect(client))) => {
+                    // the old connection's calls end with it, before any call of the new one
+                    calls.clear();
+                    closes.extend(self.connect(client).await);
+                }
+                Event::Input(Some(Input::Disconnect)) => {
+                    self.disconnect();
+                    calls.clear();
+                }
                 // every handle dropped
                 Event::Input(None) => break,
                 Event::Done(call, done) => self.feed(call, done),
-                Event::Timer => {}
+                Event::Closed | Event::Timer => {}
             }
         }
         self.disconnect();
@@ -316,15 +338,31 @@ where
     }
 
     /// The first of: a call's outcome, an input, the machine's `next_due` (law 4).
-    async fn next_event(&mut self, inputs: &async_channel::Receiver<Input<C>>) -> Event<C> {
+    async fn next_event<Call, Close>(
+        &mut self,
+        inputs: &async_channel::Receiver<Input<C>>,
+        calls: &mut FuturesUnordered<Call>,
+        closes: &mut FuturesUnordered<Close>,
+    ) -> Event<C>
+    where
+        Call: Future<Output = (CallId, Done)>,
+        Close: Future<Output = ()>,
+    {
         let now = (self.clock)();
         let due = self.conn.as_ref().and_then(|conn| conn.sync.next_due());
         let call = async {
-            match self.conn.as_mut() {
-                Some(conn) if !conn.calls.is_empty() => {
-                    conn.calls.next().await.expect("a non-empty set yields")
-                }
-                _ => std::future::pending().await,
+            if calls.is_empty() {
+                std::future::pending().await
+            } else {
+                calls.next().await.expect("a non-empty set yields")
+            }
+        }
+        .fuse();
+        let close = async {
+            if closes.is_empty() {
+                std::future::pending().await
+            } else {
+                closes.next().await.expect("a non-empty set yields")
             }
         }
         .fuse();
@@ -336,23 +374,12 @@ where
             }
         }
         .fuse();
-        futures::pin_mut!(call, input, timer);
+        futures::pin_mut!(call, close, input, timer);
         futures::select_biased! {
             (call, done) = call => Event::Done(call, done),
             input = input => Event::Input(input.ok()),
+            () = close => Event::Closed,
             () = timer => Event::Timer,
-        }
-    }
-
-    async fn input(&mut self, input: Input<C>) {
-        match input {
-            Input::Routes(update, applied) => {
-                self.update_routes(update).await;
-                // the caller may have stopped waiting: the update stands either way
-                applied.try_send(()).ok();
-            }
-            Input::Connect(client) => self.connect(client).await,
-            Input::Disconnect => self.disconnect(),
         }
     }
 
@@ -414,7 +441,10 @@ where
 
     /// Law 6: a fresh machine and session, given the current routes with their persisted
     /// cursors.
-    async fn connect(&mut self, client: C) {
+    ///
+    /// Returns the close of the replaced connection's session, which the loop drives to its
+    /// end beside everything else.
+    async fn connect(&mut self, client: C) -> Option<impl Future<Output = ()> + use<C, B, K, S>> {
         self.disconnect();
         let parts: Vec<_> = self.routes.parts.iter().cloned().collect();
         let added = Self::cursors_of(&self.cursors, &self.config, &parts).await;
@@ -430,9 +460,9 @@ where
         // a client may hold, so a reconnect closes it through the new connection. Best effort:
         // the old one's transport is usually what failed, and the peer sweeps expired sessions
         // anyway, so a failed close only means waiting for the TTL.
-        if let Some(session_id) = self.stale_session.take() {
+        let close = self.stale_session.take().map(|session_id| {
             let env = Arc::clone(&env);
-            drop(n0_future::task::spawn(async move {
+            async move {
                 let outcome = env
                     .client
                     .close_replay_session(CloseSession { session_id })
@@ -440,14 +470,14 @@ where
                 if !matches!(outcome, Ok(Ok(()))) {
                     tracing::debug!(?outcome, "closing the replaced replay session failed");
                 }
-            }));
-        }
+            }
+        });
         self.conn = Some(Conn {
             sync,
             env,
-            calls: FuturesUnordered::new(),
             aborts: default(),
         });
+        close
     }
 
     /// Law 6: the machine says what to cancel; dropping the connection drops those calls, and
@@ -488,14 +518,16 @@ where
         }
     }
 
-    /// The flush the machine is owed after every input (law 4), and its commands.
-    async fn flush(&mut self) {
+    /// The flush the machine is owed after every input (law 4), and its commands. Returns the
+    /// futures of the calls it issued, for the loop to run.
+    async fn flush(&mut self) -> Vec<impl Future<Output = (CallId, Done)> + use<C, B, K, S>> {
         let Some(conn) = self.conn.as_mut() else {
-            return;
+            return vec![];
         };
         let mut cmds = vec![];
         conn.sync.flush((self.clock)(), &mut cmds);
         let mut persists = vec![];
+        let mut issued = vec![];
         for cmd in cmds {
             match cmd {
                 PeerCommand::Cancel { call } => conn.aborts[&call].abort(),
@@ -517,8 +549,7 @@ where
                     let aborted = Done::aborted(&call);
                     let (task, handle) = abortable(run_call(Arc::clone(&conn.env), call));
                     conn.aborts.insert(id, handle);
-                    conn.calls
-                        .push(Box::pin(async move { (id, task.await.unwrap_or(aborted)) }));
+                    issued.push(async move { (id, task.await.unwrap_or(aborted)) });
                 }
             }
         }
@@ -530,6 +561,7 @@ where
                 .await
                 .expect("the peer-cursor table failed a write");
         }
+        issued
     }
 }
 

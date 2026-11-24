@@ -91,7 +91,7 @@ pub trait BigSyncRpcClient {
         Output = BigSyncRpcResult<
             Result<summary::PartSummariesResponse, summary::PartSummariesError>,
         >,
-    > + Send;
+    >;
 
     fn update_replay_session(
         &self,
@@ -100,7 +100,7 @@ pub trait BigSyncRpcClient {
         Output = BigSyncRpcResult<
             Result<crate::replay::wire::SessionUpdated, crate::replay::wire::SessionError>,
         >,
-    > + Send;
+    >;
 
     fn page_replay_session(
         &self,
@@ -109,28 +109,26 @@ pub trait BigSyncRpcClient {
         Output = BigSyncRpcResult<
             Result<crate::replay::wire::SessionPage, crate::replay::wire::SessionError>,
         >,
-    > + Send;
+    >;
 
     fn close_replay_session(
         &self,
         req: crate::replay::wire::CloseSession,
-    ) -> impl Future<Output = BigSyncRpcResult<Result<(), crate::replay::wire::SessionError>>> + Send;
+    ) -> impl Future<Output = BigSyncRpcResult<Result<(), crate::replay::wire::SessionError>>>;
 
     fn get_changed_buckets(
         &self,
         req: bucket::GetChangedBucketsRequest,
     ) -> impl Future<
         Output = BigSyncRpcResult<Result<bucket::GetChangedBucketsResponse, bucket::BucketsError>>,
-    > + Send;
+    >;
 
     /// A page per asked bucket, at most the responder's cap of entries each: a hint above the
     /// cap is capped, so a walk follows `next_after` until a page finishes its bucket.
     fn leaf_buckets(
         &self,
         req: bucket::LeafBucketsRequest,
-    ) -> impl Future<
-        Output = BigSyncRpcResult<Result<bucket::LeafBucketsResponse, bucket::BucketsError>>,
-    > + Send;
+    ) -> impl Future<Output = BigSyncRpcResult<Result<bucket::LeafBucketsResponse, bucket::BucketsError>>>;
 }
 
 #[derive(
