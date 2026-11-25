@@ -179,6 +179,21 @@ impl<F> PackageEngine for F where
 /// Where Wasmtime keeps compiled guests; see `clay_rt_wasmtime::set_component_cache_directory`.
 pub use clay_mdk::host::set_component_cache_directory;
 
+/// The app's tracing: stderr, plus a rolling JSON-lines log under `<data directory>/logs`
+/// (`daytxt.<date>.jsonl`, docs/scratch/guest-faults-and-logs.md §1), so a run nobody watched
+/// leaves something to read. Called before the launcher, which then keeps this subscriber
+/// instead of installing Dioxus's own.
+pub fn setup_logging(data_directory: &Path) {
+    utils_rs::tracing::setup_tracing_at(
+        "info",
+        Some(utils_rs::tracing::LogFile {
+            directory: data_directory.join("logs"),
+            prefix: "daytxt",
+        }),
+    )
+    .expect("the app's tracing installs once, before anything logs");
+}
+
 /// The Wasmtime [`PackageEngine`], what both native shells run packages on.
 pub fn wasmtime_engine(
     resources: Resources,

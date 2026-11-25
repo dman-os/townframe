@@ -77,7 +77,18 @@ fn run() -> Res<ExitCode> {
             ..
         })
     );
-    utils_rs::tracing::setup_tracing_at(if serves { "info" } else { "warn" })?;
+    // The serving node also keeps a rolling JSON-lines log in `<node dir>/logs`, so a run nobody
+    // watched leaves something to read. A short command's warnings stay on stderr only.
+    let log_file = match &parsed {
+        Ok(cli) if serves => Some(utils_rs::tracing::LogFile {
+            directory: config::CliConfig::source(cli.node.as_deref())?
+                .node_path
+                .join("logs"),
+            prefix: "day",
+        }),
+        _ => None,
+    };
+    utils_rs::tracing::setup_tracing_at(if serves { "info" } else { "warn" }, log_file)?;
 
     // the static cli is for commands that
     // can be executed without having to
