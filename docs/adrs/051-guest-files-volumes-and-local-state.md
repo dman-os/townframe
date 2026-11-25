@@ -54,6 +54,10 @@ returns that path. This is the presigned-URL shape: an authorized request yields
   between invocations, for deterministic routines.
 - **Writing back** already exists: ADR 042's `importFile` takes a descriptor, so a guest writes a file in its working
   mount and imports it as a blob.
+- **Native local clients** (the CLI, a desktop host on the same machine) can get the same file route as a local-only
+  method that returns a read-only path to a complete blob, gated like `blobs.importFile` (ADR 042 §3). atproto's
+  `com.atproto.sync.getBlob`-style XRPC byte reads are right for remote readers but wasteful on the same machine, where
+  the bytes are already a file in the store.
 
 The set of preopens is fixed when an instance starts (guests read it once; the C library and Rust std cache it), so the
 working mount is created up front and only its contents change.

@@ -377,7 +377,9 @@ blobs (§7's second gap).
 
 A domain handle mixes two things. Its operation-level part (`BlobsScope.put`) only repeats what
 dispatch already checked: may this routine call `blobs.put`. Its resource-level part
-(`BlobsScope.read`, a doc capability's documents) says *which* resources, and dispatch cannot.
+(`BlobsScope.read` and `BlobsScope.drawers`, which reaches the blobs pinned in a reached drawer's
+inventories at Read or more; a doc capability's documents) says *which* resources, and dispatch
+cannot.
 
 Proposed:
 - **The operation-level part follows from the `#method` permbind.** A routine that may call an
@@ -418,7 +420,7 @@ gets a failed mint. The new test for drawer `create` passes only because it gran
 back. Fix by 6.1: the service actor keeps create-drawer as a delegator and the revoke goes.
 
 (b) **A nodule with a `blobs.put` permbind cannot reach blobs.** Blobs mints handles only for the
-operator's identity or a holder of a wider blobs handle (`big_blobs/service.rs`,
+operator's root capability or a holder of a wider blobs handle (`big_blobs/service.rs`,
 `MintBlobsCapability`), and nothing mints one for a routine. The guest-bodies test mints from the
 harness meanwhile. Fix by 6.2, with the `nodules` service actor holding a blobs handle as a
 delegator per 6.1.
