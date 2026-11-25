@@ -136,7 +136,7 @@ async fn node(client: &NodeClient) -> Res<serde_json::Value> {
 async fn drawer_dump(client: &NodeClient, drawer: &DocId) -> Res<serde_json::Value> {
     let capability = client
         .call(MintDrawerCapability {
- capability: None,
+            capability: None,
             scope: DrawerScope {
                 drawers: [(drawer.clone(), DrawerAccess::Admin)].into(),
                 create: false,
@@ -191,7 +191,7 @@ async fn drawer_dump(client: &NodeClient, drawer: &DocId) -> Res<serde_json::Val
 async fn mint_read(client: &NodeClient, docs: impl IntoIterator<Item = DocId>) -> Res<CapId> {
     Ok(client
         .call(MintDocCapability {
- capability: None,
+            capability: None,
             scope: DocScope {
                 read: DocScope::read_all(docs),
                 ..default()

@@ -50,7 +50,6 @@ fn manifest_cartridge() -> Cartridge {
         .insert(Nsid::literal("org.example.photos.sidecar"), datum_pin());
     cartridge.components.insert("handler".into(), datum_pin());
     cartridge.micro = Some(MicroContribution {
-        uses: Default::default(),
         component: "handler".into(),
         schema: "org.example.clay.micro".into(),
         description: [("entry".to_owned(), json!("gallery.js"))]

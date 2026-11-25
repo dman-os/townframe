@@ -102,7 +102,9 @@ impl Detected {
         }
         let mut name = match (creator.kind == ParticipantKind::Person, generator) {
             (true, _) => "someone".to_owned(),
-            (false, Some(generator)) => generator.name.clone().unwrap_or_else(|| "agent".to_owned()),
+            (false, Some(generator)) => {
+                generator.name.clone().unwrap_or_else(|| "agent".to_owned())
+            }
             (false, None) => "agent".to_owned(),
         };
         if let Some(ReferenceDocId::Concrete(doc)) = creator.id.as_ref().map(|id| id.document()) {

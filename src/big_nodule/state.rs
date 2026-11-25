@@ -58,9 +58,7 @@ use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::drawer::protocol::RevokeDrawer;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Permbind;
-use big_cartridges_core::ResolvedCartridge;
 use big_cartridges_core::Revision;
-use big_cartridges_core::RoutineUse;
 use big_cartridges_core::RunMode;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::config::GrantBody;
@@ -627,7 +625,7 @@ fn routine_uses(
                     .cartridge
                     .permbinds
                     .get(binding)
-                    .expect("admission refuses a use without its permbind")
+                    .expect("admission refuses a routine use without its permbind")
                 {
                     Permbind::Method(method)
                         if !effective_operations

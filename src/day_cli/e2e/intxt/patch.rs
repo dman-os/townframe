@@ -41,6 +41,7 @@ async fn read_blob_text(client: &NodeClient, scratch: &Path, reference: &str) ->
     let capability = crate::cmds::intxt::call(
         client,
         MintBlobsCapability {
+            capability: None,
             scope: BlobsScope {
                 read: [blob_id].into(),
                 ..BlobsScope::default()

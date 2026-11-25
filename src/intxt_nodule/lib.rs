@@ -108,6 +108,7 @@ impl big_ndk::Handler<CreateIntxt> for Intxt {
         let caller = caller(cx)?;
         let drawers = caller
             .call(MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     drawers: Default::default(),
                     create: true,

@@ -2218,7 +2218,6 @@ fn cartridge_with_micro(id: &str, version: &str) -> FixtureCartridge {
     let mut cartridge = cartridge(id, version, true);
     cartridge.with_wasm("micro", b"micro component");
     cartridge.micro = Some(MicroContribution {
-        uses: Default::default(),
         component: "micro".into(),
         schema: "org.example.clay.micro".into(),
         description: Default::default(),

@@ -165,7 +165,6 @@ pub async fn micro_pair(
         move |envelope| {
             envelope.authority = authority;
             envelope.micro = Some(MicroContribution {
-                uses: Default::default(),
                 component: MICRO_COMPONENT_ARTIFACT.into(),
                 schema: CLAY_MICRO_MANIFEST_SCHEMA.into(),
                 description: manifest.into_iter().collect(),

@@ -176,7 +176,7 @@ pub(super) async fn known_drawers_handle(
     let info = super::status::node_info(client).await?;
     let minted = client
         .call(MintDrawerCapability {
- capability: None,
+            capability: None,
             scope: DrawerScope {
                 drawers: [(
                     info.drawers
@@ -220,7 +220,7 @@ async fn admin_handle(
         })?;
     let minted = client
         .call(MintDrawerCapability {
- capability: None,
+            capability: None,
             scope: DrawerScope {
                 drawers: [(drawer_id.clone(), DrawerAccess::Admin)].into(),
                 create: false,

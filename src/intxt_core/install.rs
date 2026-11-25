@@ -201,6 +201,7 @@ pub async fn put_blob<H: HttpTransport>(
     }
     let capability = caller
         .call(MintBlobsCapability {
+            capability: None,
             scope: BlobsScope {
                 put: true,
                 ..BlobsScope::default()

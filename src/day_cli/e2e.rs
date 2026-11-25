@@ -253,7 +253,7 @@ mod library {
             let mint = async |scope: BlobsScope| {
                 let minted = client
                     .call(MintBlobsCapability {
- capability: None,
+                        capability: None,
                         scope,
                         rights: big_cabinet_core::authority::Rights::USE,
                         subject: None,

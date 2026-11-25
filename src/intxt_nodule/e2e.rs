@@ -135,6 +135,7 @@ async fn capability(node: &TestNode, scope: DocScope) -> big_cabinet_core::autho
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
+                capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: None,
@@ -382,6 +383,7 @@ async fn two_writers_first_documents_are_both_found_and_nothing_is_orphaned() {
             RequestContext::root(),
             root.metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     drawers: [(drawer.clone(), DrawerAccess::Admin)].into(),
                     create: false,
@@ -677,6 +679,7 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
             RequestContext::root(),
             Authorization::identity(node.big_node().authority.root).metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     drawers: [(review.clone(), DrawerAccess::Read)].into(),
                     create: false,

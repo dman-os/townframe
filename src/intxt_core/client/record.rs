@@ -19,8 +19,8 @@
 use super::Caller;
 use super::to_value;
 use crate::capture::Batch;
-use crate::capture::CauseBackfill;
 use crate::capture::Cause;
+use crate::capture::CauseBackfill;
 use crate::capture::Imported;
 use crate::capture::RecordedIds;
 use crate::capture::RecordedWorktree;
