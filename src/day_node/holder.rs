@@ -680,12 +680,14 @@ mod tests {
     #[tokio::test]
     async fn attach_server_finds_no_server_when_nobody_holds_the_node_or_its_listener_is_gone() {
         let tmp = short_tempdir();
-        let dir = NodeDir::new(tmp.path().to_path_buf());
+        let dir = NodeDir::with_socket_dir(tmp.path().join("node"), tmp.path().join("run"));
         dir.init().await.unwrap();
         assert!(dir.attach_server().await.unwrap().is_none());
 
         let mut lock = dir.try_lock(LockRole::Serve).unwrap().unwrap();
         lock.serving().unwrap();
+        // The socket directory as a server makes it before binding.
+        dir.ensure_run_dir().unwrap();
         drop(std::os::unix::net::UnixListener::bind(dir.socket_path().unwrap()).unwrap());
         let release = std::thread::spawn(move || drop(lock));
         assert!(dir.attach_server().await.unwrap().is_none());
