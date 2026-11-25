@@ -1,0 +1,17 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "by": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "by"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.nodule.devTakeover",
+  "lexicon": 1
+}

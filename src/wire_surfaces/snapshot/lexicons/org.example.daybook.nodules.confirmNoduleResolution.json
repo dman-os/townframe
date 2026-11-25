@@ -1,0 +1,248 @@
+{
+  "defs": {
+    "ConfirmNoduleResolution": {
+      "properties": {
+        "binding": {
+          "type": "string"
+        },
+        "cartridgeId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cartridgeId",
+        "binding"
+      ],
+      "type": "object"
+    },
+    "DispatchScope": {
+      "properties": {
+        "authorities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "operations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "privileged": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "FilledBy": {
+      "properties": {
+        "cartridgeId": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cartridgeId",
+        "version"
+      ],
+      "type": "object"
+    },
+    "NoduleActor": {
+      "properties": {
+        "actorId": {
+          "type": "string"
+        },
+        "publicKey": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "actorId",
+        "url",
+        "publicKey"
+      ],
+      "type": "object"
+    },
+    "NoduleInitStatus": {
+      "nullable": [
+        "error"
+      ],
+      "properties": {
+        "attempts": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempts"
+      ],
+      "type": "object"
+    },
+    "NoduleMethodGrantStatus": {
+      "nullable": [
+        "error"
+      ],
+      "properties": {
+        "desired": {
+          "ref": "#DispatchScope",
+          "type": "ref"
+        },
+        "error": {
+          "type": "string"
+        },
+        "granted": {
+          "type": "boolean"
+        },
+        "unrequested": {
+          "ref": "#DispatchScope",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "desired",
+        "granted"
+      ],
+      "type": "object"
+    },
+    "NoduleRecord": {
+      "nullable": [
+        "actor",
+        "appliedHeads",
+        "error",
+        "filledBy",
+        "init",
+        "methods",
+        "revision",
+        "version"
+      ],
+      "properties": {
+        "actor": {
+          "ref": "#NoduleActor",
+          "type": "ref"
+        },
+        "appliedHeads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "artifacts": {
+          "type": "unknown"
+        },
+        "cartridgeId": {
+          "type": "string"
+        },
+        "drawers": {
+          "type": "unknown"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "filledBy": {
+          "ref": "#FilledBy",
+          "type": "ref"
+        },
+        "init": {
+          "ref": "#NoduleInitStatus",
+          "type": "ref"
+        },
+        "methods": {
+          "ref": "#NoduleMethodGrantStatus",
+          "type": "ref"
+        },
+        "observedHeads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "readiness": {
+          "ref": "#Readiness",
+          "type": "ref"
+        },
+        "requests": {
+          "type": "unknown"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cartridgeId",
+        "enabled",
+        "readiness"
+      ],
+      "type": "object"
+    },
+    "Readiness": {
+      "enum": [
+        "ready",
+        "refused",
+        "disabled",
+        "artifactsUnavailable",
+        "executorUnavailable",
+        "needsConfiguration",
+        "providerMissing",
+        "initializing",
+        "initFailed"
+      ],
+      "type": "string"
+    },
+    "main": {
+      "description": "Confirms that the nodule's request `binding` is to be served by the cartridge that now provides its\ncontract, replacing the one the operator consented to earlier (ADR 028 §3). Refused unless the\nrequest is held at `ProviderChanged`, so a confirmation cannot be applied to a state the\noperator did not see.",
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "Rejected"
+        },
+        {
+          "name": "UnknownCartridge"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#ConfirmNoduleResolution",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#NoduleRecord",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.nodules.confirmNoduleResolution",
+  "lexicon": 1
+}

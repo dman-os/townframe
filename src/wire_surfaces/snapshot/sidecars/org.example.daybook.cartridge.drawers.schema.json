@@ -1,0 +1,68 @@
+{
+  "$defs": {
+    "PermbindDrawers": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "create": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delete": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "read": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolution": {
+          "knownValues": [
+            "configured",
+            "atRuntime"
+          ],
+          "type": "string"
+        },
+        "write": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "description"
+      ],
+      "title": "PermbindDrawers",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridge.drawers"
+    }
+  },
+  "$ref": "#/$defs/PermbindDrawers",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

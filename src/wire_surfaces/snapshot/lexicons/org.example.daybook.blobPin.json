@@ -1,0 +1,18 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "lengthOctets": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "lengthOctets"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.blobPin",
+  "lexicon": 1
+}

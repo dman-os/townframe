@@ -1,0 +1,29 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "docsGroup": {
+          "type": "string"
+        },
+        "metaGroup": {
+          "type": "string"
+        },
+        "sensitiveGroup": {
+          "type": "string"
+        },
+        "sensitiveRoot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "metaGroup",
+        "docsGroup",
+        "sensitiveGroup",
+        "sensitiveRoot"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.drawer.singleGroup",
+  "lexicon": 1
+}

@@ -1,0 +1,45 @@
+{
+  "defs": {
+    "ComponentInstall": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "nullable": [
+        "micro",
+        "nodule"
+      ],
+      "properties": {
+        "cartridge": {
+          "ref": "org.example.daybook.defs#datumPin",
+          "type": "ref"
+        },
+        "configDoc": {
+          "type": "string"
+        },
+        "micro": {
+          "ref": "#ComponentInstall",
+          "type": "ref"
+        },
+        "nodule": {
+          "ref": "#ComponentInstall",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "cartridge",
+        "configDoc"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.cartridges.install",
+  "lexicon": 1
+}

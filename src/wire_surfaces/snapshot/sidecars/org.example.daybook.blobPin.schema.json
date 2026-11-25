@@ -1,0 +1,22 @@
+{
+  "$defs": {
+    "BlobPin": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "lengthOctets": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "lengthOctets"
+      ],
+      "title": "BlobPin",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.blobPin"
+    }
+  },
+  "$ref": "#/$defs/BlobPin",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

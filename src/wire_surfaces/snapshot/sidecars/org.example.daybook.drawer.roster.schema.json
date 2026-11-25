@@ -1,0 +1,22 @@
+{
+  "$defs": {
+    "DrawerRoster": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.drawer.roster/main`: marks the canonical roster on the drawer doc.\nToday every entry is a datum on the drawer doc itself, so the marker has nothing to say:\nit carries the `empty: true` convention, and the fields a future roster layout needs\n(external docs, ranges, shard routing — ADR 019 sharding design) land beside it as optional\nfields without a new datum tag. A separate one-member layout vocabulary would state no fact.",
+      "properties": {
+        "empty": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "DrawerRoster",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.drawer.roster"
+    }
+  },
+  "$ref": "#/$defs/DrawerRoster",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

@@ -1,0 +1,27 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "actors": {
+          "type": "unknown"
+        },
+        "createdAt": {
+          "format": "datetime",
+          "type": "string"
+        },
+        "datums": {
+          "type": "unknown"
+        },
+        "docUuids": {
+          "type": "unknown"
+        }
+      },
+      "required": [
+        "createdAt"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.dmeta",
+  "lexicon": 1
+}

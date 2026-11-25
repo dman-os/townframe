@@ -1,0 +1,597 @@
+{
+  "$defs": {
+    "Cartridge": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.cartridge/main`: one package revision. The revision is not a field, it is the\ncontent hash of the envelope ([`Cartridge::revision`]), so a pin names exactly these bytes and two\ncatalogs that imported the same package agree without coordination.",
+      "properties": {
+        "authority": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "categories": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "components": {
+          "additionalProperties": {
+            "x-lexicon-ref": "org.example.daybook.defs#datumPin"
+          },
+          "type": "object"
+        },
+        "dependencies": {
+          "additionalProperties": {
+            "$ref": "#/$defs/VersionReq"
+          },
+          "type": "object"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "icons": {
+          "items": {
+            "$ref": "#/$defs/ImageResource"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "lexicons": {
+          "additionalProperties": {
+            "x-lexicon-ref": "org.example.daybook.defs#datumPin"
+          },
+          "type": "object"
+        },
+        "micro": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MicroContribution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nodule": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Nodule"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "permbinds": {
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "additionalProperties": true,
+                "properties": {
+                  "$type": {
+                    "const": "org.example.daybook.cartridge.datum"
+                  },
+                  "create": {
+                    "knownValues": [
+                      "required",
+                      "optional"
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "delete": {
+                    "knownValues": [
+                      "required",
+                      "optional"
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "nsid": {
+                    "$ref": "#/$defs/Nsid"
+                  },
+                  "read": {
+                    "knownValues": [
+                      "required",
+                      "optional"
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "write": {
+                    "knownValues": [
+                      "required",
+                      "optional"
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "$type",
+                  "nsid",
+                  "description"
+                ],
+                "type": "object",
+                "x-lexicon-id": "org.example.daybook.cartridge.datum"
+              },
+              {
+                "additionalProperties": true,
+                "properties": {
+                  "$type": {
+                    "const": "org.example.daybook.cartridge.method"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "minRevision": {
+                    "maximum": 4294967295,
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "necessity": {
+                    "knownValues": [
+                      "required",
+                      "optional"
+                    ],
+                    "type": "string"
+                  },
+                  "nsid": {
+                    "$ref": "#/$defs/Nsid"
+                  }
+                },
+                "required": [
+                  "$type",
+                  "nsid",
+                  "description"
+                ],
+                "type": "object",
+                "x-lexicon-id": "org.example.daybook.cartridge.method"
+              },
+              {
+                "additionalProperties": true,
+                "properties": {
+                  "$type": {
+                    "const": "org.example.daybook.cartridge.drawers"
+                  },
+                  "create": {
+                    "knownValues": [
+                      "required",
+                      "optional"
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "delete": {
+                    "knownValues": [
+                      "required",
+                      "optional"
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "read": {
+                    "knownValues": [
+                      "required",
+                      "optional"
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "resolution": {
+                    "knownValues": [
+                      "configured",
+                      "atRuntime"
+                    ],
+                    "type": "string"
+                  },
+                  "write": {
+                    "knownValues": [
+                      "required",
+                      "optional"
+                    ],
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "$type",
+                  "description"
+                ],
+                "type": "object",
+                "x-lexicon-id": "org.example.daybook.cartridge.drawers"
+              },
+              {
+                "additionalProperties": true,
+                "properties": {
+                  "$type": {
+                    "not": {
+                      "enum": [
+                        "org.example.daybook.cartridge.datum",
+                        "org.example.daybook.cartridge.method",
+                        "org.example.daybook.cartridge.drawers"
+                      ]
+                    },
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "$type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "type": "object"
+        },
+        "screenshots": {
+          "items": {
+            "$ref": "#/$defs/ImageResource"
+          },
+          "type": "array"
+        },
+        "settings": {
+          "description": "Held as a set so a repeated NSID cannot appear twice; the datum schema describes it as a\nplain array because its admission refuses `uniqueItems`, which a set's schema carries.",
+          "items": {
+            "$ref": "#/$defs/Nsid"
+          },
+          "type": "array"
+        },
+        "shortName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sidecars": {
+          "additionalProperties": {
+            "x-lexicon-ref": "org.example.daybook.defs#datumPin"
+          },
+          "type": "object"
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CartridgeSignature"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The publisher's signature over [`Cartridge::revision`]."
+        },
+        "themeColor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ],
+      "title": "Cartridge",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridge"
+    },
+    "CartridgeSignature": {
+      "additionalProperties": true,
+      "description": "A publisher's signature over an envelope's revision.",
+      "properties": {
+        "alg": {
+          "type": "string"
+        },
+        "value": {
+          "description": "The signature bytes as multibase base58btc.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "alg",
+        "value"
+      ],
+      "type": "object"
+    },
+    "ImageResource": {
+      "additionalProperties": true,
+      "properties": {
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "purpose": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sizes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "src": {
+          "x-lexicon-ref": "org.example.daybook.defs#datumPin"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "src",
+        "type"
+      ],
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.imageResource"
+    },
+    "Initializer": {
+      "additionalProperties": true,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "mode": {
+          "knownValues": [
+            "once",
+            "everyStart"
+          ],
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/Nsid"
+        }
+      },
+      "required": [
+        "key",
+        "target",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "LocalState": {
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "knownValues": [
+            "sqlite",
+            "kv"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "MicroContribution": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.cartridge.micro`: the package's one GUI contribution. It has no key of its own:\nthe micro's identity is the cartridge id it is installed as.\n\n`component` is the key of the [`Artifact`] holding the micro's wasm component; it is the one\nmember the catalog and the host loader read, so it is typed and [`Cartridge::validate`] checks\nthe artifact exists. `schema` is the id of the manifest format `description` conforms to, and\n`description` is Clay's manifest minus the members the envelope already states (`id`,\n`package_version`). Clay's runtime owns that manifest's interpretation, so the catalog carries\nit as an open object and does not depend on Clay's crates.",
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "description": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "schema": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "schema",
+        "description"
+      ],
+      "title": "MicroContribution",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridge.micro"
+    },
+    "Nodule": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "bindings": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "initialization": {
+          "items": {
+            "$ref": "#/$defs/Initializer"
+          },
+          "type": "array"
+        },
+        "localState": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LocalState"
+          },
+          "type": "object"
+        },
+        "revisionedStores": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RevisionedStore"
+          },
+          "type": "object"
+        },
+        "routines": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Routine"
+          },
+          "type": "object"
+        }
+      },
+      "title": "Nodule",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.nodule"
+    },
+    "Nsid": {
+      "type": "string"
+    },
+    "RevisionedStore": {
+      "additionalProperties": true,
+      "properties": {
+        "entry": {
+          "$ref": "#/$defs/Nsid"
+        },
+        "mode": {
+          "knownValues": [
+            "frontier",
+            "log"
+          ],
+          "type": "string"
+        },
+        "selector": {
+          "$ref": "#/$defs/Nsid"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Nsid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "selector",
+        "entry",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "Routine": {
+      "additionalProperties": true,
+      "properties": {
+        "impl": {
+          "oneOf": [
+            {
+              "additionalProperties": true,
+              "properties": {
+                "$type": {
+                  "const": "org.example.daybook.componentExport"
+                },
+                "component": {
+                  "type": "string"
+                },
+                "export": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$type",
+                "component",
+                "export"
+              ],
+              "type": "object",
+              "x-lexicon-id": "org.example.daybook.componentExport"
+            },
+            {
+              "additionalProperties": true,
+              "properties": {
+                "$type": {
+                  "not": {
+                    "enum": [
+                      "org.example.daybook.componentExport"
+                    ]
+                  },
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$type"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "implements": {
+          "$ref": "#/$defs/Nsid"
+        },
+        "uses": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RoutineUse"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "impl",
+        "implements"
+      ],
+      "type": "object"
+    },
+    "RoutineUse": {
+      "additionalProperties": true,
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "delete": {
+          "type": "boolean"
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "write": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "VersionReq": {
+      "type": "string"
+    }
+  },
+  "$ref": "#/$defs/Cartridge",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}
