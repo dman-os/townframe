@@ -40,6 +40,7 @@ use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
 use service_utils_rs::Host;
+use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
 use service_utils_rs::ResponseEnvelope;
 use service_utils_rs::StopToken;
@@ -266,7 +267,7 @@ impl Blobs {
         self.client
             .call_with_metadata(Envelope::with_metadata(
                 context,
-                service_utils_rs::HttpMetadata {
+                HttpMetadata {
                     range,
                     ..Default::default()
                 },
@@ -353,16 +354,18 @@ impl BlobService {
 
     /// Resolves `capability` to the scope its handle was minted with and requires `permits` to
     /// hold of it, answering that scope. Only a handle this domain minted resolves: an identity,
-    /// or a capability from any other namespace, is `Denied`.
+    /// or a capability from any other namespace, is `Denied`, and so is one bound to an actor other
+    /// than the request's presenter ([`DomainCapabilities::resolve`]).
     async fn authorize(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         capability: CapId,
         permits: impl FnOnce(&BlobsScope) -> bool,
     ) -> Result<BlobsScope, BlobsError> {
         let invocation = self
             .capabilities
-            .resolve::<BlobsScope>(context, capability)
+            .resolve::<BlobsScope>(context, metadata, capability)
             .await
             .map_err(authority_error)?;
         let DomainAuthority::Scoped(scope) = invocation.authority else {
@@ -681,9 +684,12 @@ impl Handler<PutBlob> for BlobService {
         &self,
         mut request: Envelope<PutBlob>,
     ) -> Result<ResponseEnvelope<BlobInfo>, BlobsError> {
-        self.authorize(&request.context, request.params.capability, |scope| {
-            scope.put
-        })
+        self.authorize(
+            &request.context,
+            &request.metadata,
+            request.params.capability,
+            |scope| scope.put,
+        )
         .await?;
         let body = request
             .take_body()
@@ -702,9 +708,12 @@ impl Handler<ImportFile> for BlobService {
         &self,
         mut request: Envelope<ImportFile>,
     ) -> Result<ResponseEnvelope<ImportFileOutput>, BlobsError> {
-        self.authorize(&request.context, request.params.capability, |scope| {
-            scope.put
-        })
+        self.authorize(
+            &request.context,
+            &request.metadata,
+            request.params.capability,
+            |scope| scope.put,
+        )
         .await?;
         let body = request
             .take_body()
@@ -736,7 +745,12 @@ impl Handler<ReadBlob> for BlobService {
     ) -> Result<ResponseEnvelope<ByteBody>, BlobsError> {
         let params = request.params;
         let scope = self
-            .authorize(&request.context, params.capability, |_| true)
+            .authorize(
+                &request.context,
+                &request.metadata,
+                params.capability,
+                |_| true,
+            )
             .await?;
         self.authorize_read(&scope, &params.blob_id).await?;
         let info = self
@@ -801,7 +815,12 @@ impl Handler<StatBlob> for BlobService {
         request: Envelope<StatBlob>,
     ) -> Result<ResponseEnvelope<BlobStat>, BlobsError> {
         let scope = self
-            .authorize(&request.context, request.params.capability, |_| true)
+            .authorize(
+                &request.context,
+                &request.metadata,
+                request.params.capability,
+                |_| true,
+            )
             .await?;
         self.authorize_read(&scope, &request.params.blob_id).await?;
         Ok(BlobStat {

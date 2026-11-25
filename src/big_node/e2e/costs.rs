@@ -704,7 +704,7 @@ async fn dispatch_costs(table: &mut Table) {
     )
     .await;
     let input = serde_json::to_value(ReadDatums {
-        capability: capability(
+        capability: operator_capability(
             &node,
             DocScope {
                 read: DocScope::read_all([note.doc_id.clone()]),
@@ -719,7 +719,7 @@ async fn dispatch_costs(table: &mut Table) {
     })
     .unwrap();
     let operator = Authorization::identity(node.authority.root);
-    let write_capability = capability(
+    let write_capability = operator_capability(
         &node,
         DocScope {
             write: std::collections::BTreeMap::from([(

@@ -13,9 +13,10 @@ impl DocsService {
     async fn read(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: ReadDatums,
     ) -> Result<DatumsRead, DocsError> {
-        let caller = self.invocation(context, params.capability).await?;
+        let caller = self.invocation(context, metadata, params.capability).await?;
         let kinds = self
             .authorize_read(context, &caller.authority, &params.doc_id)
             .await?;
@@ -126,6 +127,6 @@ impl Handler<ReadDatums> for DocsService {
         &self,
         request: Envelope<ReadDatums>,
     ) -> Result<ResponseEnvelope<DatumsRead>, DocsError> {
-        Ok(self.read(&request.context, request.params).await?.into())
+        Ok(self.read(&request.context, &request.metadata, request.params).await?.into())
     }
 }

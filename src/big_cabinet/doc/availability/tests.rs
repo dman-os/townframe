@@ -354,6 +354,7 @@ async fn denied_queries_disclose_neither_known_nor_unknown_documents() {
             service
                 .availability(
                     &RequestContext::root(),
+                    &Default::default(),
                     GetDocAvailability {
                         capability: empty,
                         doc_id

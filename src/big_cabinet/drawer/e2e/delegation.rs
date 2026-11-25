@@ -644,7 +644,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
         .capability_id;
     let caller = node
         .core()
-        .invocation(&RequestContext::root(), delegated)
+        .invocation(&RequestContext::root(), &Default::default(), delegated)
         .await
         .unwrap();
     assert_eq!(caller.signer, cartridge.actor);
@@ -1631,7 +1631,11 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
         .await
         .unwrap()
         .capability_id;
-    let caller = node.core().invocation(&context, delegated).await.unwrap();
+    let caller = node
+        .core()
+        .invocation(&context, &Default::default(), delegated)
+        .await
+        .unwrap();
     assert_eq!(caller.signer, cartridge.actor);
     assert_eq!(caller.originating_actor, Some(alice.actor.actor_id));
     drop(

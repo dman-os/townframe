@@ -17,6 +17,7 @@ use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::MintDispatchCapability;
 use big_nodule_core::protocol::NoduleRecord;
+use method_core::ByteBody;
 use method_core::Method;
 use service_utils_rs::ClientError;
 
@@ -234,7 +235,7 @@ async fn built_in_and_nodule_operations_share_one_router_and_one_admission() {
     // The operator is admitted everywhere. The docs call is the docs service's own: the
     // capability inside the request is minted by the docs service and checked by it.
     let placement = format!("drawer {}", node.drawers.local().present_id);
-    let creating = capability(
+    let creating = operator_capability(
         &node,
         DocScope {
             create: BTreeSet::from([placement.clone()]),
@@ -272,7 +273,7 @@ async fn built_in_and_nodule_operations_share_one_router_and_one_admission() {
 
     // A handle scoped to the docs read admits that operation and nothing else, built-in or
     // nodule alike.
-    let reading = capability(
+    let reading = operator_capability(
         &node,
         DocScope {
             read: DocScope::read_all([receipt.doc_id.clone()]),
@@ -323,7 +324,7 @@ async fn built_in_and_nodule_operations_share_one_router_and_one_admission() {
     // still refuses a request whose own capability does not cover the document, and says so
     // in the XRPC domain envelope.
     let other = create(&node, "other-note", value.clone()).await;
-    let unrelated = capability(
+    let unrelated = operator_capability(
         &node,
         DocScope {
             read: DocScope::read_all([other.doc_id]),
@@ -348,5 +349,231 @@ async fn built_in_and_nodule_operations_share_one_router_and_one_admission() {
         Err(DispatchError::UnknownOperation)
     );
     assert!(call(&node, docs_reader, read_op, read_input).await.is_ok());
+    shutdown(node, stop).await;
+}
+
+/// A second actor under the operator, with a dispatch handle that admits `operations`: the
+/// handle is bound to it and it presents it under its own signer, so dispatch admission passes.
+async fn second_caller(
+    node: &BigNode,
+    operations: &[&str],
+) -> (big_cabinet_core::dmeta::Uuid7, Authorization) {
+    let opened = node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            big_cabinet_core::authority::OpenActor {
+                parent: node.authority.root,
+                path: "second".into(),
+                rights: Rights::all(),
+            },
+        )
+        .await
+        .unwrap();
+    let operator = Authorization::identity(node.authority.root);
+    let handle = node
+        .dispatch
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator.metadata(),
+            MintDispatchCapability {
+                scope: self::operations(operations),
+                rights: Rights::USE,
+                subject: Some(opened.actor.actor_id),
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    (
+        opened.actor.actor_id,
+        Authorization {
+            authority: handle,
+            signer: opened.capability,
+        },
+    )
+}
+
+/// One dispatch call whose answer may be bytes. `parameters` are the call's JSON, or the Lexicon
+/// parameters of a method whose body is `bytes`.
+async fn raw(
+    node: &BigNode,
+    authorization: Authorization,
+    operation: &str,
+    parameters: Value,
+    bytes: Option<ByteBody>,
+) -> Result<big_dispatch_core::Body, DispatchError> {
+    let invoke = match bytes {
+        Some(bytes) => big_dispatch_core::Invoke {
+            operation: operation.to_owned(),
+            parameters,
+            body: big_dispatch_core::Body::Bytes(bytes),
+            context: Default::default(),
+        },
+        None => big_dispatch_core::Invoke::json(operation, parameters, Default::default()),
+    };
+    node.dispatch
+        .client
+        .call_with(RequestContext::root(), authorization.metadata(), invoke)
+        .await
+        .map(|output| output.body)
+        .map_err(|error| match error {
+            ClientError::Method(error) => error,
+            ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
+        })
+}
+
+/// ADR 037 §2: a handle is bound to its holder in every domain, and a leaked id is a dead number
+/// under another actor's signer. Dispatch admits the second actor on its own handle, but the
+/// resource capability in the request body is another actor's, and the domain must refuse it.
+#[tokio::test]
+async fn a_body_capability_presented_by_an_actor_it_is_not_bound_to_is_refused() {
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let (read_op, write_op) = (
+        ReadDatums::XRPC.nsid,
+        big_cabinet_core::doc::WriteDatums::XRPC.nsid,
+    );
+    let (read_blob, put_blob) = (
+        big_blobs_core::ReadBlob::XRPC.nsid,
+        big_blobs_core::PutBlob::XRPC.nsid,
+    );
+
+    let stored = create(&node, "held-note", json!({"$type": NOTE, "value": "a's"})).await;
+    let info = super::blobs::put_bytes(&node, b"a's blob").await;
+    let (second, caller) = second_caller(&node, &[read_op, write_op, read_blob, put_blob]).await;
+
+    let refused =
+        |outcome: Result<big_dispatch_core::Body, DispatchError>, what: &str| match outcome {
+            Err(DispatchError::Provider { body, .. }) => {
+                assert!(
+                    matches!(
+                        body["operationError"].as_str(),
+                        Some("Denied" | "Unauthorized")
+                    ),
+                    "{what}: refused, but as {body}"
+                );
+            }
+            other => panic!("{what}: another actor's handle must be refused, got {other:?}"),
+        };
+
+    // Docs: the capability is bound to the drawers actor, the presenter is the second actor.
+    let doc_read = operator_capability(
+        &node,
+        DocScope {
+            read: DocScope::read_all([stored.doc_id.clone()]),
+            ..DocScope::default()
+        },
+    )
+    .await;
+    let read_input = |capability| {
+        serde_json::to_value(ReadDatums {
+            capability,
+            doc_id: stored.doc_id.clone(),
+            at: At::Current,
+            datums: Some(BTreeSet::from([key()])),
+            optimistic: false,
+        })
+        .unwrap()
+    };
+    refused(
+        raw(&node, caller, read_op, read_input(doc_read), None).await,
+        "docs read",
+    );
+
+    // A write signs as the handle's actor, so presenting another actor's write handle would
+    // forge that actor's signature.
+    let doc_write = operator_capability(
+        &node,
+        DocScope {
+            write: BTreeMap::from([(
+                stored.doc_id.clone(),
+                big_cabinet_core::doc::DatumKinds::All,
+            )]),
+            ..DocScope::default()
+        },
+    )
+    .await;
+    refused(
+        raw(
+            &node,
+            caller,
+            write_op,
+            serde_json::to_value(big_cabinet_core::doc::WriteDatums {
+                capability: doc_write,
+                command: None,
+                doc_id: stored.doc_id.clone(),
+                mode: big_cabinet_core::doc::WriteMode::AtCurrent,
+                set: BTreeMap::from([(key(), json!({"$type": NOTE, "value": "forged"}))]),
+                remove: BTreeSet::new(),
+            })
+            .unwrap(),
+            None,
+        )
+        .await,
+        "docs write",
+    );
+
+    // Blobs: the capabilities are bound to the operator's actor.
+    let blob_read = super::blobs::read_cap(&node, &info.blob_id).await;
+    refused(
+        raw(
+            &node,
+            caller,
+            read_blob,
+            json!({"capability": blob_read, "blobId": info.blob_id}),
+            None,
+        )
+        .await,
+        "blobs read",
+    );
+    let blob_put = super::blobs::put_cap(&node).await;
+    refused(
+        raw(
+            &node,
+            caller,
+            put_blob,
+            json!({"capability": blob_put}),
+            Some(ByteBody::from_bytes(b"b's".to_vec())),
+        )
+        .await,
+        "blobs put",
+    );
+
+    // Controls: the same operations succeed under handles bound to the second actor, so the
+    // refusals above are the holder check and nothing else.
+    let own_doc_read = node
+        .docs
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
+            MintDocCapability {
+                scope: DocScope {
+                    read: DocScope::read_all([stored.doc_id.clone()]),
+                    ..DocScope::default()
+                },
+                rights: Rights::USE,
+                subject: Some(second),
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    raw(&node, caller, read_op, read_input(own_doc_read), None)
+        .await
+        .unwrap();
+    let own_read = super::blobs::read_cap_for(&node, &info.blob_id, Some(second)).await;
+    raw(
+        &node,
+        caller,
+        read_blob,
+        json!({"capability": own_read, "blobId": info.blob_id}),
+        None,
+    )
+    .await
+    .unwrap();
     shutdown(node, stop).await;
 }

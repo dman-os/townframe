@@ -19,10 +19,11 @@ impl DrawerService {
     async fn list_docs(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: ListDocs,
     ) -> Result<Vec<ListedDoc>, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core.invocation(context, metadata, params.capability).await?;
         let level = core
             .level(context, &caller.authority, &params.drawer_id)
             .await?
@@ -51,7 +52,7 @@ impl Handler<ListDocs> for DrawerService {
         &self,
         request: Envelope<ListDocs>,
     ) -> Result<ResponseEnvelope<ListedDocs>, DrawersError> {
-        let docs = self.list_docs(&request.context, request.params).await?;
+        let docs = self.list_docs(&request.context, &request.metadata, request.params).await?;
         Ok(ListedDocs { docs }.into())
     }
 }
