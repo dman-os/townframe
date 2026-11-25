@@ -178,11 +178,11 @@ pub fn setup_tracing() -> Res<()> {
         if std::env::var("RUST_BACKTRACE").is_err() {
             // std::env::set_var("RUST_BACKTRACE", "1");
         }
-        std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_owned())
+        testing::instr_off_filter(std::env::var("RUST_LOG").ok(), default_filter)
     };
 
     #[cfg(target_arch = "wasm32")]
-    let filter = default_filter;
+    let filter = testing::instr_off_filter(None, default_filter);
 
     use tracing_subscriber::prelude::*;
     let registry = tracing_subscriber::registry()

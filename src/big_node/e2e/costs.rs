@@ -404,7 +404,7 @@ async fn a_note_costs_no_more_to_create_in_a_fuller_drawer() {
             .iter()
             .map(|count| count.load(Relaxed))
             .collect(); // INSTR
-        tracing::info!(ordinal, "INSTR create note begin"); // INSTR
+        tracing::info!(target: "instr", ordinal, "INSTR create note begin"); // INSTR
         let (_, usage) = measure(cluster.create_note(0, &drawer, &text(ordinal))).await;
         let instr_sql: Vec<u64> = sqlite_rs::INSTR_SQL
             .iter()
@@ -577,11 +577,11 @@ async fn long_test_cost_table() {
         INSTR_STRIDE.store(stride.parse().unwrap(), Relaxed);
         INSTR_PHASE.store(1, Relaxed);
     } // INSTR
-    tracing::info!("INSTR phase connect begin"); // INSTR
+    tracing::info!(target: "instr", "INSTR phase connect begin"); // INSTR
     table
         .run("connect two nodes", cluster.connect(Topology::Pair))
         .await;
-    tracing::info!("INSTR phase connect end"); // INSTR
+    tracing::info!(target: "instr", "INSTR phase connect end"); // INSTR
     if std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok() {
         INSTR_PHASE.store(2, Relaxed);
     } // INSTR
@@ -630,20 +630,20 @@ async fn long_test_cost_table() {
         .await;
     assert_eq!(received, bytes);
 
-    tracing::info!("INSTR phase replicate end"); // INSTR
+    tracing::info!(target: "instr", "INSTR phase replicate end"); // INSTR
     eprintln!("INSTR dump for connect+replicate"); // INSTR
     if std::env::var("BIG_NODE_COSTS_SAMPLE").is_ok() {
         instr_dump();
     } // INSTR
     table.run("stop node", cluster.stop(1)).await;
-    tracing::info!("INSTR phase reboot begin"); // INSTR
+    tracing::info!(target: "instr", "INSTR phase reboot begin"); // INSTR
     table
         .run(
             &format!("reboot node holding {count} notes"),
             cluster.restart(1),
         )
         .await;
-    tracing::info!("INSTR phase reboot end"); // INSTR
+    tracing::info!(target: "instr", "INSTR phase reboot end"); // INSTR
     cluster.stop_all().await;
 
     // D19: many nodes per process. What each one adds, booted side by side.

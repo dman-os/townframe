@@ -92,7 +92,9 @@ not before adding a log line.
 - Uncomment the matching `[patch."https://github.com/dman-os/<fork>"]` block in the root
   `Cargo.toml` and restore the `rev` pins once the patch is no longer needed.
 - Gate new logging behind the existing env switches (`DAYB_KEYHIVE_DIAG`, `INSTR`-style vars) so
-  the hot path stays silent by default. Mark suspicious sites even when they are only suspected.
+  the hot path stays silent by default. `INSTR` probe events carry `target: "instr"`, which the
+  setup always silences (`instr=off` is prepended, even to `RUST_LOG_TEST=debug`); read them with
+  `RUST_LOG_TEST=info,instr=info` (or `instr=debug`). Mark suspicious sites even when they are only suspected.
 - Keep instrumentation in its own commit, separate from fixes. Upstream forks move, and a pin
   bump must be able to drop the instrumentation and re-apply only the real fixes on top; a hunt
   whose instrumentation is interleaved with fixes cannot be rebased or pushed cleanly.
@@ -361,7 +363,7 @@ message outright. Survey them before adding instrumentation:
 A full run carries ~180 distinct WARN/ERROR signatures. The informative ones are the low-frequency,
 high-information lines (`unknown peer`, `no registered application peer identity`, `missing entry
 encryption key while materializing`, `peer disconnected while sending ...`), not the per-event
-chatter (`INSTR ...`, `ERROR_CALLER=caller dropped`). Do not add `debug!` noise for a condition a
+chatter (`INSTR ...` when `instr=info` is on, `ERROR_CALLER=caller dropped`). Do not add `debug!` noise for a condition a
 `WARN`/`ERROR` already states, and never raise a level just to make a probe greppable.
 
 ## Fence -> job -> missing message
