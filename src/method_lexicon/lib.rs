@@ -244,6 +244,7 @@ fn builtin_list() -> &'static [Builtin] {
             docs::ListDatums,
             docs::PollDatums,
             docs::QueryDatumRefs,
+            docs::ResolveKeyRef,
             docs::UnsafeInspectDatum,
             docs::InspectDatumClaims,
             docs::GetDocAvailability,

@@ -77,6 +77,7 @@ impl schemars :: JsonSchema for big_cabinet_core::reference::DatumKey
 impl schemars :: JsonSchema for big_cabinet_core::reference::DatumPin
 impl schemars :: JsonSchema for big_cabinet_core::reference::DatumReference
 impl schemars :: JsonSchema for big_cabinet_core::reference::DatumTag
+impl schemars :: JsonSchema for big_cabinet_core::reference::KeyReference
 impl schemars :: JsonSchema for big_cabinet_core::reference::Location
 impl std :: fmt :: Debug for big_cabinet_core::authority::CapId
 impl std :: fmt :: Debug for big_cabinet_core::authority::Rights
@@ -111,8 +112,8 @@ pub enum big_cabinet_core::dmeta::DmetaError { # [error ("an actor or datum alia
 pub enum big_cabinet_core::doc::At { Current, Heads (# [cfg_attr (feature = "schemars" , schemars (with = "Vec<String>"))] Vec < ChangeHash >) }
 pub enum big_cabinet_core::doc::DatumEvent { Datum { revision : u64 , doc_id : DocId , datum_key : DatumKey , datum : ObservedDatum , }, Leave { revision : u64 , doc_id : DocId , } }
 pub enum big_cabinet_core::doc::DatumRead { Accepted { value : Json , version : DatumVersion , # [doc = " Who wrote the accepted version, as the gate verified it for this read."] authors : Vec < DatumAuthor > , }, Absent { version : DatumVersion , }, Pending { reason : String , version : DatumVersion , value : Option < Json > , }, Rejected { reason : String , }, Undecodable { reason : String , version : DatumVersion , } }
-pub enum big_cabinet_core::doc::DatumRefSelector { Origin { doc_id : DocId , # [serde (default , skip_serializing_if = "Option::is_none")] datum_key : Option < DatumKey > , }, Target { doc_id : DocId , # [serde (default , skip_serializing_if = "Option::is_none")] datum_key : Option < DatumKey > , } }
-pub enum big_cabinet_core::doc::DocsError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("document access policy failed: {0}")] Access (String), # [error ("document repository failed: {0}")] Repository (String), # [error ("document is not locally available")] DocNotFound, # [error ("requested heads are unknown: {heads:?}")] UnknownHeads { # [cfg_attr (feature = "schemars" , schemars (with = "Vec<String>"))] heads : Vec < ChangeHash > , }, # [error ("a command id is 1..=256 bytes")] InvalidCommand, # [error ("command {command} is still in flight; retry once it resolves")] CommandInFlight { command : CommandId }, # [error ("command {command} was already used for a different request")] CommandReused { command : CommandId }, # [error ("no schema is registered for datum tag {datum_tag}")] UnknownSchema { datum_tag : String }, # [error ("datum {datum_key} is managed by the repository and cannot be written directly")] SystemDatum { datum_key : DatumKey }, # [error ("datum {datum_key} is both set and removed")] SetAndRemoved { datum_key : DatumKey }, # [error ("datum {datum_key} value is invalid: {reason}")] InvalidValue { datum_key : DatumKey , reason : String }, # [error ("datum {datum_key} value is too large: it needs {observed} {limit} and the limit is {maximum}")] ValueTooLarge { datum_key : DatumKey , limit : ResourceLimit , # [doc = " What the read of the value had reached when it was refused. The read stops at the"] # [doc = " limit, so this is the amount the value needed up to that point, not necessarily its"] # [doc = " whole size."] observed : u64 , maximum : u64 , }, # [error ("the write condition no longer holds at {heads:?}")] Conflict { # [cfg_attr (feature = "schemars" , schemars (with = "Vec<String>"))] heads : Vec < ChangeHash > , datums : BTreeMap < DatumKey , DatumVersion > , }, # [error ("datum {datum_key} at the write's base is not accepted: {verdict:?}")] BaseNotAccepted { datum_key : DatumKey , verdict : Unaccepted , }, # [error ("inspection evidence is pending: {reason}")] Pending { reason : String }, # [error ("inspection resource limit: {reason}")] ResourceRefused { reason : String }, # [error ("unsupported inspection evidence: {reason}")] Unsupported { reason : String }, # [error ("malformed inspection evidence: {reason}")] MalformedEvidence { reason : String }, # [error ("the documents share no history, so one cannot be merged into the other")] UnrelatedHistory }
+pub enum big_cabinet_core::doc::DatumRefSelector { Origin { doc_id : DocId , # [serde (default , skip_serializing_if = "Option::is_none")] datum_key : Option < DatumKey > , }, Target { doc_id : DocId , # [serde (default , skip_serializing_if = "Option::is_none")] datum_key : Option < DatumKey > , }, # [doc = " Every `#keyRef` naming `key` (ADR 035 §2.9), whichever document holds the referrer. A key"] # [doc = " reference names no document, so it has no `Target` to select by."] Key { key : DatumKey } }
+pub enum big_cabinet_core::doc::DocsError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("document access policy failed: {0}")] Access (String), # [error ("document repository failed: {0}")] Repository (String), # [error ("document is not locally available")] DocNotFound, # [error ("requested heads are unknown: {heads:?}")] UnknownHeads { # [cfg_attr (feature = "schemars" , schemars (with = "Vec<String>"))] heads : Vec < ChangeHash > , }, # [error ("a command id is 1..=256 bytes")] InvalidCommand, # [doc = " A document id arrived in a request that is not the 32 bytes every document id is. Ids are"] # [doc = " variable-width keys on the wire (ADR 012), but a document's id is its ed25519 key, so"] # [doc = " only a 32-byte one can name a document; refusing here keeps the width from ever reaching"] # [doc = " the repository, where it is an invariant."] # [error ("{doc_id} is not a document id: a document id is 32 bytes wide")] InvalidDocId { doc_id : DocId }, # [error ("command {command} is still in flight; retry once it resolves")] CommandInFlight { command : CommandId }, # [error ("command {command} was already used for a different request")] CommandReused { command : CommandId }, # [error ("no schema is registered for datum tag {datum_tag}")] UnknownSchema { datum_tag : String }, # [error ("datum {datum_key} is managed by the repository and cannot be written directly")] SystemDatum { datum_key : DatumKey }, # [error ("datum {datum_key} is both set and removed")] SetAndRemoved { datum_key : DatumKey }, # [error ("datum {datum_key} value is invalid: {reason}")] InvalidValue { datum_key : DatumKey , reason : String }, # [error ("datum {datum_key} is not content-addressed: its kind does not declare its slot a hash of its value")] NotContentAddressed { datum_key : DatumKey }, # [error ("datum {datum_key} does not hash to its key: {reason}")] ContentHashMismatch { datum_key : DatumKey , reason : String }, # [error ("no document the caller can read holds a copy of {datum_key} that hashes to its key")] KeyRefUnresolved { datum_key : DatumKey }, # [error ("datum {datum_key} value is too large: it needs {observed} {limit} and the limit is {maximum}")] ValueTooLarge { datum_key : DatumKey , limit : ResourceLimit , # [doc = " What the read of the value had reached when it was refused. The read stops at the"] # [doc = " limit, so this is the amount the value needed up to that point, not necessarily its"] # [doc = " whole size."] observed : u64 , maximum : u64 , }, # [error ("the write condition no longer holds at {heads:?}")] Conflict { # [cfg_attr (feature = "schemars" , schemars (with = "Vec<String>"))] heads : Vec < ChangeHash > , datums : BTreeMap < DatumKey , DatumVersion > , }, # [error ("datum {datum_key} at the write's base is not accepted: {verdict:?}")] BaseNotAccepted { datum_key : DatumKey , verdict : Unaccepted , }, # [error ("inspection evidence is pending: {reason}")] Pending { reason : String }, # [error ("inspection resource limit: {reason}")] ResourceRefused { reason : String }, # [error ("unsupported inspection evidence: {reason}")] Unsupported { reason : String }, # [error ("malformed inspection evidence: {reason}")] MalformedEvidence { reason : String }, # [error ("the documents share no history, so one cannot be merged into the other")] UnrelatedHistory }
 pub enum big_cabinet_core::doc::ObservedDatum { Present { # [cfg_attr (feature = "schemars" , schemars (with = "Vec<String>"))] doc_heads : Vec < ChangeHash > , version : DatumVersion , }, Removed { # [cfg_attr (feature = "schemars" , schemars (with = "Option<Vec<String>>"))] doc_heads : Option < Vec < ChangeHash > > , version : DatumVersion , } }
 pub enum big_cabinet_core::doc::StoreError { # [error ("document operation failed: {0}")] Docs (# [from] DocsError), # [error ("document service transport failed: {0}")] DocsUnavailable (String), # [error ("access to the store document was lost")] AccessLost, # [error ("invalid store edit: {0}")] InvalidEdit (String) }
 pub enum big_cabinet_core::doc::Unaccepted { Pending { reason : String }, Rejected { reason : String } }
@@ -170,6 +171,8 @@ pub impl big_cabinet_core::dmeta::Uuid7::fn new () -> Self
 pub impl big_cabinet_core::dmeta::Uuid7::fn unix_millis (& self) -> u64
 pub impl big_cabinet_core::doc::CommandId::fn as_str (& self) -> & str
 pub impl big_cabinet_core::doc::DatumPatch::fn is_empty (& self) -> bool
+pub impl big_cabinet_core::doc::DocScope::fn ensure_doc_ids (& self) -> Result < () , DocsError >
+pub impl big_cabinet_core::doc::DocsError::fn ensure_doc_id (doc_id : & DocId) -> Result < () , Self >
 pub impl big_cabinet_core::drawer::Drawer::fn groups (& self) -> Option < DrawerGroups >
 pub impl big_cabinet_core::drawer::Drawer::fn self_doc () -> Self
 pub impl big_cabinet_core::drawer::Drawer::fn sensitive_root (& self) -> Option < DocId >
@@ -217,6 +220,7 @@ pub impl big_cabinet_core::reference::DatumReference::fn parse_stored (value : &
 pub impl big_cabinet_core::reference::DatumReference::fn pinned (mut self , heads : impl IntoIterator < Item = ChangeHash >) -> Self
 pub impl big_cabinet_core::reference::DatumTag::fn as_str (& self) -> & str
 pub impl big_cabinet_core::reference::DatumTag::fn new (value : impl Into < String >) -> Result < Self , ReferenceError >
+pub impl big_cabinet_core::reference::KeyReference::fn new (key : DatumKey) -> Self
 pub impl big_cabinet_core::reference::Location::fn fragment (& self) -> Option < & str >
 pub impl big_cabinet_core::reference::Location::fn into_reference (self) -> DatumReference
 pub impl big_cabinet_core::reference::Location::fn new (reference : DatumReference , fragment : Option < String > ,) -> Result < Self , ReferenceError >
@@ -286,10 +290,12 @@ pub struct big_cabinet_core::doc::ListDatums  { capability: CapId, doc_id: DocId
 pub struct big_cabinet_core::doc::MergeDoc  { capability: CapId, command: Option < CommandId >, source_id: DocId, at: At, target_id: DocId }
 pub struct big_cabinet_core::doc::MintDocCapability  { scope: DocScope, rights: Rights, subject: Option < Uuid7 > }
 pub struct big_cabinet_core::doc::PollDatums  { capability: CapId, predicate: Predicate, datums: DatumSelection, after: u64, limit: u32, hold_ms: u32 }
-pub struct big_cabinet_core::doc::QueriedDatumRef  { origin_doc_id: DocId, origin_datum_key: DatumKey, path: String, target_doc_id: DocId, target_datum_key: DatumKey, ref_heads: Vec < ChangeHash > }
+pub struct big_cabinet_core::doc::QueriedDatumRef  { origin_doc_id: DocId, origin_datum_key: DatumKey, path: String, target_doc_id: Option < DocId >, target_datum_key: DatumKey, ref_heads: Vec < ChangeHash > }
 pub struct big_cabinet_core::doc::QueriedDatumRefs  { refs: Vec < QueriedDatumRef > }
 pub struct big_cabinet_core::doc::QueryDatumRefs  { capability: CapId, drawer_id: Option < DocId >, selector: DatumRefSelector }
 pub struct big_cabinet_core::doc::ReadDatums  { capability: CapId, doc_id: DocId, at: At, datums: Option < BTreeSet < DatumKey > >, optimistic: bool }
+pub struct big_cabinet_core::doc::ResolveKeyRef  { capability: CapId, key: DatumKey }
+pub struct big_cabinet_core::doc::ResolvedKeyRef  { doc_id: DocId, heads: Vec < ChangeHash >, value: Json }
 pub struct big_cabinet_core::doc::StoreSnapshot< S >  { heads: Vec < ChangeHash >, value: S }
 pub struct big_cabinet_core::doc::WriteDatums  { capability: CapId, command: Option < CommandId >, doc_id: DocId, mode: WriteMode, set: BTreeMap < DatumKey , Json >, remove: BTreeSet < DatumKey > }
 pub struct big_cabinet_core::doc::WriteReceipt  { doc_id: DocId, heads: Vec < ChangeHash > }
@@ -348,6 +354,7 @@ pub struct big_cabinet_core::reference::DatumKey  {  }
 pub struct big_cabinet_core::reference::DatumPin  {  }
 pub struct big_cabinet_core::reference::DatumReference  {  }
 pub struct big_cabinet_core::reference::DatumTag  {  }
+pub struct big_cabinet_core::reference::KeyReference  { key: DatumKey }
 pub struct big_cabinet_core::reference::Location  {  }
 pub struct big_cabinet_core::schema_compat::CompatibilityOutcome  { result: Compatibility, diagnostics: Vec < Diagnostic > }
 pub struct big_cabinet_core::schema_compat::CompatibilityReport  { json: CompatibilityOutcome, native_storage: CompatibilityOutcome, lexicon: CompatibilityOutcome }
@@ -364,12 +371,15 @@ pub use big_cabinet_core::datum::codec :: Counter
 pub use big_cabinet_core::datum::codec :: DeclaredReference
 pub use big_cabinet_core::datum::codec :: F64
 pub use big_cabinet_core::datum::codec :: KEYWORD
+pub use big_cabinet_core::datum::codec :: ReferenceTarget
 pub use big_cabinet_core::datum::codec :: Stored
 pub use big_cabinet_core::datum::codec :: Text
 pub use big_cabinet_core::datum::codec :: codec_schema
 pub use big_cabinet_core::datum::codec :: declared_references
 pub use big_cabinet_core::datum::codec :: hydrate_value
 pub use big_cabinet_core::datum::codec :: reconcile_json_atomic
+pub use big_cabinet_core::datum::content_hash :: ContentHash
+pub use big_cabinet_core::datum::content_hash :: ContentHashError
 pub use big_cabinet_core::datum::datum_core :: DatumMember
 pub use big_cabinet_core::datum::datum_core :: DatumShape
 pub use big_cabinet_core::datum::datum_core :: Extra
@@ -459,6 +469,7 @@ pub use big_cabinet_core::reference :: DatumPin
 pub use big_cabinet_core::reference :: DatumReference
 pub use big_cabinet_core::reference :: DatumTag
 pub use big_cabinet_core::reference :: DocId
+pub use big_cabinet_core::reference :: KeyReference
 pub use big_cabinet_core::reference :: Location
 pub use big_cabinet_core::reference :: REFERENCE_SCHEME
 pub use big_cabinet_core::reference :: ReferenceDocId
@@ -468,6 +479,7 @@ pub use big_cabinet_core::reference::defs :: DATUM_LOCATION
 pub use big_cabinet_core::reference::defs :: DATUM_PIN
 pub use big_cabinet_core::reference::defs :: DATUM_REF
 pub use big_cabinet_core::reference::defs :: DEFS_NSID
+pub use big_cabinet_core::reference::defs :: KEY_REF
 pub use big_cabinet_core::reference::defs :: LEXICON_REF
 pub use big_cabinet_core::reference::defs :: defs_lexicon
 pub use big_cabinet_core::reference::defs :: node_type_libraries

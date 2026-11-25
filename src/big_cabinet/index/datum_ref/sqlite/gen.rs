@@ -5,4 +5,5 @@ pub const MIGRATION_TABLE: &str = "_big_cabinet_index_datum_ref_migrations";
 
 pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_init.sql", sql: include_str!("migrations/001_init.sql") },
+    Migration { version: 2, name: "002_key_edges.sql", sql: include_str!("migrations/002_key_edges.sql") },
 ];
