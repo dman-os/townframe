@@ -8,6 +8,8 @@
 //! `service_client_core_rs`, the same code the CLI and the nodules use.
 
 use crate::diff::MAX_RENDERED_OCTETS;
+use crate::guide::StructureDatum;
+use crate::session::SessionSummary;
 use crate::source::IntxtSource;
 use crate::source::LoadError;
 use crate::source::Origin;
@@ -16,7 +18,6 @@ use crate::view::CommitDatum;
 use crate::view::EntryDatum;
 use crate::view::IntxtView;
 use crate::view::PatchDatum;
-use crate::view::SessionSummary;
 use crate::view::sha_of;
 use big_blobs_core::Blob;
 use big_blobs_core::BlobId;
@@ -43,6 +44,7 @@ use big_cabinet_core::query::Predicate;
 use big_cabinet_core::reference::ReferenceDocId;
 use intxt_core::annotation::Comment;
 use intxt_core::annotation::Notes;
+use intxt_core::annotation::Structure;
 use intxt_core::generic::Body;
 use intxt_core::generic::Index;
 use intxt_core::generic::Title;
@@ -57,7 +59,10 @@ use intxt_core::work::GithubPullEntry;
 use intxt_core::work::JjChange;
 use intxt_core::work::JjChangeEntry;
 use intxt_core::work::PromptTurn;
+use intxt_core::work::RepoEntry;
 use intxt_core::work::SessionEntry;
+use intxt_core::work::WorktreeEntry;
+use jiff::Timestamp;
 use method_core::ByteRange;
 use method_core::Method;
 use method_core::Unary;
@@ -543,25 +548,127 @@ impl<H: HttpTransport> NodeSource<H> {
         Ok(held)
     }
 
-    /// The intxt's comments in creation order. Comment slots are UUIDv7, so key order across the
-    /// writers' notes documents is time order.
-    async fn comments(&self, drawer: &DocId) -> Result<Vec<(DatumReference, Comment)>, Failure> {
-        let mut comments = Vec::new();
+    /// The intxt's comments in creation order and its structures (the guide's sections), from
+    /// every writer's notes document. Comment slots are UUIDv7, so key order across the notes
+    /// documents is time order.
+    async fn notes(&self, drawer: &DocId) -> Result<Notebook, Failure> {
+        let mut notebook = Notebook::default();
         for doc in self.marked_docs(drawer, Notes::ID).await? {
             for (key, value) in self.read(&doc, None).await? {
-                if key.tag().as_str() != Comment::ID {
+                let tag = key.tag().as_str();
+                if tag != Comment::ID && tag != Structure::ID {
                     continue;
                 }
-                let comment = serde_json::from_value(value)
-                    .map_err(|error| unreadable(format!("{key} in {doc}: {error}")))?;
-                comments.push((
-                    DatumReference::new(ReferenceDocId::Concrete(doc.clone()), key),
-                    comment,
-                ));
+                let malformed =
+                    |error: serde_json::Error| unreadable(format!("{key} in {doc}: {error}"));
+                if tag == Comment::ID {
+                    let comment = serde_json::from_value(value).map_err(malformed)?;
+                    let id = DatumReference::new(ReferenceDocId::Concrete(doc.clone()), key);
+                    notebook.comments.push((id, comment));
+                } else {
+                    let structure = serde_json::from_value(value).map_err(malformed)?;
+                    let id = DatumReference::new(ReferenceDocId::Concrete(doc.clone()), key);
+                    notebook.structures.push((id, structure));
+                }
             }
         }
-        comments.sort_by(|(left, _), (right, _)| left.key().cmp(right.key()));
-        Ok(comments)
+        notebook
+            .comments
+            .sort_by(|(left, _), (right, _)| left.key().cmp(right.key()));
+        Ok(notebook)
+    }
+
+    /// One entry of the body, resolved into the datums it names. An entry of a kind the page does
+    /// not know is kept as it is; a repository or worktree entry is captured work the page does
+    /// not show.
+    async fn resolve_entry(
+        &self,
+        drawer: &DocId,
+        index: &DocId,
+        key: &DatumKey,
+        value: serde_json::Value,
+        commits_held: &mut Option<BTreeMap<String, GitCommit>>,
+    ) -> Result<Option<Resolved>, Failure> {
+        let malformed = |error: serde_json::Error| unreadable(format!("{key}: {error}"));
+        Ok(Some(match key.tag().as_str() {
+            GitCommitEntry::ID => {
+                let entry: GitCommitEntry = serde_json::from_value(value).map_err(malformed)?;
+                if commits_held.is_none() {
+                    *commits_held = Some(self.held_commits(drawer).await?);
+                }
+                let held = commits_held.as_ref().expect("loaded just above");
+                let commits = range_commits(held, &entry.tip, entry.base.as_deref());
+                let patch = self.read_patch(index, entry.patch.as_ref()).await?;
+                Resolved::Commits {
+                    entry,
+                    commits,
+                    patch,
+                }
+            }
+            GitRefEntry::ID => {
+                let entry: GitRefEntry = serde_json::from_value(value).map_err(malformed)?;
+                let git_ref = self.read_referenced(index, &entry.reference).await?;
+                Resolved::GitRef { entry, git_ref }
+            }
+            JjChangeEntry::ID => {
+                let entry: JjChangeEntry = serde_json::from_value(value).map_err(malformed)?;
+                if commits_held.is_none() {
+                    *commits_held = Some(self.held_commits(drawer).await?);
+                }
+                let held = commits_held.as_ref().expect("loaded just above");
+                // The change's own datum (`jjChange/<change id>`) is in the capture drawer's
+                // repository document, which an intxt's drawer does not share. The commits
+                // the intxt holds name their change (`changeId`), and the entry's slot is
+                // the change id, so the change is read back from them, oldest first as an
+                // evolog is.
+                let change_id = String::from_utf8_lossy(key.slot_bytes()).into_owned();
+                let mut commits: Vec<CommitDatum> = held
+                    .iter()
+                    .filter(|(_, commit)| commit.change_id.as_deref() == Some(&change_id))
+                    .map(|(sha, commit)| CommitDatum {
+                        sha: sha.clone(),
+                        commit: commit.clone(),
+                    })
+                    .collect();
+                commits.sort_by(|left, right| {
+                    left.commit.committer.at.cmp(&right.commit.committer.at)
+                });
+                let change = JjChange {
+                    commits: commits.iter().map(|commit| commit.sha.clone()).collect(),
+                    extra: Default::default(),
+                };
+                commits.reverse();
+                let patch = self.read_patch(index, entry.patch.as_ref()).await?;
+                Resolved::JjChange {
+                    entry,
+                    change,
+                    commits,
+                    patch,
+                }
+            }
+            SessionEntry::ID => {
+                let entry: SessionEntry = serde_json::from_value(value).map_err(malformed)?;
+                let session = self.read_referenced(index, &entry.session).await?;
+                let summary = self
+                    .session_summary(drawer, &entry.session.document().resolve(index))
+                    .await?;
+                Resolved::Session {
+                    entry,
+                    session,
+                    summary,
+                }
+            }
+            GithubPullEntry::ID => {
+                let entry: GithubPullEntry = serde_json::from_value(value).map_err(malformed)?;
+                let pull = self.read_referenced(index, &entry.pull).await?;
+                Resolved::Pull { entry, pull }
+            }
+            RepoEntry::ID | WorktreeEntry::ID => return Ok(None),
+            _ => Resolved::Generic {
+                key: key.clone(),
+                value,
+            },
+        }))
     }
 
     async fn load_drawer(
@@ -592,96 +699,47 @@ impl<H: HttpTransport> NodeSource<H> {
         let mut resolved = Vec::new();
         for reference in &body.order {
             let key = reference.key();
-            let value = entry_values
-                .remove(key)
-                .ok_or_else(|| unreadable(format!("{key} is in the body and not readable")))?;
-            let malformed = |error: serde_json::Error| unreadable(format!("{key}: {error}"));
-            match key.tag().as_str() {
-                GitCommitEntry::ID => {
-                    let entry: GitCommitEntry = serde_json::from_value(value).map_err(malformed)?;
-                    if commits_held.is_none() {
-                        commits_held = Some(self.held_commits(drawer).await?);
-                    }
-                    let held = commits_held.as_ref().expect("loaded just above");
-                    let commits = range_commits(held, &entry.tip, entry.base.as_deref());
-                    let patch = self.read_patch(&index, entry.patch.as_ref()).await?;
-                    resolved.push(Resolved::Commits {
-                        entry,
-                        commits,
-                        patch,
-                    });
+            let entry = match entry_values.remove(key) {
+                Some(value) => {
+                    self.resolve_entry(drawer, &index, key, value, &mut commits_held)
+                        .await
                 }
-                GitRefEntry::ID => {
-                    let entry: GitRefEntry = serde_json::from_value(value).map_err(malformed)?;
-                    let git_ref = self.read_referenced(&index, &entry.reference).await?;
-                    resolved.push(Resolved::GitRef { entry, git_ref });
-                }
-                JjChangeEntry::ID => {
-                    let entry: JjChangeEntry = serde_json::from_value(value).map_err(malformed)?;
-                    if commits_held.is_none() {
-                        commits_held = Some(self.held_commits(drawer).await?);
-                    }
-                    let held = commits_held.as_ref().expect("loaded just above");
-                    // The change's own datum (`jjChange/<change id>`) is in the capture drawer's
-                    // repository document, which an intxt's drawer does not share. The commits
-                    // the intxt holds name their change (`changeId`), and the entry's slot is
-                    // the change id, so the change is read back from them, oldest first as an
-                    // evolog is.
-                    let change_id = String::from_utf8_lossy(key.slot_bytes()).into_owned();
-                    let mut commits: Vec<CommitDatum> = held
-                        .iter()
-                        .filter(|(_, commit)| commit.change_id.as_deref() == Some(&change_id))
-                        .map(|(sha, commit)| CommitDatum {
-                            sha: sha.clone(),
-                            commit: commit.clone(),
-                        })
-                        .collect();
-                    commits.sort_by(|left, right| {
-                        left.commit.committer.at.cmp(&right.commit.committer.at)
-                    });
-                    let change = JjChange {
-                        commits: commits.iter().map(|commit| commit.sha.clone()).collect(),
-                        extra: Default::default(),
-                    };
-                    commits.reverse();
-                    let patch = self.read_patch(&index, entry.patch.as_ref()).await?;
-                    resolved.push(Resolved::JjChange {
-                        entry,
-                        change,
-                        commits,
-                        patch,
-                    });
-                }
-                SessionEntry::ID => {
-                    let entry: SessionEntry = serde_json::from_value(value).map_err(malformed)?;
-                    let session = self.read_referenced(&index, &entry.session).await?;
-                    let summary = self
-                        .session_summary(drawer, &entry.session.document().resolve(&index))
-                        .await?;
-                    resolved.push(Resolved::Session {
-                        entry,
-                        session,
-                        summary,
-                    });
-                }
-                GithubPullEntry::ID => {
-                    let entry: GithubPullEntry =
-                        serde_json::from_value(value).map_err(malformed)?;
-                    let pull = self.read_referenced(&index, &entry.pull).await?;
-                    resolved.push(Resolved::Pull { entry, pull });
-                }
-                // A repository or worktree entry: captured work the page does not show.
-                _ => {}
+                None => Err(unreadable(format!("{key} is in the body and not readable"))),
+            };
+            match entry {
+                Ok(Some(entry)) => resolved.push(entry),
+                Ok(None) => {}
+                // A peer's entry that cannot be read is said where it would have been (D95); a
+                // node that cannot be asked fails the page.
+                Err(Failure::Unreadable(reason)) => resolved.push(Resolved::Gap {
+                    key: key.to_string(),
+                    reason,
+                }),
+                Err(failure) => return Err(failure),
             }
         }
 
-        let comments = self.comments(drawer).await?;
+        let notebook = self.notes(drawer).await?;
         let entries: Vec<EntryDatum<'_>> = resolved.iter().map(Resolved::datum).collect();
-        let comments: Vec<CommentDatum<'_>> = comments
+        let comments: Vec<CommentDatum<'_>> = notebook
+            .comments
             .iter()
             .map(|(id, comment)| CommentDatum { id, comment })
             .collect();
-        Ok(IntxtView::new(drawer, via, &title, &entries, &comments))
+        let structures: Vec<StructureDatum<'_>> = notebook
+            .structures
+            .iter()
+            .map(|(id, structure)| StructureDatum { id, structure })
+            .collect();
+        Ok(IntxtView::new(
+            drawer,
+            via,
+            Timestamp::now(),
+            &title,
+            &entries,
+            &comments,
+            &structures,
+        ))
     }
 }
 
@@ -724,6 +782,21 @@ enum Resolved {
         entry: GithubPullEntry,
         pull: GithubPull,
     },
+    Generic {
+        key: DatumKey,
+        value: serde_json::Value,
+    },
+    Gap {
+        key: String,
+        reason: String,
+    },
+}
+
+/// The comments and structures of an intxt's notes documents.
+#[derive(Default)]
+struct Notebook {
+    comments: Vec<(DatumReference, Comment)>,
+    structures: Vec<(DatumReference, Structure)>,
 }
 
 impl Resolved {
@@ -760,6 +833,8 @@ impl Resolved {
                 summary,
             },
             Self::Pull { entry, pull } => EntryDatum::GithubPull { entry, pull },
+            Self::Generic { key, value } => EntryDatum::Generic { key, value },
+            Self::Gap { key, reason } => EntryDatum::Gap { key, reason },
         }
     }
 }

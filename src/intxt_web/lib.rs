@@ -6,9 +6,14 @@
 //! server functions or hydration.
 
 pub mod diff;
+pub mod feed;
+pub mod files;
+pub mod guide;
 pub mod markdown;
 pub mod node;
+pub mod people;
 pub mod route;
+pub mod session;
 pub mod source;
 pub mod ui;
 pub mod view;

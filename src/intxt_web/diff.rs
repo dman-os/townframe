@@ -39,6 +39,18 @@ pub struct Line {
     pub kind: LineKind,
     /// The line as written, without its newline.
     pub text: String,
+    /// The line's number in the new version of the file, for the lines a hunk keeps or adds.
+    pub new_line: Option<u32>,
+}
+
+/// The lines of one file of a patch, from its `diff --git` header to the next one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffFile {
+    /// The new path (`b/` side of the header).
+    pub path: String,
+    pub lines: Vec<Line>,
+    pub additions: usize,
+    pub deletions: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +77,8 @@ impl Diff {
         // Whether the next line is inside a hunk, where `---`/`+++` are a removal and an addition
         // and not file headers.
         let mut in_hunk = false;
+        // The new-side number of the next line a hunk keeps or adds.
+        let mut next_new = 0u32;
         for line in complete.lines() {
             if kept + line.len() + 1 > MAX_RENDERED_OCTETS {
                 break;
@@ -75,6 +89,7 @@ impl Diff {
                 LineKind::File
             } else if line.starts_with("@@") {
                 in_hunk = true;
+                next_new = hunk_new_start(line);
                 LineKind::Hunk
             } else if !in_hunk {
                 LineKind::File
@@ -85,15 +100,65 @@ impl Diff {
                     _ => LineKind::Context,
                 }
             };
+            // A `\ No newline` marker is not a line of the file.
+            let new_line = match kind {
+                LineKind::Added | LineKind::Context if !line.starts_with('\\') => {
+                    next_new += 1;
+                    Some(next_new - 1)
+                }
+                _ => None,
+            };
             lines.push(Line {
                 kind,
                 text: line.to_owned(),
+                new_line,
             });
         }
         Self {
             lines,
             omitted_octets: total_octets.saturating_sub(kept as u64),
         }
+    }
+}
+
+/// The new-side start of a `@@ -a,b +c,d @@` header.
+fn hunk_new_start(header: &str) -> u32 {
+    header
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix('+'))
+        .and_then(|range| range.split(',').next())
+        .and_then(|start| start.parse().ok())
+        .unwrap_or(0)
+}
+
+impl Diff {
+    /// The patch split per file, in patch order. Lines before the first `diff` header (a patch
+    /// that is only hunks) belong to a file with no path.
+    pub fn files(&self) -> Vec<DiffFile> {
+        let mut files: Vec<DiffFile> = Vec::new();
+        for line in &self.lines {
+            if line.text.starts_with("diff ") || files.is_empty() {
+                let path = line
+                    .text
+                    .rsplit_once(" b/")
+                    .map_or("", |(_, path)| path)
+                    .to_owned();
+                files.push(DiffFile {
+                    path,
+                    lines: Vec::new(),
+                    additions: 0,
+                    deletions: 0,
+                });
+            }
+            let file = files.last_mut().expect("a file was just pushed");
+            match line.kind {
+                LineKind::Added => file.additions += 1,
+                LineKind::Removed => file.deletions += 1,
+                _ => {}
+            }
+            file.lines.push(line.clone());
+        }
+        files
     }
 }
 
@@ -191,5 +256,34 @@ index 1111111..2222222 100644
         assert!(shown <= MAX_RENDERED_OCTETS);
         assert!(diff.lines.len() < count);
         assert_eq!(diff.omitted_octets, (patch.len() - shown) as u64);
+    }
+
+    #[test]
+    fn files_split_with_new_side_line_numbers() {
+        let patch = "diff --git a/x.rs b/x.rs\n--- a/x.rs\n+++ b/x.rs\n@@ -5,2 +10,3 @@\n keep\n-old\n+new\n+more\n\\ No newline at end of file\ndiff --git a/y.rs b/y.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        let files = Diff::parse(patch, patch.len() as u64).files();
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            (files[0].path.as_str(), files[1].path.as_str()),
+            ("x.rs", "y.rs")
+        );
+        assert_eq!((files[0].additions, files[0].deletions), (2, 1));
+        let numbers: Vec<_> = files[0].lines.iter().map(|line| line.new_line).collect();
+        assert_eq!(
+            numbers,
+            [
+                None,
+                None,
+                None,
+                None,
+                Some(10),
+                None,
+                Some(11),
+                Some(12),
+                None
+            ]
+        );
+        assert_eq!(files[1].lines[2].new_line, None);
+        assert_eq!(files[1].lines[3].new_line, Some(1));
     }
 }

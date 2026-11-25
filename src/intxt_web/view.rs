@@ -6,6 +6,11 @@
 //! without knowing which host that was.
 
 use crate::diff::Diff;
+use crate::guide::GuideSection;
+use crate::guide::StructureDatum;
+use crate::session::SessionSummary;
+use crate::session::cut;
+use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
@@ -23,14 +28,9 @@ use intxt_core::work::GithubPull;
 use intxt_core::work::GithubPullEntry;
 use intxt_core::work::JjChange;
 use intxt_core::work::JjChangeEntry;
-use intxt_core::work::MessageKind;
-use intxt_core::work::PromptTurn;
 use intxt_core::work::SessionEntry;
-use intxt_core::work::ToolKind;
 use jiff::Timestamp;
 use serde::Serialize;
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 /// One intxt as a reader sees it.
 #[derive(Debug, Clone, PartialEq)]
@@ -42,8 +42,61 @@ pub struct IntxtView {
     pub title: String,
     /// Markdown source, rendered by the page with raw HTML escaped.
     pub description: Option<String>,
+    /// When the host read the intxt: "active now" is measured against it, so the page is a pure
+    /// function of the view.
+    pub as_of: Timestamp,
     pub entries: Vec<EntryView>,
     pub threads: Vec<ThreadView>,
+    /// The intxt's `structure` datums as a guide (ADR 041 §4), in the author's order; empty when
+    /// the intxt has none.
+    pub guide: Vec<GuideSection>,
+}
+
+/// The pages of one intxt, each its own route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Conversation,
+    Commits,
+    Files,
+    Sessions,
+    Guide,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 5] = [
+        Self::Conversation,
+        Self::Commits,
+        Self::Files,
+        Self::Sessions,
+        Self::Guide,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Conversation => "Conversation",
+            Self::Commits => "Commits",
+            Self::Files => "Files changed",
+            Self::Sessions => "Sessions",
+            Self::Guide => "Guide",
+        }
+    }
+
+    /// The route segment after `/i/<drawer>`; the conversation is the intxt's own path.
+    pub fn segment(self) -> Option<&'static str> {
+        match self {
+            Self::Conversation => None,
+            Self::Commits => Some("commits"),
+            Self::Files => Some("files"),
+            Self::Sessions => Some("sessions"),
+            Self::Guide => Some("guide"),
+        }
+    }
+
+    pub fn from_segment(segment: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|tab| tab.segment() == Some(segment))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +106,10 @@ pub enum EntryKind {
     JjChange,
     Session,
     GithubPull,
+    /// A datum kind the page does not know: shown by its kind name, never dropped (FDR 006).
+    Generic,
+    /// An entry the host could not read: the page states it where it would have been (D95).
+    Gap,
 }
 
 impl EntryKind {
@@ -63,6 +120,8 @@ impl EntryKind {
             Self::JjChange => "jj change",
             Self::Session => "session",
             Self::GithubPull => "pull request",
+            Self::Generic => "datum",
+            Self::Gap => "unreadable",
         }
     }
 }
@@ -75,6 +134,12 @@ pub struct EntryView {
     pub label: String,
     /// Labelled facts: `("base", "main")`, `("state", "merged")`.
     pub refs: Vec<EntryRef>,
+    /// The time the entry's own datums carry, when they carry one: a session's last turn, a pull
+    /// request's `updatedAt`, a generic datum's `at` or UUIDv7 slot. A commit range, a branch and
+    /// a jj change carry none (their commits do), and an entry has no "added at".
+    pub at: Option<Timestamp>,
+    /// Who the datums say did it: a session's harness, a generic datum's `creator`.
+    pub actor: Option<String>,
     /// Where the entry lives outside the node (a PR's URL), when it has such a place.
     pub href: Option<String>,
     /// For a pull request: its description as Markdown source, without the intxt block.
@@ -91,178 +156,29 @@ pub struct EntryView {
     pub session: Option<SessionSummary>,
 }
 
-/// What happened in a session, folded from its `promptTurn` datums one at a time (see
-/// [`SessionSummary::add`]), so a host reads the turns in batches and never holds more than a
-/// batch. Everything kept is bounded: counts are numbers, at most [`Self::MAX_PROMPTS`] prompts
-/// are kept with their text cut at [`Self::MAX_PROMPT_OCTETS`], and at most
-/// [`Self::MAX_EDITED_TRACKED`] distinct edited paths are kept (the smallest in sort order, so
-/// what is kept does not depend on the order turns arrive in).
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct SessionSummary {
-    /// The earliest and latest turn start.
-    pub span: Option<(Timestamp, Timestamp)>,
-    pub turns: usize,
-    pub tool_calls: usize,
-    /// Turns the host could not read (absent, not accepted yet, or not a turn). They are in none
-    /// of the other numbers, and the page says so.
-    pub unreadable: usize,
-    /// Tool calls by `ToolKind` (`edit`, `execute`, ...), as the harness spelled it.
-    pub tools: BTreeMap<String, usize>,
-    /// The paths an edit, delete or move call touched, at most [`Self::MAX_EDITED_TRACKED`].
-    edited: BTreeSet<String>,
-    /// Paths that did not fit in `edited`, counted once per touch: past the bound the number of
-    /// files is "at least this many more", not exact.
-    edited_dropped: usize,
-    /// The operator's first [`Self::MAX_PROMPTS`] prompts in session order, each under its sort key
-    /// (turn `seq`, message `seq`).
-    prompts: Vec<((u64, u64), Prompt)>,
-    prompt_count: usize,
-}
-
-/// One prompt the operator gave, as far as the page shows it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Prompt {
-    /// The first non-empty line, cut to [`SessionSummary::MAX_HEADLINE_OCTETS`].
-    pub headline: String,
-    /// The whole prompt, cut to [`SessionSummary::MAX_PROMPT_OCTETS`].
-    pub text: String,
-    /// The text was cut: the prompt is longer than what is kept.
-    pub cut: bool,
-}
-
-/// `text` cut to at most `max` octets at a character boundary, and whether it was cut.
-fn cut(text: &str, max: usize) -> (&str, bool) {
-    if text.len() <= max {
-        return (text, false);
-    }
-    let end = (0..=max)
-        .rev()
-        .find(|&end| text.is_char_boundary(end))
-        .expect("0 is a boundary");
-    (&text[..end], true)
-}
-
-impl SessionSummary {
-    /// The prompts kept.
-    pub const MAX_PROMPTS: usize = 50;
-    /// The most octets of one prompt's text kept.
-    pub const MAX_PROMPT_OCTETS: usize = 4096;
-    /// The most octets of a prompt's first line kept.
-    pub const MAX_HEADLINE_OCTETS: usize = 120;
-    /// The edited paths [`Self::edited_files`] gives.
-    pub const MAX_EDITED_FILES: usize = 20;
-    /// The distinct edited paths held, which is what makes [`Self::edited_omitted`] exact below it.
-    pub const MAX_EDITED_TRACKED: usize = 1000;
-
-    /// Folds one turn in. Turns may come in any order (a document lists its datums by key, not by
-    /// `seq`); the summary orders what it keeps by `seq`.
-    pub fn add(&mut self, turn: &PromptTurn) {
-        self.turns += 1;
-        self.span = Some(match self.span {
-            Some((first, last)) => (first.min(turn.at), last.max(turn.at)),
-            None => (turn.at, turn.at),
-        });
-        for call in &turn.tool_calls {
-            self.tool_calls += 1;
-            *self.tools.entry(spelling(&call.kind)).or_default() += 1;
-            if matches!(
-                call.kind,
-                ToolKind::Edit | ToolKind::Delete | ToolKind::Move
-            ) {
-                // A harness that reports diffs names the files in them; one that only says where it
-                // acted names them in the locations.
-                let paths: Vec<&str> = if call.diffs.is_empty() {
-                    call.locations.iter().map(|at| at.path.as_str()).collect()
-                } else {
-                    call.diffs.iter().map(|diff| diff.path.as_str()).collect()
-                };
-                for path in paths {
-                    if self.edited.len() >= Self::MAX_EDITED_TRACKED
-                        && !self.edited.contains(path)
-                        && self.edited.last().is_some_and(|last| last.as_str() < path)
-                    {
-                        self.edited_dropped += 1;
-                        continue;
-                    }
-                    if self.edited.insert(path.to_owned())
-                        && self.edited.len() > Self::MAX_EDITED_TRACKED
-                    {
-                        self.edited.pop_last();
-                        self.edited_dropped += 1;
-                    }
-                }
-            }
-        }
-        for message in &turn.messages {
-            if message.kind != MessageKind::UserMessage {
-                continue;
-            }
-            self.prompt_count += 1;
-            let order = (turn.seq, message.seq);
-            let at = self.prompts.partition_point(|(held, _)| *held < order);
-            if at >= Self::MAX_PROMPTS {
-                continue;
-            }
-            let (text, cut_text) = cut(&message.text, Self::MAX_PROMPT_OCTETS);
-            let line = text.lines().find(|line| !line.trim().is_empty());
-            let (headline, cut_line) = cut(line.unwrap_or("").trim(), Self::MAX_HEADLINE_OCTETS);
-            let prompt = Prompt {
-                headline: if cut_line {
-                    format!("{headline}…")
-                } else {
-                    headline.to_owned()
-                },
-                text: text.to_owned(),
-                cut: cut_text,
-            };
-            self.prompts.insert(at, (order, prompt));
-            self.prompts.truncate(Self::MAX_PROMPTS);
-        }
-    }
-
-    /// The prompts kept, in session order.
-    pub fn prompts(&self) -> impl Iterator<Item = &Prompt> {
-        self.prompts.iter().map(|(_, prompt)| prompt)
-    }
-
-    /// How many prompts the session has beyond those kept.
-    pub fn prompts_omitted(&self) -> usize {
-        self.prompt_count - self.prompts.len()
-    }
-
-    /// The first [`Self::MAX_EDITED_FILES`] edited paths, sorted.
-    pub fn edited_files(&self) -> impl Iterator<Item = &str> {
-        self.edited
-            .iter()
-            .take(Self::MAX_EDITED_FILES)
-            .map(String::as_str)
-    }
-
-    /// How many edited paths there are beyond those [`Self::edited_files`] gives, and whether the
-    /// number is a lower bound (more paths were touched than are tracked).
-    pub fn edited_omitted(&self) -> (usize, bool) {
-        (
-            self.edited.len().saturating_sub(Self::MAX_EDITED_FILES) + self.edited_dropped,
-            self.edited_dropped > 0,
-        )
-    }
-}
-
 /// One commit of an entry, from the `gitCommit` datum the intxt carries for it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommitView {
     pub sha: String,
-    /// `Name <email>`, as the commit says. A claim of the content, not of who wrote the datum.
+    /// The author's name, as the commit says. A claim of the content, not of who wrote the datum.
     pub author: String,
-    /// The author date, as `YYYY-MM-DD HH:MM` in UTC.
-    pub date: String,
+    /// The author date.
+    pub at: Timestamp,
     /// The whole message, subject first.
     pub message: String,
+    /// How many files the commit changes.
+    pub files: usize,
+}
+
+impl CommitView {
+    pub fn subject(&self) -> &str {
+        self.message.lines().next().unwrap_or("")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryRef {
-    pub name: &'static str,
+    pub name: String,
     pub value: String,
 }
 
@@ -274,6 +190,8 @@ pub struct PrLinksView {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinkedIntxt {
+    /// The linked intxt's drawer id.
+    pub drawer: String,
     /// The viewer path of the linked intxt, `/i/<id>?via=<keys>`.
     pub path: String,
     /// The PR author's name for it, or the drawer id when it gave none.
@@ -298,6 +216,9 @@ pub struct CommentView {
     pub motivation: String,
     pub body: String,
     pub targets: Vec<TargetView>,
+    /// When it was written, from its UUIDv7 slot: a comment has no other time. None for a slot
+    /// that is not a UUIDv7.
+    pub at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -305,6 +226,10 @@ pub struct TargetView {
     /// `path:12-14` for code, else the datum location the comment is pinned to.
     pub label: String,
     pub quote: Option<String>,
+    /// The file the target points into, when it points into one.
+    pub path: Option<String>,
+    /// First and last line, when the target names lines.
+    pub lines: Option<(u32, u32)>,
 }
 
 /// An entry datum together with the datum it names, which the source resolved. The entry alone
@@ -335,6 +260,13 @@ pub enum EntryDatum<'a> {
         entry: &'a GithubPullEntry,
         pull: &'a GithubPull,
     },
+    /// An entry of a kind the page does not know, as the datum is.
+    Generic {
+        key: &'a DatumKey,
+        value: &'a serde_json::Value,
+    },
+    /// An entry the host named and could not read.
+    Gap { key: &'a str, reason: &'a str },
 }
 
 /// A `gitCommit` datum and the sha of its slot.
@@ -364,28 +296,70 @@ impl IntxtView {
     pub fn new(
         drawer: &DocId,
         via: &[MultibaseKey],
+        as_of: Timestamp,
         title: &Title,
         entries: &[EntryDatum<'_>],
         comments: &[CommentDatum<'_>],
+        structures: &[StructureDatum<'_>],
     ) -> Self {
         Self {
             drawer: drawer.to_string(),
             via: via.iter().map(ToString::to_string).collect(),
             title: title.title.clone(),
             description: title.description.clone(),
+            as_of,
             entries: entries.iter().map(entry_view).collect(),
             threads: threads(comments),
+            guide: crate::guide::build(structures),
         }
     }
 
     /// The viewer path of this intxt, the one `/i/<id>?via=<keys>` route parses.
     pub fn path(&self) -> String {
-        intxt_path(&self.drawer, &self.via)
+        intxt_path(&self.drawer, &self.via, None)
+    }
+
+    /// The viewer path of one of this intxt's pages, keeping the `via` hint.
+    pub fn tab_path(&self, tab: Tab) -> String {
+        intxt_path(&self.drawer, &self.via, tab.segment())
+    }
+
+    /// How many things `tab` lists: the number beside its name.
+    pub fn count(&self, tab: Tab) -> usize {
+        match tab {
+            Tab::Conversation => self.feed().len(),
+            Tab::Commits => self.revisions().count(),
+            Tab::Files => self.files().iter().map(|entry| entry.files.len()).sum(),
+            Tab::Sessions => self.sessions().count(),
+            Tab::Guide => self.guide.len(),
+        }
+    }
+
+    /// The entries that hold commits, each one revision of the work.
+    pub fn revisions(&self) -> impl Iterator<Item = (usize, &EntryView)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| matches!(entry.kind, EntryKind::Commits | EntryKind::JjChange))
+    }
+
+    pub fn sessions(&self) -> impl Iterator<Item = &EntryView> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Session)
     }
 }
 
-fn intxt_path(drawer: impl std::fmt::Display, via: &[impl std::fmt::Display]) -> String {
+fn intxt_path(
+    drawer: impl std::fmt::Display,
+    via: &[impl std::fmt::Display],
+    segment: Option<&str>,
+) -> String {
     let mut path = format!("/i/{drawer}");
+    if let Some(segment) = segment {
+        path.push('/');
+        path.push_str(segment);
+    }
     if !via.is_empty() {
         let keys: Vec<String> = via.iter().map(ToString::to_string).collect();
         path.push_str("?via=");
@@ -395,14 +369,14 @@ fn intxt_path(drawer: impl std::fmt::Display, via: &[impl std::fmt::Display]) ->
 }
 
 /// The wire spelling of an open vocabulary's member, which is what a reader is shown.
-fn spelling(member: &impl Serialize) -> String {
+pub(crate) fn spelling(member: &impl Serialize) -> String {
     match serde_json::to_value(member).expect("a vocabulary member serializes") {
         serde_json::Value::String(text) => text,
         other => panic!("an open string vocabulary serialized as {other}"),
     }
 }
 
-fn short(sha: &str) -> &str {
+pub(crate) fn short(sha: &str) -> &str {
     sha.get(..8).unwrap_or(sha)
 }
 
@@ -411,6 +385,8 @@ fn entry_view(entry: &EntryDatum<'_>) -> EntryView {
         kind,
         label,
         refs,
+        at: None,
+        actor: None,
         href: None,
         description: None,
         pr_links: PrLinksView::default(),
@@ -439,15 +415,9 @@ fn entry_view(entry: &EntryDatum<'_>) -> EntryView {
             // The reference's slot is `<worktree>/<ref name>`; the name is what a reader knows.
             let slot = String::from_utf8_lossy(entry.reference.key().slot_bytes()).into_owned();
             let name = slot.split_once('/').map_or(slot.as_str(), |(_, name)| name);
-            let mut refs = vec![EntryRef {
-                name: "tip",
-                value: short(sha_of(&git_ref.target)).to_owned(),
-            }];
+            let mut refs = vec![entry_ref("tip", short(sha_of(&git_ref.target)))];
             if let Some(base) = git_ref.base.as_ref().or(entry.base.as_ref()) {
-                refs.push(EntryRef {
-                    name: "base",
-                    value: short(sha_of(base)).to_owned(),
-                });
+                refs.push(entry_ref("base", short(sha_of(base))));
             }
             row(EntryKind::GitRef, name.to_owned(), refs)
         }
@@ -463,10 +433,7 @@ fn entry_view(entry: &EntryDatum<'_>) -> EntryView {
                 change
                     .commits
                     .iter()
-                    .map(|commit| EntryRef {
-                        name: "commit",
-                        value: short(commit).to_owned(),
-                    })
+                    .map(|commit| entry_ref("commit", short(commit)))
                     .collect(),
             );
             view.commits = commits.iter().map(commit_view).collect();
@@ -483,16 +450,12 @@ fn entry_view(entry: &EntryDatum<'_>) -> EntryView {
                     .clone()
                     .unwrap_or_else(|| session.session_id.clone()),
                 vec![
-                    EntryRef {
-                        name: "harness",
-                        value: session.harness.clone(),
-                    },
-                    EntryRef {
-                        name: "session",
-                        value: session.session_id.clone(),
-                    },
+                    entry_ref("harness", session.harness.clone()),
+                    entry_ref("session", session.session_id.clone()),
                 ],
             );
+            view.actor = Some(session.harness.clone());
+            view.at = summary.span.map(|(_, last)| last);
             view.session = Some((*summary).clone());
             view
         }
@@ -501,27 +464,100 @@ fn entry_view(entry: &EntryDatum<'_>) -> EntryView {
                 EntryKind::GithubPull,
                 pull.title.clone(),
                 vec![
-                    EntryRef {
-                        name: "state",
-                        value: spelling(&pull.state),
-                    },
-                    EntryRef {
-                        name: "head",
-                        value: pull.head.clone(),
-                    },
-                    EntryRef {
-                        name: "base",
-                        value: pull.base.clone(),
-                    },
+                    entry_ref("state", spelling(&pull.state)),
+                    entry_ref("head", pull.head.clone()),
+                    entry_ref("base", pull.base.clone()),
                 ],
             );
+            // The importer's snapshot time: the PR's opening and merging are not recorded.
+            view.at = Some(pull.updated_at);
             view.href = Some(pull.url.clone());
             let (description, links) = pr_description(&pull.body);
             view.description = Some(description).filter(|text| !text.trim().is_empty());
             view.pr_links = links;
             view
         }
+        EntryDatum::Generic { key, value } => generic_view(key, value),
+        EntryDatum::Gap { key, reason } => row(
+            EntryKind::Gap,
+            (*key).to_owned(),
+            vec![entry_ref("reason", *reason)],
+        ),
     }
+}
+
+fn entry_ref(name: &str, value: impl Into<String>) -> EntryRef {
+    EntryRef {
+        name: name.to_owned(),
+        value: value.into(),
+    }
+}
+
+/// The most scalar fields of an unknown datum the page lists.
+const GENERIC_FIELDS: usize = 6;
+/// The most octets of one such field's value the page keeps.
+const GENERIC_VALUE_OCTETS: usize = 120;
+
+/// What the page can say of a datum it does not know: the kind, the top-level fields that are
+/// plain values, and whoever and whenever the datum names by the common spellings.
+fn generic_view(key: &DatumKey, value: &serde_json::Value) -> EntryView {
+    let fields = value.as_object().into_iter().flatten();
+    let refs = fields
+        .filter_map(|(name, field)| {
+            let text = match field {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Number(number) => number.to_string(),
+                serde_json::Value::Bool(flag) => flag.to_string(),
+                _ => return None,
+            };
+            let (kept, was_cut) = cut(&text, GENERIC_VALUE_OCTETS);
+            Some(entry_ref(
+                name,
+                if was_cut {
+                    format!("{kept}…")
+                } else {
+                    kept.to_owned()
+                },
+            ))
+        })
+        .take(GENERIC_FIELDS)
+        .collect();
+    let name_of = |field: &str| match value.get(field)? {
+        serde_json::Value::String(text) => Some(text.clone()),
+        object => object.get("name")?.as_str().map(str::to_owned),
+    };
+    let named_time = ["at", "createdAt", "updatedAt", "time"]
+        .iter()
+        .find_map(|field| value.get(field)?.as_str()?.parse::<Timestamp>().ok());
+    EntryView {
+        kind: EntryKind::Generic,
+        label: key.tag().to_string(),
+        refs,
+        at: slot_time(key).or(named_time),
+        actor: ["creator", "author", "writer"]
+            .iter()
+            .find_map(|field| name_of(field)),
+        href: None,
+        description: None,
+        pr_links: PrLinksView::default(),
+        commits: Vec::new(),
+        patch: None,
+        session: None,
+    }
+}
+
+/// The time a UUIDv7 slot carries in its first 48 bits, none for a slot that is not a UUIDv7.
+pub(crate) fn slot_time(key: &DatumKey) -> Option<Timestamp> {
+    let slot = String::from_utf8_lossy(key.slot_bytes());
+    let hex: String = slot.chars().filter(|ch| *ch != '-').collect();
+    let is_v7 = hex.len() == 32
+        && hex.as_bytes()[12] == b'7'
+        && matches!(hex.as_bytes()[16], b'8' | b'9' | b'a' | b'b' | b'A' | b'B');
+    if !is_v7 {
+        return None;
+    }
+    let millis = i64::from_str_radix(&hex[..12], 16).ok()?;
+    Timestamp::from_millisecond(millis).ok()
 }
 
 /// The PR description a reader sees (the text without its intxt block) and the intxts the block
@@ -537,7 +573,8 @@ fn pr_description(description: &str) -> (String, PrLinksView) {
                     .map(|link| {
                         let drawer = link.reference.document();
                         LinkedIntxt {
-                            path: intxt_path(drawer, link.reference.via()),
+                            drawer: drawer.to_string(),
+                            path: intxt_path(drawer, link.reference.via(), None),
                             label: link.title.clone().unwrap_or_else(|| drawer.to_string()),
                             refs: link.refs.clone(),
                         }
@@ -560,9 +597,10 @@ fn commit_view(commit: &CommitDatum) -> CommitView {
     let author = &commit.commit.author;
     CommitView {
         sha: commit.sha.clone(),
-        author: format!("{} <{}>", author.name, author.email),
-        date: author.at.strftime("%Y-%m-%d %H:%M").to_string(),
+        author: author.name.clone(),
+        at: author.at,
         message: commit.commit.message.trim_end().to_owned(),
+        files: commit.commit.files.len(),
     }
 }
 
@@ -592,7 +630,7 @@ fn threads(comments: &[CommentDatum<'_>]) -> Vec<ThreadView> {
     }
     let mut threads: Vec<(usize, ThreadView)> = Vec::new();
     for (index, comment) in comments.iter().enumerate() {
-        let view = comment_view(comment.comment);
+        let view = comment_view(comment);
         if root_of[index] == index {
             threads.push((
                 index,
@@ -612,13 +650,26 @@ fn threads(comments: &[CommentDatum<'_>]) -> Vec<ThreadView> {
     threads.into_iter().map(|(_, thread)| thread).collect()
 }
 
-fn comment_view(comment: &Comment) -> CommentView {
+fn comment_view(datum: &CommentDatum<'_>) -> CommentView {
+    let (comment, at) = (datum.comment, slot_time(datum.id.key()));
     CommentView {
         author: participant(&comment.creator),
         generator: comment.generator.as_ref().map(participant),
         motivation: spelling(&comment.motivation),
         body: comment.body.content.clone(),
-        targets: comment.targets.iter().map(target_view).collect(),
+        // A reply's target that says nothing but the parent comment is the thread, not an anchor.
+        targets: comment
+            .targets
+            .iter()
+            .filter(|target| {
+                comment.reply_to.is_none()
+                    || target.path.is_some()
+                    || target.lines.is_some()
+                    || target.quote.is_some()
+            })
+            .map(target_view)
+            .collect(),
+        at,
     }
 }
 
@@ -629,7 +680,7 @@ fn participant(participant: &Participant) -> String {
         .unwrap_or_else(|| spelling(&participant.kind).to_lowercase())
 }
 
-fn target_view(target: &Target) -> TargetView {
+pub(crate) fn target_view(target: &Target) -> TargetView {
     let location = target.source.location().to_string();
     let label = match (&target.path, &target.lines) {
         (Some(path), Some(lines)) => format!("{path}:{}-{}", lines.start, lines.end),
@@ -640,162 +691,7 @@ fn target_view(target: &Target) -> TargetView {
     TargetView {
         label,
         quote: target.quote.as_ref().map(|quote| quote.exact.clone()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn turn(
-        seq: u64,
-        at: &str,
-        messages: &[(&str, &str)],
-        calls: &[serde_json::Value],
-    ) -> PromptTurn {
-        let messages: Vec<_> = messages
-            .iter()
-            .enumerate()
-            .map(|(index, (kind, text))| {
-                json!({"id": format!("m{seq}-{index}"), "seq": index, "at": at, "kind": kind, "text": text})
-            })
-            .collect();
-        serde_json::from_value(
-            json!({"seq": seq, "at": at, "messages": messages, "toolCalls": calls}),
-        )
-        .unwrap()
-    }
-
-    fn call(kind: &str, diff_paths: &[&str], location_paths: &[&str]) -> serde_json::Value {
-        json!({
-            "id": "c", "seq": 1, "title": "t", "kind": kind, "status": "completed",
-            "diffs": diff_paths.iter().map(|path| json!({"path": path, "patch": ""})).collect::<Vec<_>>(),
-            "locations": location_paths.iter().map(|path| json!({"path": path})).collect::<Vec<_>>(),
-        })
-    }
-
-    #[test]
-    fn a_summary_counts_turns_calls_and_edited_files_whatever_the_order() {
-        let mut summary = SessionSummary::default();
-        summary.add(&turn(
-            2,
-            "2026-11-03T12:00:00Z",
-            &[("userMessage", "second")],
-            &[
-                call("edit", &[], &["/a.rs"]),
-                call("move", &["/b.rs", "/c.rs"], &[]),
-            ],
-        ));
-        summary.add(&turn(
-            1,
-            "2026-11-03T10:00:00Z",
-            &[
-                ("userMessage", "first"),
-                ("agentMessage", "no"),
-                ("notification", "no"),
-            ],
-            &[
-                call("read", &[], &["/never.rs"]),
-                call("edit", &["/a.rs"], &["/x.rs"]),
-            ],
-        ));
-        assert_eq!((summary.turns, summary.tool_calls), (2, 4));
-        assert_eq!(
-            summary.tools,
-            BTreeMap::from([("edit".into(), 2), ("move".into(), 1), ("read".into(), 1)])
-        );
-        // Diffs name the files when there are any, else the locations; reads touch nothing.
-        assert_eq!(
-            summary.edited_files().collect::<Vec<_>>(),
-            ["/a.rs", "/b.rs", "/c.rs"]
-        );
-        let (first, last) = summary.span.unwrap();
-        assert_eq!(
-            (first.to_string(), last.to_string()),
-            ("2026-11-03T10:00:00Z".into(), "2026-11-03T12:00:00Z".into())
-        );
-        // Only the operator's own messages, in session order and not in the order they arrived.
-        let prompts: Vec<_> = summary.prompts().map(|p| p.text.as_str()).collect();
-        assert_eq!(prompts, ["first", "second"]);
-    }
-
-    #[test]
-    fn prompts_are_cut_and_capped_without_losing_their_order() {
-        let mut summary = SessionSummary::default();
-        let long_line = "é".repeat(SessionSummary::MAX_HEADLINE_OCTETS);
-        let huge = format!(
-            "\n\n  {long_line}\nsecond line {}",
-            "y".repeat(SessionSummary::MAX_PROMPT_OCTETS)
-        );
-        // Newest first, more than the cap.
-        for seq in (0..SessionSummary::MAX_PROMPTS as u64 + 5).rev() {
-            let text = if seq == 0 { huge.as_str() } else { "short" };
-            summary.add(&turn(
-                seq,
-                "2026-11-03T10:00:00Z",
-                &[("userMessage", text)],
-                &[],
-            ));
-        }
-        assert_eq!(summary.prompts().count(), SessionSummary::MAX_PROMPTS);
-        assert_eq!(summary.prompts_omitted(), 5);
-        let first = summary.prompts().next().unwrap();
-        // The headline is the first non-empty line, cut on a character boundary with an ellipsis.
-        assert!(first.headline.ends_with('…'), "{}", first.headline);
-        assert!(first.headline.len() <= SessionSummary::MAX_HEADLINE_OCTETS + '…'.len_utf8());
-        assert!(first.cut);
-        assert!(first.text.len() <= SessionSummary::MAX_PROMPT_OCTETS);
-        assert!(
-            summary
-                .prompts()
-                .skip(1)
-                .all(|p| p.headline == "short" && !p.cut)
-        );
-    }
-
-    #[test]
-    fn edited_files_are_capped_and_the_rest_counted() {
-        let mut summary = SessionSummary::default();
-        let calls: Vec<_> = (0..SessionSummary::MAX_EDITED_FILES + 3)
-            .map(|index| call("edit", &[&format!("/f{index:03}.rs")], &[]))
-            .collect();
-        summary.add(&turn(1, "2026-11-03T10:00:00Z", &[], &calls));
-        assert_eq!(
-            summary.edited_files().count(),
-            SessionSummary::MAX_EDITED_FILES
-        );
-        assert_eq!(summary.edited_omitted(), (3, false));
-    }
-
-    #[test]
-    fn tracked_edited_paths_are_bounded_and_deterministic() {
-        let paths: Vec<String> = (0..SessionSummary::MAX_EDITED_TRACKED + 7)
-            .map(|index| format!("/f{index:05}.rs"))
-            .collect();
-        let fold = |order: Vec<&String>| {
-            let mut summary = SessionSummary::default();
-            for path in order {
-                summary.add(&turn(
-                    1,
-                    "2026-11-03T10:00:00Z",
-                    &[],
-                    &[call("edit", &[path], &[])],
-                ));
-            }
-            summary
-        };
-        let forward = fold(paths.iter().collect());
-        let backward = fold(paths.iter().rev().collect());
-        // The smallest paths are the ones kept, whatever order the turns came in.
-        assert_eq!(forward.edited, backward.edited);
-        assert_eq!(forward.edited.len(), SessionSummary::MAX_EDITED_TRACKED);
-        assert_eq!(
-            forward.edited_omitted(),
-            (
-                SessionSummary::MAX_EDITED_TRACKED - SessionSummary::MAX_EDITED_FILES + 7,
-                true
-            )
-        );
+        path: target.path.clone(),
+        lines: target.lines.as_ref().map(|lines| (lines.start, lines.end)),
     }
 }
