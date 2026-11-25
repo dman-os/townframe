@@ -58,7 +58,7 @@ fn cases(seed: u8, count: usize) -> Vec<Vec<Op>> {
 
 #[test]
 fn the_same_seed_replays_the_same_trace() {
-    for seed in 0..8u8 {
+    for seed in 0..32u8 {
         for (at, ops) in cases(seed, 12).iter().enumerate() {
             let first = trace(ops, u64::from(seed));
             let second = trace(ops, u64::from(seed));
