@@ -64,10 +64,14 @@ strike! {
     pub enum BigSyncEvent {
         UpdatePeerEvent (pub struct {
             pub peer_key: PeerKey,
-            /// Partitions to sync from the peer
-            pub parts: Set<PartKey>,
-            /// Objects to follow directly from the peer.
-            pub objects: Set<ObjKey>,
+            /// Partitions newly synced from the peer
+            pub added_parts: Set<PartKey>,
+            /// Partitions no longer synced from the peer
+            pub removed_parts: Set<PartKey>,
+            /// Objects newly followed directly from the peer
+            pub added_objects: Set<ObjKey>,
+            /// Objects no longer followed directly from the peer
+            pub removed_objects: Set<ObjKey>,
             pub allowed_strat_override: Map<PartKey, AllowedStrat>
         }),
         RemovePeerEvent (pub struct {
@@ -146,7 +150,21 @@ impl BigSyncMachine {
     pub fn handle_evt(&mut self, evt: BigSyncEvent) {
         use BigSyncEvent::*;
         match evt {
-            UpdatePeerEvent(evt) => self.handle_update_peer_evt(evt),
+            UpdatePeerEvent(UpdatePeerEvent {
+                peer_key,
+                added_parts,
+                removed_parts,
+                added_objects,
+                removed_objects,
+                allowed_strat_override: _,
+            }) => self.handle_peer_route_change(
+                peer_key,
+                added_parts,
+                removed_parts,
+                added_objects,
+                removed_objects,
+                false,
+            ),
             RemovePeerEvent(evt) => self.handle_remove_peer_evt(evt),
             WaitForFullSyncEvent(evt) => todo!(),
             SyncCompletedEvent(evt) => todo!(),
@@ -327,8 +345,10 @@ mod test {
             //
             BigSyncEvent::UpdatePeerEvent(UpdatePeerEvent {
                 peer_key: peer_a,
-                parts: [part_a].into(),
-                objects: default(),
+                added_parts: [part_a].into(),
+                removed_parts: default(),
+                added_objects: default(),
+                removed_objects: default(),
             }),
         ];
     }
