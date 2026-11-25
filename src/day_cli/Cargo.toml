@@ -49,6 +49,7 @@ tower = { workspace = true, features = ["util"] }
 #
 # error
 tracing.workspace = true
+thiserror.workspace = true
 
 #
 # encoding
@@ -69,6 +70,7 @@ libc = "0.2"
 #
 # internal
 secrets_rs = { workspace = true, features = ["test-support"] }
+big_blobs_core.workspace = true
 
 #
 # misc

@@ -1,3 +1,4 @@
+use crate::client::CallError;
 use crate::client::Mode;
 use crate::client::NodeClient;
 use crate::interlude::*;
@@ -17,7 +18,6 @@ use big_cartridges_core::protocol::ListCartridgeGrantRequests;
 use big_cartridges_core::protocol::ListCartridgeGrants;
 use big_cartridges_core::protocol::RequestedAccess;
 use big_cartridges_core::protocol::SetCartridgeGrant;
-use method_core::Method;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -30,7 +30,7 @@ pub enum GrantsCommands {
     /// List the requests waiting for an answer
     ///
     /// One per line: its id, the cartridge, what it asks and when. Requests live in the running
-    /// node's memory, so this needs the node running (`day node run`).
+    /// node's memory, so this needs the node running (`day node start`).
     Pending {
         /// Print the node's raw answer as JSON
         #[arg(long)]
@@ -105,36 +105,25 @@ pub async fn run(command: GrantsCommands) -> Res<ExitCode> {
 /// lists them is refused with the way to a running node rather than shown an empty queue.
 fn require_running_node(client: &NodeClient) -> Res<()> {
     eyre::ensure!(
-        client.mode() == Mode::Daemon,
+        client.mode() == Mode::Serving,
         "no node is running here, and grant requests live in a running node's memory: start it \
-         with `day node run`"
+         with `day node start`"
     );
     Ok(())
 }
 
-async fn pending_requests(client: &NodeClient) -> Res<(serde_json::Value, GrantRequests)> {
+async fn pending_requests(client: &NodeClient) -> Res<GrantRequests> {
     require_running_node(client)?;
-    let reply = client
-        .call(
-            ListCartridgeGrantRequests::XRPC.nsid,
-            ListCartridgeGrantRequests::XRPC.method,
-            &json!({}),
-        )
-        .await?;
-    eyre::ensure!(
-        reply.is_success(),
-        "listing the requests failed with {}: {}",
-        reply.status,
-        reply.body
-    );
-    let requests = serde_json::from_value(reply.body.clone())?;
-    Ok((reply.body, requests))
+    client
+        .call(ListCartridgeGrantRequests {})
+        .await
+        .wrap_err("listing the requests failed")
 }
 
 async fn pending(client: &NodeClient, as_json: bool) -> Res<ExitCode> {
-    let (raw, requests) = pending_requests(client).await?;
+    let requests = pending_requests(client).await?;
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&raw)?);
+        println!("{}", serde_json::to_string_pretty(&requests)?);
         return Ok(ExitCode::SUCCESS);
     }
     let now = now_ms();
@@ -208,30 +197,28 @@ async fn answer_request(
                 .map_err(|error| eyre::eyre!("`{drawer}` is not a drawer id: {error}"))
         })
         .transpose()?;
-    let (_, requests) = pending_requests(client).await?;
+    let requests = pending_requests(client).await?;
     let Some(asked) = requests.requests.iter().find(|asked| asked.id == id) else {
         error!("there is no waiting request {id}: `day grants pending` lists them");
         return Ok(ExitCode::FAILURE);
     };
-    let reply = client
-        .call(
-            AnswerCartridgeGrantRequest::XRPC.nsid,
-            AnswerCartridgeGrantRequest::XRPC.method,
-            &serde_json::to_value(AnswerCartridgeGrantRequest {
-                request: id,
-                answer,
-                drawer: drawer.clone(),
-            })?,
-        )
-        .await?;
-    if !reply.is_success() {
-        error!(
-            status = reply.status,
-            "the node refused the answer: {}: {}",
-            reply.body["error"].as_str().unwrap_or("unnamed error"),
-            reply.body["message"].as_str().unwrap_or_default()
-        );
-        return Ok(ExitCode::FAILURE);
+    let answered = client
+        .call(AnswerCartridgeGrantRequest {
+            request: id,
+            answer,
+            drawer: drawer.clone(),
+        })
+        .await;
+    match answered {
+        Ok(_) => {}
+        Err(CallError::Transport(error)) => return Err(error),
+        Err(refused) => {
+            error!(
+                status = refused.status(),
+                "the node refused the answer: {refused}"
+            );
+            return Ok(ExitCode::FAILURE);
+        }
     }
     let GrantRequestRecord {
         cartridge_id,
@@ -288,24 +275,15 @@ async fn list(client: &NodeClient, cartridge: Option<String>, as_json: bool) -> 
                 .map_err(|error| eyre::eyre!("`{cartridge}` is not a cartridge id: {error}"))
         })
         .transpose()?;
-    let reply = client
-        .call(
-            ListCartridgeGrants::XRPC.nsid,
-            ListCartridgeGrants::XRPC.method,
-            &serde_json::to_value(ListCartridgeGrants { cartridge_id })?,
-        )
-        .await?;
-    eyre::ensure!(
-        reply.is_success(),
-        "listing the grants failed with {}: {}",
-        reply.status,
-        reply.body
-    );
+    let listed = client
+        .call(ListCartridgeGrants { cartridge_id })
+        .await
+        .wrap_err("listing the grants failed")?;
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&reply.body)?);
+        println!("{}", serde_json::to_string_pretty(&listed)?);
         return Ok(ExitCode::SUCCESS);
     }
-    let CartridgeGrants { grants } = serde_json::from_value(reply.body)?;
+    let CartridgeGrants { grants } = listed;
     for CartridgeGrantRecord {
         cartridge_id,
         grant,
@@ -327,24 +305,23 @@ async fn revoke(client: &NodeClient, cartridge: &str, grant: &str) -> Res<ExitCo
         .parse()
         .map_err(|error| eyre::eyre!("`{cartridge}` is not a cartridge id: {error}"))?;
     let grant: GrantKey = grant.parse()?;
-    let reply = client
-        .call(
-            SetCartridgeGrant::XRPC.nsid,
-            SetCartridgeGrant::XRPC.method,
-            &serde_json::to_value(SetCartridgeGrant {
-                cartridge_id,
-                grant: grant.clone(),
-                value: None,
-            })?,
-        )
-        .await?;
-    if !reply.is_success() {
-        println!("{}", serde_json::to_string_pretty(&reply.body)?);
-        error!(
-            status = reply.status,
-            "the node refused to take the answer back"
-        );
-        return Ok(ExitCode::FAILURE);
+    let revoked = client
+        .call(SetCartridgeGrant {
+            cartridge_id,
+            grant: grant.clone(),
+            value: None,
+        })
+        .await;
+    match revoked {
+        Ok(()) => {}
+        Err(CallError::Transport(error)) => return Err(error),
+        Err(refused) => {
+            error!(
+                status = refused.status(),
+                "the node refused to take the answer back: {refused}"
+            );
+            return Ok(ExitCode::FAILURE);
+        }
     }
     println!("Took back `{grant}` from {cartridge}. It takes effect on its next action.");
     Ok(ExitCode::SUCCESS)

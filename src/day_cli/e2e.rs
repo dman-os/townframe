@@ -1,9 +1,9 @@
 //! End-to-end tests for the `day` CLI, in two layers.
 //!
 //! - **Library layer** (`mod library`): the polymorphic [`NodeClient`] against real nodes, with
-//!   the daemon served inside the test process by [`crate::cmds::daemon::serve`]. It proves that
+//!   the server served inside the test process by [`crate::cmds::serve::serve`]. It proves that
 //!   one call gives one answer whichever way the node is reached, and covers the lock and the
-//!   stale socket. Readiness is the daemon's own `ready` callback and shutdown is its `shutdown`
+//!   stale socket. Readiness is the server's own `ready` callback and shutdown is its `shutdown`
 //!   future, so nothing sleeps or polls. The keyring is the in-process mock that `secrets_rs`
 //!   selects under its `test-support` feature.
 //! - **Blackbox layer** (`mod blackbox`): the real `day` binary in a sandbox directory, asserting
@@ -11,7 +11,7 @@
 //!   invocations). Cases are literate trycmd `.md` files: one file is one sandbox, and every
 //!   ```console fence in it runs in order in the same directory. A case needs a sibling
 //!   `*.out/` directory (with at least a `.keep`) to opt into the sandbox. This layer uses the
-//!   platform keyring, since the daemon and the commands are separate processes: each case runs
+//!   platform keyring, since the server and the commands are separate processes: each case runs
 //!   with its node and its runtime directory in a sandbox of the test's own, and the node's
 //!   keyring entries are deleted when the case ends, whether it passed or not.
 //!
@@ -29,6 +29,8 @@ mod library {
     use crate::context::NodeDir;
     use crate::context::SocketState;
     use crate::interlude::*;
+    use big_blobs_core::protocol::BlobsScope;
+    use big_blobs_core::protocol::MintBlobsCapability;
     use big_node::peers::Peers;
     use big_nodule_core::protocol::ListNodules;
     use method_core::Method;
@@ -79,22 +81,22 @@ mod library {
         }
     }
 
-    /// A daemon served from inside the test process, stopped by [`TestDaemon::stop`].
-    struct TestDaemon {
+    /// A server served from inside the test process, stopped by [`TestServer::stop`].
+    struct TestServer {
         shutdown: oneshot::Sender<()>,
         task: tokio::task::JoinHandle<Res<()>>,
-        /// The daemon's peers service, when its `node.json` configures one.
+        /// The server's peers service, when its `node.json` configures one.
         peers: Option<Peers>,
     }
 
-    impl TestDaemon {
+    impl TestServer {
         /// Starts serving and returns once the socket accepts connections.
         async fn start(dir: &NodeDir) -> Self {
             let (ready_tx, ready_rx) = oneshot::channel();
             let (shutdown, shutdown_rx) = oneshot::channel::<()>();
             let dir = dir.clone();
             let task = tokio::spawn(async move {
-                crate::cmds::daemon::serve(
+                crate::cmds::serve::serve(
                     &dir,
                     |booted| {
                         ready_tx
@@ -104,14 +106,14 @@ mod library {
                     async {
                         shutdown_rx
                             .await
-                            .expect("the test stops the daemon by sending")
+                            .expect("the test stops the server by sending")
                     },
                 )
                 .await
             });
             let peers = match ready_rx.await {
                 Ok(peers) => peers,
-                Err(_) => panic!("the daemon failed before it was serving: {:?}", task.await),
+                Err(_) => panic!("the server failed before it was serving: {:?}", task.await),
             };
             Self {
                 shutdown,
@@ -121,7 +123,7 @@ mod library {
         }
 
         async fn stop(self) {
-            self.shutdown.send(()).expect("the daemon is serving");
+            self.shutdown.send(()).expect("the server is serving");
             self.task.await.unwrap().unwrap();
         }
     }
@@ -132,9 +134,12 @@ mod library {
         verb: method_core::HttpMethod,
         input: serde_json::Value,
     ) -> Reply {
-        client.call(nsid, verb, &input).await.unwrap()
+        client.call_untyped(nsid, verb, &input).await.unwrap()
     }
 
+    /// Untyped, because the wire is what these tests compare: an unclaimed NSID and input that is
+    /// not the method's are refused by the router, which no typed call can send.
+    ///
     /// Calls whose answers must not depend on how the node was reached: a query that succeeds, an
     /// operation nothing claims, and a real operation given input it must refuse.
     fn calls() -> Vec<(&'static str, method_core::HttpMethod, serde_json::Value)> {
@@ -156,15 +161,14 @@ mod library {
         let client = connect(&dir).await.unwrap();
         assert_eq!(client.mode(), Mode::InProcess);
         assert_eq!(client.socket_state(), SocketState::Absent);
-        let reply = call(
-            &client,
-            ListNodules::XRPC.nsid,
-            ListNodules::XRPC.method,
-            json!({}),
-        )
-        .await;
-        assert_eq!(reply.status, 200, "{reply:?}");
-        assert_eq!(reply.body, json!({"nodules": []}));
+        assert!(
+            client
+                .call(ListNodules {})
+                .await
+                .unwrap()
+                .nodules
+                .is_empty()
+        );
         client.stop().await.unwrap();
         // Stopping released the node: it can be booted again by the next command.
         connect(&dir).await.unwrap().stop().await.unwrap();
@@ -194,16 +198,16 @@ mod library {
         }
         in_process.stop().await.unwrap();
 
-        let daemon = TestDaemon::start(&dir).await;
+        let server = TestServer::start(&dir).await;
         let over_socket = connect(&dir).await.unwrap();
-        assert_eq!(over_socket.mode(), Mode::Daemon);
+        assert_eq!(over_socket.mode(), Mode::Serving);
         assert_eq!(over_socket.socket_state(), SocketState::Live);
         let mut remote = Vec::new();
         for (nsid, verb, input) in calls() {
             remote.push(call(&over_socket, nsid, verb, input).await);
         }
         over_socket.stop().await.unwrap();
-        daemon.stop().await;
+        server.stop().await;
 
         assert_eq!(local, remote);
         assert_eq!(local[0].status, 200);
@@ -214,13 +218,12 @@ mod library {
 
     /// A file put and read back, whole and by `Range`, is the same bytes whichever way the node
     /// is reached: streamed from and to files (ADR 042), never as JSON, so the in-process router
-    /// and the daemon's socket carry the raw bodies alike.
+    /// and the server's socket carry the raw bodies alike.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_file_round_trips_as_raw_bytes_in_process_and_over_the_daemon() {
+    async fn a_file_round_trips_as_raw_bytes_in_process_and_over_the_server() {
         use crate::client::Raw;
         use method_core::HttpMethod::Get;
         use method_core::HttpMethod::Post;
-        const MINT: &str = "org.example.daybook.blobs.mintCapability";
         const PUT: &str = "org.example.daybook.blobs.put";
         const READ: &str = "org.example.daybook.blobs.read";
         let (tmp, dir) = new_node().await;
@@ -228,19 +231,25 @@ mod library {
         // Over the 64 KiB chunks a read yields, so it is several chunks long.
         let content: Vec<u8> = (0..300_000u32).map(|at| (at % 251) as u8).collect();
         std::fs::write(&upload, &content).unwrap();
-        let rights = serde_json::to_value(big_cabinet_core::authority::Rights::USE).unwrap();
         let round_trip = async |client: &NodeClient, name: &str| {
-            let mint = async |scope: serde_json::Value| {
-                let reply = client
-                    .call(MINT, Post, &json!({ "scope": scope, "rights": rights }))
+            let mint = async |scope: BlobsScope| {
+                let minted = client
+                    .call(MintBlobsCapability {
+                        scope,
+                        rights: big_cabinet_core::authority::Rights::USE,
+                        subject: None,
+                    })
                     .await
                     .unwrap();
-                assert_eq!(reply.status, 200, "{reply:?}");
-                reply.body["capabilityId"].as_str().unwrap().to_owned()
+                serde_json::to_value(minted.capability_id).unwrap()
             };
-            let put = mint(json!({ "put": true })).await;
+            let put = mint(BlobsScope {
+                put: true,
+                ..Default::default()
+            })
+            .await;
             let stored = client
-                .call_raw(
+                .call_untyped_bytes(
                     PUT,
                     Post,
                     &json!({ "capability": put }),
@@ -253,12 +262,17 @@ mod library {
                 .unwrap();
             assert_eq!(stored.status, 200, "{stored:?}");
             assert_eq!(stored.body["lengthOctets"], content.len());
-            let blob_id = stored.body["blobId"].as_str().unwrap().to_owned();
-            let read = mint(json!({ "read": [blob_id] })).await;
+            let blob_id: big_blobs_core::BlobId =
+                serde_json::from_value(stored.body["blobId"].clone()).unwrap();
+            let read = mint(BlobsScope {
+                read: [blob_id].into(),
+                ..Default::default()
+            })
+            .await;
             let params = json!({ "capability": read, "blobId": blob_id });
             let whole = tmp.path().join(format!("{name}-whole.bin"));
             let reply = client
-                .call_raw(
+                .call_untyped_bytes(
                     READ,
                     Get,
                     &params,
@@ -274,7 +288,7 @@ mod library {
             assert!(std::fs::read(&whole).unwrap() == content);
             let part = tmp.path().join(format!("{name}-part.bin"));
             let reply = client
-                .call_raw(
+                .call_untyped_bytes(
                     READ,
                     Get,
                     &params,
@@ -298,12 +312,12 @@ mod library {
         let local = round_trip(&in_process, "in-process").await;
         in_process.stop().await.unwrap();
 
-        let daemon = TestDaemon::start(&dir).await;
+        let server = TestServer::start(&dir).await;
         let over_socket = connect(&dir).await.unwrap();
-        assert_eq!(over_socket.mode(), Mode::Daemon);
+        assert_eq!(over_socket.mode(), Mode::Serving);
         let remote = round_trip(&over_socket, "socket").await;
         over_socket.stop().await.unwrap();
-        daemon.stop().await;
+        server.stop().await;
         // The node's answer is the content's own id, however the bytes arrived.
         assert_eq!(local, remote);
     }
@@ -322,10 +336,10 @@ mod library {
         assert_eq!(client.socket_state(), SocketState::Stale);
         client.stop().await.unwrap();
 
-        // A daemon takes the path over.
-        let daemon = TestDaemon::start(&dir).await;
+        // A server takes the path over.
+        let server = TestServer::start(&dir).await;
         assert_eq!(dir.probe_socket().await.unwrap(), SocketState::Live);
-        daemon.stop().await;
+        server.stop().await;
         assert_eq!(dir.probe_socket().await.unwrap(), SocketState::Absent);
     }
 
@@ -344,18 +358,18 @@ mod library {
     #[tokio::test(flavor = "multi_thread")]
     async fn one_process_at_a_time_boots_a_node() {
         let (_tmp, dir) = new_node().await;
-        let daemon = TestDaemon::start(&dir).await;
+        let server = TestServer::start(&dir).await;
         let held = dir.try_lock(LockRole::Command).unwrap().unwrap_err();
         assert_eq!(held.pid, Some(std::process::id()));
-        // A second daemon is refused before it touches the node's storage.
-        let error = crate::cmds::daemon::serve(&dir, |_| Ok(()), async {})
+        // A second server is refused before it touches the node's storage.
+        let error = crate::cmds::serve::serve(&dir, |_| Ok(()), async {})
             .await
             .unwrap_err();
         assert!(
             format!("{error:#}").contains("already has the node"),
             "{error:#}"
         );
-        daemon.stop().await;
+        server.stop().await;
 
         // A node booting elsewhere that never gets its socket up is waited for until the
         // deadline, not opened a second time.
@@ -384,14 +398,14 @@ mod library {
         states.sort_by_key(|state| matches!(state, SocketState::Live));
         assert_eq!(states, [SocketState::Absent, SocketState::Live]);
         for client in [&first, &second] {
-            let reply = call(
-                client,
-                ListNodules::XRPC.nsid,
-                ListNodules::XRPC.method,
-                json!({}),
-            )
-            .await;
-            assert_eq!(reply.body, json!({"nodules": []}));
+            assert!(
+                client
+                    .call(ListNodules {})
+                    .await
+                    .unwrap()
+                    .nodules
+                    .is_empty()
+            );
         }
         let (holder, client) = if first.socket_state() == SocketState::Live {
             (second, first)
@@ -406,14 +420,14 @@ mod library {
             tokio::task::yield_now().await;
         }
         assert!(!holder_stopped.is_finished());
-        let reply = call(
-            &client,
-            ListNodules::XRPC.nsid,
-            ListNodules::XRPC.method,
-            json!({}),
-        )
-        .await;
-        assert_eq!(reply.body, json!({"nodules": []}));
+        assert!(
+            client
+                .call(ListNodules {})
+                .await
+                .unwrap()
+                .nodules
+                .is_empty()
+        );
         client.stop().await.unwrap();
         holder_stopped.await.unwrap().unwrap();
         assert_eq!(dir.probe_socket().await.unwrap(), SocketState::Absent);
@@ -421,24 +435,24 @@ mod library {
         connect(&dir).await.unwrap().stop().await.unwrap();
     }
 
-    /// `node run` against a node a command has open waits for the command, instead of refusing.
+    /// `node start` against a node a command has open waits for the command, instead of refusing.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_daemon_waits_for_a_command_that_has_the_node_open() {
         let (_tmp, dir) = new_node().await;
         let holder = connect(&dir).await.unwrap();
         let (ready, serving) = oneshot::channel();
         let (stop, stopped) = oneshot::channel::<()>();
-        let daemon = tokio::spawn({
+        let server = tokio::spawn({
             let dir = dir.clone();
             async move {
-                crate::cmds::daemon::serve(
+                crate::cmds::serve::serve(
                     &dir,
                     |_| {
                         ready.send(()).expect("the test waits for readiness");
                         Ok(())
                     },
                     async {
-                        stopped.await.expect("the test stops the daemon by sending");
+                        stopped.await.expect("the test stops the server by sending");
                     },
                 )
                 .await
@@ -447,9 +461,9 @@ mod library {
         holder.stop().await.unwrap();
         serving
             .await
-            .expect("the daemon booted once the command finished");
+            .expect("the server booted once the command finished");
         stop.send(()).unwrap();
-        daemon.await.unwrap().unwrap();
+        server.await.unwrap().unwrap();
     }
 
     /// A command that arrives while the holder is still booting waits for the socket, and is
@@ -468,14 +482,14 @@ mod library {
             .unwrap();
         let client = arriving.await.unwrap().unwrap();
         assert_eq!(client.socket_state(), SocketState::Live);
-        let reply = call(
-            &client,
-            ListNodules::XRPC.nsid,
-            ListNodules::XRPC.method,
-            json!({}),
-        )
-        .await;
-        assert_eq!(reply.body, json!({"nodules": []}));
+        assert!(
+            client
+                .call(ListNodules {})
+                .await
+                .unwrap()
+                .nodules
+                .is_empty()
+        );
         client.stop().await.unwrap();
         holder.stop().await.unwrap();
     }
@@ -545,7 +559,7 @@ mod library {
     }
 
     /// Two nodes on one machine (one keyring, one runtime directory) get entries and sockets of
-    /// their own: each daemon is live at its own path, and deleting one node's keyring entries
+    /// their own: each server is live at its own path, and deleting one node's keyring entries
     /// removes exactly one entry and leaves the other node's.
     #[tokio::test(flavor = "multi_thread")]
     async fn two_nodes_on_one_machine_have_distinct_sockets_and_keyring_entries() {
@@ -560,14 +574,14 @@ mod library {
             second.socket_path().unwrap().parent()
         );
 
-        let (first_daemon, second_daemon) = (
-            TestDaemon::start(&first).await,
-            TestDaemon::start(&second).await,
+        let (first_server, second_server) = (
+            TestServer::start(&first).await,
+            TestServer::start(&second).await,
         );
         assert_eq!(first.probe_socket().await.unwrap(), SocketState::Live);
         assert_eq!(second.probe_socket().await.unwrap(), SocketState::Live);
-        first_daemon.stop().await;
-        second_daemon.stop().await;
+        first_server.stop().await;
+        second_server.stop().await;
 
         // The mock keyring is process-wide, as the platform keyring is machine-wide.
         let secrets = secrets_rs::SecretStore::boot().await.unwrap();
@@ -579,7 +593,7 @@ mod library {
         secrets.stop().await.unwrap();
     }
 
-    /// A daemon whose `node.json` lists a bootstrap peer dials it at start, with no command
+    /// A server whose `node.json` lists a bootstrap peer dials it at start, with no command
     /// issued. Everything is learned through the node's own operations over the sockets: the
     /// dialed node's address from its `getNodeInfo`, and both ends then report each other as
     /// connected. Waiting is on the peers service's events.
@@ -598,9 +612,9 @@ mod library {
         };
         let (_dialed_tmp, dialed_dir) = new_node().await;
         loopback(&dialed_dir).await;
-        let dialed = TestDaemon::start(&dialed_dir).await;
+        let dialed = TestServer::start(&dialed_dir).await;
         let dialed_client = connect(&dialed_dir).await.unwrap();
-        assert_eq!(dialed_client.mode(), Mode::Daemon);
+        assert_eq!(dialed_client.mode(), Mode::Serving);
         let dialed_info = crate::cmds::status::node_info(&dialed_client)
             .await
             .unwrap();
@@ -638,7 +652,7 @@ mod library {
             dialer_dir.settings().unwrap().peers.unwrap().bootstrap,
             [address]
         );
-        let dialer = TestDaemon::start(&dialer_dir).await;
+        let dialer = TestServer::start(&dialer_dir).await;
         let dialer_id = dialer_dir.settings().unwrap().node_id();
         connected_to(dialer.peers.as_ref().unwrap(), &dialed_info.node_id).await;
         connected_to(dialed.peers.as_ref().unwrap(), &dialer_id).await;
@@ -739,7 +753,7 @@ mod blackbox {
     }
 
     /// One case's private world: its node (`<sandbox>/node`) and its runtime directory
-    /// (`<sandbox>/run`, where the daemon puts its socket, as `XDG_RUNTIME_DIR` would). The node
+    /// (`<sandbox>/run`, where the server puts its socket, as `XDG_RUNTIME_DIR` would). The node
     /// is booted by the real binary, so it leaves entries in the platform keyring; they are
     /// deleted when the sandbox is dropped, whether the case passed or panicked.
     struct Sandbox {
@@ -858,7 +872,7 @@ mod blackbox {
         run_cases("node");
     }
 
-    /// `node status` and `exec` with no daemon: the command boots the node itself.
+    /// `node status` and `exec` with no server: the command boots the node itself.
     #[test]
     fn in_process_cases() {
         run_cases("in_process");
@@ -866,8 +880,8 @@ mod blackbox {
 
     /// `node start | status | stop` and the commands reaching the node over its socket.
     #[test]
-    fn daemon_cases() {
-        run_cases("daemon");
+    fn serve_cases() {
+        run_cases("serve");
     }
 
     /// Parallel commands against one node (as a capture hook firing several times at once does)
@@ -908,10 +922,10 @@ mod blackbox {
         );
     }
 
-    /// A daemon killed without cleaning up leaves a socket and no lock: every command still
+    /// A server killed without cleaning up leaves a socket and no lock: every command still
     /// works, and `node stop` and `node start` clean up after it.
     #[test]
-    fn a_killed_daemon_leaves_a_stale_socket_that_commands_survive() {
+    fn a_killed_server_leaves_a_stale_socket_that_commands_survive() {
         let sandbox = Sandbox::new();
         let node = sandbox.node();
         let day = |args: &[&str]| sandbox.day(args);
@@ -920,7 +934,7 @@ mod blackbox {
                 + &String::from_utf8_lossy(&output.stderr)
         };
         assert!(day(&["node", "init"]).status.success());
-        let started = day(&["node", "start"]);
+        let started = day(&["node", "start", "--bg"]);
         assert!(started.status.success(), "{}", text(&started));
         // The lock records the holder's pid on its first line.
         let pid: u32 = std::fs::read_to_string(node.join("node.lock"))
@@ -970,8 +984,8 @@ mod blackbox {
         );
         assert!(!socket.exists());
 
-        // And a daemon can start over a stale socket too.
-        assert!(day(&["node", "start"]).status.success());
+        // And a server can start over a stale socket too.
+        assert!(day(&["node", "start", "--bg"]).status.success());
         let lock_again = std::fs::read_to_string(node.join("node.lock")).unwrap();
         assert_ne!(
             lock_again.lines().next().unwrap().parse::<u32>().unwrap(),

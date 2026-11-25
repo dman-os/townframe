@@ -10,8 +10,8 @@ being handed a capability first. `remember` and `forget` go through the same han
 $ day node init
 initialized node [..] at [..]/node
 
-$ day node start
-daemon started (pid [..]) listening on [..]/run/day/[..].sock
+$ day node start --bg
+node serving in the background (pid [..]) on [..]/run/day/[..].sock
 
 $ day drawers ls
 
@@ -34,6 +34,6 @@ Error:[..]
 ...
 
 $ day node stop
-daemon stopped (pid [..])
+server stopped (pid [..])
 
 ```

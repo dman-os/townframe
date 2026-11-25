@@ -129,12 +129,12 @@ fn try_static_cli() -> Res<StaticCliResult> {
     }
 
     lazy::set_node_flag(cli.node.clone());
-    // The foreground daemon shuts its node down on SIGINT itself; racing it against Ctrl-C here
+    // The foreground server shuts its node down on SIGINT itself; racing it against Ctrl-C here
     // would drop the serving future with the node still booted.
     let owns_signals = matches!(
         cli.command,
         StaticCommands::Node {
-            command: cmds::node::NodeCommands::Run
+            command: cmds::node::NodeCommands::Start { bg: false }
         }
     );
     lazy::rt()
@@ -230,7 +230,7 @@ enum StaticCommands {
         #[clap(subcommand)]
         command: cmds::carts::CartsCommands,
     },
-    /// Manage the peers the node's daemon dials at start
+    /// Manage the peers the node's server dials at start
     #[clap(visible_alias = "peer")]
     Peers {
         #[clap(subcommand)]

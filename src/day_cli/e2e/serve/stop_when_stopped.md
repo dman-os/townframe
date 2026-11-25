@@ -1,10 +1,10 @@
-# `node stop` with no daemon is not an error
+# `node stop` with no server is not an error
 
 ```console
 $ day node init
 initialized node [..] at [..]/node
 
 $ day node stop
-daemon not running
+no server running
 
 ```

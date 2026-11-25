@@ -1,4 +1,4 @@
-# `status` with no daemon boots the node in process
+# `status` with no server boots the node in process
 
 The node id, its directory, how it was reached, and what the node can say about itself.
 A fresh node has no nodules and, reached in process, no peers service; the services are not
@@ -16,6 +16,6 @@ mode      in-process
 socket    [..]/run/day/[..].sock (absent)
 nodules   0 enabled of 0
 services  not exposed by the node
-peers     none attached (only a daemon attaches peers)
+peers     none attached (only a server attaches peers)
 
 ```

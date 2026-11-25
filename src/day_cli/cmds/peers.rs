@@ -3,12 +3,12 @@ use crate::interlude::*;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum PeersCommands {
-    /// Add a peer to the daemon's bootstrap list: it is dialed as soon as the daemon starts
+    /// Add a peer to the server's bootstrap list: it is dialed as soon as the server starts
     Add {
         /// The peer's endpoint ticket, as `day node status` prints it under `address`
         ticket: String,
     },
-    /// List the bootstrap peers and, when a daemon is serving, who it is connected to
+    /// List the bootstrap peers and, when a server is serving, who it is connected to
     Ls,
 }
 
@@ -19,10 +19,10 @@ pub async fn run(command: PeersCommands) -> Res<ExitCode> {
     }
 }
 
-/// Records the peer in `node.json`. The settings are read once, when a daemon boots, so this
-/// never reaches into a running node: a serving daemon is told that it has to restart to dial
+/// Records the peer in `node.json`. The settings are read once, when a server boots, so this
+/// never reaches into a running node: a serving server is told that it has to restart to dial
 /// the new peer. Adding the first peer also creates the `peers` section, which is what makes the
-/// daemon attach the network endpoint at all.
+/// server attach the network endpoint at all.
 async fn add(ticket: &str) -> Res<ExitCode> {
     let conf = lazy::config().await?;
     let dir = &conf.node_dir;
@@ -43,7 +43,7 @@ async fn add(ticket: &str) -> Res<ExitCode> {
         }
     );
     if changed && dir.probe_socket().await? == SocketState::Live {
-        println!("the running daemon dials it after `day node stop` and `day node start`");
+        println!("the running server dials it after `day node stop` and `day node start --bg`");
     }
     Ok(ExitCode::SUCCESS)
 }

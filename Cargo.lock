@@ -4185,6 +4185,7 @@ name = "day_cli"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "big_blobs_core",
  "big_cabinet",
  "big_cabinet_core",
  "big_cartridges_core",
@@ -4210,6 +4211,7 @@ dependencies = [
  "service_utils_rs",
  "sqlite_rs",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tower",
