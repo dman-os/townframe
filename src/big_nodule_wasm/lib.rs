@@ -252,6 +252,9 @@ impl NoduleExecutor for WasmExecutor {
                     // The grants may have changed since the last ensure: the handler is told
                     // the capability that is live now, on its next request.
                     running.provider.set_capability(spec.capability);
+                    running
+                        .provider
+                        .set_config(spec.config_doc.clone(), spec.config_capability);
                     return Hosted::Ready(Arc::clone(&running.provider) as Arc<dyn Provider>);
                 }
                 // Another revision (or handler) of the cartridge: the reconciler retires first, but
@@ -341,6 +344,7 @@ impl NoduleExecutor for WasmExecutor {
             ingress: Arc::clone(&self.ingress),
             workload_id: workload_id.clone(),
             capability: Mutex::new(spec.capability),
+            config: Mutex::new((spec.config_doc.clone(), spec.config_capability)),
         });
         self.hosted.lock().expect("hosted lock").insert(
             spec.cartridge_id.clone(),
@@ -384,11 +388,16 @@ struct WasmProvider {
     /// The nodule's own dispatch capability, delivered in [`NODULE_CAPABILITY_HEADER`]. Replaced in
     /// place when the nodule's grants change.
     capability: Mutex<Option<CapId>>,
+    config: Mutex<(big_cabinet_core::dmeta::DocId, Option<CapId>)>,
 }
 
 impl WasmProvider {
     fn set_capability(&self, capability: Option<CapId>) {
         *self.capability.lock().expect("capability lock") = capability;
+    }
+
+    fn set_config(&self, doc_id: big_cabinet_core::dmeta::DocId, capability: Option<CapId>) {
+        *self.config.lock().expect("config lock") = (doc_id, capability);
     }
 }
 
@@ -409,10 +418,13 @@ impl Provider for WasmProvider {
             return Err(big_nodule::wire::byte_body_refused());
         }
         // The guest sees the contract every XRPC hop speaks, built by the shared `wire`.
+        let (config_doc, config_capability) = self.config.lock().expect("config lock").clone();
         let headers = delivery_headers(
             caller,
             request,
             context,
+            &config_doc,
+            config_capability,
             *self.capability.lock().expect("capability lock"),
         );
         let mut http_request = hyper::Request::post(format!("http://{AUTHORITY}/xrpc/{operation}"))

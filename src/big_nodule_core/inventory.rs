@@ -11,6 +11,7 @@ use crate::Nodule;
 use crate::NoduleAdmission;
 use crate::NoduleError;
 
+use big_cabinet_core::dmeta::DocId;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeError;
 use big_cartridges_core::CartridgeId;
@@ -19,6 +20,7 @@ use big_cartridges_core::ResolvedCartridge;
 use big_cartridges_core::Revision;
 use big_cartridges_core::Version;
 use big_cartridges_core::config::Component;
+
 use big_dispatch_core::Readiness;
 use serde::Deserialize;
 use serde::Serialize;
@@ -57,7 +59,9 @@ pub struct FilledBy {
 /// An admitted nodule installed in a standalone [`Inventory`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct InstalledNodule {
+    /// The cartridge config document containing this nodule's settings and grants.
     pub cartridge_id: CartridgeId,
+    pub config_doc: DocId,
     pub version: Version,
     pub revision: Revision,
     pub resolved: ResolvedCartridge,
@@ -77,6 +81,7 @@ impl InstalledNodule {
     )]
     pub(crate) fn new(
         cartridge_id: CartridgeId,
+        config_doc: DocId,
         version: Version,
         revision: Revision,
         resolved: ResolvedCartridge,
@@ -87,6 +92,7 @@ impl InstalledNodule {
     ) -> Self {
         Self {
             cartridge_id,
+            config_doc,
             version,
             revision,
             resolved,
