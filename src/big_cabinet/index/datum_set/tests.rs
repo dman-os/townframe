@@ -151,6 +151,7 @@ fn project(doc: &Automerge, previous: Option<&DocState>, cursor: u64) -> Prepare
         slots,
         replace_all,
         ref_edges: BTreeMap::new(),
+        memberships: BTreeMap::new(),
     }
 }
 
