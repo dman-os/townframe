@@ -8261,6 +8261,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "intxt_web_host"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "http",
+ "tokio",
+ "tracing",
+ "utils_rs",
+ "wash-runtime",
+]
+
+[[package]]
 name = "inventory"
 version = "0.3.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
