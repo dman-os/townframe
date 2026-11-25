@@ -51,13 +51,13 @@ pub fn Drawer(
             "data-state": "open",
             "data-placement": "leading",
             button {
-                "data-part": "scrim",
+                "part": "drawer-scrim",
                 r#type: "button",
                 "aria-label": "Dismiss {name}",
                 onclick: move |_| on_dismiss.call(()),
             }
             div {
-                "data-part": "panel",
+                "part": "drawer-panel",
                 role: "dialog",
                 "aria-modal": "true",
                 "aria-label": "{name}",
@@ -125,7 +125,7 @@ mod tests {
             page.attr(root, "data-placement").as_deref(),
             Some("leading")
         );
-        assert_eq!(page.parts(root), ["scrim", "panel"]);
+        assert_eq!(page.parts(root), ["drawer-scrim", "drawer-panel"]);
         assert!(page.has_role("button", "Home"));
     }
 

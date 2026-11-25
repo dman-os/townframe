@@ -4,7 +4,7 @@
  * quiet default (no borders on containers, no shadows in the flow, no decorative gradients); what
  * two reasonable themes would choose differently is a component token the kit's skins read
  * (`--ct-<component>-radius|border|shadow|fill`, listed in `../tokens.css`). This sheet sets those
- * tokens, and where a token is not enough, restyles the parts by their `data-part` vocabulary.
+ * tokens, and where a token is not enough, restyles the parts by their `part` vocabulary.
  * Changing the app's look means editing this file, never a skin and never Rust.
  *
  * What this sheet must not do (ADR 057 section 5): decorative gradients, glow or frosted glass;

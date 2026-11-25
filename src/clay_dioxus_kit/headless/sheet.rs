@@ -63,13 +63,13 @@ pub fn Sheet(
             "data-placement": placement.value(),
             "data-width": width.as_str(),
             button {
-                "data-part": "scrim",
+                "part": "sheet-scrim",
                 r#type: "button",
                 "aria-label": "Dismiss {name}",
                 onclick: move |_| on_dismiss.call(()),
             }
             div {
-                "data-part": "panel",
+                "part": "sheet-panel",
                 role: "dialog",
                 "aria-modal": "true",
                 "aria-label": "{name}",
@@ -164,7 +164,7 @@ mod tests {
                 page.attr(root, "data-width").as_deref(),
                 Some(width.as_str())
             );
-            assert_eq!(page.parts(root), ["scrim", "panel"]);
+            assert_eq!(page.parts(root), ["sheet-scrim", "sheet-panel"]);
             assert_eq!(page.parent(page.by_role("dialog", "Pick a file")), root);
             assert_eq!(
                 page.parent(page.by_role("button", "Dismiss Pick a file")),

@@ -174,12 +174,12 @@ fn view(host: Host) -> Element {
             div { class: "ct-theme-lab",
                 Navigator { selection }
                 Canvas { selection: selection(), frame, scheme }
-                aside { "data-part": "inspector", "aria-label": "Inspector",
-                    section { "data-part": "editor", "aria-label": "Theme CSS",
-                        label { "data-part": "heading", r#for: "theme-css", "Theme CSS" }
+                aside { "part": "theme-lab-inspector", "aria-label": "Inspector",
+                    section { "part": "theme-lab-editor", "aria-label": "Theme CSS",
+                        label { "part": "theme-lab-heading", r#for: "theme-css", "Theme CSS" }
                         textarea {
                             id: "theme-css",
-                            "data-part": "field",
+                            "part": "theme-lab-field",
                             spellcheck: "false",
                             rows: "14",
                             value: "{text}",
@@ -188,7 +188,7 @@ fn view(host: Host) -> Element {
                                 status.set(Status::Idle);
                             },
                         }
-                        div { "data-part": "actions",
+                        div { "part": "theme-lab-actions",
                             Button {
                                 variant: ButtonVariant::Outline,
                                 label: "Apply theme".to_owned(),
@@ -206,7 +206,7 @@ fn view(host: Host) -> Element {
                                 },
                                 "Revert"
                             }
-                            label { "data-part": "toggle",
+                            label { "part": "theme-lab-toggle",
                                 input {
                                     r#type: "checkbox",
                                     checked: preview(),
@@ -414,14 +414,14 @@ fn Navigator(selection: Signal<Selection>) -> Element {
         }
     };
     rsx! {
-        nav { "data-part": "navigator", "aria-label": "Theme lab sections",
-            h2 { "data-part": "group", "Sheets" }
+        nav { "part": "theme-lab-navigator", "aria-label": "Theme lab sections",
+            h2 { "part": "theme-lab-group", "Sheets" }
             {entry("Your theme", Selection::Sheets)}
-            h2 { "data-part": "group", "Tokens" }
+            h2 { "part": "theme-lab-group", "Tokens" }
             for foundation in Foundation::ALL {
                 {entry(foundation.title(), Selection::Foundation(foundation))}
             }
-            h2 { "data-part": "group", "Components" }
+            h2 { "part": "theme-lab-group", "Components" }
             for component in Component::ALL {
                 {entry(component.title(), Selection::Component(component))}
             }
@@ -442,9 +442,9 @@ fn Canvas(selection: Selection, frame: Signal<Frame>, scheme: Signal<CanvasSchem
         .map(|px| format!("max-width:{px}px;"))
         .unwrap_or_default();
     rsx! {
-        main { "data-part": "canvas",
-            div { "data-part": "toolbar", role: "toolbar", "aria-label": "Canvas",
-                span { "data-part": "label", "Width" }
+        main { "part": "theme-lab-canvas",
+            div { "part": "theme-lab-toolbar", role: "toolbar", "aria-label": "Canvas",
+                span { "part": "theme-lab-label", "Width" }
                 for each in Frame::ALL {
                     Button {
                         key: "{each.title()}",
@@ -455,8 +455,8 @@ fn Canvas(selection: Selection, frame: Signal<Frame>, scheme: Signal<CanvasSchem
                     }
                 }
             }
-            div { "data-part": "toolbar", role: "toolbar", "aria-label": "Canvas scheme",
-                span { "data-part": "label", "Scheme" }
+            div { "part": "theme-lab-toolbar", role: "toolbar", "aria-label": "Canvas scheme",
+                span { "part": "theme-lab-label", "Scheme" }
                 for each in CanvasScheme::ALL {
                     Button {
                         key: "{each.title()}",
@@ -468,12 +468,12 @@ fn Canvas(selection: Selection, frame: Signal<Frame>, scheme: Signal<CanvasSchem
                 }
             }
             div {
-                "data-part": "frame",
+                "part": "theme-lab-frame",
                 "data-scheme": scheme().attr(),
                 style: "{width}",
                 match selection {
                     Selection::Sheets => rsx! {
-                        section { "data-part": "sheets",
+                        section { "part": "theme-lab-sheets",
                             h2 { "Sheets" }
                             p {
                                 "One sheet today: your theme, edited in the inspector. Installed themes "

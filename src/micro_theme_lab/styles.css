@@ -1,6 +1,6 @@
 /*
  * The theme lab's own stylesheet (a micro's rules sit above the kit and the user's theme). Parts
- * are local to this micro: `.ct-theme-lab` and its `data-part`s. The monospace field and the text
+ * are local to this micro: `.ct-theme-lab` and its `part`s. The monospace field and the text
  * roles have no kit component yet, so they are built from kit tokens here.
  */
 .ct-theme-lab {
@@ -11,17 +11,17 @@
   padding-bottom: var(--ct-dimension-spacing-6);
 }
 
-.ct-theme-lab [data-part="editor"] {
+.ct-theme-lab [part~="theme-lab-editor"] {
   display: flex;
   flex-direction: column;
   gap: var(--ct-dimension-spacing-2);
 }
 
-.ct-theme-lab [data-part="heading"] {
+.ct-theme-lab [part~="theme-lab-heading"] {
   font-weight: var(--ct-font-weight-medium);
 }
 
-.ct-theme-lab [data-part="field"] {
+.ct-theme-lab [part~="theme-lab-field"] {
   box-sizing: border-box;
   width: 100%;
   min-height: 16rem;
@@ -36,18 +36,18 @@
   resize: vertical;
 }
 
-.ct-theme-lab [data-part="field"]:focus-visible {
+.ct-theme-lab [part~="theme-lab-field"]:focus-visible {
   outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
 }
 
-.ct-theme-lab [data-part="actions"] {
+.ct-theme-lab [part~="theme-lab-actions"] {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--ct-dimension-spacing-2);
 }
 
-.ct-theme-lab [data-part="toggle"] {
+.ct-theme-lab [part~="theme-lab-toggle"] {
   display: flex;
   align-items: center;
   gap: var(--ct-dimension-spacing-2);
@@ -58,19 +58,19 @@
  * Three panes: the navigator, the canvas and the inspector (the sheet editor). Stacked on a
  * phone, navigator beside canvas on a tablet, all three side by side on a desktop.
  */
-.ct-theme-lab [data-part="navigator"] {
+.ct-theme-lab [part~="theme-lab-navigator"] {
   display: flex;
   flex-wrap: wrap;
   gap: var(--ct-dimension-spacing-1);
 }
 
 /* Entries read as a list, so they align to the start rather than centring like buttons. */
-.ct-theme-lab [data-part="navigator"] .ct-button {
+.ct-theme-lab [part~="theme-lab-navigator"] .ct-button {
   justify-content: flex-start;
   text-align: start;
 }
 
-.ct-theme-lab [data-part="group"] {
+.ct-theme-lab [part~="theme-lab-group"] {
   flex-basis: 100%;
   margin: var(--ct-dimension-spacing-3) 0 var(--ct-dimension-spacing-1);
   color: var(--ct-color-text-muted);
@@ -78,28 +78,28 @@
   font-weight: var(--ct-font-weight-semibold);
 }
 
-.ct-theme-lab [data-part="canvas"] {
+.ct-theme-lab [part~="theme-lab-canvas"] {
   display: flex;
   flex-direction: column;
   gap: var(--ct-dimension-spacing-3);
   min-width: 0;
 }
 
-.ct-theme-lab [data-part="toolbar"] {
+.ct-theme-lab [part~="theme-lab-toolbar"] {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--ct-dimension-spacing-2);
 }
 
-/* Scoped to the toolbar's own label: a bare `[data-part="label"]` rule also matched the `label`
+/* Scoped to the toolbar's own label: a bare `[part~="theme-lab-label"]` rule also matched the `label`
    part of every kit Button inside the canvas and recoloured it text-muted, whatever its fill. */
-.ct-theme-lab [data-part="toolbar"] > [data-part="label"] {
+.ct-theme-lab [part~="theme-lab-toolbar"] > [part~="theme-lab-label"] {
   color: var(--ct-color-text-muted);
   font-size: var(--ct-dimension-font-size-sm);
 }
 
-.ct-theme-lab [data-part="frame"] {
+.ct-theme-lab [part~="theme-lab-frame"] {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
@@ -115,15 +115,15 @@
  * roles are `light-dark()` values carried unresolved from the root, so every role used inside the
  * frame resolves against the frame's scheme while the lab's chrome keeps the host's.
  */
-.ct-theme-lab [data-part="frame"][data-scheme="light"] {
+.ct-theme-lab [part~="theme-lab-frame"][data-scheme="light"] {
   color-scheme: light;
 }
 
-.ct-theme-lab [data-part="frame"][data-scheme="dark"] {
+.ct-theme-lab [part~="theme-lab-frame"][data-scheme="dark"] {
   color-scheme: dark;
 }
 
-.ct-theme-lab [data-part="sheets"] > p {
+.ct-theme-lab [part~="theme-lab-sheets"] > p {
   max-width: 40rem;
   color: var(--ct-color-text-muted);
 }
@@ -135,7 +135,7 @@
     align-items: start;
   }
 
-  .ct-theme-lab [data-part="navigator"] {
+  .ct-theme-lab [part~="theme-lab-navigator"] {
     flex-direction: column;
     flex-wrap: nowrap;
     grid-row: span 2;
@@ -143,7 +143,7 @@
     top: var(--ct-dimension-spacing-4);
   }
 
-  .ct-theme-lab [data-part="inspector"] {
+  .ct-theme-lab [part~="theme-lab-inspector"] {
     grid-column: 2;
   }
 }
@@ -153,11 +153,11 @@
     grid-template-columns: 12rem minmax(0, 1fr) minmax(20rem, 26rem);
   }
 
-  .ct-theme-lab [data-part="navigator"] {
+  .ct-theme-lab [part~="theme-lab-navigator"] {
     grid-row: auto;
   }
 
-  .ct-theme-lab [data-part="inspector"] {
+  .ct-theme-lab [part~="theme-lab-inspector"] {
     grid-column: 3;
     position: sticky;
     top: var(--ct-dimension-spacing-4);

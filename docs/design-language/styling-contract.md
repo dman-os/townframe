@@ -17,7 +17,7 @@ The kit's own skin is one such stylesheet. If a visual change needs a Rust edit,
 Consequences a reviewer can check:
 
 - A headless part contains no class literal except its root's `ct-<component>`, and no utility string.
-- A skin selector is a root class, a `data-part` and a `data-*` state, never a tag or a position (`div > span:nth-child(2)`).
+- A skin selector is a root class, a `part` token and a `data-*` state, never a tag or a position (`div > span:nth-child(2)`).
 - A skin never uses `!important`. Layers, not weight, decide who wins, so a user rule needs no weapon to beat the kit.
 - Every animation is a CSS `transition` or `animation` that the stylesheet declares and `prefers-reduced-motion` removes. Rust never runs a timer to animate.
 
@@ -28,7 +28,7 @@ One component is one root and some named parts.
 | Thing | Spelling | Example |
 |---|---|---|
 | Root | `class="ct-<component>"`, kebab-case, on the root element only | `ct-button`, `ct-scrub-strip` |
-| Internal part | `data-part="<part>"`, kebab-case, on the part's element | `data-part="tab"` |
+| Internal part | `part="<component>-<part>"`, kebab-case, on the part's element; the component is the root class without `ct-` | `part="tabs-tab"` |
 | The one enumerated state of a part | `data-state="<state>"` | `data-state="active"` |
 | Boolean state | a bare data attribute, present or absent | `data-disabled` |
 | Orientation | `data-orientation="horizontal" \| "vertical"` | on `ct-tabs`, `ct-separator` |
@@ -39,7 +39,7 @@ One component is one root and some named parts.
 Rules for the names:
 
 - Part names are the component's nouns, not its looks: `list`, `tab`, `panel`, `label`, `marker`, `bubble`; never `blue-bar` or `left`.
-- A part name is unique within its component and is selected as `.ct-<component> [data-part="<part>"]`. Components nest (a `Card` holds a `Button`), so a parent's rule that must not reach a child component's parts uses the child combinator or `:where()`.
+- A part token is qualified by its component because `::part()` is flat per shadow root (a `tab` of `ct-tabs` and a `tab` of another component would be one name), and is selected inside a root as `.ct-<component> [part~="<component>-<part>"]`. A component that stands in for a kit one by hand (a micro's button) uses the kit component's tokens. See ADR 059. Components nest (a `Card` holds a `Button`), so a parent's rule that must not reach a child component's parts uses the child combinator or `:where()`.
 - States go on the element the user perceives as changing, and describe the state, not the cause (`active`, not `clicked`). Attributes that carry meaning to assistive technology stay ARIA (`aria-selected`, `aria-pressed`, `aria-current`); `data-state` mirrors them so a stylesheet has one vocabulary.
 - A native pseudo-class is used where one exists (`:hover`, `:active`, `:focus-visible`, `:disabled`), because a theme can then be written for a component it has never seen. State that has no pseudo-class gets a `data-*`.
 - Adding a part, state or axis value is compatible. Renaming or removing one is a breaking change to every theme and is treated like a public API change.
@@ -49,27 +49,27 @@ Rules for the names:
 ```html
 <!-- Button: variants and sizes are axes, the label is a part. -->
 <button class="ct-button" type="button" data-variant="outline" data-size="md">
-  <span data-part="label">Save</span>
+  <span part="button-label">Save</span>
 </button>
 
 <!-- Tabs: the state is on the tab and on the panel it controls. -->
 <div class="ct-tabs" data-orientation="horizontal">
-  <div data-part="list" role="tablist" aria-label="Sections">
-    <button data-part="tab" role="tab" data-state="active"   aria-selected="true">Overview</button>
-    <button data-part="tab" role="tab" data-state="inactive" aria-selected="false" tabindex="-1">Activity</button>
+  <div part="tabs-list" role="tablist" aria-label="Sections">
+    <button part="tabs-tab" role="tab" data-state="active"   aria-selected="true">Overview</button>
+    <button part="tabs-tab" role="tab" data-state="inactive" aria-selected="false" tabindex="-1">Activity</button>
   </div>
-  <div data-part="panel" role="tabpanel" data-state="active">...</div>
+  <div part="tabs-panel" role="tabpanel" data-state="active">...</div>
 </div>
 
 <!-- Alert: the status is a semantic axis. -->
 <div class="ct-alert" role="status" data-status="success">
-  <span data-part="icon" aria-hidden="true"></span>
-  <div data-part="content"><p data-part="title">Saved</p><p data-part="body">...</p></div>
+  <span part="alert-icon" aria-hidden="true"></span>
+  <div part="alert-content"><p part="alert-title">Saved</p><p part="alert-body">...</p></div>
 </div>
 
 <!-- ScrubStrip: geometry is computed, so it arrives as custom properties. -->
 <div class="ct-scrub-strip" data-state="engaged" style="--ct-strip-thumb: 812px">
-  <span data-part="marker" data-state="active" style="--ct-strip-push: 96px; --ct-strip-dy: -34px">K</span>
+  <span part="scrub-strip-marker" data-state="active" style="--ct-strip-push: 96px; --ct-strip-dy: -34px">K</span>
 </div>
 ```
 
@@ -90,8 +90,8 @@ Because every visual is a rule over this vocabulary, and a `user` layer rule bea
   }
 
   /* Square tabs with a bottom rule on the active one. */
-  .ct-tabs [data-part="tab"] { border-radius: 0; }
-  .ct-tabs [data-part="tab"][data-state="active"] { box-shadow: inset 0 -2px 0 var(--ct-color-primary); background: none; }
+  .ct-tabs [part~="tabs-tab"] { border-radius: 0; }
+  .ct-tabs [part~="tabs-tab"][data-state="active"] { box-shadow: inset 0 -2px 0 var(--ct-color-primary); background: none; }
 
   /* A different success colour everywhere (alerts, chips, any later component). */
   :root { --ct-color-success: oklch(0.62 0.17 150); }
@@ -136,7 +136,7 @@ The contract is the attribute vocabulary and the stylesheet, so a Solid or React
 <button class="ct-button" type="button" data-variant={props.variant ?? "primary"}
         data-size={props.size ?? "md"} data-disabled={props.disabled ? "" : undefined}
         disabled={props.disabled}>
-  <span data-part="label">{props.children}</span>
+  <span part="button-label">{props.children}</span>
 </button>
 
 // React
@@ -146,7 +146,7 @@ The contract is the attribute vocabulary and the stylesheet, so a Solid or React
 
 What a port must do:
 
-- Emit the same root class, `data-part`, `data-state`, `data-*` axes and ARIA as the Rust part. Each headless module's docs (`src/clay_dioxus_kit/headless/<name>.rs`) list the parts, states and axes of its component, and its tests are the executable statement of them.
+- Emit the same root class, `part`, `data-state`, `data-*` axes and ARIA as the Rust part. Each headless module's docs (`src/clay_dioxus_kit/headless/<name>.rs`) list the parts, states and axes of its component, and its tests are the executable statement of them.
 - Set `data-*` booleans as present-or-absent (`data-disabled=""`), never `="false"`.
 - Compute dynamic geometry in JS and write it as an inline custom property of the documented name. The stylesheet decides what to do with it.
 - Own behaviour the same way: keyboard map, roving focus, `aria-*`. The kit's tests list the keys.
@@ -162,11 +162,11 @@ Things that stop a theme from restyling the app today, seeded 2026-11-18. Counts
 |---|---|---|
 | The old `ui` crate's inline `style:` strings (tiles, `ArcIndex`, `CanvasProbe`) | 63 | Removed with the crate in the lane that wrote this contract. `ArcIndex` returns as `ScrubStrip` with no inline style. |
 | Tailwind utility strings as the skin of the old kit components (`app_bar`, `drawer`, `list_row`, `nav_button`, `panel_page`, `sheet`, `sections`, `list_details`) and their `*Skin` structs | about 30 | Fixed 2026-11-18: each is a headless part and `styles/kit/<name>.css`; `Layer`, `SCRIM` and `styles/motion.css` are gone with them. |
-| Tailwind utility strings in `micro_theme_lab`, `micro_shell`, `micro_settings`, `micro_sample`, `micro_counter`, `micro_lab`, `micro_layout` | about 60 | Fixed 2026-11-18: kit components, and a micro stylesheet (`styles.css`, one `ct-<micro>` root and local `data-part`s, layout and token-built looks only) for what the kit has no component for. `micro_toolbar` emits the `ct-button` vocabulary by hand (see below). |
+| Tailwind utility strings in `micro_theme_lab`, `micro_shell`, `micro_settings`, `micro_sample`, `micro_counter`, `micro_lab`, `micro_layout` | about 60 | Fixed 2026-11-18: kit components, and a micro stylesheet (`styles.css`, one `ct-<micro>` root and local `part`s, layout and token-built looks only) for what the kit has no component for. `micro_toolbar` emits the `ct-button` vocabulary by hand (see below). |
 | Tailwind utility strings in `micro_review` (and `review_mock`) | about 37 | Open; the intxt lane converts it from this document. |
 | Tailwind utility strings in `daytxt_core/lifecycle.rs` (the Settings lifecycle section), `clay_mdk/tests.rs` (a fixture) and the showcase's layout glue (`flex`, `gap`) | about 15 | Open; not on the lane's list. The showcase's glue is by design (the contract's specimens are cells in a page). |
 | A micro stylesheet that names `--ct-color-*` tokens (the `micro_sample` text field, the `micro_lab` experiment rows, the `micro_theme_lab` field and text roles) outranks the `user` layer, so a theme restyles them only through the tokens, not by part. | 3 micros | Open; needs the design-session items below (a text input, a list-row primitive that can stand alone, text roles) so these stop being local looks. |
-| `Button` cannot carry `aria-description`: it is not in the guest wire vocabulary (`clay_surface::render`), which a kit component is held to, so `micro_toolbar`'s unavailable-because-X button emits `ct-button`, `data-variant`, `data-part="label"` itself. | 1 micro | Open design question: admit `aria-description` to the wire vocabulary, then give `Button` a `description` prop. |
+| `Button` cannot carry `aria-description`: it is not in the guest wire vocabulary (`clay_surface::render`), which a kit component is held to, so `micro_toolbar`'s unavailable-because-X button emits `ct-button`, `data-variant`, `part="button-label"` itself. | 1 micro | Open design question: admit `aria-description` to the wire vocabulary, then give `Button` a `description` prop. |
 | The status roles (`info`, `success`, `warning`, `danger`, with `on-` pairs) are provisional (FOUND-012: Material has no equivalent, so `info` follows its secondary colour, `danger` its error, and the other two keep authored values). Checked 2026-11-18 as text on the Material surface: `info` and `danger` pass in every scheme (5.8 to 14.4:1); `success` was 3.05 to 3.19:1 in the three dark schemes and now takes green 400 there (6.3 to 6.6:1, ink on it 6.3:1); `warning` is 8.1 to 8.5:1 on dark and **1.8:1 on the light schemes**, which fails AA as text (it is used as a border and a tint, with `--ct-color-text` for the words, so no kit skin reads it as text today). | 2 token files, `tokens.css` | Open for `warning` as text on light: it needs a text-safe role or a darker light value (a design question). The type scale is three sizes (`--ct-dimension-font-size-{sm,md,lg}`). |
 | `url()` is refused in a theme and in a micro's sheet, and `@font-face` and `@import` with it. Custom fonts and images cannot be themed. | n/a | Open. Needs a design: `data:` or `blob:` font and image sources, admitted by `clay_surface::refuse_fetching_stylesheet` (which exists to stop the host fetching on a guest's behalf, so a payload carried inline is a different case). |
 | The `reset` layer sits above Tailwind's `utilities` (the contract's layers are declared after Tailwind's so that `user` outranks a utility), so a reset rule beats a utility on the same property. The reset only sets `box-sizing` and zeroes `html`/`body` margin and padding. | 1 file | Open; harmless today, revisit if a utility must override it. |

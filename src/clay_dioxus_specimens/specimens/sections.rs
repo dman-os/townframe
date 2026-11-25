@@ -17,7 +17,7 @@ pub fn SectionsSpecimens() -> Element {
         FoundationSection {
             id: "sections-widths".to_string(),
             title: "Resizable panes".to_string(),
-            description: "data-part pane, handle (with a grip) and gesture; --ct-sections-weight, -min and -max arrive as custom properties on a pane. Drag a handle, or focus it and use the arrow keys.".to_string(),
+            description: "part sections-pane, sections-handle (with a sections-grip) and sections-gesture; --ct-sections-weight, -min and -max arrive as custom properties on a pane. Drag a handle, or focus it and use the arrow keys.".to_string(),
             div { class: "flex flex-wrap items-start gap-8",
                 Frame { title: "Sections".to_string(), width_px: COMPACT_PX,
                     SectionsSpecimen { width_px: COMPACT_PX, three: false }

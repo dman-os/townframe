@@ -172,7 +172,7 @@ fn the_sections_name_their_parts_and_hand_their_geometry_to_the_stylesheet() {
     let (mut page, _) = render(Renderer::Blitz);
     let root = page.by_class("ct-sections");
     // A pane, then the handle that divides it from the next: the seam is a part of the run.
-    assert_eq!(page.parts(root), ["pane", "handle", "pane"]);
+    assert_eq!(page.parts(root), ["sections-pane", "sections-handle", "sections-pane"]);
     let sidebar = page.by_role("region", "Sidebar");
     assert_eq!(page.attr(sidebar, "data-state").as_deref(), Some("open"));
     assert_eq!(
@@ -188,12 +188,12 @@ fn the_sections_name_their_parts_and_hand_their_geometry_to_the_stylesheet() {
     // No limit, no custom property: the stylesheet's own default is "none".
     assert_eq!(page.custom_property(sidebar, "--ct-sections-max"), None);
     let handle = page.by_role("separator", "Resize Sidebar and Content");
-    assert_eq!(page.parts(handle), ["grip"]);
+    assert_eq!(page.parts(handle), ["sections-grip"]);
     assert_eq!(page.attr(handle, "data-edge"), None);
     page.pointer(handle, "pointerdown", 200.0);
     let overlay = page.by_role("presentation", "");
-    assert_eq!(page.attr(overlay, "data-part").as_deref(), Some("gesture"));
-    assert_eq!(page.parts(root), ["pane", "handle", "pane", "gesture"]);
+    assert_eq!(page.attr(overlay, "part").as_deref(), Some("sections-gesture"));
+    assert_eq!(page.parts(root), ["sections-pane", "sections-handle", "sections-pane", "sections-gesture"]);
 }
 
 #[test]

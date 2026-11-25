@@ -923,15 +923,15 @@ impl Page {
         }
     }
 
-    /// The `data-part` of each child element of `node`, in order; every child of a contract
+    /// The `part` of each child element of `node`, in order; every child of a contract
     /// component's root or part must be a part, so a child without one fails.
     pub(crate) fn parts(&self, node: Node) -> Vec<String> {
         self.children(node)
             .into_iter()
             .filter(|child| matches!(self.dom.nodes[child.0].kind, Kind::Element { .. }))
             .map(|child| {
-                self.attr(child, "data-part").unwrap_or_else(|| {
-                    panic!("{} is a child without a data-part", self.describe(child))
+                self.attr(child, "part").unwrap_or_else(|| {
+                    panic!("{} is a child without a part", self.describe(child))
                 })
             })
             .collect()

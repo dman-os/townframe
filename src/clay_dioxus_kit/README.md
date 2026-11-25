@@ -73,7 +73,7 @@ enforces them. They apply to every component.
   px (FOUND-008) and reaches CSS through a custom property or a data attribute, never a number in
   Rust that is a layout decision.
 - **KIT-201** The vocabulary a stylesheet keys on: a `ct-<name>` class on the root (kebab case),
-  `data-part="<part>"` on internals, `data-state` for a part's one enumerated state, a bare
+  `part="<component>-<part>"` on internals (the component is the root class without `ct-`; `part` is what `::part()` selects by and its namespace is flat per shadow root, ADR 059), `data-state` for a part's one enumerated state, a bare
   `data-<name>` for a boolean state (`data-disabled`), `data-orientation`, and the axes the caller
   picks: `data-variant`, `data-size`, `data-status`. Native pseudo-classes (`:hover`,
   `:focus-visible`, `:disabled`) are used where one exists. A module's docs list its parts,
@@ -83,7 +83,7 @@ enforces them. They apply to every component.
   `tailwind.css` and so part of the generated bundle (`assets/tailwind.css`, regenerated with
   `deno run --allow-all x/check-kit-bundle.ts --write`, which also regenerates the token CSS; the
   same script without `--write` is the `kit-bundle` pre-commit hook and fails on any difference).
-  Rules are keyed on the root class, `data-part` and `data-*`, read tokens as `--ct-*`, and use no
+  Rules are keyed on the root class, `part` and `data-*`, read tokens as `--ct-*`, and use no
   `!important` (layers order the cascade), no `@apply` and no `url()`. Checked:
   `conventions::contract_skins_are_stylesheets_in_the_kit_layer`.
 - **KIT-203** Motion and focus are the skin's: a `transition` or `animation` is declared in the
@@ -200,7 +200,7 @@ named after it.
   its own would have collided with them. Checked:
   `conventions::skins_stack_on_the_layer_scale_and_never_name_a_z_index_number`.
 - **KIT-103** The scrim. An overlay (`Drawer` while open, every `Sheet`) renders one: a button
-  named `Dismiss <name>` (`data-part="scrim"`) filling the overlay, under the panel by tree order
+  named `Dismiss <name>` (`part="sheet-scrim"` or `part="drawer-scrim"`) filling the overlay, under the panel by tree order
   (no `z-index` of its own). It is always shown, dims with the `scrim` colour role (a fixed 32%
   black, so it darkens a light and a dark theme alike, where `text` at low opacity would lighten a
   dark one), and a press on it calls `on_dismiss`, the same as Escape. Reason: dismissal by tapping

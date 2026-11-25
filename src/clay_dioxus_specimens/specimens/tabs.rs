@@ -26,7 +26,7 @@ pub fn TabsSpecimens() -> Element {
         FoundationSection {
             id: "tabs-horizontal".to_string(),
             title: "Horizontal".to_string(),
-            description: "role=tablist, data-part list|tab|panel, data-state active|inactive. Left and Right arrows, Home and End move and select; the disabled tab is skipped.".to_string(),
+            description: "role=tablist, part tabs-list|tabs-tab|tabs-panel, data-state active|inactive. Left and Right arrows, Home and End move and select; the disabled tab is skipped.".to_string(),
             Tabs {
                 items: sections(),
                 value: horizontal(),

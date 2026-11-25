@@ -35,7 +35,7 @@ deno run --allow-all x/daytxt-gui.ts run script.ts --route home
 - `--width/--height` (default 1280x800; 420x800 is the compact phone layout), `--full-page`,
   `--verbose` (stream the build log).
 - `inspect <selector>` prints up to 20 matches as JSON: tag, role, aria-label, text, `ct-*` classes,
-  `data-*` attributes (`data-part`, `data-state`) and the computed styles the contract layers decide.
+  `data-*` attributes (`part`, `data-state`) and the computed styles the contract layers decide.
   Playwright CSS pierces the open shadow roots every micro mounts in.
 - `run script.ts` takes a module whose default export is
   `async ({ page, goto, settle, context, browser }) => {...}` (Node strips the types; imports resolve

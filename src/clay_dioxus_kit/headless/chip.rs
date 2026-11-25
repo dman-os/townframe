@@ -69,17 +69,17 @@ pub fn Chip(
                 "data-status": status,
                 "data-state": if selected { "on" } else { "off" },
                 onclick: move |_| on_toggle.call(!selected),
-                span { "data-part": "label", "{label}" }
+                span { "part": "chip-label", "{label}" }
             }
         };
     }
     rsx! {
         span { class: "ct-chip", "data-variant": variant, "data-status": status,
-            span { "data-part": "label", "{label}" }
+            span { "part": "chip-label", "{label}" }
             if let Some(on_remove) = on_remove {
                 button {
                     r#type: "button",
-                    "data-part": "remove",
+                    "part": "chip-remove",
                     "aria-label": "Remove {label}",
                     onclick: move |_| on_remove.call(()),
                 }
@@ -118,7 +118,7 @@ mod tests {
                     page.attr(chip, "data-status").as_deref(),
                     status.map(Status::as_str)
                 );
-                assert_eq!(page.parts(chip), ["label"]);
+                assert_eq!(page.parts(chip), ["chip-label"]);
                 assert_eq!(page.text(chip), "Draft");
             }
         }
@@ -181,7 +181,7 @@ mod tests {
         let removals = Rc::new(RefCell::new(0));
         let mut page = Page::with_props(removable_chip, Rc::clone(&removals));
         let chip = page.by_class("ct-chip");
-        assert_eq!(page.parts(chip), ["label", "remove"]);
+        assert_eq!(page.parts(chip), ["chip-label", "chip-remove"]);
         let remove = page.by_role("button", "Remove rust");
         page.click(remove);
         assert_eq!(*removals.borrow(), 1);

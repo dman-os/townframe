@@ -1,7 +1,7 @@
 /*
  * The review micro's own sheet: what the kit has no component or token for. Unlayered, so it sits
  * above the host's kit layers; the end user's theme (the `user` layer) is not this sheet's to
- * take. Rules are keyed on the root class and `data-part`, so a theme can target them. Parts:
+ * take. Rules are keyed on the root class and `part`, so a theme can target them. Parts:
  * page, section, group, items, row, entry, name, headline, heading, secondary, prose, id, meta,
  * empty, placeholder, detail, failure, unreadable, unlisted, code, diff. Axes on `row` and
  * `items`: data-variant (outline, spaced).
@@ -12,35 +12,35 @@
   color: var(--ct-color-text);
 }
 
-.micro-review [data-part="page"] {
+.micro-review [part~="review-page"] {
   display: flex;
   flex-direction: column;
   gap: calc(var(--ct-spacing) * 6);
   padding: 0 var(--ct-dimension-spacing-4) calc(var(--ct-spacing) * 6);
 }
 
-.micro-review [data-part="section"],
-.micro-review [data-part="group"],
-.micro-review [data-part="entry"],
-.micro-review [data-part="meta"],
-.micro-review [data-part="empty"] {
+.micro-review [part~="review-section"],
+.micro-review [part~="review-group"],
+.micro-review [part~="review-entry"],
+.micro-review [part~="review-meta"],
+.micro-review [part~="review-empty"] {
   display: flex;
   flex-direction: column;
   gap: var(--ct-dimension-spacing-2);
 }
 
-.micro-review [data-part="meta"] {
+.micro-review [part~="review-meta"] {
   flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
 }
 
-.micro-review [data-part="empty"] {
+.micro-review [part~="review-empty"] {
   padding-block: calc(var(--ct-spacing) * 8);
   text-align: center;
 }
 
-.micro-review [data-part="items"] {
+.micro-review [part~="review-items"] {
   display: flex;
   flex-direction: column;
   margin: 0;
@@ -48,16 +48,16 @@
   list-style: none;
 }
 
-.micro-review [data-part="items"][data-variant="spaced"] {
+.micro-review [part~="review-items"][data-variant="spaced"] {
   gap: var(--ct-dimension-spacing-2);
 }
 
-.micro-review [data-part="entry"] {
+.micro-review [part~="review-entry"] {
   padding: var(--ct-dimension-spacing-3) var(--ct-dimension-spacing-2);
 }
 
 /* A row that opens something: a 48 px target, quiet until hovered or focused. */
-.micro-review [data-part="row"] {
+.micro-review [part~="review-row"] {
   display: flex;
   flex-direction: column;
   gap: var(--ct-dimension-spacing-1);
@@ -73,88 +73,88 @@
   cursor: pointer;
 }
 
-.micro-review [data-part="row"][data-variant="outline"] {
+.micro-review [part~="review-row"][data-variant="outline"] {
   padding-inline: var(--ct-dimension-spacing-4);
   border: var(--ct-dimension-border-width-hairline) solid var(--ct-color-border);
   border-radius: var(--ct-dimension-radius-md);
 }
 
-.micro-review [data-part="row"]:hover {
+.micro-review [part~="review-row"]:hover {
   background: var(--ct-color-surface-sunken);
 }
 
-.micro-review [data-part="row"]:focus-visible {
+.micro-review [part~="review-row"]:focus-visible {
   outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
 }
 
-.micro-review [data-part="name"] {
+.micro-review [part~="review-name"] {
   font-weight: var(--ct-font-weight-semibold);
   overflow-wrap: anywhere;
 }
 
-.micro-review [data-part="headline"] {
+.micro-review [part~="review-headline"] {
   margin: 0;
   font-size: var(--ct-dimension-font-size-lg);
   font-weight: var(--ct-font-weight-semibold);
   overflow-wrap: anywhere;
 }
 
-.micro-review [data-part="heading"] {
+.micro-review [part~="review-heading"] {
   margin: 0;
   font-size: var(--ct-dimension-font-size-sm);
   font-weight: var(--ct-font-weight-semibold);
   color: var(--ct-color-text-muted);
 }
 
-.micro-review [data-part="secondary"] {
+.micro-review [part~="review-secondary"] {
   font-size: var(--ct-dimension-font-size-sm);
   color: var(--ct-color-text-muted);
   overflow-wrap: anywhere;
 }
 
-.micro-review [data-part="prose"] {
+.micro-review [part~="review-prose"] {
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 /* A machine identifier: a commit, a change id, an address. It breaks anywhere to fit a phone. */
-.micro-review [data-part="id"] {
+.micro-review [part~="review-id"] {
   margin: 0;
   font-family: ui-monospace, monospace;
   font-weight: var(--ct-font-weight-semibold);
   word-break: break-all;
 }
 
-.micro-review [data-part="placeholder"] {
+.micro-review [part~="review-placeholder"] {
   padding-block: calc(var(--ct-spacing) * 8);
   text-align: center;
   color: var(--ct-color-text-muted);
 }
 
-.micro-review [data-part="detail"] {
+.micro-review [part~="review-detail"] {
   overflow-wrap: anywhere;
 }
 
-.micro-review [data-part="failure"] {
+.micro-review [part~="review-failure"] {
   margin: 0;
   font-size: var(--ct-dimension-font-size-sm);
   font-weight: var(--ct-font-weight-semibold);
   color: var(--ct-color-danger);
 }
 
-.micro-review [data-part="unlisted"] {
+.micro-review [part~="review-unlisted"] {
   color: var(--ct-color-text-muted);
 }
 
-.micro-review [data-part="code"] {
+.micro-review [part~="review-code"] {
   padding-inline: var(--ct-dimension-spacing-1);
   border-radius: var(--ct-dimension-radius-sm);
   background: var(--ct-color-surface-sunken);
   color: var(--ct-color-text);
 }
 
-.micro-review [data-part="diff"] {
+.micro-review [part~="review-diff"] {
   overflow-x: auto;
   border: var(--ct-dimension-border-width-hairline) solid var(--ct-color-border);
   border-radius: var(--ct-dimension-radius-md);

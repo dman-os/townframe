@@ -93,12 +93,12 @@ button.ct-chip {
 }
 
 .ct-chip:focus-visible,
-.ct-chip [data-part="remove"]:focus-visible {
+.ct-chip [part~="chip-remove"]:focus-visible {
   outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
   outline-offset: 1px;
 }
 
-.ct-chip [data-part="remove"] {
+.ct-chip [part~="chip-remove"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -113,10 +113,10 @@ button.ct-chip {
   cursor: pointer;
 }
 
-.ct-chip [data-part="remove"]::before {
+.ct-chip [part~="chip-remove"]::before {
   content: "\00d7";
 }
 
-.ct-chip [data-part="remove"]:hover {
+.ct-chip [part~="chip-remove"]:hover {
   background: color-mix(in srgb, currentColor 16%, transparent);
 }

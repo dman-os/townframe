@@ -84,11 +84,11 @@ fn view(context: &Context) -> Element {
             div { class: "ct-lab",
                 Stylesheet { css: STYLES }
                 AppBar { title: "Lab" }
-                ul { "data-part": "experiments", "aria-label": "Experiments",
+                ul { "part": "lab-experiments", "aria-label": "Experiments",
                     for experiment in EXPERIMENTS {
                         li { key: "{experiment.id}",
                             button {
-                                "data-part": "experiment",
+                                "part": "lab-experiment",
                                 r#type: "button",
                                 "aria-label": "Open {experiment.title}",
                                 onclick: move |_| open.set(Some(experiment.id)),

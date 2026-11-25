@@ -18,7 +18,7 @@
   justify-content: flex-start;
 }
 
-.ct-drawer [data-part="panel"] {
+.ct-drawer [part~="drawer-panel"] {
   width: 20rem;
   max-width: 83.3333%;
   height: 100%;
@@ -30,7 +30,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ct-drawer [data-part="panel"] {
+  .ct-drawer [part~="drawer-panel"] {
     animation: none;
   }
 }

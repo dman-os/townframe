@@ -22,11 +22,11 @@ pub fn AppBar(title: String, leading: Option<Element>, trailing: Option<Element>
     rsx! {
         header { class: "ct-app-bar", "data-state": state,
             if let Some(leading) = leading {
-                div { "data-part": "leading", {leading} }
+                div { "part": "app-bar-leading", {leading} }
             }
-            h2 { "data-part": "title", "{title}" }
+            h2 { "part": "app-bar-title", "{title}" }
             if let Some(trailing) = trailing {
-                div { "data-part": "trailing", {trailing} }
+                div { "part": "app-bar-trailing", {trailing} }
             }
         }
     }
@@ -62,8 +62,8 @@ mod tests {
     #[test]
     fn the_bar_names_its_parts_in_order_and_says_whether_it_has_a_leading_slot() {
         for (with_slots, state, parts) in [
-            (true, "leading", vec!["leading", "title", "trailing"]),
-            (false, "bare", vec!["title"]),
+            (true, "leading", vec!["app-bar-leading", "app-bar-title", "app-bar-trailing"]),
+            (false, "bare", vec!["app-bar-title"]),
         ] {
             let page = Page::with_props(app, with_slots);
             let bar = page.by_class("ct-app-bar");

@@ -81,7 +81,7 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
             },
         div { class: "ct-settings", "data-state": "list",
             Stylesheet { css: STYLES }
-            div { "data-part": "preferences",
+            div { "part": "settings-preferences",
               Card {
                 CardContent {
                   details {
@@ -96,7 +96,7 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
                         let toggle_name = row.key.clone();
                         let order_name = row.key.clone();
                         rsx! {
-                            div { key: "{row.key}", "data-part": "preference",
+                            div { key: "{row.key}", "part": "settings-preference",
                                 Button {
                                     variant: ButtonVariant::Outline,
                                     disabled: preferences.is_none(),
@@ -127,7 +127,7 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
                 }
               }
             }
-            nav { "data-part": "sections", "aria-label": "Settings sections",
+            nav { "part": "settings-sections", "aria-label": "Settings sections",
                 for row in &shown {
                     ListRow {
                         key: "{row.key}",
@@ -178,7 +178,7 @@ pub fn SettingsSection(props: SettingsSectionProps) -> Element {
                         leading: rsx! { PresentationSlot { reference: props.micro.shell.nav_button.clone() } },
                     }
                 },
-                div { "data-part": "detail",
+                div { "part": "settings-detail",
                     PresentationSlot {
                         reference: row.links[row.value.detail.index()].clone(),
                     }

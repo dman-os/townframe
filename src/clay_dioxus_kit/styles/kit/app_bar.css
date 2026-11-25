@@ -23,13 +23,13 @@
   padding-left: var(--ct-dimension-spacing-4);
 }
 
-.ct-app-bar [data-part="leading"] {
+.ct-app-bar [part~="app-bar-leading"] {
   display: flex;
   flex: none;
   align-items: center;
 }
 
-.ct-app-bar [data-part="title"] {
+.ct-app-bar [part~="app-bar-title"] {
   flex: 1 1 0;
   min-width: 0;
   margin: 0;
@@ -41,7 +41,7 @@
   white-space: nowrap;
 }
 
-.ct-app-bar [data-part="trailing"] {
+.ct-app-bar [part~="app-bar-trailing"] {
   display: flex;
   flex: none;
   align-items: center;

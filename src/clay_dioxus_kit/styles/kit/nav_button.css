@@ -27,7 +27,7 @@
   outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
 }
 
-.ct-nav-button [data-part="icon"] {
+.ct-nav-button [part~="nav-button-icon"] {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -35,7 +35,7 @@
   height: 1.5rem;
 }
 
-.ct-nav-button[data-state="back"] [data-part="glyph"] {
+.ct-nav-button[data-state="back"] [part~="nav-button-glyph"] {
   width: 0.75rem;
   height: 0.75rem;
   border-bottom: var(--ct-dimension-border-width-thick) solid currentColor;
@@ -43,12 +43,12 @@
   rotate: 45deg;
 }
 
-.ct-nav-button[data-state="sidebar"] [data-part="icon"] {
+.ct-nav-button[data-state="sidebar"] [part~="nav-button-icon"] {
   flex-direction: column;
   gap: var(--ct-dimension-spacing-1);
 }
 
-.ct-nav-button[data-state="sidebar"] [data-part="bar"] {
+.ct-nav-button[data-state="sidebar"] [part~="nav-button-bar"] {
   width: 1.25rem;
   height: 0.125rem;
   background: currentColor;

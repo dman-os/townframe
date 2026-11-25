@@ -98,7 +98,7 @@ pub fn Button(
                     onclick.call(());
                 }
             },
-            span { "data-part": "label", {children} }
+            span { "part": "button-label", {children} }
         }
     }
 }
@@ -157,7 +157,7 @@ mod tests {
         assert_eq!(page.attr(button, "class").as_deref(), Some("ct-button"));
         assert_eq!(page.attr(button, "type").as_deref(), Some("button"));
         let label = page.children(button)[0];
-        assert_eq!(page.attr(label, "data-part").as_deref(), Some("label"));
+        assert_eq!(page.attr(label, "part").as_deref(), Some("button-label"));
         // Nothing but vocabulary: no state a plain button does not have.
         assert_eq!(page.attr(button, "aria-pressed"), None);
         assert_eq!(page.attr(button, "data-state"), None);

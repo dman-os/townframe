@@ -17,7 +17,7 @@ pub fn CardSpecimens() -> Element {
         FoundationSection {
             id: "card-variants".to_string(),
             title: "Variants".to_string(),
-            description: "data-variant tonal|sunken|plain|outlined; data-part header|content|footer.".to_string(),
+            description: "data-variant tonal|sunken|plain|outlined; part card-header|card-content|card-footer.".to_string(),
             div { class: "grid grid-cols-[repeat(auto-fit,minmax(16rem,1fr))] gap-4",
                 for (variant , name) in [
                     (CardVariant::Tonal, "Tonal"),

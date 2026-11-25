@@ -17,7 +17,7 @@ pub fn SheetSpecimens() -> Element {
         FoundationSection {
             id: "sheet-widths".to_string(),
             title: "Width classes".to_string(),
-            description: "data-placement bottom|side and data-width compact|medium|expanded; data-part scrim, panel. Dismiss by the scrim or Escape.".to_string(),
+            description: "data-placement bottom|side and data-width compact|medium|expanded; part sheet-scrim, sheet-panel. Dismiss by the scrim or Escape.".to_string(),
             div { class: "flex flex-wrap items-start gap-8",
                 for width_px in [COMPACT_PX, MEDIUM_PX, EXPANDED_PX] {
                     Frame { key: "{width_px}", title: "Sheet".to_string(), width_px,

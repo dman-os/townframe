@@ -17,7 +17,7 @@ pub fn DrawerSpecimens() -> Element {
         FoundationSection {
             id: "drawer-widths".to_string(),
             title: "Compact and wide".to_string(),
-            description: "data-state open, data-placement leading; data-part scrim, panel. Only a compact host shows a drawer.".to_string(),
+            description: "data-state open, data-placement leading; part drawer-scrim, drawer-panel. Only a compact host shows a drawer.".to_string(),
             div { class: "flex flex-wrap items-start gap-8",
                 Frame { title: "Drawer".to_string(), width_px: COMPACT_PX,
                     DrawerSpecimen { width_px: COMPACT_PX }

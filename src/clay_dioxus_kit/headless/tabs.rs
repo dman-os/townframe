@@ -154,7 +154,7 @@ pub fn Tabs(
                 r#type: "button",
                 role: "tab",
                 id: tab_id(instance, &item.value),
-                "data-part": "tab",
+                "part": "tabs-tab",
                 "aria-selected": if active { "true" } else { "false" },
                 "aria-controls": panel_id(instance, &item.value),
                 "data-state": if active { "active" } else { "inactive" },
@@ -195,7 +195,7 @@ pub fn Tabs(
     rsx! {
         div { class: "ct-tabs", "data-orientation": orientation.as_str(),
             div {
-                "data-part": "list",
+                "part": "tabs-list",
                 role: "tablist",
                 "aria-label": "{label}",
                 "aria-orientation": orientation.as_str(),
@@ -216,7 +216,7 @@ pub fn TabPanel(value: String, children: Element) -> Element {
         div {
             role: "tabpanel",
             id: panel_id(tabs.id, &value),
-            "data-part": "panel",
+            "part": "tabs-panel",
             "aria-labelledby": tab_id(tabs.id, &value),
             "data-state": if active { "active" } else { "inactive" },
             hidden: !active,
@@ -340,11 +340,11 @@ mod tests {
             page.attr(list, "aria-orientation").as_deref(),
             Some("horizontal")
         );
-        assert_eq!(page.attr(list, "data-part").as_deref(), Some("list"));
+        assert_eq!(page.attr(list, "part").as_deref(), Some("tabs-list"));
         let root = page.by_class("ct-tabs");
         assert_eq!(
             page.parts(root),
-            ["list", "panel", "panel", "panel", "panel"]
+            ["tabs-list", "tabs-panel", "tabs-panel", "tabs-panel", "tabs-panel"]
         );
         let overview = page.by_role("tab", "Overview");
         let panel = page.by_role("tabpanel", "Overview body");

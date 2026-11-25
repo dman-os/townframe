@@ -27,7 +27,7 @@
   pointer-events: auto;
 }
 
-.ct-scrub-strip [data-part="scrim"] {
+.ct-scrub-strip [part~="scrub-strip-scrim"] {
   position: absolute;
   top: 0;
   right: 0;
@@ -49,12 +49,12 @@
   transition: opacity var(--ct-motion-duration-fade);
 }
 
-.ct-scrub-strip[data-state="engaged"] [data-part="scrim"] {
+.ct-scrub-strip[data-state="engaged"] [part~="scrub-strip-scrim"] {
   opacity: 1;
   transition: none;
 }
 
-.ct-scrub-strip [data-part="marker"] {
+.ct-scrub-strip [part~="scrub-strip-marker"] {
   position: absolute;
   right: calc(
     var(--ct-strip-inset) +
@@ -85,17 +85,17 @@
 
 /* Releasing unbends the strip: the properties return to rest at once and these transitions
    carry the markers there. Only at rest: while a finger is down a marker must follow it. */
-.ct-scrub-strip:not([data-state="engaged"]) [data-part="marker"] {
+.ct-scrub-strip:not([data-state="engaged"]) [part~="scrub-strip-marker"] {
   transition:
     right var(--ct-motion-duration-enter) var(--ct-motion-easing-enter),
     top var(--ct-motion-duration-enter) var(--ct-motion-easing-enter);
 }
 
-.ct-scrub-strip [data-part="marker"][data-state="active"] {
+.ct-scrub-strip [part~="scrub-strip-marker"][data-state="active"] {
   color: var(--ct-color-primary);
 }
 
-.ct-scrub-strip [data-part="tick"] {
+.ct-scrub-strip [part~="scrub-strip-tick"] {
   display: block;
   width: 0.75rem;
   height: 2px;
@@ -103,13 +103,13 @@
   background: currentColor;
 }
 
-.ct-scrub-strip [data-part="label"] {
+.ct-scrub-strip [part~="scrub-strip-label"] {
   display: none;
 }
 
 /* The labels appear when the strip is being used: hovered, pressed or keyboard-focused. */
-.ct-scrub-strip:not([data-state="idle"]) [data-part="marker"],
-.ct-scrub-strip:focus-within [data-part="marker"] {
+.ct-scrub-strip:not([data-state="idle"]) [part~="scrub-strip-marker"],
+.ct-scrub-strip:focus-within [part~="scrub-strip-marker"] {
   width: max-content;
   padding-inline: var(--ct-dimension-spacing-2);
   background: color-mix(
@@ -120,30 +120,30 @@
   color: var(--ct-color-text);
 }
 
-.ct-scrub-strip:not([data-state="idle"]) [data-part="tick"],
-.ct-scrub-strip:focus-within [data-part="tick"] {
+.ct-scrub-strip:not([data-state="idle"]) [part~="scrub-strip-tick"],
+.ct-scrub-strip:focus-within [part~="scrub-strip-tick"] {
   display: none;
 }
 
-.ct-scrub-strip:not([data-state="idle"]) [data-part="label"],
-.ct-scrub-strip:focus-within [data-part="label"] {
+.ct-scrub-strip:not([data-state="idle"]) [part~="scrub-strip-label"],
+.ct-scrub-strip:focus-within [part~="scrub-strip-label"] {
   display: block;
 }
 
 /* While pressed, the bubble names the active breakpoint, so its own marker is a tick again. */
 .ct-scrub-strip[data-state="engaged"]
-  [data-part="marker"][data-state="active"]
-  [data-part="tick"] {
+  [part~="scrub-strip-marker"][data-state="active"]
+  [part~="scrub-strip-tick"] {
   display: block;
 }
 
 .ct-scrub-strip[data-state="engaged"]
-  [data-part="marker"][data-state="active"]
-  [data-part="label"] {
+  [part~="scrub-strip-marker"][data-state="active"]
+  [part~="scrub-strip-label"] {
   display: none;
 }
 
-.ct-scrub-strip [data-part="bubble"] {
+.ct-scrub-strip [part~="scrub-strip-bubble"] {
   position: absolute;
   right: calc(
     var(--ct-strip-inset) +
@@ -175,7 +175,7 @@
   pointer-events: none;
 }
 
-.ct-scrub-strip [data-part="grab-band"] {
+.ct-scrub-strip [part~="scrub-strip-grab-band"] {
   position: fixed;
   top: 0;
   right: 16px;
@@ -187,19 +187,19 @@
 
 /* A thumb is wide and starts far from the edge it aims at. */
 @media (pointer: coarse) {
-  .ct-scrub-strip [data-part="grab-band"] {
+  .ct-scrub-strip [part~="scrub-strip-grab-band"] {
     right: 0;
     width: 150px;
   }
 }
 
-.ct-scrub-strip [data-part="grab-band"]:focus-visible {
+.ct-scrub-strip [part~="scrub-strip-grab-band"]:focus-visible {
   outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
   outline-offset: -2px;
   border-radius: var(--ct-dimension-radius-md);
 }
 
-.ct-scrub-strip [data-part="status"] {
+.ct-scrub-strip [part~="scrub-strip-status"] {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -209,7 +209,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ct-scrub-strip [data-part] {
+  .ct-scrub-strip [part] {
     transition: none;
   }
 }

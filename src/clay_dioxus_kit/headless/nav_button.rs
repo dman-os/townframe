@@ -50,14 +50,14 @@ pub fn NavButton(mode: NavButtonMode, onclick: EventHandler<()>) -> Element {
             "aria-label": mode.label(),
             "data-state": mode.state(),
             onclick: move |_| onclick.call(()),
-            span { "data-part": "icon", "aria-hidden": "true",
+            span { "part": "nav-button-icon", "aria-hidden": "true",
                 match mode {
                     NavButtonMode::Back => rsx! {
-                        span { "data-part": "glyph" }
+                        span { "part": "nav-button-glyph" }
                     },
                     NavButtonMode::Sidebar => rsx! {
                         for index in 0..3 {
-                            span { key: "{index}", "data-part": "bar" }
+                            span { key: "{index}", "part": "nav-button-bar" }
                         }
                     },
                 }
@@ -111,14 +111,14 @@ mod tests {
     #[test]
     fn the_button_names_its_vocabulary_and_draws_its_glyph_from_parts() {
         for (mode, state, glyph) in [
-            (NavButtonMode::Back, "back", vec!["glyph"]),
-            (NavButtonMode::Sidebar, "sidebar", vec!["bar", "bar", "bar"]),
+            (NavButtonMode::Back, "back", vec!["nav-button-glyph"]),
+            (NavButtonMode::Sidebar, "sidebar", vec!["nav-button-bar", "nav-button-bar", "nav-button-bar"]),
         ] {
             let (page, _) = render(mode);
             let button = page.by_class("ct-nav-button");
             assert_eq!(page.attr(button, "type").as_deref(), Some("button"));
             assert_eq!(page.attr(button, "data-state").as_deref(), Some(state));
-            assert_eq!(page.parts(button), ["icon"]);
+            assert_eq!(page.parts(button), ["nav-button-icon"]);
             let icon = page.children(button)[0];
             assert_eq!(page.attr(icon, "aria-hidden").as_deref(), Some("true"));
             assert_eq!(page.parts(icon), glyph);

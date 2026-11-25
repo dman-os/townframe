@@ -85,7 +85,7 @@ fn view(
     framed(
         rsx! { PresentationSlot { reference: nav_button } },
         rsx! {
-            div { "data-part": "toggles", role: "toolbar", "aria-label": "Panels",
+            div { "part": "layout-toggles", role: "toolbar", "aria-label": "Panels",
                 for row in rows.iter() {
                     {
                         let shown = arrangement.visible.contains(&row.key);
@@ -119,7 +119,7 @@ fn view(
                 }
             }
             if let Some(problem) = failure() {
-                p { "data-part": "problem", role: "alert", "{problem}" }
+                p { "part": "layout-problem", role: "alert", "{problem}" }
             }
             for id in arrangement.visible.iter() {
                 {
@@ -128,7 +128,7 @@ fn view(
                     rsx! {
                         section {
                             key: "panel-{id}",
-                            "data-part": "slot",
+                            "part": "layout-slot",
                             "aria-label": "{title} panel",
                             Card {
                                 CardContent {

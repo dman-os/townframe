@@ -15,8 +15,8 @@
   color: var(--ct-color-text);
 }
 
-.ct-list-details [data-part="list"],
-.ct-list-details [data-part="details"] {
+.ct-list-details [part~="list-details-list"],
+.ct-list-details [part~="list-details-details"] {
   width: 100%;
   height: 100%;
   background: var(--ct-color-surface);
@@ -27,18 +27,18 @@
    on the raised one. Without it the list's app bar (a positioned element on the app bar layer)
    would take part in the root's stacking order, paint over the details and take their pointer
    events. */
-.ct-list-details[data-state="stacked"] [data-part="list"] {
+.ct-list-details[data-state="stacked"] [part~="list-details-list"] {
   position: relative;
   z-index: var(--ct-layer-content);
 }
 
 /* Covered, the list is out of hit-testing outright (`inert` is not in the guest wire
    vocabulary), so nothing in it can take a click meant for the details. */
-.ct-list-details [data-part="list"][data-state="covered"] {
+.ct-list-details [part~="list-details-list"][data-state="covered"] {
   pointer-events: none;
 }
 
-.ct-list-details[data-state="stacked"] [data-part="details"] {
+.ct-list-details[data-state="stacked"] [part~="list-details-details"] {
   position: absolute;
   inset: 0;
   z-index: var(--ct-layer-raised);

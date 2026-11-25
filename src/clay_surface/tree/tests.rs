@@ -1722,6 +1722,38 @@ fn host_owned_names_are_refused_from_a_guest() {
     );
 }
 
+/// `part` is the name a `::part()` selector reaches an element by (ADR 059).
+#[test]
+fn part_takes_a_bounded_list_of_kebab_case_tokens() {
+    let set = |value: &str| {
+        SurfaceTree::new().apply(&[
+            element("span", None),
+            Mutation::SetId(1),
+            text_attr("part", None, value),
+            Mutation::AppendChildren(1),
+        ])
+    };
+    for good in ["tabs-tab", "tabs-tab state-active", "a b c d e f g h"] {
+        set(good).unwrap_or_else(|error| panic!("{good:?}: {error}"));
+    }
+    for bad in [
+        "",
+        " tabs-tab",
+        "tabs-tab ",
+        "tabs  tab",
+        "Tabs-tab",
+        "tabs_tab",
+        "tabs-tab\"x",
+        "a b c d e f g h i",
+        &"a".repeat(129),
+    ] {
+        assert!(
+            matches!(set(bad), Err(PresentationError::Unsupported(_))),
+            "{bad:?} must be refused"
+        );
+    }
+}
+
 #[test]
 fn custom_element_names_are_validated_and_capped_per_surface() {
     // A refused batch poisons the tree, so each bad name gets a fresh one.

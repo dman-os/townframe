@@ -25,7 +25,7 @@
   color: var(--ct-color-text);
 }
 
-.ct-sections [data-part="pane"] {
+.ct-sections [part~="sections-pane"] {
   position: relative;
   z-index: var(--ct-layer-content);
   flex: var(--ct-sections-weight) 1 0px;
@@ -35,11 +35,11 @@
   background: var(--ct-color-surface);
 }
 
-.ct-sections [data-part="pane"][data-state="collapsed"] {
+.ct-sections [part~="sections-pane"][data-state="collapsed"] {
   overflow: hidden;
 }
 
-.ct-sections [data-part="handle"] {
+.ct-sections [part~="sections-handle"] {
   position: relative;
   z-index: var(--ct-layer-raised);
   display: flex;
@@ -52,7 +52,7 @@
 }
 
 /* The strip on the leading edge: the half of a handle's hit area that lies inside the window. */
-.ct-sections [data-part="handle"][data-edge] {
+.ct-sections [part~="sections-handle"][data-edge] {
   position: absolute;
   top: 0;
   bottom: 0;
@@ -61,25 +61,25 @@
   margin-inline: 0;
 }
 
-.ct-sections [data-part="handle"]:focus-visible {
+.ct-sections [part~="sections-handle"]:focus-visible {
   outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
 }
 
-.ct-sections [data-part="grip"] {
+.ct-sections [part~="sections-grip"] {
   width: var(--ct-dimension-border-width-thin);
   height: 100%;
   background: var(--ct-color-border);
 }
 
-.ct-sections [data-part="handle"]:hover [data-part="grip"],
-.ct-sections [data-part="handle"][data-state="dragging"] [data-part="grip"] {
+.ct-sections [part~="sections-handle"]:hover [part~="sections-grip"],
+.ct-sections [part~="sections-handle"][data-state="dragging"] [part~="sections-grip"] {
   width: var(--ct-dimension-border-width-thick);
   background: var(--ct-color-primary);
 }
 
 /* The overlay that takes a gesture's pointer events once a drag is live (KIT-041). Absolute inside
    the presentation: a guest box cannot be fixed to the viewport. */
-.ct-sections [data-part="gesture"] {
+.ct-sections [part~="sections-gesture"] {
   position: absolute;
   inset: 0;
   z-index: var(--ct-layer-gesture);

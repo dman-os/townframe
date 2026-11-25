@@ -40,7 +40,7 @@ fn view(buttons: &Collection<String, Button>) -> Element {
     rsx! {
         div { class: "ct-toolbar", role: "toolbar", "aria-label": "Toolbar",
             Stylesheet { css: STYLES }
-            div { "data-part": "buttons",
+            div { "part": "toolbar-buttons",
                 for row in rows.iter() {
                     ToolbarButton {
                         key: "{row.key}",
@@ -83,7 +83,7 @@ fn ToolbarButton(
         // The kit's `Button` is not used here: a button that says why it is unavailable carries
         // `aria-description`, which is native-only (not in the guest wire vocabulary a kit
         // component is held to), so the toolbar emits the button vocabulary of the styling contract
-        // (`ct-button`, `data-variant`, `data-part="label"`) itself and takes the kit's skin.
+        // (`ct-button`, `data-variant`, `part="button-label"`) itself and takes the kit's skin.
         button {
             class: "ct-button",
             r#type: "button",
@@ -107,7 +107,7 @@ fn ToolbarButton(
                     pending.write().remove(&id);
                 });
             },
-            span { "data-part": "label", "{label}" }
+            span { "part": "button-label", "{label}" }
         }
     }
 }

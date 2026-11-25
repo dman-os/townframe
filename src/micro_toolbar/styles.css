@@ -8,7 +8,7 @@
   gap: var(--ct-dimension-spacing-2);
 }
 
-.ct-toolbar [data-part="buttons"] {
+.ct-toolbar [part~="toolbar-buttons"] {
   display: flex;
   flex-wrap: wrap;
   gap: var(--ct-dimension-spacing-2);
