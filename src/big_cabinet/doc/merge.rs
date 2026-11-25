@@ -17,12 +17,12 @@ impl DocsService {
             .signing_invocation(context, metadata, params.capability)
             .await?;
         let actor = &caller.signer;
-        self.authorize(
-            context,
-            &caller.authority,
-            AccessRequest::Read(&params.source_id),
-        )
-        .await?;
+        // A merge folds the whole source into the target, so the source must be held at every
+        // kind, as for a branch.
+        let source_kinds = self
+            .authorize_read(context, &caller.authority, &params.source_id)
+            .await?;
+        Self::require_all(source_kinds)?;
         let target_kinds = self
             .authorize_write(context, &caller.authority, &params.target_id)
             .await?;
