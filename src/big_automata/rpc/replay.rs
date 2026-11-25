@@ -94,6 +94,7 @@ strike! {
                 // which doesn't support serde_json::Value
                 // types
                 #[serde(
+                    // FIXME: is there value in using cbor over json here?
                     serialize_with = "crate::utils::value_as_cbor",
                     deserialize_with = "crate::utils::value_from_cbor"
                 )]

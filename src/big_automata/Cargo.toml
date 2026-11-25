@@ -12,6 +12,8 @@ path = "lib.rs"
 [features]
 default = ["automerge"]
 automerge = ["dep:autosurgeon"]
+# exports the okv oracle and law harness so other okv backends run the same laws
+test-support = ["dep:proptest"]
 
 [dependencies]
 utils_rs = { workspace = true, features = ["hash"] }
@@ -29,6 +31,8 @@ thiserror.workspace = true
 #
 # async
 # tokio-util.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+surelock.workspace = true
 async-channel.workspace = true
 async-trait.workspace = true
 future_form.workspace = true
@@ -45,3 +49,11 @@ ciborium.workspace = true
 #
 # logging
 tracing.workspace = true
+
+#
+# test-support
+proptest = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+futures.workspace = true

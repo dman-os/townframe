@@ -1167,6 +1167,7 @@ impl BigSyncMachine {
     }
 }
 
+// FIXME: so this should go to big_automata/peer.rs as already started
 // peer support
 impl BigSyncMachine {
     /// Applies one peer route delta: added parts get a strategy decision, removed parts

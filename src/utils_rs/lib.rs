@@ -500,18 +500,17 @@ pub mod hash {
         source: &str,
         buf: impl bs58::decode::DecodeTarget,
     ) -> eyre::Result<usize> {
-        match (
-            &source[0..1],
-            bs58::decode(&source.as_bytes()[1..]).onto(buf),
-        ) {
-            ("z", Ok(count)) => Ok(count),
-            (prefix, Ok(_)) => Err(eyre::format_err!(
-                "unexpected multibase prefix for base58bitcoin multibase: {prefix}"
-            )),
-            (_, Err(err)) => Err(eyre::format_err!(
-                "error decoding base58bitcoin ({source}): {err}"
-            )),
-        }
+        // The input is untrusted text: an empty string or a multi-byte first character must be
+        // an error, not a slice panic.
+        let Some(encoded) = source.strip_prefix('z') else {
+            let prefix = source.chars().next();
+            return Err(eyre::format_err!(
+                "unexpected multibase prefix for base58bitcoin multibase: {prefix:?}"
+            ));
+        };
+        bs58::decode(encoded)
+            .onto(buf)
+            .map_err(|err| eyre::format_err!("error decoding base58bitcoin ({source}): {err}"))
     }
 
     #[cfg(feature = "hash")]

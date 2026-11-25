@@ -105,7 +105,7 @@ mod tests {
 
         assert!(matches!(outbox.queue[0].1, Cmd::PersistCursor { .. }));
         assert!(matches!(outbox.queue[1].1, Cmd::WriteStore));
-        assert!(outbox.is_empty());
+        assert!(!outbox.is_empty());
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -154,6 +154,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "unexpected cmd success, cmds must be performed serially")]
     fn out_of_order_completion_panics() {
         let mut outbox: SerialOutbox<Cmd, ()> = SerialOutbox::default();
         outbox.push(Cmd::WriteStore, ());
