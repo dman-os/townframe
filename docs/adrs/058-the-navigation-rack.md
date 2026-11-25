@@ -37,7 +37,8 @@ What the rack holds depends on the width class (FDR 006) and the position it is 
 
 | Host | Position | Rack |
 |---|---|---|
-| wide | main or details, sidebar hidden | sidebar toggle, back, forward |
+| wide | main, sidebar hidden | sidebar toggle, back, forward |
+| wide | details beside its list | nothing: the window's top-left is main's, and main's back and forward cover details |
 | wide | any, sidebar shown | nothing: the sidebar's header holds the controls (§2.3) |
 | compact | main (a list, a top-level panel) | sidebar toggle; back when there is somewhere to go back to |
 | compact | details | back only |
@@ -80,7 +81,7 @@ the sidebar header take a leading inset from the host; until then nothing reserv
 
 1. The rack presentation in `micro_shell` with the rules of §2.1 (state from `Navigation::can_back` and a matching `can_forward`,
    the sidebar state and the width class), replacing `NavigationButton`; headless tests for each row of the table.
-2. Floating by default in the kit's content panes, with the corner kept clear; app bars that mounted the old button
+2. Floating by default in the kit's content panes (truly floating: pinned over the pane's top-left while content scrolls under it; the pane reads the rack from a kit context the micro provides once from the shell's presentation, and keeps its first content clear of the corner by a rack-size token); app bars that mounted the old button
    move to the rack.
 3. The sidebar header (mark, toggle, back, forward) and the compact footer's forward; the "Hide sidebar" button and the
    sidebar's own app bar go.
