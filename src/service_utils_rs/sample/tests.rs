@@ -9,7 +9,7 @@ use super::SampleError;
 use super::SampleProtocol;
 use super::SubscribeEvents;
 use super::boot;
-use super::service::TEST_TASK_MARKER;
+use super::TEST_TASK_MARKER;
 use crate::ClientError;
 use crate::RequestContext;
 use method_core::ContextError;
@@ -21,8 +21,11 @@ fn nsid_log(nsid: &str) -> Vec<String> {
     vec![format!("{nsid}:start"), format!("{nsid}:complete")]
 }
 
+/// A direct call from outside any handler is a fresh request: it runs through the host's layers
+/// on a task of the host's own, not on the caller's (whose task-local it does not see). A hop
+/// made from inside a handler stays inline: see the crate's `e2e::runtime`.
 #[tokio::test]
-async fn direct_calls_run_inline_on_the_caller_task_through_the_layers() {
+async fn a_fresh_direct_call_runs_through_the_layers_on_the_hosts_own_task() {
     let (sample, stop) = boot("initial");
     let client = Client::new(Transport::<SampleProtocol>::direct(Arc::clone(
         &sample.host,
@@ -37,7 +40,7 @@ async fn direct_calls_run_inline_on_the_caller_task_through_the_layers() {
 
     assert_eq!(output.observed_context, child);
     assert_eq!(output.snapshot.value, "initial");
-    assert_eq!(sample.service.last_handler_task(), Some(41));
+    assert_eq!(sample.service.last_handler_task(), None);
     assert_eq!(
         sample.calls.entries(),
         nsid_log("org.example.sample.getValue")
