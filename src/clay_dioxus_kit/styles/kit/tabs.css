@@ -1,6 +1,6 @@
 /*
  * ct-tabs (headless/tabs.rs). Parts: list, tab, panel. States: data-state (active|inactive) on a
- * tab and a panel, data-disabled on a tab. Axis: data-orientation on the root.
+ * tab and a panel, data-disabled on a tab; hover, pressed (:active) and focus-visible on an enabled tab. Axis: data-orientation on the root.
  */
 .ct-tabs {
   display: flex;
@@ -56,14 +56,31 @@
   }
 }
 
-.ct-tabs [data-part="tab"]:hover:not(:disabled) {
+/* Hover and pressed lift only the unselected tabs: a hover rule at the same weight as the
+   selected rule used to win by coming first in the cascade of specificity, so hovering the selected
+   tab repainted it as an unselected one. The selected tab, a filled surface like a button's, takes
+   the button's brightness steps instead. */
+.ct-tabs [data-part="tab"][data-state="inactive"]:hover:not(:disabled) {
   background: var(--ct-color-canvas);
+  color: var(--ct-color-text);
+}
+
+.ct-tabs [data-part="tab"][data-state="inactive"]:active:not(:disabled) {
+  background: var(--ct-color-surface-raised);
   color: var(--ct-color-text);
 }
 
 .ct-tabs [data-part="tab"][data-state="active"] {
   background: var(--ct-color-accent-container);
   color: var(--ct-color-on-accent-container);
+}
+
+.ct-tabs [data-part="tab"][data-state="active"]:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.ct-tabs [data-part="tab"][data-state="active"]:active:not(:disabled) {
+  filter: brightness(0.94);
 }
 
 .ct-tabs [data-part="tab"]:focus-visible {
