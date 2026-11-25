@@ -9588,6 +9588,8 @@ dependencies = [
  "big_nodule_core",
  "insta",
  "method_core",
+ "schemars 1.2.3",
+ "serde",
  "serde_json",
  "service_core_rs",
  "thiserror 2.0.21",
