@@ -194,26 +194,16 @@ fn procedure(nsid: &str, input: Value, output: Value, errors: &[&str]) -> Value 
     })
 }
 
-/// The core cartridge of the node whose publisher DID is `publisher`: the reference defs
-/// (`org.example.daybook.defs`), the one type library every cartridge's Lexicons may refer to, and
-/// the core nodule, which is the micros nodule of ADR 052 (`micros.handles` and
-/// `micros.awaitHandles`, both privileged to the operator by the nodule itself). Its manifest
-/// declares a method permbind for each of [`methods`], the runtime permbind of ADR 052 §2.2 item
-/// 2, which [`pin`] grants, and the settings datum it keeps its minted handles in.
-///
-/// Also the bytes of its wasm component by digest, which go into the blob store before the
-/// package is staged.
-fn package(publisher: &str) -> (ResolvedCartridge, BTreeMap<Digest, Vec<u8>>) {
+/// The Lexicons of the core cartridge: the reference defs, the micros nodule's two operations and
+/// the settings datum it keeps its minted handles in.
+fn lexicons() -> BTreeMap<Nsid, Value> {
     let defs = defs_lexicon();
     let defs_nsid: Nsid = defs["id"]
         .as_str()
         .expect("the defs Lexicon states its id")
         .parse()
         .expect("the defs Lexicon id is an NSID");
-    let mut lexicons = BTreeMap::from([(
-        defs_nsid,
-        serde_json::from_value(defs).expect("a Lexicon file is a JSON object"),
-    )]);
+    let mut lexicons = BTreeMap::from([(defs_nsid, defs)]);
     let handles_nsid = <micros_nodule::Handles as Method>::XRPC.nsid;
     let await_nsid = <micros_nodule::AwaitHandles as Method>::XRPC.nsid;
     let micro_handles = json!({ "type": "object", "required": ["micros", "revision"], "properties": {
@@ -256,12 +246,23 @@ fn package(publisher: &str) -> (ResolvedCartridge, BTreeMap<Digest, Vec<u8>>) {
             .expect("a Lexicon states its id")
             .parse()
             .expect("a Lexicon id is an NSID");
-        lexicons.insert(
-            nsid,
-            serde_json::from_value(file).expect("a Lexicon file is a JSON object"),
-        );
+        lexicons.insert(nsid, file);
     }
+    lexicons
+}
 
+/// The core cartridge of the node whose publisher DID is `publisher`: the reference defs
+/// (`org.example.daybook.defs`), the one type library every cartridge's Lexicons may refer to, and
+/// the core nodule, which is the micros nodule of ADR 052 (`micros.handles` and
+/// `micros.awaitHandles`, both privileged to the operator by the nodule itself). Its manifest
+/// declares a method permbind for each of [`methods`], the runtime permbind of ADR 052 §2.2 item
+/// 2, which [`pin`] grants, and the settings datum it keeps its minted handles in.
+///
+/// Also the bytes of its wasm component by digest, which go into the blob store before the
+/// package is staged.
+fn package(publisher: &str) -> (ResolvedCartridge, BTreeMap<Digest, Vec<u8>>) {
+    let handles_nsid = <micros_nodule::Handles as Method>::XRPC.nsid;
+    let await_nsid = <micros_nodule::AwaitHandles as Method>::XRPC.nsid;
     let digest = Digest::of(MICROS_COMPONENT);
     let placeholder = |name: &str| {
         DatumPin::new(
@@ -360,7 +361,20 @@ fn package(publisher: &str) -> (ResolvedCartridge, BTreeMap<Digest, Vec<u8>>) {
         }),
     )]);
     (
-        ResolvedCartridge::new(cartridge, lexicons, BTreeMap::new(), components),
+        ResolvedCartridge::new(
+            cartridge,
+            lexicons()
+                .into_iter()
+                .map(|(nsid, file)| {
+                    (
+                        nsid,
+                        serde_json::from_value(file).expect("a Lexicon file is a JSON object"),
+                    )
+                })
+                .collect(),
+            BTreeMap::new(),
+            components,
+        ),
         BTreeMap::from([(digest, MICROS_COMPONENT.to_vec())]),
     )
 }

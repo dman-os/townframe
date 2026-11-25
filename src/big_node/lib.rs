@@ -970,23 +970,8 @@ where
     // name (ADR 049 §6.2), so it holds, as their delegator, a handle for every operation-level
     // blobs flag. Only the operator's root capability mints a blobs handle unscoped by another, so the
     // operator introduces this one to the service's actor.
-    let blobs_delegator = blobs
-        .client
-        .call_with(
-            RequestContext::root(),
-            Authorization::identity(authority.root).metadata(),
-            big_blobs_core::MintBlobsCapability {
-                capability: None,
-                scope: big_blobs_core::protocol::BlobsScope {
-                    put: true,
-                    ..Default::default()
-                },
-                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
-                subject: Some(nodules_actor.actor.actor_id),
-            },
-        )
-        .await?
-        .capability_id;
+    let blobs_delegator =
+        mint_blobs_delegator(blobs, authority, nodules_actor.actor.actor_id).await?;
     // The core cartridge's nodule acts as `micros`, a sibling of `nodules`, and an introduction
     // may only name a descendant of the delegator's subject. So its routine handles are minted
     // from delegators the operator introduces to `micros`, as it introduces the nodule service's
@@ -995,23 +980,8 @@ where
     // shared config drawer, the most a routine's docs handle can name. (A drawers handle is
     // minted by the `micros` actor's identity capability, as the nodule service's are by its
     // own.)
-    let micros_blobs_delegator = blobs
-        .client
-        .call_with(
-            RequestContext::root(),
-            Authorization::identity(authority.root).metadata(),
-            big_blobs_core::MintBlobsCapability {
-                capability: None,
-                scope: big_blobs_core::protocol::BlobsScope {
-                    put: true,
-                    ..Default::default()
-                },
-                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
-                subject: Some(micros_actor.actor.actor_id),
-            },
-        )
-        .await?
-        .capability_id;
+    let micros_blobs_delegator =
+        mint_blobs_delegator(blobs, authority, micros_actor.actor.actor_id).await?;
     let micros_docs_delegator = docs
         .client
         .call_with(
@@ -1070,6 +1040,33 @@ where
     .await?;
     stop.stages.push(Stage::Service(nodules_stop));
     Ok((executor, nodules))
+}
+
+/// The handle for every operation-level blobs flag (`put`) that the operator introduces to a
+/// subsystem actor, so it can mint each routine's blobs handle from it (ADR 049 section 6.2).
+/// Only the operator's root capability mints a blobs handle unscoped by another.
+async fn mint_blobs_delegator(
+    blobs: &big_blobs::Blobs,
+    authority: &Authority,
+    subject: Uuid7,
+) -> Res<CapId> {
+    Ok(blobs
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(authority.root).metadata(),
+            big_blobs_core::MintBlobsCapability {
+                capability: None,
+                scope: big_blobs_core::protocol::BlobsScope {
+                    put: true,
+                    ..Default::default()
+                },
+                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                subject: Some(subject),
+            },
+        )
+        .await?
+        .capability_id)
 }
 
 /// Boots dispatch first: the nodule service registers its providers in dispatch's router, so it

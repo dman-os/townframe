@@ -821,6 +821,53 @@ impl<'a> Granted<'a> {
     }
 }
 
+/// The scopes of the core nodule's delivered dispatch and blobs handles, which are the
+/// `micros` delegators' and not lowered from its own `uses`.
+fn widen_core_handles(state: &State, desired: &mut BTreeMap<String, RoutineScopes>) {
+    // The core nodule is the micros runtime, and a runtime's actor is the delegator of
+    // everything its children can be granted (ADR 049 section 6.1): `micros` is the micro
+    // runtime as `nodules` is the nodule runtime, whose service mints every nodule's handle
+    // from delegators of that full scope. The core nodule cannot narrow a handle to a
+    // micro's scope unless its own covers it, and `attenuateCapability` and the mints only
+    // narrow, so its delivered dispatch and blobs handles are the delegators' scopes and not
+    // lowered from its own `uses`. Its privilege is exactly the privileged methods the node
+    // grants it (node-91's rule: a privileged grant covers its method and no other), so it
+    // reaches `listCartridgeGrants` and the like and is refused `installCartridge` and
+    // `setCartridgeGrant`.
+    // The handles are never written down: they are minted for the boot, which is why the
+    // ids are not kept in the config document (it outlives a restart and syncs to sisters).
+    let privileged: BTreeSet<String> = state
+        .stores
+        .core_cartridge
+        .grants
+        .iter()
+        .filter(|(_, grant)| grant.privileged)
+        .filter_map(|(key, _)| match key {
+            // Only a method that is privileged for dispatch names a privilege: a grant may
+            // be privileged for the service's own check without dispatch holding the method
+            // so (`listCartridgeInstalls`), and the delegator's set, which a mint is covered
+            // by, is the privileged built-ins.
+            GrantKey::Method(nsid)
+                if method_lexicon::builtin_method(nsid).is_some_and(|m| m.privileged) =>
+            {
+                Some(nsid.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    for scopes in desired.values_mut() {
+        scopes.dispatch = Some(DispatchScope {
+            authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
+            privileged: privileged.clone(),
+            ..Default::default()
+        });
+        scopes.blobs = Some(big_blobs_core::protocol::BlobsScope {
+            put: true,
+            ..Default::default()
+        });
+    }
+}
+
 /// Brings each routine's handles to its desired scopes (ADR 047 §6): a handle whose scope did
 /// not change is kept, one that changed is retracted and then minted again, and one whose
 /// routine no longer wants it is retracted. Before anything is retracted dispatch is
@@ -857,48 +904,7 @@ async fn apply_nodule_capabilities(
         BTreeMap::new()
     };
     if *cartridge_id == state.stores.core_cartridge.id {
-        // The core nodule is the micros runtime, and a runtime's actor is the delegator of
-        // everything its children can be granted (ADR 049 section 6.1): `micros` is the micro
-        // runtime as `nodules` is the nodule runtime, whose service mints every nodule's handle
-        // from delegators of that full scope. The core nodule cannot narrow a handle to a
-        // micro's scope unless its own covers it, and `attenuateCapability` and the mints only
-        // narrow, so its delivered dispatch and blobs handles are the delegators' scopes and not
-        // lowered from its own `uses`. Its privilege is exactly the privileged methods the node
-        // grants it (node-91's rule: a privileged grant covers its method and no other), so it
-        // reaches `listCartridgeGrants` and the like and is refused `installCartridge` and
-        // `setCartridgeGrant`.
-        // The handles are never written down: they are minted for the boot, which is why the
-        // ids are not kept in the config document (it outlives a restart and syncs to sisters).
-        let privileged: BTreeSet<String> = state
-            .stores
-            .core_cartridge
-            .grants
-            .iter()
-            .filter(|(_, grant)| grant.privileged)
-            .filter_map(|(key, _)| match key {
-                // Only a method that is privileged for dispatch names a privilege: a grant may
-                // be privileged for the service's own check without dispatch holding the method
-                // so (`listCartridgeInstalls`), and the delegator's set, which a mint is covered
-                // by, is the privileged built-ins.
-                GrantKey::Method(nsid)
-                    if method_lexicon::builtin_method(nsid).is_some_and(|m| m.privileged) =>
-                {
-                    Some(nsid.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        for scopes in desired.values_mut() {
-            scopes.dispatch = Some(DispatchScope {
-                authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
-                privileged: privileged.clone(),
-                ..Default::default()
-            });
-            scopes.blobs = Some(big_blobs_core::protocol::BlobsScope {
-                put: true,
-                ..Default::default()
-            });
-        }
+        widen_core_handles(state, &mut desired);
     }
     let previous = state
         .routine_capabilities
