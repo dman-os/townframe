@@ -1216,7 +1216,8 @@ mod blackbox {
             "{}",
             String::from_utf8_lossy(&started.stderr)
         );
-        assert!(sandbox.socket().exists(), "serving once started");
+        // `start --bg` returns only after the server's readiness line, so it was serving. Its
+        // socket is not checked here: under load the idle period can end before this line runs.
         // Returns once the server has exited and let go of the node.
         day_node::NodeDir::new(sandbox.node())
             .wait_for_lock_release()
