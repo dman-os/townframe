@@ -78,18 +78,19 @@ async fn whole_sync_costs_by_size_and_round_trip() {
     }
 }
 
-/// A part holding more objects than the default `max_tracked` (1024) times three has never
-/// synced in this harness: 3000 objects sync in two rounds, 3500 do not finish (under an hour of
-/// virtual time the wait is still pending, or the loop spins). Pinned here, not fixed, by the
-/// bench lane; see the benchmarking skill's findings.
+/// A part of more than three leaf pages (1024 entries each) syncs: its second page's
+/// `next_after` sorts below the first's by key, and a walk that judged progress by key failed
+/// the page for ever (found at 3500 objects; 3000 fit in two pages and never met it). Past
+/// 16384 objects the walk leafs one level down, and 30k objects spread over many buckets.
 #[tokio::test(start_paused = true)]
 async fn whole_sync_of_a_part_beyond_three_pages_completes() {
-    utils_rs::testing::setup_tracing_once();
-    let report = n0_future::time::timeout(
-        Duration::from_secs(3600),
-        sync_once(4_000, Duration::ZERO, |_| {}, clock()),
-    )
-    .await
-    .expect("4000 objects sync within an hour of virtual time");
-    assert_eq!(report.objects, 4_000);
+    for objects in [3_500, 4_000, 10_000, 30_000] {
+        let report = n0_future::time::timeout(
+            Duration::from_secs(3600),
+            sync_once(objects, Duration::ZERO, |_| {}, clock()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{objects} objects sync within an hour of virtual time"));
+        assert_eq!(report.objects, objects);
+    }
 }

@@ -179,3 +179,32 @@ fn law_3_a_leaf_page_that_does_not_move_forward_fails_its_call() {
     let (_, _, again) = rig.flush().leaves().remove(0);
     assert_eq!(again[0].after, Some(obj(2)), "the same request is reissued");
 }
+
+/// Law 3: a page is forward in the order leaves are paged in (deepest bucket, then key), not in
+/// key order. A `next_after` below its `after` by key is forward when it hashes to a later
+/// deepest bucket, and a walk that judged by key failed such pages for ever: a part of more
+/// than three pages never synced, because the second page's `next_after` was below the first's.
+#[test]
+fn law_3_a_leaf_page_forward_in_leaf_order_but_below_by_key_is_accepted() {
+    let (after, next) = (0..=u8::MAX)
+        .flat_map(|a| (0..=u8::MAX).map(move |b| (obj(a), obj(b))))
+        .find(|(after, next)| {
+            next < after && BuckId::leaf_cmp(next, after) == std::cmp::Ordering::Greater
+        })
+        .expect("some pair of keys is paged in another order than it sorts");
+    let mut rig = Rig::new();
+    let (list, ..) = rig.walk(1, 0, 10);
+    let (leaf, _) = rig.list_root(list, 10, 4);
+    let first = leaf_page(None, &[(1, PartObjDelta::New)], Some(after.clone()));
+    rig.sync.leaf_replied(leaf, Reply::Answer(first));
+    let (second, _, asked) = rig.flush().leaves().remove(0);
+    assert_eq!(asked[0].after, Some(after.clone()));
+    let page = leaf_page(Some(after.clone()), &[(2, PartObjDelta::New)], Some(next.clone()));
+    rig.sync.leaf_replied(second, Reply::Answer(page));
+    let (_, _, asked) = rig.flush().leaves().remove(0);
+    assert_eq!(
+        asked[0].after,
+        Some(next),
+        "the walk moves on to the page after it"
+    );
+}
