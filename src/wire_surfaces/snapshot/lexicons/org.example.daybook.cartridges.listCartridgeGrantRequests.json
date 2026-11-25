@@ -50,7 +50,8 @@
     },
     "RequestedAccess": {
       "nullable": [
-        "drawer"
+        "drawer",
+        "port"
       ],
       "properties": {
         "access": {
@@ -65,15 +66,24 @@
         "drawer": {
           "type": "string"
         },
+        "host": {
+          "type": "string"
+        },
         "kind": {
           "enum": [
             "drawers",
-            "method"
+            "method",
+            "net"
           ],
           "type": "string"
         },
         "nsid": {
           "type": "string"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": [

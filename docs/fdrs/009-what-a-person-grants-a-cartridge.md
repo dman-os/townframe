@@ -18,7 +18,7 @@ declarations exist underneath so the system can tell them what a combination of 
 - **Drawer:** their named collections. Access is **read**, **write** or **admin**, the words the node
   already uses for every other grant.
 - **Data from another cartridge:** "may use your data from Notes".
-- **Internet:** "may talk to `api.example.com`".
+- **Internet:** "may use the network to reach `api.example.com`".
 - **Only this time / Allow / Don't allow.** "Only this time" lasts until the app is next started,
   and so does "Don't allow": the same question is not asked again before then.
 

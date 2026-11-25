@@ -50,6 +50,7 @@ pub use manifest::Permbind;
 pub use manifest::PermbindDatum;
 pub use manifest::PermbindDrawers;
 pub use manifest::PermbindMethod;
+pub use manifest::PermbindNet;
 pub use manifest::RevisionedStore;
 pub use manifest::Routine;
 pub use manifest::RoutineImpl;
@@ -182,7 +183,29 @@ impl Cartridge {
                 ));
             }
         }
+        for (binding, permbind) in &self.permbinds {
+            if let Permbind::Net(net) = permbind {
+                Self::validate_net(binding, net)?;
+            }
+        }
         self.validate_routine_uses()
+    }
+
+    /// A `#net` permbind names a host the grant datum can be keyed by, and HTTP verbs.
+    fn validate_net(binding: &str, net: &PermbindNet) -> Result<(), CartridgeError> {
+        let path = format!("permbinds.{binding}");
+        if let Err(error) = net.target() {
+            return Err(CartridgeError::invalid(path, error.to_string()));
+        }
+        for method in net.methods.iter().flatten() {
+            if method.is_empty() || !method.bytes().all(|byte| byte.is_ascii_uppercase()) {
+                return Err(CartridgeError::invalid(
+                    path,
+                    format!("`{method}` is not an upper-case HTTP method"),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn validate_routine_uses(&self) -> Result<(), CartridgeError> {
@@ -247,7 +270,7 @@ impl Cartridge {
                 (usage.create, value.create.as_ref()),
                 (usage.delete, value.delete.as_ref()),
             ],
-            Permbind::Method(_) | Permbind::Unknown(_) => [
+            Permbind::Method(_) | Permbind::Net(_) | Permbind::Unknown(_) => [
                 (usage.read, None),
                 (usage.write, None),
                 (usage.create, None),
