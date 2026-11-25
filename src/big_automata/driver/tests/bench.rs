@@ -84,6 +84,7 @@ async fn whole_sync_costs_by_size_and_round_trip() {
 /// bench lane; see the benchmarking skill's findings.
 #[tokio::test(start_paused = true)]
 async fn whole_sync_of_a_part_beyond_three_pages_completes() {
+    utils_rs::testing::setup_tracing_once();
     let report = n0_future::time::timeout(
         Duration::from_secs(3600),
         sync_once(4_000, Duration::ZERO, |_| {}, clock()),
