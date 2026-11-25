@@ -261,6 +261,120 @@ async fn installing_intxt_twice_changes_nothing() {
     .await;
 }
 
+/// An older revision of intxt's cartridge, as an earlier build of `intxt_core` published it:
+/// the current manifest without `createDoc` (its permbind and `createIntxt`'s use of it), the
+/// 7-method set a node installed before that request existed. Installed the way `install` does,
+/// granting the methods it requests, and enabled.
+async fn install_revision_without_create_doc(
+    client: &NodeClient,
+    wasm: &[u8],
+) -> big_nodule_core::protocol::NoduleRecord {
+    use big_cartridges_core::config::Component;
+    use big_cartridges_core::config::GrantBody;
+    use big_cartridges_core::config::GrantKey;
+    use big_cartridges_core::protocol::GetCartridge;
+    use big_cartridges_core::protocol::InstallCartridge;
+    use big_cartridges_core::protocol::PublishCartridgeVersion;
+    use big_cartridges_core::protocol::SetCartridgeEnabled;
+    use big_cartridges_core::protocol::SetCartridgeGrant;
+    use big_cartridges_core::registry::version_key;
+    use big_cartridges_core::registry::version_pin;
+
+    let caller = operator(client);
+    let mut fixture = intxt_core::cartridge::cartridge(wasm);
+    assert!(fixture.permbinds.remove("createDoc").is_some());
+    let routines = &mut fixture.nodule.as_mut().unwrap().routines;
+    for routine in routines.values_mut() {
+        routine.uses.remove("createDoc");
+    }
+    let (cartridge_id, version) = (fixture.id.clone(), fixture.version.clone());
+    intxt_core::install::put_blob(&caller, wasm).await.unwrap();
+    let staged = caller.call(fixture.stage_request()).await.unwrap();
+    caller
+        .call(PublishCartridgeVersion {
+            envelope: fixture.publishable(staged),
+        })
+        .await
+        .unwrap();
+    let doc_id = caller
+        .call(GetCartridge {
+            id: cartridge_id.clone(),
+        })
+        .await
+        .unwrap()
+        .doc_id;
+    let (heads, _) = caller.read(&doc_id, &version_key(&version)).await.unwrap();
+    caller
+        .call(InstallCartridge {
+            cartridge: version_pin(doc_id, &version, heads),
+        })
+        .await
+        .unwrap();
+    for method in intxt_core::cartridge::requested_methods(&fixture) {
+        caller
+            .call(SetCartridgeGrant {
+                cartridge_id: cartridge_id.clone(),
+                grant: GrantKey::Method(method.to_owned()),
+                value: Some(GrantBody::present()),
+            })
+            .await
+            .unwrap();
+    }
+    caller
+        .call(SetCartridgeEnabled {
+            cartridge_id: cartridge_id.clone(),
+            component: Component::Nodule,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    caller
+        .call(big_nodule_core::protocol::GetNodule { cartridge_id })
+        .await
+        .unwrap()
+}
+
+/// Installing a build whose manifest requests a method the node's installed revision did not
+/// (`createDoc`) grants it, so the nodule is ready: both when the new build has another handler
+/// (another version) and when only the manifest changed under the same handler bytes (the same
+/// version, which `install` takes for current).
+#[tokio::test(flavor = "multi_thread")]
+async fn installing_a_revision_that_requests_a_new_method_grants_it() {
+    use big_dispatch_core::Readiness;
+
+    let wasm = std::fs::read(guest_path()).unwrap();
+    // Another handler build: a custom section changes the bytes and so the version.
+    let mut older = wasm.clone();
+    older.extend_from_slice(&[0, 2, 1, b'x']);
+    for (case, old_wasm) in [("another handler", &older), ("the same handler", &wasm)] {
+        let (_tmp, dir) = new_node().await;
+        let client = connect(&dir).await.unwrap();
+        let before = install_revision_without_create_doc(&client, old_wasm).await;
+        assert_eq!(before.readiness, Readiness::Ready, "{case}");
+        const CREATE_DOC: &str = "org.example.daybook.docs.createDoc";
+        assert!(
+            !before.methods.unwrap().desired.operations.contains(CREATE_DOC),
+            "{case}"
+        );
+
+        let installed = intxt_core::install::install(&operator(&client), &wasm, &[])
+            .await
+            .unwrap();
+        let methods = installed.record.methods.clone().unwrap();
+        assert_eq!(
+            installed.record.readiness,
+            Readiness::Ready,
+            "{case}: {:?}",
+            installed.record
+        );
+        assert!(
+            methods.desired.operations.contains(CREATE_DOC),
+            "{case}: {methods:?}"
+        );
+        client.stop().await.unwrap();
+    }
+}
+
 /// Runs `git` in `dir` with nothing taken from the machine. Hooks do not run: capture installs a
 /// `post-rewrite` hook that execs `day`, which must never find a real one on the `PATH` when a
 /// test amends or rebases.
