@@ -772,6 +772,9 @@ async fn the_registry_is_rebuilt_from_its_drawer_after_a_restart() {
 /// A node publishes and installs its core cartridge at boot (ADR 053 §3): the version its build
 /// carries, under its own publisher DID, with the core nodule enabled and acting as the `micros`
 /// subsystem actor. A reboot finds the install already pinning that version and leaves it as it is.
+// A boot-time `InstallCartridge` was once answered `Denied` under load, unreproduced. To catch it,
+// run with `RUST_LOG_TEST=info,instr=info`: the `instr` lines name the presented authority and
+// signer, what `ResolveAuthority` returned and the scope `scope_of` read, at each refusal.
 #[tokio::test]
 async fn a_node_installs_its_core_cartridge_at_boot_and_a_reboot_keeps_the_install() {
     let directory = tempfile::tempdir().unwrap();

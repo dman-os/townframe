@@ -186,12 +186,22 @@ impl DomainCapabilities {
             ),
         };
         let (signer, signing) = match credential {
-            Some(credential) if credential.authority == capability => {
-                (credential.signer, self.inspect(context, credential.signer).await?)
-            }
+            Some(credential) if credential.authority == capability => (
+                credential.signer,
+                self.inspect(context, credential.signer).await?,
+            ),
             Some(credential) => {
                 let presenter = self.inspect(context, credential.signer).await?;
                 if !presenter.rights.contains(Rights::USE) || presenter.subject != Some(subject) {
+                    tracing::info!(
+                        target: "instr",
+                        ?capability,
+                        signer_cap = ?credential.signer,
+                        presenter_subject = ?presenter.subject,
+                        handle_subject = ?subject,
+                        presenter_rights = ?presenter.rights,
+                        "INSTR domain resolve: holder check refused the presenter"
+                    ); // INSTR
                     return Err(ClientError::Method(AuthorityServiceError::Unauthorized));
                 }
                 (capability, cap.clone())
@@ -234,6 +244,15 @@ impl DomainCapabilities {
             )
             .await?;
         let is_operator_root = resolved.is_operator_root();
+        tracing::info!(
+            target: "instr",
+            authority = ?authorization.authority,
+            signer_cap = ?authorization.signer,
+            is_operator_root,
+            resolved_actor = ?resolved.actor.as_ref().map(|actor| actor.actor_id),
+            resolved_subject = ?resolved.capability.subject,
+            "INSTR domain source resolved authority"
+        ); // INSTR
         let signing = if authorization.signer == authorization.authority {
             resolved.capability.clone()
         } else {
@@ -256,8 +275,27 @@ impl DomainCapabilities {
                 rights: resolved.capability.rights,
             }),
             None => {
-                let (bound, bound_subject) = self.bound(&resolved.capability)?;
+                let (bound, bound_subject) =
+                    self.bound(&resolved.capability).inspect_err(|error| {
+                        tracing::info!(
+                            target: "instr",
+                            authority = ?authorization.authority,
+                            ?error,
+                            issuer = ?resolved.capability.issuer_id,
+                            object = %resolved.capability.object,
+                            rights = ?resolved.capability.rights,
+                            "INSTR domain source: capability is not a handle of this domain"
+                        ); // INSTR
+                    })?;
                 if bound_subject != signer.actor_id {
+                    tracing::info!(
+                        target: "instr",
+                        authority = ?authorization.authority,
+                        signer_cap = ?authorization.signer,
+                        ?bound_subject,
+                        signer_actor = ?signer.actor_id,
+                        "INSTR domain source: scoped handle presented under another actor's signer"
+                    ); // INSTR
                     return Err(ClientError::Method(AuthorityServiceError::Unauthorized));
                 }
                 Ok(Invocation {

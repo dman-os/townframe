@@ -1403,6 +1403,13 @@ impl State {
         if let Some(scope) = &scope
             && !(scope.admit && scope.cartridges.contains(&resolved.cartridge.id))
         {
+            tracing::info!(
+                target: "instr",
+                admit = scope.admit,
+                cartridge = %resolved.cartridge.id,
+                scoped_cartridges = ?scope.cartridges,
+                "INSTR nodule install denied: scope does not admit this cartridge"
+            ); // INSTR
             return Err(NodulesError::Denied);
         }
         // The core cartridge is installed at the version the node's build carries and no other,
