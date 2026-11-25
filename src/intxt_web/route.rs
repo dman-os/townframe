@@ -8,6 +8,7 @@ use crate::ui::IndexPage;
 use crate::ui::IntxtPage;
 use crate::ui::STYLESHEET_PATH;
 use crate::view::IntxtView;
+use crate::view::Tab;
 use big_cabinet_core::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
 use dioxus::prelude::*;
@@ -20,10 +21,11 @@ const STYLESHEET: &str = include_str!("intxt_web.css");
 pub enum Route {
     Index,
     Stylesheet,
-    /// `/i/<drawer id>?via=<node key>|<node key>`
+    /// `/i/<drawer id>[/commits|/files|/sessions|/guide]?via=<node key>|<node key>`
     Intxt {
         drawer: DocId,
         via: Vec<MultibaseKey>,
+        tab: Tab,
     },
 }
 
@@ -53,20 +55,21 @@ impl Route {
             return Ok(Self::Stylesheet);
         }
         let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
-        match segments[..] {
-            [] => Ok(Self::Index),
-
-            ["i", drawer] => {
-                let drawer = drawer
-                    .parse()
-                    .map_err(|error| RouteError::BadRequest(format!("drawer id: {error}")))?;
-                Ok(Self::Intxt {
-                    drawer,
-                    via: parse_via(query)?,
-                })
-            }
-            _ => Err(RouteError::NotFound(path_with_query.to_owned())),
-        }
+        let not_found = || RouteError::NotFound(path_with_query.to_owned());
+        let (drawer, tab) = match segments[..] {
+            [] => return Ok(Self::Index),
+            ["i", drawer] => (drawer, Tab::Conversation),
+            ["i", drawer, segment] => (drawer, Tab::from_segment(segment).ok_or_else(not_found)?),
+            _ => return Err(not_found()),
+        };
+        let drawer = drawer
+            .parse()
+            .map_err(|error| RouteError::BadRequest(format!("drawer id: {error}")))?;
+        Ok(Self::Intxt {
+            drawer,
+            via: parse_via(query)?,
+            tab,
+        })
     }
 }
 
@@ -114,8 +117,8 @@ pub async fn serve(source: &impl IntxtSource, path_with_query: &str) -> Page {
             content_type: "text/css; charset=utf-8",
             body: STYLESHEET.to_owned(),
         },
-        Ok(Route::Intxt { drawer, via }) => match source.load(&drawer, &via).await {
-            Ok(view) => Page::html(200, render(intxt_page, view)),
+        Ok(Route::Intxt { drawer, via, tab }) => match source.load(&drawer, &via).await {
+            Ok(view) => Page::html(200, render(intxt_page, (view, tab))),
             Err(error) => error_page_for(error.status(), error.to_string()),
         },
         Err(error) => error_page_for(error.status(), error.to_string()),
@@ -136,10 +139,10 @@ fn error_page_for(status: u16, message: String) -> Page {
     Page::html(status, render(error_page, (status, message)))
 }
 
-pub(crate) fn intxt_page(view: IntxtView) -> Element {
+pub(crate) fn intxt_page((view, tab): (IntxtView, Tab)) -> Element {
     rsx! {
         Document { title: view.title.clone(),
-            IntxtPage { view }
+            IntxtPage { view, tab }
         }
     }
 }
@@ -190,14 +193,29 @@ mod tests {
             Route::parse(&format!("/i/{DRAWER}")),
             Ok(Route::Intxt {
                 drawer: DRAWER.parse().unwrap(),
-                via: vec![]
+                via: vec![],
+                tab: Tab::Conversation
             })
         );
+        for tab in Tab::ALL {
+            let segment = tab
+                .segment()
+                .map_or(String::new(), |segment| format!("/{segment}"));
+            assert_eq!(
+                Route::parse(&format!("/i/{DRAWER}{segment}?via={}", key(3))),
+                Ok(Route::Intxt {
+                    drawer: DRAWER.parse().unwrap(),
+                    via: vec![key(3)],
+                    tab
+                })
+            );
+        }
         assert_eq!(
             Route::parse(&format!("/i/{DRAWER}?via={}|{}", key(3), key(7))),
             Ok(Route::Intxt {
                 drawer: DRAWER.parse().unwrap(),
-                via: vec![key(3), key(7)]
+                via: vec![key(3), key(7)],
+                tab: Tab::Conversation
             })
         );
         // Clients may percent-encode the separator.
@@ -207,10 +225,58 @@ mod tests {
         );
     }
 
-    /// The page for the fixture, as the same `IntxtPage` any host would render for that view.
+    /// The page `path` is, as the server serves it for the fixture.
+    fn fixture_body(path: &str) -> String {
+        let page = pollster::block_on(serve(&FixtureSource, path));
+        assert_eq!(page.status, 200, "{path}");
+        page.body
+    }
+
     #[test]
-    fn the_fixture_page_renders() {
-        insta::assert_snapshot!(render(intxt_page, FixtureSource::view()));
+    fn the_conversation_tab_renders() {
+        insta::assert_snapshot!(fixture_body(&format!("/i/{DRAWER}")));
+    }
+
+    #[test]
+    fn the_commits_tab_renders() {
+        insta::assert_snapshot!(fixture_body(&format!("/i/{DRAWER}/commits")));
+    }
+
+    #[test]
+    fn the_files_tab_renders() {
+        insta::assert_snapshot!(fixture_body(&format!("/i/{DRAWER}/files")));
+    }
+
+    #[test]
+    fn the_sessions_tab_renders() {
+        insta::assert_snapshot!(fixture_body(&format!("/i/{DRAWER}/sessions")));
+    }
+
+    #[test]
+    fn the_guide_tab_renders() {
+        insta::assert_snapshot!(fixture_body(&format!("/i/{DRAWER}/guide")));
+    }
+
+    #[test]
+    fn a_tab_link_keeps_the_via_hint_and_an_intxt_without_a_guide_says_so() {
+        let mut view = FixtureSource::view();
+        let via = view.via.join("|");
+        let page = render(intxt_page, (view.clone(), Tab::Guide));
+        for tab in Tab::ALL {
+            let segment = tab
+                .segment()
+                .map_or(String::new(), |segment| format!("/{segment}"));
+            assert!(
+                page.contains(&format!("href=\"/i/{DRAWER}{segment}?via={via}\"")),
+                "{tab:?}: {page}"
+            );
+        }
+        view.guide.clear();
+        let page = render(intxt_page, (view, Tab::Guide));
+        assert!(
+            page.contains("The author left no guide for this intxt."),
+            "{page}"
+        );
     }
 
     #[test]

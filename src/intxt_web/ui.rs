@@ -1,19 +1,28 @@
 //! The components. [`IntxtPage`] is `view(state)`: it takes an [`IntxtView`] and renders it, and
 //! nothing below it reads anything but its props, so any host that builds the view can render the
 //! same markup. Everything under `Document` is the server's own business (the HTML envelope).
+//!
+//! The page, top to bottom: the header, the description, the tabs and the selected tab's view.
+//! Related intxts and discussions sit beside the view when the window is wide and under the
+//! header when it is narrow (the stylesheet moves one element). Plain text and rules only: the
+//! look is claytxt's (D88) and the vocabulary's Restraint list rules out the rest.
 
-use crate::diff::Diff;
+mod changes;
+mod conversation;
+mod guide;
+mod header;
+mod sessions;
+
 use crate::markdown;
 use crate::source::Origin;
 use crate::view::CommentView;
-use crate::view::CommitView;
 use crate::view::EntryRef;
-use crate::view::EntryView;
 use crate::view::IntxtView;
 use crate::view::PrLinksView;
-use crate::view::SessionSummary;
+use crate::view::Tab;
 use crate::view::ThreadView;
 use dioxus::prelude::*;
+use jiff::Timestamp;
 
 /// Where the server serves the viewer's stylesheet (`intxt_web.css`, embedded by `route`).
 pub const STYLESHEET_PATH: &str = "/assets/intxt_web.css";
@@ -46,67 +55,73 @@ fn TopBar(title: String) -> Element {
     }
 }
 
+/// `YYYY-MM-DD HH:MM UTC`: times are UTC, so a page reads the same wherever and whenever it is
+/// rendered.
+fn when(at: Timestamp) -> String {
+    at.strftime("%Y-%m-%d %H:%M UTC").to_string()
+}
+
+/// "no replies", "1 reply", "3 replies".
+fn replies(count: usize) -> String {
+    match count {
+        0 => "no replies".to_owned(),
+        1 => "1 reply".to_owned(),
+        count => format!("{count} replies"),
+    }
+}
+
+/// A `<time>` element with `at` as its machine-readable value.
 #[component]
-pub fn IntxtPage(view: IntxtView) -> Element {
+fn At(at: Timestamp, #[props(default)] short: bool) -> Element {
+    let text = if short {
+        at.strftime("%H:%M UTC").to_string()
+    } else {
+        when(at)
+    };
+    rsx! {
+        time { datetime: "{at}", "{text}" }
+    }
+}
+
+/// One of the intxt's pages. The description is pinned above the tabs.
+#[component]
+pub fn IntxtPage(view: IntxtView, tab: Tab) -> Element {
+    let selected = match tab {
+        Tab::Conversation => conversation::conversation(&view),
+        Tab::Commits => changes::commits(&view),
+        Tab::Files => changes::files(&view),
+        Tab::Sessions => sessions::sessions(&view),
+        Tab::Guide => guide::guide(&view),
+    };
     rsx! {
         div { class: "intxt-page",
             TopBar { title: view.title.clone() }
-            main {
-                p { class: "intxt-muted intxt-small",
-                    "drawer "
-                    code { "{view.drawer}" }
-                }
+            div { class: "intxt-layout",
+                {header::header(&view)}
+                {header::aside(&view)}
                 if let Some(description) = &view.description {
-                    Markdown { source: description.clone() }
+                    {description_block(description)}
                 }
-                section { aria_labelledby: "entries",
-                    h2 { id: "entries", "Entries" }
-                    if view.entries.is_empty() {
-                        p { class: "intxt-muted", "Nothing included yet." }
-                    }
-                    ul {
-                        for entry in view.entries.iter().cloned() {
-                            EntryRow { entry }
-                        }
-                    }
-                }
-                section { aria_labelledby: "comments",
-                    h2 { id: "comments", "Comments" }
-                    if view.threads.is_empty() {
-                        p { class: "intxt-muted", "No comments." }
-                    }
-                    for thread in view.threads.iter().cloned() {
-                        Thread { thread }
-                    }
+                div { class: "intxt-view",
+                    {header::tabs(&view, tab)}
+                    {selected}
                 }
             }
         }
     }
 }
 
-#[component]
-fn EntryRow(entry: EntryView) -> Element {
+/// The description above the tabs, folded after a few lines like a pull request's body.
+fn description_block(source: &str) -> Element {
+    let (head, rest) = markdown::fold(source);
     rsx! {
-        li {
-            strong { "{entry.kind.name()} " }
-            if let Some(href) = &entry.href {
-                a { href: "{href}", "{entry.label}" }
-            } else {
-                code { "{entry.label}" }
-            }
-            RefList { refs: entry.refs.clone() }
-            if let Some(description) = &entry.description {
-                Markdown { source: description.clone() }
-            }
-            PrLinks { links: entry.pr_links.clone() }
-            if let Some(summary) = &entry.session {
-                Session { summary: summary.clone() }
-            }
-            for commit in entry.commits.iter().cloned() {
-                Commit { commit }
-            }
-            if let Some(diff) = &entry.patch {
-                DiffBlock { diff: diff.clone() }
+        section { class: "intxt-description", aria_label: "Description",
+            Markdown { source: head.to_owned() }
+            if let Some(rest) = rest {
+                details {
+                    summary { "Show the rest of the description" }
+                    Markdown { source: rest.to_owned() }
+                }
             }
         }
     }
@@ -119,93 +134,6 @@ fn Markdown(source: String) -> Element {
     let html = markdown::to_html(&source);
     rsx! {
         div { class: "intxt-markdown", dangerous_inner_html: "{html}" }
-    }
-}
-
-#[component]
-fn Commit(commit: CommitView) -> Element {
-    rsx! {
-        div { class: "intxt-commit",
-            p { class: "intxt-muted intxt-small",
-                code { "{commit.sha.get(..12).unwrap_or(&commit.sha)}" }
-                " {commit.author}, {commit.date}"
-            }
-            p { class: "intxt-commit-message", "{commit.message}" }
-        }
-    }
-}
-
-/// A unified diff as `<pre>` of one `<span>` per line, classed by what the line is. The lines are
-/// text nodes, so they are escaped like any other text on the page.
-#[component]
-fn DiffBlock(diff: Diff) -> Element {
-    rsx! {
-        pre { class: "intxt-diff",
-            for line in diff.lines {
-                span { class: line.kind.class(), "{line.text}\n" }
-            }
-        }
-        if diff.omitted_octets > 0 {
-            p { class: "intxt-muted intxt-small",
-                "The diff is cut here: {diff.omitted_octets} more octets are not shown."
-            }
-        }
-    }
-}
-
-/// What happened in a session. Prompt text is a text node, so the operator's words are escaped
-/// like any other text on the page.
-#[component]
-fn Session(summary: SessionSummary) -> Element {
-    let when = |at: jiff::Timestamp| at.strftime("%Y-%m-%d %H:%M").to_string();
-    let tools = summary
-        .tools
-        .iter()
-        .map(|(kind, count)| format!("{kind} {count}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let (omitted, at_least) = summary.edited_omitted();
-    let plus = if at_least { "+" } else { "" };
-    rsx! {
-        div { class: "intxt-session",
-            p { class: "intxt-muted intxt-small",
-                "{summary.turns} prompt turns, {summary.tool_calls} tool calls"
-                if let Some((first, last)) = summary.span {
-                    ", {when(first)} to {when(last)} UTC"
-                }
-            }
-            if summary.unreadable > 0 {
-                p { class: "intxt-muted intxt-small",
-                    "{summary.unreadable} turns could not be read and are not counted."
-                }
-            }
-            if !tools.is_empty() {
-                p { class: "intxt-muted intxt-small", "tools: {tools}" }
-            }
-            if summary.edited_files().next().is_some() {
-                p { class: "intxt-muted intxt-small", "edited" }
-                ul { class: "intxt-session-files",
-                    for path in summary.edited_files() {
-                        li { code { "{path}" } }
-                    }
-                }
-                if omitted > 0 {
-                    p { class: "intxt-muted intxt-small", "and {omitted}{plus} more files" }
-                }
-            }
-            for prompt in summary.prompts() {
-                details { class: "intxt-prompt",
-                    summary { "{prompt.headline}" }
-                    p { class: "intxt-prompt-text", "{prompt.text}" }
-                    if prompt.cut {
-                        p { class: "intxt-muted intxt-small", "The prompt is cut here." }
-                    }
-                }
-            }
-            if summary.prompts_omitted() > 0 {
-                p { class: "intxt-muted intxt-small", "and {summary.prompts_omitted()} more prompts" }
-            }
-        }
     }
 }
 
@@ -246,10 +174,11 @@ fn PrLinks(links: PrLinksView) -> Element {
     }
 }
 
+/// A root comment and its replies, set in from the page edge by a rule.
 #[component]
-fn Thread(thread: ThreadView) -> Element {
+fn Thread(thread: ThreadView, id: String) -> Element {
     rsx! {
-        article { class: "intxt-thread",
+        article { class: "intxt-thread", id: "{id}",
             Comment { comment: thread.root }
             for reply in thread.replies {
                 Comment { comment: reply }
@@ -268,6 +197,10 @@ fn Comment(comment: CommentView) -> Element {
                     span { class: "intxt-muted", " via {generator}" }
                 }
                 span { class: "intxt-muted", " ({comment.motivation})" }
+                if let Some(at) = comment.at {
+                    " "
+                    span { class: "intxt-muted", At { at } }
+                }
             }
             for target in comment.targets {
                 p { class: "intxt-muted intxt-small",
