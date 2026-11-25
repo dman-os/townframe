@@ -21,6 +21,7 @@ pub(super) fn config() -> Config {
         },
         jobs: object_jobs::Config {
             window: 4,
+            max_tracked: 8,
             fetch_cap: 2,
             min_backoff: Duration::from_secs(2),
             max_backoff: Duration::from_secs(5),

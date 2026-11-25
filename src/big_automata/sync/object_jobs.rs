@@ -74,9 +74,16 @@
 //!    rounds. It still owes its cursors, so its part's cursor does not advance past it: cursor
 //!    liveness is then the backend's responsibility. A backend that cannot apply something yet
 //!    should accept and park it, answering `Done`; one that fails forever holds that part's
-//!    cursor forever. The window can be overshot by the rows of one revision: a page never
-//!    splits a revision, and one transaction may touch many objects. At most `C` fetches run
-//!    at once. A long fetch holds one slot of each; the rest keep flowing. Fetches start in
+//!    cursor forever. The window bounds work in flight; a separate, much larger cap `T`
+//!    (`max_tracked`, at least `W`) bounds memory: it counts every object this machine holds
+//!    state for, backing off or not. Once `T` objects are tracked `room` is 0, so no replay
+//!    round or walk pull admits another object until tracked objects settle or their part is
+//!    retired. Reaching `T` is a stall by design, at a size far above the window: a backend
+//!    that fails everything stops a part with a million objects at `T`, not at a million.
+//!    Both bounds can be overshot by the rows of one revision: a page never splits a
+//!    revision, and one transaction may touch many objects. Object routes and their content
+//!    wants are not admitted through `room`, so they can exceed `T` by the routed objects. At
+//!    most `C` fetches run at once. A long fetch holds one slot of each; the rest keep flowing. Fetches start in
 //!    cursor order, which is what moves the watermark.
 //! 8. **Retry backs off per call.** Failed and stale calls are reissued with a backoff that
 //!    starts at 2s, doubles and is capped (a minute by default). Merging new wants keeps the
@@ -218,6 +225,8 @@ pub(crate) enum Settlement {
 pub(crate) struct Config {
     /// The receive window: unsettled objects admitted before the next replay round waits.
     pub window: usize,
+    /// The cap on tracked objects, backing off or not (law 7); at least `window`.
+    pub max_tracked: usize,
     /// Fetches in flight at once, across objects.
     pub fetch_cap: usize,
     pub min_backoff: Duration,
@@ -858,15 +867,24 @@ impl ObjectJobs {
             .min()
     }
 
-    /// Objects with unsettled wants still admissible under the receive window (law 7: objects
-    /// waiting out a failure backoff do not count).
+    /// Objects still admissible: the receive window less the unsettled objects (law 7: those
+    /// waiting out a failure backoff do not count), and never beyond the cap on tracked objects.
     pub(crate) fn room(&self) -> usize {
-        self.config.window.saturating_sub(
-            self.objs
-                .values()
-                .filter(|state| state.is_unsettled() && !state.backing_off())
-                .count(),
-        )
+        let counted = self
+            .objs
+            .values()
+            .filter(|state| state.is_unsettled() && !state.backing_off())
+            .count();
+        self.config
+            .window
+            .saturating_sub(counted)
+            .min(self.config.max_tracked.saturating_sub(self.objs.len()))
+    }
+
+    /// Objects this machine holds state for: unsettled, routed or with a call in flight.
+    #[cfg(test)]
+    pub(crate) fn tracked(&self) -> usize {
+        self.objs.len()
     }
 
     /// Objects with unsettled wants, backing off or not: what a quiet drain must see reach 0

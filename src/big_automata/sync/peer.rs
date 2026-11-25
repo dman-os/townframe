@@ -402,6 +402,12 @@ impl PeerSync {
             config.jobs.window,
             config.lanes.live_limit,
         );
+        assert!(
+            config.jobs.max_tracked >= config.jobs.window,
+            "the tracked-object cap ({}) must not be below the window ({})",
+            config.jobs.max_tracked,
+            config.jobs.window,
+        );
         Self {
             lifecycle: PartLifecycle::new(config.lifecycle.clone()),
             client: ReplayClient::new(session_id),

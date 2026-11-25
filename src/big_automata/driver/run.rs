@@ -60,6 +60,10 @@ pub struct DriverConfig {
     /// The receive window: unsettled objects admitted before the next replay round waits. At
     /// least 3 (the machine needs room for a `Live` and a `Bulk` round beside a walk).
     pub window: usize,
+    /// The cap on objects the machine tracks, including ones waiting out a failure backoff
+    /// (law 7 of `ObjectJobs`): the window bounds work in flight, this bounds memory. At least
+    /// `window`; once reached, no further objects are admitted until tracked ones settle.
+    pub max_tracked: usize,
     /// Fetches in flight at once.
     pub fetch_cap: usize,
     pub strat: AllowedStrat,
@@ -73,6 +77,7 @@ impl DriverConfig {
             peer,
             backend: backend.into(),
             window: 64,
+            max_tracked: 16 * 64,
             fetch_cap: 4,
             strat: AllowedStrat::default(),
             min_backoff: Duration::from_secs(1),
@@ -90,6 +95,7 @@ impl DriverConfig {
             },
             jobs: object_jobs::Config {
                 window: self.window,
+                max_tracked: self.max_tracked,
                 fetch_cap: self.fetch_cap,
                 min_backoff: backoffs.0,
                 max_backoff: backoffs.1,
