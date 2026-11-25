@@ -1665,7 +1665,7 @@ dependencies = [
  "big_cartridges_core",
  "big_dispatch_core",
  "blake3",
- "indexmap 2.14.2",
+ "indexmap",
  "irpc",
  "macros",
  "method_core",
