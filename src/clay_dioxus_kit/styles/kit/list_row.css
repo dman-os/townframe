@@ -10,7 +10,7 @@
   min-height: var(--ct-dimension-target-coarse);
   padding: var(--ct-dimension-spacing-3) var(--ct-dimension-spacing-4);
   border: 0;
-  border-radius: var(--ct-dimension-radius-md);
+  border-radius: var(--ct-list-row-radius);
   background: transparent;
   color: var(--ct-color-text);
   font-family: var(--ct-font-family);

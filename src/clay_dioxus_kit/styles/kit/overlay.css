@@ -26,7 +26,6 @@
   overflow: hidden;
   background: var(--ct-color-surface-raised);
   color: var(--ct-color-text);
-  box-shadow: var(--ct-elevation-raised);
   font-family: var(--ct-font-family);
 }
 
