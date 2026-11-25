@@ -27,6 +27,7 @@ use big_cartridges_core::Revision;
 use big_cartridges_core::Version;
 use big_cartridges_core::protocol::AnswerCartridgeGrantRequest;
 use big_cartridges_core::protocol::AwaitCartridgeGrantRequest;
+use big_cartridges_core::protocol::AwaitCartridgeGrants;
 use big_cartridges_core::protocol::CartridgesError;
 use big_cartridges_core::protocol::ClearCartridgeConfig;
 use big_cartridges_core::protocol::InstallCartridge;
@@ -307,6 +308,7 @@ declare_service_protocol! {
             ListCartridgeGrantRequests(ListCartridgeGrantRequests),
             AnswerCartridgeGrantRequest(AnswerCartridgeGrantRequest),
             ListCartridgeGrants(ListCartridgeGrants),
+            AwaitCartridgeGrants(AwaitCartridgeGrants),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
             SetNoduleDevTakeover(SetNoduleDevTakeover),
             SetMethodRoute(SetMethodRoute),

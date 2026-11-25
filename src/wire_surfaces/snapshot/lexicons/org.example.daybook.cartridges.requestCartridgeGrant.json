@@ -79,6 +79,14 @@
           "name": "PinnedDatumInvalid"
         },
         {
+          "description": "The envelope a [`ResolveCartridgePin`] pin selects is not available at its heads yet;\nthis is recoverable when sync catches up.",
+          "name": "PinnedEnvelopeUnreadable"
+        },
+        {
+          "description": "The envelope a [`ResolveCartridgePin`] pin selects is not the revision the registry\nserves under its label.",
+          "name": "PinnedRevisionMismatch"
+        },
+        {
           "description": "A published version never changes content: the label is taken by another envelope.",
           "name": "VersionExists"
         },
