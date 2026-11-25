@@ -1110,6 +1110,39 @@ be implemented now.
   which loses the replay session and forces a reconnect, hence fresh summaries.
 - Store-level only.
 
+**Durable outbox (draft for operator review, 2026-11-25).** For backends that answer `Done`
+from `record` and fetch on their own time (big_blobs' transfer worker is the first user). A
+sans-IO machine plus a driver, built on okv, `RevStream` and `KeyedScheduler`.
+1. **A want is durable and atomic with its admission.** `record` writes a want row (object,
+   payload hint, priority, the peer it came from) into an okv wants table in the same
+   transaction as its membership writes, then answers `Done`. A crash after commit keeps the
+   want; a crash before keeps neither.
+2. **No cursor of its own.** The wants table holds only pending work (a row is deleted when its
+   fetch lands), so on start the machine reads every live want and schedules it, then follows
+   the table with `RevStream`. Memory holds at most `M` scheduled wants; the rest are read
+   again as slots free.
+3. **One fetch per object at a time.** A newer want for an object in flight (new payload,
+   higher priority, another provider) waits for the running fetch to end instead of running
+   beside it. (This is the zombie race `KeyedScheduler::replace` has today, queueing the
+   replacement while the old task may still run; the worker audit item. The outbox must not
+   inherit it: fix `replace` or keep the in-flight call table in the machine, as ObjectJobs
+   does.)
+4. **Landing deletes the want in the same transaction** that writes the fetched content. A
+   crash between fetch and commit fetches again (fetches are idempotent).
+5. **Withdrawal cancels.** Deleting a want (the object left every part, a pin was dropped)
+   cancels its fetch; the cancelled call still reports before its slot frees (ObjectJobs law 7).
+6. **Priority, then age.** Among due wants, higher priority starts first, older first among
+   equals. At most `C` fetches run at once.
+7. **Providers.** A fetch goes to a connected peer that advertised the object (the want's
+   providers, unioned across records from several peers); on failure it backs off and tries the
+   next provider; with no provider connected it waits without spinning.
+8. **Backoff per want**, from a floor, doubling, capped; reset by success; kept across restarts
+   only as "due now" (no durable backoff state).
+Testing: laws with a naive oracle and a differential proptest; a simulation with crashes
+between record, fetch and land, providers connecting and leaving, and withdrawals racing
+fetches; planted-bug checks (a replacement running beside the old fetch, a crash losing a
+want, a landed fetch leaving its want).
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a

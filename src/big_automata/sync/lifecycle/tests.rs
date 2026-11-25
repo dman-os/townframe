@@ -712,6 +712,13 @@ fn law_10_another_generation_restarts_from_zero() {
                 peer_generation: generation(1),
                 peer_latest: 9
             },
+            LifecycleCommand::PersistCursor {
+                part: part(1),
+                cursor: PeerCursor {
+                    generation: generation(1),
+                    rev: 0
+                }
+            },
             LifecycleCommand::StartCursor {
                 part: part(1),
                 from: 0
@@ -722,7 +729,7 @@ fn law_10_another_generation_restarts_from_zero() {
     // a walk lists everything, and hands over at the summary's latest
     let (rig, out) = decide_held(5, walk_in(1, 9));
     assert_eq!(
-        out[1],
+        out[2],
         LifecycleCommand::StartWalk {
             part: part(1),
             strat: walk_in(1, 9),
@@ -748,6 +755,13 @@ fn law_10_a_latest_below_the_cursor_restarts_from_zero() {
                 peer_generation: generation(0),
                 peer_latest: 4
             },
+            LifecycleCommand::PersistCursor {
+                part: part(1),
+                cursor: PeerCursor {
+                    generation: generation(0),
+                    rev: 0
+                }
+            },
             LifecycleCommand::StartCursor {
                 part: part(1),
                 from: 0
@@ -760,9 +774,44 @@ fn law_10_a_latest_below_the_cursor_restarts_from_zero() {
         out[..],
         [
             LifecycleCommand::Restart { .. },
+            LifecycleCommand::PersistCursor { .. },
             LifecycleCommand::StartWalk { since: 0, .. }
         ]
     ));
+}
+
+/// The restart writes `(peer generation, 0)` at once, also for a part that walks: a stale cursor
+/// of an unminted restore must not outlive a crash.
+#[test]
+fn law_10_a_restart_persists_zero_under_the_peers_generation_at_once() {
+    for (strat, peer_generation, phase) in [
+        (cursor_in(0, 4), 0, Phase::Cursor),
+        (walk_in(0, 4), 0, Phase::Walking),
+        (cursor_in(1, 9), 1, Phase::Cursor),
+        (walk_in(1, 9), 1, Phase::Walking),
+    ] {
+        let (rig, out) = decide_held(5, strat);
+        assert!(
+            matches!(out[0], LifecycleCommand::Restart { .. }),
+            "{out:?}"
+        );
+        assert_eq!(
+            out[1],
+            LifecycleCommand::PersistCursor {
+                part: part(1),
+                cursor: PeerCursor {
+                    generation: generation(peer_generation),
+                    rev: 0
+                }
+            },
+            "the write comes before the start"
+        );
+        assert_eq!(persists(&out), [(1, 0)]);
+        assert_eq!(rig.phase(1), Some(phase));
+    }
+    // no restart, no write
+    let (_, out) = decide_held(5, cursor_in(0, 9));
+    assert!(persists(&out).is_empty());
 }
 
 #[test]

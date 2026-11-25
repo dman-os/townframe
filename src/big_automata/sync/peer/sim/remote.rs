@@ -91,7 +91,9 @@ pub(super) struct Remote {
     pub unminted: bool,
     /// Members the peer had in a part before it lost its data or went back to a backup, and
     /// that the new log does not mention: a pull-only client keeps them, because nothing
-    /// removes a row the peer has no tombstone for.
+    /// removes a row the peer has no tombstone for. Kept on purpose: a peer that lost data must
+    /// not delete our copies, or data loss would propagate across the network; a backend may
+    /// reconcile them if it wants (`PartLifecycle` law 10).
     ghosts: BTreeMap<PartKey, BTreeSet<ObjKey>>,
 }
 

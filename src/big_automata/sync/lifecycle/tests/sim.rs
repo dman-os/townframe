@@ -264,6 +264,19 @@ impl Sim {
                     assert!(decidable.contains(p), "{op:?}: decided an undecidable part");
                     assert_eq!(phase_of(p), Some(Phase::Deciding));
                 }
+                LifecycleCommand::PersistCursor { part: p, cursor }
+                    if cursor.rev == 0 && matches!(op, Op::Answer { .. }) =>
+                {
+                    // the restart's write (law 10), right after its `Restart`, whatever
+                    // phase the part starts in
+                    assert!(
+                        self.rewound.contains(p),
+                        "{op:?}: a zero persist from nowhere"
+                    );
+                    assert!(matches!(op, Op::Answer { .. }));
+                    self.store.insert(p.clone(), *cursor);
+                    self.rewound.remove(p);
+                }
                 LifecycleCommand::PersistCursor { part: p, cursor } => {
                     assert_eq!(
                         self.lc.phase(p),

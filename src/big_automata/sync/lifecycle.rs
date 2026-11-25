@@ -55,7 +55,8 @@
 //!    watermark with `applied(part, cursor)`; this machine raises the held handover cursor
 //!    but emits no `PersistCursor` for a walking part. Persisting before the walk's work
 //!    settled would let a crash skip what the walk found, for good: the next session resumes
-//!    by cursor and never re-walks.
+//!    by cursor and never re-walks. The one exception is law 10's restart write, a cursor of
+//!    0, which can never skip anything.
 //! 8. **Upgrade happens once, and only when told.** `upgrade(part)` is valid only for a
 //!    `Walking` part (anything else is a caller bug and panics); the parent sends it when the walk reports done **and** no object work
 //!    for the part is outstanding (adds and removals alike). It emits `PersistCursor` with the
@@ -76,10 +77,16 @@
 //!     log, or the walk lists everything and reconciles against the local part), the part
 //!     takes the summary's generation, and a `Restart` command (carrying the old cursor with
 //!     its generation, and the summary's generation and `latest`) comes before
-//!     `StartCursor`/`StartWalk` for the embedder to log. Every `PersistCursor` carries the
-//!     part's current generation, so the first persist after a restart writes the new one; a
-//!     crash before it leaves the old generation stored and the next connection restarts
-//!     again, which is idempotent.
+//!     `StartCursor`/`StartWalk` for the embedder to log. The restart **persists
+//!     `(peer generation, 0)` at once**, before `StartCursor`/`StartWalk`, also for a part
+//!     that then walks (law 7's exception: 0 skips nothing). It is needed because an unminted
+//!     restore keeps the generation: the stale high cursor would otherwise stay stored until
+//!     the first raise, and a crash before it, followed by the peer's head passing that cursor
+//!     again, would resume from it and miss the rows the new log stamped below it. Every
+//!     later `PersistCursor` carries the part's current generation.
+//!     Rows the part holds that the peer's new log has no row for (ghosts) are kept: a peer
+//!     that lost data must not delete our copies, or data loss would propagate across the
+//!     network. A backend may reconcile them if it wants.
 //!     Checked once per decision, never mid-connection: a generation change while connected
 //!     means the peer restarted, which loses the replay session (its next update or round
 //!     fails) and forces a reconnect, whose parts all decide again from fresh summaries. So
@@ -517,6 +524,13 @@ impl PartLifecycle {
                 peer_latest: latest,
             });
             p.cursor = 0;
+            out.push(LifecycleCommand::PersistCursor {
+                part: part.clone(),
+                cursor: PeerCursor {
+                    generation: peer_generation,
+                    rev: 0,
+                },
+            });
         }
         p.generation = Some(peer_generation);
         match strat {

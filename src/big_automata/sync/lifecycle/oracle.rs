@@ -231,6 +231,14 @@ impl Oracle {
                 peer_latest: latest,
             });
             p.cursor = 0;
+            let zero = PeerCursor {
+                generation: peer_generation,
+                rev: 0,
+            };
+            cmds.push(LifecycleCommand::PersistCursor {
+                part: part.clone(),
+                cursor: zero,
+            });
         }
         p.generation = Some(peer_generation);
         match strat {
@@ -252,6 +260,11 @@ impl Oracle {
                 });
             }
             PeerPartStrat::Unknown => unreachable!("not an answer"),
+        }
+        for cmd in &cmds {
+            if let LifecycleCommand::PersistCursor { part, cursor } = cmd {
+                self.persisted.insert(part.clone(), *cursor);
+            }
         }
         cmds
     }
