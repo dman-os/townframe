@@ -4,11 +4,14 @@
 # exposed_external_crates: [uuid]
 
 impl From < String > for intxt_capture::hook::Event
+pub const intxt_capture::git_hooks::MARKER: & str
 pub enum intxt_capture::Error { # [error ("io: {0}")] Io (# [from] std :: io :: Error), # [error ("git {args}: {stderr}")] Git { args : String , stderr : String }, # [doc = " git printed something this crate cannot read: a path that is not UTF-8 or contains a"] # [doc = " newline, or a log line of an unknown shape."] # [error ("{0}")] Format (String), # [doc = " A hook's JSON input lacks a required field or is not JSON."] # [error ("hook input: {0}")] Hook (String), # [doc = " An ACP message a recording cannot follow: not JSON-RPC, a response to a request never"] # [doc = " seen, an update outside a prompt turn."] # [error ("acp: {0}")] Acp (String), # [error (transparent)] Transcript (# [from] crate :: transcript :: ImportError), # [doc = " What a person named when packaging work (a range, a branch, a jj change) is not usable:"] # [doc = " the reason is for them."] # [error ("{0}")] Revision (String), # [doc = " A state file is not what this version wrote."] # [error ("state file {path}: {reason}")] State { path : String , reason : String } }
 pub enum intxt_capture::acp::Direction { # [doc = " Client to agent: the agent's stdin."] ToAgent, # [doc = " Agent to client: the agent's stdout."] FromAgent }
 pub enum intxt_capture::acp::Window { # [doc = " Observe the worktrees: whatever changed since the last observation has no tool call to"] # [doc = " name. A session start, a turn end and the connection's end."] Boundary, # [doc = " A tool call began: take the worktrees' pre-snapshot for it. `session` is empty."] Open (ToolWindow), # [doc = " A tool call finished: observe the worktrees, the ops caused by"] # [doc = " the call. `session` is empty; the call itself is recorded with its turn."] # [doc = ""] # [doc = " Calls that overlap cut the time since the last observation into segments at each"] # [doc = " opening, one op per segment; a segment with several calls open has no cause, as on the"] # [doc = " hook path for parallel `PreToolUse` and `PostToolUse`."] Close (ToolWindow) }
 pub enum intxt_capture::anchor::Placement { # [doc = " `exact` is whether the quote's prefix and suffix hold as well as its text; when only the"] # [doc = " text does, the lines are still right but their surroundings changed."] Placed { lines : LineRange , exact : bool }, # [doc = " The quoted text is not in the destination where the diff says it should be."] Outdated }
 pub enum intxt_capture::anchor::Source { # [doc = " A commit, spelled as the hex id (full or abbreviated; resolving it is the caller's)."] Commit (String), # [doc = " A worktree op by its sequence number, spelled `op<seq>`: the prefix keeps it from being"] # [doc = " read as an all-digit abbreviated commit id."] Op (u64) }
+pub enum intxt_capture::git_hooks::HookState { # [doc = " The hook is capture's and is in place."] Installed, # [doc = " A `post-rewrite` that is not capture's is there, so none was installed and rewrites are"] # [doc = " not seen exactly (`add` falls back to patch ids)."] ForeignPostRewrite, # [doc = " Installing failed (a read-only hooks directory, say). Capture goes on recording and tries"] # [doc = " again at its next observation, or when `capture install-git-hooks` is run."] Failed { reason : String } }
+pub enum intxt_capture::git_hooks::Install { # [doc = " Wrote the hook (none was there, or ours was out of date)."] Installed (PathBuf), # [doc = " Ours was already in place; nothing changed."] AlreadyInstalled (PathBuf), # [doc = " A `post-rewrite` that is not ours is at the path; nothing was written."] Foreign (PathBuf) }
 pub enum intxt_capture::hook::Event { SessionStart, PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, Stop, SubagentStop, PreCompact, SessionEnd, Other (String) }
 pub enum intxt_capture::transcript::ImportError { # [error ("reading the transcript: {0}")] Io (# [from] std :: io :: Error), # [error ("the transcript is {len} bytes, shorter than the offset {offset} already imported")] Shrank { len : u64 , offset : u64 }, # [error ("transcript line at byte {at}: {reason}")] Line { at : u64 , reason : String }, # [error ("transcript record {uuid}: {reason}")] Record { uuid : String , reason : String } }
 pub impl intxt_capture::acp::Recorder::fn feed (& mut self , direction : Direction , at : Timestamp , bytes : & [u8] ,) -> Result < Vec < Emit > , Error >
@@ -18,6 +21,9 @@ pub impl intxt_capture::acp::Recorder::fn recording_thinking (mut self) -> Self
 pub impl intxt_capture::acp::Recorder::fn set_doc (& mut self , session_id : & str , doc : String)
 pub impl intxt_capture::anchor::Target::fn parse (spelling : & str) -> Result < Self , Error >
 pub impl intxt_capture::git::Git::fn new (dir : & Path) -> Self
+pub impl intxt_capture::git_hooks::HookState::fn describe (& self) -> String
+pub impl intxt_capture::git_hooks::HookState::fn needs_install (state : & Option < Self >) -> bool
+pub impl intxt_capture::git_hooks::Install::fn state (& self) -> HookState
 pub impl intxt_capture::hook::Hook::fn parse (input : & [u8]) -> Result < Self , Error >
 pub impl intxt_capture::host::Prepared::fn commit (mut self , recorded : RecordedIds) -> Result < () , Error >
 pub impl intxt_capture::host::Prepared::fn worktree_roots (& self) -> impl Iterator < Item = & Path >
@@ -38,9 +44,13 @@ pub intxt_capture::anchor::fn first_parent (git : & Git , commit : & str) -> Res
 pub intxt_capture::anchor::fn quote (content : & str , lines : & LineRange) -> Result < TextQuote , Error >
 pub intxt_capture::git::fn commit (git : & Git , sha : & str) -> Result < GitCommit , Error >
 pub intxt_capture::git::fn observe (root : & Path , git_dir : & Path , common_dir : & Path , state : & GitState , import : & [String] ,) -> Result < (GitObserved , GitState) , Error >
+pub intxt_capture::git_hooks::fn install_post_rewrite (root : & Path) -> Result < Install , Error >
+pub intxt_capture::git_hooks::fn parse_post_rewrite (input : & str) -> Result < Vec < RewritePair > , Error >
+pub intxt_capture::host::fn install_git_hooks (identity : & Identity) -> Result < git_hooks :: Install , Error >
 pub intxt_capture::host::fn prepare (hook : & Hook , session_path : & Path) -> Result < Prepared , Error >
 pub intxt_capture::host::fn prepare_acp (session : SessionBatch , sessions_dir : & Path , cwd : & Path , known : & BTreeSet < PathBuf > , window : & Window ,) -> Result < Prepared , Error >
 pub intxt_capture::host::fn prepare_import (identity : & Identity , import : & [String]) -> Result < Prepared , Error >
+pub intxt_capture::host::fn prepare_rewrite (identity : & Identity , rewrites : & [RewritePair]) -> Result < Prepared , Error >
 pub intxt_capture::host::fn put_on_intxt (identity : & Identity , drawer : Option < String >) -> Result < () , Error >
 pub intxt_capture::host::fn recorded_worktree (identity : & Identity) -> Result < RecordedWorktree , Error >
 pub intxt_capture::host::fn sessions_in (sessions_dir : & Path , root : & Path) -> Result < Vec < RecordedSession > , Error >
@@ -58,6 +68,7 @@ pub intxt_capture::revisions::fn written_files (git : & Git , commits : & [Strin
 pub mod intxt_capture::acp
 pub mod intxt_capture::anchor
 pub mod intxt_capture::git
+pub mod intxt_capture::git_hooks
 pub mod intxt_capture::hook
 pub mod intxt_capture::host
 pub mod intxt_capture::identity
@@ -78,7 +89,7 @@ pub struct intxt_capture::git::Head  { reference: Option < String >, target: Opt
 pub struct intxt_capture::hook::Hook  { session_id: String, transcript_path: PathBuf, cwd: PathBuf, event: Event, tool_name: Option < String >, tool_use_id: Option < String >, tool_input: Option < Value >, extra: BTreeMap < String , Value > }
 pub struct intxt_capture::host::Prepared  { batch: Batch }
 pub struct intxt_capture::host::RecordedSession  { session_id: String, doc: Option < String >, modified: std :: time :: SystemTime }
-pub struct intxt_capture::host::RecordedWorktree  { docs: WorktreeDocs, ops: u64, intxt: Option < String > }
+pub struct intxt_capture::host::RecordedWorktree  { docs: WorktreeDocs, ops: u64, intxt: Option < String >, git_hooks: Option < HookState > }
 pub struct intxt_capture::identity::Identity  { root: PathBuf, git_dir: PathBuf, common_dir: PathBuf, clone_id: String, worktree_id: String, remotes: Vec < String >, roots: Vec < String > }
 pub struct intxt_capture::observe::Observation  { identity: Identity, earlier: Vec < Vec < Change > >, changes: Vec < Change >, git: GitObserved }
 pub struct intxt_capture::observe::WorktreeState  {  }

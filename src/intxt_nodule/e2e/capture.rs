@@ -386,7 +386,7 @@ async fn is_absent(node: &TestNode, doc: &str, tag: &str, slot: &str) -> bool {
     let capability = capability(
         node,
         DocScope {
-            read: BTreeSet::from([doc.clone()]),
+            read: DocScope::read_all([doc.clone()]),
             ..DocScope::default()
         },
     )
@@ -687,4 +687,126 @@ async fn ref_moves_and_a_reflog_gap_are_recorded() {
     assert!(ops[0]["git"].get("reflog").is_none(), "{}", ops[0]["git"]);
     assert_eq!(target_of("refs/heads/feat").await, third_sha);
     node.stop().await;
+}
+
+/// Amends `repo`'s `HEAD` with the installed `post-rewrite` hook run by git, whose `day` is a
+/// stand-in that keeps what the script handed it: returns the hook's arguments and its stdin.
+fn amend_through_the_hook(repo: &Path, message: &str) -> (String, String) {
+    let bin = repo.with_file_name("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let seen = repo.with_file_name("seen");
+    let day = bin.join("day");
+    std::fs::write(
+        &day,
+        format!(
+            "#!/bin/sh\necho \"$@\" > {0}.args\ncat > {0}.stdin\n",
+            seen.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&day, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["commit", "-q", "--amend", "-m", message])
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Ada")
+        .env("GIT_AUTHOR_EMAIL", "ada@example.com")
+        .env("GIT_COMMITTER_NAME", "Grace")
+        .env("GIT_COMMITTER_EMAIL", "grace@example.com")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        std::fs::read_to_string(seen.with_extension("args"))
+            .unwrap()
+            .trim()
+            .to_owned(),
+        std::fs::read_to_string(seen.with_extension("stdin")).unwrap(),
+    )
+}
+
+/// The hook capture installed on its first look at the clone reports an amend: what
+/// `day x intxt capture git-rewrite` does with git's stdin (observe under the worktree's lock,
+/// record into the capture drawer) writes `rewrite/<old>` and `rewrittenFrom/<new>` with
+/// `how: hook` beside the commits in the repository document, and recording them again changes
+/// nothing.
+#[tokio::test]
+async fn an_amend_the_hook_reports_is_recorded_beside_the_commits() {
+    let node = boot().await;
+    let mut session = start(&node).await;
+    let root = session.repo.display().to_string();
+    session
+        .run(&node, session.hook("SessionStart", None), false)
+        .await
+        .expect("the first hook records the baseline and installs the hook");
+    std::fs::write(session.repo.join("a.txt"), "one\nTWO\n").unwrap();
+    git(&session.repo, &["add", "-A"]);
+    git(&session.repo, &["commit", "-q", "-m", "second"]);
+    session
+        .run(&node, session.hook("Stop", None), false)
+        .await
+        .expect("the commit is an op");
+    let old = git(&session.repo, &["rev-parse", "HEAD"]);
+
+    let (arguments, stdin) = amend_through_the_hook(&session.repo, "second, amended");
+    let new = git(&session.repo, &["rev-parse", "HEAD"]);
+    assert_ne!(old, new);
+    assert_eq!(arguments, "x intxt capture git-rewrite amend");
+
+    let identity = intxt_capture::identity::resolve(&session.repo)
+        .unwrap()
+        .unwrap();
+    let pairs = intxt_capture::git_hooks::parse_post_rewrite(&stdin).unwrap();
+    let prepared = intxt_capture::host::prepare_rewrite(&identity, &pairs).unwrap();
+    session.calls += 1;
+    let key = format!("hook-{}", session.calls);
+    let recorded = session.send(&node, &prepared.batch, &key).await;
+    assert_eq!(
+        session.send(&node, &prepared.batch, &key).await,
+        recorded,
+        "a retried call answers the same"
+    );
+    prepared.commit(recorded.clone()).unwrap();
+
+    let repo = recorded.worktrees[&root].docs.repo.clone().unwrap();
+    let rewrite = value(&node, &repo, work::Rewrite::ID, &old).await;
+    assert_eq!(rewrite, json!({"successor": new, "how": "hook"}));
+    let from = value(&node, &repo, work::RewrittenFrom::ID, &new).await;
+    assert_eq!(from, json!({"predecessor": old, "how": "hook"}));
+    assert_eq!(
+        value(&node, &repo, work::GitCommit::ID, &new).await["message"],
+        "second, amended"
+    );
+
+    // The same report again (a re-run of the hook) writes nothing new: the document keeps its
+    // heads.
+    let before = doc_heads(&node, &repo).await;
+    let again = intxt_capture::host::prepare_rewrite(&identity, &pairs).unwrap();
+    session.calls += 1;
+    let answered = session
+        .send(&node, &again.batch, &format!("hook-{}", session.calls))
+        .await;
+    again.commit(answered).unwrap();
+    assert_eq!(doc_heads(&node, &repo).await, before);
+    node.stop().await;
+}
+
+/// The heads of `doc`.
+async fn doc_heads(node: &TestNode, doc: &str) -> Vec<big_cabinet_core::doc::ChangeHash> {
+    let doc: DocId = doc.parse().unwrap();
+    operator(node, "heads")
+        .read_datums(&doc, Some(BTreeSet::new()))
+        .await
+        .unwrap()
+        .0
 }

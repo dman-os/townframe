@@ -117,6 +117,22 @@ pub struct WorktreeBatch {
     pub refs: BTreeMap<String, GitRef>,
     /// The reflog lost entries since the last observation; the last op is a synthetic move.
     pub reflog_gap: bool,
+    /// Commits git's `post-rewrite` hook reported as replaced (an amend, a rebase), in the order
+    /// git listed them. Recorded beside the commits as `rewrite/<old>` and `rewrittenFrom/<new>`
+    /// with `how: hook`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rewrites: Vec<RewritePair>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// One line of `post-rewrite`'s input: the commit `old` was replaced by `new`.
+#[macros::datum]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RewritePair {
+    pub old: String,
+    pub new: String,
     #[serde(flatten)]
     pub extra: Extra,
 }

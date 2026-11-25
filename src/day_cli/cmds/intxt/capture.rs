@@ -46,6 +46,137 @@ pub(crate) struct Summary {
     pub uncaused_tool_calls: u64,
 }
 
+/// What git's `post-rewrite` reports.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub(crate) enum RewriteKind {
+    Amend,
+    Rebase,
+}
+
+/// `day x intxt capture <command>`: capture's git hooks.
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum CaptureCommands {
+    /// Record the commits git's `post-rewrite` hook reports as replaced (stdin: `<old> <new>`
+    /// per line) in this worktree's capture
+    ///
+    /// The command of the `post-rewrite` hook capture installs; git runs it with `amend` or
+    /// `rebase`. The pairs are recorded as `rewrite` and `rewrittenFrom` datums beside the
+    /// worktree's commits in the capture drawer, where `day x intxt add` finds them. A failure
+    /// is one line on stderr and status 1; git ignores it, since `post-rewrite` cannot block.
+    #[command(after_long_help = "Example (what the hook runs):
+  day x intxt capture git-rewrite amend")]
+    GitRewrite {
+        /// What was rewritten, git's argument to the hook
+        #[arg(value_enum)]
+        kind: RewriteKind,
+    },
+    /// Install capture's `post-rewrite` hook in this worktree's clone, and say what was done
+    ///
+    /// Capture does this itself the first time it records a clone. A `post-rewrite` hook that is
+    /// not capture's is left alone, and `day x intxt status` says so.
+    InstallGitHooks,
+}
+
+impl CaptureCommands {
+    /// Runs `day x intxt capture [command]`. A failure is one line on stderr and status 1: Claude
+    /// Code shows it to the operator, and status 2 would be fed back to the model.
+    pub(super) async fn run(command: Option<Self>, verbose: bool) -> Res<ExitCode> {
+        let outcome = match command {
+            None => Self::hook(verbose).await,
+            Some(Self::GitRewrite { kind }) => Self::rewritten(kind, verbose).await,
+            Some(Self::InstallGitHooks) => Self::install_git_hooks(),
+        };
+        match outcome {
+            Ok(()) => Ok(ExitCode::SUCCESS),
+            Err(error) => {
+                let line = format!("{error:#}").replace('\n', " ");
+                eprintln!("intxt capture: {line}");
+                Ok(ExitCode::FAILURE)
+            }
+        }
+    }
+
+    /// The hook's JSON from stdin, captured against the node `--node` names.
+    async fn hook(verbose: bool) -> Res<()> {
+        let node_dir = lazy::config().await?.node_dir.clone();
+        super::require_daemon(&node_dir).await?;
+        let mut input = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)
+            .wrap_err("reading the hook's JSON from stdin")?;
+        let client = lazy::node().await?;
+        let summary = run(&client, node_dir.root(), &input).await?;
+        Self::report(&summary, verbose);
+        Ok(())
+    }
+
+    /// `capture git-rewrite`: git's `post-rewrite` stdin, recorded for the worktree git ran the hook
+    /// in (the current directory).
+    async fn rewritten(kind: RewriteKind, verbose: bool) -> Res<()> {
+        let node_dir = lazy::config().await?.node_dir.clone();
+        super::require_daemon(&node_dir).await?;
+        let mut input = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+            .wrap_err("reading post-rewrite's pairs from stdin")?;
+        let client = lazy::node().await?;
+        let cwd = std::env::current_dir()?;
+        let recorded = git_rewrite(&client, node_dir.root(), &cwd, &input).await?;
+        if verbose {
+            eprintln!("intxt capture: recorded {recorded} {kind:?} rewrite(s)");
+        }
+        Ok(())
+    }
+
+    /// `capture install-git-hooks`: installs the hook in the current directory's clone.
+    fn install_git_hooks() -> Res<()> {
+        let cwd = std::env::current_dir()?;
+        let identity = intxt_capture::identity::resolve(&cwd)?.ok_or_else(|| {
+            eyre::eyre!(
+                "{} is not in a git worktree; run this in the clone to install the hook in",
+                cwd.display()
+            )
+        })?;
+        match intxt_capture::host::install_git_hooks(&identity)? {
+            intxt_capture::git_hooks::Install::Installed(path) => {
+                println!("installed the post-rewrite hook at {}", path.display());
+            }
+            intxt_capture::git_hooks::Install::AlreadyInstalled(path) => {
+                println!(
+                    "the post-rewrite hook is already installed at {}",
+                    path.display()
+                );
+            }
+            intxt_capture::git_hooks::Install::Foreign(path) => {
+                println!(
+                    "hook not installed: foreign post-rewrite at {} (left alone; rewrites are matched by patch id)",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// What a run says on stderr: everything under `--verbose`, otherwise only what the operator
+    /// should see (a tool call recorded without its cause).
+    fn report(summary: &Summary, verbose: bool) {
+        if summary.uncaused_tool_calls > 0 {
+            eprintln!(
+                "intxt capture: {} op(s) of a tool call the transcript did not show yet were recorded without a cause",
+                summary.uncaused_tool_calls
+            );
+        }
+        if verbose {
+            eprintln!(
+                "intxt capture: {}",
+                if summary.recorded.is_some() {
+                    "recorded"
+                } else {
+                    "nothing to record"
+                }
+            );
+        }
+    }
+}
+
 pub(super) fn write_atomically(path: &Path, bytes: &[u8]) -> Res<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -171,6 +302,34 @@ pub(crate) async fn run(client: &NodeClient, node_dir: &Path, input: &[u8]) -> R
     let recorded = record_prepared(client, node_dir, prepared).await?;
     summary.recorded = recorded;
     Ok(summary)
+}
+
+/// Records the pairs `input` (git's `post-rewrite` stdin) holds for the worktree `cwd` is in, the
+/// way a hook's batch is recorded: observed under the worktree's lock, written into the capture
+/// drawer. Returns how many pairs git reported.
+pub(crate) async fn git_rewrite(
+    client: &NodeClient,
+    node_dir: &Path,
+    cwd: &Path,
+    input: &str,
+) -> Res<usize> {
+    let rewrites = intxt_capture::git_hooks::parse_post_rewrite(input)?;
+    if rewrites.is_empty() {
+        return Ok(0);
+    }
+    let identity = intxt_capture::identity::resolve(cwd)?.ok_or_else(|| {
+        eyre::eyre!(
+            "{} is not in a git worktree; git runs the hook in one",
+            cwd.display()
+        )
+    })?;
+    let recorded = rewrites.len();
+    let prepared = tokio::task::spawn_blocking(move || {
+        intxt_capture::host::prepare_rewrite(&identity, &rewrites)
+    })
+    .await??;
+    record_prepared(client, node_dir, prepared).await?;
+    Ok(recorded)
 }
 
 /// Records `prepared`'s batch through intxt's `recordObservations` and commits the recorder's

@@ -1,0 +1,296 @@
+use big_cabinet_core::ActorUrl;
+use big_cabinet_core::DatumReference;
+use big_cabinet_core::Location;
+use big_cabinet_core::datum::Extra;
+use jiff::Timestamp;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde::Serialize;
+use std::collections::BTreeMap;
+
+/// A project, as far as recorders can tell (`gitRepo/<uuid>`): git has no repository identity,
+/// so the first recorder mints a UUID. Shared root commits only suggest that two clones are one
+/// project; they never merge repos.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRepo {
+    /// Root commit shas, for matching clones on other machines.
+    pub roots: Vec<String>,
+    /// Remote URLs; fetch hints, never identity.
+    pub remotes: Vec<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// One `.git` directory or jj repository on one machine (`gitClone/<uuid>`, the UUID kept in
+/// `.git/intxt-id`). Refs and the jj op log live here.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GitClone {
+    /// The `gitRepo` datum, once the repository has a root commit to be keyed by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<DatumReference>,
+    /// The node holding the clone.
+    pub machine: ActorUrl,
+    /// Absolute path of the git directory; a hint, not identity.
+    pub path: String,
+    pub vcs: Vec<Vcs>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+#[macros::datum(open_string)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Vcs {
+    #[serde(rename = "git")]
+    Git,
+    #[serde(rename = "jj")]
+    Jj,
+    #[datum(other)]
+    Unknown(String),
+}
+
+/// One checkout directory of a clone (`worktree/main`, one per worktree document). Written only
+/// by the recorder on its machine.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Worktree {
+    /// The `gitClone` datum.
+    pub clone: DatumReference,
+    /// The UUID kept in the worktree's own git directory.
+    pub id: String,
+    /// Absolute path of the checkout; a hint, not identity.
+    pub path: String,
+    /// The op-log documents, in sequence order.
+    pub op_logs: Vec<OpLogDoc>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// One op-log document and the first sequence number it holds; it holds every op up to the next
+/// document's `from`.
+#[macros::datum]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OpLogDoc {
+    pub doc: String,
+    pub from: u64,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// One observed change in a worktree (`worktreeOp/<seq>`). Sequential keys from one writer make
+/// the log linear by construction, like jj's operation log.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeOp {
+    pub at: Timestamp,
+    pub kind: OpKind,
+    /// The tool call whose window the change fell in, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<Location>,
+    /// Path → the git blob id of the path's content after this op, for every path the op changed
+    /// and did not delete. The content is a git object (ADR 040 §4): committed, or written by the
+    /// host with `git hash-object -w` and kept under `refs/intxt/keep/<worktree id>`. Renames are
+    /// not recorded; a reader pairs `deleted` and `files` with `git diff -M`.
+    pub files: BTreeMap<String, String>,
+    /// Paths this op deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jj: Option<JjObservation>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// What an op is. Ref moves are spelled after git's own reflog account of them. A change with no
+/// known cause is an `edit` without `cause`, not a kind of its own.
+#[macros::datum(open_string)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum OpKind {
+    #[serde(rename = "edit")]
+    Edit,
+    #[serde(rename = "checkout")]
+    Checkout,
+    #[serde(rename = "reset")]
+    Reset,
+    #[serde(rename = "commit")]
+    Commit,
+    #[serde(rename = "amend")]
+    Amend,
+    #[serde(rename = "rebase")]
+    Rebase,
+    #[serde(rename = "merge")]
+    Merge,
+    #[serde(rename = "cherryPick")]
+    CherryPick,
+    #[serde(rename = "revert")]
+    Revert,
+    /// A ref moved some other way: a fast-forward, `branch -f`, a fetch.
+    #[serde(rename = "refMove")]
+    RefMove,
+    #[serde(rename = "jjSnapshot")]
+    JjSnapshot,
+    #[datum(other)]
+    Unknown(String),
+}
+
+/// Git state an op observed: `HEAD` after it, and the ref it moved.
+#[macros::datum]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GitObservation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// The ref's target before the move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The ref's target after the move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Git's reflog message for the move, verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reflog: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// The jj operation and change an op observed, when the clone is a jj repository.
+#[macros::datum]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct JjObservation {
+    pub operation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// Provenance of a file document (`file/main`), beside the generic `path` and `note`.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct File {
+    /// The `worktree` datum.
+    pub worktree: DatumReference,
+    /// The `Blob` datum, when the file is binary or too large to hold as text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<DatumReference>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// A git commit (`gitCommit/<sha>`). Capture writes it into the repository document, and `add`
+/// writes the commits an intxt references into the intxt's commits document; each writer puts the
+/// same value in the same slot, and none rewrites it: a later fact about a commit goes into its
+/// own datum. Holds no pins; the op that observed the commit does. The commit object itself
+/// travels in a pack (an entry's), where git checks it against its sha on import; this datum is the readable part.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommit {
+    pub parents: Vec<String>,
+    /// The jj change id, when the commit is known to jj.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<String>,
+    pub author: GitIdent,
+    pub committer: GitIdent,
+    pub message: String,
+    pub files: Vec<CommitFile>,
+    /// `git patch-id --stable` of the commit against its first parent: equal for a commit and its
+    /// rebased or amended-without-change successor, which is how `add` matches a rewrite. Absent
+    /// for a merge, a root, and a commit that changes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_id: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// A commit's author or committer line, as git records it. It is a claim the content makes, not
+/// who wrote the datum.
+#[macros::datum]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GitIdent {
+    pub name: String,
+    pub email: String,
+    pub at: Timestamp,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// A path a commit changed relative to its first parent.
+#[macros::datum]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitFile {
+    pub path: String,
+    pub status: FileStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+#[macros::datum(open_string)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FileStatus {
+    #[serde(rename = "added")]
+    Added,
+    #[serde(rename = "modified")]
+    Modified,
+    #[serde(rename = "deleted")]
+    Deleted,
+    #[serde(rename = "renamed")]
+    Renamed,
+    #[serde(rename = "copied")]
+    Copied,
+    #[datum(other)]
+    Unknown(String),
+}
+
+/// A ref of one clone (`gitRef/<clone uuid>/<ref name>`). One writer: the clone's recorder.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRef {
+    pub target: String,
+    /// What a review compares against: the merge base with the upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// A jj operation (`jjOperation/<op id>`): ids and structure, not the op store's contents.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct JjOperation {
+    pub parents: Vec<String>,
+    pub description: String,
+    pub at: Timestamp,
+    pub heads: Vec<String>,
+    pub bookmarks: BTreeMap<String, String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// A jj change's evolution (`jjChange/<change id>`): the commits it has been, in evolog order.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct JjChange {
+    pub commits: Vec<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}

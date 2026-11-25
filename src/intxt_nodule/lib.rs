@@ -51,7 +51,12 @@ use std::collections::BTreeMap;
 pub struct Intxt;
 
 impl big_ndk::Nodule for Intxt {
-    async fn route(&self, nsid: &str, cx: &big_ndk::Cx, body: &[u8]) -> Option<big_ndk::Reply> {
+    async fn route(
+        &self,
+        nsid: &str,
+        cx: &big_ndk::Cx,
+        body: big_ndk::XrpcBody,
+    ) -> Option<big_ndk::Reply> {
         if nsid == CreateIntxt::XRPC.nsid {
             return Some(big_ndk::invoke::<Self, CreateIntxt>(self, cx, body).await);
         }

@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// Run git in `dir` with nothing taken from the machine: no global or system config, and a fixed
-/// identity.
+/// identity. Hooks do not run: capture installs a `post-rewrite` hook that execs `day`, which
+/// must never find a real one on the `PATH` of a test that amends or rebases.
 pub(crate) fn git_in(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .arg("-C")
@@ -13,6 +14,9 @@ pub(crate) fn git_in(dir: &Path, args: &[&str]) -> String {
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", "/dev/null")
         .env("GIT_AUTHOR_NAME", "Ada")
         .env("GIT_AUTHOR_EMAIL", "ada@example.com")
         .env("GIT_COMMITTER_NAME", "Grace")

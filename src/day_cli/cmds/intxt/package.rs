@@ -46,6 +46,7 @@ use intxt_capture::pack;
 use intxt_capture::pack::PackRequest;
 use intxt_capture::revisions;
 use intxt_core::client::Caller;
+use intxt_core::client::MAX_REWRITE_HOPS;
 use intxt_core::client::key;
 use intxt_core::client::to_value;
 use intxt_core::generic;
@@ -73,6 +74,23 @@ pub(crate) enum Named {
     Branch(String),
     /// A jj change, followed through its rewrites.
     Change(String),
+}
+
+impl Named {
+    /// The one thing `add`'s `--commits`, `--branch` and `--change` flags name; clap requires
+    /// exactly one of them, so any other combination is a bug in the command's definition.
+    pub(crate) fn from_flags(
+        commits: Option<String>,
+        branch: Option<String>,
+        change: Option<String>,
+    ) -> Self {
+        match (commits, branch, change) {
+            (Some(range), None, None) => Self::Commits(range),
+            (None, Some(branch), None) => Self::Branch(branch),
+            (None, None, Some(change)) => Self::Change(change),
+            _ => unreachable!("clap requires exactly one of --commits, --branch and --change"),
+        }
+    }
 }
 
 /// What `add` named, resolved now: the entry that names the commits, the commits, and what the
@@ -191,7 +209,8 @@ impl View {
     }
 }
 
-/// The key an entry names a commit by, until the cabinet resolves `#keyRef` (ADR 035 §2.9).
+/// The key an entry names a commit by. Entries hold it as a plain string that intxt resolves
+/// itself; finding the intxt that holds a commit comes later, from a cartridge index.
 pub(super) fn commit_key(sha: &str) -> String {
     format!("{}/{sha}", work::GitCommit::ID)
 }
@@ -453,16 +472,22 @@ impl<'a> Packaging<'a> {
     /// document holds already is left alone, which makes adding again, or adding a range that
     /// overlaps, write only what is new.
     ///
-    /// A new commit whose patch id matches exactly one commit the document already holds from
-    /// outside the range is a rewrite of it (an amend, a rebase, a force-push seen from another
-    /// machine): `rewrite/<old>` and `rewrittenFrom/<new>` are written beside them. Several
-    /// matches name no single predecessor, so nothing is written and the line says so.
+    /// A new commit that git's `post-rewrite` hook reported as replacing a commit the document
+    /// holds (`hooked_rewrites`) is a rewrite of it, exactly: the pair is copied from the capture
+    /// drawer's repository document, `repo`. Every other new commit whose patch id matches exactly
+    /// one commit the document already holds from outside the range is a rewrite of it too (an
+    /// amend, a rebase, a force-push seen from another machine): `rewrite/<old>` and
+    /// `rewrittenFrom/<new>` are written beside them. Several matches name no single
+    /// predecessor, so nothing is written and the line says so. A commit with a hook pair in the
+    /// capture drawer whose chain reaches a held commit is not matched by patch id; one whose chain
+    /// reaches none still is.
     ///
     /// Answers how many commits were written and the lines to report.
     async fn write_commits(
         &self,
         drawer: &DrawerId,
         resolved: &Resolved,
+        repo: Option<&DocId>,
     ) -> Res<(usize, Vec<String>)> {
         if resolved.commits.is_empty() {
             return Ok((0, Vec::new()));
@@ -512,33 +537,70 @@ impl<'a> Packaging<'a> {
         .await??;
         // The predecessors are held commits outside the range, that no rewrite replaced yet.
         let in_range: BTreeSet<&String> = resolved.commits.iter().collect();
-        let predecessors: BTreeMap<String, Option<String>> = held
+        let mut predecessors: BTreeMap<String, Option<String>> = held
             .into_iter()
             .filter(|(sha, _)| !in_range.contains(sha) && !rewritten.contains(sha))
             .collect();
-        let (pairs, mut lines) = match_rewrites(&new, &predecessors);
-        let mut write = BTreeMap::new();
-        for (old, successor) in &pairs {
-            write.insert(
-                key(work::Rewrite::ID, old)?,
-                to_value(&work::Rewrite {
-                    successor: successor.clone(),
-                    how: work::RewriteHow::PatchId,
-                    extra: Default::default(),
-                }),
+        let hooked = match repo {
+            Some(repo) => {
+                self.hooked_rewrites(
+                    repo,
+                    &new.keys().cloned().collect::<Vec<_>>(),
+                    &predecessors,
+                )
+                .await?
+            }
+            None => Default::default(),
+        };
+        // A hook pair is exact: its commits are not matched by patch id, and a predecessor it
+        // claimed is not claimed again. A commit whose hook chain reached no held commit has no
+        // pair here and falls back to patch ids.
+        for (old, _) in &hooked {
+            predecessors.remove(old);
+        }
+        let paired: BTreeSet<&String> = hooked.iter().map(|(_, successor)| successor).collect();
+        let unpaired: BTreeMap<String, work::GitCommit> = new
+            .iter()
+            .filter(|(sha, _)| !paired.contains(*sha))
+            .map(|(sha, commit)| (sha.clone(), commit.clone()))
+            .collect();
+        let (matched, mut lines) = match_rewrites(&unpaired, &predecessors);
+        let pairs = hooked
+            .into_iter()
+            .map(|(old, successor)| (old, successor, work::RewriteHow::Hook))
+            .chain(
+                matched
+                    .into_iter()
+                    .map(|(old, successor)| (old, successor, work::RewriteHow::PatchId)),
             );
+        let mut write = BTreeMap::new();
+        for (old, successor, how) in pairs {
+            // A commit's first recorded successor stands, as in the capture drawer.
+            write
+                .entry(key(work::Rewrite::ID, &old)?)
+                .or_insert_with(|| {
+                    to_value(&work::Rewrite {
+                        successor: successor.clone(),
+                        how: how.clone(),
+                        extra: Default::default(),
+                    })
+                });
             write.insert(
-                key(work::RewrittenFrom::ID, successor)?,
+                key(work::RewrittenFrom::ID, &successor)?,
                 to_value(&work::RewrittenFrom {
                     predecessor: old.clone(),
-                    how: work::RewriteHow::PatchId,
+                    how: how.clone(),
                     extra: Default::default(),
                 }),
             );
             lines.push(format!(
-                "  rewrite    {} replaces {} (same patch id)",
-                short_sha(successor),
-                short_sha(old)
+                "  rewrite    {} replaces {} ({})",
+                short_sha(&successor),
+                short_sha(&old),
+                match how {
+                    work::RewriteHow::Hook => "post-rewrite hook",
+                    _ => "same patch id",
+                }
             ));
         }
         let written = new.len();
@@ -549,6 +611,56 @@ impl<'a> Packaging<'a> {
             .write_datums(&doc, write, BTreeSet::new())
             .await?;
         Ok((written, lines))
+    }
+
+    /// The exact rewrites of `new` commits that git's `post-rewrite` hook reported, from the
+    /// capture drawer's repository document `repo`: the (old, new) pairs whose old commit is one
+    /// of `held` (held by the intxt, outside the range, not rewritten yet).
+    ///
+    /// Each commit's `rewrittenFrom/<sha>` is read for all of them in one read; the answer's
+    /// predecessors that are not held are asked in the next read, since an amend repeated between
+    /// two `add`s leaves a chain (held -> amended -> amended again -> new) of which the intxt
+    /// holds the first. So a hop is one read however many commits are walking, at most
+    /// `MAX_REWRITE_HOPS` of them, and a chain that never reaches a held commit pairs nothing, which leaves the commit to patch-id
+    /// matching.
+    async fn hooked_rewrites(
+        &self,
+        repo: &DocId,
+        new: &[String],
+        held: &BTreeMap<String, Option<String>>,
+    ) -> Res<Vec<(String, String)>> {
+        let mut pairs = Vec::new();
+        // The commit each new commit's walk is at.
+        let mut walking: BTreeMap<String, String> =
+            new.iter().map(|sha| (sha.clone(), sha.clone())).collect();
+        let mut seen: BTreeSet<String> = new.iter().cloned().collect();
+        for _ in 0..MAX_REWRITE_HOPS {
+            if walking.is_empty() {
+                break;
+            }
+            let keys = walking
+                .values()
+                .map(|at| key(work::RewrittenFrom::ID, at))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            let (_, reads) = self.caller.read_datums(repo, Some(keys)).await?;
+            let mut next = BTreeMap::new();
+            for (sha, at) in walking {
+                let from_key = key(work::RewrittenFrom::ID, &at)?;
+                let value = match reads.get(&from_key) {
+                    Some(DatumRead::Accepted { value, .. }) => value.clone(),
+                    Some(DatumRead::Absent { .. }) | None => continue,
+                    Some(other) => eyre::bail!("{from_key} in {repo} is not readable: {other:?}"),
+                };
+                let from: work::RewrittenFrom = serde_json::from_value(value)?;
+                if held.contains_key(&from.predecessor) {
+                    pairs.push((from.predecessor, sha));
+                } else if seen.insert(from.predecessor.clone()) {
+                    next.insert(sha, from.predecessor);
+                }
+            }
+            walking = next;
+        }
+        Ok(pairs)
     }
 
     /// Remembers `drawer` so the node lists it, which is what makes an intxt live.
@@ -1105,7 +1217,19 @@ impl<'a> Packaging<'a> {
 
         // Written even when the entry is already in, so an intxt that holds a range from before
         // its commits document existed gets its commits by adding the range again.
-        let (wrote_commits, commit_lines) = self.write_commits(&drawer, &resolved).await?;
+        let (wrote_commits, commit_lines) = self
+            .write_commits(
+                &drawer,
+                &resolved,
+                recorded
+                    .docs
+                    .repo
+                    .as_deref()
+                    .map(str::parse::<DocId>)
+                    .transpose()?
+                    .as_ref(),
+            )
+            .await?;
         if wrote_commits > 0 {
             plan.lines.push(format!(
                 "  commit data {wrote_commits} commit(s) in the intxt's commits document"
@@ -1420,6 +1544,13 @@ impl<'a> Packaging<'a> {
             None => writeln!(out, "on no intxt (day x intxt use <intxt>)")?,
         }
         writeln!(out, "recorded here: {} op(s)", recorded.ops)?;
+        match recorded.git_hooks {
+            Some(state) => writeln!(out, "git hooks: {}", state.describe())?,
+            None => writeln!(
+                out,
+                "git hooks: not looked at yet (capture installs post-rewrite when it first records; or day x intxt capture install-git-hooks)"
+            )?,
+        }
         if sessions.is_empty() {
             writeln!(out, "sessions recorded here: none")?;
         } else {

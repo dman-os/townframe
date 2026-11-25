@@ -63,7 +63,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 /// How many rewrites deep [`Caller::commit_holders`] follows a commit back.
-const MAX_REWRITE_HOPS: usize = 16;
+pub const MAX_REWRITE_HOPS: usize = 16;
 
 /// What a caller needs to call cabinet methods on behalf of whoever it presents the authority of:
 /// the transport to the node, the capability it presents (none when the node already admits the
@@ -204,7 +204,7 @@ impl<H: HttpTransport> Caller<H> {
     ) -> Result<(Vec<ChangeHash>, BTreeMap<DatumKey, DatumRead>), IntxtError> {
         let capability = self
             .doc_capability(DocScope {
-                read: [doc.clone()].into(),
+                read: DocScope::read_all([doc.clone()]),
                 ..DocScope::default()
             })
             .await?;
@@ -354,7 +354,7 @@ impl<H: HttpTransport> Caller<H> {
     pub async fn datum_keys(&self, doc: &DocId) -> Result<BTreeSet<DatumKey>, IntxtError> {
         let capability = self
             .doc_capability(DocScope {
-                read: [doc.clone()].into(),
+                read: DocScope::read_all([doc.clone()]),
                 ..DocScope::default()
             })
             .await?;
@@ -416,7 +416,7 @@ impl<H: HttpTransport> Caller<H> {
             .await?;
         self.call(WriteDatums {
             capability,
-            command: Some(self.command("write-datums", &(&set, &remove))?),
+            command: Some(self.command("write-datums", &(doc, &set, &remove))?),
             doc_id: doc.clone(),
             mode: WriteMode::AtCurrent,
             set,

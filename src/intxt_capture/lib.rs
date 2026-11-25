@@ -16,6 +16,7 @@
 pub mod acp;
 pub mod anchor;
 pub mod git;
+pub mod git_hooks;
 pub mod hook;
 pub mod host;
 pub mod identity;
