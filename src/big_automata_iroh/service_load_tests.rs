@@ -20,7 +20,7 @@ use big_automata::BuckLevel;
 use big_automata::ObjKey;
 use big_automata::part_store::AuthorizedPage;
 use big_automata::part_store::Generation;
-use big_automata::part_store::LeafEntry;
+use big_automata::part_store::LeafPage;
 use big_automata::part_store::LogRoutes;
 use big_automata::part_store::ObjState;
 use big_automata::part_store::PartStoreServe;
@@ -106,9 +106,10 @@ impl PartStoreServe for Watched {
         bucks: &[(BuckId, Option<ObjKey>)],
         since: Rev,
         limit: usize,
-    ) -> impl Future<Output = Res<Option<Vec<Vec<LeafEntry>>>>> + Send {
+        byte_budget: usize,
+    ) -> impl Future<Output = Res<Option<Vec<LeafPage>>>> + Send {
         self.inner
-            .bucket_leaves(principal, part, bucks, since, limit)
+            .bucket_leaves(principal, part, bucks, since, limit, byte_budget)
     }
 }
 

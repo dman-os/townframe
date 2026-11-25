@@ -65,6 +65,11 @@ fn bucket_summaries_follow_changes_inside_one_bucket() -> Res<()> {
 }
 
 #[test]
+fn leaf_pages_are_the_longest_prefix_within_the_byte_budget() -> Res<()> {
+    block_on(laws::leaf_pages_are_the_longest_prefix_within_the_byte_budget(&Memory))
+}
+
+#[test]
 fn a_listing_ends_at_the_last_bucket_of_a_level() -> Res<()> {
     block_on(laws::a_listing_ends_at_the_last_bucket_of_a_level(&Memory))
 }
@@ -269,8 +274,9 @@ fn bucket_leaves_page_without_loss() -> Res<()> {
             &[(BuckId::ROOT, after)],
             0,
             limit,
+            usize::MAX,
         ))
-        .map(|leaves| leaves.expect("the part is readable").remove(0))
+        .map(|leaves| leaves.expect("the part is readable").remove(0).entries)
     };
     let all = leaves(None, usize::MAX)?;
     assert_eq!(all.len(), 12);

@@ -119,7 +119,7 @@ fn crowd_buckets() -> Vec<BuckId> {
 }
 
 /// The payload and the membership of part 0 for `keys`, as two batches of one transaction.
-fn live(keys: &[ObjKey], value: u8) -> Vec<PartWrite> {
+pub(super) fn live(keys: &[ObjKey], value: u8) -> Vec<PartWrite> {
     vec![
         PartWrite::SetPayloads(
             keys.iter()
@@ -186,10 +186,18 @@ pub async fn crowded_buckets_count_and_list_every_member<B: Backend>(backend: &B
     let principal = principal(0);
     let in_first = harness
         .store
-        .bucket_leaves(&principal, &part(0), &[(first, None)], 0, usize::MAX)
+        .bucket_leaves(
+            &principal,
+            &part(0),
+            &[(first, None)],
+            0,
+            usize::MAX,
+            usize::MAX,
+        )
         .await?
         .expect("the part is readable")
-        .remove(0);
+        .remove(0)
+        .entries;
     let mut keys = crowd()[..3].to_vec();
     keys.sort();
     assert_eq!(
@@ -201,20 +209,35 @@ pub async fn crowded_buckets_count_and_list_every_member<B: Backend>(backend: &B
     for id in crowd_buckets() {
         let whole = harness
             .store
-            .bucket_leaves(&principal, &part(0), &[(id, None)], 0, usize::MAX)
+            .bucket_leaves(
+                &principal,
+                &part(0),
+                &[(id, None)],
+                0,
+                usize::MAX,
+                usize::MAX,
+            )
             .await?
             .expect("the part is readable")
-            .remove(0);
+            .remove(0)
+            .entries;
         let mut paged = Vec::new();
         let mut after = None;
         loop {
             let page = harness
                 .store
-                .bucket_leaves(&principal, &part(0), &[(id, after.clone())], 0, 1)
+                .bucket_leaves(
+                    &principal,
+                    &part(0),
+                    &[(id, after.clone())],
+                    0,
+                    1,
+                    usize::MAX,
+                )
                 .await?
                 .expect("the part is readable")
                 .remove(0);
-            let Some(entry) = page.into_iter().next() else {
+            let Some(entry) = page.entries.into_iter().next() else {
                 break;
             };
             after = Some(entry.obj.clone());

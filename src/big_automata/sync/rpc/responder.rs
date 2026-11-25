@@ -6,10 +6,11 @@
 
 use crate::interlude::*;
 
+use crate::part_store::LEAF_PAGE_BYTE_BUDGET;
 use crate::part_store::LeafEntry;
+use crate::part_store::LeafPage;
 use crate::part_store::PartStoreServe;
 use crate::part_store::bucket_summary::BucketSummary;
-use crate::sync::rpc::LEAF_PAGE_BYTE_BUDGET;
 use crate::sync::rpc::MAX_LEAF_BUCKETS;
 use crate::sync::rpc::MAX_LEAF_PAGE;
 use crate::sync::rpc::MAX_LIST_BUCKETS;
@@ -192,10 +193,17 @@ impl<S: PartStoreServe> RpcResponder<S> {
             .into_iter()
             .map(|LeafBucketRequest { buck_id, after }| (buck_id, after))
             .collect::<Vec<_>>();
-        // One past the limit tells whether a page finishes its bucket.
+        // The store cuts each page at the limit and the byte budget.
         let Some(leaves) = self
             .store
-            .bucket_leaves(principal, &part_key, &bucks, since, limit + 1)
+            .bucket_leaves(
+                principal,
+                &part_key,
+                &bucks,
+                since,
+                limit,
+                self.leaf_byte_budget,
+            )
             .await?
         else {
             return Ok(Err(BucketsError::UnknownPart));
@@ -203,24 +211,9 @@ impl<S: PartStoreServe> RpcResponder<S> {
         Ok(Ok(bucks
             .into_iter()
             .zip(leaves)
-            .map(|((buck_id, after), mut entries)| {
-                // The longest prefix within the limit and the byte budget. It stops before the
-                // entry that does not fit instead of skipping it for a narrower one: the next
-                // page resumes after the last entry taken, so a skipped entry is never read.
-                // The first entry is always taken (an empty page reads as the bucket's end).
-                let mut bytes = 0usize;
-                let mut taken = 0usize;
-                for entry in entries.iter().take(limit) {
-                    bytes += BucketObjPageEntry::wire_bytes(entry.obj.as_bytes().len());
-                    if taken > 0 && bytes > self.leaf_byte_budget {
-                        break;
-                    }
-                    taken += 1;
-                }
-                // The probe entry past the limit, or an entry the budget turned away, is left.
-                let done = taken == entries.len();
-                entries.truncate(taken);
-                let next_after = (!done).then(|| {
+            .map(|((buck_id, after), LeafPage { entries, more })| {
+                // The next page resumes after the last entry taken.
+                let next_after = more.then(|| {
                     entries
                         .last()
                         .expect("a page of a bucket with more is not empty")

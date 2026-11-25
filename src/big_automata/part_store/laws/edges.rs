@@ -85,10 +85,18 @@ pub async fn a_listing_ends_at_the_last_bucket_of_a_level<B: Backend>(backend: &
         async move {
             eyre::Ok(
                 store
-                    .bucket_leaves(principal, &part(0), &[(id, None)], 0, usize::MAX)
+                    .bucket_leaves(
+                        principal,
+                        &part(0),
+                        &[(id, None)],
+                        0,
+                        usize::MAX,
+                        usize::MAX,
+                    )
                     .await?
                     .expect("the part is readable")
-                    .remove(0),
+                    .remove(0)
+                    .entries,
             )
         }
     };

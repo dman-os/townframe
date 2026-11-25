@@ -342,6 +342,81 @@ pub struct LeafEntry {
     pub live: Option<PayloadDigest>,
 }
 
+/// Ceiling on the encoded size of one leaf page's entries, whatever the hint.
+///
+/// The entry cap alone leaves a page's cost unbounded: an object key is any byte string
+/// (`ByteKey` has no length limit), so a page of long keys is as large as the asker's keys are
+/// wide, and the page is remote input to the walk's buffer. At 64 KiB the protocol's entry cap
+/// ([`MAX_LEAF_PAGE`](crate::sync::rpc::MAX_LEAF_PAGE)) still binds for ordinary keys (about
+/// 1560 entries of 32-byte keys fit, against a cap of 1024) and the budget binds once a page
+/// averages wider than about 50 bytes a key.
+///
+/// A page is never empty for want of room: [`PartStoreServe::bucket_leaves`] returns its first
+/// entry even when it alone is over the budget, because a page with no entries reads as the
+/// bucket's end, which would strand the tail. A responder may be built with a smaller budget
+/// (`RpcResponder::with_leaf_byte_budget`); this is the default and the largest.
+pub const LEAF_PAGE_BYTE_BUDGET: usize = 64 * 1024;
+
+impl LeafEntry {
+    /// The most bytes a fingerprint takes on the wire: postcard frames a `u64` as a varint of up
+    /// to ten bytes, and the fingerprint is a hash, so a fixed ten is the bound that does not
+    /// depend on its value.
+    const FP_WIRE_BYTES: usize = 10;
+
+    /// The most bytes one entry adds to a leaf page on the wire, from its key's width alone:
+    /// the cost [`PartStoreServe::bucket_leaves`] charges against its byte budget.
+    ///
+    /// An entry is the key (postcard frames a byte string as a varint length and the bytes), the
+    /// `Option` tag of the fingerprint, and the fingerprint. The key is the only variable part
+    /// (identity is the byte string, any length is a key), and the fingerprint is counted at its
+    /// widest, so the cost of a page is decided from the keys without reading a payload or
+    /// hashing, and a dead entry (no fingerprint) is charged as if it carried one.
+    #[must_use]
+    pub const fn wire_bytes(key_len: usize) -> usize {
+        // Base-128 groups, and one byte even for zero.
+        let length_prefix = if key_len == 0 {
+            1
+        } else {
+            (usize::BITS - key_len.leading_zeros()).div_ceil(7) as usize
+        };
+        length_prefix + key_len + 1 + Self::FP_WIRE_BYTES
+    }
+}
+
+/// One bucket's page of leaf entries, as [`PartStoreServe::bucket_leaves`] answers it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LeafPage {
+    pub entries: Vec<LeafEntry>,
+    /// Whether the bucket has entries after the last of `entries`: a page that stopped at the
+    /// limit or the byte budget, told from one that finished the bucket.
+    pub more: bool,
+}
+
+impl LeafPage {
+    /// The page `entries` (the bucket's members after the cursor, in order) make under `limit`
+    /// and `byte_budget`: the law of [`PartStoreServe::bucket_leaves`] over an iterator that is
+    /// read no further than it must be (the entry that ends the page, to know there is more).
+    /// A store that reads lazily collects its rows through this.
+    pub fn collect(
+        entries: impl IntoIterator<Item = LeafEntry>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> Self {
+        assert!(limit >= 1, "a leaf page limit is at least 1");
+        let mut page = Self::default();
+        let mut bytes = 0usize;
+        for entry in entries {
+            bytes += LeafEntry::wire_bytes(entry.obj.as_bytes().len());
+            if !page.entries.is_empty() && (page.entries.len() == limit || bytes > byte_budget) {
+                page.more = true;
+                break;
+            }
+            page.entries.push(entry);
+        }
+        page
+    }
+}
+
 /// The embedder's writes. Every method stages one batch in the caller's transaction, and the
 /// transaction commits all of them at once: nothing is visible before commit, and everything
 /// is after. A committed transaction that changed any log row stamps them all with one new rev.
@@ -514,10 +589,19 @@ pub trait PartStoreServe {
         since: Rev,
         limit: usize,
     ) -> impl Future<Output = Res<Option<Vec<BucketSummary>>>> + Send;
-    /// For each `(bucket, after)`, the part's members (live and dead) in that bucket in
-    /// (deepest bucket, key) order after `after`, at most `limit`, in the order asked; a bucket
-    /// unchanged past `since` has none. `None` for a part `principal` may not read. One call
-    /// answers a whole leaf request, so all its buckets come from one snapshot.
+    /// For each `(bucket, after)`, one [`LeafPage`] of the part's members (live and dead) in
+    /// that bucket in (deepest bucket, key) order after `after`, in the order asked; a bucket
+    /// unchanged past `since` has an empty page. `None` for a part `principal` may not read. One
+    /// call answers a whole leaf request, so all its buckets come from one snapshot.
+    ///
+    /// A page is the **longest prefix** of those members that holds at most `limit` entries
+    /// (`limit` is at least 1) and whose entries' [`LeafEntry::wire_bytes`] sum to at most
+    /// `byte_budget`, with these two edges. The first entry is always included, however wide
+    /// (an empty page reads as the bucket's end). And the page **stops** before the entry that
+    /// does not fit instead of skipping it for a narrower one (the next page resumes after the
+    /// last entry taken, so a skipped entry would never be read). `more` says whether the
+    /// bucket has entries past the page. A store stops reading at the budget: it needs the one
+    /// entry that ended the page, to set `more`, and no further.
     fn bucket_leaves(
         &self,
         principal: &PeerKey,
@@ -525,5 +609,6 @@ pub trait PartStoreServe {
         bucks: &[(BuckId, Option<ObjKey>)],
         since: Rev,
         limit: usize,
-    ) -> impl Future<Output = Res<Option<Vec<Vec<LeafEntry>>>>> + Send;
+        byte_budget: usize,
+    ) -> impl Future<Output = Res<Option<Vec<LeafPage>>>> + Send;
 }
