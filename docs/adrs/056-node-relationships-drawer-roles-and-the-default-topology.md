@@ -1,6 +1,6 @@
 # ADR 056: Node relationships, drawer roles and the default topology
 
-**Status:** Accepted direction (operator, 2026-11-25): mother and twin between nodes; member and anchor per drawer. The defaults in §5 and the open questions at the end are
+**Status:** Accepted direction (operator, 2026-11-25): mother and twin between nodes; member and anchor per drawer. **Building waits on keyline:** nothing here, nor the grant and invite work of identity-drawer-grants.md, is built until the automata lane delivers the upstream keyhive/keyline move (operator, 2026-11-25). The defaults in §5 and the open questions at the end are
 still to be confirmed.
 
 **Amends:** [ADR 038](038-node-orientations-and-the-relay-alpha.md) §2. Its same-owner "sister" becomes **twin**,
