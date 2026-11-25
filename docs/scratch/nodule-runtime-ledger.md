@@ -131,6 +131,13 @@ D-numbers are stable names; the archive holds each one's original text.
 - **Blob scope and drawer reach (#244 node-67):** `BlobsScope.drawers` reaches drawers monotonically under covers; `blobs.read` and `stat` admit a digest pinned in an inventory of a reached drawer. A docs scope's drawer reach reads the drawer's own document (D55).
 - **CI:** draft PRs skip checks; only the tip is greened. Full suites run on GitHub CI; local runs are narrow.
 
+## Handoff (2026-11-25 night)
+
+- **#381 node-97, micros nodule** (on #379, tip `13048322`): verified on alpha. The wire is blessed, and the narrow 33/33 passes, the micros e2e included. claytxt has both mbx faults, the rmeta one and the nested-build target one; the workaround is `mbx clean` before the run. claytxt swaps `clay_node` onto `micros.handles`. Follow-up: drawer mirroring (ADR 052 §2 step 4).
+- **#382 node-101, blob-binding crash** (on #94 lineup, tip `71ca81b5`): verified (big_blobs 197/197). The operator's node needs no repair, because the failed upsert rolled back. intxt has been pinged to restore the hooks and reinstall. Left open: the short-stale-ciphertext error in `CipherReader::open`, and the `setup_tracing` double panic.
+- **#383 node-102, gate verdicts** (on #361): the design note `docs/scratch/gate-verdicts-in-the-index.md` is in, with six open questions. It waits on the operator's go.
+- claytxt's cuts to main are ready: #384 (facet) → #385 (legacy exclude) → #386 (mltools). After they merge, line up #360 #361 #362 #364 #379 #381 #382 #383 into stack #101, rebase it onto main, and run `gh stack link`.
+
 ## To do
 
 Items are open unless noted; verify against the stack before starting.
@@ -206,6 +213,19 @@ Items are open unless noted; verify against the stack before starting.
 - **Identity work:** the identity-to-drawer-grant design is in progress (`docs/scratch/identity-drawer-grants.md`, node-93). Its requirements: method-agnostic DIDs (AT Protocol on a PDS, maybe a keyhive-backed DID later); resolving a DID to the principals that act for it; a group per context instead of one public device list (metadata privacy); offline granting through contact cards and prekeys.
 - **Public reads redefined:** there's no anonymous or Public-agent path. "Public" means the relay hosting the viewer has read access, and the viewer is an ordinary client of that relay, with its own identity through ADR 043 pairing.
 - **Security:** body capabilities weren't holder-checked (ADR 037 §2). Fixed in #348.
+
+### Identity and drawer grants (operator, 2026-11-24/25; #349 `docs/scratch/identity-drawer-grants.md`)
+
+- **One keyhive agent per node.** A person's public-facing principal is a **keyhive group per context**. Invites and prekeys grant that group. The person accepts by delegating from the group to their own nodes.
+- **What a drawer's readers learn (corrected 2026-11-25):** keyline sync sends a subject's *closure* (every node that ever had standing over it and every certificate about those nodes). Granting drawer D to group G therefore shows every member of G to D's readers, including devices that never open D, plus any device later given standing over D. "Hidden until they join" was wrong. A device stays private only by being in no group D's closure reaches. A public front group with one front agent shields the device list from someone who merely invites, but not after accepting.
+- **No lazy reveal:** a revocation cites the delegation it revokes, and delegations can be signed while their owner is offline, so delegations propagate eagerly. The only lever is when, and through whom, a delegation is issued.
+- **Upstream** (inkandswitch/keyhive `main` `fef75a50`; keyline lives in it, `keyline/` and `design/keyline/`): any member delegates at or below its level; invites need no write access; #262 (CGKA Add carries an Invitation) and #264 (predecessor key chains) are merged. Our fork has neither and is 113 commits behind.
+- **Discovery:** being made a member fetches nothing until `rememberDrawer`. There is no inbox (a spam vector; it belongs with messaging). The first build is an **invite ticket**: drawer id, `via` endpoints, the granter's node key and signature, an expiry, an optional label, and no device list. Also `day peers add-card`, because receiving keyhive contact cards is test-only today.
+- **Shared interests on connect** (finding common drawers) is in tension with full privacy. The operator takes it to the keyhive maintainers.
+- **The upstream keyhive/keyline move is automata's, eventually**, after big_sync and the other cleanup, including `big_repo` on wasm. Not this lane's.
+- **Agents' identity depends on context;** ADR 043 pairing is accepted (per-client and per-agent actors). The identity doc stays thin on purpose.
+- **Open (ADR 050 §2 amendment, next week):** with "no per-resource substitution for collections", §2's own rule (an NSID only if substitutable) would drop collections to owner-local names. Clay keeps `nsid#def` tokens until then.
+- **The idle-exit ADR** (intxt, accepted): the registry is `utils_rs::activity`. intxt does the Client and Call holds and the CLI; this lane does Sync, Blob, Upkeep and Guest holds, after the micros nodule.
 
 ## Open questions for the operator
 
