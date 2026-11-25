@@ -573,7 +573,7 @@ mod tests {
             ),
             (
                 "0.3.0",
-                "zAY9PkRdrcWxNCzNJ3sMTy2mrh6NVCPWEpmcbVMns7Pm1".to_owned()
+                "z3LTqTo6LAzb7tN37z9eERrnNJEgR1ryFF6Ux1HBYTTgQ".to_owned()
             ),
         );
     }

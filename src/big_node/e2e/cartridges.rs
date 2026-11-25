@@ -903,7 +903,12 @@ async fn a_node_installs_its_core_cartridge_at_boot_and_a_reboot_keeps_the_insta
         expected(&[
             "org.example.daybook.authority.attenuateCapability",
             "org.example.daybook.authority.openActor",
+            "org.example.daybook.authority.resolveAuthority",
             "org.example.daybook.authority.retractCapability",
+            "org.example.daybook.blobs.mintCapability",
+            "org.example.daybook.dispatch.mintCapability",
+            "org.example.daybook.docs.mintDocCapability",
+            "org.example.daybook.drawers.mintDrawerCapability",
         ])
     );
     shutdown(node, stop).await;

@@ -270,8 +270,10 @@ async fn the_micros_nodule_mints_a_micro_its_handles_and_reminted_ones_when_a_gr
         "{under_other:?}"
     );
 
-    // A grant change moves the revision: `awaitHandles` holds on the grant feed and answers new
-    // handles, and the old ones stop working.
+    // A grant change moves the revision: `awaitHandles` holds on the grant feed and answers
+    // re-minted handles, and the old ones stop working. Revoking the drawer takes the micro's
+    // docs handle away (a change of access level alone moves no scope, as the micro only reads,
+    // so its handles are kept).
     let revision = first["revision"].as_str().unwrap().to_owned();
     let awaiting = invoke(
         &node,
@@ -281,26 +283,35 @@ async fn the_micros_nodule_mints_a_micro_its_handles_and_reminted_ones_when_a_gr
     );
     let changing = async {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        grant_drawer(&node, Some(DrawerAccess::Write)).await;
+        grant_drawer(&node, None).await;
     };
     let (moved, ()) = tokio::join!(awaiting, changing);
     let moved = moved.expect("the operator awaits the handles");
     let remade = &moved["cartridges"][GALLERY];
     assert_ne!(remade["revision"], first["revision"], "{moved}");
-    let new_docs = cap(&remade["micros"][0]["handles"]["docs"]);
-    assert_ne!(new_docs, docs);
-    assert!(
-        node.authority
-            .client
-            .call(
-                RequestContext::root(),
-                InspectCapability { capability: docs },
-            )
-            .await
-            .is_err(),
-        "the old docs handle is retracted"
+    let micro = &remade["micros"][0];
+    assert!(micro["handles"].get("docs").is_none(), "{moved}");
+    assert_ne!(
+        micro["handles"]["dispatch"],
+        first["micros"][0]["handles"]["dispatch"]
     );
-    assert_eq!(subject_of(&node, new_docs).await, Some(actor));
+    for old in [docs, cap(&first["micros"][0]["handles"]["dispatch"])] {
+        assert!(
+            node.authority
+                .client
+                .call(
+                    RequestContext::root(),
+                    InspectCapability { capability: old },
+                )
+                .await
+                .is_err(),
+            "an old handle is retracted"
+        );
+    }
+    assert_eq!(
+        subject_of(&node, cap(&micro["handles"]["dispatch"])).await,
+        Some(actor)
+    );
     // What the host reads next is the new revision's handles.
     assert_eq!(handles(&node).await.unwrap(), *remade);
 
