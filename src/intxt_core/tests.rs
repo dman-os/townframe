@@ -74,6 +74,7 @@ fn every_datum_declares_publishes_and_admits() {
             .collect::<Vec<_>>(),
         [
             "org.example.intxt",
+            "org.example.intxt.index",
             "org.example.intxt.title",
             "org.example.intxt.path",
             "org.example.intxt.note",
@@ -82,7 +83,7 @@ fn every_datum_declares_publishes_and_admits() {
             "org.example.intxt.threadState",
             "org.example.intxt.structure",
             "org.example.intxt.seen",
-            "org.example.intxt.annotationsEntry",
+            "org.example.intxt.notes",
             "org.example.intxt.work.gitRepo",
             "org.example.intxt.work.gitClone",
             "org.example.intxt.work.worktree",
@@ -99,7 +100,7 @@ fn every_datum_declares_publishes_and_admits() {
             "org.example.intxt.work.promptTurn",
             "org.example.intxt.work.plan",
             "org.example.intxt.work.repoEntry",
-            "org.example.intxt.work.commitsDoc",
+            "org.example.intxt.commits",
             "org.example.intxt.work.worktreeEntry",
             "org.example.intxt.work.sessionEntry",
             "org.example.intxt.work.githubPullEntry",
@@ -126,8 +127,7 @@ fn the_adr_examples_are_valid_datums() {
     codec_round_trip::<generic::Note>(json!({"mime": "text/x-rust", "content": "fn main() {}\n"}));
     codec_round_trip::<generic::Body>(json!({"order": [
         "dtxt:datum:self/org.example.intxt.work.sessionEntry/eb26ecaa",
-        "dtxt:datum:self/org.example.intxt.work.worktreeEntry/0193a",
-        "dtxt:datum:self/org.example.intxt.annotationsEntry/main"
+        "dtxt:datum:self/org.example.intxt.work.worktreeEntry/0193a"
     ]}));
     // A comment on code: the op and a path, whose content is git's blob at that op (ADR 041 §2).
     codec_round_trip::<annotation::Comment>(json!({
@@ -318,8 +318,12 @@ fn the_adr_examples_are_valid_datums() {
     codec_round_trip::<work::JjChangeEntry>(
         json!({"pack": "dtxt:datum:z11111111111111111111111111111111/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949"}),
     );
-    codec_round_trip::<work::CommitsDoc>(json!({
+    codec_round_trip::<generic::Index>(json!({
         "doc": "z11111111111111111111111111111111",
+        "note": "carried"
+    }));
+    codec_round_trip::<work::Commits>(json!({
+        "writer": "019a0000-0000-7000-8000-000000000000",
         "note": "carried"
     }));
     codec_round_trip::<work::GithubPullEntry>(json!({
@@ -330,7 +334,9 @@ fn the_adr_examples_are_valid_datums() {
         "ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.gitRef/0193c/refs/heads/feat/refs",
         "base": "org.example.intxt.work.gitCommit/9a0e11"
     }));
-    codec_round_trip::<annotation::AnnotationsEntry>(json!({"empty": true}));
+    codec_round_trip::<annotation::Notes>(json!({
+        "writer": "019a0000-0000-7000-8000-000000000000"
+    }));
 }
 
 fn node(byte: u8) -> big_cabinet_core::dmeta::MultibaseKey {
@@ -585,6 +591,7 @@ fn posted(
         format!("dtxt:datum:z11111111111111111111111111111111/org.example.intxt.comment/{slot}")
     };
     annotation::Posted {
+        doc: "z11111111111111111111111111111111".parse().unwrap(),
         key: format!("org.example.intxt.comment/{slot}").parse().unwrap(),
         comment: serde_json::from_value(json!({
             "targets": [],

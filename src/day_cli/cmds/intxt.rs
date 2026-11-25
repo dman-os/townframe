@@ -181,7 +181,7 @@ pub enum IntxtCommands {
     ///
     /// Prints the new intxt's short id, which names it in `add`, `show` and `rm`.
     ///
-    /// With `--with`, the new intxt shares the named intxt's commits document, for a stack or a
+    /// With `--with`, the new intxt is lent the named intxt's commits documents, for a stack or a
     /// follow-up: commits they have in common are stored once, and each holds the commits the
     /// other added.
     #[command(
@@ -193,8 +193,8 @@ pub enum IntxtCommands {
         /// The intxt's description, in Markdown
         #[arg(long)]
         description: Option<String>,
-        /// A related intxt (its short id, or its full drawer id) whose commits document the new
-        /// intxt shares
+        /// A related intxt (its short id, or its full drawer id) whose commits documents the new
+        /// intxt is lent
         #[arg(long)]
         with: Option<String>,
     },

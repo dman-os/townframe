@@ -25,11 +25,7 @@ fn expected_diff(repo: &Path, base: &str, tip: &str) -> String {
 
 /// Reads the bytes of the blob datum `reference` names in the intxt's commits document, from
 /// the node's blob store.
-async fn read_blob_text(
-    client: &NodeClient,
-    scratch: &Path,
-    reference: &str,
-) -> (String, String) {
+async fn read_blob_text(client: &NodeClient, scratch: &Path, reference: &str) -> (String, String) {
     use crate::client::Raw;
     use big_blobs_core::BlobsScope;
     use big_blobs_core::MintBlobsCapability;
@@ -104,7 +100,7 @@ async fn add_branch(
     let tip = super::rev(repo, "feat/x");
     let (_, entry) = read_at(
         client,
-        &drawer,
+        &super::index_of(client, &drawer).await,
         &format!("org.example.intxt.work.gitCommitEntry/{tip}")
             .parse()
             .unwrap(),

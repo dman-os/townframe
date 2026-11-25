@@ -2,9 +2,10 @@
 //! of an intxt, `reply` answers one and resolves or reopens its thread, and `inbox` lists what is
 //! waiting for the caller and where each comment is now.
 //!
-//! The datums are ADR 041's. They live in the intxt drawer's notes document (a meta document
-//! named `notes/annotations`, ADR 041 §6), which the first comment creates and enters with an
-//! `annotationsEntry/main`. Like the packaging verbs these are client code: the caller writes with
+//! The datums are ADR 041's. They live in notes documents, content documents of the intxt's
+//! drawer: one per writer, made by the writer's first comment and found by their
+//! `org.example.intxt.notes/main` marker (ADR 041 §6), so two nodes' first comments never race
+//! for one document. Like the packaging verbs these are client code: the caller writes with
 //! the operator's own authority, so the cabinet attests the operator for every caller on a node;
 //! what makes two readers two sides is the `creator` a comment claims, detected by
 //! [`super::participant`] (ADR 041 §2).
@@ -24,12 +25,8 @@ use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::Uuid7;
-use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::DatumRead;
-use big_cabinet_core::drawer::MetaRoot;
-use big_cabinet_core::drawer::protocol::CreateMetaDoc;
 use big_cabinet_core::drawer::protocol::DrawerId;
-use big_cabinet_core::drawer::protocol::GetDrawer;
 use big_cabinet_core::reference::DatumPin;
 use big_cabinet_core::reference::DatumReference;
 use big_cabinet_core::reference::Location;
@@ -53,9 +50,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io::Write;
 
-/// The meta document that holds an intxt's annotations: `notes/annotations`.
-const NOTES_SLOT: &str = "notes/annotations";
-
 /// Which end of a commit's diff a line number counts on, as GitHub's `side` does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Side {
@@ -65,9 +59,8 @@ pub(crate) enum Side {
     New,
 }
 
-/// The notes document as the reader sees it.
+/// The intxt's notes documents as the reader sees them, every writer's together.
 struct Notes {
-    doc: DocId,
     posted: Vec<Posted>,
     /// Thread state by the root comment's slot.
     resolved: BTreeMap<String, bool>,
@@ -109,80 +102,37 @@ fn sorted_heads(version: &big_cabinet_core::doc::DatumVersion) -> Vec<String> {
 }
 
 impl Packaging<'_> {
-    /// The drawer's meta document in `slot`, if it has one.
-    async fn meta_doc(&self, drawer: &DrawerId, slot: &str) -> Res<Option<DocId>> {
-        let view = self
+    /// The intxt's notes documents, one per writer that has commented, as their markers say.
+    async fn notes_docs(&self, drawer: &DrawerId) -> Res<Vec<DocId>> {
+        Ok(self
             .caller
-            .call(GetDrawer {
-                capability: self.drawer_capability(drawer).await?,
-                drawer_id: drawer.clone(),
-            })
-            .await?;
-        Ok(view
-            .meta_docs
-            .get(&MetaRoot::Sensitive)
-            .and_then(|docs| docs.get(slot))
-            .cloned())
+            .tagged_docs(drawer, annotation::Notes::ID)
+            .await?
+            .into_keys()
+            .collect())
     }
 
-    /// The intxt's notes document, if anything has been written to it.
-    async fn notes_doc(&self, drawer: &DrawerId) -> Res<Option<DocId>> {
-        self.meta_doc(drawer, NOTES_SLOT).await
-    }
-
-    /// The notes document, made if the intxt has none yet, and the intxt's entry for it. The
-    /// command id is fixed per drawer, so two writers creating it converge on one document.
-    async fn ensure_notes_doc(&self, drawer: &DrawerId, view: &View) -> Res<DocId> {
-        let created = self
-            .caller
-            .call(CreateMetaDoc {
-                capability: self.drawer_capability(drawer).await?,
-                command: CommandId::try_from(format!("intxt-notes-{drawer}"))?,
-                drawer_id: drawer.clone(),
-                kind: "notes".into(),
-                name: "annotations".into(),
-                root: MetaRoot::Sensitive,
-            })
-            .await?;
-        let entry = key(annotation::AnnotationsEntry::ID, "main")?;
-        if !view.has(&entry) {
-            self.caller
-                .include(
-                    drawer,
-                    [(
-                        entry.clone(),
-                        to_value(&annotation::AnnotationsEntry {
-                            empty: Some(true),
-                            extra: Default::default(),
-                        }),
-                    )]
-                    .into(),
-                    &[entry],
-                )
-                .await?;
-        }
-        Ok(created.doc_id)
-    }
-
-    /// The keys of the comments in the intxt's notes document.
+    /// The keys of the comments in the intxt's notes documents.
     pub(super) async fn comment_keys(
         &self,
         drawer: &DrawerId,
     ) -> Result<BTreeSet<DatumKey>, eyre::Report> {
-        let Some(doc) = self.notes_doc(drawer).await? else {
-            return Ok(BTreeSet::new());
-        };
-        Ok(self
-            .caller
-            .datum_keys(&doc)
-            .await?
-            .into_iter()
-            .filter(|key| key.tag().as_str() == annotation::Comment::ID)
-            .collect())
+        let mut keys = BTreeSet::new();
+        for doc in self.notes_docs(drawer).await? {
+            keys.extend(
+                self.caller
+                    .datum_keys(&doc)
+                    .await?
+                    .into_iter()
+                    .filter(|key| key.tag().as_str() == annotation::Comment::ID),
+            );
+        }
+        Ok(keys)
     }
 
-    /// Removes `comments` from the intxt's notes document, each thread whose first comment is
-    /// among them whole, with its state. Answers the keys removed.
+    /// Removes `comments` from the intxt's notes documents, each thread whose first comment is
+    /// among them whole, with its state: every comment from the document it is in, and the state
+    /// from the document of the thread's root. Answers the keys removed.
     pub(super) async fn remove_comments(
         &self,
         drawer: &DrawerId,
@@ -191,23 +141,48 @@ impl Packaging<'_> {
         if comments.is_empty() {
             return Ok(comments);
         }
-        let notes = self
-            .read_notes(drawer)
-            .await?
-            .ok_or_else(|| eyre::eyre!("{drawer} has no notes document to remove comments from"))?;
+        let notes = self.read_notes(drawer).await?;
+        let homes: BTreeMap<DatumKey, DocId> = notes
+            .posted
+            .iter()
+            .map(|post| (post.key.clone(), post.doc.clone()))
+            .collect();
         let mut remove = comments.clone();
+        let mut states = BTreeMap::new();
         for thread in Thread::group(notes.posted) {
             if comments.contains(&thread.root) {
                 remove.extend(thread.comments.into_iter().map(|post| post.key));
-                remove.insert(key(
-                    ThreadState::ID,
-                    &String::from_utf8_lossy(thread.root.slot_bytes()),
-                )?);
+                states.insert(
+                    key(
+                        ThreadState::ID,
+                        &String::from_utf8_lossy(thread.root.slot_bytes()),
+                    )?,
+                    homes
+                        .get(&thread.root)
+                        .ok_or_else(|| eyre::eyre!("{} is in no notes document", thread.root))?
+                        .clone(),
+                );
             }
         }
-        self.caller
-            .write_datums(&notes.doc, BTreeMap::new(), remove.clone())
-            .await?;
+        let mut by_doc: BTreeMap<DocId, BTreeSet<DatumKey>> = BTreeMap::new();
+        for comment in &remove {
+            let doc = homes
+                .get(comment)
+                .ok_or_else(|| eyre::eyre!("{comment} is in no notes document"))?;
+            by_doc
+                .entry(doc.clone())
+                .or_default()
+                .insert(comment.clone());
+        }
+        for (state, doc) in states {
+            remove.insert(state.clone());
+            by_doc.entry(doc).or_default().insert(state);
+        }
+        for (doc, keys) in by_doc {
+            self.caller
+                .write_datums(&doc, BTreeMap::new(), keys)
+                .await?;
+        }
         Ok(remove)
     }
 
@@ -221,58 +196,60 @@ impl Packaging<'_> {
         })
     }
 
-    /// The notes document with this participant's seen records; none when the intxt has no notes
-    /// document.
-    async fn read_notes(&self, drawer: &DrawerId) -> Res<Option<Notes>> {
-        let Some(doc) = self.notes_doc(drawer).await? else {
-            return Ok(None);
-        };
-        let (_, datums) = self.caller.read_datums(&doc, None).await?;
+    /// Every writer's notes documents read together, with this participant's seen records (the
+    /// only ones read: a reader's seen records are in the reader's own notes document, and
+    /// another actor's slots never match this actor's prefix).
+    async fn read_notes(&self, drawer: &DrawerId) -> Res<Notes> {
         let mut notes = Notes {
-            doc,
             posted: Vec::new(),
             resolved: BTreeMap::new(),
             seen: BTreeMap::new(),
         };
         let mine = self.seen_prefix().await?;
-        for (datum_key, read) in datums {
-            let tag = datum_key.tag().as_str();
-            let slot = String::from_utf8_lossy(datum_key.slot_bytes()).into_owned();
-            if ![
-                annotation::Comment::ID,
-                ThreadState::ID,
-                annotation::Seen::ID,
-            ]
-            .contains(&tag)
-            {
-                continue;
-            }
-            if tag == annotation::Seen::ID && !slot.starts_with(&mine) {
-                continue;
-            }
-            let DatumRead::Accepted {
-                value,
-                version,
-                authors,
-            } = read
-            else {
-                eyre::bail!("{datum_key} in the notes document is not readable: {read:?}");
-            };
-            if tag == annotation::Comment::ID {
-                notes.posted.push(Posted {
-                    key: datum_key,
-                    comment: serde_json::from_value(value)?,
-                    heads: sorted_heads(&version),
-                    authors: authors.into_iter().map(|author| author.actor).collect(),
-                });
-            } else if tag == ThreadState::ID {
-                let state: ThreadState = serde_json::from_value(value)?;
-                notes.resolved.insert(slot, state.resolved);
-            } else {
-                notes.seen.insert(datum_key, serde_json::from_value(value)?);
+        for doc in self.notes_docs(drawer).await? {
+            let (_, datums) = self.caller.read_datums(&doc, None).await?;
+            for (datum_key, read) in datums {
+                let tag = datum_key.tag().as_str();
+                let slot = String::from_utf8_lossy(datum_key.slot_bytes()).into_owned();
+                if ![
+                    annotation::Comment::ID,
+                    ThreadState::ID,
+                    annotation::Seen::ID,
+                ]
+                .contains(&tag)
+                {
+                    continue;
+                }
+                if tag == annotation::Seen::ID && !slot.starts_with(&mine) {
+                    continue;
+                }
+                let DatumRead::Accepted {
+                    value,
+                    version,
+                    authors,
+                } = read
+                else {
+                    eyre::bail!(
+                        "{datum_key} in the notes document {doc} is not readable: {read:?}"
+                    );
+                };
+                if tag == annotation::Comment::ID {
+                    notes.posted.push(Posted {
+                        doc: doc.clone(),
+                        key: datum_key,
+                        comment: serde_json::from_value(value)?,
+                        heads: sorted_heads(&version),
+                        authors: authors.into_iter().map(|author| author.actor).collect(),
+                    });
+                } else if tag == ThreadState::ID {
+                    let state: ThreadState = serde_json::from_value(value)?;
+                    notes.resolved.insert(slot, state.resolved);
+                } else {
+                    notes.seen.insert(datum_key, serde_json::from_value(value)?);
+                }
             }
         }
-        Ok(Some(notes))
+        Ok(notes)
     }
 
     /// The commits the intxt's commit entries name, read in the worktree's repository.
@@ -378,13 +355,21 @@ impl Packaging<'_> {
                         ""
                     }
                 );
-                // The commit's datum is in the intxt's commits document, written by `add`.
-                let commits_doc = self.commits_doc(&drawer).await?.ok_or_else(|| {
-                    eyre::eyre!(
-                        "the intxt {} holds no commits: run `day x intxt add` first",
-                        shown(&intxts, &drawer.to_string())
-                    )
-                })?;
+                // The commit's datum is in a commits document of the intxt, written by whoever
+                // `add`ed it: the same datum in any of them, so the first is as good as another.
+                let commits_doc = self
+                    .caller
+                    .holders(&drawer, key(work::GitCommit::ID, &sha)?)
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "no commits document of the intxt {} holds {}: run `day x intxt add` again",
+                            shown(&intxts, &drawer.to_string()),
+                            short_sha(&sha)
+                        )
+                    })?;
                 let blob = anchor::commit_blob(&git, &sha, &target.path)?
                     .ok_or_else(|| eyre::eyre!("{} has no {}", short_sha(&sha), target.path))?;
                 let location = Location::new(
@@ -466,7 +451,7 @@ impl Packaging<'_> {
             extra: Default::default(),
         };
         let comment_key = key(annotation::Comment::ID, &Uuid7::new().to_string())?;
-        let notes = self.ensure_notes_doc(&drawer, &view).await?;
+        let notes = self.caller.own_doc(&drawer, annotation::Notes::ID).await?;
         self.caller
             .write_datums(
                 &notes,
@@ -527,20 +512,28 @@ impl Packaging<'_> {
                 )
             })?
             .parse::<DatumKey>()?;
-        let notes = self
-            .read_notes(&drawer)
-            .await?
-            .ok_or_else(|| eyre::eyre!("{drawer} has no notes document"))?;
+        let notes = self.read_notes(&drawer).await?;
         let thread = Thread::group(notes.posted)
             .into_iter()
             .find(|thread| thread.comments.iter().any(|post| post.key == parent_key))
             .ok_or_else(|| eyre::eyre!("{parent_key} is in no thread"))?;
+        let post_of = |key: &DatumKey| {
+            thread
+                .comments
+                .iter()
+                .find(|post| &post.key == key)
+                .ok_or_else(|| eyre::eyre!("{key} is gone from its thread"))
+        };
         let root_slot = String::from_utf8_lossy(thread.root.slot_bytes()).into_owned();
-        let mut set = BTreeMap::new();
+        // The reply goes in the caller's own notes document and points at its parent in the
+        // parent's, so a thread spans documents. The thread's state is in the document of its
+        // root comment, which exists before anyone resolves the thread.
+        let mut writes: BTreeMap<DocId, BTreeMap<DatumKey, serde_json::Value>> = BTreeMap::new();
         let mut reply_key = None;
         if let Some(text) = text {
             let new_key = key(annotation::Comment::ID, &Uuid7::new().to_string())?;
-            set.insert(
+            let own = self.caller.own_doc(&drawer, annotation::Notes::ID).await?;
+            writes.entry(own).or_default().insert(
                 new_key.clone(),
                 to_value(&annotation::Comment {
                     targets: Vec::new(),
@@ -551,7 +544,7 @@ impl Packaging<'_> {
                     },
                     motivation: Motivation::Replying,
                     reply_to: Some(DatumReference::new(
-                        ReferenceDocId::Concrete(notes.doc.clone()),
+                        ReferenceDocId::Concrete(post_of(&parent_key)?.doc.clone()),
                         parent_key.clone(),
                     )),
                     creator: self.participant.creator.clone(),
@@ -562,17 +555,20 @@ impl Packaging<'_> {
             reply_key = Some(new_key);
         }
         if let Some(resolved) = resolved {
-            set.insert(
-                key(ThreadState::ID, &root_slot)?,
-                to_value(&ThreadState {
-                    resolved,
-                    extra: Default::default(),
-                }),
-            );
+            writes
+                .entry(post_of(&thread.root)?.doc.clone())
+                .or_default()
+                .insert(
+                    key(ThreadState::ID, &root_slot)?,
+                    to_value(&ThreadState {
+                        resolved,
+                        extra: Default::default(),
+                    }),
+                );
         }
-        self.caller
-            .write_datums(&notes.doc, set, BTreeSet::new())
-            .await?;
+        for (doc, set) in writes {
+            self.caller.write_datums(&doc, set, BTreeSet::new()).await?;
+        }
 
         let names = self
             .load(&drawer)
@@ -721,10 +717,11 @@ impl Packaging<'_> {
         let heading = shown(&intxts, &drawer.to_string());
         let me = &self.participant.creator;
         let seen_prefix = self.seen_prefix().await?;
-        let Some(notes) = self.read_notes(&drawer).await? else {
+        let notes = self.read_notes(&drawer).await?;
+        if notes.posted.is_empty() {
             writeln!(out, "inbox {heading}: no comments yet")?;
             return Ok(());
-        };
+        }
         let seen = notes.seen_heads();
         let view = self.load(&drawer).await?;
         let actor = self.caller.actor().await?;
@@ -817,8 +814,11 @@ impl Packaging<'_> {
             record.datums.extend(datums);
             write.insert(seen_key, to_value(&record));
         }
+        // The reader's seen records go in the reader's own notes document, which a reader who
+        // never commented has none of yet.
+        let own = self.caller.own_doc(&drawer, annotation::Notes::ID).await?;
         self.caller
-            .write_datums(&notes.doc, write, BTreeSet::new())
+            .write_datums(&own, write, BTreeSet::new())
             .await?;
         Ok(())
     }

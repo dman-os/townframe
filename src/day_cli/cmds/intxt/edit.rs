@@ -69,7 +69,7 @@ fn bare(reference: &str) -> &str {
     reference.split('?').next().unwrap_or(reference)
 }
 
-/// The heads the document is based on: the descriptor's, sorted, as base58 multibase text.
+/// The heads the document is based on: the index document's, sorted, as base58 multibase text.
 fn base_of(view: &View) -> Vec<String> {
     let mut base: Vec<String> = view
         .heads

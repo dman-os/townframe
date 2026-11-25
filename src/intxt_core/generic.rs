@@ -17,8 +17,11 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Marks a drawer's descriptor document as an intxt (`org.example.intxt/main`). It says nothing
-/// else yet; intxt-wide fields land beside `empty`.
+/// Marks a drawer's own document as an intxt (`org.example.intxt/main`). It says nothing
+/// else yet; intxt-wide fields land beside `empty`. The drawer's own document is its public
+/// metadata root, which a relay can read (ADR 019, "Meta docs"), so it holds only the cabinet's
+/// descriptor, this marker and the [`Index`] pointer; everything about the work is in content
+/// documents.
 #[macros::datum(authority = "org.example", name = "intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +39,21 @@ impl Default for Intxt {
             extra: Extra::default(),
         }
     }
+}
+
+/// The pointer from an intxt's drawer document to its index document
+/// (`org.example.intxt.index/main`): the content document, in the intxt's drawer, that holds the
+/// title and description (`title/main`), the entry datums and the `body` order. `createIntxt`
+/// makes it in the same routine as the drawer, and only the creator ever does, so nothing races
+/// for it. The document id is text, as in [`OpLogDoc`](crate::work::OpLogDoc), because a datum
+/// reference names a datum and this names a whole document.
+#[macros::datum(authority = "org.example.intxt")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Index {
+    pub doc: String,
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 impl Intxt {

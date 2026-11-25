@@ -1,5 +1,7 @@
 # ADR 041: Annotation datums: comments, threads, structure, seen state
 
+**Changed 2026-11-19 (operator, ledger D70):** annotations are content, not drawer metadata, and no fixed slot names their document. Each writer (an attested actor, which today is a node's operator) keeps its own notes document, a content document of the intxt's drawer found by an `org.example.intxt.notes/main` marker naming the writer, so two nodes' first comments cannot race for one document and orphan one (§6). A thread's state is written in the document that holds its root comment (§3), and a reader's seen records in the reader's own notes document (§5). A reply points at its parent with a concrete reference, so a thread can span documents (§2). §2's `creator.id` example is a datum reference to the session's `agentSession/main`, as ledger D69 built it.
+
 **Changed 2026-11-18 (operator, ledger D69):** comments carry `creator` and `generator` (W3C Web Annotation) as a claimed participant beside the cabinet's attested actor, so an agent and the operator on one node are two sides of a review. `creator.id` names a recorded session today and a long-lived identity later (§2).
 
 **Changed 2026-11-12:** recorded work has no file documents (ledger D59, ADR 040 §4), so a comment on code targets a commit or a worktree op with a path, a line range and a quote, and is carried across revisions by git's diff mapping instead of a CRDT cursor (§2). Cursors stay for text held in documents.
@@ -31,7 +33,7 @@ We take W3C's shape (targets, quote selectors, motivation), an explicit parent f
   ],
   "body": { "mime": "text/markdown", "content": "Why not reuse the fragment here?" },   // the generic note shape
   "motivation": "commenting",                                             // open; W3C's list
-  "replyTo": "dtxt:datum:zNotes/org.example.intxt.comment/0193…"                // replies only
+  "replyTo": "dtxt:datum:zNotes/org.example.intxt.comment/0193…"                // replies only; the parent's own notes document, which may be another writer's
 }
 ```
 
@@ -46,12 +48,12 @@ We take W3C's shape (targets, quote selectors, motivation), an explicit parent f
 - **`creator` and `generator`** (W3C Web Annotation §3.3.1, Agents) name who wrote the comment and the software that produced it, as a claim. The cabinet's attestation (ADR 036 §1, rule 4) stays the verified layer: which actor signed the write. The two differ because one node's socket admits every caller from the node's uid as the operator (ADR 043, Context), so the operator and an agent running `day` in the same session are one attested actor. `creator` is what tells a reviewer's comment from the agent's. A reader shows `creator` as claimed until the attested actor is the creator's own: once a client pairs (ADR 043), the plugin's actor signs its own writes and the claim can be checked against it.
 
   ```jsonc
-  "creator":   { "type": "Software", "id": "dtxt:doc:zSess…" },   // or { "type": "Person" }: the operator, when no agent is detected
+  "creator":   { "type": "Software", "id": "dtxt:datum:zSess…/org.example.intxt.work.agentSession/main" },   // or { "type": "Person" }: the operator, when no agent is detected
   "generator": { "type": "Software", "name": "claude-code", "version": "2.1.322" }
   ```
 
   - **Detection** follows the cross-tool convention: `AI_AGENT` (then `AGENT`) names the agent, and a tool-specific variable gives its session (Claude Code: `CLAUDE_CODE_SESSION_ID`). With none set, the creator is a `Person`. `generator` is the parsed `AI_AGENT` value.
-  - **`creator.id` is a reference to whatever identifies the participant**: today the session document capture recorded for that session id, and nothing when the session is not recorded. A long-lived identity (an agent lane that spans many sessions, a member of a swarm) is a later datum that `creator.id` can name instead, with no change to this shape (ledger D69).
+  - **`creator.id` is a datum reference to whatever identifies the participant**: today the session's `agentSession/main` datum, in the session document capture recorded for that session id, and nothing when the session is not recorded. A long-lived identity (an agent lane that spans many sessions, a member of a swarm) is a later datum that `creator.id` can name instead, with no change to this shape (ledger D69).
   - **Time** stays the datum's change time; there is no `created`.
 
 ## 3. Thread state
@@ -61,7 +63,7 @@ We take W3C's shape (targets, quote selectors, motivation), an explicit parent f
 { "resolved": false }
 ```
 
-One slot per thread, written by anyone. Resolving and reopening at the same time leaves one of the two values under Automerge's rules, and the DocService does not expose the overwritten one (`docs/wiki/docs.md`, Conflict model); the loser sees the thread in the other state and acts again. That is acceptable for a flag; if it proves not to be, the flag becomes a competing set (an array cleared and pushed on every write, so concurrent writes leave both values). Whose turn a thread is waiting on is derived (the side that didn't write last), not stored.
+One slot per thread, in the notes document that holds the thread's root comment, which exists before anyone resolves the thread, and written by anyone with Write on it. Resolving and reopening at the same time leaves one of the two values under Automerge's rules, and the DocService does not expose the overwritten one (`docs/wiki/docs.md`, Conflict model); the loser sees the thread in the other state and acts again. That is acceptable for a flag; if it proves not to be, the flag becomes a competing set (an array cleared and pushed on every write, so concurrent writes leave both values). Whose turn a thread is waiting on is derived (the side that didn't write last), not stored.
 
 ## 4. Structure
 
@@ -80,16 +82,37 @@ A guided review is a set of `section` structures with `order`. Adapters can map 
 ## 5. What a reader has seen
 
 ```jsonc
-// org.example.intxt.seen/<actor uuid>/<range>  (one writer: that reader)
+// org.example.intxt.seen/<actor uuid>/<range>  (one writer: that reader, in the reader's own notes document)
 { "datums": { "org.example.intxt.comment/0193…": ["zbd7…"] },   // per slot: the datum heads last read
   "reviewed": { "<ref or layer>": "<position>" } }       // vocabulary-defined: e.g. a ref target last reviewed
 ```
 
-"New" is any slot whose current datum version differs from what is recorded here: one `ListDatums` at current heads (per-slot versions, no values) compared on the client. Datum heads are global, so the comparison is the same on every device. `PollDatums` cursors are node-local and can't be synced seen state. Seen state is split by slot range because one map datum hits the native read budget at about 5,400 entries (F10). How a reader picks ranges (by the target notes document, by the first characters of the slot) is open.
+"New" is any slot whose current datum version differs from what is recorded here: one `ListDatums` at current heads (per-slot versions, no values) compared on the client. Datum heads are global, so the comparison is the same on every device. `PollDatums` cursors are node-local and can't be synced seen state. Seen state is split by slot range because one map datum hits the native read budget at about 5,400 entries (F10). A reader's seen records are in the reader's own notes document (§6), the one document they write that no one else does. How a reader picks ranges (by the first characters of a comment's slot, today) is open.
 
 ## 6. Where annotations live
 
-In an intxt, annotations are one part (ADR 036 §2), entered by `annotationsEntry/main` and found by tag: any document in the drawer holding these tags. Annotations go into a shared notes document. Every comment is its own UUIDv7 slot, so writers sharing one document never conflict. When the current notes document nears the ~500-datum update limit (F10), the next writer starts a new one, as worktree op logs rotate (ADR 040 §7). A notes document per commenter would only be needed for access (a commenter with no write access to the shared one), not for conflicts. Outside intxts, any drawer can hold annotations the same way.
+In an intxt, annotations are content documents of the intxt's drawer (ADR 036 §2), not drawer metadata: a comment is something people said, and a drawer's meta documents describe the drawer. They are not a shared document with a fixed name either. A meta document's `(root, kind, name)` slot, or any pointer slot, holds one value, and two nodes that comment before they sync each create a document and the last writer's wins the slot, orphaning the other's comments (the live two-node run of 2026-11-18). Get-or-create on the synced roster cannot fix that for a writer that is offline.
+
+So each writer has a notes document of its own:
+
+```jsonc
+// the notes document of one writer: a content document in the intxt's drawer
+{
+  "org.example.intxt.notes/main": { "writer": "<actor uuid>" },   // the marker: this is a notes document, and whose
+  "org.example.intxt.comment/<uuidv7>": { … },                     // the writer's comments and replies
+  "org.example.intxt.structure/<uuidv7>": { … },
+  "org.example.intxt.threadState/<root comment uuid>": { … },      // for threads whose root is in this document (§3)
+  "org.example.intxt.seen/<actor uuid>/<range>": { … }            // the writer's own seen records (§5)
+}
+```
+
+- **A writer is an attested actor**, which today is a node's operator. Agent sessions on one node share their node's notes document (command ids already dedupe within a node, so the race is only between nodes), and each comment still carries its own `creator` (§2).
+- **Discovery is by tag.** A reader lists the drawer's documents carrying `org.example.intxt.notes/main` and reads each marker. No slot names "the" notes document, so there is nothing to race for. A writer finds its own current document by the marker naming it, and makes one (marker included, in the same write that creates it) when it has none.
+- **Threads span documents.** A reply is written in its writer's own notes document and names its parent with a concrete reference, so a thread is every comment whose `replyTo` chain reaches a root, whichever document each is in.
+- **Rotation.** When a writer's notes document nears the ~500-datum update limit (F10), the writer starts a new one, as worktree op logs rotate (ADR 040 §7); the marker finds both. Not built yet.
+- **Commits** follow the same pattern (ADR 040 §4): each writer's `add` writes its commits into a commits document of its own, marked `org.example.intxt.commits/main` with the writer, and the blob inventory of a drawer is named per writer (`blobInventory/intxt-<writer>`).
+
+Outside intxts, any drawer can hold annotations the same way.
 
 ## 7. Open questions
 

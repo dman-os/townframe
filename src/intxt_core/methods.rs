@@ -87,7 +87,7 @@ pub struct IntxtSummary {
     /// How many entries the intxt's body lists. Present when `found`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entries: Option<u32>,
-    /// The newest logical clock among the descriptor's datums, which rises with every write to
+    /// The newest logical clock among the title and body datums of the index document, which rises with every write to
     /// them: a change token, not a time. Present when `found`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated: Option<u64>,
@@ -106,10 +106,10 @@ pub struct IntxtSummary {
 pub enum SummaryStatus {
     /// The drawer is an intxt the caller can read.
     Found,
-    /// The caller reads the drawer's descriptor and it holds no intxt marker.
+    /// The caller reads the drawer's own document and it holds no intxt marker.
     NotFound,
     /// A read failed (the caller may not read it, or the node does not hold it) or the intxt's
-    /// descriptor is malformed; `reason` says which.
+    /// drawer document or index document is malformed; `reason` says which.
     Unreadable,
 }
 

@@ -13,7 +13,7 @@ mod repo;
 mod rewrite;
 mod session;
 
-pub use entry::CommitsDoc;
+pub use entry::Commits;
 pub use entry::GitCommitEntry;
 pub use entry::GitRefEntry;
 pub use entry::GithubPullEntry;
