@@ -79,20 +79,34 @@ pub fn ButtonSpecimens() -> Element {
         FoundationSection {
             id: "button-toggle".to_string(),
             title: "Toggle".to_string(),
-            description: "pressed makes a button a toggle: aria-pressed and data-state (on|off). The caller owns the state.".to_string(),
+            description: "pressed makes a button a toggle: aria-pressed and data-state (on|off). The caller owns the state. Here they format the sample line; italic starts on, so both states show.".to_string(),
             div { class: "grid gap-3",
-                Row { label: "toggle".to_string(),
+                Row { label: "formatting".to_string(),
                     Button {
                         variant: ButtonVariant::Outline,
                         pressed: Some(bold()),
+                        label: "Bold".to_string(),
                         onclick: move |()| bold.set(!bold()),
-                        "Bold"
+                        strong { "B" }
                     }
                     Button {
                         variant: ButtonVariant::Outline,
                         pressed: Some(italic()),
+                        label: "Italic".to_string(),
                         onclick: move |()| italic.set(!italic()),
-                        "Italic"
+                        em { "I" }
+                    }
+                }
+                // The toggles' effect: the sample re-renders inside `strong`/`em` as they flip, so a
+                // reader sees what each one is for (no inline style; the elements carry the face).
+                Row { label: "sample".to_string(),
+                    p {
+                        {match (bold(), italic()) {
+                            (true, true) => rsx! { strong { em { "The quick brown fox jumps over the lazy dog." } } },
+                            (true, false) => rsx! { strong { "The quick brown fox jumps over the lazy dog." } },
+                            (false, true) => rsx! { em { "The quick brown fox jumps over the lazy dog." } },
+                            (false, false) => rsx! { "The quick brown fox jumps over the lazy dog." },
+                        }}
                     }
                 }
             }
