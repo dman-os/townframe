@@ -9,6 +9,9 @@ pub mod peers;
 
 pub use info::GET_NODE_INFO;
 pub use info::GetNodeInfo;
+pub use info::ConfigDrawer;
+pub use info::ConfigDrawerRole;
+pub use info::NodeDrawers;
 pub use info::NodeInfo;
 pub use info::NodeInfoError;
 #[cfg(unix)]
@@ -307,6 +310,30 @@ impl Attachments {
 }
 
 impl BigNode {
+    /// The drawers `getNodeInfo` reports, each sourced where the node already records it: the
+    /// four local drawers from the drawers service's local record, the registry from boot, and the
+    /// cartridge config drawer from the nodule service that owns it.
+    fn node_drawers(&self) -> NodeDrawers {
+        let local = self.drawers.local();
+        let config = |role, drawer_id: DrawerId| ConfigDrawer { role, drawer_id };
+        NodeDrawers {
+            present: local.present_id,
+            originated: local.originated_id,
+            config: vec![
+                config(ConfigDrawerRole::KnownDrawers, local.known_drawers_id),
+                config(ConfigDrawerRole::NodeConfig, local.config_id),
+                config(
+                    ConfigDrawerRole::CartridgeRegistry,
+                    self.registry_drawer.clone(),
+                ),
+                config(
+                    ConfigDrawerRole::CartridgeConfig,
+                    self.nodules.shared_config_drawer.clone(),
+                ),
+            ],
+        }
+    }
+
     /// Starts the attachments the config asks for and registers the late built-in providers
     /// ([`BigNode::register_late_built_ins`]). They come last in boot, so they stop first: nothing is served or dialed from a node whose services
     /// are coming down. Each is pushed as soon as it runs, so a later one failing to start still
@@ -536,7 +563,7 @@ impl BigNode {
             &self.dispatch.router,
             "builtin:node",
             self.node_id.clone(),
-            self.drawers.local().known_drawers_id,
+            self.node_drawers(),
             self.peers.clone(),
         );
         Stage::BuiltIns {

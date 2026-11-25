@@ -177,7 +177,11 @@ pub(super) async fn known_drawers_handle(
     let minted = client
         .call(MintDrawerCapability {
             scope: DrawerScope {
-                drawers: [(info.known_drawers_id, DrawerAccess::Admin)].into(),
+                drawers: [(
+                    info.drawers.config(big_node::ConfigDrawerRole::KnownDrawers).clone(),
+                    DrawerAccess::Admin,
+                )]
+                .into(),
                 create: false,
             },
             rights: Rights::USE,
