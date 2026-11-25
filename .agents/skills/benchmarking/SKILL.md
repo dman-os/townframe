@@ -59,7 +59,8 @@ Records of a dirty tree are kept but ignored by `compare` and `report`. `compare
 cross machines, toolchains or profiles; `--force-cross-machine` compares anyway under a loud
 banner (counts can transfer between machines of one architecture, times cannot).
 
-Noise thresholds (a step beyond one is flagged): 1% for instructions, allocations, bytes and
+Noise thresholds (a step beyond one is flagged): 5% for instructions (hash seeds alone moved one
+bench 3.8% on identical code), 1% for allocations, bytes and
 simulated time; 0.5% for calls, rounds and wire bytes; 15% for wall time.
 
 **On a mothership** (the dev shell has valgrind and the Cargo shim; nothing builds on the laptop):
@@ -128,8 +129,12 @@ Recorded from runs on mothership-alpha (2026-11-25), not guessed:
 - **`requeue_spawned`** (kit scheduler) rebuilds the whole spawn queue per call, so a budgeted
   driver using it is quadratic; nothing but tests calls it today.
 
-**Unproven on GitHub.** The gate was run end to end on mothership-alpha, base against head, with
-a planted regression, and not on a GitHub runner. Until a CI section goes green, unverified are:
+**Unproven on GitHub.** The gate (`x/bench.ts gate --base <sha> big_automata`, the command the
+workflow runs) was run end to end on mothership-alpha, base against head, and not on a GitHub
+runner. With a planted 256-key scan per okv apply it exited 1 (`okv_write` instructions +83.79%
+at 1k, +77.25% at 10k); after `git revert` of the plant it exited 0 (153 measurements, none
+beyond noise). A heavier plant (an O(n) scan per apply) made the head's scaling tests time out
+and failed the gate the same way. Until a CI section goes green, unverified are:
 the runner's valgrind (nix build or cache hit), cache behaviour (`rust-cache` and the
 flakehub cache with a second checkout of the base commit in one job), the job's duration (the
 gated tiers run twice, and callgrind is slow), whether `perf_event_open` exists there, and the

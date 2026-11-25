@@ -50,7 +50,9 @@ const HIGHER_IS_BETTER = new Set<string>([]);
  * deterministic, wall time is not.
  */
 export const NOISE: Record<string, number> = {
-  instructions: 0.01,
+  // hash seeds move hash-heavy benches by a few percent between processes: the replay server
+  // bench read -3.4% and -3.8% on identical code, so a tighter line would fail clean commits
+  instructions: 0.05,
   allocations: 0.01,
   alloc_bytes: 0.01,
   sim_time: 0.01,
