@@ -17,8 +17,11 @@ use dioxus::prelude::*;
 /// What a button does, which decides its accessible name and its glyph.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum NavButtonKind {
-    /// Shows or hides the sidebar.
+    /// Shows the sidebar.
     Sidebar,
+    /// Hides the sidebar: the same glyph, for the control that sits in the sidebar's own header
+    /// while it is shown.
+    HideSidebar,
     /// Steps back through where the user has been.
     Back,
     /// Steps forward over what back left.
@@ -31,6 +34,7 @@ impl NavButtonKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Sidebar => "Open sidebar",
+            Self::HideSidebar => "Hide sidebar",
             Self::Back => "Back",
             Self::Forward => "Forward",
         }
@@ -38,7 +42,7 @@ impl NavButtonKind {
 
     fn data_kind(self) -> &'static str {
         match self {
-            Self::Sidebar => "sidebar",
+            Self::Sidebar | Self::HideSidebar => "sidebar",
             Self::Back => "back",
             Self::Forward => "forward",
         }
@@ -69,7 +73,7 @@ pub fn NavButton(
             },
             span { "data-part": "icon", "aria-hidden": "true",
                 match kind {
-                    NavButtonKind::Sidebar => rsx! {
+                    NavButtonKind::Sidebar | NavButtonKind::HideSidebar => rsx! {
                         for index in 0..3 {
                             span { key: "{index}", "data-part": "bar" }
                         }
@@ -123,6 +127,7 @@ mod tests {
     fn each_kind_is_named_for_what_it_does() {
         for kind in [
             NavButtonKind::Sidebar,
+            NavButtonKind::HideSidebar,
             NavButtonKind::Back,
             NavButtonKind::Forward,
         ] {
@@ -130,12 +135,18 @@ mod tests {
             assert!(page.has_role("button", kind.label()));
         }
         assert_eq!(NavButtonKind::Sidebar.label(), "Open sidebar");
+        assert_eq!(NavButtonKind::HideSidebar.label(), "Hide sidebar");
     }
 
     #[test]
     fn the_button_names_its_vocabulary_and_draws_its_glyph_from_parts() {
         for (kind, data_kind, glyph) in [
             (NavButtonKind::Sidebar, "sidebar", vec!["bar", "bar", "bar"]),
+            (
+                NavButtonKind::HideSidebar,
+                "sidebar",
+                vec!["bar", "bar", "bar"],
+            ),
             (NavButtonKind::Back, "back", vec!["glyph"]),
             (NavButtonKind::Forward, "forward", vec!["glyph"]),
         ] {
@@ -178,7 +189,8 @@ mod tests {
                 kind: kind(),
                 onclick: move |()| {
                     kind.set(match kind() {
-                        NavButtonKind::Sidebar => NavButtonKind::Back,
+                        NavButtonKind::Sidebar => NavButtonKind::HideSidebar,
+                        NavButtonKind::HideSidebar => NavButtonKind::Back,
                         NavButtonKind::Back => NavButtonKind::Forward,
                         NavButtonKind::Forward => NavButtonKind::Sidebar,
                     });

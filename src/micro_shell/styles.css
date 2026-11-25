@@ -17,6 +17,22 @@
   gap: var(--ct-dimension-spacing-2);
 }
 
+/* The header is the rack's place on screen while the sidebar is shown: the same offsets the
+ * floating rack takes in a pane (ct-panel-page), so nothing moves when the sidebar opens. */
+.ct-shell [data-part="sidebar"] > [data-part="header"] {
+  display: flex;
+  align-items: center;
+  gap: var(--ct-dimension-spacing-2);
+  box-sizing: border-box;
+  height: 3.5rem;
+  padding-inline: var(--ct-dimension-spacing-2);
+}
+
+.ct-shell [data-part="sidebar"] > [data-part="footer"] {
+  margin-top: auto;
+  padding: 0 var(--ct-dimension-spacing-2);
+}
+
 .ct-shell [data-part="sidebar"] > .ct-button {
   justify-content: flex-start;
   margin: 0 var(--ct-dimension-spacing-2);

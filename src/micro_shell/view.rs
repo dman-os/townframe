@@ -15,7 +15,6 @@ use clay_dioxus_kit::NavButton;
 use clay_dioxus_kit::NavButtonKind;
 use clay_dioxus_kit::NavRack;
 use clay_dioxus_kit::PanelPage;
-use clay_dioxus_kit::use_pane_rack;
 use clay_dioxus_kit::Renderer;
 use clay_dioxus_kit::SectionPane;
 use clay_dioxus_kit::Sections;
@@ -23,6 +22,7 @@ use clay_dioxus_kit::Sheet;
 use clay_dioxus_kit::SizeRule;
 use clay_dioxus_kit::Split;
 use clay_dioxus_kit::WidthClass;
+use clay_dioxus_kit::use_pane_rack;
 use clay_mdk::FacetSnapshot;
 use clay_mdk::FacetState;
 use clay_mdk::Row;
@@ -536,6 +536,34 @@ fn Frame(shell: Shell) -> Element {
     }
 }
 
+/// The sidebar's header while it is shown (ADR 058 §2.3): the rack's controls at the window's
+/// top-left, where the floating rack was, then the app's mark. Docked, the rack's three: hide,
+/// back and forward (the last two disabled when there is nowhere to go, as in the floating rack).
+/// As the compact drawer, hide alone: back would pop the same entry, and forward is the footer's.
+/// The mark is a plain image, not a control, and there is no menu behind it yet.
+#[component]
+fn SidebarHeader(
+    wide: bool,
+    can_back: bool,
+    can_forward: bool,
+    on_hide: EventHandler<()>,
+    on_back: EventHandler<()>,
+    on_forward: EventHandler<()>,
+) -> Element {
+    rsx! {
+        header { "data-part": "header",
+            NavRack {
+                NavButton { kind: NavButtonKind::HideSidebar, onclick: on_hide }
+                if wide {
+                    NavButton { kind: NavButtonKind::Back, disabled: !can_back, onclick: on_back }
+                    NavButton { kind: NavButtonKind::Forward, disabled: !can_forward, onclick: on_forward }
+                }
+            }
+            span { "data-part": "mark", role: "img", "aria-label": "daytxt", "🌞" }
+        }
+    }
+}
+
 /// The sidebar (FDR 006): navigation across micros. It offers every destination and mounts the
 /// panels that fill the sidebar socket.
 #[component]
@@ -558,17 +586,34 @@ fn Sidebar(shell: Shell) -> Element {
         });
     rsx! {
         nav { "data-part": "sidebar", "aria-label": "Sidebar",
-            AppBar { title: "daytxt" }
-            if wide {
-                Button {
-                    variant: ButtonVariant::Outline,
-                    label: "Hide sidebar".to_owned(),
-                    onclick: {
-                        let shell = shell.clone();
-                        move |()| shell.set_sidebar_hidden(true)
-                    },
-                    "Hide sidebar"
-                }
+            SidebarHeader {
+                wide,
+                can_back: state.navigation.can_back(),
+                can_forward: state.navigation.can_forward(),
+                on_hide: {
+                    let shell = shell.clone();
+                    move |()| {
+                        // Docked, hiding is the setting; as the compact drawer it is the
+                        // navigation entry that opened it.
+                        if wide {
+                            shell.set_sidebar_hidden(true);
+                        } else {
+                            shell.back();
+                        }
+                    }
+                },
+                on_back: {
+                    let shell = shell.clone();
+                    move |()| {
+                        shell.back();
+                    }
+                },
+                on_forward: {
+                    let shell = shell.clone();
+                    move |()| {
+                        shell.forward();
+                    }
+                },
             }
             for row in destinations(&panels) {
                 Button {
@@ -589,6 +634,21 @@ fn Sidebar(shell: Shell) -> Element {
             }
             for row in panels.iter().filter(|row| row.value.sockets.contains(&Socket::Sidebar)) {
                 div { key: "sidebar-{row.key}", "data-part": "slot", {panel_slot(row, row.value.content)} }
+            }
+            // Forward is the drawer's footer on a compact host; docked, the header holds it.
+            if !wide {
+                footer { "data-part": "footer",
+                    NavButton {
+                        kind: NavButtonKind::Forward,
+                        disabled: !state.navigation.can_forward(),
+                        onclick: {
+                            let shell = shell.clone();
+                            move |()| {
+                                shell.forward();
+                            }
+                        },
+                    }
+                }
             }
         }
     }
@@ -953,5 +1013,60 @@ mod tests {
             details: 1.0,
         };
         assert_eq!(arrangement(&present(fine)), fine);
+    }
+
+    /// The header's buttons as the page renders them, in order, `!` after a disabled one.
+    fn header(wide: bool, can_back: bool, can_forward: bool) -> Vec<String> {
+        fn app(props: (bool, bool, bool)) -> Element {
+            rsx! {
+                SidebarHeader {
+                    wide: props.0,
+                    can_back: props.1,
+                    can_forward: props.2,
+                    on_hide: |()| {},
+                    on_back: |()| {},
+                    on_forward: |()| {},
+                }
+            }
+        }
+        let mut dom = VirtualDom::new_with_props(app, (wide, can_back, can_forward));
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("aria-label=\"daytxt\""),
+            "the mark is named: {html}"
+        );
+        html.split("<button")
+            .skip(1)
+            .map(|button| {
+                let tag = &button[..button.find('>').unwrap()];
+                let name = tag
+                    .split("aria-label=\"")
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .unwrap();
+                format!(
+                    "{name}{}",
+                    if tag.contains("data-disabled") {
+                        "!"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_docked_header_holds_the_racks_three_and_the_drawers_only_hide() {
+        assert_eq!(
+            header(true, true, false),
+            ["Hide sidebar", BACK, "Forward!"]
+        );
+        assert_eq!(
+            header(true, false, false),
+            ["Hide sidebar", "Back!", "Forward!"]
+        );
+        assert_eq!(header(false, true, true), ["Hide sidebar"]);
     }
 }
