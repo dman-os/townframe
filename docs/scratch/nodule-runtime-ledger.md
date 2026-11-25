@@ -2,7 +2,7 @@
 
 Status: Active
 Owner: Townframe maintainers
-Updated: 2026-11-12
+Updated: 2026-11-16
 Scope: Working ledger for the `feat/nodules` PR: decisions made with the operator, work in flight, to-dos, and questions awaiting review. Read this first after any context compaction, together with AGENTS.md and ADR 027.
 
 ## How to use this ledger
@@ -123,6 +123,7 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 Answers review question 4. Precedents: Kubernetes init containers and lifecycle hooks (the kubelet runs them directly; the pod is not Ready until they succeed; callers are not queued), and Helm install/upgrade hooks (re-run per release revision).
 - **Shape:** `Initializer{key, target, mode}`. `key` is a new required string, unique per nodule. `mode` keeps `Once` (once per node per revision) and `EveryStart` (each time the nodule starts: node boot, or enable).
 - **Done-ness:** host-local SQLite (big_nodule migration), keyed (plug, init key, revision). Per revision, like Helm. A new revision re-runs `Once` inits, so inits must be idempotent. No synced done-ness: running it again on a mirrored node is harmless by idempotency.
+- 2026-11-16 (operator decision): per ADR 047 §8, `initialization` is a list again so declaration order survives Automerge and the cartridge revision hash; each entry carries its own `key`.
 - **Idempotency key:** `nodule/<plug>/<revision>/<key>` in the `InvocationContext`, so durable document mutations made by an init dedupe (D3).
 - **Who invokes:**
   - A **local** target (an operation the nodule implements) is called by the runtime directly on the nodule's provider from the executor, not through dispatch. This is the host running its own lifecycle hook, like the kubelet. The `Caller` is the nodule service.

@@ -1850,15 +1850,15 @@ impl State {
         if !self.inits.contains_key(cartridge_id) {
             let done = inits
                 .iter()
-                .filter(|(key, init)| {
+                .filter(|init| {
                     init.mode == RunMode::Once
                         && self
                             .init_done
                             .get(cartridge_id)
-                            .and_then(|keys| keys.get(*key))
+                            .and_then(|keys| keys.get(&init.key))
                             == Some(&installed.revision)
                 })
-                .map(|(key, _)| key.clone())
+                .map(|init| init.key.clone())
                 .collect();
             self.next_epoch += 1;
             self.inits.insert(
@@ -1880,7 +1880,8 @@ impl State {
             .inits
             .get_mut(cartridge_id)
             .expect("run inserted above");
-        let (init_key, init) = inits.iter().find(|(key, _)| !run.done.contains(*key))?;
+        let init = inits.iter().find(|init| !run.done.contains(&init.key))?;
+        let init_key = &init.key;
         if run.running.is_some() {
             return Some(Readiness::Initializing);
         }
