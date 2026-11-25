@@ -831,7 +831,6 @@
     --ct-dimension-spacing-6: 1.5rem;
     --ct-dimension-spacing-8: 2rem;
     --ct-dimension-spacing-12: 3rem;
-    --ct-dimension-spacing-36: 9rem;
     --ct-dimension-radius-sm: 0.25rem;
     --ct-dimension-radius-md: 0.5rem;
     --ct-dimension-radius-lg: 0.75rem;
@@ -860,7 +859,6 @@
     --ct-dimension-spacing: 0.25rem;
     --ct-spacing: 0.25rem;
     --ct-dimension-target-coarse: 3rem;
-    --ct-dimension-rack-size: 9rem;
     --ct-radius-sm: 0.25rem;
     --ct-radius-md: 0.5rem;
     --ct-radius-lg: 0.75rem;
@@ -879,7 +877,6 @@
     --ct-layer-content: 0;
     --ct-layer-raised: 10;
     --ct-layer-app-bar: 20;
-    --ct-layer-rack: 25;
     --ct-layer-drawer: 30;
     --ct-layer-sheet: 40;
     --ct-layer-toast: 50;
@@ -1794,29 +1791,31 @@
     }
   }
   .ct-panel-page {
-    --ct-pane-rack-inset: 0px;
-    position: relative;
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
     height: 100%;
     min-height: 0;
   }
+  .ct-panel-page [data-part="rack"] {
+    display: flex;
+    grid-column: 1;
+    grid-row: 1;
+    align-items: center;
+    min-width: 0;
+  }
   .ct-panel-page [data-part="bar"] {
-    flex: none;
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+  .ct-panel-page[data-rack="true"] [data-part="bar"] {
+    grid-column: 2;
   }
   .ct-panel-page [data-part="body"] {
-    flex: 1 1 auto;
+    grid-column: 1 / -1;
+    grid-row: 2;
     min-height: 0;
     overflow-y: auto;
-  }
-  .ct-panel-page[data-rack="true"] {
-    --ct-pane-rack-inset: calc(var(--ct-dimension-rack-size) + var(--ct-dimension-spacing-2));
-  }
-  .ct-panel-page [data-part="rack"] {
-    position: absolute;
-    top: var(--ct-dimension-spacing-1);
-    left: var(--ct-dimension-spacing-2);
-    z-index: var(--ct-layer-rack);
   }
   .ct-list-row {
     box-sizing: border-box;
@@ -1858,7 +1857,7 @@
     font-family: var(--ct-font-family);
   }
   .ct-app-bar[data-state="bare"] {
-    padding-left: calc(var(--ct-pane-rack-inset, 0px) + var(--ct-dimension-spacing-4));
+    padding-left: var(--ct-dimension-spacing-4);
   }
   .ct-app-bar [data-part="leading"] {
     display: flex;
@@ -1939,6 +1938,7 @@
     display: inline-flex;
     flex: none;
     align-items: center;
+    margin-inline-start: var(--ct-dimension-spacing-2);
   }
 }
 @property --tw-rotate-x {

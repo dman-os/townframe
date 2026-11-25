@@ -26,7 +26,7 @@ renders structure, ARIA and behaviour, and `styles/kit/<name>.css` is the whole 
 | `Sheet` (bottom/side sheet) | `headless::sheet` | `styles/kit/sheet.css` | `specimens/sheet.rs` |
 | `NavButton` (sidebar toggle, back, forward) | `headless::nav_button` | `styles/kit/nav_button.css` | `specimens/nav_button.rs` |
 | `NavRack` (the group of nav buttons) | `headless::nav_rack` | `styles/kit/nav_rack.css` | `specimens/nav_button.rs` |
-| `PanelPage` (app bar pinned over a scrolling body, the rack floating over its corner; `use_pane_rack` provides it) | `headless::panel_page` | `styles/kit/panel_page.css` | `specimens/panel_page.rs` |
+| `PanelPage` (app bar pinned over a scrolling body, the rack beside its title; `use_pane_rack` provides it) | `headless::panel_page` | `styles/kit/panel_page.css` | `specimens/panel_page.rs` |
 | `AppBar` (leading slot, title, trailing actions) | `headless::app_bar` | `styles/kit/app_bar.css` | `specimens/app_bar.rs` |
 | `Drawer` (left drawer of a compact host) | `headless::drawer` | `styles/kit/drawer.css` | `specimens/drawer.rs` |
 | `ListRow` (openable, highlighted-when-open list row) | `headless::list_row` | `styles/kit/list_row.css` | `specimens/list_row.rs` |

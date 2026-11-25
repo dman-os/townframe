@@ -1,7 +1,6 @@
 /*
  * ct-app-bar (headless/app_bar.rs). Parts: leading, title, trailing. State: the root's data-state
- * (leading|bare). A bare bar has no leading slot, so its title is inset to the page's own gutter,
- * after the corner a floating rack covers (--ct-pane-rack-inset, set by ct-panel-page).
+ * (leading|bare). A bare bar has no leading slot, so its title is inset to the page's own gutter.
  * Metrics (KIT-105): 56px tall and fixed, the title one line that ends in an ellipsis rather than
  * growing the bar.
  */
@@ -21,7 +20,7 @@
 }
 
 .ct-app-bar[data-state="bare"] {
-  padding-left: calc(var(--ct-pane-rack-inset, 0px) + var(--ct-dimension-spacing-4));
+  padding-left: var(--ct-dimension-spacing-4);
 }
 
 .ct-app-bar [data-part="leading"] {

@@ -10,8 +10,7 @@
       "4": { "$value": { "value": 1, "unit": "rem" } },
       "6": { "$value": { "value": 1.5, "unit": "rem" } },
       "8": { "$value": { "value": 2, "unit": "rem" } },
-      "12": { "$value": { "value": 3, "unit": "rem" } },
-      "36": { "$value": { "value": 9, "unit": "rem" } }
+      "12": { "$value": { "value": 3, "unit": "rem" } }
     },
     "radius": {
       "sm": { "$value": { "value": 0.25, "unit": "rem" } },

@@ -272,7 +272,6 @@ function dimension(value: unknown, path: string): string {
   const isBorder = /(^|\.)border(?:[-.]|$)/.test(path);
   const isFontSize = /(^|\.)font-size(?:[-.]|$)/.test(path);
   const isTarget = /(^|\.)target(?:[-.]|$)/.test(path);
-  const isRack = /(^|\.)rack(?:[-.]|$)/.test(path);
 
   if (isPill) {
     if (value.unit !== "px" || value.value !== 999) {
@@ -280,7 +279,7 @@ function dimension(value: unknown, path: string): string {
     }
   } else if (isShadow || isBorder) {
     if (value.unit !== "px") fail(`dimension ${path} must use px`);
-  } else if (isSpacing || isRadius || isFontSize || isTarget || isRack) {
+  } else if (isSpacing || isRadius || isFontSize || isTarget) {
     if (value.unit !== "rem") fail(`dimension ${path} must use rem`);
   } else {
     fail(`dimension ${path} has no documented unit policy`);

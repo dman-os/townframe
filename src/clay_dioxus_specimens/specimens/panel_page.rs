@@ -15,8 +15,8 @@ pub fn PanelPageSpecimens() -> Element {
     rsx! {
         FoundationSection {
             id: "panel-page-scroll".to_string(),
-            title: "Pinned bar, floating rack, scrolling body".to_string(),
-            description: "data-part rack, bar, body. The page fills its mount, the bar is pinned and the body takes the height the bar leaves; the rack floats over the top-left corner and the title starts after it.".to_string(),
+            title: "Pinned bar, rack, scrolling body".to_string(),
+            description: "data-part rack, bar, body. The page fills its mount, the bar is pinned and the body takes the height the bar leaves; the rack sits at the top-left in the bar's row and the title starts after it.".to_string(),
             div { class: "flex flex-wrap items-start gap-8",
                 for width_px in [COMPACT_PX, EXPANDED_PX] {
                     Frame { key: "{width_px}", title: "PanelPage".to_string(), width_px,
