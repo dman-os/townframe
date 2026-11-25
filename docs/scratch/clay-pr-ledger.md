@@ -9,7 +9,11 @@ Updated: 2026-11-24 (rebased onto node-76; layers 56-63: CI fixed and scoped, NS
 Keep this head current. Update it in the same layer as the work it records. The dated sections below
 "History" are the original #79 design-settling ledger, kept for its decisions.
 
-## Where things are (2026-11-24)
+## Where things are (2026-11-25)
+
+- **Tip:** layer 79 (#380). #344 (layer 69) was green on CI; layers 70-79 are drafts. Three cuts to main are in
+  flight from a lane: the facet-grant port (`clay_docs::FacetAccess`), then the legacy workspace exclusion, then
+  mltools out, so every stack's CI stops building the legacy crates.
 
 - **On main from this lane:** #79 (Clay collections/lifecycle/manifests), #80 (shell, kit, Settings), #81 (Android),
   #82 (datum_core), #83 (mbx), #120. Nothing since 2026-11-17.
@@ -96,6 +100,21 @@ of its paths and lists the original commits in its message. They are topical and
 | 62-ledger-docs | #319 | docs(scratch): ledger update and the web components step 2 note |
 | 63-review-blob-reach | #323 | feat(clay_node,daytxt_native): the review micro's blobCap reaches its intxt drawers |
 | 64-review-codeview | #324 | feat(micro_review): Show changes renders the patch in CodeView (intxt's commit, carried) |
+| 65-ci-regen | #332 | chore: regenerate derived files the base left stale (sql gen, wire sidecars, lexicon snaps, CLI docs) |
+| 66-style-contain | #338 | fix(clay_surface): admit contain and isolation, and name a refused style property |
+| 67-log-faults | #339 | fix(clay_host): log a micro fault where the supervisor records it |
+| 68-mltools-out | #340 | chore: take mltools out of the workspace with the legacy daybook crates |
+| 69-codeview-admitted | #344 | test(pierre_diffs_dioxus): every CodeView batch admitted by a Clay surface; batch limits sized for it |
+| 70-clay-docs-note | #346 | docs(adr): ADR 054, Clay docs on the collection waist |
+| 71-docs-source | #351 | feat(clay_cabinet): docs.datums feeds per authority over a fake cabinet |
+| 72-predicate-evaluator | #353 | feat(big_cabinet_core): in-memory predicate evaluator and conformance table (ADR 054 §7) |
+| 73-waker-proposal | #354 | docs(scratch): waker-driven render proposal |
+| 74-specimens-crate | #355 | refactor: specimen and foundation pages move to clay_dioxus_specimens |
+| 75-outline-admitted | #356 | fix(clay_surface): admit outlines; every specimen page admitted by a Clay surface |
+| 76-specimen-board | #357 | feat(micro_theme_lab): the specimen board |
+| 77-clay-nsids | #363 | feat(clay): the Clay half of ADR 050 §2 NSIDs (LexRef, Clay Lexicons, Contract enum) |
+| 78-lab-panes | #358 | feat(micro_theme_lab): navigator, canvas and inspector |
+| 79-colour-adr | #380 | docs(adr): ADR 055, the colour system |
 
 ## Accounting of operator requests (2026-11-03..24)
 
@@ -167,14 +186,8 @@ Built from the raw chat on 2026-11-24 (83 requests: 23 on main, 23 done but unme
     (3) `CodeViewFile::from_patch` over bytes that reports non-UTF-8 itself.
 
 Questions still open for the operator:
-- Is a dev-dependency from `clay_mdk` to `clay_dioxus_kit` acceptable?
-- Where does the sysadmin e2e live now (it is skipped)?
-- The overnight 2026-11-18 calls on cartridge micros: `package_version` 0, replacement by name equality, the grants
-  handle source, load-failure policy, settings document exposure.
-- Which bucket backs the CI cache.
-- The pierre_diffs budget exemptions (layer 57, `ARCHITECTURAL_EXCEPTION`s) and the DioxusHost ceiling cut to 67.
-- Closing the superseded PRs listed above once the stack is reviewed.
-- Sign-off on nodules' ADR 052/053 (micros on the node), which gates item 16.
+- None from before 11-25: all seven were answered on 11-24 (see standing decisions). New ones live in ADR 054/055
+  and docs/scratch/waker-driven-render.md.
 
 ## Standing decisions (summary; dates are when the operator ruled)
 
@@ -197,6 +210,27 @@ Questions still open for the operator:
   with their own tooling (11-17, 11-18, 11-23); push everything to origin, WIP included (11-23); never block on
   Blitz (11-10, 11-17); never file on third-party repos (11-19); clippy only right before pushing, full suites on
   CI (11-19); mbx keeps 10 GiB free and uses the rest (11-18).
+
+- 11-24/25 (operator): pierre budget exemptions OK; close superseded PRs we own; clay_mdk may take any
+  dev-dependency; sysadmin e2e is not this lane's; CI cache bucket deferred; formatting is not a concern; mltools out.
+  ADR 052/053 signed: micro wasm runs in the host, never on the node; the micros nodule manages installs, grants and
+  minting; actors are `micros/<cartridge>/<micro>`; the micros component is embedded so the app starts offline.
+  Cartridge micros: replacement by name is the cross-cartridge question; settings are exposed (permissions are
+  identical across a cartridge's nodules and micros); a micro failing to load never breaks boot.
+- Web components (11-24): the sandbox is wasm plus the host-checked wire, not shadow DOM; scoped registries;
+  host-generated tag names per binding, requested by manifest-local binding name (no NSID); a sanitized
+  `setHTML`-like op (11-25); built-in micros isomorphic with wasm ones.
+- NSIDs (ADR 050 §2, nodules' record): an NSID names a Lexicon, only for what another cartridge could provide; no
+  custom primary types; presentations named by WIT interface. Clay half done in layer 77.
+- Clay docs (ADR 054, 11-24/25): micros mount queries over node docs as collections; feeds per authority, the node
+  is the only filter, no host grants; values cached by version; hydration is the budget; membership pages plus a
+  per-micro value stream; one predicate evaluator with a conformance table; no drawer interest, known drawers
+  stream their meta group (nodules node-95).
+- Styling (11-25): N stylesheets in an ordered stack (shipped, installed, the user's own), each its own layer, all
+  above a micro's own sheet; no "identity" layer. Colour system (ADR 055): palette ramps, roles derived, scheme and
+  contrast settings via `color-scheme`/`light-dark()`; implementation later.
+- Process (11-25): no back-compat, shims or migrations for anything not on main; all non-GUI work (builds, clippy,
+  nextest, xtask) on the motherships (mothership, mothership-alpha), the laptop for GUI only.
 
 ## Design debt on record
 
