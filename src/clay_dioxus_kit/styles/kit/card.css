@@ -2,7 +2,7 @@
  * ct-card (headless/card.rs). Parts: header, content, footer. Axis: data-variant
  * (tonal|sunken|plain|outlined) and data-status (info|success|warning|danger; absent is neutral).
  * The status fills the card with its container role, so a theme that recolours the status
- * recolours every status-carrying component. Tokens: --ct-card-radius|border|fill (ADR 057); the
+ * recolours every status-carrying component. Tokens: --ct-card-radius|border|divider|fill (ADR 057); the
  * fill token is the tonal variant's.
  */
 .ct-card {
@@ -117,6 +117,5 @@
   align-items: center;
   gap: var(--ct-dimension-spacing-2);
   padding: var(--ct-dimension-spacing-3) calc(var(--ct-spacing) * 5);
-  border-top: var(--ct-dimension-border-width-hairline) solid
-    var(--ct-color-border);
+  border-top: var(--ct-card-divider);
 }

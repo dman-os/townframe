@@ -38,6 +38,8 @@
     --ct-scrub-bubble-radius: var(--ct-dimension-radius-md);
 
     --ct-card-border: none;
+    /* The footer top edge: none by default, spacing alone separates it (a card adds no internal edge). */
+    --ct-card-divider: none;
     --ct-alert-border: none;
     --ct-chip-border: none;
 
