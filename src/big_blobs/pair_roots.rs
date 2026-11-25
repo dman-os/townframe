@@ -86,7 +86,16 @@ impl PairRoots {
         Ok(())
     }
 
-    pub(crate) async fn record_virtual(&self, pair: &VirtualPair) -> Res<()> {
+    /// Bind `pair.cipher` to its `(plaintext, key, framing)` and root it.
+    ///
+    /// Returns `false`, leaving every row untouched, when the digest is already
+    /// bound to a different `(plaintext, key, framing)`. A ciphertext digest is
+    /// a function of exactly those, so a second binding means the caller's
+    /// claim is wrong (a stale or foreign document claim), not that the stored
+    /// row is: the stored binding is immutable and the caller decides what a
+    /// claim that contradicts it means. Re-recording the same binding only
+    /// advances its `source`.
+    pub(crate) async fn record_virtual(&self, pair: &VirtualPair) -> Res<bool> {
         let tx = self.sql.begin_write().await?;
         let cipher = pair.cipher.to_hex().to_string();
         let changed = sqlite::queries::record_virtual(
@@ -102,10 +111,9 @@ impl PairRoots {
             pair.source.clone(),
         )
         .await?;
-        eyre::ensure!(
-            changed.rows_affected == 1,
-            "virtual ciphertext binding changed"
-        );
+        if changed.rows_affected != 1 {
+            return Ok(false);
+        }
         sqlite::queries::insert_root(&tx, cipher.clone()).await?;
         if let Some((document, branch)) = &pair.claimed_by {
             sqlite::queries::update_provenance(
@@ -117,7 +125,7 @@ impl PairRoots {
             .await?;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
 
     pub(crate) async fn virtual_pairs(&self) -> Res<Vec<(VirtualPair, bool, bool, bool)>> {
@@ -277,16 +285,11 @@ mod tests {
             source: "local".into(),
             claimed_by: Some(("document".into(), "main".into())),
         };
-        roots.record_virtual(&pair).await?;
+        assert!(roots.record_virtual(&pair).await?);
         pair.source = "accepted-document-version".into();
-        roots.record_virtual(&pair).await?;
+        assert!(roots.record_virtual(&pair).await?);
         pair.key = MasterKey::random();
-        let error = roots.record_virtual(&pair).await.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("virtual ciphertext binding changed")
-        );
+        assert!(!roots.record_virtual(&pair).await?);
         let mut records = roots.virtual_pairs().await?;
         assert_eq!(records.len(), 1);
         let (stored, preclaim, owned, managed_pin) = records.pop().unwrap();
