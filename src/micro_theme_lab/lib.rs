@@ -158,6 +158,7 @@ fn view(host: Host) -> Element {
     // What the canvas shows, and the width it is framed at; both belong to this mount.
     let selection = use_signal(|| Selection::Foundation(Foundation::Colour));
     let frame = use_signal(|| Frame::Fill);
+    let scheme = use_signal(|| CanvasScheme::Inherit);
     // The pages' sections register their mounted handles here (`FoundationSection`), and the
     // Tabs and ScrubStrip pages read the renderer. A micro renders under a browser engine on
     // every host that adopts its shadow root (Wry, the web build); Blitz never shapes this.
@@ -172,7 +173,7 @@ fn view(host: Host) -> Element {
             Stylesheet { css: format!("{STYLES}\n{preview_css}") }
             div { class: "ct-theme-lab",
                 Navigator { selection }
-                Canvas { selection: selection(), frame }
+                Canvas { selection: selection(), frame, scheme }
                 aside { "data-part": "inspector", "aria-label": "Inspector",
                     section { "data-part": "editor", "aria-label": "Theme CSS",
                         label { "data-part": "heading", r#for: "theme-css", "Theme CSS" }
@@ -364,6 +365,38 @@ impl Frame {
     }
 }
 
+/// The scheme the canvas previews under. The canvas sets its own `color-scheme` (ADR 055 §4.2),
+/// so a `light-dark()` value inside it resolves to the chosen scheme while the lab's chrome keeps
+/// the host's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CanvasScheme {
+    /// No `color-scheme` of its own: the canvas follows the host.
+    Inherit,
+    Light,
+    Dark,
+}
+
+impl CanvasScheme {
+    const ALL: [CanvasScheme; 3] = [Self::Inherit, Self::Light, Self::Dark];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Inherit => "Follow app",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    /// The value of the frame's `data-scheme`, which the lab's stylesheet maps to `color-scheme`.
+    fn attr(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
 /// The navigator: every section of the lab, grouped as the stack, the foundations and the
 /// components. One entry is current; the canvas shows it.
 #[component]
@@ -401,8 +434,9 @@ fn Navigator(selection: Signal<Selection>) -> Element {
 /// anything is applied. One section at a time: everything in one render would be one oversized
 /// batch.
 #[component]
-fn Canvas(selection: Selection, frame: Signal<Frame>) -> Element {
+fn Canvas(selection: Selection, frame: Signal<Frame>, scheme: Signal<CanvasScheme>) -> Element {
     let mut frame = frame;
+    let mut scheme = scheme;
     let width = frame()
         .width_px()
         .map(|px| format!("max-width:{px}px;"))
@@ -421,7 +455,26 @@ fn Canvas(selection: Selection, frame: Signal<Frame>) -> Element {
                     }
                 }
             }
-            div { "data-part": "frame", style: "{width}",
+            div { "data-part": "toolbar", role: "toolbar", "aria-label": "Canvas scheme",
+                span { "data-part": "label", "Scheme" }
+                for each in CanvasScheme::ALL {
+                    Button {
+                        key: "{each.title()}",
+                        variant: ButtonVariant::Outline,
+                        pressed: Some(scheme() == each),
+                        onclick: move |()| scheme.set(each),
+                        "{each.title()}"
+                    }
+                }
+                // The same `light-dark()` custom property as the probe inside the frame, outside
+                // it: this one keeps the host's scheme while the canvas flips.
+                span { "data-part": "probe", "data-where": "chrome", "Chrome probe" }
+            }
+            div {
+                "data-part": "frame",
+                "data-scheme": scheme().attr(),
+                style: "{width}",
+                span { "data-part": "probe", "data-where": "canvas", "Canvas probe" }
                 match selection {
                     Selection::Sheets => rsx! {
                         section { "data-part": "sheets",
