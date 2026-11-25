@@ -86,3 +86,27 @@ irpc = { version = "0.17.0", default-features = false, features = ["derive", "sp
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
 irpc = { version = "0.17.0", default-features = false, features = ["derive", "spans"] }
+
+# Instruction-count benches (see `benches/instr.rs` and the benchmarking skill). Valgrind has no
+# wasm build, so the dependency is native only and the target is empty on wasm.
+[[bench]]
+name = "instr"
+harness = false
+
+[[bench]]
+name = "wall"
+harness = false
+required-features = ["test-support"]
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+gungraun = "0.20.0"
+divan = "0.1.21"
+uuid.workspace = true
+
+# Which tiers `x/bench.ts` runs for this crate: `counts` is a nextest filter over tests that
+# print `BENCH_RECORD` lines (allocation counts, simulated time); `instr` and `wall` name bench
+# targets.
+[package.metadata.bench]
+counts = { filter = "test(/scaling::|whole_sync_costs|outbox_configuration_sweep/)", features = ["test-support"] }
+instr = { bench = "instr" }
+wall = { bench = "wall", features = ["test-support"] }

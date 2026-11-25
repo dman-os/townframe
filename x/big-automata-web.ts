@@ -53,6 +53,7 @@ await site.join("index.html").writeText(`<!doctype html>
   <body>
     <p>status: <span id="status">connecting</span></p>
     <p>objects: <span id="objects"></span> of <span id="expected"></span></p>
+    <pre id="bench"></pre>
     <p>accept probe: node <span id="node_id"></span>, echoed <span id="echoed"></span>, closed <span id="closed"></span>, echo <span id="echo"></span></p>
     <script type="module">
       import init from "./big_automata_web.js";

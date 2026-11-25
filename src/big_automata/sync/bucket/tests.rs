@@ -3,6 +3,7 @@
 
 mod harness;
 mod last_bucket;
+mod scaling;
 mod walk;
 
 use super::*;
