@@ -108,7 +108,7 @@
 //!
 //! # Testing
 //!
-//! Each law above has a `law_N_...` test. [`oracle`](self::oracle) is a naive machine that
+//! Each law above has a `law_N_...` test. `oracle` is a naive machine that
 //! recomputes every decision from the whole state; a differential proptest drives both
 //! with the same inputs and compares every command and every want's phase. A deterministic
 //! simulation runs the real driver on a paused clock over a memory table, with crashes

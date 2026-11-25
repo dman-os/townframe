@@ -114,7 +114,9 @@ async fn crash_after_content(run: &mut Run) {
     run.world
         .with(|shared| shared.crash_after_content = Some(Arc::clone(&armed)));
     // no fetch may come: the crash then is a plain one
-    let _ = tokio::time::timeout(Duration::from_secs(10), armed.notified()).await;
+    tokio::time::timeout(Duration::from_secs(10), armed.notified())
+        .await
+        .ok();
     run.world.with(|shared| shared.crash_after_content = None);
     run.restart().await;
 }

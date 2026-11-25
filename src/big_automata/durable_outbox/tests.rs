@@ -68,10 +68,6 @@ impl Rig {
         out
     }
 
-    pub(super) fn advance(&mut self, secs: u64) {
-        self.now += Duration::from_secs(secs);
-    }
-
     pub(super) fn end(&mut self, call: CallId, ended: Ended) {
         self.outbox.fetch_ended(self.now, call, ended);
     }
