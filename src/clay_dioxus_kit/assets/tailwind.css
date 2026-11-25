@@ -1115,8 +1115,16 @@
     outline-offset: 2px;
   }
   .ct-button[data-disabled] {
-    opacity: 0.4;
+    --ct-button-bg: var(--ct-color-surface-sunken);
+    --ct-button-fg: var(--ct-color-text-muted);
+    --ct-button-border: var(--ct-color-border);
     cursor: not-allowed;
+  }
+  .ct-button[data-disabled][data-variant="outline"], .ct-button[data-disabled][data-variant="ghost"] {
+    --ct-button-bg: transparent;
+  }
+  .ct-button[data-disabled][data-variant="ghost"] {
+    --ct-button-border: transparent;
   }
   @media (prefers-reduced-motion: reduce) {
     .ct-button {
