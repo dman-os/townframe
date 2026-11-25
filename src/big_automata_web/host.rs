@@ -186,7 +186,8 @@ async fn run_dial(target: iroh::EndpointId) {
 
 // Counts the allocations of `?mode=bench`; costs one thread-local read per allocation otherwise.
 #[global_allocator]
-static HEAP: utils_rs::alloc_count::CountingAllocator = utils_rs::alloc_count::CountingAllocator;
+static HEAP: utils_rs::testing::alloc_count::CountingAllocator =
+    utils_rs::testing::alloc_count::CountingAllocator;
 
 /// `?mode=bench&n=<objects>&rtt_ms=<ms>`: the whole-sync workload of `big_automata::bench` with
 /// two in-memory nodes in this page, timed by `performance.now()` (what `web_time` reads) and

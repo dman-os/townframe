@@ -16,7 +16,7 @@ target, ts; schema and logic in `x/bench-lib.ts`, tested by `x/bench-lib.test.ts
 | Tier | What it measures | Gated | Where it lives | Use it for |
 | --- | --- | --- | --- | --- |
 | `instr` | callgrind instructions (Gungraun) | yes | `benches/instr.rs` | any CPU path, including ones that allocate nothing; a quadratic shows as 10x input costing 100x |
-| `counts` | allocations and bytes (`utils_rs::alloc_count`), simulated time, rounds, wire bytes | yes | in-crate tests that print `BENCH_RECORD` lines (`scaling`, `driver/tests/bench.rs`, `durable_outbox/tests/bench.rs`) | scaling checks that need crate internals; throughput and latency sweeps on the paused tokio clock |
+| `counts` | allocations and bytes (`utils_rs::testing::alloc_count`), simulated time, rounds, wire bytes | yes | in-crate tests that print `BENCH_RECORD` lines (`scaling`, `driver/tests/bench.rs`, `durable_outbox/tests/bench.rs`) | scaling checks that need crate internals; throughput and latency sweeps on the paused tokio clock |
 | `wall` | real time (divan, release) | never | `benches/wall.rs` | exploring where time goes on the machine in front of you |
 | `web` | `performance.now()` and allocations in a browser | never | `src/big_automata_web` Playwright spec | the same workload as wasm; browsers have no instruction counter |
 
@@ -27,9 +27,9 @@ crate that does, so nothing in the tool is specific to big_automata.
 ## Adding a bench
 
 - **Scaling check (allocation counts):** a `#[test]` that calls `assert_linear(name, n, |n| ...)`
-  with a closure that builds its input and returns `utils_rs::alloc_count::measure(op).1`. It runs
+  with a closure that builds its input and returns `utils_rs::testing::alloc_count::measure(op).1`. It runs
   n and 10n and fails above x14. Each run prints `BENCH_RECORD` lines. Install
-  `#[global_allocator] static HEAP: utils_rs::alloc_count::CountingAllocator` once per test
+  `#[global_allocator] static HEAP: utils_rs::testing::alloc_count::CountingAllocator` once per test
   binary; counting is per thread, so tests may share a process.
 - **Instruction bench:** put the setup and the measured body as public functions in
   `benches/workloads/mod.rs`, then wrap them with `#[library_benchmark]` and `#[bench::nXk(args =

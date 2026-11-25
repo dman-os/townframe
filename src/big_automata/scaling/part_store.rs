@@ -1,7 +1,7 @@
 //! The part store's writes and listings at 10k and 100k members of one part.
 
 use futures::executor::block_on;
-use utils_rs::alloc_count::measure;
+use utils_rs::testing::alloc_count::measure;
 
 use super::assert_linear;
 use crate::interlude::*;

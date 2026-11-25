@@ -8,10 +8,10 @@
 //! which the CI gate compares across commits.
 //!
 //! The counting allocator is process-wide for this test binary but counts only the thread
-//! inside a [`measure`](utils_rs::alloc_count::measure), so tests may share a process.
+//! inside a [`measure`](utils_rs::testing::alloc_count::measure), so tests may share a process.
 
-use utils_rs::alloc_count::Counted;
-use utils_rs::alloc_count::CountingAllocator;
+use utils_rs::testing::alloc_count::Counted;
+use utils_rs::testing::alloc_count::CountingAllocator;
 
 mod okv;
 mod part_store;
@@ -33,7 +33,7 @@ const MAX_BYTES_RATIO: f64 = 25.0;
 
 /// Run `measured` at `small` and at ten times it, and assert neither allocations nor bytes
 /// grew by more than [`MAX_ALLOCATIONS_RATIO`] and [`MAX_BYTES_RATIO`]. `measured` builds its own input and returns only what the
-/// operation under test allocated (setup is outside the [`measure`](utils_rs::alloc_count::measure)).
+/// operation under test allocated (setup is outside the [`measure`](utils_rs::testing::alloc_count::measure)).
 pub(crate) fn assert_linear(what: &str, small: usize, mut measured: impl FnMut(usize) -> Counted) {
     let low = measured(small);
     let high = measured(small * GROWTH);

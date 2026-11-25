@@ -69,7 +69,7 @@ pub struct SyncReport {
     pub bytes_up: u64,
     pub bytes_down: u64,
     /// What the pulling side and the serving responders allocated while syncing (zero unless the
-    /// host installed `utils_rs::alloc_count::CountingAllocator`), setup excluded.
+    /// host installed `utils_rs::testing::alloc_count::CountingAllocator`), setup excluded.
     pub allocations: u64,
     pub alloc_bytes: u64,
 }
@@ -345,13 +345,13 @@ pub async fn sync_once(
             .await
             .expect("the part stays wanted");
     };
-    utils_rs::alloc_count::start();
+    utils_rs::testing::alloc_count::start();
     // The loop never ends while the handle lives, so the sync finishing is what ends the run.
     match futures::future::select(std::pin::pin!(driver_loop), std::pin::pin!(pulled)).await {
         Either::Left(((), _)) => panic!("the driver loop ended before the part synced"),
         Either::Right(((), _)) => {}
     }
-    let counted = utils_rs::alloc_count::finish();
+    let counted = utils_rs::testing::alloc_count::finish();
     assert_eq!(
         pulled_into.member_count(&part()).await.expect("count"),
         objects as u64,

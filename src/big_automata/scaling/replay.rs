@@ -4,7 +4,7 @@
 //! nothing, so it is the instruction bench's (`replay_replace_every_target`).
 
 use futures::executor::block_on;
-use utils_rs::alloc_count::measure;
+use utils_rs::testing::alloc_count::measure;
 
 use super::assert_linear;
 use crate::interlude::*;

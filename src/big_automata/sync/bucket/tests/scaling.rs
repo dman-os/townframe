@@ -3,7 +3,7 @@
 //! part the requester holds nothing of (the walk costs every member).
 
 use futures::executor::block_on;
-use utils_rs::alloc_count::measure;
+use utils_rs::testing::alloc_count::measure;
 
 use super::harness::Driver;
 use super::harness::Member;
@@ -42,7 +42,7 @@ fn walked(
     n: usize,
     lacks: impl Fn(usize) -> bool,
     expect: impl Fn(&Walk, u64),
-) -> utils_rs::alloc_count::Counted {
+) -> utils_rs::testing::alloc_count::Counted {
     let theirs = vec![live(); n];
     let ours: Vec<_> = (0..n)
         .map(|at| if lacks(at) { missing() } else { live() })

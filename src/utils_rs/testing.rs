@@ -1,3 +1,5 @@
+pub mod alloc_count;
+
 use crate::interlude::*;
 
 // Ensure that the `tracing` stack is only initialised once using `once_cell`

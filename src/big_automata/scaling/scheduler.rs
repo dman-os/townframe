@@ -1,6 +1,6 @@
 //! The keyed scheduler at 10k and 100k keys: start, replace a running task, and retry.
 
-use utils_rs::alloc_count::measure;
+use utils_rs::testing::alloc_count::measure;
 
 use super::assert_linear;
 use crate::interlude::*;

@@ -5,9 +5,9 @@
 //!
 //! ```ignore
 //! #[global_allocator]
-//! static HEAP: utils_rs::alloc_count::CountingAllocator = utils_rs::alloc_count::CountingAllocator;
+//! static HEAP: utils_rs::testing::alloc_count::CountingAllocator = utils_rs::testing::alloc_count::CountingAllocator;
 //!
-//! let (out, counted) = utils_rs::alloc_count::measure(|| work());
+//! let (out, counted) = utils_rs::testing::alloc_count::measure(|| work());
 //! ```
 //!
 //! Counting is per thread: only the thread inside [`measure`] is counted, so concurrent tests

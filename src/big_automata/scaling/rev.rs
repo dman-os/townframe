@@ -1,7 +1,7 @@
 //! The rev stream's replay, its live follow, and a projection over it, at 10k and 100k revs.
 
 use futures::executor::block_on;
-use utils_rs::alloc_count::measure;
+use utils_rs::testing::alloc_count::measure;
 
 use super::assert_linear;
 use crate::okv::Mutation;
