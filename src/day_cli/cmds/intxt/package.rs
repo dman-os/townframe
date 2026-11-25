@@ -47,6 +47,7 @@ use intxt_capture::identity::Identity;
 use intxt_capture::pack;
 use intxt_capture::pack::PackRequest;
 use intxt_capture::revisions;
+use intxt_core::methods::IntxtError;
 use intxt_core::client::Caller;
 use intxt_core::client::MAX_REWRITE_HOPS;
 use intxt_core::client::key;
@@ -204,6 +205,14 @@ pub(crate) struct Packaging<'a> {
 }
 
 /// An intxt as `show` and `add` read it: its title and its entries in body order.
+/// An intxt this node remembers whose data cannot be read as one ([`Packaging::load`]).
+#[derive(Debug, thiserror::Error)]
+#[error("{drawer} cannot be read as an intxt: {reason}")]
+pub(super) struct Unreadable {
+    pub(super) drawer: DrawerId,
+    pub(super) reason: String,
+}
+
 pub(super) struct View {
     pub(super) title: generic::Title,
     pub(super) entries: Vec<(DatumKey, Value)>,
@@ -698,9 +707,12 @@ impl<'a> Packaging<'a> {
         let live = self.live_intxts().await?;
         let ids = ShortIds::new(live.iter().map(ToString::to_string).collect::<Vec<_>>());
         let mut listed = Vec::with_capacity(live.len());
+        let mut unreadable = Vec::new();
         for drawer in live {
-            let view = self.load(&drawer).await?;
-            listed.push((drawer, view));
+            match self.load(&drawer).await? {
+                Ok(view) => listed.push((drawer, view)),
+                Err(error) => unreadable.push(error),
+            }
         }
         listed.sort_by(|(left_drawer, left), (right_drawer, right)| {
             left.title
@@ -726,13 +738,25 @@ impl<'a> Packaging<'a> {
                 view.title.title,
             )?;
         }
+        // Listed, not fatal: one intxt that cannot be read must not hide the others.
+        for Unreadable { drawer, reason } in unreadable {
+            writeln!(
+                out,
+                "{}  (unreadable: {reason})\n  forget it: day x intxt drop {drawer}",
+                shown(&ids, &drawer.to_string()),
+            )?;
+        }
         Ok(())
     }
 
     /// `day x intxt drop`: forgets an intxt on this node without changing its drawer or shared data.
     pub(crate) async fn drop(&self, out: &mut impl Write, intxt: &str) -> Res<()> {
         let (drawer, intxts) = self.resolve(Some(intxt)).await?;
-        let view = self.load(&drawer).await?;
+        // An intxt that cannot be read is still forgotten: that is how it is cleaned up.
+        let title = match self.load(&drawer).await? {
+            Ok(view) => format!("\"{}\"", view.title.title),
+            Err(_) => "(unreadable)".to_owned(),
+        };
         let short = shown(&intxts, &drawer.to_string());
         self.caller
             .call(ForgetDrawer {
@@ -740,7 +764,7 @@ impl<'a> Packaging<'a> {
                 drawer_id: drawer.clone(),
             })
             .await?;
-        writeln!(out, "dropped {short} \"{}\"", view.title.title)?;
+        writeln!(out, "dropped {short} {title}")?;
         writeln!(out, "undo: day x intxt show {drawer}")?;
         Ok(())
     }
@@ -831,7 +855,7 @@ impl<'a> Packaging<'a> {
     /// comment removes its replies and its state with it.
     pub(crate) async fn rm(&self, out: &mut impl Write, intxt: &str, items: &[String]) -> Res<()> {
         let (drawer, intxts) = self.resolve(Some(intxt)).await?;
-        let view = self.load(&drawer).await?;
+        let view = self.load(&drawer).await??;
         let comments = self.comment_keys(&drawer).await?;
         let ids = view.names(&comments);
         let mut removed = BTreeSet::new();
@@ -875,25 +899,55 @@ impl<'a> Packaging<'a> {
     }
 
     /// The intxt's index document read: its title and its entries in body order.
-    pub(super) async fn load(&self, drawer: &DrawerId) -> Res<View> {
-        let index = self.caller.index(drawer).await?;
+    /// The intxt in `drawer`: its title and entries, read from its index document. The outer
+    /// error is a call that failed; the inner one is the intxt's own data that cannot be read
+    /// (no index document, as an intxt made before D70 has; an invalid index pointer; a title,
+    /// body or entry the node does not hold as accepted). A command about one intxt fails on
+    /// either (`.await??`); one that walks every intxt reports the unreadable one and goes on.
+    pub(super) async fn load(&self, drawer: &DrawerId) -> Res<Result<View, Unreadable>> {
+        let unreadable = |reason: String| {
+            Ok(Err(Unreadable {
+                drawer: drawer.clone(),
+                reason,
+            }))
+        };
+        let index = match self.caller.try_index(drawer).await {
+            Ok(Some(index)) => index,
+            Ok(None) => {
+                return unreadable(
+                    "it has no index document (an intxt made before its index moved to a content document, D70)"
+                        .to_owned(),
+                );
+            }
+            Err(IntxtError::Invalid(reason)) => return unreadable(reason),
+            Err(error) => return Err(error.into()),
+        };
         let (heads, mut datums) = self.caller.read_datums(&index, None).await?;
         let mut accepted = |key: &DatumKey| match datums.remove(key) {
             Some(DatumRead::Accepted { value, .. }) => Ok(value),
-            other => Err(eyre::eyre!("{key} in {index} is not readable: {other:?}")),
+            other => Err(format!("{key} in {index} is not readable: {other:?}")),
         };
-        let title = serde_json::from_value(accepted(&key(generic::Title::ID, "main")?)?)?;
-        let body: generic::Body =
-            serde_json::from_value(accepted(&key(generic::Body::ID, "main")?)?)?;
+        let (title, body) = match (
+            accepted(&key(generic::Title::ID, "main")?),
+            accepted(&key(generic::Body::ID, "main")?),
+        ) {
+            (Ok(title), Ok(body)) => (title, body),
+            (Err(reason), _) | (_, Err(reason)) => return unreadable(reason),
+        };
+        let title = serde_json::from_value(title)?;
+        let body: generic::Body = serde_json::from_value(body)?;
         let mut entries = Vec::with_capacity(body.order.len());
         for reference in &body.order {
-            entries.push((reference.key().clone(), accepted(reference.key())?));
+            match accepted(reference.key()) {
+                Ok(value) => entries.push((reference.key().clone(), value)),
+                Err(reason) => return unreadable(reason),
+            }
         }
-        Ok(View {
+        Ok(Ok(View {
             title,
             entries,
             heads,
-        })
+        }))
     }
 
     /// What capture holds for the worktree `identity` names, after recording what `resolved`
@@ -1255,7 +1309,7 @@ impl<'a> Packaging<'a> {
         resolved: &Resolved,
         full: bool,
     ) -> Res<Added> {
-        let view = self.load(drawer).await?;
+        let view = self.load(drawer).await??;
         let identity = self.identity()?;
         let recorded = self.recorded_after_import(&identity, resolved).await?;
 
@@ -1460,7 +1514,7 @@ impl<'a> Packaging<'a> {
     /// short id among the intxt's entries.
     pub(crate) async fn show(&self, out: &mut impl Write, intxt: Option<&str>) -> Res<()> {
         let (drawer, intxts) = self.resolve(intxt).await?;
-        let view = self.load(&drawer).await?;
+        let view = self.load(&drawer).await??;
         let ids = ShortIds::new(
             view.entries
                 .iter()
@@ -1548,7 +1602,7 @@ impl<'a> Packaging<'a> {
         if name.is_some() {
             host::put_on_intxt(&identity, Some(drawer.to_string()))?;
         }
-        let view = self.load(&drawer).await?;
+        let view = self.load(&drawer).await??;
         writeln!(
             out,
             "this worktree is on {}  \"{}\"",
@@ -1571,7 +1625,7 @@ impl<'a> Packaging<'a> {
         let mut links = generic::PrLinks::default();
         for name in names {
             let (drawer, _) = self.resolve(name).await?;
-            let view = self.load(&drawer).await?;
+            let view = self.load(&drawer).await??;
             let mut link = generic::PrLink::new(self.reference(&drawer)?);
             link.title = Some(view.title.title.clone());
             for (entry, _) in &view.entries {
@@ -1645,8 +1699,13 @@ impl<'a> Packaging<'a> {
         let mut including = Vec::new();
         let live = self.live_intxts().await?;
         let live_ids = ShortIds::new(live.iter().map(ToString::to_string).collect::<Vec<_>>());
+        let mut unreadable = 0;
         for drawer in &live {
-            let view = self.load(drawer).await?;
+            let Ok(view) = self.load(drawer).await? else {
+                // `list` names it; here it only cannot be checked.
+                unreadable += 1;
+                continue;
+            };
             let mut matched = Vec::new();
             for (entry, value) in &view.entries {
                 let tag = entry.tag().as_str();
@@ -1697,6 +1756,12 @@ impl<'a> Packaging<'a> {
             for line in including {
                 writeln!(out, "{line}")?;
             }
+        }
+        if unreadable > 0 {
+            writeln!(
+                out,
+                "  {unreadable} intxt(s) on this node cannot be read, so were not checked (day x intxt list)"
+            )?;
         }
         Ok(())
     }

@@ -791,6 +791,67 @@ async fn assert_new_with_shares_commits_document(
     assert_eq!(list().await, before);
 }
 
+/// An intxt whose data cannot be read, such as one made before D70 with no index document, is
+/// listed as unreadable instead of failing `list` for every other intxt, is only counted by
+/// `status`, and can still be dropped, which is how it is cleaned up.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_intxt_is_listed_and_dropped_without_failing_the_others() {
+    use crate::cmds::intxt::package::Packaging;
+    use intxt_core::generic;
+
+    with_intxt_node(async |tmp, client| {
+        let node_root = tmp.path().join("node");
+        let base = tmp.path().canonicalize().unwrap();
+        let repo = init_repo(&base, &[("a.txt", "one\n")]);
+        let packaging = Packaging::new(client, &repo, &node_root);
+        packaging
+            .create(&mut Vec::new(), "Readable", None, None)
+            .await
+            .unwrap();
+        let stale = packaging
+            .create(&mut Vec::new(), "Stale", None, None)
+            .await
+            .unwrap();
+        // What an intxt made before D70 looks like: a marked drawer with no index pointer.
+        operator(client)
+            .write_datums(
+                &stale,
+                Default::default(),
+                [intxt_core::client::key(generic::Index::ID, "main").unwrap()].into(),
+            )
+            .await
+            .unwrap();
+        let run = async |command: &str| {
+            let mut out = Vec::new();
+            match command {
+                "list" => packaging.list(&mut out).await.unwrap(),
+                "status" => packaging.status(&mut out).await.unwrap(),
+                _ => packaging.drop(&mut out, &stale.to_string()).await.unwrap(),
+            }
+            String::from_utf8(out).unwrap()
+        };
+
+        let listed = run("list").await;
+        assert!(listed.contains("\"Readable\""), "{listed}");
+        assert!(
+            listed.contains("(unreadable: it has no index document"),
+            "{listed}"
+        );
+        assert!(listed.contains(&format!("day x intxt drop {stale}")), "{listed}");
+        let status = run("status").await;
+        assert!(
+            status.contains("1 intxt(s) on this node cannot be read"),
+            "{status}"
+        );
+        let dropped = run("drop").await;
+        assert!(dropped.contains("(unreadable)"), "{dropped}");
+        let listed = run("list").await;
+        assert!(listed.contains("\"Readable\""), "{listed}");
+        assert!(!listed.contains("unreadable"), "{listed}");
+    })
+    .await;
+}
+
 /// Packaging a branch of two commits whose content a recorded session's tool calls produced:
 /// `add --branch` writes one commit entry carrying the pack, tracks the ref on this clone
 /// and brings the session; `show` lists all three; adding again changes nothing; `status`
