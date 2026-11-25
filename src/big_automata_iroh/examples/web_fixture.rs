@@ -14,7 +14,10 @@
 //! {"relay_url":"http://127.0.0.1:41233/","node_id":"…","part":"…","objects":7}
 //! ```
 //!
-//! The fixture runs until its stdin closes, so a parent that dies takes it along.
+//! Its stdin carries commands, one per line, and it runs until stdin closes, so a parent that dies
+//! takes it along. `dial <endpoint id>` dials that endpoint (a browser page) over the relay with
+//! the echo probe's ALPN, sends `ECHO_REQUEST`, and answers with one stdout line, `ok` when the
+//! echo matches or `err <why>`: the probe of whether a browser endpoint can accept.
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -43,7 +46,42 @@ use service_utils_rs::ServerBinding;
 use service_utils_rs::TransportContext;
 use service_utils_rs::xrpc::XrpcRouter;
 use service_utils_rs::xrpc::iroh_protocol_handler;
-use tokio::io::AsyncReadExt;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::BufReader;
+
+/// Mirrors the page's echo probe (`big_automata_web`'s host).
+const ECHO_ALPN: &[u8] = b"townframe/echo-probe/0";
+const ECHO_REQUEST: &[u8] = b"hello through the relay";
+
+async fn dial_echo(
+    node: &iroh::Endpoint,
+    relay_url: &iroh::RelayUrl,
+    target: iroh::EndpointId,
+) -> Result<(), String> {
+    let addr = iroh::EndpointAddr::new(target).with_relay_url(relay_url.clone());
+    let connection = node
+        .connect(addr, ECHO_ALPN)
+        .await
+        .map_err(|err| format!("connect: {err:?}"))?;
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|err| format!("open_bi: {err:?}"))?;
+    send.write_all(ECHO_REQUEST)
+        .await
+        .map_err(|err| format!("write: {err:?}"))?;
+    send.finish().map_err(|err| format!("finish: {err:?}"))?;
+    let echo = recv
+        .read_to_end(1 << 16)
+        .await
+        .map_err(|err| format!("read: {err:?}"))?;
+    connection.close(0u8.into(), b"done");
+    if echo == ECHO_REQUEST {
+        Ok(())
+    } else {
+        Err(format!("echo differs: {echo:?}"))
+    }
+}
 
 /// Objects published in the part, in two commits so the page pulls more than one rev.
 const OBJECTS: u8 = 7;
@@ -112,8 +150,17 @@ async fn main() {
         })
     );
 
-    let mut sink = Vec::new();
-    tokio::io::stdin().read_to_end(&mut sink).await.unwrap();
+    let mut commands = BufReader::new(tokio::io::stdin()).lines();
+    while let Some(line) = commands.next_line().await.unwrap() {
+        let target = line
+            .strip_prefix("dial ")
+            .unwrap_or_else(|| panic!("unknown fixture command {line:?}"));
+        let target: iroh::EndpointId = target.trim().parse().expect("dial takes an endpoint id");
+        match dial_echo(&node, &relay_url, target).await {
+            Ok(()) => println!("ok"),
+            Err(why) => println!("err {why}"),
+        }
+    }
 
     iroh_router.shutdown().await.expect("router shutdown");
     node.close().await;
