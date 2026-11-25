@@ -23,7 +23,7 @@ mod lazy;
 
 fn main() -> Res<ExitCode> {
     // dotenv_flow::dotenv_flow().ok();
-    utils_rs::setup_tracing()?;
+    utils_rs::tracing::setup_tracing()?;
 
     // the static cli is for commands that
     // can be executed without having to

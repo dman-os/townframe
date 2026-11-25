@@ -185,7 +185,7 @@ pub struct NetGrant {
 }
 
 /// `org.example.daybook.cartridges.grant.method/<nsid>`: the cartridge may invoke the one
-/// operation through dispatch.
+/// method through dispatch.
 #[macros::datum(authority = GRANT_AUTHORITY, name = "method")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,8 +199,8 @@ pub struct MethodGrant {
 }
 
 /// `org.example.daybook.cartridges.grant.authority/<prefix>`: the cartridge may invoke every
-/// operation under an NSID authority prefix, or `*`. A separate datum from [`MethodGrant`]
-/// because an NSID-shaped name such as `org.example.tags` is both a valid operation and a valid
+/// method under an NSID authority prefix, or `*`. A separate datum from [`MethodGrant`]
+/// because an NSID-shaped name such as `org.example.tags` is both a valid method and a valid
 /// authority, and the two grant different things (a prefix never stretches to a dev build's
 /// additions, ADR 028 §3).
 #[macros::datum(authority = GRANT_AUTHORITY, name = "authority")]
@@ -250,9 +250,9 @@ pub enum GrantKey {
     Cartridge(CartridgeId),
     /// `net:<host[:port]>`: using the network to reach a host.
     Net(NetTarget),
-    /// `method:<nsid>`: one operation the cartridge may invoke through dispatch.
+    /// `method:<nsid>`: one method the cartridge may invoke through dispatch.
     Method(String),
-    /// `authority:<prefix>`: every operation under an NSID authority prefix, or `*`.
+    /// `authority:<prefix>`: every method under an NSID authority prefix, or `*`.
     Authority(String),
 }
 

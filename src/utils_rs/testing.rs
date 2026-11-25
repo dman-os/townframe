@@ -10,23 +10,6 @@ pub fn setup_tracing_once() {
     });
 }
 
-/// Whether stderr gets ANSI colour: only on a terminal, and never when `NO_COLOR` is set
-/// (https://no-color.org: set and not empty). tracing's formatter colours unconditionally
-/// unless told otherwise, and so does color-eyre 0.6, so both are driven from here.
-pub(crate) fn stderr_colour() -> bool {
-    std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
-        && std::io::IsTerminal::is_terminal(&std::io::stderr())
-}
-
-/// Filter string for a subscriber: `env` (the `RUST_LOG`/`RUST_LOG_TEST` value) or else
-/// `default`, with `instr=off,` prepended. `INSTR` investigation probes log under the `instr`
-/// target and stay silent even when the env filter is a plain `info` or `debug`; `EnvFilter`
-/// lets a later directive for the same target win, so an explicit `instr=info` in the env value
-/// turns them back on.
-pub(crate) fn instr_off_filter(env: Option<String>, default: &str) -> String {
-    format!("instr=off,{}", env.as_deref().unwrap_or(default))
-}
-
 fn setup_tracing() -> Res<()> {
     let default_filter = "info,cranelift_codegen=info,wasmtime_internal_cranelift=info,wasmtime=info,rustls=info,h2=info,hyper_util=info,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_quinn_proto::connection=error,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn";
     #[cfg(not(target_arch = "wasm32"))]
@@ -34,11 +17,11 @@ fn setup_tracing() -> Res<()> {
         // if std::env::var("RUST_BACKTRACE_TEST").is_err() {
         //     std::env::set_var("RUST_BACKTRACE", "1");
         // }
-        instr_off_filter(std::env::var("RUST_LOG_TEST").ok(), default_filter)
+        crate::tracing::instr_off_filter(std::env::var("RUST_LOG_TEST").ok(), default_filter)
     };
 
     #[cfg(target_arch = "wasm32")]
-    let filter = instr_off_filter(None, default_filter);
+    let filter = crate::tracing::instr_off_filter(None, default_filter);
 
     // #[cfg(test)]
     // console_subscriber::init();
@@ -71,7 +54,7 @@ fn setup_tracing() -> Res<()> {
     registry.try_init().map_err(|err| ferr!(err))?;
 
     // color_eyre::install()?;
-    let (eyre_panic_hook, eyre_hook) = crate::eyre_hook_builder().try_into_hooks()?;
+    let (eyre_panic_hook, eyre_hook) = crate::tracing::eyre_hook_builder().try_into_hooks()?;
     std::panic::set_hook(Box::new(move |panic_info| {
         let report = eyre_panic_hook.panic_report(panic_info);
         eprintln!("{report}");
@@ -150,51 +133,5 @@ pub fn test_seed(default_seed: u64) -> u64 {
             }
         }
         Err(_) => default_seed,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use tracing_subscriber::prelude::*;
-
-    struct Count(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Count {
-        fn on_event(&self, _: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    /// Events admitted by `filter`: one `instr` target event, one ordinary info event.
-    fn admitted(filter: &str) -> (usize, usize) {
-        let run = |instr: bool| {
-            let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let subscriber = tracing_subscriber::registry()
-                .with(tracing_subscriber::EnvFilter::new(filter))
-                .with(Count(std::sync::Arc::clone(&count)));
-            tracing::subscriber::with_default(subscriber, || {
-                if instr {
-                    tracing::info!(target: "instr", "INSTR probe");
-                } else {
-                    tracing::info!("ordinary");
-                }
-            });
-            count.load(std::sync::atomic::Ordering::Relaxed)
-        };
-        (run(true), run(false))
-    }
-
-    #[test]
-    fn instr_target_is_off_by_default_and_on_by_filter() {
-        let default = "info,h2=info";
-        let built = |env: Option<&str>| super::instr_off_filter(env.map(str::to_owned), default);
-        // No env value: the default applies, probes off.
-        assert_eq!(admitted(&built(None)), (0, 1));
-        // A plain env filter replaces the default but cannot re-enable the probes.
-        assert_eq!(admitted(&built(Some("info"))), (0, 1));
-        assert_eq!(admitted(&built(Some("debug"))), (0, 1));
-        // An explicit `instr=info` in the env value turns them on.
-        assert_eq!(admitted(&built(Some("info,instr=info"))), (1, 1));
-        assert_eq!(admitted(&built(Some("warn,instr=info"))), (1, 0));
     }
 }

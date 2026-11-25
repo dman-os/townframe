@@ -141,7 +141,17 @@ impl Storage {
     }
 }
 
+/// How long an upload nothing references keeps its bytes by default (ADR 042 §6): a client that
+/// goes offline between putting and recording what it put (a laptop closed mid-capture) still
+/// finds its uploads the next working day, and one that needs longer puts again, which is cheap
+/// because a put is idempotent. A node overrides it with `blobs.upload_hold_grace_secs` in
+/// `node.json`.
+pub const DEFAULT_UPLOAD_HOLD_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(24 * 60 * 60);
+
 pub struct Config {
+    /// How long an unreferenced upload keeps its bytes; `None` is [`DEFAULT_UPLOAD_HOLD_GRACE`].
+    pub upload_hold_grace: Option<std::time::Duration>,
     pub storage: Storage,
     pub sql: Database,
     pub authority: Client<AuthorityProtocol>,
@@ -186,6 +196,7 @@ pub struct BlobService {
     capabilities: DomainCapabilities,
     sql: Database,
     availability: SqliteKeyedFrontier<AvailabilityCodec>,
+    pub(crate) upload_hold_grace: std::time::Duration,
     _owner: Option<std::fs::File>,
 }
 
@@ -305,6 +316,9 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
         capabilities: DomainCapabilities::new(config.authority, config.namespace, SCOPE_PREFIX),
         sql: config.sql,
         availability,
+        upload_hold_grace: config
+            .upload_hold_grace
+            .unwrap_or(DEFAULT_UPLOAD_HOLD_GRACE),
         _owner: owner,
     });
     let (store_stop, tasks) = StopToken::new();

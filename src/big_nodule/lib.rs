@@ -175,8 +175,8 @@ pub struct NodulesConfig {
     pub cartridges: Client<CartridgesProtocol>,
     pub cartridges_authorization: Authorization,
     /// The blobs service, and the delegator handle the operator minted the nodule service's actor
-    /// for every operation-level blobs flag (`put`), with `DELEGATE`: each routine whose `#method`
-    /// permbind names an operation that needs a blobs handle is minted its narrowed handle from it
+    /// for every method-level blobs flag (`put`), with `DELEGATE`: each routine whose `#method`
+    /// permbind names a method that needs a blobs handle is minted its narrowed handle from it
     /// (ADR 049 §6.1–6.2).
     pub blobs: Client<big_blobs_core::BlobsProtocol>,
     pub blobs_capability: CapId,

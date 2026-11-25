@@ -1,5 +1,6 @@
 use crate::client::NodeClient;
 use crate::interlude::*;
+use crate::out::out;
 
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::CapId;
@@ -75,7 +76,7 @@ pub async fn run(command: DumpCommands) -> Res<ExitCode> {
         DumpCommands::Grants => grants(&client).await?,
         DumpCommands::Carts => carts(&client).await?,
     };
-    println!("{}", serde_json::to_string_pretty(&dumped)?);
+    writeln!(out(), "{}", serde_json::to_string_pretty(&dumped)?)?;
     Ok(ExitCode::SUCCESS)
 }
 

@@ -81,7 +81,7 @@ pub struct WorkloadCaller {
 /// proxy answers a call from a drained upstream rather than crashing the node.
 ///
 /// A call dispatch refuses as [`DispatchError::Denied`] is refined by `missing_authority`: when
-/// the routine's `uses` declare the operation and no grant covers it yet, the answer is the
+/// the routine's `uses` declare the method and no grant covers it yet, the answer is the
 /// cartridge's `MissingAuthority`, which the guest's typed client decodes (ADR 049 §4.3).
 pub async fn call(
     dispatch: &Client<DispatchProtocol>,
