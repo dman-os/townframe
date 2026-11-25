@@ -57,6 +57,7 @@ tracing.workspace = true
 # internal
 method_lexicon.workspace = true
 big_cartridges_core = { workspace = true, features = ["test-support"] }
+tracing-subscriber.workspace = true
 
 #
 # misc

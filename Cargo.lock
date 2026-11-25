@@ -1729,6 +1729,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "utils_rs",
 ]
 
@@ -1824,6 +1825,7 @@ dependencies = [
  "tracing",
  "utils_rs",
  "wash-runtime",
+ "wasmtime-wasi",
  "wasmtime-wasi-http",
 ]
 
@@ -17407,7 +17409,7 @@ dependencies = [
 [[package]]
 name = "wash-runtime"
 version = "2.11.0"
-source = "git+https://github.com/dman-os/wasmCloud?rev=e7648c6e939c50ba1be8d9c138ef6da3305a672e#e7648c6e939c50ba1be8d9c138ef6da3305a672e"
+source = "git+https://github.com/dman-os/wasmCloud?rev=f9c740425488ec045061c065636e4d4b8170d6eb#f9c740425488ec045061c065636e4d4b8170d6eb"
 dependencies = [
  "anyhow",
  "arc-swap",

@@ -37,6 +37,8 @@
 //!   `content-type` and the wrapping sum of every octet. It reads the stream one chunk at a time.
 //! - `/xrpc/<nsid>.emit` answers a byte body of [`EMIT_CHUNKS`] chunks of [`EMIT_CHUNK_OCTETS`]
 //!   octets (chunk `i` is all `i as u8`) as `application/x-emit`, produced lazily.
+//! - `/xrpc/<nsid>.panic` panics with [`PANIC_MESSAGE`]. A Wasm guest prints it to stderr and traps
+//!   on `unreachable`, which is what the host's guest-fault handling is tested against.
 //! - Any other `/xrpc/` operation answers 404 `{ "error": "UnknownOperation" }` and any other
 //!   path answers 404 `{ "error": "NotFound" }`.
 
@@ -192,6 +194,9 @@ async fn fetch(cx: &Cx, body: XrpcBody) -> Reply {
     }
 }
 
+/// What the `panic` route panics with.
+pub const PANIC_MESSAGE: &str = "the nodule fixture panicked on purpose";
+
 /// How many chunks `emit` answers, and how long each is.
 pub const EMIT_CHUNKS: usize = 4;
 pub const EMIT_CHUNK_OCTETS: usize = 64 * 1024;
@@ -332,6 +337,7 @@ impl Nodule for Fixture {
             "fetch" => Some(fetch(cx, body).await),
             "ingest" => Some(ingest(body).await),
             "emit" => Some(emit()),
+            "panic" => panic!("{PANIC_MESSAGE}"),
             "config" => Some(invoke::<Self, Config>(self, cx, body).await),
             _ => None,
         }
