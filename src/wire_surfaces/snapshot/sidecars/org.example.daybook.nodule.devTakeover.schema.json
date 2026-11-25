@@ -3,7 +3,7 @@
     "NoduleDevTakeover": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,
-      "description": "`org.example.daybook.nodule.devTakeover/<cartridgeId>`: the dev hook that runs the installed\ncartridge `by` *as* this cartridge, to test a dev build against real data (ADR 045 §5). `by`'s\ncode and manifest take the slot over, and every other slot state (actor, drawer grants, method\ngrants narrowed by `substituted_grants`, operation caps, initializer done-ness, the resolution\nlockfile, dispatch registrations) stays keyed by this cartridge id, so the dev build holds the\noriginal's data and actor. Only `setNoduleDevTakeover` writes it, and that is refused unless\nthe node's `node.json` sets `dev.allow_slot_takeover`. Absence means the slot runs its own\ninstall; deleting the datum reinstalls it.",
+      "description": "`org.example.daybook.nodule.devTakeover/<cartridgeId>`: the dev hook that runs the installed\ncartridge `by` *as* this cartridge, to test a dev build against real data (ADR 045 §5). `by`'s\ncode and manifest take the slot over, and every other slot state (actor, drawer grants, method\ngrants narrowed by `substituted_grants`, method caps, initializer done-ness, the resolution\nlockfile, dispatch registrations) stays keyed by this cartridge id, so the dev build holds the\noriginal's data and actor. Only `setNoduleDevTakeover` writes it, and that is refused unless\nthe node's `node.json` sets `dev.allow_slot_takeover`. Absence means the slot runs its own\ninstall; deleting the datum reinstalls it.",
       "properties": {
         "by": {
           "type": "string"
