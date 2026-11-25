@@ -1668,7 +1668,12 @@ fn custom_elements_carry_attributes_listeners_and_children_through_the_host_vdom
 #[test]
 fn host_owned_names_are_refused_from_a_guest() {
     let on_element = |attribute: Mutation| {
-        SurfaceTree::new().apply(&[element("div", None), Mutation::SetId(1), attribute])
+        SurfaceTree::new().apply(&[
+            element("div", None),
+            Mutation::SetId(1),
+            attribute,
+            Mutation::AppendChildren(1),
+        ])
     };
     for (name, value) in [
         (
@@ -1710,7 +1715,11 @@ fn host_owned_names_are_refused_from_a_guest() {
     ] {
         on_element(text_attr(name, None, value)).unwrap_or_else(|error| panic!("{name}: {error}"));
     }
-    assert!(SurfaceTree::new().apply(&[element("x-ct-card", None)]).is_ok());
+    assert!(
+        SurfaceTree::new()
+            .apply(&[element("x-ct-card", None), Mutation::AppendChildren(1)])
+            .is_ok()
+    );
 }
 
 #[test]
