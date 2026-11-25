@@ -466,15 +466,11 @@ fn Canvas(selection: Selection, frame: Signal<Frame>, scheme: Signal<CanvasSchem
                         "{each.title()}"
                     }
                 }
-                // The same `light-dark()` custom property as the probe inside the frame, outside
-                // it: this one keeps the host's scheme while the canvas flips.
-                span { "data-part": "probe", "data-where": "chrome", "Chrome probe" }
             }
             div {
                 "data-part": "frame",
                 "data-scheme": scheme().attr(),
                 style: "{width}",
-                span { "data-part": "probe", "data-where": "canvas", "Canvas probe" }
                 match selection {
                     Selection::Sheets => rsx! {
                         section { "data-part": "sheets",
