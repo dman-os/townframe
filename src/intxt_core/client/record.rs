@@ -383,35 +383,11 @@ impl<H: HttpTransport> Recorder<'_, H> {
             .contains_key(&op))
     }
 
-    /// The batch's commits into the repository document (a recorded commit is never rewritten)
-    /// and its refs into the clone's (ADR 040 §7).
-    async fn write_git(
-        &self,
-        worktree: &WorktreeBatch,
-        repo: Option<&DocId>,
-        clone: &DocId,
-    ) -> Result<(), IntxtError> {
+    /// The batch's refs into the clone's document (ADR 040 §7). Commits are not written here: an
+    /// intxt holds the commits it names, written by `add`, and the repository document keeps
+    /// identity only.
+    async fn write_git(&self, worktree: &WorktreeBatch, clone: &DocId) -> Result<(), IntxtError> {
         let step = |what: &str| format!("{}/{what}", worktree.identity.worktree_id);
-        let commits = worktree
-            .commits
-            .iter()
-            .map(|(sha, commit)| Ok((key(work::GitCommit::ID, sha)?, to_value(commit))))
-            .collect::<Result<BTreeMap<_, _>, IntxtError>>()?;
-        if !commits.is_empty() {
-            let repo = repo.ok_or_else(|| {
-                invalid("commits were observed in a repository without a root commit")
-            })?;
-            let known = self
-                .read(repo, &commits.keys().cloned().collect::<Vec<_>>())
-                .await?;
-            let new: BTreeMap<_, _> = commits
-                .into_iter()
-                .filter(|(key, _)| !known.contains_key(key))
-                .collect();
-            if !new.is_empty() {
-                self.write(&step("commits"), repo, new).await?;
-            }
-        }
         let refs = worktree
             .refs
             .iter()
@@ -534,7 +510,7 @@ impl<H: HttpTransport> Recorder<'_, H> {
         if self.already_recorded(worktree, &state).await? {
             return Ok(recorded);
         }
-        self.write_git(worktree, repo.as_ref(), &clone).await?;
+        self.write_git(worktree, &clone).await?;
         self.write_ops(worktree, &mut state, sessions).await?;
         if state.changed {
             self.write(

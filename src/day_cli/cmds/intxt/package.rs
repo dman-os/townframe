@@ -339,7 +339,7 @@ impl<'a> Packaging<'a> {
     /// without an entry and `which` finds it by its datums, not by name. The command id is fixed
     /// per drawer, so creating it again answers the first creation, and two writers converge on
     /// one document.
-    async fn ensure_commits_doc(&self, drawer: &DrawerId) -> Res<DocId> {
+    pub(super) async fn ensure_commits_doc(&self, drawer: &DrawerId) -> Res<DocId> {
         Ok(self
             .caller
             .call(CreateMetaDoc {
@@ -633,18 +633,17 @@ impl<'a> Packaging<'a> {
         Ok(View { title, entries })
     }
 
-    /// What capture holds for the worktree `identity` names, after recording what `resolved`
-    /// names if it was never recorded (FDR 008 W6): the work was done before intxt was installed
-    /// or on another machine, so no hook saw its commits or its branch move.
+    /// What capture holds for the worktree `identity` names, after recording the branch
+    /// `resolved` tracks if capture never saw it where it is now (FDR 008 W6): the work was done
+    /// before intxt was installed or on another machine, so no hook saw the branch move. The
+    /// commits are not recorded: they are in the local repository, `resolved` names them from
+    /// git, and `add` writes them into the intxt.
     ///
-    /// The import is recording, through the path a hook's batch takes: the host observes the
-    /// worktree under its lock with the range's commits named explicitly
-    /// ([`host::prepare_import`], since the reflog never showed them) and the recorder writes
-    /// the identity documents, the `gitCommit` datums and the `gitRef`. The host commits the
-    /// recorder's answer as its state, the state hooks continue from, so a hook after the
-    /// import reports only what moves later. No session is derived: none was recorded, and the
-    /// ops of the worktree hold none for these commits.
-    async fn recorded_after_import(
+    /// Recording is an observation under the host's worktree lock ([`host::prepare_observation`])
+    /// whose batch the recorder writes (the identity documents and the `gitRef`). The host commits
+    /// the recorder's answer as its state, the state hooks continue from, so a hook after it
+    /// reports only what moves later. No session is derived: none was recorded.
+    async fn recorded_with_ref(
         &self,
         identity: &Identity,
         resolved: &Resolved,
@@ -653,46 +652,30 @@ impl<'a> Packaging<'a> {
         // A jj change's commits live in jj's git directory, which the worktree's observation
         // does not read; its sessions come from what capture saw of the worktree.
         if resolved.git_dir != identity.root
-            || self.is_recorded(&recorded, identity, resolved).await?
+            || self.ref_recorded(&recorded, identity, resolved).await?
         {
             return Ok(recorded);
         }
-        let (observed, commits) = (identity.clone(), resolved.commits.clone());
+        let observed = identity.clone();
         let prepared =
-            tokio::task::spawn_blocking(move || host::prepare_import(&observed, &commits))
-                .await??;
+            tokio::task::spawn_blocking(move || host::prepare_observation(&observed)).await??;
         super::capture::record_prepared(self.client, self.node_dir, prepared).await?;
         host::recorded_worktree(identity).map_err(Into::into)
     }
 
-    /// Whether the clone and repository documents hold every commit `resolved` names and, for a
-    /// branch, where it points now.
-    async fn is_recorded(
+    /// Whether the clone's document holds the branch `resolved` tracks where it points now.
+    /// Without a tracked branch there is nothing to hold.
+    async fn ref_recorded(
         &self,
         recorded: &host::RecordedWorktree,
         identity: &Identity,
         resolved: &Resolved,
     ) -> Res<bool> {
-        let (Some(repo), Some(clone)) = (&recorded.docs.repo, &recorded.docs.clone) else {
-            return Ok(false);
-        };
-        let commits = resolved
-            .commits
-            .iter()
-            .map(|sha| key(work::GitCommit::ID, sha))
-            .collect::<Result<BTreeSet<_>, _>>()?;
-        let (_, known) = self
-            .caller
-            .read_datums(&repo.parse()?, Some(commits))
-            .await?;
-        if !known
-            .values()
-            .all(|read| matches!(read, DatumRead::Accepted { .. }))
-        {
-            return Ok(false);
-        }
         let Some((reference, _)) = &resolved.tracked else {
             return Ok(true);
+        };
+        let Some(clone) = &recorded.docs.clone else {
+            return Ok(false);
         };
         let ref_key = key(
             work::GitRef::ID,
@@ -756,7 +739,6 @@ impl<'a> Packaging<'a> {
         drawer: &DrawerId,
         view: &View,
         resolved: &Resolved,
-        recorded: &host::RecordedWorktree,
         full: bool,
     ) -> Res<bool> {
         if view.has(&resolved.entry) {
@@ -792,10 +774,6 @@ impl<'a> Packaging<'a> {
             "  commits    {} ({kind} pack, {size} bytes)",
             resolved.label
         ));
-        // The commits' own datums live in the repository's document.
-        if let Some(repo) = &recorded.docs.repo {
-            plan.shared.insert(repo.parse()?);
-        }
         Ok(true)
     }
 
@@ -819,7 +797,7 @@ impl<'a> Packaging<'a> {
                 .push(format!("  ref        {reference} (already tracked)"));
             return Ok(());
         }
-        // `recorded_after_import` recorded the clone and the branch's position if they were not.
+        // `recorded_with_ref` recorded the clone and the branch's position if they were not.
         let clone_doc: DocId = recorded
             .docs
             .clone
@@ -911,11 +889,11 @@ impl<'a> Packaging<'a> {
         let view = self.load(&drawer).await?;
         let identity = self.identity()?;
         let resolved = Resolved::new(&named, &identity)?;
-        let recorded = self.recorded_after_import(&identity, &resolved).await?;
+        let recorded = self.recorded_with_ref(&identity, &resolved).await?;
 
         let mut plan = Plan::default();
         let new_commits = self
-            .plan_commits(&mut plan, &drawer, &view, &resolved, &recorded, full)
+            .plan_commits(&mut plan, &drawer, &view, &resolved, full)
             .await?;
         self.plan_ref(&mut plan, &view, &resolved, &identity, &recorded)
             .await?;

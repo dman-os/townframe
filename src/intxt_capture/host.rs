@@ -380,7 +380,6 @@ fn observe_worktree(
     found: Identity,
     tool_cause: Option<&Cause>,
     tool_turns: &BTreeMap<String, (Option<String>, String)>,
-    import: &[String],
     host: &mut WorktreeHost,
 ) -> Result<(Option<WorktreeBatch>, u64), Error> {
     if let (Event::PreToolUse, Some(tool_use_id)) = (event, tool_use_id) {
@@ -401,7 +400,7 @@ fn observe_worktree(
     let closing = tool_use_id.filter(|_| !ends_session);
 
     let (snapshots, sole) = host.segments(closing, tool_cause, tool_turns);
-    let (observation, next) = observe::observe(&host.observed, found, &snapshots, import)?;
+    let (observation, next) = observe::observe(&host.observed, found, &snapshots)?;
     host.observed = next;
     host.clock += 1;
     host.observed_at = host.clock;
@@ -480,7 +479,7 @@ fn observe_worktree(
         .filter_map(|change| change.blob.as_deref())
         .collect();
     Git::new(&observation.identity.root).keep(&observation.identity.worktree_id, &blobs)?;
-    if ops.is_empty() && git.commits.is_empty() && git.refs.is_empty() {
+    if ops.is_empty() && git.refs.is_empty() {
         return Ok((None, uncaused));
     }
     Ok((
@@ -489,7 +488,6 @@ fn observe_worktree(
             docs: host.docs.clone(),
             next_seq: host.next_seq,
             ops,
-            commits: git.commits,
             refs: git.refs,
             reflog_gap: git.reflog_gap,
             extra: Default::default(),
@@ -508,7 +506,6 @@ fn observe_worktrees(
     tool_turns: &BTreeMap<String, (Option<String>, String)>,
     candidates: &BTreeSet<PathBuf>,
     stored: &BTreeSet<PathBuf>,
-    import: &[String],
 ) -> Result<(Vec<PendingWorktree>, Vec<WorktreeBatch>, u64), Error> {
     let mut identities: BTreeMap<PathBuf, Identity> = BTreeMap::new();
     for candidate in candidates {
@@ -526,15 +523,8 @@ fn observe_worktrees(
         let worktree_lock = lock(&found.git_dir.join("intxt/lock"))?;
         let state_path = found.git_dir.join("intxt/state.json");
         let mut host: WorktreeHost = load(&state_path)?;
-        let (batch, uncaused) = observe_worktree(
-            event,
-            tool_use_id,
-            found,
-            cause,
-            tool_turns,
-            import,
-            &mut host,
-        )?;
+        let (batch, uncaused) =
+            observe_worktree(event, tool_use_id, found, cause, tool_turns, &mut host)?;
         uncaused_tool_calls += uncaused;
         let batched = batch.is_some();
         batches.extend(batch);
@@ -672,7 +662,6 @@ pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
         &session.tool_turns,
         &candidates,
         &session.worktrees,
-        &[],
     )?;
     session.worktrees = worktrees
         .iter()
@@ -776,7 +765,6 @@ pub fn prepare_acp(
         &BTreeMap::new(),
         &candidates,
         known,
-        &[],
     )?;
     Ok(Prepared {
         batch: Batch {
@@ -792,26 +780,24 @@ pub fn prepare_acp(
     })
 }
 
-/// Observe the worktree `identity` names for an import of git history: the commits in `import`
-/// are recorded with the worktree's identity documents, as a hook's observation records the
-/// commits its moves made (FDR 008 W6; [`crate::git::observe`] says how). It is a full
-/// observation under the worktree's lock, so state and sequence numbers are the ones hooks
-/// continue from: what the observation reports (a first sight's baseline, the refs, moves since
-/// the last look) is what the next hook would have reported, and it will not report it twice.
+/// Observe the worktree `identity` names outside any hook: a full observation under the
+/// worktree's lock, so state and sequence numbers are the ones hooks continue from. What it
+/// reports (a first sight's baseline, the refs, moves since the last look) is what the next hook
+/// would have reported, and it will not report it twice. It is how `add` makes sure the clone
+/// and the branch's `gitRef` are recorded before an intxt tracks them.
 ///
 /// There is no session, none having been recorded; the batch's session half is empty. The event
 /// is no hook's: it neither opens a pre-snapshot nor drops the ones other sessions' tool calls
 /// have in flight.
-pub fn prepare_import(identity: &Identity, import: &[String]) -> Result<Prepared, Error> {
+pub fn prepare_observation(identity: &Identity) -> Result<Prepared, Error> {
     let candidates = BTreeSet::from([identity.root.clone()]);
     let (worktrees, batches, uncaused_tool_calls) = observe_worktrees(
-        &Event::Other("import".to_owned()),
+        &Event::Other("observation".to_owned()),
         None,
         None,
         &BTreeMap::new(),
         &candidates,
         &BTreeSet::new(),
-        import,
     )?;
     Ok(Prepared {
         batch: Batch {

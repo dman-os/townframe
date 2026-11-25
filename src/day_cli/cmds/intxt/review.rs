@@ -363,17 +363,13 @@ impl Packaging<'_> {
                         ""
                     }
                 );
-                let repo = recorded.docs.repo.as_deref().ok_or_else(|| {
-                    eyre::eyre!(
-                        "capture has recorded no repository for {}: run `day x intxt add` here first",
-                        identity.root.display()
-                    )
-                })?;
+                // The commit's datum is in the intxt's commits document, written by `add`.
+                let commits_doc = self.ensure_commits_doc(&drawer).await?;
                 let blob = anchor::commit_blob(&git, &sha, &target.path)?
                     .ok_or_else(|| eyre::eyre!("{} has no {}", short_sha(&sha), target.path))?;
                 let location = Location::new(
                     DatumReference::new(
-                        ReferenceDocId::Concrete(repo.parse()?),
+                        ReferenceDocId::Concrete(commits_doc),
                         key(work::GitCommit::ID, &sha)?,
                     ),
                     None,
