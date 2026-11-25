@@ -343,9 +343,20 @@ async fn installing_a_revision_that_requests_a_new_method_grants_it() {
     use big_dispatch_core::Readiness;
 
     let wasm = std::fs::read(guest_path()).unwrap();
-    // Another handler build: a custom section changes the bytes and so the version.
-    let mut older = wasm.clone();
-    older.extend_from_slice(&[0, 2, 1, b'x']);
+    // Another handler build: a custom section changes the bytes and so the version. The registry
+    // only takes a version that orders after the newest it has had, and versions that differ in
+    // build metadata alone order by it, so the older build is one whose version sorts lower.
+    let older = (0..=u8::MAX)
+        .map(|salt| {
+            let mut older = wasm.clone();
+            older.extend_from_slice(&[0, 3, 1, b'x', salt]);
+            older
+        })
+        .find(|older| {
+            intxt_core::cartridge::cartridge(older).version
+                < intxt_core::cartridge::cartridge(&wasm).version
+        })
+        .expect("some salt gives a lower version");
     for (case, old_wasm) in [("another handler", &older), ("the same handler", &wasm)] {
         let (_tmp, dir) = new_node().await;
         let client = connect(&dir).await.unwrap();
