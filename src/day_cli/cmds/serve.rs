@@ -99,22 +99,30 @@ async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn start_background(dir: &NodeDir) -> Res<ExitCode> {
+/// What [`ensure_background`] found or did.
+pub(crate) enum Background {
+    /// It spawned the server, which is now serving on `socket`.
+    Started { pid: u32, socket: String },
+    /// A server was already serving, or another caller's spawn won the node first.
+    Running,
+}
+
+/// A server for `dir`, in the background: the running one, or one spawned and awaited until it
+/// is serving. It prints nothing, so a hook (whose stdout is the harness's to read) can call it.
+///
+/// Callers racing here (parallel hooks) each spawn a server, and the node lock admits one: a
+/// spawned server that exits before its readiness line because another holds the node to serve
+/// is the race lost, which is [`Background::Running`] once the winner is serving.
+pub(crate) async fn ensure_background(dir: &NodeDir) -> Res<Background> {
     // A command that has the node open is not the server: wait for it to finish, then start serving.
-    // A server that is still booting is awaited, so `start --bg` never reports one that is not
-    // serving.
+    // A server that is still booting is awaited, so nobody is told about one that is not serving.
     if let Err(held) = dir.try_lock(LockRole::Command)? {
         if held.role == Some(LockRole::Serve) {
             let waiting = dir.clone();
             tokio::task::spawn_blocking(move || waiting.wait_until_serving())
                 .await
                 .expect(ERROR_TOKIO)?;
-            writeln!(
-                out(),
-                "a server is already running on {}",
-                dir.socket_path()?.display()
-            )?;
-            return Ok(ExitCode::SUCCESS);
+            return Ok(Background::Running);
         }
         let waiting = dir.clone();
         tokio::task::spawn_blocking(move || waiting.wait_for_lock_release())
@@ -147,6 +155,15 @@ async fn start_background(dir: &NodeDir) -> Res<ExitCode> {
     // Readiness is the server's first line. End of input before it means the server exited.
     if stdout.read_line(&mut line).await? == 0 {
         let status = child.wait().await?;
+        if let Err(held) = dir.try_lock(LockRole::Command)?
+            && held.role == Some(LockRole::Serve)
+        {
+            let waiting = dir.clone();
+            tokio::task::spawn_blocking(move || waiting.wait_until_serving())
+                .await
+                .expect(ERROR_TOKIO)?;
+            return Ok(Background::Running);
+        }
         eyre::bail!(
             "the server exited with {status} before it was serving; see {}",
             log_path.display()
@@ -156,13 +173,25 @@ async fn start_background(dir: &NodeDir) -> Res<ExitCode> {
         line.starts_with(READY_PREFIX),
         "the server's first line was not its readiness line: {line:?}"
     );
-    writeln!(
-        out(),
-        "node serving in the background (pid {pid}) on {}",
-        line.trim_end()
-            .strip_prefix(READY_PREFIX)
-            .expect("the line starts with the readiness prefix, as checked above")
-    )?;
+    let socket = line
+        .trim_end()
+        .strip_prefix(READY_PREFIX)
+        .expect("the line starts with the readiness prefix, as checked above")
+        .to_owned();
+    Ok(Background::Started { pid, socket })
+}
+
+async fn start_background(dir: &NodeDir) -> Res<ExitCode> {
+    match ensure_background(dir).await? {
+        Background::Started { pid, socket } => {
+            writeln!(out(), "node serving in the background (pid {pid}) on {socket}")?
+        }
+        Background::Running => writeln!(
+            out(),
+            "a server is already running on {}",
+            dir.socket_path()?.display()
+        )?,
+    }
     Ok(ExitCode::SUCCESS)
 }
 

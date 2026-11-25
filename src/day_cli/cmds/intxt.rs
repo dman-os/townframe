@@ -743,16 +743,17 @@ async fn with_packaging_exit(
     .await
 }
 
-/// Capture runs against the node's server only. Booting the node in the hook's own process costs
-/// seconds per hook, and parallel tool calls run parallel hooks, of which only one process can
-/// hold the node. The socket is probed, not connected to through [`NodeClient`], which would boot
-/// the node just to be refused.
-pub(crate) async fn require_daemon(dir: &day_node::NodeDir) -> Res<()> {
-    eyre::ensure!(
-        dir.probe_socket().await? == day_node::SocketState::Live,
-        "no server is running the node at {}; start one with `day node start --bg`",
-        dir.root().display()
-    );
+/// Capture runs against the node's server only, and starts one in the background when none is
+/// serving (as `day node start --bg` does); it stays up until `day node stop`. Booting the node in
+/// the hook's own process instead would be paid on every hook, and parallel tool calls run
+/// parallel hooks, of which only one process can hold the node. The socket is probed, not
+/// connected to through [`NodeClient`], which would boot the node in this process. Nothing is
+/// printed: a hook's stdout is the harness's to read.
+pub(crate) async fn ensure_server(dir: &day_node::NodeDir) -> Res<()> {
+    if dir.probe_socket().await? == day_node::SocketState::Live {
+        return Ok(());
+    }
+    crate::cmds::serve::ensure_background(dir).await?;
     Ok(())
 }
 

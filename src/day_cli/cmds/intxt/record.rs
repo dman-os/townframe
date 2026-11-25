@@ -193,7 +193,7 @@ struct Recording {
 impl Recording {
     async fn connect() -> Res<Self> {
         let node_dir = lazy::config().await?.node_dir.clone();
-        super::require_daemon(&node_dir).await?;
+        super::ensure_server(&node_dir).await?;
         Ok(Self {
             client: lazy::node().await?,
             sessions_dir: capture::sessions_dir(node_dir.root()),
