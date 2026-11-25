@@ -502,12 +502,12 @@ fn contract_skins_are_stylesheets_in_the_kit_layer() {
 
 /// `KIT-102`: one z-order scale. A skin never writes a number as a `z-index`: it names a layer
 /// token (`var(--ct-layer-sheet)`), and every such token exists in `semantic.tokens.json`, whose
-/// scale runs content, raised, app bar, drawer, sheet, toast, gesture, lowest first. (A sheet
+/// scale runs content, raised, app bar, rack, drawer, sheet, toast, gesture, lowest first. (A sheet
 /// opened from the sidebar covers it, so the sheet is above the drawer.)
 #[test]
 fn skins_stack_on_the_layer_scale_and_never_name_a_z_index_number() {
-    const SCALE: [&str; 7] = [
-        "content", "raised", "app-bar", "drawer", "sheet", "toast", "gesture",
+    const SCALE: [&str; 8] = [
+        "content", "raised", "app-bar", "rack", "drawer", "sheet", "toast", "gesture",
     ];
     let tokens: serde_json::Value =
         serde_json::from_str(&read(&crate_root().join("styles/tokens/semantic.tokens.json")).text)

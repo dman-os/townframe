@@ -10,6 +10,7 @@ use clay_dioxus_kit::CardContent;
 use clay_dioxus_kit::CardVariant;
 use clay_dioxus_kit::ListRow;
 use clay_dioxus_kit::PanelPage;
+use clay_dioxus_kit::use_pane_rack;
 use clay_mdk::Error;
 use clay_mdk::Operation;
 use clay_mdk::OperationReceipt;
@@ -33,6 +34,7 @@ pub struct SettingsListProps {
 
 #[expect(non_snake_case, reason = "Dioxus component naming")]
 pub fn SettingsList(props: SettingsListProps) -> Element {
+    use_pane_rack(rsx! { PresentationSlot { reference: props.micro.shell.navigation_rack.clone() } });
     let preferences = props.micro.preferences(&use_facet(&props.micro.config));
     let mut receipt = use_signal(|| None::<OperationReceipt>);
     let mut error = use_signal(|| None::<String>);
@@ -77,7 +79,6 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
             app_bar: rsx! {
                 AppBar {
                     title: "Settings",
-                    leading: rsx! { PresentationSlot { reference: props.micro.shell.navigation_rack.clone() } },
                 }
             },
         div { class: "ct-settings", "data-state": "list",
@@ -154,6 +155,7 @@ pub struct SettingsSectionProps {
 
 #[expect(non_snake_case, reason = "Dioxus component naming")]
 pub fn SettingsSection(props: SettingsSectionProps) -> Element {
+    use_pane_rack(rsx! { PresentationSlot { reference: props.micro.shell.navigation_rack.clone() } });
     let rows = use_rows(&props.micro.sections);
     let opened = props.micro.shell.opened.clone();
     let open = use_resource(move || {
@@ -176,7 +178,6 @@ pub fn SettingsSection(props: SettingsSectionProps) -> Element {
                 app_bar: rsx! {
                     AppBar {
                         title: row.value.title.clone(),
-                        leading: rsx! { PresentationSlot { reference: props.micro.shell.navigation_rack.clone() } },
                     }
                 },
                 div { "data-part": "detail",

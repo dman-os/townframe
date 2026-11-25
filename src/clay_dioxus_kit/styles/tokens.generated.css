@@ -10,6 +10,7 @@
     --ct-dimension-spacing-6: 1.5rem;
     --ct-dimension-spacing-8: 2rem;
     --ct-dimension-spacing-12: 3rem;
+    --ct-dimension-spacing-36: 9rem;
     --ct-dimension-radius-sm: 0.25rem;
     --ct-dimension-radius-md: 0.5rem;
     --ct-dimension-radius-lg: 0.75rem;
@@ -38,6 +39,7 @@
     --ct-dimension-spacing: 0.25rem;
     --ct-spacing: 0.25rem;
     --ct-dimension-target-coarse: 3rem;
+    --ct-dimension-rack-size: 9rem;
     --ct-radius-sm: 0.25rem;
     --ct-radius-md: 0.5rem;
     --ct-radius-lg: 0.75rem;
@@ -56,6 +58,7 @@
     --ct-layer-content: 0;
     --ct-layer-raised: 10;
     --ct-layer-app-bar: 20;
+    --ct-layer-rack: 25;
     --ct-layer-drawer: 30;
     --ct-layer-sheet: 40;
     --ct-layer-toast: 50;

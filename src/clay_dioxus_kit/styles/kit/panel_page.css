@@ -1,10 +1,15 @@
 /*
- * ct-panel-page (headless/panel_page.rs). Parts: bar, body. A micro's presentation root is exactly
+ * ct-panel-page (headless/panel_page.rs). Parts: rack, bar, body. State: data-rack. A micro's presentation root is exactly
  * its pane's size and clips what overflows it, so a body taller than the panel scrolls here or
  * nowhere: the page fills the root, the bar is pinned and the body takes the height the bar
- * leaves (min-height 0, or a flex column grows to its content instead of scrolling).
+ * leaves (min-height 0, or a flex column grows to its content instead of scrolling). The rack is
+ * out of flow, pinned to the page's top-left over the bar and over whatever scrolls under it;
+ * --ct-pane-rack-inset is the corner it covers (the rack's full size and the bar's own inset),
+ * for a title to start after, and is 0 without a rack.
  */
 .ct-panel-page {
+  --ct-pane-rack-inset: 0px;
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -19,4 +24,15 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+}
+
+.ct-panel-page[data-rack="true"] {
+  --ct-pane-rack-inset: calc(var(--ct-dimension-rack-size) + var(--ct-dimension-spacing-2));
+}
+
+.ct-panel-page [data-part="rack"] {
+  position: absolute;
+  top: var(--ct-dimension-spacing-1);
+  left: var(--ct-dimension-spacing-2);
+  z-index: var(--ct-layer-rack);
 }

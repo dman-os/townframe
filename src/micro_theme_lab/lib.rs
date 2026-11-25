@@ -19,6 +19,7 @@ use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::Button;
 use clay_dioxus_kit::ButtonVariant;
 use clay_dioxus_kit::PanelPage;
+use clay_dioxus_kit::use_pane_rack;
 use clay_dioxus_kit::Renderer;
 use clay_dioxus_kit::Status as Tone;
 use clay_dioxus_specimens::AlertSpecimens;
@@ -112,17 +113,14 @@ fn view(host: Host) -> Element {
     let mut status = use_signal(|| Status::Idle);
     let mut applying = use_signal(|| false);
 
-    let leading = rsx! { PresentationSlot { reference: host.navigation_rack.clone() } };
+    use_pane_rack(rsx! { PresentationSlot { reference: host.navigation_rack.clone() } });
     let applied_css = match &*applied.read() {
         Some(Ok(sheet)) => sheet.css.clone(),
         Some(Err(error)) => {
-            return page(
-                leading,
-                rsx! { p { role: "alert", "The host's theme could not be read: {error}" } },
-            );
+            return page(rsx! { p { role: "alert", "The host's theme could not be read: {error}" } });
         }
         None => {
-            return page(leading, rsx! { p { role: "status", "Loading the theme…" } });
+            return page(rsx! { p { role: "status", "Loading the theme…" } });
         }
     };
     let text = draft().unwrap_or_else(|| applied_css.clone());
@@ -166,7 +164,6 @@ fn view(host: Host) -> Element {
     use_context_provider(|| Renderer::Browser);
 
     page(
-        leading,
         rsx! {
             // The draft is this micro's stylesheet while it previews, which the host adopts for
             // this mount alone. It follows the lab's own rules in the one stylesheet a micro has.
@@ -233,11 +230,12 @@ fn view(host: Host) -> Element {
     )
 }
 
-/// The lab's frame: the app bar with `leading` (the shell's navigation rack), then `body`.
+/// The lab's frame: the app bar, then `body`, under the shell's navigation rack that
+/// `use_pane_rack` floats over the corner.
 /// Every state of the view goes through it, so none leaves the panel without a way out.
-fn page(leading: Element, body: Element) -> Element {
+fn page(body: Element) -> Element {
     rsx! {
-        PanelPage { app_bar: rsx! { AppBar { title: "Theme lab", leading } }, {body} }
+        PanelPage { app_bar: rsx! { AppBar { title: "Theme lab" } }, {body} }
     }
 }
 

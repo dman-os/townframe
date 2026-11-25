@@ -15,6 +15,7 @@ use clay_dioxus_kit::NavButton;
 use clay_dioxus_kit::NavButtonKind;
 use clay_dioxus_kit::NavRack;
 use clay_dioxus_kit::PanelPage;
+use clay_dioxus_kit::use_pane_rack;
 use clay_dioxus_kit::Renderer;
 use clay_dioxus_kit::SectionPane;
 use clay_dioxus_kit::Sections;
@@ -78,8 +79,8 @@ enum Placement {
 /// `Element` prop does not re-render when the element inside it changes.
 ///
 /// The panel's own tree carries the navigation rack, so while the panel has no presentation
-/// (its micro is disabled or still starting) the shell supplies a bar with the panel's title and
-/// the rack; otherwise a compact window would show a placeholder with no way
+/// (its micro is disabled or still starting) the shell supplies a page with the panel's title and
+/// the rack floating over it; otherwise a compact window would show a placeholder with no way
 /// out of it.
 #[component]
 fn PlacedSlot(
@@ -90,7 +91,11 @@ fn PlacedSlot(
 ) -> Element {
     use_context_provider(|| placement);
     let placeholder_chrome = rsx! {
-        AppBar { title, leading: rsx! { Rack { shell } } }
+        PanelPage {
+            rack: rsx! { Rack { shell } },
+            app_bar: rsx! { AppBar { title } },
+            ""
+        }
     };
     rsx! { PresentationSlot { reference, placeholder_chrome } }
 }
@@ -595,15 +600,11 @@ fn Sidebar(shell: Shell) -> Element {
 fn Home(shell: Shell) -> Element {
     let panels = use_rows(&shell.panels);
     let failure = use_signal(|| None::<String>);
+    use_pane_rack(rsx! { Rack { shell: shell.clone() } });
     rsx! {
         // The frame's region already carries the panel's title as its accessible name.
         PanelPage {
-            app_bar: rsx! {
-                AppBar {
-                    title: "Home",
-                    leading: rsx! { Rack { shell: shell.clone() } },
-                }
-            },
+            app_bar: rsx! { AppBar { title: "Home" } },
         div { "data-part": "home",
             nav { "data-part": "entries", "aria-label": "Entry points",
                 for row in destinations(&panels).into_iter().filter(|row| !row.value.home) {

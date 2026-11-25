@@ -7,6 +7,10 @@
       "$description": "The least a pressable measures on each axis under a coarse pointer (Material's 48 dp touch minimum). Sizes are rem, so it is 48px only while the root font size is 16px.",
       "$value": "{dimension.spacing.12}"
     },
+    "rack-size": {
+      "$description": "The width of the navigation rack at its fullest: three targets (toggle, back, forward). A pane keeps this much of its top-left corner clear for the rack that floats over it.",
+      "$value": "{dimension.spacing.36}"
+    },
     "radius-sm": { "$value": "{dimension.radius.sm}" },
     "radius-md": { "$value": "{dimension.radius.md}" },
     "radius-lg": { "$value": "{dimension.radius.lg}" },
@@ -29,6 +33,7 @@
     "content": { "$value": 0 },
     "raised": { "$value": 10 },
     "app-bar": { "$value": 20 },
+    "rack": { "$value": 25 },
     "drawer": { "$value": 30 },
     "sheet": { "$value": 40 },
     "toast": { "$value": 50 },
