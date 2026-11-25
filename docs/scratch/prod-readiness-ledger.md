@@ -1128,3 +1128,33 @@ inside the transaction. This ties together:
     (`subduction_ephemeral`), and sign and commit once on a debounce.
 - **dmeta signatures as map entries keyed by signer, instead of a list:** a cabinet decision.
   Only needed if the cabinet wants hydration-free writes.
+
+### big_repo: operator answers (2026-11-26)
+- **Mutating the live Automerge before disk is the samod design** (the Automerge doc is the
+  write object), so we keep it. Today:
+  - `with_document_with_origin` releases its sync lock before `commit_delta` persists
+    (`lib.rs:1607-1665`);
+  - the handle breaks only on a no-write-access rejection, a key-unavailable rejection or a
+    dropped worker. A plain persistence failure leaves the change in memory without breaking.
+
+  Improve within the design: break the handle on any persistence failure, or hold the per-doc
+  write until it is durable.
+- **The SQL Keyline fixes the authority-graph half of in-memory keyhive state.** BeeKEM/CGKA
+  state and encrypt-time app keys still need a prepare/apply-after-commit split in our keyhive
+  fork.
+- **The `CgkaOp` listener event** has one consumer, the hub (`hub.rs:2207`): it notifies the
+  change manager of a key rotation and retries materialization on an existing worker. It fires
+  before the op is durable. `notify_document_key_rotated(..).inspect_err(warn).ok()` swallows
+  the error, which AGENTS.md forbids. The FIXME at `hub.rs:2205` (one rotation may be several
+  ops) is relevant to the rework.
+- **Ephemeral live-change stream:** unsigned changes never enter subduction and are never
+  encrypted as commits. Other nodes use the stream only for live watching and treat its changes
+  as retractable.
+- **Read-time authorization** is automerge's path: filtered materialization by actor id, which
+  the automerge authors are building.
+- **automerge 0.12:** port `dman-os/townframe#54` ("refactor: automerge 0.12 and authors") in
+  this lane as part of the big_repo rewrite.
+- **SQL Keyline:** build it, and possibly contribute it upstream.
+- **Scalar dmeta signatures:** deferred.
+- **Study in progress:** upstream keyhive/automerge-repo integration, checkpointing ("nudge
+  edits"), author-filtered materialization, and automerge main since 0.11.
