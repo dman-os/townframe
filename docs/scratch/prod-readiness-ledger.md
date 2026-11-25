@@ -1024,3 +1024,30 @@ sqlite_rs).
   on trusted machines. Cross-build tracking is `x/bench.ts`; the skill is
   `.agents/skills/benchmarking`.
 - **At most 5 lanes run at once.**
+
+### Service rework cut points (agreed with the nodules PR marshal, 2026-11-25)
+
+Both cut points base on main after nodules' critical path (node-56…76, then intxt-01…37, then
+claytxt #344), on nodules' ping. Design and audit: `docs/scratch/service-macro-rework.md` on
+`agent/service-rework`.
+- **Cut A:**
+  - remove `Transport::Irpc`, `IrpcAdapter` and `Admission`, plus the cancellation ledger;
+  - stop held polls starving ordinary calls in iroh stream admission;
+  - report a 429 as `outcome_unknown: false` and surface `Retry-After`;
+  - flag `PollDatums`, `WatchCartridges` and `PageSession` `long_poll`, with `WatchCartridges`
+    comparing `seq` before querying;
+  - drop the extra `RequestContext` clones, the one-byte WebSocket handshake reads and the double
+    event parse;
+  - fix `decode_response`: decode the success body straight into `O` and an error body only into
+    `XrpcErrorEnvelope`, with no `Value` and no clone. This dates from #84 (`04763f60`), not the
+    nodules tips.
+- **Cut B:**
+  - the `protocol!` block macro (an open attribute set: `long_poll`, `privileged`, `bytes_*`,
+    `local_only`, `needs_handle`), with names inferred by lowercasing the ident's first character
+    and the guardrails walker taught to see inside the block;
+  - wire renames: `blobs.put`/`read`/`stat`/`mintCapability` → `putBlob`/`readBlob`/`statBlob`/
+    `mintBlobsCapability`, `dispatch.mintCapability` → `mintDispatchCapability`, and the three
+    `bigsync.rpc` names;
+  - the operator approved the renames, and nodules is flagging them in its review summary.
+- **Deferred to the big_repo rework:** waking every held poll on every commit (O(n), about 2 SQL
+  queries per poll). Move held polls to subscriptions, with one reader fanning out to waiters.

@@ -10,13 +10,13 @@ use crate::driver::PeerDriver;
 use crate::driver::RouteUpdate;
 use crate::driver::Settle;
 use crate::driver::SyncBackend;
+use crate::driver::memory::LwwPayload;
 use crate::driver::memory::MemoryBackend;
 use crate::driver::memory::MemoryPeerCursors;
 use crate::interlude::*;
 use crate::part_store::laws::obj;
 use crate::part_store::laws::part;
 use crate::part_store::laws::principal;
-use crate::driver::memory::LwwPayload;
 use crate::part_store::memory::MemoryPartStore;
 use crate::sync::PeerCursor;
 

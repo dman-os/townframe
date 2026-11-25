@@ -6,10 +6,10 @@ use super::rig::*;
 use crate::driver::Fact;
 use crate::driver::FactEvent;
 use crate::driver::Facts;
+use crate::driver::memory::LwwPayload;
 use crate::interlude::*;
 use crate::part_store::laws::obj;
 use crate::part_store::laws::part;
-use crate::driver::memory::LwwPayload;
 
 /// Law 6: a lost connection drops every call in flight and leaves every part `Unsynced`; a new
 /// one is a fresh session that asks each part from its persisted cursor, and work already
