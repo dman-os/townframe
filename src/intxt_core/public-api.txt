@@ -17,6 +17,7 @@ pub enum intxt_core::work::FileStatus { # [serde (rename = "added")] Added, # [s
 pub enum intxt_core::work::MessageKind { # [serde (rename = "userMessage")] UserMessage, # [serde (rename = "agentMessage")] AgentMessage, # [serde (rename = "agentThought")] AgentThought, # [serde (rename = "notification")] Notification, # [serde (rename = "localCommand")] LocalCommand, # [serde (rename = "interrupt")] Interrupt, # [serde (rename = "spawnPrompt")] SpawnPrompt, # [doc = " Text the harness injected that the model saw: reminders and records it marks as meta."] # [serde (rename = "meta")] Meta, # [doc = " A message from another agent session."] # [serde (rename = "crossSession")] CrossSession, # [serde (rename = "compactionSummary")] CompactionSummary, # [datum (other)] Unknown (String) }
 pub enum intxt_core::work::OpKind { # [serde (rename = "edit")] Edit, # [serde (rename = "checkout")] Checkout, # [serde (rename = "reset")] Reset, # [serde (rename = "commit")] Commit, # [serde (rename = "amend")] Amend, # [serde (rename = "rebase")] Rebase, # [serde (rename = "merge")] Merge, # [serde (rename = "cherryPick")] CherryPick, # [serde (rename = "revert")] Revert, # [doc = " A ref moved some other way: a fast-forward, `branch -f`, a fetch."] # [serde (rename = "refMove")] RefMove, # [serde (rename = "jjSnapshot")] JjSnapshot, # [datum (other)] Unknown (String) }
 pub enum intxt_core::work::Priority { # [serde (rename = "high")] High, # [serde (rename = "medium")] Medium, # [serde (rename = "low")] Low, # [datum (other)] Unknown (String) }
+pub enum intxt_core::work::RewriteHow { # [doc = " The commits have the same `git patch-id --stable`, which is what `git range-diff` uses."] # [serde (rename = "patchId")] PatchId, # [datum (other)] Unknown (String) }
 pub enum intxt_core::work::StopReason { # [serde (rename = "end_turn")] EndTurn, # [serde (rename = "max_tokens")] MaxTokens, # [serde (rename = "max_turn_requests")] MaxTurnRequests, # [serde (rename = "refusal")] Refusal, # [serde (rename = "cancelled")] Cancelled, # [datum (other)] Unknown (String) }
 pub enum intxt_core::work::ToolKind { # [serde (rename = "read")] Read, # [serde (rename = "edit")] Edit, # [serde (rename = "delete")] Delete, # [serde (rename = "move")] Move, # [serde (rename = "search")] Search, # [serde (rename = "execute")] Execute, # [serde (rename = "think")] Think, # [serde (rename = "fetch")] Fetch, # [serde (rename = "switch_mode")] SwitchMode, # [serde (rename = "other")] Other, # [datum (other)] Unknown (String) }
 pub enum intxt_core::work::ToolStatus { # [serde (rename = "pending")] Pending, # [serde (rename = "in_progress")] InProgress, # [serde (rename = "completed")] Completed, # [serde (rename = "failed")] Failed, # [datum (other)] Unknown (String) }
@@ -79,7 +80,7 @@ pub struct intxt_core::capture::RecordedIds  { session: Option < String >, subag
 pub struct intxt_core::capture::RecordedWorktree  { docs: WorktreeDocs, next_seq: u64, extra: Extra }
 pub struct intxt_core::capture::SessionBatch  { session_id: String, doc: Option < String >, imported: Imported, subagents: Vec < SubagentBatch >, extra: Extra }
 pub struct intxt_core::capture::SubagentBatch  { agent_id: String, doc: Option < String >, imported: Imported, extra: Extra }
-pub struct intxt_core::capture::WorktreeBatch  { identity: WorktreeIdentity, docs: WorktreeDocs, next_seq: u64, ops: Vec < Op >, commits: BTreeMap < String , GitCommit >, refs: BTreeMap < String , GitRef >, reflog_gap: bool, extra: Extra }
+pub struct intxt_core::capture::WorktreeBatch  { identity: WorktreeIdentity, docs: WorktreeDocs, next_seq: u64, ops: Vec < Op >, refs: BTreeMap < String , GitRef >, reflog_gap: bool, extra: Extra }
 pub struct intxt_core::capture::WorktreeDocs  { worktree: Option < String >, clone: Option < String >, repo: Option < String >, extra: Extra }
 pub struct intxt_core::capture::WorktreeIdentity  { root: String, clone_path: String, clone_id: String, worktree_id: String, remotes: Vec < String >, roots: Vec < String >, extra: Extra }
 pub struct intxt_core::client::Caller< H >  {  }
@@ -97,7 +98,7 @@ pub struct intxt_core::work::AgentSession  { harness: String, session_id: String
 pub struct intxt_core::work::CommitFile  { path: String, status: FileStatus, old_path: Option < String >, extra: Extra }
 pub struct intxt_core::work::File  { worktree: DatumReference, blob: Option < DatumReference >, extra: Extra }
 pub struct intxt_core::work::GitClone  { repo: Option < DatumReference >, machine: ActorUrl, path: String, vcs: Vec < Vcs >, extra: Extra }
-pub struct intxt_core::work::GitCommit  { parents: Vec < String >, change_id: Option < String >, author: GitIdent, committer: GitIdent, message: String, files: Vec < CommitFile >, extra: Extra }
+pub struct intxt_core::work::GitCommit  { parents: Vec < String >, change_id: Option < String >, author: GitIdent, committer: GitIdent, message: String, files: Vec < CommitFile >, patch_id: Option < String >, extra: Extra }
 pub struct intxt_core::work::GitCommitEntry  { tip: String, base: Option < String >, pack: DatumReference, extra: Extra }
 pub struct intxt_core::work::GitIdent  { name: String, email: String, at: Timestamp, extra: Extra }
 pub struct intxt_core::work::GitObservation  { head: Option < String >, reference: Option < String >, from: Option < String >, to: Option < String >, reflog: Option < String >, extra: Extra }
@@ -114,6 +115,8 @@ pub struct intxt_core::work::Plan  { entries: Vec < PlanEntry >, extra: Extra }
 pub struct intxt_core::work::PlanEntry  { content: String, priority: Priority, status: crate :: annotation :: Progress, extra: Extra }
 pub struct intxt_core::work::PromptTurn  { seq: u64, at: Timestamp, parent_turn: Option < String >, stop_reason: Option < StopReason >, messages: Vec < Message >, tool_calls: Vec < ToolCall >, extra: Extra }
 pub struct intxt_core::work::RepoEntry  { repo: DatumReference, extra: Extra }
+pub struct intxt_core::work::Rewrite  { successor: String, how: RewriteHow, extra: Extra }
+pub struct intxt_core::work::RewrittenFrom  { predecessor: String, how: RewriteHow, extra: Extra }
 pub struct intxt_core::work::SessionEntry  { session: DatumReference, extra: Extra }
 pub struct intxt_core::work::ToolCall  { id: String, seq: u64, title: String, kind: ToolKind, status: ToolStatus, cwd: Option < String >, locations: Vec < ToolLocation >, diffs: Vec < ToolDiff >, output: Option < String >, extra: Extra }
 pub struct intxt_core::work::ToolDiff  { path: String, patch: String, extra: Extra }
