@@ -83,6 +83,7 @@ line.
 - **Card variants** become:
   - `tonal` (the default): `surface-raised` on `surface`, or `surface` on `canvas`; no edge, no shadow;
   - `sunken`: `surface-sunken`, for a well that holds other content (code, previews, inputs grouped together);
+    it sits inside a surface (a tonal card, a panel), one step below it, and never directly on the canvas;
   - `plain`: no fill; it only groups and pads (a section of a form, a run of rows);
   - `outlined`: a hairline border, opt-in, for a container on a busy background where fill alone is not enough.
 
@@ -145,6 +146,8 @@ The kit does not stop a user sheet from doing anything; this list binds the ship
 - no shadow on anything in the flow (§4);
 - no edge on a container nested in a container (§3);
 - no pills or badges for information that is not a control or a count;
+  pills are for controls and counts only: filter and toggle chips stay pills, while a status chip
+  (information) is a small rounded rectangle (`radius-sm`) that keeps its glyph;
 - no emoji as icons; no low-contrast body text (ADR 055 AA holds for every text role).
 
 ## 6. Consequences
