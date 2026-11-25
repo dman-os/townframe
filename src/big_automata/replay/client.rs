@@ -1,7 +1,7 @@
 //! The client half of the replay session protocol: one session with one peer, kept in step with
 //! the routes the embedder wants from that peer.
 //!
-//! The machine is sans-IO. The embedder sets the wanted routes; the driver takes the next
+//! The machine is sans-IO. The embedder wants and unwants routes one at a time; the driver takes the next
 //! [`UpdateSession`] to send and reports its answer (or its loss), builds rounds from the
 //! acknowledged targets with the cursors the cursor machine owns, and reports their answers.
 //! Each answer comes back paired with the request it answers, because answers carry no session
@@ -28,6 +28,8 @@ use crate::replay::wire::UpdateSession;
 use crate::replay::wire::Verdict;
 use crate::rev::Rev;
 
+#[cfg(test)]
+mod differential;
 #[cfg(test)]
 mod tests;
 
@@ -160,49 +162,43 @@ impl ReplayClient {
         id
     }
 
-    /// Make `wanted` the routes the client follows. A new route is queued for the next update
-    /// under a fresh id; a dropped one leaves every index, and an id the server may hold for it
-    /// (acknowledged, or carried by the update in flight) is queued for removal. Only this ever
-    /// drops a route (law 4).
-    pub fn set_wanted(&mut self, wanted: &BTreeSet<Route>) {
-        let Self {
-            routes,
-            pending,
-            acked,
-            blocked,
-            removals,
-            next_target,
-            ..
-        } = self;
-        routes.retain(|route, standing| {
-            if wanted.contains(route) {
-                return true;
+    /// Start following `route`: it is queued for the next update under a fresh id. Wanting a
+    /// route that is already wanted, in whatever standing, changes nothing: it keeps its id and
+    /// its standing, and no second id is made for it.
+    pub fn want(&mut self, route: Route) {
+        if self.routes.contains_key(&route) {
+            return;
+        }
+        let id = Self::fresh_id(&mut self.next_target);
+        self.routes.insert(route.clone(), Standing::Pending(id));
+        self.pending.insert(id, route);
+    }
+
+    /// Stop following `route`: it leaves every index, and an id the server may hold for it
+    /// (acknowledged, or carried by the update in flight) is queued for removal. Unwanting a
+    /// route that is not wanted changes nothing. A route wanted again later gets a fresh id,
+    /// never the dropped one. Only this drops a route: the server's refusals block one, which stays
+    /// wanted (law 4).
+    pub fn unwant(&mut self, route: &Route) {
+        let Some(standing) = self.routes.remove(route) else {
+            return;
+        };
+        match standing {
+            Standing::Pending(id) => {
+                self.pending.remove(&id);
             }
-            match *standing {
-                Standing::Pending(id) => {
-                    pending.remove(&id);
-                }
-                // The update in flight may land: removing the id next is what keeps the
-                // server from serving a route nobody wants. The next update goes out only
-                // after this one is answered, so the removal applies after the addition.
-                Standing::InFlight(id) => {
-                    removals.insert(id);
-                }
-                Standing::Acked(id) => {
-                    acked.remove(&id);
-                    removals.insert(id);
-                }
-                Standing::Blocked => {
-                    blocked.remove(route);
-                }
+            // The update in flight may land: removing the id next is what keeps the server
+            // from serving a route nobody wants. The next update goes out only after this one
+            // is answered, so the removal applies after the addition.
+            Standing::InFlight(id) => {
+                self.removals.insert(id);
             }
-            false
-        });
-        for route in wanted {
-            if !routes.contains_key(route) {
-                let id = Self::fresh_id(next_target);
-                routes.insert(route.clone(), Standing::Pending(id));
-                pending.insert(id, route.clone());
+            Standing::Acked(id) => {
+                self.acked.remove(&id);
+                self.removals.insert(id);
+            }
+            Standing::Blocked => {
+                self.blocked.remove(route);
             }
         }
     }
