@@ -32,83 +32,92 @@ use service_utils_rs::RequestContext;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+/// What the host signs as and presents for one micro.
+#[derive(Clone, Copy)]
+struct Binding {
+    /// The micro's own actor capability, the signer of every call, so dispatch binds the call to
+    /// this actor.
+    signer: CapId,
+    /// The capability the host presents for the micro, or `None` for a micro with no granted
+    /// methods (or none minted), whose every call is then refused for want of a credential.
+    capability: Option<CapId>,
+}
+
 /// One micro's `dispatch.local` egress: calls are signed by the micro's actor and present the
-/// micro's capability. Clones share the capability, so the egress a host handed to the micro's
-/// incarnation follows [`Self::remint`].
+/// micro's capability. Clones share the binding, so the egress a host handed to the micro's
+/// incarnation follows [`Self::rebind`], and the binding is read at each call, so a re-mint
+/// reaches a micro that is running.
 #[derive(Clone)]
 pub struct MicroEgress {
     dispatch: Client<DispatchProtocol>,
-    /// The micro's own actor capability, from the host's incarnation table. It is the signer of
-    /// every call, so dispatch binds the call to this actor.
-    signer: CapId,
-    /// The capability the host presents for the micro, or `None` for a micro with no granted
-    /// methods, whose every call is then refused for want of a credential. Read at each call, so
-    /// a grant change that re-mints it reaches a micro that is running.
-    capability: Arc<Mutex<Option<CapId>>>,
+    binding: Arc<Mutex<Binding>>,
 }
 
 impl MicroEgress {
+    /// The egress of a micro whose handles the node's `micros` nodule minted: `signer` is the
+    /// micro's actor capability and `capability` its dispatch handle, as `micros.handles` answers
+    /// them. The host mints nothing for it.
+    pub fn attached(
+        dispatch: Client<DispatchProtocol>,
+        signer: CapId,
+        capability: Option<CapId>,
+    ) -> Self {
+        Self {
+            dispatch,
+            binding: Arc::new(Mutex::new(Binding { signer, capability })),
+        }
+    }
+
     /// Gives `actor` (the micro's actor, opened by the host) a capability for exactly `scope`,
-    /// minted by `minter` and bound to the actor, so dispatch refuses it under any other. The
-    /// scope is what the host lowered from the micro's `uses` and its cartridge's grants (ADR 049
-    /// section 3). A scope that permits nothing mints nothing: the micro then can call nothing,
-    /// and an empty scope is not a way to say "everything".
+    /// minted by `minter` and bound to the actor, so dispatch refuses it under any other. A scope
+    /// that permits nothing mints nothing: the micro then can call nothing, and an empty scope is
+    /// not a way to say "everything".
+    ///
+    /// INTERIM, for a micro that is in no cartridge ([`crate::MicroInstall`]): a cartridge's micro
+    /// is minted by the node ([`Self::attached`]).
     pub async fn install(
         dispatch: Client<DispatchProtocol>,
         minter: Authorization,
         actor: &OpenedActor,
         scope: DispatchScope,
     ) -> Result<Self, ClientError<DispatchError>> {
-        let capability = Self::mint(&dispatch, minter, actor, scope).await?;
-        Ok(Self {
-            dispatch,
-            signer: actor.capability,
-            capability: Arc::new(Mutex::new(capability)),
-        })
-    }
-
-    /// Presents a capability for `scope` from the next call on, and answers the one it presented
-    /// before, which the host retracts. This is how a grant change reaches a running micro: its
-    /// incarnation holds this egress, not a capability.
-    pub async fn remint(
-        &self,
-        minter: Authorization,
-        actor: &OpenedActor,
-        scope: DispatchScope,
-    ) -> Result<Option<CapId>, ClientError<DispatchError>> {
-        let minted = Self::mint(&self.dispatch, minter, actor, scope).await?;
-        Ok(std::mem::replace(
-            &mut *self.capability.lock().expect("capability lock"),
-            minted,
-        ))
-    }
-
-    async fn mint(
-        dispatch: &Client<DispatchProtocol>,
-        minter: Authorization,
-        actor: &OpenedActor,
-        scope: DispatchScope,
-    ) -> Result<Option<CapId>, ClientError<DispatchError>> {
         if scope.operations.is_empty() && scope.authorities.is_empty() {
-            return Ok(None);
+            return Ok(Self::attached(dispatch, actor.capability, None));
         }
         let minted = dispatch
             .call_with(
                 RequestContext::root(),
                 minter.metadata(),
                 MintDispatchCapability {
+                    capability: None,
                     scope,
                     rights: Rights::USE,
                     subject: Some(actor.actor.actor_id),
                 },
             )
             .await?;
-        Ok(Some(minted.capability_id))
+        Ok(Self::attached(
+            dispatch,
+            actor.capability,
+            Some(minted.capability_id),
+        ))
+    }
+
+    /// Signs as `signer` and presents `capability` from the next call on. This is how a re-mint
+    /// the node made reaches a running micro: its incarnation holds this egress, not a capability.
+    /// The node retracts the handles it replaced.
+    pub fn rebind(&self, signer: CapId, capability: Option<CapId>) {
+        *self.binding.lock().expect("binding lock") = Binding { signer, capability };
+    }
+
+    /// Presents no capability from the next call on: the micro's handles were taken away.
+    pub fn unbind(&self) {
+        self.binding.lock().expect("binding lock").capability = None;
     }
 
     /// The capability the host presents for the micro, `None` for a micro that can call nothing.
     pub fn capability(&self) -> Option<CapId> {
-        *self.capability.lock().expect("capability lock")
+        self.binding.lock().expect("binding lock").capability
     }
 }
 
@@ -118,7 +127,7 @@ impl DispatchEgress for MicroEgress {
         mut request: http::Request<EgressBody>,
     ) -> BoxFuture<'static, http::Response<EgressBody>> {
         let dispatch = self.dispatch.clone();
-        let (signer, capability) = (self.signer, self.capability());
+        let Binding { signer, capability } = *self.binding.lock().expect("binding lock");
         Box::pin(async move {
             // The engine already drops a guest's credential; the composition owns the header
             // regardless, so no engine can leak one through.

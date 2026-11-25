@@ -31,6 +31,7 @@ use big_cartridges_core::RoutineUse;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::protocol::AWAIT_MAX_HOLD_MS;
 use big_cartridges_core::protocol::GetCartridge;
 use big_cartridges_core::protocol::InstallCartridge;
 use big_cartridges_core::protocol::PublishCartridgeVersion;
@@ -629,16 +630,10 @@ async fn call_method(egress: &Arc<dyn DispatchEgress>, nsid: &str, input: &Value
     (status, serde_json::from_slice(&body).unwrap())
 }
 
-/// A micro a cartridge contributes is loaded from the catalog by the `component` its contribution
-/// names, and its egress is minted from its `uses` intersected with the cartridge's grants: a
-/// method it uses but was not granted is denied, one it was granted but does not use is denied
-/// (the grant is the cartridge's, and each component's `uses` narrows it), a grant that is
-/// given or revoked reaches the running micro's egress through its grants follower, and a
-/// disabled micro is dropped on the next sync.
-#[tokio::test]
-async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
+/// A node that boots with the test methods ([`ECHO`], [`REVEAL`]) registered in its dispatch.
+async fn boot_with_test_methods() -> (tempfile::TempDir, NodeComposition) {
     let dir = tempfile::tempdir().unwrap();
-    let mut composition = NodeComposition::boot(NodeConfig {
+    let composition = NodeComposition::boot(NodeConfig {
         root: dir.path().to_owned(),
         bootstrap: vec![],
         schemas: no_schemas(),
@@ -664,6 +659,19 @@ async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
             ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(TestMethods))),
         )
         .expect("the test methods are unclaimed");
+    (dir, composition)
+}
+
+/// A micro a cartridge contributes is loaded from the catalog by the `component` its contribution
+/// names, and its handles are the node's: the `micros` nodule mints them from its `uses`
+/// intersected with the cartridge's grants, and the composition only presents them. A method it
+/// uses but was not granted is denied, one it was granted but does not use is denied (the grant
+/// is the cartridge's, and each component's `uses` narrows it), a grant that is given or revoked
+/// reaches the running micro's egress through the handles follower, and a disabled micro is
+/// dropped on the next sync.
+#[tokio::test]
+async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
+    let (_dir, mut composition) = boot_with_test_methods().await;
     let operator = Operator::of(&composition);
     assert!(
         composition
@@ -724,8 +732,8 @@ async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
             )
             .await;
     }
-    // The micro's grants follower mints its handles again, and the egress the micro holds
-    // presents the new capability from its next call.
+    // The node re-mints the micro's handles, the follower binds them, and the egress the micro
+    // holds presents the new capability from its next call.
     changes.changed().await.unwrap();
     let (status, answer) = call_method(&egress, ECHO, &json!({"text": "ping"})).await;
     assert_eq!(
@@ -746,7 +754,7 @@ async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
     let (status, _) = call_method(&egress, ECHO, &json!({"text": "ping"})).await;
     assert_eq!(
         status, 403,
-        "a revoked grant is gone once the follower mints again"
+        "a revoked grant is gone once the node mints again"
     );
 
     operator.set_micro_enabled(&id, false).await;
@@ -759,6 +767,64 @@ async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
         "a disabled micro is not loaded"
     );
     assert!(composition.egress(&micro).is_none(), "and it holds nothing");
+    composition.stop().await.unwrap();
+}
+
+/// Mounting a micro never waits on the handles poll, and the one poll follows every cartridge the
+/// host has mounted: a second cartridge synced while the first's poll is held (up to
+/// [`AWAIT_MAX_HOLD_MS`]) mounts at once, and its grants then reach its egress.
+#[tokio::test]
+async fn a_cartridge_micro_mounts_while_the_handles_poll_is_held_and_is_followed_after() {
+    let (_dir, mut composition) = boot_with_test_methods().await;
+    let operator = Operator::of(&composition);
+    let permbinds = || [("echo", method_permbind(ECHO))];
+    let uses = || [("echo", RoutineUse::default())];
+    let first = operator
+        .install_micro(micro_cartridge("cart-first", permbinds(), uses()))
+        .await;
+    for loaded in composition.sync_cartridge_micros().await.unwrap() {
+        loaded.unwrap();
+    }
+    // The follower is now polling for the first cartridge alone.
+    let second = operator
+        .install_micro(micro_cartridge("cart-second", permbinds(), uses()))
+        .await;
+    let mounting = std::time::Instant::now();
+    for loaded in composition.sync_cartridge_micros().await.unwrap() {
+        loaded.unwrap();
+    }
+    assert!(
+        mounting.elapsed() < std::time::Duration::from_millis(AWAIT_MAX_HOLD_MS.into()),
+        "mounting waited out the poll"
+    );
+
+    let (first_micro, second_micro) = (first.to_string(), second.to_string());
+    let mut changes = composition.handles_changed(&second_micro).unwrap();
+    operator
+        .grant(
+            &second,
+            GrantKey::Method(ECHO.to_owned()),
+            Some(GrantBody::present()),
+        )
+        .await;
+    changes.changed().await.unwrap();
+    let (status, answer) = call_method(
+        &composition.egress(&second_micro).unwrap(),
+        ECHO,
+        &json!({"text": "ping"}),
+    )
+    .await;
+    assert_eq!(
+        (status, &answer),
+        (200, &json!({"operation": ECHO, "echo": "ping"}))
+    );
+    let (status, _) = call_method(
+        &composition.egress(&first_micro).unwrap(),
+        ECHO,
+        &json!({"text": "ping"}),
+    )
+    .await;
+    assert_eq!(status, 403, "the first cartridge was never granted ECHO");
     composition.stop().await.unwrap();
 }
 

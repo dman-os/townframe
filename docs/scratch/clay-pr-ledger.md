@@ -115,6 +115,7 @@ of its paths and lists the original commits in its message. They are topical and
 | 77-clay-nsids | #363 | feat(clay): the Clay half of ADR 050 §2 NSIDs (LexRef, Clay Lexicons, Contract enum) |
 | 78-lab-panes | #358 | feat(micro_theme_lab): navigator, canvas and inspector |
 | 79-colour-adr | #380 | docs(adr): ADR 055, the colour system |
+| 85-micros-handles-client | draft | feat(clay_node): cartridge micros take their handles from the node's micros nodule (carries nodules #381) |
 
 ## Accounting of operator requests (2026-11-03..24)
 
@@ -178,6 +179,12 @@ Built from the raw chat on 2026-11-24 (83 requests: 23 on main, 23 done but unme
     Update (11-24 night): the `micros` service is a nodule in a core cartridge (ADR 053) that opens micro actors
     under its own cartridge actor (node-78); the GUI contract is unchanged. The node SDK builds on our `day_node`
     crate. The node-76 restack conflicts in `day_node` with nodules #239 and #250 (`day_cli/context.rs`).
+    Update (11-25, layer 85): `clay_node`'s cartridge side is a client of the nodule (nodules #381, carried by a
+    merge): `micros.handles` at mount, one `micros.awaitHandles` follower per composition that rebinds each micro's
+    egress, and `Minted`, `mint_handles`, the per-micro grants follower and `RoutineScopes::lower` are gone.
+    Still ours until the nodule has them: the interim (no-cartridge) installs, `mirror_drawers` for cartridge
+    micros (the nodule's step 4 is unbuilt), the config datum's slot (the nodule returns a record, not a tag/key),
+    and the socket attach (the typed micros client in `day_node` is the nodules lane's step 4).
 
 17. **CodeView for micros (asked by intxt, 11-24 night):** intxt's review micro renders "Show changes" with
     CodeView (their commit, carried above our tip). Our part, in this order: (1) rows on a first render or under

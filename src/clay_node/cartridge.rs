@@ -1,4 +1,4 @@
-//! Micros that cartridges contribute (Clay on the node section 5, ADR 049 sections 3 and 6).
+//! Micros that cartridges contribute (Clay on the node section 5, ADR 049 sections 3 and 6, ADR 052).
 //!
 //! A cartridge in the node's catalog may carry a micro beside its nodule: one envelope, one
 //! install datum, each component enabled on its own. [`NodeComposition::sync_cartridge_micros`]
@@ -10,45 +10,50 @@
 //!    bytes are read out of the blob store by the digest the envelope pins, and its Clay manifest
 //!    is the contribution's `description` plus the identity the envelope owns (`id`,
 //!    `package_version`, `authority`), which is the sidecar a host loads a package from;
-//! 3. the micro's handles are minted from its `uses` intersected with the cartridge's grants. The
-//!    grants are resolved as the nodule's are ([`ResolvedGrants`]) and lowered by
-//!    [`big_nodule::RoutineScopes::lower`], the function that lowers a routine's `uses`, so a
-//!    `uses` entry confers the same thing in either runtime. The handles are bound to the micro's
-//!    own actor and held by the host: the guest names only operations.
+//! 3. the micro's handles are the node's: the `micros` nodule of the core cartridge opens the
+//!    micro's actor and mints dispatch, docs, drawers and blobs handles from its `uses`
+//!    intersected with the cartridge's grants, and `micros.handles` answers them. The host mints
+//!    nothing. It presents the dispatch handle and signs with the actor capability on the micro's
+//!    egress, and the guest names only operations.
 //!
-//! A micro with no granted `uses` is minted nothing and can call nothing. Each micro then has a
-//! follower: a task that long-polls the cartridge's grants (`awaitCartridgeGrants`) and, when they
-//! move, retracts the handles whose scope changed and mints them again, so the micro's next call
-//! sees the new grant. The follower is owned by the micro's entry in the composition and stops when
-//! the micro is dropped or the composition stops.
+//! Mounting never waits on a poll: `micros.handles` answers at once, and the host mounts the micro
+//! with what it returned. One task per composition, [`HandlesFollower`], long-polls
+//! `micros.awaitHandles` for every cartridge the host has mounted and binds each re-minted
+//! answer to the micro's egress, so the micro's next call presents the new handle. A micro that
+//! loses a handle sees a retryable not-ready answer between the node's retraction and re-mint
+//! (ADR 049 section 6.4), never a stale handle. A micro with no granted `uses` holds a dispatch
+//! handle that reaches nothing and can call nothing.
 
 use crate::Installed;
-use crate::Minted;
+use crate::MicroEgress;
 use crate::MintedState;
 use crate::Minting;
 use crate::NodeComposition;
-use crate::mint_handles;
-use crate::retract;
 use big_blobs_core::BlobId;
 use big_cartridges_core::CLAY_MICRO_MANIFEST_SCHEMA;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Component;
-use big_cartridges_core::ResolvedCartridge;
 use big_cartridges_core::protocol::AWAIT_MAX_HOLD_MS;
-use big_cartridges_core::protocol::AwaitCartridgeGrants;
-use big_cartridges_core::protocol::CartridgeGrantsAt;
 use big_cartridges_core::protocol::CartridgeInstallRecord;
 use big_cartridges_core::protocol::CartridgesError;
 use big_cartridges_core::protocol::ListCartridgeInstalls;
 use big_cartridges_core::protocol::ResolveCartridgePin;
+use big_dispatch_core::Invoke;
+use method_core::Method;
+use micros_nodule::AwaitHandles;
+use micros_nodule::CartridgeHandles;
+use micros_nodule::Handles;
+use micros_nodule::MicroHandles;
+use micros_nodule::Moved;
 use serde_json::Value;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use service_utils_rs::Spawner;
 use service_utils_rs::StopToken;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use tokio::task::JoinHandle;
+use tokio::sync::watch;
 use utils_rs::prelude::Res;
 use utils_rs::prelude::WrapErr;
 use utils_rs::prelude::ferr;
@@ -77,11 +82,12 @@ impl NodeComposition {
     /// payloads have not reached this node yet is skipped now and resolved by the next sync, and a
     /// pin the registry refuses (a bad signature, a mismatched revision, an invalid payload) is
     /// refused for good. A micro that was installed from a cartridge and is no longer enabled or
-    /// installed is dropped: its follower stops and its handles are retracted.
+    /// installed is dropped: it stops being followed and its egress goes, so its guest holds no way
+    /// out. The node retracts its handles when it next re-mints for the cartridge.
     ///
-    /// It is idempotent: a micro whose pinned revision is unchanged keeps its follower and its
+    /// It is idempotent: a micro whose pinned revision is unchanged keeps its egress and its
     /// handles. Call it again when installs change (`observeCartridgeInstalls`); grants are
-    /// followed by each micro's own follower.
+    /// followed by the composition's [`HandlesFollower`].
     pub async fn sync_cartridge_micros(&mut self) -> Res<Vec<Res<CartridgeMicro>>> {
         let installs = self
             .minting
@@ -112,16 +118,15 @@ impl NodeComposition {
             .installed
             .iter()
             .filter(|(micro, installed)| {
-                installed.follower.is_some() && !wanted_ids.contains(*micro)
+                installed.revision.is_some() && !wanted_ids.contains(*micro)
             })
             .map(|(micro, _)| micro.clone())
             .collect();
         for micro in dropped {
-            let installed = self
-                .installed
+            self.installed
                 .remove(&micro)
                 .expect("the micro was listed from the table");
-            installed.release(&self.minting).await?;
+            self.follower.unwatch(&micro);
         }
         let mut loaded = Vec::with_capacity(wanted.len());
         for record in wanted {
@@ -199,68 +204,37 @@ impl NodeComposition {
 
         let micro = cartridge_id.to_string();
         let revision = cartridge.revision();
-        let held = self.installed.remove(&micro);
-        let installed = match held {
+        let installed = match self.installed.remove(&micro) {
             Some(held) if held.revision == Some(revision) => held,
             held => {
-                // The follower holds the envelope it lowers `uses` from, so a new revision
-                // restarts it. The egress the micro's incarnation holds stays, and so does the
-                // state its handles are diffed against.
-                let (egress, state, mut minted) = match held {
-                    Some(Installed {
-                        egress,
-                        state,
-                        follower,
-                        ..
-                    }) => {
-                        let minted = match follower {
-                            Some(follower) => follower.stop().await,
-                            None => None,
-                        };
-                        (egress, state, minted)
-                    }
+                // Asked for at once, never held: the micro is mounted with these and the
+                // follower brings them up to date.
+                let answer = handles(&minting, &cartridge_id).await?;
+                let handles = only_micro(&answer.micros, &cartridge_id);
+                let (egress, state) = match held {
+                    // The egress the micro's incarnation holds stays, and so does the state its
+                    // handles are announced on; the new handles are bound to them.
+                    Some(Installed { egress, state, .. }) => (egress, state),
                     None => (
-                        Arc::new(
-                            crate::MicroEgress::install(
-                                minting.dispatch.clone(),
-                                minting.operator(),
-                                &crate::open_micro_actor(&minting, &micro).await?,
-                                Default::default(),
-                            )
-                            .await
-                            .wrap_err_with(|| format!("minting the capability of micro {micro}"))?,
-                        ),
-                        Arc::new(MintedState::new(None)),
-                        None,
+                        Arc::new(MicroEgress::attached(
+                            minting.dispatch.clone(),
+                            handles.actor,
+                            Some(handles.handles.dispatch),
+                        )),
+                        Arc::new(MintedState::new(handles.handles.docs)),
                     ),
                 };
-                let first = await_grants(&minting, &cartridge_id, None, 0).await?;
-                let following = Following {
-                    micro: micro.clone(),
-                    cartridge_id: cartridge_id.clone(),
-                    resolved: Arc::new(resolved),
-                    config_doc: install.config_doc.clone(),
+                let watched = Watched {
+                    revision: answer.revision.clone(),
                     egress: Arc::clone(&egress),
                     state: Arc::clone(&state),
                 };
-                apply_grants(&minting, &following, &mut minted, &first).await?;
-                let (stop, spawner) = StopToken::new();
-                // The follower's tasks run on the node's runtime, not on the caller's.
-                let _runtime = self.runtime.enter();
-                let task = spawner
-                    .spawn(follow_grants(
-                        minting.clone(),
-                        spawner.clone(),
-                        following,
-                        minted,
-                        first.revision,
-                    ))
-                    .expect("a fresh spawner is open");
+                watched.bind(Some(handles), true);
+                self.follower.watch(micro.clone(), watched);
                 Installed {
                     egress,
                     config: None,
                     state,
-                    follower: Some(Follower { stop, task }),
                     revision: Some(revision),
                 }
             }
@@ -274,123 +248,199 @@ impl NodeComposition {
     }
 }
 
-/// What a micro's follower lowers grants against and re-mints into.
-struct Following {
-    micro: String,
-    cartridge_id: CartridgeId,
-    resolved: Arc<ResolvedCartridge>,
-    config_doc: big_cabinet_core::dmeta::DocId,
-    egress: Arc<crate::MicroEgress>,
+/// The one micro a cartridge contributes. The envelope carries one unnamed micro (ADR 050
+/// section 1's several micros per cartridge are not built), and the nodule answers a micro for
+/// every enabled cartridge that ships one, which `sync_one` has just checked this one does.
+fn only_micro<'a>(micros: &'a [MicroHandles], cartridge: &CartridgeId) -> &'a MicroHandles {
+    let mut micros = micros.iter();
+    let micro = micros
+        .next()
+        .unwrap_or_else(|| panic!("the micros nodule answered no micro for `{cartridge}`"));
+    assert!(
+        micros.next().is_none(),
+        "the micros nodule answered several micros for `{cartridge}`, which ships one"
+    );
+    micro
+}
+
+/// A micro the host has mounted, as the follower binds new handles to it.
+#[derive(Clone)]
+struct Watched {
+    /// The handles revision the egress was last bound at, as `micros.handles` names it.
+    revision: String,
+    egress: Arc<MicroEgress>,
     state: Arc<MintedState>,
 }
 
-/// A micro's grants follower: the task, and the token that stops it. It owns the micro's
-/// [`Minted`] handles for as long as it runs and hands them back when it stops, so exactly one
-/// task re-mints them at a time.
-pub(crate) struct Follower {
-    stop: StopToken,
-    task: JoinHandle<Option<Minted>>,
-}
-
-impl Follower {
-    /// Cancels the follower, waits for it, and answers what it held.
-    pub(crate) async fn stop(self) -> Option<Minted> {
-        self.stop.stop().await;
-        self.task.await.expect("a stopped follower task joins")
+impl Watched {
+    /// Binds the micro's egress and document capability to `micro`'s handles, or takes them away
+    /// when the node answers none (the cartridge's micro was disabled). With `announce`, the
+    /// handles are reported changed to whoever follows [`NodeComposition::handles_changed`].
+    fn bind(&self, micro: Option<&MicroHandles>, announce: bool) {
+        match micro {
+            Some(micro) => {
+                self.egress
+                    .rebind(micro.actor, Some(micro.handles.dispatch));
+                *self
+                    .state
+                    .doc_capability
+                    .lock()
+                    .expect("doc capability lock") = micro.handles.docs;
+            }
+            None => {
+                self.egress.unbind();
+                *self
+                    .state
+                    .doc_capability
+                    .lock()
+                    .expect("doc capability lock") = None;
+            }
+        }
+        if announce {
+            self.state
+                .generation
+                .send_modify(|generation| *generation += 1);
+        }
     }
 }
 
-/// Long-polls the micro's cartridge's grants and applies each new revision, until the micro is
-/// dropped (the spawner is cancelled) or its revision is replaced, and then answers the handles it
-/// holds. A failure here is a broken invariant of the node the composition holds (the node stops
-/// only after every follower), so it panics, and the stop that joins this task panics with it.
-async fn follow_grants(
+/// The composition's one follower of the `micros` nodule: a task that long-polls
+/// `micros.awaitHandles` for every micro the host has mounted and binds what it answers (ADR 052
+/// section 3). A host with several cartridges polls once.
+pub(crate) struct HandlesFollower {
+    watched: watch::Sender<BTreeMap<String, Watched>>,
+    stop: StopToken,
+}
+
+impl HandlesFollower {
+    /// Starts the task on the current runtime, the node's.
+    pub(crate) fn start(minting: Minting) -> Self {
+        let (stop, spawner) = StopToken::new();
+        let (watched, changes) = watch::channel(BTreeMap::new());
+        spawner
+            .spawn(follow_handles(
+                minting,
+                spawner.clone(),
+                watched.clone(),
+                changes,
+            ))
+            .expect("a fresh spawner is open");
+        Self { watched, stop }
+    }
+
+    /// Follows `watched` from now on, replacing an earlier one of the same micro.
+    fn watch(&self, micro: String, watched: Watched) {
+        self.watched.send_modify(|all| {
+            all.insert(micro, watched);
+        });
+    }
+
+    fn unwatch(&self, micro: &str) {
+        self.watched.send_modify(|all| {
+            all.remove(micro);
+        });
+    }
+
+    /// Cancels the task and waits for it. The composition stops it before the node, because it
+    /// calls the node's services.
+    pub(crate) async fn stop(self) {
+        self.stop.stop().await;
+    }
+}
+
+/// Long-polls the handles of the watched micros and binds each answer, until cancelled. The poll
+/// restarts whenever the watched set changes, so a micro mounted meanwhile is in the next one. A
+/// failure here is a broken invariant of the node the composition holds (the node stops only
+/// after the follower), so it panics, and the stop that joins this task panics with it.
+async fn follow_handles(
     minting: Minting,
     spawner: Spawner,
-    following: Following,
-    mut minted: Option<Minted>,
-    mut revision: String,
-) -> Option<Minted> {
+    watched: watch::Sender<BTreeMap<String, Watched>>,
+    mut changes: watch::Receiver<BTreeMap<String, Watched>>,
+) {
+    const SENDER_LIVES: &str = "the follower's handle holds the sender until it stops the task";
     loop {
-        let answer = tokio::select! {
-            () = spawner.cancelled() => return minted,
-            answer = await_grants(
-                &minting,
-                &following.cartridge_id,
-                Some(revision.clone()),
-                AWAIT_MAX_HOLD_MS,
-            ) => answer.expect("following a cartridge's grants"),
-        };
-        if answer.revision == revision {
+        let since: BTreeMap<String, String> = changes
+            .borrow_and_update()
+            .iter()
+            .map(|(micro, watched)| (micro.clone(), watched.revision.clone()))
+            .collect();
+        if since.is_empty() {
+            tokio::select! {
+                () = spawner.cancelled() => return,
+                changed = changes.changed() => changed.expect(SENDER_LIVES),
+            }
             continue;
         }
-        apply_grants(&minting, &following, &mut minted, &answer)
-            .await
-            .expect("re-minting a micro's handles for its moved grants");
-        revision = answer.revision;
+        let moved = tokio::select! {
+            () = spawner.cancelled() => return,
+            changed = changes.changed() => {
+                changed.expect(SENDER_LIVES);
+                continue;
+            }
+            moved = await_handles(&minting, since) => {
+                moved.expect("following the handles of the cartridges' micros")
+            }
+        };
+        watched.send_modify(|all| {
+            for (cartridge, handles) in moved.cartridges {
+                // A micro dropped while the poll was out is no longer followed.
+                let Some(watched) = all.get_mut(&cartridge) else {
+                    continue;
+                };
+                watched.revision = handles.revision;
+                watched.bind(handles.micros.first(), true);
+            }
+        });
     }
 }
 
-async fn await_grants(
-    minting: &Minting,
-    cartridge_id: &CartridgeId,
-    since: Option<String>,
-    hold_ms: u32,
-) -> Res<CartridgeGrantsAt> {
-    minting
-        .nodules
+/// Calls a method of the `micros` nodule through dispatch as the node's operator, which is who it
+/// answers (ADR 052 section 3): dispatch routes its NSID to the core cartridge's nodule like any
+/// nodule method.
+async fn call_micros<M: Method>(minting: &Minting, request: &M) -> Res<Value> {
+    let nsid = M::XRPC.nsid;
+    let output = minting
+        .dispatch
         .call_with(
             RequestContext::root(),
             minting.operator().metadata(),
-            AwaitCartridgeGrants {
-                cartridge_id: cartridge_id.clone(),
-                since,
-                hold_ms,
-            },
+            Invoke::json(
+                nsid,
+                serde_json::to_value(request).expect("a method's request is JSON"),
+                Default::default(),
+            ),
         )
         .await
-        .wrap_err("awaiting the cartridge's grants")
+        .wrap_err_with(|| format!("calling {nsid}"))?;
+    Ok(output.body.into_json())
 }
 
-/// Lowers the micro's `uses` against `grants` and brings its handles to the result.
-async fn apply_grants(
-    minting: &Minting,
-    following: &Following,
-    minted: &mut Option<Minted>,
-    grants: &CartridgeGrantsAt,
-) -> Res<()> {
-    use big_nodule_core::NoduleAdmission;
-    let resolved = &following.resolved;
-    let contribution = resolved
-        .cartridge
-        .micro()
-        .expect("a micro's follower is started for an envelope that contributes one");
-    let grants = big_nodule_core::config::ResolvedGrants::from_grants(
-        grants
-            .grants
-            .iter()
-            .map(|record| (&record.grant, &record.value)),
-    )
-    .map_err(|reason| ferr!("the cartridge's grants do not resolve: {reason}"))?;
-    // The grants that cover a method permbind of the cartridge, as the nodule binds them: an
-    // authority-prefix grant never reaches beyond the operations the manifest names.
-    let (effective, _unrequested) = resolved.bind_operations(&grants.operations);
-    let scopes = big_nodule::RoutineScopes::lower(
-        resolved,
-        &following.config_doc,
-        &contribution.uses,
-        &grants.drawers,
-        &effective,
-    );
-    mint_handles(
+/// `micros.handles` of `cartridge`: its micros' live handles, answered at once.
+async fn handles(minting: &Minting, cartridge: &CartridgeId) -> Res<CartridgeHandles> {
+    let answer = call_micros(
         minting,
-        &following.micro,
-        &following.egress,
-        &following.state,
-        minted,
-        scopes,
+        &Handles {
+            cartridge_id: cartridge.to_string(),
+            micro: None,
+        },
     )
-    .await
+    .await?;
+    Ok(serde_json::from_value(answer).expect("the micros nodule answers the shape it declares"))
+}
+
+/// `micros.awaitHandles` since `since` (the revision each watched cartridge's handles were last
+/// bound at): the cartridges whose handles moved, held up to the nodule's longest hold.
+async fn await_handles(minting: &Minting, since: BTreeMap<String, String>) -> Res<Moved> {
+    let answer = call_micros(
+        minting,
+        &AwaitHandles {
+            since,
+            hold_ms: AWAIT_MAX_HOLD_MS,
+        },
+    )
+    .await?;
+    Ok(serde_json::from_value(answer).expect("the micros nodule answers the shape it declares"))
 }
 
 /// The error of a pin that did not resolve, saying whether the next sync retries it, as the
@@ -437,28 +487,4 @@ fn sidecar_json(
         sidecar.insert("authority".to_owned(), Value::String(authority.clone()));
     }
     Ok(serde_json::to_vec(&Value::Object(sidecar)).expect("a JSON object serializes"))
-}
-
-impl Installed {
-    /// Stops this micro's follower, then retracts every handle minted for it.
-    pub(crate) async fn release(self, minting: &Minting) -> Res<()> {
-        let Some(follower) = self.follower else {
-            return Ok(());
-        };
-        if let Some(minted) = follower.stop().await {
-            let handles = &minted.handles;
-            for handle in [
-                handles.dispatch,
-                handles.docs,
-                handles.drawers,
-                handles.blobs,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                retract(minting, handle).await?;
-            }
-        }
-        Ok(())
-    }
 }
