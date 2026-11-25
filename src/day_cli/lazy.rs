@@ -101,13 +101,21 @@ pub async fn config() -> Res<Arc<Config>> {
 /// this process. The shutdown callback owns the client and stops it at [`shutdown`]; commands hold
 /// clones only while they run.
 pub async fn node() -> Res<Arc<NodeClient>> {
+    node_from(async {
+        let conf = config().await?;
+        NodeClient::connect(&conf.node_dir, day_node::CONNECT_DEADLINE).await
+    })
+    .await
+}
+
+/// [`node`] with the client made by `connect`, which runs only if no client has been made yet. A
+/// `connect` that fails leaves nothing cached, so a later call connects afresh.
+pub async fn node_from(connect: impl Future<Output = Res<NodeClient>>) -> Res<Arc<NodeClient>> {
     static NODE: tokio::sync::OnceCell<std::sync::Weak<NodeClient>> =
         tokio::sync::OnceCell::const_new();
     let owner = NODE
         .get_or_try_init(|| async {
-            let conf = config().await?;
-            let client =
-                Arc::new(NodeClient::connect(&conf.node_dir, day_node::CONNECT_DEADLINE).await?);
+            let client = Arc::new(connect.await?);
             let weak = Arc::downgrade(&client);
             register_shutdown(move || async move {
                 Arc::try_unwrap(client)

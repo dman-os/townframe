@@ -194,6 +194,22 @@ impl NodeClient {
         }
     }
 
+    /// The client for the process serving the node, never booting the node in this one
+    /// ([`NodeDir::attach_server`]): `None` when there is no server to attach to.
+    pub async fn attach_server(dir: &NodeDir) -> Res<Option<Self>> {
+        Ok(dir.attach_server().await?.map(|attached| Self {
+            transport: Transport::Socket(attached.http),
+            mode: if attached.role == Some(LockRole::Serve) {
+                Mode::Serving
+            } else {
+                Mode::InProcess
+            },
+            #[cfg(unix)]
+            fd_socket: Some(attached.fd_socket),
+            socket: SocketState::Live,
+        }))
+    }
+
     pub fn mode(&self) -> Mode {
         self.mode
     }

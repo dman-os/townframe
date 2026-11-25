@@ -1216,7 +1216,8 @@ mod blackbox {
             "{}",
             String::from_utf8_lossy(&started.stderr)
         );
-        assert!(sandbox.socket().exists(), "serving once started");
+        // `start --bg` returns only after the server's readiness line, so it was serving. Its
+        // socket is not checked here: under load the idle period can end before this line runs.
         // Returns once the server has exited and let go of the node.
         day_node::NodeDir::new(sandbox.node())
             .wait_for_lock_release()
@@ -1228,6 +1229,61 @@ mod blackbox {
         let log = std::fs::read_to_string(sandbox.node().join("run/serve.log")).unwrap();
         assert!(log.contains("idle for its idle period"), "{log}");
         assert!(!log.contains("Error"), "{log}");
+    }
+
+    /// A capture hook that finds the server gone (idled out, its listener closed) starts a fresh
+    /// server and attaches to that, instead of failing or booting the node in its own process
+    /// (ADR 052 section 4). The idle exit is awaited through the node lock, not slept for, and a
+    /// socket file nobody listens on is left in its place, which is what a hook sees when it
+    /// probed the server just before it closed. The window between the probe and the connect
+    /// itself cannot be made deterministic from outside the process, so this covers its outcome:
+    /// the connect finds a refused or absent socket and no holder.
+    #[test]
+    fn a_capture_that_lost_the_race_to_an_idle_exit_starts_a_server_and_succeeds() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        let started = sandbox.day(&["node", "start", "--bg", "--idle-exit", "1s"]);
+        assert!(started.status.success());
+        day_node::NodeDir::new(sandbox.node())
+            .wait_for_lock_release()
+            .unwrap();
+        assert!(
+            !sandbox.socket().exists(),
+            "the idle server removed its socket"
+        );
+        // Bound and dropped: the file stays and refuses connections.
+        drop(std::os::unix::net::UnixListener::bind(sandbox.socket()).unwrap());
+        assert!(sandbox.socket().exists());
+        let worktree = sandbox.node().with_file_name("worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let output = Command::new(day_bin())
+            .env("RUST_LOG", "error")
+            .env("NO_COLOR", "1")
+            .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+            .current_dir(&worktree)
+            .arg("--node")
+            .arg(sandbox.node())
+            .args(["x", "intxt", "capture", "git-rewrite", "amend"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let text = |output: &std::process::Output| {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+                + &String::from_utf8_lossy(&output.stderr)
+        };
+        assert!(output.status.success(), "{}", text(&output));
+        assert!(output.stdout.is_empty(), "{}", text(&output));
+        let status = text(&sandbox.day(&["node", "status"]));
+        assert!(status.contains("serving"), "{status}");
+        assert!(sandbox.day(&["node", "stop"]).status.success());
     }
 
     /// `--idle-exit` takes a duration, and refuses anything else before it starts a server.
