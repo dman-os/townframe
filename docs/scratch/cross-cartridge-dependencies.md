@@ -1,6 +1,9 @@
 # Cross-cartridge dependencies: a catalogue
 
-**Status:** research note, nothing decided. **Owner:** nodules lane. **Date:** 2026-11-24.
+Status: research note, nothing decided
+Owner: nodules lane
+Updated: 2026-11-24
+Scope: Catalogue of what one cartridge depends on from another, direct versus NSID-based, with co-provision options, for operator review.
 
 The operator asked for a catalogue of everything one cartridge depends on from another, marking which dependencies
 name a specific cartridge (**direct**: a cartridge id, an artifact key, a `<DID>/<name>@<range>#<component>`) and which

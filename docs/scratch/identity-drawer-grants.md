@@ -3,6 +3,7 @@
 Status: proposal for review, nothing decided
 Owner: nodules lane
 Updated: 2026-11-24
+Scope: Granting a drawer to a person (an identity) rather than to one actor, for operator review before an ADR.
 Builds on: `identity-layers.md` (branch `stack/node-90-identity-layers`), whose delineation the operator accepted: actors
 are runtime principals bound to a device, identities are DIDs (data, cross-node), and link records join them. Keyhive
 groups are a separate membership and recovery mechanism.

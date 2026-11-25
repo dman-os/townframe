@@ -2520,6 +2520,36 @@ mod core_like {
             )
             .await
             .expect("the child reads with the handle narrowed onto it");
+        // The handle is bound to the child alone (ADR 037 §2). Dispatch forwards its caller's
+        // credential, so the parent's routine presents the child's narrowed handle in a body
+        // under its own dispatch handle and actor signer (`core_auth`): the presenter is the
+        // parent, the handle's subject is the child, and the domain refuses it. A credential
+        // naming the narrowed handle as its own `authority` is the other branch of
+        // `DomainCapabilities::resolve` (a service signing through a handle it minted) and
+        // is not what a nodule's call carries.
+        let parent_refused = node
+            .docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                core_auth.metadata(),
+                ReadDatums {
+                    capability: narrowed_cap,
+                    doc_id: node.install_of(CORE).await.config_doc,
+                    at: At::Current,
+                    datums: Some(BTreeSet::new()),
+                    optimistic: false,
+                },
+            )
+            .await
+            .unwrap_err();
+        // The docs service reports an authority's `Unauthorized` as `Denied`. The read just above,
+        // with the same handle under the child's signer, is the control that it is the presenter
+        // that is refused.
+        assert!(
+            format!("{parent_refused:?}").contains("Denied"),
+            "{parent_refused:?}"
+        );
         // A path that is not one segment under the presenting actor is refused: a sibling, the
         // `nodules` subtree, an ancestor.
         for path in ["sibling", "nodules/alpha", "", "micros/child/grandchild"] {
