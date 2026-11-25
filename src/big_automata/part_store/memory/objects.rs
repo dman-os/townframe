@@ -2,7 +2,6 @@
 
 use std::ops::Bound;
 
-use super::MemberRow;
 use super::ObjRow;
 use super::State;
 use crate::interlude::*;
@@ -110,15 +109,11 @@ impl State {
             },
             Some(LogEntry::Member(Membership { added_at: rev })),
         );
-        self.members
-            .entry((
-                part.clone(),
-                BuckId::deepest_from_obj_key(obj).index(),
-                obj.clone(),
-            ))
-            .or_insert(MemberRow {
-                first_added_at: rev,
-            });
+        self.members.insert((
+            part.clone(),
+            BuckId::deepest_from_obj_key(obj).index(),
+            obj.clone(),
+        ));
         self.bucket_transition(part, obj, rev, old, BucketMemberKind::Live(digest));
     }
 
@@ -130,7 +125,7 @@ impl State {
         let mut stamped = false;
         for (obj, payload, digest) in payloads {
             let old = self.objs.get(&obj);
-            if old.is_some_and(|row| row.payload == payload) {
+            if old.is_some_and(|row| row.digest == digest) {
                 continue;
             }
             let old_digest = old.map(|row| row.digest);
@@ -220,6 +215,33 @@ impl State {
             }
         }
         stamped
+    }
+
+    /// Payload law 2: drop each object's payload, applied in the transaction's order.
+    pub(super) fn drop_payloads(&mut self, objs: &[ObjKey]) {
+        for obj in objs {
+            if !self.objs.contains_key(obj) {
+                continue;
+            }
+            assert!(
+                self.live_parts_of(obj).next().is_none(),
+                "dropped the payload of {obj}, which is still a live member of a part: remove \
+                 it from every part first"
+            );
+            self.objs.remove(obj);
+        }
+    }
+
+    /// Payload law 3: objects with a payload and no live member row, after `after`.
+    pub(super) fn partless_objects(&self, limit: usize, after: Option<&ObjKey>) -> Vec<ObjKey> {
+        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+        self.objs
+            .range::<ObjKey, _>((from, Bound::Unbounded))
+            .map(|(obj, _)| obj)
+            .filter(|obj| self.live_parts_of(obj).next().is_none())
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// The parts `obj` is a live member of.

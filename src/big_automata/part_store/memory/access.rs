@@ -139,15 +139,9 @@ impl State {
             rows.through = until;
         } else {
             self.log.read_into(
-                |key, rev, value| match key {
+                |key, rev, _value| match key {
                     LogKey::Member { obj, part } => {
-                        let (on_part, on_object) = routes.carriers(
-                            obj,
-                            part,
-                            rev,
-                            after,
-                            self.removed_added_at(key, value),
-                        );
+                        let (on_part, on_object) = routes.carriers(obj, part, rev);
                         (on_part || (on_object && readable_objects.contains(obj)))
                             && self.permits(principal, part)
                     }
@@ -205,8 +199,8 @@ impl State {
         let member_changes = self
             .members
             .range((part.clone(), 0, ObjKey::new(&[]))..)
-            .take_while(|((member_part, _, _), _)| member_part == part)
-            .filter(|((_, _, obj), _)| {
+            .take_while(|(member_part, _, _)| member_part == part)
+            .filter(|(_, _, obj)| {
                 let key = LogKey::Member {
                     obj: obj.clone(),
                     part: part.clone(),
@@ -220,6 +214,7 @@ impl State {
             .get(&access_key(part, principal))
             .map_or(0, |(rev, _)| u64::from(rev > since));
         PartSummary {
+            generation: self.generation,
             latest_cursor: self.parts.get(part).map_or(0, |row| row.latest_cursor),
             member_count: self.member_count(part),
             deepest_bucket_level: BuckId::MAX_LEVEL,

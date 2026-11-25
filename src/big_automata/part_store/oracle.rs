@@ -11,6 +11,7 @@ use std::num::NonZeroUsize;
 use crate::interlude::*;
 use crate::part_store::AccessLevel;
 use crate::part_store::AuthorizedPage;
+use crate::part_store::Generation;
 use crate::part_store::LeafEntry;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
@@ -41,6 +42,7 @@ strike! {
         SetPayloads(Vec<(ObjKey, ObjPayload)>),
         AddMembers(Vec<(ObjKey, PartKey)>),
         RemoveMembers(Vec<(ObjKey, PartKey)>),
+        DropPayloads(Vec<ObjKey>),
         GrantAccess(Vec<(PartKey, PeerKey, AccessLevel)>),
         RevokeAccess(Vec<(PartKey, PeerKey)>),
     }
@@ -48,6 +50,9 @@ strike! {
 
 #[derive(Debug, Clone, Default)]
 pub struct PartOracle {
+    /// What the store under test minted: the oracle cannot predict a random id, only follow it
+    /// ([`Self::set_generation`]) and answer that every summary carries it.
+    generation: Generation,
     rev: Rev,
     parts: BTreeSet<PartKey>,
     payloads: BTreeMap<ObjKey, ObjPayload>,
@@ -56,12 +61,25 @@ pub struct PartOracle {
     access: BTreeMap<(PartKey, PeerKey), AccessLevel>,
     /// The collapsed log: each key's last stamp.
     log: BTreeMap<LogKey, (Rev, Option<LogEntry>)>,
-    /// When each membership first went live, kept after removal for the route rule.
-    added_at: BTreeMap<(ObjKey, PartKey), Rev>,
-    peer_cursors: BTreeMap<(PeerKey, PartKey), Rev>,
 }
 
 impl PartOracle {
+    /// An empty oracle for a store that minted `generation` at its creation.
+    pub fn with_generation(generation: Generation) -> Self {
+        Self {
+            generation,
+            ..default()
+        }
+    }
+
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+
+    pub fn set_generation(&mut self, generation: Generation) {
+        self.generation = generation;
+    }
+
     pub fn latest_rev(&self) -> Rev {
         self.rev
     }
@@ -109,11 +127,6 @@ impl PartOracle {
                 (LogKey::Member { obj, .. }, Some(changed)) if obj == changed
             );
             if before.get(key) != Some(value) || restamp {
-                if let (LogKey::Member { obj, part }, LogEntry::Member(membership)) = (key, value) {
-                    self.added_at
-                        .entry((obj.clone(), part.clone()))
-                        .or_insert(membership.added_at);
-                }
                 self.log.insert(key.clone(), (rev, Some(value.clone())));
                 stamped = true;
             }
@@ -145,7 +158,12 @@ impl PartOracle {
                 PartWrite::SetPayloads(payloads) => {
                     for (obj, payload) in payloads {
                         stamped |= self.step(rev, |oracle| {
-                            if oracle.payloads.get(&obj) == Some(&payload) {
+                            // unchanged means the same canonical content, as the digest sees it
+                            let digest = |payload: &ObjPayload| {
+                                PayloadDigest::of(payload)
+                                    .expect("generated payloads are canonical")
+                            };
+                            if oracle.payloads.get(&obj).map(digest) == Some(digest(&payload)) {
                                 return None;
                             }
                             oracle.payloads.insert(obj.clone(), payload);
@@ -166,6 +184,23 @@ impl PartOracle {
                     for member in members {
                         stamped |= self.step(rev, |oracle| {
                             oracle.intended.remove(&member);
+                            None
+                        });
+                    }
+                }
+                PartWrite::DropPayloads(objs) => {
+                    for obj in objs {
+                        // no payload to drop; a stamp is never the result: a part-less object
+                        // has no live row
+                        stamped |= self.step(rev, |oracle| {
+                            if oracle.payloads.contains_key(&obj) {
+                                assert!(
+                                    oracle.live_parts_of(&obj).is_empty(),
+                                    "dropped the payload of {obj}, which is still a live member \
+                                     of a part: remove it from every part first"
+                                );
+                                oracle.payloads.remove(&obj);
+                            }
                             None
                         });
                     }
@@ -195,22 +230,6 @@ impl PartOracle {
         stamped.then_some(rev)
     }
 
-    pub fn set_peer_part_cursors(&mut self, cursors: &[(PeerKey, PartKey, Rev)]) {
-        for (peer, part, cursor) in cursors {
-            let stored = self
-                .peer_cursors
-                .entry((peer.clone(), part.clone()))
-                .or_default();
-            *stored = (*stored).max(*cursor);
-        }
-    }
-
-    pub fn peer_part_cursor(&self, peer: &PeerKey, part: &PartKey) -> Option<Rev> {
-        self.peer_cursors
-            .get(&(peer.clone(), part.clone()))
-            .copied()
-    }
-
     /// With a payload, the content and the live parts; without, the parts it was added to,
     /// which are all still pending.
     pub fn obj_state(&self, obj: &ObjKey) -> Option<ObjState> {
@@ -235,6 +254,41 @@ impl PartOracle {
                 })
             }
         }
+    }
+
+    /// Objects with a payload and no live member row, after `after`, at most `limit`.
+    pub fn partless_objects(&self, limit: usize, after: Option<&ObjKey>) -> Vec<ObjKey> {
+        self.payloads
+            .keys()
+            .filter(|obj| after.is_none_or(|after| *obj > after))
+            .filter(|obj| self.live_parts_of(obj).is_empty())
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// `writes` with the drops that would be a caller bug removed (law 2): an object that
+    /// holds a payload and is still a member when its drop comes, in the transaction's order.
+    pub fn without_member_drops(&self, writes: Vec<PartWrite>) -> Vec<PartWrite> {
+        let mut probe = self.clone();
+        writes
+            .into_iter()
+            .map(|write| {
+                let write = match write {
+                    PartWrite::DropPayloads(objs) => PartWrite::DropPayloads(
+                        objs.into_iter()
+                            .filter(|obj| {
+                                !probe.payloads.contains_key(obj)
+                                    || probe.live_parts_of(obj).is_empty()
+                            })
+                            .collect(),
+                    ),
+                    other => other,
+                };
+                probe.commit(vec![write.clone()]);
+                write
+            })
+            .collect()
     }
 
     /// The object's state cut down to the live parts `principal` may read; `None` without one.
@@ -422,6 +476,7 @@ impl PartOracle {
             principal: principal.clone(),
         };
         self.permits(principal, part).then(|| PartSummary {
+            generation: self.generation,
             latest_cursor: self
                 .member_rows(part)
                 .map(|(_, rev, _)| rev)
@@ -465,9 +520,7 @@ impl PartOracle {
         until: Rev,
         limits: Limits,
     ) -> Page<LogKey, LogEntry> {
-        self.read_where(after, until, limits, |key, rev, removed_added_at| {
-            selector.selects(key, rev, after, removed_added_at)
-        })
+        self.read_where(after, until, limits, |key, rev| selector.selects(key, rev))
     }
 
     /// What an authorized read must return, by brute force: the verdicts from current access,
@@ -497,13 +550,13 @@ impl PartOracle {
                 .map(|(obj, bound)| (obj.clone(), *bound))
                 .collect(),
         });
-        let rows = self.read_where(after, until, limits, |key, rev, removed_added_at| {
+        let rows = self.read_where(after, until, limits, |key, rev| {
             let readable_part = match key {
                 LogKey::Member { part, .. } | LogKey::Access { part, .. } => {
                     self.permits(principal, part)
                 }
             };
-            readable_part && permitted.selects(key, rev, after, removed_added_at)
+            readable_part && permitted.selects(key, rev)
         });
         let payloads = rows
             .entries
@@ -538,27 +591,19 @@ impl PartOracle {
         }
     }
 
-    /// The rows `selects(key, rev, removed_added_at)` keeps with a rev in `(after, until]`, in
+    /// The rows `selects(key, rev)` keeps with a rev in `(after, until]`, in
     /// `(rev, key)` order, cut after the last whole revision that fits the limits.
     fn read_where(
         &self,
         after: Rev,
         until: Rev,
         limits: Limits,
-        selects: impl Fn(&LogKey, Rev, Option<Rev>) -> bool,
+        selects: impl Fn(&LogKey, Rev) -> bool,
     ) -> Page<LogKey, LogEntry> {
         let mut window = self
             .log
             .iter()
-            .filter(|(key, (rev, value))| {
-                let removed_added_at = match (key, value) {
-                    (LogKey::Member { obj, part }, None) => {
-                        Some(self.added_at[&(obj.clone(), part.clone())])
-                    }
-                    _ => None,
-                };
-                *rev > after && *rev <= until && selects(key, *rev, removed_added_at)
-            })
+            .filter(|(key, (rev, _))| *rev > after && *rev <= until && selects(key, *rev))
             .map(|(key, (rev, value))| Entry {
                 key: key.clone(),
                 rev: *rev,

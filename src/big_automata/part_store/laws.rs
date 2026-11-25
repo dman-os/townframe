@@ -18,16 +18,24 @@
 //! | an object route follows the object's readable parts and carries only their rows | [`object_routes_follow_the_readable_parts`] |
 //! | an authorized read of the empty window decides every verdict and reads no row | [`an_empty_window_reads_verdicts_only`], every check, [`differential`] |
 //! | an authorized read carries, from its snapshot, one payload per object with a live row in it, and no other | [`authorized_reads_carry_their_payloads`], every check, [`differential`] |
+//! | a store has a generation from its creation, stable across writes and reads, new after a mint, and carried by every summary | [`generations_identify_the_log`], every check, [`differential`] |
 //! | the responder's rev and watch follow commits like the log's | every commit and rollback |
 //! | an authorized read equals the oracle's filter of current access | every check, every authorized read in [`differential`] |
-//! | a route skips a removal of a membership added after its cursor | [`removals_skip_routes_that_never_saw_the_member`], every route read in [`differential`] |
+//! | a route delivers every removal above its bound, whatever the membership's `added_at` | [`removals_reach_every_route_above_its_bound`], every route read in [`differential`] |
 //! | incremental bucket summaries equal a recompute | every check |
 //! | part summaries (member count, dirt) equal a count over the oracle's log | every check, [`dirty_count_counts_log_rows`] |
 //! | bucket reads, summaries and object states follow current access, revocation mid-walk included | [`revocation_hides_the_parts_buckets`], every check |
-//! | peer cursors only advance | [`peer_cursors_only_advance`], every check |
+//! | a dropped payload is no longer served or observable; dropping nothing is a no-op | [`a_dropped_payload_is_gone`] |
+//! | dropping the payload of a live member is a caller bug and panics; remove-then-drop in one transaction is valid | [`dropping_the_payload_of_a_member_is_a_caller_bug`], [`removing_then_dropping_in_one_transaction_is_valid`] |
+//! | a part-less object is listed, in key order, until its payload is dropped | [`a_partless_object_is_listed_until_its_payload_is_dropped`], every check |
+//! | dropping is a batch of its transaction | [`dropping_is_atomic_with_its_transaction`], [`differential`] |
 //! | a transaction is atomic: nothing before commit, everything after, nothing on rollback | [`writes_are_atomic`] |
 //! | a write that changes nothing stamps nothing | [`unchanged_writes_stamp_nothing`] |
-//! | all of the above over generated sequences, authorized reads by random principals included | [`differential`] |
+//! | many keys sharing deep buckets: every level counts every member under it and its leaves list them in order, whole or paged | [`crowded_buckets_count_and_list_every_member`] |
+//! | a bucket's summary does not depend on the order its members were written, pending first or live first | [`bucket_summaries_ignore_write_order`] |
+//! | removals and payload changes inside one deep bucket move its path only, and a change undone restores the fingerprints | [`bucket_summaries_follow_changes_inside_one_bucket`] |
+//! | a listing ends at the last bucket of a level: nothing past it at its level, then the next level's own start, and no repeat at the deepest level | [`a_listing_ends_at_the_last_bucket_of_a_level`] |
+//! | all of the above over generated sequences, authorized reads by random principals included | [`differential`], and over keys that crowd into shared deep buckets, [`crowded_differential`] |
 //! | the rev stream laws over the log | [`LogStreams`] with [`crate::rev::laws`] |
 
 use std::pin::pin;
@@ -41,6 +49,7 @@ use crate::okv::laws::Bytes;
 use crate::okv::oracle::Oracle;
 use crate::part_store::AccessLevel;
 use crate::part_store::AuthorizedPage;
+use crate::part_store::Generation;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
@@ -51,6 +60,7 @@ use crate::part_store::PartStoreServe;
 use crate::part_store::PartStoreWrite;
 use crate::part_store::PayloadDigest;
 use crate::part_store::ReadVerdict;
+use crate::part_store::bucket_summary::BucketSummary;
 use crate::part_store::oracle::PartOracle;
 use crate::part_store::oracle::PartWrite;
 use crate::rev::Limits;
@@ -64,9 +74,25 @@ use crate::rev::laws::WakeCount;
 use crate::rev::laws::any_limits;
 use crate::rev::laws::limits;
 
+mod crowd;
+pub use crowd::bucket_summaries_follow_changes_inside_one_bucket;
+pub use crowd::bucket_summaries_ignore_write_order;
+pub use crowd::crowd_ops;
+pub use crowd::crowded_buckets_count_and_list_every_member;
+pub use crowd::crowded_differential;
+pub use crowd::obj_in_bucket;
+mod edges;
+pub use edges::a_listing_ends_at_the_last_bucket_of_a_level;
 mod generators;
 pub use generators::part_ops;
 use generators::*;
+
+mod payloads;
+pub use payloads::a_dropped_payload_is_gone;
+pub use payloads::a_partless_object_is_listed_until_its_payload_is_dropped;
+pub use payloads::dropping_is_atomic_with_its_transaction;
+pub use payloads::dropping_the_payload_of_a_member_is_a_caller_bug;
+pub use payloads::removing_then_dropping_in_one_transaction_is_valid;
 
 type Tx<B> = <<B as Backend>::Store as PartStoreWrite>::Tx;
 
@@ -94,6 +120,7 @@ use universe::OBJS;
 use universe::PARTS;
 use universe::PRINCIPALS;
 pub use universe::add;
+pub use universe::drop_payloads;
 pub use universe::grant;
 pub use universe::obj;
 pub use universe::part;
@@ -113,10 +140,18 @@ pub struct Harness<B: Backend> {
     /// The responder's watch ([`PartStoreServe::watch`]).
     serve_watch: RevWatch,
     oracle: PartOracle,
+    /// The objects [`Harness::check`] reads states and bucket paths for: the writes the harness
+    /// is fed stay within them.
+    objs: Vec<ObjKey>,
 }
 
 impl<B: Backend> Harness<B> {
     pub async fn open(backend: &B) -> Res<Self> {
+        Self::open_over(backend, (0..OBJS).map(obj).collect()).await
+    }
+
+    /// A harness whose checks cover `objs`, the universe the writes it is fed are drawn from.
+    pub async fn open_over(backend: &B, objs: Vec<ObjKey>) -> Res<Self> {
         let store = backend.open().await?;
         let watch = RevSource::watch(&store);
         let serve_watch = PartStoreServe::watch(&store);
@@ -126,13 +161,33 @@ impl<B: Backend> Harness<B> {
             "a fresh store has stamped nothing"
         );
         assert_eq!(PartStoreServe::latest_rev(&store).await?, 0);
+        let generation = store.generation().await?;
+        assert_ne!(
+            generation,
+            Generation::default(),
+            "a new store mints its generation"
+        );
         Ok(Self {
             backend: backend.clone(),
             store,
             watch,
             serve_watch,
-            oracle: default(),
+            oracle: PartOracle::with_generation(generation),
+            objs,
         })
+    }
+
+    /// Mint a new generation, which must differ from the last and change nothing else.
+    pub async fn mint_generation(&mut self) -> Res<Generation> {
+        let before = self.oracle.generation();
+        let minted = self.store.mint_generation().await?;
+        assert_ne!(minted, before, "a mint gives the generation it replaced");
+        assert_ne!(minted, Generation::default());
+        self.oracle.set_generation(minted);
+        // The log is untouched: no rev, no wake-up, no row (`check` compares all of them).
+        self.check_revs().await?;
+        self.check().await?;
+        Ok(minted)
     }
 
     /// Commit `writes` in one transaction, mirror it into the oracle, and check everything.
@@ -181,23 +236,18 @@ impl<B: Backend> Harness<B> {
         Ok(())
     }
 
-    pub async fn set_peer_part_cursors(&mut self, cursors: &[(PeerKey, PartKey, Rev)]) -> Res<()> {
-        self.store.set_peer_part_cursors(cursors).await?;
-        self.oracle.set_peer_part_cursors(cursors);
-        self.check().await
-    }
-
     /// Compare the store's whole observable state over the universe with the oracle.
     pub async fn check(&self) -> Res<()> {
         let store = &self.store;
         let oracle = &self.oracle;
-        let objs = (0..OBJS).map(obj).collect::<Vec<_>>();
+        let objs = &self.objs;
         let parts = (0..PARTS).map(part).collect::<Vec<_>>();
         let principals = (0..PRINCIPALS).map(principal).collect::<Vec<_>>();
         let latest = oracle.latest_rev();
 
+        assert_eq!(store.generation().await?, oracle.generation(), "generation");
         assert_eq!(
-            store.obj_states(&objs).await?,
+            store.obj_states(objs).await?,
             objs.iter()
                 .map(|obj| oracle.obj_state(obj))
                 .collect::<Vec<_>>(),
@@ -215,6 +265,21 @@ impl<B: Backend> Harness<B> {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
+        for limit in [1, 2, usize::MAX] {
+            let mut after: Option<ObjKey> = None;
+            loop {
+                let page = store.partless_objects(limit, after.as_ref()).await?;
+                assert_eq!(
+                    page,
+                    oracle.partless_objects(limit, after.as_ref()),
+                    "part-less objects, {limit} at a time after {after:?}"
+                );
+                match page.last() {
+                    Some(last) if page.len() == limit => after = Some(last.clone()),
+                    _ => break,
+                }
+            }
+        }
         for part in &parts {
             assert_eq!(store.member_count(part).await?, oracle.member_count(part));
             // Incremental summaries against a recompute.
@@ -262,29 +327,42 @@ impl<B: Backend> Harness<B> {
                         ),
                         "bucket list of {part} for {principal} since {since}"
                     );
-                    let bucks = [(BuckId::ROOT, None), (BuckId::new(1, 3), None)];
+                    // Every bucket the check knows, whole: the deep ones are where members
+                    // share a bucket and its (deepest bucket, key) order shows.
+                    let bucks = ids.iter().map(|id| (*id, None)).collect::<Vec<_>>();
+                    let expected = oracle.bucket_leaves(principal, part, &bucks, since, usize::MAX);
                     assert_eq!(
                         store
                             .bucket_leaves(principal, part, &bucks, since, usize::MAX)
                             .await?,
-                        oracle.bucket_leaves(principal, part, &bucks, since, usize::MAX),
+                        expected,
                         "leaves of {part} for {principal} since {since}"
                     );
+                    // And resumed: each bucket after its first member, two at a time.
+                    if let Some(whole) = expected {
+                        let resumed = bucks
+                            .iter()
+                            .zip(&whole)
+                            .filter_map(|((id, _), members)| {
+                                Some((*id, Some(members.first()?.obj.clone())))
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            store
+                                .bucket_leaves(principal, part, &resumed, since, 2)
+                                .await?,
+                            oracle.bucket_leaves(principal, part, &resumed, since, 2),
+                            "resumed leaves of {part} for {principal} since {since}"
+                        );
+                    }
                 }
             }
             assert_eq!(
-                store.readable_obj_states(principal, &objs).await?,
+                store.readable_obj_states(principal, objs).await?,
                 objs.iter()
                     .map(|obj| oracle.readable_obj_state(principal, obj))
                     .collect::<Vec<_>>(),
                 "objects readable by {principal}"
-            );
-            assert_eq!(
-                store.peer_part_cursors(principal, &parts).await?,
-                parts
-                    .iter()
-                    .map(|part| oracle.peer_part_cursor(principal, part))
-                    .collect::<Vec<_>>()
             );
         }
         if latest > 0 {
@@ -928,9 +1006,11 @@ pub async fn authorized_reads_carry_their_payloads<B: Backend>(backend: &B) -> R
     let page = harness
         .read_authorized(&principal(0), &routes, 0, latest, all)
         .await?;
-    assert_eq!(page.rows.entries.len(), 2, "{page:?}");
+    // Two live rows and object 1's removal, which carries no payload.
+    assert_eq!(page.rows.entries.len(), 3, "{page:?}");
+    assert!(page.rows.entries.iter().any(|entry| entry.value.is_none()));
     assert_eq!(page.payloads, vec![(obj(0), payload(1))]);
-    // From rev 1 the page also carries object 1's removal, which carries no payload.
+    // From rev 1 the page loses only the first live row.
     let page = harness
         .read_authorized(&principal(0), &routes, 1, latest, all)
         .await?;
@@ -1080,6 +1160,7 @@ pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
         .commit(vec![remove(&[(1, 0)]), revoke(&[(0, 1)])])
         .await?;
     harness.commit(vec![grant(&[(0, 2)])]).await?;
+    let generation = harness.oracle.generation();
     let summaries = |principal_index| {
         let store = harness.store.clone();
         async move {
@@ -1091,6 +1172,7 @@ pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
     };
     let summary = |member_changes, access_changes| {
         Some(crate::part_store::PartSummary {
+            generation,
             latest_cursor: 3,
             member_count: 1,
             deepest_bucket_level: BuckId::MAX_LEVEL,
@@ -1108,10 +1190,62 @@ pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
     Ok(())
 }
 
-/// A route hands out a removal only to a reader that may have seen the membership: one whose
-/// cursor (the larger of the route's bound and the read's `after`) is at or past the
-/// membership's `added_at`. `All` keeps every removal.
-pub async fn removals_skip_routes_that_never_saw_the_member<B: Backend>(backend: &B) -> Res<()> {
+/// A store has a generation from its creation, and no two stores share one. It is stable across
+/// writes, rollbacks and reads; [`mint_generation`](PartStoreWrite::mint_generation) replaces
+/// it with another and changes nothing else (the log, the revs and the watches stay put); and
+/// every part summary carries the current one, a mint included.
+pub async fn generations_identify_the_log<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    let other = Harness::open(backend).await?;
+    let first = harness.oracle.generation();
+    assert_ne!(
+        first,
+        other.oracle.generation(),
+        "two stores, one generation"
+    );
+
+    let summarize = |harness: &Harness<B>| {
+        let store = harness.store.clone();
+        async move {
+            store
+                .part_summaries(&principal(0), &[(part(0), 0)])
+                .await
+                .map(|mut summaries| summaries.remove(0).expect("the part is readable"))
+        }
+    };
+    harness
+        .commit(vec![set(&[(0, 1)]), add(&[(0, 0)]), grant(&[(0, 0)])])
+        .await?;
+    harness
+        .rollback(vec![set(&[(1, 1)]), add(&[(1, 0)])])
+        .await?;
+    harness.commit(vec![remove(&[(0, 0)])]).await?;
+    assert_eq!(harness.store.generation().await?, first, "writes keep it");
+    assert_eq!(summarize(&harness).await?.generation, first);
+
+    let second = harness.mint_generation().await?;
+    assert_ne!(second, first);
+    assert_eq!(harness.store.generation().await?, second);
+    assert_eq!(summarize(&harness).await?.generation, second);
+    // The log carries on from where it was, under the new generation.
+    harness.commit(vec![set(&[(0, 2)]), add(&[(0, 0)])]).await?;
+    assert_eq!(harness.store.generation().await?, second);
+    assert_eq!(summarize(&harness).await?.generation, second);
+    let third = harness.mint_generation().await?;
+    assert!(
+        third != second && third != first,
+        "a mint repeated an old generation"
+    );
+    // The other store never moved.
+    assert_eq!(other.store.generation().await?, other.oracle.generation());
+    Ok(())
+}
+
+/// A route hands out every removal above its bound, whatever rev the membership went live at:
+/// a reader's persisted cursor only passes settled work, so it may hold a membership that went
+/// live above that cursor, and skipping the removal would leave it there for good. The route
+/// bound and the read's `after` still cut by rev, and `All` keeps every removal.
+pub async fn removals_reach_every_route_above_its_bound<B: Backend>(backend: &B) -> Res<()> {
     let mut harness = Harness::open(backend).await?;
     // Object 0 goes live at 1 and leaves at 2; object 1 goes live at 3 and leaves at 4.
     harness.commit(vec![set(&[(0, 1)]), add(&[(0, 0)])]).await?;
@@ -1134,14 +1268,17 @@ pub async fn removals_skip_routes_that_never_saw_the_member<B: Backend>(backend:
             .collect::<Vec<_>>()
     };
     let all = limits(usize::MAX, None);
-    // A reader at 0 saw neither membership.
-    assert_eq!(removed(harness.read(&route(0), 0, 4, all).await?), vec![]);
-    // A reader at 1 may have seen object 0, not object 1.
+    // A reader at 0 never saw either membership and still hears both removals.
     assert_eq!(
-        removed(harness.read(&route(0), 1, 4, all).await?),
-        vec![(obj(0), 2)]
+        removed(harness.read(&route(0), 0, 4, all).await?),
+        vec![(obj(0), 2), (obj(1), 4)]
     );
-    // A route bound counts as the reader's cursor too: from 3, object 1's removal is news.
+    // A reader at 2 gets the removal of object 1, which went live above its cursor.
+    assert_eq!(
+        removed(harness.read(&route(0), 2, 4, all).await?),
+        vec![(obj(1), 4)]
+    );
+    // A route bound cuts by rev like the read's `after`.
     assert_eq!(
         removed(harness.read(&route(3), 0, 4, all).await?),
         vec![(obj(1), 4)]
@@ -1153,47 +1290,24 @@ pub async fn removals_skip_routes_that_never_saw_the_member<B: Backend>(backend:
     });
     assert_eq!(
         removed(harness.read(&object_route, 2, 4, all).await?),
-        vec![]
-    );
-    assert_eq!(
-        removed(harness.read(&object_route, 3, 4, all).await?),
         vec![(obj(1), 4)]
     );
-    // Object 2 goes live at 5, leaves at 6, comes back at 7 and leaves at 8. A reader at 5 saw
-    // the first incarnation; the log collapsed its removal at 6 away, so the removal at 8 is the
-    // only way it learns the membership is gone, though the second incarnation is news to it.
+    // Object 2 goes live at 5, leaves at 6, comes back at 7 and leaves at 8; the log keeps only
+    // the removal at 8, which every reader below it gets.
     harness.commit(vec![set(&[(2, 1)]), add(&[(2, 0)])]).await?;
     harness.commit(vec![remove(&[(2, 0)])]).await?;
     harness.commit(vec![add(&[(2, 0)])]).await?;
     harness.commit(vec![remove(&[(2, 0)])]).await?;
-    assert_eq!(
-        removed(harness.read(&route(0), 5, 8, all).await?),
-        vec![(obj(2), 8)]
-    );
-    assert_eq!(removed(harness.read(&route(0), 4, 8, all).await?), vec![]);
-    // A full replay keeps both.
+    for after in [4, 5, 7] {
+        assert_eq!(
+            removed(harness.read(&route(0), after, 8, all).await?),
+            vec![(obj(2), 8)]
+        );
+    }
+    // A full replay keeps every removal too.
     assert_eq!(
         removed(harness.read(&LogSelector::All, 0, 8, all).await?),
         vec![(obj(0), 2), (obj(1), 4), (obj(2), 8)]
-    );
-    Ok(())
-}
-
-/// A peer cursor only moves forward; setting a lower one keeps the higher.
-pub async fn peer_cursors_only_advance<B: Backend>(backend: &B) -> Res<()> {
-    let mut harness = Harness::open(backend).await?;
-    harness
-        .set_peer_part_cursors(&[(principal(0), part(0), 5), (principal(0), part(1), 2)])
-        .await?;
-    harness
-        .set_peer_part_cursors(&[(principal(0), part(0), 3), (principal(0), part(1), 7)])
-        .await?;
-    assert_eq!(
-        harness
-            .store
-            .peer_part_cursors(&principal(0), &[part(0), part(1), part(2)])
-            .await?,
-        vec![Some(5), Some(7), None]
     );
     Ok(())
 }
@@ -1251,6 +1365,19 @@ pub async fn unchanged_writes_stamp_nothing<B: Backend>(backend: &B) -> Res<()> 
         None
     );
     assert_eq!(RevSource::latest_rev(&harness.store).await?, 1);
+    // Unchanged is judged by canonical content: `5.0` is the payload `5` is.
+    let as_payload = |value| PartWrite::SetPayloads(vec![(obj(0), value)]);
+    let stamped = harness
+        .commit(vec![as_payload(serde_json::json!(5))])
+        .await?;
+    assert_eq!(stamped, Some(2));
+    assert_eq!(
+        harness
+            .commit(vec![as_payload(serde_json::json!(5.0))])
+            .await?,
+        None,
+        "a payload equal in canonical form is unchanged"
+    );
     Ok(())
 }
 
@@ -1260,7 +1387,8 @@ strike! {
     pub enum PartOp {
         Commit(Vec<PartWrite>),
         Rollback(Vec<PartWrite>),
-        SetPeerCursors(Vec<(PeerKey, PartKey, Rev)>),
+        /// An admin mint of a new generation.
+        MintGeneration,
         /// A log read; `after` and `until` are fractions (of 256) of the stamped revs.
         Read {
             selector: LogSelector,
@@ -1292,14 +1420,30 @@ fn window(latest: Rev, after: u8, until: u8) -> Option<(Rev, Rev)> {
 
 /// Every law's check over an arbitrary run of commits, rollbacks, cursor moves and log reads.
 pub async fn differential<B: Backend>(backend: &B, ops: Vec<PartOp>) -> Res<()> {
-    let mut harness = Harness::open(backend).await?;
+    differential_over(backend, (0..OBJS).map(obj).collect(), ops).await
+}
+
+/// [`differential`] with the checks covering `objs`, the universe `ops` draws from.
+async fn differential_over<B: Backend>(
+    backend: &B,
+    objs: Vec<ObjKey>,
+    ops: Vec<PartOp>,
+) -> Res<()> {
+    let mut harness = Harness::open_over(backend, objs).await?;
     for op in ops {
         match op {
+            // generated drops of members' payloads are caller bugs (law 2): not issued
             PartOp::Commit(writes) => {
+                let writes = harness.oracle.without_member_drops(writes);
                 harness.commit(writes).await?;
             }
-            PartOp::Rollback(writes) => harness.rollback(writes).await?,
-            PartOp::SetPeerCursors(cursors) => harness.set_peer_part_cursors(&cursors).await?,
+            PartOp::Rollback(writes) => {
+                let writes = harness.oracle.without_member_drops(writes);
+                harness.rollback(writes).await?
+            }
+            PartOp::MintGeneration => {
+                harness.mint_generation().await?;
+            }
             PartOp::Read {
                 selector,
                 after,

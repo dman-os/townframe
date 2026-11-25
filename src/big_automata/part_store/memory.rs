@@ -15,6 +15,7 @@ use crate::interlude::*;
 use crate::okv::memory::OkvTable;
 use crate::part_store::AccessLevel;
 use crate::part_store::AuthorizedPage;
+use crate::part_store::Generation;
 use crate::part_store::LeafEntry;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
@@ -43,17 +44,21 @@ mod objects;
 strike! {
     /// The state behind the lock. The log is the truth for membership and access; `members`
     /// and `buckets` are indexes over it, written by the same functions that write the log.
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct State {
+        /// The store's [`Generation`]; every summary carries it.
+        generation: Generation,
         /// `Member` and `Access` rows, stamped with the global cursor.
         log: OkvTable<LogKey, LogEntry>,
-        objs: BTreeMap<ObjKey, struct ObjRow {
+        objs: BTreeMap<ObjKey,
+            #[derive(Clone)]
+            struct ObjRow {
             payload: ObjPayload,
             /// Computed when the payload was written.
             digest: PayloadDigest,
         }>,
         parts: BTreeMap<PartKey,
-            #[derive(Default)]
+            #[derive(Default, Clone)]
             struct PartRow {
                 /// The rev of the part's latest member row; 0 for none. Access rows do not move
                 /// it (see `PartSummary::latest_cursor`).
@@ -62,17 +67,11 @@ strike! {
         >,
         /// Every object with a member row in a part, live or removed, keyed by the part and
         /// the object's deepest bucket index so a bucket's members are one range.
-        members: BTreeMap<(PartKey, u16, ObjKey), struct MemberRow {
-            /// When the membership first went live; a re-add does not reset it. Kept when it
-            /// is removed: the log's tombstone carries no value, and a route read needs it to
-            /// skip the removal for a reader that never saw the membership ([`LogSelector`]).
-            first_added_at: Rev,
-        }>,
+        members: BTreeSet<(PartKey, u16, ObjKey)>,
         /// Memberships added before the object had a payload: no log row, no bucket entry.
         pending: BTreeSet<(ObjKey, PartKey)>,
         /// Each part's bucket summaries, every level, maintained per transition.
         buckets: BTreeMap<(PartKey, BuckId), BucketSummaryState>,
-        peer_cursors: BTreeMap<(PeerKey, PartKey), Rev>,
         /// Scratch for an object's parts while its rows are rewritten.
         part_buf: Vec<PartKey>,
     }
@@ -87,10 +86,15 @@ pub struct MemoryPartStore {
 }
 
 impl Default for MemoryPartStore {
+    /// A new, empty store with a freshly minted generation.
     fn default() -> Self {
         let (wakeups, _) = watch::channel(0);
+        let state = State {
+            generation: Generation::mint(),
+            ..default()
+        };
         Self {
-            state: Arc::new(surelock::mutex::Mutex::new(default())),
+            state: Arc::new(surelock::mutex::Mutex::new(state)),
             wakeups,
         }
     }
@@ -104,6 +108,7 @@ enum Staged {
     SetPayloads(Vec<(ObjKey, ObjPayload, PayloadDigest)>),
     AddMembers(Vec<(ObjKey, PartKey)>),
     RemoveMembers(Vec<(ObjKey, PartKey)>),
+    DropPayloads(Vec<ObjKey>),
     GrantAccess(Vec<(PartKey, PeerKey, AccessLevel)>),
     RevokeAccess(Vec<(PartKey, PeerKey)>),
 }
@@ -121,6 +126,19 @@ impl MemoryPartStore {
         MemoryPartTx {
             store: self.clone(),
             staged: default(),
+        }
+    }
+
+    /// A copy of the store that shares nothing with it, the generation included: the files of a
+    /// backup. Restoring one is replacing the store with it; call
+    /// [`mint_generation`](PartStoreWrite::mint_generation) on the restored store to tell its
+    /// peers that the log went back.
+    pub fn snapshot(&self) -> Self {
+        let state = self.with_state(State::clone);
+        let (wakeups, _) = watch::channel(state.log.rev());
+        Self {
+            state: Arc::new(surelock::mutex::Mutex::new(state)),
+            wakeups,
         }
     }
 
@@ -178,6 +196,10 @@ impl State {
             Staged::SetPayloads(payloads) => self.set_payloads(rev, payloads),
             Staged::AddMembers(members) => self.add_members(rev, &members),
             Staged::RemoveMembers(members) => self.remove_members(rev, &members),
+            Staged::DropPayloads(objs) => {
+                self.drop_payloads(&objs);
+                false
+            }
             Staged::GrantAccess(grants) => self.grant_access(rev, &grants),
             Staged::RevokeAccess(revokes) => self.revoke_access(rev, &revokes),
         }
@@ -198,23 +220,6 @@ impl State {
             row.latest_cursor = rev;
         }
         self.log.write(rev, key, value);
-    }
-}
-
-impl State {
-    /// For a removed membership's row, when it had gone live: what the route rule needs.
-    fn removed_added_at(&self, key: &LogKey, value: Option<&LogEntry>) -> Option<Rev> {
-        match (key, value) {
-            (LogKey::Member { obj, part }, None) => {
-                let index = BuckId::deepest_from_obj_key(obj).index();
-                let row = self
-                    .members
-                    .get(&(part.clone(), index, obj.clone()))
-                    .expect("a removed member row without its member");
-                Some(row.first_added_at)
-            }
-            (LogKey::Member { .. }, Some(_)) | (LogKey::Access { .. }, _) => None,
-        }
     }
 }
 
@@ -265,6 +270,24 @@ impl PartStoreWrite for MemoryPartStore {
         std::future::ready(Ok(()))
     }
 
+    fn drop_payloads(
+        &self,
+        tx: &mut MemoryPartTx,
+        objs: &[ObjKey],
+    ) -> impl Future<Output = Res<()>> + Send {
+        self.stage(tx, Staged::DropPayloads(objs.to_vec()));
+        std::future::ready(Ok(()))
+    }
+
+    fn mint_generation(&self) -> impl Future<Output = Res<Generation>> + Send {
+        let minted = Generation::mint();
+        surelock::key::lock_scope(|key| {
+            let (mut state, _key) = key.lock(&self.state);
+            state.generation = minted;
+        });
+        std::future::ready(Ok(minted))
+    }
+
     fn grant_access(
         &self,
         tx: &mut MemoryPartTx,
@@ -308,39 +331,14 @@ impl PartStoreRead for MemoryPartStore {
         std::future::ready(Ok(self.with_state(|state| state.member_count(part))))
     }
 
-    fn peer_part_cursors(
+    fn partless_objects(
         &self,
-        peer: &PeerKey,
-        parts: &[PartKey],
-    ) -> impl Future<Output = Res<Vec<Option<Rev>>>> + Send {
-        std::future::ready(Ok(self.with_state(|state| {
-            parts
-                .iter()
-                .map(|part| {
-                    state
-                        .peer_cursors
-                        .get(&(peer.clone(), part.clone()))
-                        .copied()
-                })
-                .collect()
-        })))
-    }
-
-    fn set_peer_part_cursors(
-        &self,
-        cursors: &[(PeerKey, PartKey, Rev)],
-    ) -> impl Future<Output = Res<()>> + Send {
-        surelock::key::lock_scope(|key| {
-            let (mut state, _key) = key.lock(&self.state);
-            for (peer, part, cursor) in cursors {
-                let stored = state
-                    .peer_cursors
-                    .entry((peer.clone(), part.clone()))
-                    .or_default();
-                *stored = (*stored).max(*cursor);
-            }
-        });
-        std::future::ready(Ok(()))
+        limit: usize,
+        after: Option<&ObjKey>,
+    ) -> impl Future<Output = Res<Vec<ObjKey>>> + Send {
+        std::future::ready(Ok(
+            self.with_state(|state| state.partless_objects(limit, after))
+        ))
     }
 }
 
@@ -368,12 +366,7 @@ impl RevSource for MemoryPartStore {
     ) -> impl Future<Output = Res<()>> + Send {
         self.with_state(|state| {
             state.log.read_into(
-                |key, rev, value| match selector {
-                    LogSelector::All => true,
-                    LogSelector::Routes(_) => {
-                        selector.selects(key, rev, after, state.removed_added_at(key, value))
-                    }
-                },
+                |key, rev, _value| selector.selects(key, rev),
                 log_row_bytes,
                 after,
                 until,
@@ -397,6 +390,10 @@ impl PartStoreServe for MemoryPartStore {
     /// The log's own watch: the one [`RevSource::watch`] hands out.
     fn watch(&self) -> RevWatch {
         RevWatch::new(self.wakeups.subscribe())
+    }
+
+    fn generation(&self) -> impl Future<Output = Res<Generation>> + Send {
+        std::future::ready(Ok(self.with_state(|state| state.generation)))
     }
 
     /// Decides every route and copies the rows and their payloads out in one critical section,

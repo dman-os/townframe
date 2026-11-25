@@ -31,6 +31,7 @@ pub async fn stage<S: PartStoreWrite>(store: &S, tx: &mut S::Tx, write: PartWrit
         PartWrite::SetPayloads(payloads) => store.set_payloads(tx, payloads).await,
         PartWrite::AddMembers(members) => store.add_members(tx, &members).await,
         PartWrite::RemoveMembers(members) => store.remove_members(tx, &members).await,
+        PartWrite::DropPayloads(objs) => store.drop_payloads(tx, &objs).await,
         PartWrite::GrantAccess(grants) => store.grant_access(tx, &grants).await,
         PartWrite::RevokeAccess(revokes) => store.revoke_access(tx, &revokes).await,
     }
@@ -51,6 +52,9 @@ pub fn set(payloads: &[(u8, u8)]) -> PartWrite {
             .map(|&(o, value)| (obj(o), payload(value)))
             .collect(),
     )
+}
+pub fn drop_payloads(objs: &[u8]) -> PartWrite {
+    PartWrite::DropPayloads(objs.iter().map(|&o| obj(o)).collect())
 }
 pub fn grant(grants: &[(u8, u8)]) -> PartWrite {
     PartWrite::GrantAccess(

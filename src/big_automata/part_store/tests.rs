@@ -48,6 +48,33 @@ fn collapse_and_tombstones() -> Res<()> {
 }
 
 #[test]
+fn crowded_buckets_count_and_list_every_member() -> Res<()> {
+    block_on(laws::crowded_buckets_count_and_list_every_member(&Memory))
+}
+
+#[test]
+fn bucket_summaries_ignore_write_order() -> Res<()> {
+    block_on(laws::bucket_summaries_ignore_write_order(&Memory))
+}
+
+#[test]
+fn bucket_summaries_follow_changes_inside_one_bucket() -> Res<()> {
+    block_on(laws::bucket_summaries_follow_changes_inside_one_bucket(
+        &Memory,
+    ))
+}
+
+#[test]
+fn a_listing_ends_at_the_last_bucket_of_a_level() -> Res<()> {
+    block_on(laws::a_listing_ends_at_the_last_bucket_of_a_level(&Memory))
+}
+
+#[test]
+fn generations_identify_the_log() -> Res<()> {
+    block_on(laws::generations_identify_the_log(&Memory))
+}
+
+#[test]
 fn pending_goes_live_once() -> Res<()> {
     block_on(laws::pending_goes_live_once(&Memory))
 }
@@ -93,10 +120,8 @@ fn grant_returns_the_backlog() -> Res<()> {
 }
 
 #[test]
-fn removals_skip_routes_that_never_saw_the_member() -> Res<()> {
-    block_on(laws::removals_skip_routes_that_never_saw_the_member(
-        &Memory,
-    ))
+fn removals_reach_every_route_above_its_bound() -> Res<()> {
+    block_on(laws::removals_reach_every_route_above_its_bound(&Memory))
 }
 
 #[test]
@@ -110,11 +135,6 @@ fn dirty_count_counts_log_rows() -> Res<()> {
 }
 
 #[test]
-fn peer_cursors_only_advance() -> Res<()> {
-    block_on(laws::peer_cursors_only_advance(&Memory))
-}
-
-#[test]
 fn writes_are_atomic() -> Res<()> {
     block_on(laws::writes_are_atomic(&Memory))
 }
@@ -122,6 +142,37 @@ fn writes_are_atomic() -> Res<()> {
 #[test]
 fn unchanged_writes_stamp_nothing() -> Res<()> {
     block_on(laws::unchanged_writes_stamp_nothing(&Memory))
+}
+
+#[test]
+fn a_dropped_payload_is_gone() -> Res<()> {
+    block_on(laws::a_dropped_payload_is_gone(&Memory))
+}
+
+#[test]
+#[should_panic(expected = "live member")]
+fn dropping_the_payload_of_a_member_is_a_caller_bug() {
+    block_on(laws::dropping_the_payload_of_a_member_is_a_caller_bug(
+        &Memory,
+    ))
+    .unwrap();
+}
+
+#[test]
+fn removing_then_dropping_in_one_transaction_is_valid() -> Res<()> {
+    block_on(laws::removing_then_dropping_in_one_transaction_is_valid(
+        &Memory,
+    ))
+}
+
+#[test]
+fn a_partless_object_is_listed_until_its_payload_is_dropped() -> Res<()> {
+    block_on(laws::a_partless_object_is_listed_until_its_payload_is_dropped(&Memory))
+}
+
+#[test]
+fn dropping_is_atomic_with_its_transaction() -> Res<()> {
+    block_on(laws::dropping_is_atomic_with_its_transaction(&Memory))
 }
 
 #[test]
@@ -149,6 +200,12 @@ proptest! {
     #[test]
     fn differential(ops in laws::part_ops()) {
         block_on(laws::differential(&Memory, ops))
+            .map_err(|err| TestCaseError::fail(format!("{err:?}")))?;
+    }
+
+    #[test]
+    fn crowded_differential(ops in laws::crowd_ops()) {
+        block_on(laws::crowded_differential(&Memory, ops))
             .map_err(|err| TestCaseError::fail(format!("{err:?}")))?;
     }
 

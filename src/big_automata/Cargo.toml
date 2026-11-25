@@ -39,6 +39,8 @@ tokio = { workspace = true, features = ["sync"] }
 surelock.workspace = true
 async-channel.workspace = true
 async-trait.workspace = true
+# The driver spawns and sleeps through it: tokio natively, the browser's event loop on wasm.
+n0-future.workspace = true
 # `futures::future::select` races the replay responder's hold against its timer
 futures.workspace = true
 
@@ -58,11 +60,17 @@ tracing.workspace = true
 
 #
 # test-support
-proptest = { workspace = true, optional = true }
+# Without proptest's defaults: `fork` and `timeout` pull in `wait-timeout`, which has no
+# wasm32-unknown-unknown build, and the browser host (`big_automata_web`) takes `test-support`
+# for the memory backend.
+proptest = { version = "1.12", default-features = false, features = ["std", "bit-set"], optional = true }
 
 [dev-dependencies]
+postcard.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
+# The driver's tests run on a paused clock.
+tokio = { workspace = true, features = ["sync", "macros", "rt", "time", "test-util"] }
 
 # `rand` pulls in getrandom 0.3. On the web, `.cargo/config.toml` selects its `wasm_js`
 # backend, which only compiles with the feature of the same name turned on.

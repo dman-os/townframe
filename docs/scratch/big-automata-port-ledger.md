@@ -19,15 +19,15 @@ see the redesign section).
 
 | File                                                           | Lines | Role                                                                                                                                           | big_automata                                         | Status        | Notes                                                                                                                                                                                                                                                         |
 | -------------------------------------------------------------- | ----: | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lib.rs`                                                       |  5866 | `BigSyncMachine`, `PeerState`, `SyncStatMachine`, and four impl sections: peer, cursor, bucket, sync support                                   | `lib.rs` (skeleton), `peer.rs`, `stat.rs`            | partial       | 6 of 8 `handle_evt` arms are `todo!()`                                                                                                                                                                                                                        |
-| ↳ `PeerState` + "peer support" (`lib.rs:319–407`, `1171–1648`) |  ~570 | peer lifecycle, part strategy decisions, replay subscription and pages                                                                         | `peer.rs`                                            | copied        | Verbatim, beside the operator's started `handle_update_peer_evt`/`handle_remove_peer_evt`; names don't line up yet (`PeerPartStrat` vs `PeerPartStrategy`, `objs` vs `objects`); `PeerState` is private. Was the "most ambitious piece"; parked.              |
-| ↳ "cursor support" (`lib.rs:1650–3008`)                        | ~1360 | turns `CursorMachineCommand`s into tasks: sync/remove worker coalescing per object, zombie-removal deferral (`pending_removals`), replay pages | —                                                    | not started   | Owns the coalescing contract `cursor.rs` now documents: report every cursor a coalesced task held                                                                                                                                                             |
-| ↳ "bucket support" (`lib.rs:3009–3382`)                        |  ~370 | drives `BucketMachine` tasks                                                                                                                   | —                                                    | not started   |                                                                                                                                                                                                                                                               |
-| ↳ "sync support" (`lib.rs:3383–…`)                             | ~1200 | sync task completion, stat updates                                                                                                             | —                                                    | not started   |                                                                                                                                                                                                                                                               |
-| ↳ `SyncStatMachine`                                            |  ~400 | full-sync waiters, per peer/part stats                                                                                                         | `stat.rs` (404)                                      | partial       |                                                                                                                                                                                                                                                               |
-| `cursor.rs`                                                    |  1052 | `CursorSyncMachine`                                                                                                                            | `cursor.rs`                                          | rewritten     | `JobKey { Sync, RemoveFromPart }`; 19 tests ported/adapted; fully rejected touch now emits nothing                                                                                                                                                            |
+| `lib.rs` | 5866 | `BigSyncMachine`, `PeerState`, `SyncStatMachine`, and four impl sections | `peer.rs` (per-peer machine) | laws drafted | Decomposed per peer (2026-11-24): the multi-peer struct goes; laws in `peer.rs`, sub-machines below |
+| ↳ `PeerState` + "peer support" (`lib.rs:319–407`, `1171–1648`) | ~570 | peer lifecycle, strategy decisions, replay subscription and pages | `part_lifecycle.rs`, `replay/client.rs`, `lanes.rs`, `peer.rs` | rewritten / in progress | PartLifecycle done (#329); routes incremental (#330); lanes being implemented; parent next |
+| ↳ "cursor support" (`lib.rs:1650–3008`) | ~1360 | sync/remove worker coalescing, zombie-removal deferral, replay pages | `object_jobs.rs` | rewritten | ObjectJobs on the record/fetch cut (#291) |
+| ↳ "bucket support" (`lib.rs:3009–3382`) | ~370 | drives `BucketMachine` tasks | `peer.rs` | laws drafted | Walk backpressure and the upgrade gate are parent laws 9–11 |
+| ↳ "sync support" (`lib.rs:3383–…`) | ~1200 | sync task completion, stat updates | `object_jobs.rs`, `peer.rs` | rewritten / laws drafted | Completions are ObjectJobs outcomes; stats are derived (parent law 13) |
+| ↳ `SyncStatMachine` | ~400 | full-sync waiters, per peer/part stats | `peer.rs` (derived facts); waiters a layer above | replaced | `stat.rs` is the old copy, to delete with the parent |
+| `cursor.rs` | 1052 | `CursorSyncMachine` | `cursor.rs` | rewritten | Part cursors only; laws 1–9, oracle, proptest (#328) |
 | `watermark.rs`                                                 |  1013 | `WatermarkMachine` (lanes, payload, supersede closure)                                                                                         | `watermark.rs` + `watermark/tests.rs`                | rewritten     | Lanes dropped (kind lives in the key); W-1 (slots opened ready) and W-2 (`unwrap_or_default` admission) fixed; 11 example tests + oracle proptest. Delta-walker features (`settle_job`, `force_finish`, multi-waiter batch slots) deliberately not ported yet |
-| `bucket.rs` | 778 | `BucketMachine` (per part; FIXME says it should be per peer) | `bucket.rs` | copied | Verbatim except `obj_key`/`part_key` and `on_obj_sync_completed(&ObjKey)` (no `SyncJobEvt`); 3 tests ported; no type errors (borrowck unverified until the crate type-checks) |
+| `bucket.rs` | 778 | `BucketMachine` | `bucket.rs` | rewritten | Walk only with a pull budget; laws 1–8, oracle, proptest (#331) |
 | `scheduler.rs` | 681 | task table, retries | `scheduler.rs` + `scheduler/tests.rs` | rewritten | `Scheduler` only so far. `KeyedScheduler` (via `TokioKeyedScheduler`) has 10 users: big_repo runtime2's `automerge_frontier_worker`, `causal_checkpoint_worker` and `group_part_worker`, plus seven daybook_core blob and index modules. It's live infrastructure, not legacy. **Ported as `scheduler/keyed.rs`** on the new `Scheduler` (sans-IO: the caller supplies `now` and reports `complete(task)` / `fail(task, min_delay, now)`; stale reports return `None`; `replace`/`replace_with`/`cancel`/`park`/`wake` kept because `group_part_worker`, `pin_worker` and `facet_set` still wake). 13 unit tests + model proptest; 71/71 crate tests pass. `TokioKeyedScheduler` itself reads `Instant::now()` internally: audit item. `park`/`wake` was dropped by the frontier worker in favour of delayed retry (an unwoken park stalls the walker's contiguous prefix). big_blobs avoids it by consuming walkers serially and durably parking (`projection.rs::retry_parked`). Verbs: `queue`, `complete`, `stop`, `retry`, `tick`, `next_due`, drains; the `stopped` licence set and both respawn variants folded into `retry`. 13 unit tests + model proptest; all pass |
 | `tasks.rs`                                                     |   194 | task seeds and kinds                                                                                                                           | `tasks.rs` (134)                                     | partial       |                                                                                                                                                                                                                                                               |
 | `tasks/decide_peer_strat.rs`                                   |   724 | cursor-vs-bucket decision                                                                                                                      | `tasks/decide_peer_strat.rs` (275)                   | partial       |                                                                                                                                                                                                                                                               |
@@ -39,7 +39,7 @@ see the redesign section).
 | `mpsc.rs`                                                      |    97 | channel helpers                                                                                                                                | `mpsc.rs` (99)                                       | ported?       | review                                                                                                                                                                                                                                                        |
 | `ids.rs`                                                       |   464 | `ByteKey`, `ObjKey`, `PartKey`, `PeerKey`, `BuckId`                                                                                            | `ids.rs` (381)                                       | partial       | review                                                                                                                                                                                                                                                        |
 | `rpc.rs`                                                       |   951 | wire types                                                                                                                                     | `rpc.rs` + `rpc/{bucket,replay,summary}.rs`          | partial       | `BigSyncRpcClient<K: FutureForm>` trait added                                                                                                                                                                                                                 |
-| `peer_routes.rs`                                               |   185 | pending-part takeout, part teardown on route change                                                                                            | —                                                    | not started   | Folds into `peer.rs`                                                                                                                                                                                                                                          |
+| `peer_routes.rs` | 185 | pending-part takeout, part teardown on route change | `peer.rs` | laws drafted | Incremental routes (parent law 1), retire everywhere (law 8) |
 | `part_store.rs`                                                |   185 | thin `PartStore`/`PartStoreReadOnly` traits + contract tests                                                                                   | `store.rs` (aliases only)                            | not started   | See redesign                                                                                                                                                                                                                                                  |
 | —                                                              |     — |                                                                                                                                                | `fingerprint.rs` (259)                               | new           | Seeded SipHash fingerprints                                                                                                                                                                                                                                   |
 | —                                                              |     — |                                                                                                                                                | `okv.rs` (23)                                        | new           | FIXME: replacement for `KeyedFrontier` (ordered KV)                                                                                                                                                                                                           |
@@ -1051,6 +1051,152 @@ Port items from this cut:
   parent's, session only, advanced by content settlements); `PartIdle` becomes an
   `is_settled(part)` query; one receive window from `ObjectJobs::room()`; the `cursor.rs`
   header TODO/FIXME go (stats are derived; deletes are ObjectJobs' `Absent`).
+
+**Decisions and follow-ups from the PeerSync simulation (operator, 2026-11-24).**
+- **Ghost members: the server always sends removals after the cursor** (replay law 11
+  amended). A client's applied state can be ahead of its persisted cursor (a long fetch holds
+  the cursor while later adds apply), so a removal skipped "because the client never saw the
+  member" left that member in the local store for good after a crash or a re-want. The
+  rejected alternative was a persisted "seen up to" cursor, which needs a write before every
+  record. **Later wire optimisation:** removal rows for members the client may never have
+  held cost bandwidth; send them compactly (a hash or fingerprint of the object id, batched)
+  instead of reinstating the skip.
+- **`Bulk` rounds batch with a linger** (lanes law 9): wait for `bulk_batch` free rows, but
+  send what is free after `bulk_linger`, so long fetches holding the window cannot stall it.
+- **Browser client for the sync calls:** `big_automata_iroh`'s client sits on the native
+  transport (`service_client_native_rs`, tokio `net`), so it does not build for
+  `wasm32-unknown-unknown`. Build it on `service_client_iroh_rs`'s `Client<IrohHttp>` (HTTP/1
+  over QUIC, `n0_future`, relay-only in the browser); the open point is the `Send` bound on
+  the transport futures in a generic client.
+- **A bucket page must move `next_after` strictly forward** (to land with the walk's
+  `next_after` trust, which lets a hostile peer page a bucket without end otherwise).
+
+**Scope until big_repo (operator, 2026-11-25).** Finish everything from big_sync down before
+moving any embedder or porting the walkers:
+1. SQLite store (`big_automata_sqlite`, own lane): part store + the driver's peer-cursor table,
+   passing the same store laws and proptests as memory, with a baseline benchmark. `sqlite_rs`
+   targets native and wasip3 guests, not the browser; a browser-native store (OPFS or
+   IndexedDB) is a later item.
+2. Tests: comb the old contract and whole-machine tests for gaps (audit running), port the gaps
+   into the matching layer (store law, replay law, machine law, sim op/check, driver test,
+   backend contract test, e2e).
+3. Durable outbox component.
+4. Browser: the sync stack builds and runs in the browser on `service_client_iroh_rs`
+   (`Send` dropped from the driver's traits, the embedder spawns the loop).
+5. Test types across the board, benchmarks included: once the stack is assembled, benchmark it
+   and revisit the driver defaults (window 64, fetch cap 4, backoff 1-60 s, Live hold 15 s,
+   Bulk batch 16 with 50 ms linger), which are accepted for now.
+**Merge point: "done with big automata"** (operator, 2026-11-25). The stack merges once the
+items above are done; big_repo starts after. Until then CI and `check-matrix` may stay red
+(e.g. dead code in `kit/` that the durable outbox and the big_repo port will use).
+Cleanup before the merge point: fold `big_automata_sqlite`'s `002_generation.sql` into `001`
+(no database with 001 alone ever shipped) and drop the upgrade test that guards it; split
+`sync/peer/sim/ops.rs` `Sim::step` (guardrails `ERROR_FN_LENGTH`); the `check-matrix` dead code.
+Deferred to the big_repo phase: the backend migrations, the embedder cutover, deleting
+big_sync, and the delta-walker/frontier family with the other big_sync_core workers.
+
+**Store generations (operator, 2026-11-25).** Generations cover data loss: a node that keeps
+its identity but not its previous data (a lost or recreated store, a restore from an older
+backup). A client's cursor from before means nothing on the new log, and rows in (new head, old
+cursor] would be silently missed. A fresh store mints a new generation by being created, so
+plain data loss needs no operator action. Clearing tombstones is not part of this and is not to
+be implemented now.
+- Each part store carries a `generation` id, minted when the store is created and minted again
+  by an explicit reset or a restore from backup (an admin operation; the store cannot tell a
+  restored file from a live one by itself).
+- Part summaries carry the peer's generation. The driver's peer-cursor table stores
+  `(generation, rev)` per (peer, backend, part).
+- A summary from another generation than the stored cursor's: the part restarts from cursor 0,
+  which makes it walk and reconcile, and the event is logged loudly. A summary whose latest
+  cursor is below the stored cursor is treated the same (a restore that forgot to mint).
+- Checked at summary time only: a generation change mid-connection means the peer restarted,
+  which loses the replay session and forces a reconnect, hence fresh summaries.
+- Store-level only.
+
+**Durable outbox (draft for operator review, 2026-11-25).** For backends that answer `Done`
+from `record` and fetch on their own time (big_blobs' transfer worker is the first user). A
+sans-IO machine plus a driver, built on okv, `RevStream` and `KeyedScheduler`.
+1. **A want is durable and atomic with its admission.** `record` writes a want row (object,
+   payload hint, priority, the peer it came from) into an okv wants table in the same
+   transaction as its membership writes, then answers `Done`. A crash after commit keeps the
+   want; a crash before keeps neither.
+2. **No cursor of its own.** The wants table holds only pending work (a row is deleted when its
+   fetch lands), so on start the machine reads every live want and schedules it, then follows
+   the table with `RevStream`. Memory holds at most `M` scheduled wants; the rest are read
+   again as slots free.
+3. **One fetch per object at a time.** A newer want for an object in flight (new payload,
+   higher priority, another provider) waits for the running fetch to end instead of running
+   beside it. (This is the zombie race `KeyedScheduler::replace` has today, queueing the
+   replacement while the old task may still run; the worker audit item. The outbox must not
+   inherit it: fix `replace` or keep the in-flight call table in the machine, as ObjectJobs
+   does.)
+4. **Landing deletes the want in the same transaction** that writes the fetched content. A
+   crash between fetch and commit fetches again (fetches are idempotent).
+5. **Withdrawal cancels.** Deleting a want (the object left every part, a pin was dropped)
+   cancels its fetch; the cancelled call still reports before its slot frees (ObjectJobs law 7).
+6. **Priority, then age.** Among due wants, higher priority starts first, older first among
+   equals. At most `C` fetches run at once.
+7. **Providers.** A fetch goes to a connected peer that advertised the object (the want's
+   providers, unioned across records from several peers); on failure it backs off and tries the
+   next provider; with no provider connected it waits without spinning.
+8. **Backoff per want**, from a floor, doubling, capped; reset by success; kept across restarts
+   only as "due now" (no durable backoff state).
+Testing: laws with a naive oracle and a differential proptest; a simulation with crashes
+between record, fetch and land, providers connecting and leaving, and withdrawals racing
+fetches; planted-bug checks (a replacement running beside the old fetch, a crash losing a
+want, a landed fetch leaving its want).
+
+**Durable outbox: decisions after research (operator, 2026-11-25).** Research report in the lane
+scratchpad (`outbox-research.md`); it supersedes parts of the draft above.
+- **Keyed by object on okv.** A newer want overwrites the key (supersession in the store); a
+  withdrawal is a tombstone; the table is the pending set. Row values carry a version, first-seen
+  time (kept across overwrites), priority, identity and providers.
+- **Stopped before replaced.** A superseding want waits for the running fetch's terminal event;
+  `KeyedScheduler` gets a `Stopping` state (this fixes the `replace` race for its 10 users too).
+  An overwrite with the same identity (priority or providers only) never touches a running fetch.
+- **Memory:** an in-memory index of every live want; `M` bounds scheduled and running wants only.
+- **Priority, then age, with priority aging** (old low-priority wants eventually overtake).
+- **Landing:** delete the want only if its version matches what was fetched, after the content is
+  durable; one transaction when the store is shared, else one idempotent refetch after a crash.
+- **Walkers launch wflow jobs** instead of tokio tasks for multi-step crash-safe work (see
+  `docs/scratch/wflow-for-walker-jobs.md`: findings and what wflow must gain first); walkers
+  keep their own caps and priorities, orthogonal to any node-wide ones wflow adds.
+- **No materialization wakes:** walkers follow rev streams; a new row is the wake.
+
+**okv pruning by consumer cursors (operator, 2026-11-25).** okv keeps every tombstone forever
+today. Walkers that consume an okv table register and report the cursor they have gone past;
+tombstones at or below the lowest registered cursor can be pruned (live rows are state and are
+never pruned). A consumer that never reports holds pruning back, which is visible, not silent.
+The outbox then needs no floor rev of its own.
+
+**Durable outbox: delivered (lane `agent/outbox`, 2026-11-25).** `big_automata::durable_outbox`
+(laws in its module docs): `WantsTable` (record, withdraw, land in the caller's okv tx),
+`Outbox` (sans-IO machine over `KeyedScheduler`), `OutboxHandle::start` (the loop). Also
+`KeyedScheduler` stopped-before-replaced (`replace` returns `Option<TaskId>`, the driver reports
+`stopped(task)` for every task it drained from the stop queue) and okv consumer pruning
+(`register_consumer`, `report_cursor`, `unregister_consumer`, `consumers`, `prune` on `OkvStore`).
+Decisions taken for the operator to confirm: identity is opaque `ByteKey` and the version is a
+fresh random `u64` per identity change (equality only); priority is last-record-wins and
+providers union under an equal identity; aging is `queued_at - priority * aging` (default one
+level per 60 s, `Duration::MAX` is strict); `C` default 4, `M` default 16, where `M` bounds
+fetches plus landings in flight (so a slow store backs up new fetches); a provider disconnect
+cancels its fetches without counting a failure; no durable "first seen" other than the
+writer's millisecond clock.
+
+**Browser runtime (operator, 2026-11-25).**
+- **Portable `service_utils`.** axum is not tied to tokio TCP (only `axum::serve` is); the iroh
+  handler already runs hyper's http1 server over `IrohHttpStream`. Swap the glue (tokio
+  `Semaphore`/`watch`/`JoinSet`/`select!`, the `tokio` features) for runtime-free parts and split
+  the crate into a portable core and native extras. Settle the iroh side first: a browser endpoint
+  accepts a connection through the relay, from native and from another page.
+- **Tabs:** Web Locks lease elects the leader tab, which runs the node in a dedicated worker
+  (OPFS sync handles live there); other tabs are clients over `BroadcastChannel`/`MessagePort`
+  speaking the service stack; a leadership epoch fences stale replies. No SharedWorker (no
+  Android Chrome, no OPFS sync handles). No read-only cache in follower tabs. This machinery is
+  for everything that runs on the web, so it is its own crate or package (TypeScript where the
+  Rust web APIs fall short).
+- **Follow-ups:** a two-tab spec (both pull from the native peer); `PageSession` as a long-poll
+  method so held rounds use the router's long-poll pool instead of handler slots.
 
 ## Cross-cutting items
 

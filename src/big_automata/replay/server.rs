@@ -11,6 +11,7 @@ use std::num::NonZeroUsize;
 
 use crate::interlude::*;
 
+use crate::kit::scheduler::Instant;
 use crate::part_store::AuthorizedPage;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
@@ -31,7 +32,6 @@ use crate::replay::wire::UpdateSession;
 use crate::replay::wire::Verdict;
 use crate::rev::Limits;
 use crate::rev::Rev;
-use crate::scheduler::Instant;
 
 #[cfg(test)]
 mod tests;
@@ -365,10 +365,8 @@ impl RouteProbe<'_> {
 
 impl Round {
     /// The routes to read, each bounded by its target's cursor. Rows of a route at or below its
-    /// bound are not selected, and the store's removal rule (law 11) is decided from the bound.
-    /// That is why a round may not name one route twice: with two cursors on one route, the
-    /// lower bound would let the store skip a removal the target with the higher cursor saw the
-    /// membership of.
+    /// bound are not selected; removals above it are always delivered (law 11). A round may not
+    /// name one route twice: the store keeps one bound per route.
     pub fn routes(&self) -> &LogRoutes {
         &self.routes
     }

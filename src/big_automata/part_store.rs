@@ -16,9 +16,58 @@
 //! - **Membership before payload is pending.** Adding an object that has no payload yet writes
 //!   no log row and no bucket entry; when the payload arrives, every pending membership goes
 //!   live in that transaction, stamped once. A live membership always has a payload; payload
-//!   removal is explicit: remove the object from every part, then drop the payload.
+//!   removal is explicit: remove the object from every part, then drop the payload
+//!   ([`PartStoreWrite::drop_payloads`]). [`PartStoreRead::partless_objects`] lists the objects
+//!   that are ready for it.
+//! - **Dropping a payload** (laws 1 to 4 below). It changes no log row, so it stamps nothing.
 //! - **A write that changes nothing stamps nothing:** re-writing the payload an object holds,
 //!   adding a live member, removing a non-member, granting the level a principal has.
+//!
+//! # Payload laws
+//!
+//! 1. **A dropped payload is gone.** After the transaction that drops an object's payload
+//!    commits, [`obj_states`](PartStoreRead::obj_states) and
+//!    [`readable_obj_states`](PartStoreServe::readable_obj_states) answer `None` for it and no
+//!    authorized read carries it (it has no live row to carry it for). Its tombstones stay in
+//!    the log, so removals still reach routes. Dropping a payload an object does not hold (never
+//!    set, already dropped, or an object with only pending memberships) is a no-op.
+//! 2. **Only a part-less object's payload may be dropped.** Dropping the payload of an object
+//!    that holds one and is a live member of any part is a caller bug and panics, the same
+//!    panic in every backend. It is not an `Err`: the order (remove from every part, then
+//!    drop) is the embedder's own sequencing, a store that returned an error could not be
+//!    recovered from by anything but fixing the caller, and an `Err` at commit time could not be
+//!    rolled back by the memory store. The check sees the transaction's own earlier batches, so
+//!    `remove_members` then `drop_payloads` in one transaction is valid and the reverse order
+//!    is the bug. A backend must not commit a transaction after its drop panicked.
+//! 3. **A part-less object is listed until its payload is dropped.**
+//!    [`partless_objects`](PartStoreRead::partless_objects) lists, in key order, exactly the
+//!    objects that hold a payload and are a live member of no part: an object whose memberships
+//!    were all removed, and nothing else (a live member is not listed; an object with no payload
+//!    is not listed, pending memberships included). It leaves the list when its payload is
+//!    dropped, and when it is added to a part again.
+//! 4. **Dropping is a batch of its transaction.** It is invisible before commit, gone with a
+//!    rollback, and after commit it has happened in order with the transaction's other batches
+//!    (a payload set after the drop in the same transaction survives; a membership added after
+//!    the drop is pending).
+//!
+//! # Generation laws
+//!
+//! A store has a [`Generation`], the identity of its log, which a client's cursor is a position
+//! in: a peer that kept its identity but not its data (a recreated store, a restore from an older
+//! backup) would otherwise have its clients resume from cursors that mean nothing on the new
+//! log, silently missing the rows stamped below them.
+//!
+//! 1. **A store has a generation from its creation**, minted then, so plain data loss needs no
+//!    operator action: no two stores share one, and it is never [`Generation::default`].
+//! 2. **It is stable.** Writes, rollbacks and reads do not change it, and neither does a
+//!    restart of the store over the same files.
+//! 3. **Minting changes it and nothing else.** [`PartStoreWrite::mint_generation`] gives a
+//!    generation the store never had, and stamps no rev, wakes no watch and changes no row. A
+//!    restore from a backup brings back the backup's files, generation included, so the
+//!    operator mints after one: the store cannot tell a restored file from a live one.
+//! 4. **Every part summary carries the current generation**, a mint included from the next
+//!    answer on ([`PartSummary::generation`]); a client compares it with the one its cursor was
+//!    stored under (`PartLifecycle` law 10).
 //!
 //! Three traits, one per audience: [`PartStoreWrite`] for the embedder that owns the data,
 //! [`PartStoreRead`] for the sync client, [`PartStoreServe`] for the responder (which assembles
@@ -112,13 +161,11 @@ strike! {
         /// row's rev: a part route covers the part's member rows, an object route the object's
         /// member rows in every part. Access rows are on no route.
         ///
-        /// A removal carries no news to a reader that never saw the membership: a removed row
-        /// is skipped on a route whose cursor (the larger of its bound and the read's `after`)
-        /// is below the rev at which the membership *first* went live. A reader that saw any
-        /// incarnation live did so at or after that rev, so its cursor is never below it and
-        /// it always gets the removal. The first presence, not the latest: a reader that saw
-        /// the first incarnation must hear the removal of a later one, because the log
-        /// collapsed the removal in between away.
+        /// Removals are never filtered: a removal after a route's bound is delivered whatever
+        /// rev the membership went live at. A reader's persisted cursor only passes settled
+        /// work, so it may already hold a membership that went live above that cursor;
+        /// skipping the removal for want of a cursor that "saw" the membership would strand
+        /// it there.
         Routes(pub struct LogRoutes {
             pub parts: BTreeMap<PartKey, Rev>,
             pub objects: BTreeMap<ObjKey, Rev>,
@@ -127,20 +174,12 @@ strike! {
 }
 
 impl LogSelector {
-    /// Whether a read of `(after, ..]` hands out `key`'s row at `rev`. `removed_added_at` is
-    /// `Some(first_added_at)` when the row is a removed membership: the rev at which that
-    /// membership first went live.
-    pub fn selects(
-        &self,
-        key: &LogKey,
-        rev: Rev,
-        after: Rev,
-        removed_added_at: Option<Rev>,
-    ) -> bool {
+    /// Whether a read hands out `key`'s row at `rev`.
+    pub fn selects(&self, key: &LogKey, rev: Rev) -> bool {
         match (self, key) {
             (Self::All, _) => true,
             (Self::Routes(routes), LogKey::Member { obj, part }) => {
-                let (on_part, on_object) = routes.carriers(obj, part, rev, after, removed_added_at);
+                let (on_part, on_object) = routes.carriers(obj, part, rev);
                 on_part || on_object
             }
             (Self::Routes(_), LogKey::Access { .. }) => false,
@@ -149,25 +188,14 @@ impl LogSelector {
 }
 
 impl LogRoutes {
-    /// Which routes carry the member row `(obj, part)` at `rev` to a read of `(after, ..]`:
-    /// `(part route, object route)`. A route carries the row when its bound is below `rev` and
-    /// the removal rule of [`LogSelector::Routes`] lets it through. The two answers are kept
-    /// apart because an [authorized read](PartStoreServe::read_authorized) admits them on
-    /// different grounds.
-    pub fn carriers(
-        &self,
-        obj: &ObjKey,
-        part: &PartKey,
-        rev: Rev,
-        after: Rev,
-        removed_added_at: Option<Rev>,
-    ) -> (bool, bool) {
-        let on_route = |bound: Rev| {
-            rev > bound && removed_added_at.is_none_or(|added_at| added_at <= bound.max(after))
-        };
+    /// Which routes carry the member row `(obj, part)` at `rev`: `(part route, object route)`.
+    /// A route carries the row when its bound is below `rev`. The two answers are kept apart
+    /// because an [authorized read](PartStoreServe::read_authorized) admits them on different
+    /// grounds.
+    pub fn carriers(&self, obj: &ObjKey, part: &PartKey, rev: Rev) -> (bool, bool) {
         (
-            self.parts.get(part).copied().is_some_and(on_route),
-            self.objects.get(obj).copied().is_some_and(on_route),
+            self.parts.get(part).is_some_and(|bound| rev > *bound),
+            self.objects.get(obj).is_some_and(|bound| rev > *bound),
         )
     }
 }
@@ -202,9 +230,41 @@ pub struct ObjState {
     pub parts: BTreeSet<PartKey>,
 }
 
-/// A part as a principal sees it from a cursor: what a peer decides its sync strategy on.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The identity of a store's log: minted when the store is created and again by
+/// [`PartStoreWrite::mint_generation`]. A cursor is a position in one generation's log; a
+/// client holding a cursor of another generation knows nothing about where it stands in this
+/// one.
+///
+/// Generations cover data loss, a peer that keeps its identity but not its data (a lost or
+/// recreated store, a restore from an older backup). A new store gets a new generation by being
+/// created. A restore brings back the files of the old one, with the old generation, so only
+/// the operator can tell the store: [`PartStoreWrite::mint_generation`] after a restore.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct Generation(pub Uuid);
+
+impl Generation {
+    pub fn mint() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl std::fmt::Display for Generation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+/// A part as a principal sees it from a cursor: what a peer decides its sync strategy on. It is
+/// also the wire answer of the summary call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartSummary {
+    /// The generation of the store that answers: the log that `latest_cursor` and the dirt
+    /// counts are positions in. A client compares it with the generation of the cursor it
+    /// holds.
+    pub generation: Generation,
     /// The rev of the part's latest member row. The cursor strat resumes from it, and a bucket
     /// walk hands over to the cursor strat at it: the walk reads state no older than this
     /// summary, so replaying from here may repeat rows but never skips one. Access rows do not
@@ -219,7 +279,7 @@ pub struct PartSummary {
 }
 
 /// How far a principal is behind on a part: the part's log rows past a cursor.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartDirtyCount {
     /// Member rows of the part, live or removed.
     pub member_changes: u64,
@@ -297,7 +357,9 @@ pub trait PartStoreWrite {
         parts: &[PartKey],
     ) -> impl Future<Output = Res<()>> + Send;
     /// Set objects' payloads. A changed payload re-stamps the object's member rows and promotes
-    /// its pending memberships; an unchanged one is a no-op.
+    /// its pending memberships; an unchanged one is a no-op. Unchanged means the same canonical
+    /// content (equal [`PayloadDigest`]), so `1` and `1.0` are the same payload and the stored
+    /// form is kept.
     fn set_payloads(
         &self,
         tx: &mut Self::Tx,
@@ -316,6 +378,20 @@ pub trait PartStoreWrite {
         tx: &mut Self::Tx,
         members: &[(ObjKey, PartKey)],
     ) -> impl Future<Output = Res<()>> + Send;
+    /// Drop the payloads of objects that are members of no part (payload laws 1, 2 and 4). An
+    /// object with no payload is skipped; one that holds a payload and is a live member of a
+    /// part panics, see law 2. Stamps nothing: a part-less object has no live log row, and its
+    /// tombstones stay.
+    fn drop_payloads(
+        &self,
+        tx: &mut Self::Tx,
+        objs: &[ObjKey],
+    ) -> impl Future<Output = Res<()>> + Send;
+    /// Mint a new [generation](Generation) for the store and return it. An admin operation, not
+    /// part of a transaction: it takes effect at once and durably, and changes no log row, so
+    /// it stamps nothing. Run it after restoring the store from a backup, whose files carry the
+    /// generation they had; a store cannot tell a restored file from a live one by itself.
+    fn mint_generation(&self) -> impl Future<Output = Res<Generation>> + Send;
     /// Grant principals access to parts, `(part, principal, level)`.
     fn grant_access(
         &self,
@@ -347,18 +423,14 @@ pub trait PartStoreRead {
     ) -> impl Future<Output = Res<Vec<BucketSummary>>> + Send;
     /// The part's live members.
     fn member_count(&self, part: &PartKey) -> impl Future<Output = Res<u64>> + Send;
-    /// The peer's cursors on the parts, in the order asked.
-    fn peer_part_cursors(
+    /// Objects that hold a payload and are a live member of no part (payload law 3), in key
+    /// order, at most `limit`, strictly after `after`: pass the last key returned to page. The
+    /// candidates for [`PartStoreWrite::drop_payloads`].
+    fn partless_objects(
         &self,
-        peer: &PeerKey,
-        parts: &[PartKey],
-    ) -> impl Future<Output = Res<Vec<Option<Rev>>>> + Send;
-    /// Move peers' cursors, `(peer, part, cursor)`. A cursor only advances: a lower one than
-    /// stored is ignored.
-    fn set_peer_part_cursors(
-        &self,
-        cursors: &[(PeerKey, PartKey, Rev)],
-    ) -> impl Future<Output = Res<()>> + Send;
+        limit: usize,
+        after: Option<&ObjKey>,
+    ) -> impl Future<Output = Res<Vec<ObjKey>>> + Send;
 }
 
 /// The responder's reads. Every one answers a principal, and every one decides access and
@@ -385,6 +457,8 @@ pub trait PartStoreServe {
     /// A handle on the latest committed rev, moved from the commit path after the commit is
     /// visible to reads (as [`RevSource::watch`](crate::rev::RevSource::watch)).
     fn watch(&self) -> RevWatch;
+    /// The store's current [generation](Generation): the one every [`PartSummary`] carries.
+    fn generation(&self) -> impl Future<Output = Res<Generation>> + Send;
     /// The log rows `principal` may read on `routes` in `(after, until]`, with each route's
     /// verdict and the payloads of the rows' objects, into `page`.
     ///

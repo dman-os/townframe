@@ -85,13 +85,18 @@
 //!    within a target.
 //! 10. *Drained.* `drained: true` means the target's read reached the newest revision of the
 //!     round's snapshot. It is a hint for pacing, never "the replay is over".
-//! 11. *Removals the client never saw.* The server may omit a removal for a membership that
-//!     first went live after the target's cursor, since the client cannot hold it. Omitting it
-//!     is allowed, never required. The omission is judged against the cursor the round was
-//!     asked from, so a client applies a round's answer for a target only while its cursor for
-//!     that target is still the round's cursor; an answer to an older round, overtaken by a
-//!     newer one, is dropped. Otherwise rows a newer round delivered could survive a removal
-//!     the older round's omission hid (found by the stack simulation).
+//! 11. *Every removal after the cursor.* The server delivers every removal of a membership
+//!     after the target's cursor, whatever rev the membership first went live at. The client's
+//!     applied state can be ahead of its cursor: the persisted cursor only passes settled work,
+//!     so a long fetch of one object holds it while a later membership is applied locally. If
+//!     that membership is removed and the client restarts (or unwants and wants the part
+//!     again) before applying the removal, a replay from the cursor would skip the add and the
+//!     removal together unless the removal is sent, and the member would stay locally for good
+//!     (found by the stack simulation). The price is removal rows for members the client may
+//!     never have held. A client applies a round's answer for a target only while its cursor
+//!     for that target is still the cursor the round was asked from; an answer to an older
+//!     round, overtaken by a newer one, is dropped, so rows of a stale answer never sit next
+//!     to a newer round's.
 //! 12. *Object targets carry content.* An object target delivers the object's changes in the
 //!     parts the client may read, not its membership removals; those travel on part targets.
 //!     An object target is refused while the object is live in no part the client may read.
@@ -106,6 +111,7 @@
 //!     [`wire::SessionError::Limit`]; `limit` and `hold_ms` are silently capped.
 
 pub mod client;
+pub(crate) mod lanes;
 pub mod responder;
 pub mod server;
 pub mod wire;

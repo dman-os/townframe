@@ -19,6 +19,10 @@
 //! | L9 wakeups | the watch moves after commit, never before | every commit, [`wakeups_follow_commit`] |
 //! | get | a transaction reads its own staged writes (a staged delete as `None`), then the committed row | before every batch, [`get_reads_your_writes`] |
 //! | tables | tables written in one transaction become visible and wake together, and neither on rollback | [`tables_commit_together`] |
+//! | P1 register | registering is idempotent and returns the stored cursor, `0` when new | [`consumer_cursors`], [`differential`] |
+//! | P2 report | a cursor only moves forward; unregistered consumer or cursor past the latest rev panics | [`consumer_cursors`], [`report_past_the_latest_rev_panics`], [`report_unregistered_panics`] |
+//! | P3 prune | drops exactly the tombstones at or below the lowest registered cursor, never a live row, nothing without consumers | [`prune_by_lowest_cursor`], [`differential`] |
+//! | P4 prune is silent | no rev consumed, no wakeup, reads equal the oracle's | [`prune_by_lowest_cursor`], [`differential`] |
 //!
 //! The laws are async and executor agnostic; the one place they poll by hand
 //! ([`WakeCount`]) is to see whether a wait is pending or was woken, which no executor reports.
@@ -34,6 +38,7 @@ use crate::interlude::*;
 use crate::okv::KeyRange;
 use crate::okv::Mutation;
 use crate::okv::OkvStore;
+use crate::okv::Pruned;
 use crate::okv::Selector;
 use crate::okv::oracle::Oracle;
 use crate::okv::row_bytes;
@@ -90,7 +95,20 @@ strike! {
             after: u8,
             limits: Limits,
         },
+        /// Register consumer `n % CONSUMERS`.
+        Register(u8),
+        /// Report consumer `n % CONSUMERS` (if registered) at a fraction (of 256) of the
+        /// committed revs, the latest rev included.
+        Report { consumer: u8, cursor: u8 },
+        Unregister(u8),
+        Prune,
     }
+}
+
+const CONSUMERS: u8 = 3;
+
+fn consumer_name(consumer: u8) -> String {
+    format!("consumer-{}", consumer % CONSUMERS)
 }
 
 /// A store and the oracle it must agree with.
@@ -248,6 +266,55 @@ impl<B: Backend> Harness<B> {
             assert_eq!(page.revisions().count(), 1, "limits exceeded: {page:?}");
         }
         assert_eq!(*page, self.oracle.read(selector, after, until, limits));
+    }
+
+    /// P1: register, and check the cursor and the consumer list against the oracle.
+    async fn register(&mut self, consumer: &str) -> Res<Rev> {
+        let cursor = self.store.register_consumer(consumer).await?;
+        assert_eq!(
+            cursor,
+            self.oracle.register(consumer),
+            "register {consumer}"
+        );
+        self.check_consumers().await?;
+        Ok(cursor)
+    }
+
+    /// P2: report a cursor to both and compare the consumer lists.
+    async fn report(&mut self, consumer: &str, cursor: Rev) -> Res<()> {
+        self.store.report_cursor(consumer, cursor).await?;
+        self.oracle.report(consumer, cursor);
+        self.check_consumers().await
+    }
+
+    async fn unregister(&mut self, consumer: &str) -> Res<()> {
+        self.store.unregister_consumer(consumer).await?;
+        self.oracle.unregister(consumer);
+        self.check_consumers().await
+    }
+
+    async fn check_consumers(&self) -> Res<()> {
+        assert_eq!(
+            &self.store.consumers().await?,
+            self.oracle.consumers(),
+            "registered consumers"
+        );
+        Ok(())
+    }
+
+    /// P3 and P4: prune, then check what it reports, that it consumed no rev and woke nobody,
+    /// and that every row still reads as the oracle says.
+    async fn prune(&mut self) -> Res<Pruned> {
+        let latest = self.oracle.latest_rev();
+        let pruned = self.store.prune().await?;
+        assert_eq!(pruned, self.oracle.prune(), "prune");
+        assert_eq!(self.store.latest_rev().await?, latest, "a prune took a rev");
+        assert_eq!(self.watch.latest(), latest, "a prune moved the watch");
+        if latest > 0 {
+            self.read(&Selector::All, 0, latest, limits(usize::MAX, None))
+                .await?;
+        }
+        Ok(pruned)
     }
 
     /// L4: page from `after` to the latest rev and compare the whole sweep with the oracle.
@@ -484,6 +551,21 @@ pub async fn differential<B: Backend>(backend: &B, ops: Vec<Op>) -> Res<()> {
                     .sweep(&selector, fraction_of(after, latest), limits)
                     .await?;
             }
+            Op::Register(consumer) => {
+                harness.register(&consumer_name(consumer)).await?;
+            }
+            Op::Report { consumer, cursor } => {
+                let name = consumer_name(consumer);
+                if harness.oracle.consumers().contains_key(&name) {
+                    harness
+                        .report(&name, fraction_of(cursor, latest + 1))
+                        .await?;
+                }
+            }
+            Op::Unregister(consumer) => harness.unregister(&consumer_name(consumer)).await?,
+            Op::Prune => {
+                harness.prune().await?;
+            }
         }
     }
     let latest = harness.oracle.latest_rev();
@@ -613,6 +695,160 @@ pub async fn tables_commit_together<B: Backend>(backend: &B) -> Res<()> {
     Ok(())
 }
 
+/// P1 and P2: registering returns the stored cursor (`0` when new) and is idempotent, a cursor
+/// only moves forward, and unregistering forgets the consumer.
+pub async fn consumer_cursors<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    harness
+        .commit(vec![
+            vec![put(1, b"a")],
+            vec![put(2, b"b")],
+            vec![put(3, b"c")],
+        ])
+        .await?;
+    assert_eq!(
+        harness.register("a").await?,
+        0,
+        "a new consumer starts at 0"
+    );
+    harness.report("a", 2).await?;
+    assert_eq!(harness.register("a").await?, 2, "registering again resumes");
+    harness.report("a", 1).await?;
+    harness.report("a", 2).await?;
+    assert_eq!(harness.register("a").await?, 2, "a cursor never goes back");
+    harness.report("a", 3).await?;
+    assert_eq!(harness.register("b").await?, 0);
+    assert_eq!(
+        harness.store.consumers().await?,
+        BTreeMap::from([("a".to_owned(), 3), ("b".to_owned(), 0)])
+    );
+    harness.unregister("a").await?;
+    harness.unregister("a").await?;
+    assert_eq!(
+        harness.register("a").await?,
+        0,
+        "a forgotten consumer is new"
+    );
+    Ok(())
+}
+
+/// P2: a cursor past the latest rev is a caller bug. The calling test is `#[should_panic]`.
+pub async fn report_past_the_latest_rev_panics<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    harness.commit(vec![vec![put(1, b"a")]]).await?;
+    harness.store.register_consumer("a").await?;
+    harness.store.report_cursor("a", 2).await?;
+    unreachable!("a cursor past the latest rev was accepted");
+}
+
+/// P2: a report for a consumer that never registered is a caller bug. The calling test is
+/// `#[should_panic]`.
+pub async fn report_unregistered_panics<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    harness.commit(vec![vec![put(1, b"a")]]).await?;
+    harness.store.report_cursor("nobody", 1).await?;
+    unreachable!("a report for an unregistered consumer was accepted");
+}
+
+/// P3 and P4: the lowest registered cursor is the floor, a lagging consumer holds tombstones
+/// back, live rows are never dropped, and a tombstone written after a prune is kept until the
+/// cursors pass it.
+pub async fn prune_by_lowest_cursor<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    harness
+        .commit(vec![
+            vec![put(1, b"a"), put(2, b"b"), put(3, b"c")],
+            vec![delete(1)],
+            vec![delete(2)],
+            vec![put(4, b"d")],
+            vec![delete(4)],
+        ])
+        .await?;
+    let all = Selector::All;
+    let rows = |page: Page<Bytes, Bytes>| {
+        page.entries
+            .into_iter()
+            .map(|entry| (entry.key[0], entry.rev, entry.value.is_some()))
+            .collect::<Vec<_>>()
+    };
+
+    let none = Pruned {
+        floor: 0,
+        tombstones: 0,
+    };
+    assert_eq!(harness.prune().await?, none, "no consumer, no prune");
+    assert_eq!(
+        rows(harness.read(&all, 0, 5, limits(10, None)).await?),
+        vec![(3, 1, true), (1, 2, false), (2, 3, false), (4, 5, false)]
+    );
+
+    harness.register("fast").await?;
+    harness.register("slow").await?;
+    harness.report("fast", 5).await?;
+    assert_eq!(
+        harness.prune().await?,
+        none,
+        "a consumer that never reported holds all back"
+    );
+
+    harness.report("slow", 3).await?;
+    assert_eq!(
+        harness.prune().await?,
+        Pruned {
+            floor: 3,
+            tombstones: 2
+        }
+    );
+    assert_eq!(
+        rows(harness.read(&all, 0, 5, limits(10, None)).await?),
+        vec![(3, 1, true), (4, 5, false)],
+        "the live row stays, the tombstone above the lagging cursor stays"
+    );
+
+    harness.report("slow", 5).await?;
+    assert_eq!(
+        harness.prune().await?,
+        Pruned {
+            floor: 5,
+            tombstones: 1
+        }
+    );
+    assert_eq!(
+        rows(harness.read(&all, 0, 5, limits(10, None)).await?),
+        vec![(3, 1, true)]
+    );
+    assert_eq!(
+        harness.prune().await?,
+        Pruned {
+            floor: 5,
+            tombstones: 0
+        }
+    );
+
+    // A key written again after its tombstone was pruned starts a new row, and its own
+    // tombstone waits for the cursors.
+    harness
+        .commit(vec![vec![put(1, b"e")], vec![delete(1)]])
+        .await?;
+    assert_eq!(
+        harness.prune().await?,
+        Pruned {
+            floor: 5,
+            tombstones: 0
+        }
+    );
+    harness.report("fast", 7).await?;
+    harness.report("slow", 7).await?;
+    assert_eq!(
+        harness.prune().await?,
+        Pruned {
+            floor: 7,
+            tombstones: 1
+        }
+    );
+    Ok(())
+}
+
 /// Runs the stream laws of [`crate::rev::laws`] against an okv backend: a table is the source,
 /// a transaction per call is the commit hook, and the oracle's read is the mapping.
 #[derive(Clone)]
@@ -682,6 +918,11 @@ pub fn ops() -> impl Strategy<Value = Vec<Op>> {
                 limits,
             }
         }),
+        1 => any::<u8>().prop_map(Op::Register),
+        2 => (any::<u8>(), any::<u8>())
+            .prop_map(|(consumer, cursor)| Op::Report { consumer, cursor }),
+        1 => any::<u8>().prop_map(Op::Unregister),
+        2 => Just(Op::Prune),
     ];
     proptest::collection::vec(op, 0..40)
 }

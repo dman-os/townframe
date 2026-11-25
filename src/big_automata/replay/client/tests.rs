@@ -35,7 +35,9 @@ fn acked(routes: &[Route]) -> (ReplayClient, UpdateSession) {
     }
     let open = send(&mut client);
     assert_eq!(
-        client.update_answered(&open, &updated(0, &[])).unwrap(),
+        client
+            .update_answered(&open, &updated(0, &[]), &mut vec![])
+            .unwrap(),
         UpdateOutcome::Applied { blocked: 0 }
     );
     (client, open)
@@ -88,7 +90,9 @@ fn law_2_one_update_flies_and_a_lost_one_is_resent_unchanged() {
     assert_eq!(send(&mut client), open);
     assert!(client.next_update().is_none());
     // The retry's answer is the first answer's: generation 0, nothing refused.
-    client.update_answered(&open, &updated(0, &[])).unwrap();
+    client
+        .update_answered(&open, &updated(0, &[]), &mut vec![])
+        .unwrap();
     let next = send(&mut client);
     assert_eq!(next.generation, 1);
     assert_eq!(next.additions.len(), 1);
@@ -103,14 +107,16 @@ fn stale_answers_change_nothing() {
     // A duplicate answer of the opening, and an answer naming the update in flight but for
     // another session, are both stale.
     assert_eq!(
-        client.update_answered(&open, &updated(0, &[])).unwrap(),
+        client
+            .update_answered(&open, &updated(0, &[]), &mut vec![])
+            .unwrap(),
         UpdateOutcome::Stale
     );
     let mut foreign = next.clone();
     foreign.session_id = Uuid::from_u128(2);
     assert_eq!(
         client
-            .update_answered(&foreign, &Err(SessionError::UnknownSession))
+            .update_answered(&foreign, &Err(SessionError::UnknownSession), &mut vec![])
             .unwrap(),
         UpdateOutcome::Stale
     );
@@ -120,7 +126,9 @@ fn stale_answers_change_nothing() {
         "a stale loss resends nothing"
     );
     assert_eq!(
-        client.update_answered(&next, &updated(1, &[])).unwrap(),
+        client
+            .update_answered(&next, &updated(1, &[]), &mut vec![])
+            .unwrap(),
         UpdateOutcome::Applied { blocked: 0 }
     );
     assert_eq!(client.acked().count(), 2);
@@ -143,7 +151,9 @@ fn law_3_dropped_routes_are_removed_and_never_acknowledged() {
     // the removal of the one in flight.
     client.unwant(&part_route(3));
     client.want(part_route(3));
-    client.update_answered(&next, &updated(1, &[])).unwrap();
+    client
+        .update_answered(&next, &updated(1, &[]), &mut vec![])
+        .unwrap();
     assert!(client.route_of(three).is_none());
     let after = send(&mut client);
     assert_eq!(after.removals, [three]);
@@ -166,7 +176,7 @@ fn law_4_refused_routes_block_stay_wanted_and_return_under_fresh_ids() {
         .0;
     assert_eq!(
         client
-            .update_answered(&open, &updated(0, &[refused]))
+            .update_answered(&open, &updated(0, &[refused]), &mut vec![])
             .unwrap(),
         UpdateOutcome::Applied { blocked: 1 }
     );
@@ -191,7 +201,9 @@ fn a_dropped_route_refused_in_flight_needs_no_removal() {
     let open = send(&mut client);
     client.unwant(&part_route(1));
     let id = open.additions[0].0;
-    client.update_answered(&open, &updated(0, &[id])).unwrap();
+    client
+        .update_answered(&open, &updated(0, &[id]), &mut vec![])
+        .unwrap();
     assert_eq!(client.blocked().count(), 0);
     assert!(client.next_update().is_none());
 }
@@ -204,7 +216,7 @@ fn law_5_unknown_session_reopens_with_the_whole_wanted_set() {
     let next = send(&mut client);
     assert_eq!(
         client
-            .update_answered(&next, &Err(SessionError::UnknownSession))
+            .update_answered(&next, &Err(SessionError::UnknownSession), &mut vec![])
             .unwrap(),
         UpdateOutcome::Reset
     );
@@ -240,7 +252,7 @@ fn law_5_a_round_naming_a_forgotten_session_resets() {
     );
     assert_eq!(
         client
-            .update_answered(&open, &Err(SessionError::UnknownSession))
+            .update_answered(&open, &Err(SessionError::UnknownSession), &mut vec![])
             .unwrap(),
         UpdateOutcome::Stale
     );
@@ -252,18 +264,28 @@ fn an_answer_ahead_of_the_update_resets_and_one_behind_is_an_error() {
     client.unwant(&part_route(1));
     client.want(part_route(2));
     let next = send(&mut client);
-    assert!(client.update_answered(&next, &updated(0, &[])).is_err());
+    assert!(
+        client
+            .update_answered(&next, &updated(0, &[]), &mut vec![])
+            .is_err()
+    );
     assert_eq!(
-        client.update_answered(&next, &updated(5, &[])).unwrap(),
+        client
+            .update_answered(&next, &updated(5, &[]), &mut vec![])
+            .unwrap(),
         UpdateOutcome::Reset
     );
     let mut client = ReplayClient::new(Uuid::from_u128(1));
     client.want(part_route(1));
     let open = send(&mut client);
-    assert!(client.update_answered(&open, &updated(0, &[99])).is_err());
     assert!(
         client
-            .update_answered(&open, &Err(SessionError::Invalid("x".into())))
+            .update_answered(&open, &updated(0, &[99]), &mut vec![])
+            .is_err()
+    );
+    assert!(
+        client
+            .update_answered(&open, &Err(SessionError::Invalid("x".into())), &mut vec![])
             .is_err()
     );
 }
@@ -279,7 +301,7 @@ fn law_14_a_limit_unwinds_the_update_as_maybe_applied() {
     let two = next.additions[0].0;
     assert_eq!(
         client
-            .update_answered(&next, &Err(SessionError::Limit))
+            .update_answered(&next, &Err(SessionError::Limit), &mut vec![])
             .unwrap(),
         UpdateOutcome::Limit
     );
@@ -471,7 +493,7 @@ fn law_4_wanting_a_wanted_route_is_a_no_op_in_every_standing() {
         .unwrap()
         .0;
     client
-        .update_answered(&open, &updated(0, &[refused]))
+        .update_answered(&open, &updated(0, &[refused]), &mut vec![])
         .unwrap();
     let before: Vec<_> = client.acked().map(|(id, _)| id).collect();
     // Acknowledged and blocked: still the same ids, nothing queued, the block stays.
@@ -513,7 +535,7 @@ fn law_4_unwanting_a_pending_or_blocked_route_leaves_without_a_removal() {
     let open = send(&mut client);
     let refused = open.additions[0].0;
     client
-        .update_answered(&open, &updated(0, &[refused]))
+        .update_answered(&open, &updated(0, &[refused]), &mut vec![])
         .unwrap();
     client.unwant(&part_route(2));
     assert_eq!(client.blocked().count(), 0);
@@ -532,7 +554,9 @@ fn law_4_unwanting_an_in_flight_route_removes_it_after_the_update_is_answered() 
     // The update is still out, so nothing goes before its answer.
     assert!(client.next_update().is_none());
     assert!(!client.is_settled());
-    client.update_answered(&open, &updated(0, &[])).unwrap();
+    client
+        .update_answered(&open, &updated(0, &[]), &mut vec![])
+        .unwrap();
     assert!(
         client.route_of(id).is_none(),
         "a dropped route is not acknowledged"
@@ -565,4 +589,59 @@ fn law_3_unwanting_then_wanting_a_route_gets_a_fresh_id() {
     assert_eq!(update.additions.len(), 1);
     assert_ne!(update.additions[0].0, one);
     assert_eq!(update.additions[0].1, part_route(1));
+}
+
+#[test]
+fn an_update_answer_names_the_routes_it_acknowledged() {
+    let mut client = ReplayClient::new(Uuid::from_u128(1));
+    client.want(part_route(1));
+    client.want(part_route(2));
+    client.want(obj_route(3));
+    let open = send(&mut client);
+    let id_of_route = |route: &Route| open.additions.iter().find(|(_, r)| r == route).unwrap().0;
+    let refused = id_of_route(&part_route(2));
+    let dropped = id_of_route(&obj_route(3));
+    // dropped while the update flew: its removal is queued, and it is not acknowledged
+    client.unwant(&obj_route(3));
+    let mut acked = vec![part_route(9)];
+    assert_eq!(
+        client
+            .update_answered(&open, &updated(0, &[refused]), &mut acked)
+            .unwrap(),
+        UpdateOutcome::Applied { blocked: 1 }
+    );
+    assert_eq!(
+        acked,
+        [part_route(1)],
+        "cleared first; neither blocked nor dropped"
+    );
+    assert!(client.is_acked(&part_route(1)));
+    assert!(
+        !client.is_acked(&part_route(2)),
+        "blocked is not acknowledged"
+    );
+    assert!(!client.is_acked(&obj_route(3)));
+    assert_eq!(client.next_update().unwrap().removals, [dropped]);
+}
+
+#[test]
+fn an_update_answer_that_acknowledges_nothing_leaves_acked_empty() {
+    let mut client = ReplayClient::new(Uuid::from_u128(1));
+    client.want(part_route(1));
+    let open = send(&mut client);
+    let mut acked = vec![part_route(9)];
+    client
+        .update_answered(&open, &Err(SessionError::UnknownSession), &mut acked)
+        .unwrap();
+    assert!(acked.is_empty(), "a reset acknowledges nothing");
+    let reopen = send(&mut client);
+    client
+        .update_answered(&reopen, &Err(SessionError::Limit), &mut acked)
+        .unwrap();
+    assert!(acked.is_empty(), "a limit acknowledges nothing");
+    acked.push(part_route(9));
+    client
+        .update_answered(&open, &updated(0, &[]), &mut acked)
+        .unwrap();
+    assert!(acked.is_empty(), "a stale answer acknowledges nothing");
 }
