@@ -89,7 +89,7 @@ $ day x intxt read m4 k7 --turns 20-45   # a session as turns
 ```
 $ day x intxt comment m4 4c1f:src/big_cabinet_core/reference.rs:120-124 -m "Why not reuse the fragment?"
 comment kz   undo: day x intxt rm m4 kz
-$ day x intxt reply kz -m "Done in 77b2" --resolve
+$ day x intxt reply kz --intxt m4 -m "Done in 77b2" --resolve
 $ day x intxt inbox m4
 ```
 
