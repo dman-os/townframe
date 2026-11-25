@@ -182,7 +182,7 @@ impl Puller {
         let cursors = &self.cursors;
         let request = self
             .machine
-            .round(|route| cursors.get(route).copied(), limit, 0)?;
+            .round(|route| cursors.get(route).copied(), limit, 0, None)?;
         let reply = answer(client.call(RequestContext::root(), request.clone()).await);
         let mut outcomes = Vec::new();
         let round = self
@@ -352,6 +352,7 @@ async fn a_session_the_server_does_not_hold_is_unknown() {
                 targets: vec![(0, 0)],
                 limit: 8,
                 hold_ms: 0,
+                linger_ms: None,
             },
         )
         .await;
@@ -619,13 +620,15 @@ async fn exercise_the_rpc_client(client: &impl BigSyncRpcClient, (first, second)
         .expect("transport")
         .expect("method");
     assert_eq!(updated.refused, Vec::<u32>::new());
+    let round = || PageSession {
+        session_id,
+        targets: vec![(0, 0)],
+        limit: 8,
+        hold_ms: 0,
+        linger_ms: None,
+    };
     let page = client
-        .page_replay_session(PageSession {
-            session_id,
-            targets: vec![(0, 0)],
-            limit: 8,
-            hold_ms: 0,
-        })
+        .page_replay_session(round())
         .await
         .expect("transport")
         .expect("method");
@@ -637,12 +640,7 @@ async fn exercise_the_rpc_client(client: &impl BigSyncRpcClient, (first, second)
         .expect("method");
     assert_eq!(
         client
-            .page_replay_session(PageSession {
-                session_id,
-                targets: vec![(0, 0)],
-                limit: 8,
-                hold_ms: 0,
-            })
+            .page_replay_session(round())
             .await
             .expect("transport"),
         Err(SessionError::UnknownSession)

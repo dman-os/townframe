@@ -13,6 +13,7 @@ pub(super) struct ORound {
     pub targets: BTreeSet<(Route, Rev)>,
     pub limit: u32,
     pub hold_ms: u32,
+    pub linger_ms: Option<u32>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -244,6 +245,11 @@ impl Oracle {
                     self.config.hold_ms
                 } else {
                     0
+                },
+                linger_ms: if lane == Lane::Live {
+                    self.config.live_linger_ms
+                } else {
+                    self.config.bulk_linger_ms
                 },
             });
         }

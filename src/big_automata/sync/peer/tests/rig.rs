@@ -28,6 +28,8 @@ pub(super) fn config() -> Config {
         },
         lanes: lanes::Config {
             hold_ms: 300,
+            live_linger_ms: None,
+            bulk_linger_ms: None,
             live_limit: 1,
             bulk_batch: 1,
             bulk_linger: Duration::from_secs(1),

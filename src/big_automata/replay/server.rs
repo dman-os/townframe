@@ -258,6 +258,7 @@ impl ReplayServer {
         round.index()?;
         round.limit = request.limit.clamp(1, MAX_PAGE_LIMIT);
         round.hold = Duration::from_millis(request.hold_ms.into()).min(MAX_HOLD);
+        round.linger = Duration::from_millis(request.linger_ms.unwrap_or(0).into());
         Ok(())
     }
 
@@ -321,6 +322,8 @@ strike! {
         after: Rev,
         limit: u32,
         hold: Duration,
+        /// The client's linger hint, as asked (law 13); the responder caps it.
+        linger: Duration,
         /// Scratch for [`Round::answer`]: per payload of the read, the event its payload
         /// moved into, so the events before it clone from there.
         moved_into: Vec<Option<usize>>,
@@ -339,6 +342,7 @@ impl Default for Round {
             after: 0,
             limit: 1,
             hold: Duration::ZERO,
+            linger: Duration::ZERO,
             moved_into: default(),
         }
     }
@@ -388,6 +392,12 @@ impl Round {
     /// How long the round may wait for rows, capped (laws 13, 14).
     pub fn hold(&self) -> Duration {
         self.hold
+    }
+
+    /// How long the client asks the round to linger after its first row, as asked: the
+    /// responder caps it (law 13). Zero when the request carried no hint.
+    pub fn linger(&self) -> Duration {
+        self.linger
     }
 
     fn index(&mut self) -> Result<(), SessionError> {

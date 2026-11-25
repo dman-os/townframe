@@ -102,6 +102,10 @@ impl DriverConfig {
             },
             lanes: crate::replay::lanes::Config {
                 hold_ms: u32::try_from(MAX_HOLD.as_millis()).expect(ERROR_IMPOSSIBLE),
+                // a starting point to tune by benchmark: a burst of commits within 20 ms
+                // answers a held `Live` round once, and `Bulk` never lingers
+                live_linger_ms: Some(20),
+                bulk_linger_ms: None,
                 // a held `Live` round takes at most a quarter of the window, which leaves the
                 // machine's requirement that the window exceed twice that
                 live_limit: (self.window / 4).max(1),

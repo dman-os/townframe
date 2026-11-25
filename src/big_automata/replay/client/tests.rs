@@ -222,7 +222,7 @@ fn law_5_unknown_session_reopens_with_the_whole_wanted_set() {
     );
     assert_ne!(client.session_id(), open.session_id);
     assert_eq!(client.acked().count(), 0);
-    assert!(client.round(|_| Some(0), 10, 0).is_none());
+    assert!(client.round(|_| Some(0), 10, 0, None).is_none());
     let reopen = send(&mut client);
     assert_eq!(reopen.session_id, client.session_id());
     assert_eq!(reopen.generation, 0);
@@ -234,7 +234,7 @@ fn law_5_unknown_session_reopens_with_the_whole_wanted_set() {
 #[test]
 fn law_5_a_round_naming_a_forgotten_session_resets() {
     let (mut client, open) = acked(&[part_route(1)]);
-    let request = client.round(|_| Some(0), 10, 0).unwrap();
+    let request = client.round(|_| Some(0), 10, 0, None).unwrap();
     let mut outcomes = Vec::new();
     assert_eq!(
         client
@@ -320,12 +320,28 @@ fn law_6_rounds_name_acknowledged_targets_with_the_callers_cursors() {
     send(&mut client);
     let one = id_of(&client, &part_route(1));
     let request = client
-        .round(|route| (*route != part_route(2)).then_some(7), 50, 100)
+        .round(
+            |route| (*route != part_route(2)).then_some(7),
+            50,
+            100,
+            None,
+        )
         .unwrap();
     // Route 3 is in flight, route 2 got no cursor.
     assert_eq!(request.targets, [(one, 7)]);
     assert_eq!((request.limit, request.hold_ms), (50, 100));
-    assert!(client.round(|_| None, 50, 100).is_none());
+    assert!(client.round(|_| None, 50, 100, None).is_none());
+}
+
+#[test]
+fn a_round_carries_the_linger_hint_it_is_given() {
+    let (client, _) = acked(&[part_route(1)]);
+    let hinted = client.round(|_| Some(0), 10, 0, Some(20)).unwrap();
+    assert_eq!(hinted.linger_ms, Some(20));
+    assert_eq!(
+        client.round(|_| Some(0), 10, 0, None).unwrap().linger_ms,
+        None
+    );
 }
 
 #[test]
@@ -335,7 +351,7 @@ fn law_7_8_10_round_outcomes_advance_or_block() {
         id_of(&client, &part_route(1)),
         id_of(&client, &part_route(2)),
     );
-    let request = client.round(|_| Some(3), 10, 0).unwrap();
+    let request = client.round(|_| Some(3), 10, 0, None).unwrap();
     let mut outcomes = Vec::new();
     let answer = page(&[
         (
@@ -385,7 +401,7 @@ fn round_answers_racing_the_clients_own_changes_are_stale() {
         id_of(&client, &part_route(1)),
         id_of(&client, &part_route(2)),
     );
-    let request = client.round(|_| Some(0), 10, 0).unwrap();
+    let request = client.round(|_| Some(0), 10, 0, None).unwrap();
     client.unwant(&part_route(2));
     let mut outcomes = Vec::new();
     // The removal overtook the round.
@@ -442,7 +458,7 @@ fn faulty_pages_are_errors() {
         id_of(&client, &part_route(1)),
         id_of(&client, &part_route(2)),
     );
-    let request = client.round(|_| Some(5), 10, 0).unwrap();
+    let request = client.round(|_| Some(5), 10, 0, None).unwrap();
     let ok = Verdict::Events {
         resume: 5,
         drained: false,

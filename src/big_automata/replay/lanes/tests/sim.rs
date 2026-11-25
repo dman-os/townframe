@@ -226,6 +226,7 @@ impl Harness {
                     targets,
                     limit: page.limit,
                     hold_ms: page.hold_ms,
+                    linger_ms: page.linger_ms,
                 }
             })
             .collect();

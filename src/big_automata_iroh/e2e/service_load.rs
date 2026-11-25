@@ -189,7 +189,12 @@ impl Served {
         puller.cursors.insert(part_route(index), head);
         puller
             .machine
-            .round(|route| puller.cursors.get(route).copied(), 16, hold_ms)
+            .round(
+                |route| puller.cursors.get(route).copied(),
+                16,
+                hold_ms,
+                None,
+            )
             .expect("the target is acknowledged")
     }
 
