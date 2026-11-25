@@ -5,7 +5,7 @@ name: bench
 # `.agents/skills/benchmarking/SKILL.md`.
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "src/big_automata/**"
       - "src/big_automata_web/**"
@@ -27,6 +27,8 @@ env:
 jobs:
   deno-tests:
     name: bench tooling tests
+    # Draft PRs skip CI; marking one ready for review runs it.
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -37,7 +39,8 @@ jobs:
 
   gate:
     name: instruction and allocation gate
-    if: github.event_name == 'pull_request'
+    # Draft PRs skip CI; marking one ready for review runs it.
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
