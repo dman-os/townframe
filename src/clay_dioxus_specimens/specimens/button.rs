@@ -59,6 +59,24 @@ pub fn ButtonSpecimens() -> Element {
             }
         }
         FoundationSection {
+            id: "button-label-styles".to_string(),
+            title: "Label styles".to_string(),
+            description: "Emphasis inside a label: strong and em (a toggle's own state is data-state, not the label's weight).".to_string(),
+            div { class: "grid gap-3",
+                Row { label: "emphasis".to_string(),
+                    for variant in [ButtonVariant::Primary, ButtonVariant::Outline] {
+                        Button { key: "{variant.as_str()}", variant, onclick: |()| {},
+                            strong { "Bold" }
+                            " "
+                            em { "italic" }
+                            " "
+                            strong { em { "both" } }
+                        }
+                    }
+                }
+            }
+        }
+        FoundationSection {
             id: "button-toggle".to_string(),
             title: "Toggle".to_string(),
             description: "pressed makes a button a toggle: aria-pressed and data-state (on|off). The caller owns the state.".to_string(),
