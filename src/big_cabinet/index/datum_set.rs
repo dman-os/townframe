@@ -242,6 +242,66 @@ impl DatumSetStore {
         Arc::clone(&self.drawer_changes)
     }
 
+    /// Wait until the worker has settled `doc_id` at heads that include every one of `heads`.
+    ///
+    /// Why this exists: the drawer membership rows now move with the datum-set revision, in the
+    /// settle transaction that indexes the roster datum (ADR 024: indexes are fed only by the
+    /// change stream, local writes take the remote path). A local roster write is therefore
+    /// visible in the rows only after the worker settles the revision carrying it, so a caller
+    /// that must read its own write (the drawer operations, `GetDrawer`, discovery) asks for the
+    /// receipt's heads here instead of assuming the rows are already there.
+    ///
+    /// Coverage is ancestry, not equality: the document may have moved on past `heads` by the
+    /// time it settles, and that settles them too. There is no timeout and no retry: the wait is
+    /// woken by the settle counter alone. The worker parks a document it cannot read (missing
+    /// dependencies, not yet materialized); a document that is not materialized here is refused
+    /// with an error rather than waited on, since the worker would never settle it. A local write
+    /// leaves its document materialized, so that refusal is a broken invariant, not a lag.
+    pub(crate) async fn settled_through(
+        &self,
+        repo: &SharedBigRepo,
+        doc_id: &DocId,
+        heads: &[ChangeHash],
+    ) -> Res<()> {
+        // Subscribed before the first check, so a settle landing between the check and the wait
+        // still wakes it.
+        let mut settled = self.settled.subscribe();
+        loop {
+            let handle = match repo.get_doc_for_projection(doc_id).await? {
+                DocLookup::Ready(handle) => handle,
+                DocLookup::Missing | DocLookup::PendingMaterialization => {
+                    return Err(ferr!(
+                        "document {doc_id} is not materialized, so the worker cannot settle it"
+                    ));
+                }
+            };
+            if let Some(DocState {
+                heads: Some(settled_heads),
+                ..
+            }) = self.doc_state(doc_id).await?
+            {
+                let covered = handle
+                    .with_document(|doc| {
+                        // `get_changes(have)` is every change `have` does not already cover.
+                        let uncovered: BTreeSet<ChangeHash> = doc
+                            .get_changes(&settled_heads)
+                            .into_iter()
+                            .map(|change| change.hash())
+                            .collect();
+                        heads.iter().all(|head| !uncovered.contains(head))
+                    })
+                    .await?;
+                if covered {
+                    return Ok(());
+                }
+            }
+            settled
+                .changed()
+                .await
+                .expect("the store owns the settle counter");
+        }
+    }
+
     /// Open the frontier across every tag namespace, for consumers (such as
     /// doc-scoped observation) whose filter is not a single tag.
     pub async fn open_all(
