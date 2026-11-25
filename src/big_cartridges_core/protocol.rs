@@ -458,6 +458,7 @@ declare_service_protocol! {
 }
 
 mod installs;
+mod requests;
 
 pub use installs::CartridgeInstallRecord;
 pub use installs::CartridgeInstalls;
@@ -468,3 +469,18 @@ pub use installs::ObserveCartridgeInstalls;
 pub use installs::SetCartridgeEnabled;
 pub use installs::SetCartridgeGrant;
 pub use installs::UninstallCartridge;
+pub use requests::AWAIT_MAX_HOLD_MS;
+pub use requests::AnswerCartridgeGrantRequest;
+pub use requests::AwaitCartridgeGrantRequest;
+pub use requests::CartridgeGrantRecord;
+pub use requests::CartridgeGrants;
+pub use requests::FiledGrantRequest;
+pub use requests::GrantAnswer;
+pub use requests::GrantRequestAnswer;
+pub use requests::GrantRequestRecord;
+pub use requests::GrantRequestState;
+pub use requests::GrantRequests;
+pub use requests::ListCartridgeGrantRequests;
+pub use requests::ListCartridgeGrants;
+pub use requests::RequestCartridgeGrant;
+pub use requests::RequestedAccess;

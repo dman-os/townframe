@@ -32,6 +32,7 @@ pub impl big_nodule_core::config::AdmissionCache::fn insert (& self , cartridge_
 pub impl big_nodule_core::config::AdmissionCache::fn needs_read (& self , cartridge_id : & CartridgeId , pin : & DatumPin) -> bool
 pub impl big_nodule_core::config::AdmissionCache::fn new () -> Self
 pub impl big_nodule_core::config::AdmissionCache::fn restore (& self , cartridge_id : & CartridgeId , displaced : Displaced)
+pub impl big_nodule_core::config::CartridgeConfig::fn attach_boot_grants (& mut self , grants : BTreeMap < GrantKey , GrantBody >)
 pub impl big_nodule_core::config::CartridgeConfig::fn clear (& mut self)
 pub impl big_nodule_core::config::CartridgeConfig::fn grants (& self) -> impl Iterator < Item = (& GrantKey , & DatumSlot < GrantBody >) >
 pub impl big_nodule_core::config::CartridgeConfig::fn identity (& self) -> & DatumSlot < CartridgeConfigIdentity >
@@ -41,6 +42,7 @@ pub impl big_nodule_core::config::DatumSlot < T >::fn accepted (& self) -> Optio
 pub impl big_nodule_core::config::DatumSlot < T >::fn is_absent (& self) -> bool
 pub impl big_nodule_core::config::NoduleConfig::fn attach_cartridge_docs (& mut self , docs : BTreeMap < CartridgeId , CartridgeConfig >)
 pub impl big_nodule_core::config::NoduleConfig::fn carried_keys (& self) -> & BTreeMap < DatumKey , DatumRead >
+pub impl big_nodule_core::config::NoduleConfig::fn cartridge_docs (& self) -> & BTreeMap < CartridgeId , CartridgeConfig >
 pub impl big_nodule_core::config::NoduleConfig::fn config_docs (& self) -> BTreeMap < CartridgeId , DocId >
 pub impl big_nodule_core::config::NoduleConfig::fn entries (& self) -> & BTreeMap < CartridgeId , NoduleEntry >
 pub impl big_nodule_core::config::NoduleConfig::fn entry (& self , cartridge_id : & CartridgeId) -> Option < & NoduleEntry >
