@@ -23,6 +23,8 @@ structstruck.workspace = true
 #
 # os
 rand.workspace = true
+# `Instant` that is std's on native targets and readable on wasm32-unknown-unknown
+web-time.workspace = true
 
 #
 # error
@@ -36,10 +38,13 @@ surelock.workspace = true
 async-channel.workspace = true
 async-trait.workspace = true
 future_form.workspace = true
+# `#[future_form]` expands to `::futures::future::{BoxFuture, LocalBoxFuture}`
+futures.workspace = true
 
 #
 # encoding
 blake3.workspace = true
+json-canon.workspace = true
 bs58.workspace = true
 serde.workspace = true
 autosurgeon = { workspace = true, optional = true }
@@ -56,4 +61,8 @@ proptest = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
-futures.workspace = true
+
+# `rand` pulls in getrandom 0.3. On the web, `.cargo/config.toml` selects its `wasm_js`
+# backend, which only compiles with the feature of the same name turned on.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom03 = { workspace = true, features = ["wasm_js"] }

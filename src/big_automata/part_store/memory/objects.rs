@@ -2,6 +2,7 @@
 
 use std::ops::Bound;
 
+use super::MemberRow;
 use super::ObjRow;
 use super::State;
 use crate::interlude::*;
@@ -82,18 +83,25 @@ impl State {
             },
             Some(LogEntry::Member(Membership { added_at: rev })),
         );
-        self.members.insert((
-            part.clone(),
-            BuckId::deepest_from_obj_key(obj).index(),
-            obj.clone(),
-        ));
+        self.members
+            .entry((
+                part.clone(),
+                BuckId::deepest_from_obj_key(obj).index(),
+                obj.clone(),
+            ))
+            .or_insert(MemberRow {
+                first_added_at: rev,
+            });
         self.bucket_transition(part, obj, rev, old, BucketMemberKind::Live(digest));
     }
 
-    pub(super) fn set_payloads(&mut self, rev: Rev, payloads: Vec<(ObjKey, PayloadState)>) -> bool {
+    pub(super) fn set_payloads(
+        &mut self,
+        rev: Rev,
+        payloads: Vec<(ObjKey, PayloadState, PayloadDigest)>,
+    ) -> bool {
         let mut stamped = false;
-        for (obj, payload) in payloads {
-            let digest = payload.digest();
+        for (obj, payload, digest) in payloads {
             let old = self.objs.get(&obj);
             if old.is_some_and(|row| row.payload == payload) {
                 continue;

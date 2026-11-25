@@ -354,6 +354,8 @@ wcmp-wasm-core-wasmi = { git = "https://github.com/dman-os/wasm-component-model-
 wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "da35a9b4e4cc71dacb57323b906093f9e18e78b6" }
 wasm-bindgen = "=0.2.127"
 wasm-bindgen-futures = "0.4.77"
+web-time = "1.1"
+json-canon = "0.1.3"
 js-sys = "0.3.104"
 web-sys = "0.3.104"
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}

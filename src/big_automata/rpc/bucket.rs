@@ -3,7 +3,7 @@ use crate::interlude::*;
 use crate::fingerprint::Fingerprint;
 use crate::fingerprint::FingerprintSeed;
 use crate::ids::BuckId;
-use crate::store::ObjPayload;
+use crate::part_store::PayloadDigest;
 use crate::store::bucket::BucketSummary;
 
 /// Changed buckets are returned for every level from [`Self::offset`].level()
@@ -64,12 +64,27 @@ structstruck::strike! {
                 pub entries: Vec<pub struct BucketObjPageEntry {
                     pub obj_key: ObjKey,
                     pub dead: bool,
-                    pub fp: Fingerprint<(&'static str, ObjKey, ObjPayload)>,
+                    /// Over the object's payload digest, under the request's seed: see
+                    /// [`BucketObjPageEntry::fingerprint`].
+                    pub fp: Fingerprint<(&'static str, ObjKey, PayloadDigest)>,
                 }>,
                 pub next_after: Option<ObjKey>,
                 pub done: bool,
             }
         >
+    }
+}
+
+impl BucketObjPageEntry {
+    /// A leaf entry's fingerprint: the object and its payload digest under the request's seed.
+    /// Both sides compute it from the digest stored at write time, so neither rereads payloads
+    /// and a withheld payload compares like a held one.
+    pub fn fingerprint(
+        seed: &FingerprintSeed,
+        obj_key: &ObjKey,
+        digest: PayloadDigest,
+    ) -> Fingerprint<(&'static str, ObjKey, PayloadDigest)> {
+        Fingerprint::new(seed, &("big-sync-obj-fp-v2", obj_key.clone(), digest))
     }
 }
 

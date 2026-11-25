@@ -17,6 +17,9 @@ use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::ops::Bound;
 
+use future_form::Local;
+use future_form::Sendable;
+use future_form::future_form;
 use tokio::sync::watch;
 
 use crate::interlude::*;
@@ -349,7 +352,7 @@ where
     /// anything.
     pub(crate) fn read_into(
         &self,
-        selects: impl Fn(&K, Rev) -> bool,
+        selects: impl Fn(&K, Rev, Option<&V>) -> bool,
         cost: impl Fn(&K, Option<&V>) -> usize,
         after: Rev,
         until: Rev,
@@ -372,12 +375,12 @@ where
             .rows_by_rev
             .range((Bound::Excluded(after), Bound::Included(until)))
         {
-            let (rev_len, rev_bytes) = rows.iter().filter(|(key, _)| selects(key, rev)).fold(
-                (0usize, 0usize),
-                |(len, bytes), (key, value)| {
+            let (rev_len, rev_bytes) = rows
+                .iter()
+                .filter(|(key, value)| selects(key, rev, value.as_ref()))
+                .fold((0usize, 0usize), |(len, bytes), (key, value)| {
                     (len + 1, bytes.saturating_add(cost(key, value.as_ref())))
-                },
-            );
+                });
             if rev_len == 0 {
                 continue;
             }
@@ -389,22 +392,23 @@ where
                 return;
             }
             bytes = bytes.saturating_add(rev_bytes);
-            page.entries
-                .extend(
-                    rows.iter()
-                        .filter(|(key, _)| selects(key, rev))
-                        .map(|(key, value)| Entry {
-                            key: key.clone(),
-                            rev,
-                            value: value.clone(),
-                        }),
-                );
+            page.entries.extend(
+                rows.iter()
+                    .filter(|(key, value)| selects(key, rev, value.as_ref()))
+                    .map(|(key, value)| Entry {
+                        key: key.clone(),
+                        rev,
+                        value: value.clone(),
+                    }),
+            );
         }
     }
 }
 
-#[async_trait]
-impl<K, V> RevSource for MemoryOkv<K, V>
+// Every operation is one synchronous critical section, so the memory backend does its work when
+// called and hands back a ready future.
+#[future_form(Sendable, Local)]
+impl<Async: FutureForm, K, V> RevSource<Async> for MemoryOkv<K, V>
 where
     K: Ord + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V: Clone + AsRef<[u8]> + Send + Sync + 'static,
@@ -413,22 +417,22 @@ where
     type Value = V;
     type Selector = Selector<K>;
 
-    async fn latest_rev(&self) -> Res<Rev> {
-        Ok(self.with_table(OkvTable::rev))
+    fn latest_rev(&self) -> Async::Future<'_, Res<Rev>> {
+        Async::ready(Ok(self.with_table(OkvTable::rev)))
     }
 
     /// Copies one bounded page out under the lock.
-    async fn read(
-        &self,
-        selector: &Selector<K>,
+    fn read<'a>(
+        &'a self,
+        selector: &'a Selector<K>,
         after: Rev,
         until: Rev,
         limits: Limits,
-        page: &mut Page<K, V>,
-    ) -> Res<()> {
+        page: &'a mut Page<K, V>,
+    ) -> Async::Future<'a, Res<()>> {
         self.with_table(|table| {
             table.read_into(
-                |key, _rev| selector.matches(key),
+                |key, _rev, _value| selector.matches(key),
                 row_bytes,
                 after,
                 until,
@@ -436,7 +440,7 @@ where
                 page,
             );
         });
-        Ok(())
+        Async::ready(Ok(()))
     }
 
     fn watch(&self) -> RevWatch {
@@ -444,37 +448,39 @@ where
     }
 }
 
-#[async_trait]
-impl<K, V> OkvStore for MemoryOkv<K, V>
+#[future_form(Sendable, Local)]
+impl<Async: FutureForm, K, V> OkvStore<Async> for MemoryOkv<K, V>
 where
     K: Ord + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V: Clone + AsRef<[u8]> + Send + Sync + 'static,
 {
     type Tx = MemoryTx;
 
-    async fn apply<I>(&self, tx: &mut MemoryTx, mutations: I) -> Res<Rev>
-    where
-        I: IntoIterator<Item = Mutation<K, V>> + Send,
-        I::IntoIter: Send,
-    {
+    fn apply<'a>(
+        &'a self,
+        tx: &'a mut MemoryTx,
+        mutations: Vec<Mutation<K, V>>,
+    ) -> Async::Future<'a, Res<Rev>> {
         let stage = self.stage(tx);
         let rev = stage.rev.checked_add(1).expect("okv rev overflow");
-        let mut empty = true;
+        assert!(
+            !mutations.is_empty(),
+            "an empty mutation batch has no rows to stamp"
+        );
         for mutation in mutations {
-            empty = false;
             let (key, value) = mutation.into_row();
             stage.rows.insert(key, (rev, value));
         }
-        assert!(!empty, "an empty mutation batch has no rows to stamp");
         stage.rev = rev;
-        Ok(rev)
+        Async::ready(Ok(rev))
     }
 
-    async fn get(&self, tx: &mut MemoryTx, key: &K) -> Res<Option<V>> {
+    fn get<'a>(&'a self, tx: &'a mut MemoryTx, key: &'a K) -> Async::Future<'a, Res<Option<V>>> {
         let stage = self.stage(tx);
-        if let Some((_, value)) = stage.rows.get(key) {
-            return Ok(value.clone());
-        }
-        Ok(self.with_table(|table| table.get(key).and_then(|(_rev, value)| value.clone())))
+        let value = match stage.rows.get(key) {
+            Some((_, value)) => value.clone(),
+            None => self.with_table(|table| table.get(key).and_then(|(_rev, value)| value.clone())),
+        };
+        Async::ready(Ok(value))
     }
 }

@@ -3,6 +3,7 @@
 
 use std::pin::pin;
 
+use future_form::Sendable;
 use futures::executor::block_on;
 use proptest::prelude::*;
 
@@ -135,7 +136,14 @@ type Table = MemoryOkv<Bytes, Bytes>;
 
 fn read_all(table: &Table, until: u64) -> Res<Page<Bytes, Bytes>> {
     let mut page = Page::default();
-    block_on(table.read(&Selector::All, 0, until, limits(10, None), &mut page))?;
+    block_on(RevSource::<Sendable>::read(
+        table,
+        &Selector::All,
+        0,
+        until,
+        limits(10, None),
+        &mut page,
+    ))?;
     Ok(page)
 }
 
@@ -147,17 +155,38 @@ fn a_conflicting_commit_leaves_no_trace() -> Res<()> {
     let table: Table = db.table();
     let bystander: Table = db.table();
     let mut loser = db.begin();
-    assert_eq!(block_on(table.apply(&mut loser, vec![put(1, b"lost")]))?, 1);
     assert_eq!(
-        block_on(bystander.apply(&mut loser, vec![put(1, b"lost")]))?,
+        block_on(OkvStore::<Sendable>::apply(
+            &table,
+            &mut loser,
+            vec![put(1, b"lost")]
+        ))?,
+        1
+    );
+    assert_eq!(
+        block_on(OkvStore::<Sendable>::apply(
+            &bystander,
+            &mut loser,
+            vec![put(1, b"lost")]
+        ))?,
         1
     );
     let mut winner = db.begin();
-    assert_eq!(block_on(table.apply(&mut winner, vec![put(2, b"won")]))?, 1);
+    assert_eq!(
+        block_on(OkvStore::<Sendable>::apply(
+            &table,
+            &mut winner,
+            vec![put(2, b"won")]
+        ))?,
+        1
+    );
     winner.commit()?;
 
     let wakes = WakeCount::default();
-    let (mut table_watch, mut bystander_watch) = (table.watch(), bystander.watch());
+    let (mut table_watch, mut bystander_watch) = (
+        RevSource::<Sendable>::watch(&table),
+        RevSource::<Sendable>::watch(&bystander),
+    );
     let mut table_wait = pin!(table_watch.wait_past(1));
     let mut bystander_wait = pin!(bystander_watch.wait_past(0));
     assert!(wakes.poll(table_wait.as_mut()).is_pending());
@@ -173,8 +202,8 @@ fn a_conflicting_commit_leaves_no_trace() -> Res<()> {
     assert_eq!(wakes.count(), 0, "a failed commit woke a waiter");
     assert_eq!(
         (
-            block_on(table.latest_rev())?,
-            block_on(bystander.latest_rev())?
+            block_on(RevSource::<Sendable>::latest_rev(&table))?,
+            block_on(RevSource::<Sendable>::latest_rev(&bystander))?
         ),
         (1, 0)
     );
@@ -191,8 +220,22 @@ fn a_conflicting_commit_leaves_no_trace() -> Res<()> {
     );
 
     let mut next = db.begin();
-    assert_eq!(block_on(table.apply(&mut next, vec![put(3, b"c")]))?, 2);
-    assert_eq!(block_on(bystander.apply(&mut next, vec![put(3, b"c")]))?, 1);
+    assert_eq!(
+        block_on(OkvStore::<Sendable>::apply(
+            &table,
+            &mut next,
+            vec![put(3, b"c")]
+        ))?,
+        2
+    );
+    assert_eq!(
+        block_on(OkvStore::<Sendable>::apply(
+            &bystander,
+            &mut next,
+            vec![put(3, b"c")]
+        ))?,
+        1
+    );
     next.commit()?;
     Ok(())
 }
@@ -205,18 +248,30 @@ fn a_read_conflicts_with_a_later_commit() -> Res<()> {
     let db = MemoryDb::default();
     let table: Table = db.table();
     let mut seed = db.begin();
-    block_on(table.apply(&mut seed, vec![put(1, b"a")]))?;
+    block_on(OkvStore::<Sendable>::apply(
+        &table,
+        &mut seed,
+        vec![put(1, b"a")],
+    ))?;
     seed.commit()?;
 
     let mut reader = db.begin();
     assert_eq!(
-        block_on(table.get(&mut reader, &vec![1]))?,
+        block_on(OkvStore::<Sendable>::get(&table, &mut reader, &vec![1]))?,
         Some(b"a".to_vec())
     );
     let mut writer = db.begin();
-    block_on(table.apply(&mut writer, vec![put(1, b"b")]))?;
+    block_on(OkvStore::<Sendable>::apply(
+        &table,
+        &mut writer,
+        vec![put(1, b"b")],
+    ))?;
     writer.commit()?;
-    block_on(table.apply(&mut reader, vec![put(1, b"a+")]))?;
+    block_on(OkvStore::<Sendable>::apply(
+        &table,
+        &mut reader,
+        vec![put(1, b"a+")],
+    ))?;
     assert_eq!(
         reader.commit(),
         Err(Conflict {
@@ -226,17 +281,17 @@ fn a_read_conflicts_with_a_later_commit() -> Res<()> {
     );
 
     let wakes = WakeCount::default();
-    let mut watch = table.watch();
+    let mut watch = RevSource::<Sendable>::watch(&table);
     let mut wait = pin!(watch.wait_past(2));
     assert!(wakes.poll(wait.as_mut()).is_pending());
     let mut quiet = db.begin();
     assert_eq!(
-        block_on(table.get(&mut quiet, &vec![1]))?,
+        block_on(OkvStore::<Sendable>::get(&table, &mut quiet, &vec![1]))?,
         Some(b"b".to_vec())
     );
     quiet.commit()?;
     assert_eq!(wakes.count(), 0, "a read-only commit woke a waiter");
-    assert_eq!(block_on(table.latest_rev())?, 2);
+    assert_eq!(block_on(RevSource::<Sendable>::latest_rev(&table))?, 2);
     Ok(())
 }
 
@@ -245,7 +300,12 @@ fn a_read_conflicts_with_a_later_commit() -> Res<()> {
 fn apply_to_another_db_panics() {
     let table: Table = MemoryDb::default().table();
     let mut tx = MemoryDb::default().begin();
-    block_on(table.apply(&mut tx, vec![put(1, b"a")])).expect("the apply panics first");
+    block_on(OkvStore::<Sendable>::apply(
+        &table,
+        &mut tx,
+        vec![put(1, b"a")],
+    ))
+    .expect("the apply panics first");
 }
 
 #[test]
@@ -254,7 +314,12 @@ fn read_past_the_committed_rev_panics() {
     let db = MemoryDb::default();
     let table: Table = db.table();
     let mut tx = db.begin();
-    block_on(table.apply(&mut tx, vec![put(1, b"a")])).expect("a batch applies");
+    block_on(OkvStore::<Sendable>::apply(
+        &table,
+        &mut tx,
+        vec![put(1, b"a")],
+    ))
+    .expect("a batch applies");
     tx.commit().expect("nothing races the commit");
     read_all(&table, 2).expect("the read panics first");
 }
@@ -265,20 +330,96 @@ fn read_reuses_the_callers_page() -> Res<()> {
     let db = MemoryDb::default();
     let table: Table = db.table();
     let mut tx = db.begin();
-    block_on(table.apply(&mut tx, vec![put(1, b"a"), put(2, b"b"), put(3, b"c")]))?;
-    block_on(table.apply(&mut tx, vec![put(4, b"d")]))?;
+    block_on(OkvStore::<Sendable>::apply(
+        &table,
+        &mut tx,
+        vec![put(1, b"a"), put(2, b"b"), put(3, b"c")],
+    ))?;
+    block_on(OkvStore::<Sendable>::apply(
+        &table,
+        &mut tx,
+        vec![put(4, b"d")],
+    ))?;
     tx.commit()?;
 
     let mut page = Page::default();
-    block_on(table.read(&Selector::All, 0, 2, limits(10, None), &mut page))?;
+    block_on(RevSource::<Sendable>::read(
+        &table,
+        &Selector::All,
+        0,
+        2,
+        limits(10, None),
+        &mut page,
+    ))?;
     assert_eq!(page.entries.len(), 4);
     let buffer = page.entries.as_ptr();
-    block_on(table.read(&Selector::All, 1, 2, limits(10, None), &mut page))?;
+    block_on(RevSource::<Sendable>::read(
+        &table,
+        &Selector::All,
+        1,
+        2,
+        limits(10, None),
+        &mut page,
+    ))?;
     assert_eq!(page.entries.len(), 1);
     assert_eq!(
         page.entries.as_ptr(),
         buffer,
         "the read reallocated the page"
     );
+    Ok(())
+}
+
+/// The memory store through the `Local` form, as the single-threaded web node drives it: writes,
+/// a transactional read, a stream, and a projection.
+#[test]
+fn the_local_form_drives_the_memory_store() -> Res<()> {
+    use future_form::Local;
+
+    use crate::rev::RevSourceExt;
+    use crate::rev::RevStream;
+
+    let db = MemoryDb::default();
+    let table: Table = db.table();
+    let mut tx = db.begin();
+    assert_eq!(
+        block_on(OkvStore::<Local>::apply(
+            &table,
+            &mut tx,
+            vec![put(1, b"a"), put(2, b"bc")]
+        ))?,
+        1
+    );
+    assert_eq!(
+        block_on(OkvStore::<Local>::get(&table, &mut tx, &vec![1]))?,
+        Some(b"a".to_vec())
+    );
+    tx.commit()?;
+    assert_eq!(block_on(RevSource::<Local>::latest_rev(&table))?, 1);
+
+    let lengths =
+        RevSourceExt::<Local>::map(table.clone(), |_key: &Bytes, value: Bytes| value.len());
+    let mut stream = RevStream::<Local, _>::new(lengths, Selector::All, 0);
+    let mut page = Page::default();
+    block_on(stream.next_into(&mut page, limits(10, None)))?;
+    assert_eq!(
+        page,
+        Page {
+            entries: vec![
+                Entry {
+                    key: vec![1],
+                    rev: 1,
+                    value: Some(1),
+                },
+                Entry {
+                    key: vec![2],
+                    rev: 1,
+                    value: Some(2),
+                },
+            ],
+            through: 1,
+        }
+    );
+    assert!(stream.caught_up());
     Ok(())
 }

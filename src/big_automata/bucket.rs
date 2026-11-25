@@ -4,10 +4,9 @@
 /// - Use batched Leafing to minimize RPC
 use crate::interlude::*;
 
-use crate::fingerprint::Fingerprint;
 use crate::fingerprint::FingerprintSeed;
 use crate::part_store::PartStoreRead;
-use crate::part_store::PayloadState;
+use crate::rpc::bucket::BucketObjPageEntry as RawLeafBucketEntry;
 use crate::rpc::bucket::LeafBucketPage as RawLeafBucketPage;
 use crate::rpc::bucket::LeafBucketRequest;
 use crate::store::CursorIndex;
@@ -437,7 +436,7 @@ fn summaries_agree(local: &BucketSummary, remote: &BucketSummary) -> bool {
 ///
 /// The local summaries of every bucket the scan can reach (the prefix at or above the working
 /// level) are read in one batch.
-pub async fn filter_buckets<S: PartStoreRead>(
+pub async fn filter_buckets<K: FutureForm, S: PartStoreRead<K>>(
     part_key: PartKey,
     working_lvl: BuckLevel,
     buckets: Vec<BucketSummary>,
@@ -522,7 +521,7 @@ pub struct BucketObjLeafPage {
 // FIXME: this is too expensive
 /// The local side of every requested bucket is read in two batches: the summaries of all the
 /// buckets, then the states of every object listed in a bucket that is not empty locally.
-pub async fn filter_objects<S: PartStoreRead>(
+pub async fn filter_objects<K: FutureForm, S: PartStoreRead<K>>(
     part_key: PartKey,
     bucks: Map<BuckId, RawLeafBucketPage>,
     seed: FingerprintSeed,
@@ -576,17 +575,9 @@ pub async fn filter_objects<S: PartStoreRead>(
                         });
                         continue;
                     }
-                    let changed = match &state.payload {
-                        PayloadState::Payload(payload) => {
-                            Fingerprint::new(
-                                &seed,
-                                &("big-sync-obj-fp-v1", obj.obj_key.clone(), payload.clone()),
-                            ) != obj.fp
-                        }
-                        // The payload is not held here, so it can't match the remote one:
-                        // fetch it.
-                        PayloadState::Withheld(_) => true,
-                    };
+                    let changed =
+                        RawLeafBucketEntry::fingerprint(&seed, &obj.obj_key, state.digest)
+                            != obj.fp;
                     if changed {
                         out_objs.push(BucketObjEntry {
                             obj_key: obj.obj_key,
@@ -628,6 +619,7 @@ mod tests {
     use crate::part_store::ObjState;
     use crate::rev::Rev;
     use crate::store::bucket::BucketFingerprint;
+    use future_form::Local;
     use std::collections::HashMap;
 
     fn part() -> PartKey {
@@ -651,18 +643,20 @@ mod tests {
         summaries: HashMap<BuckId, BucketSummary>,
     }
 
-    #[async_trait]
-    impl PartStoreRead for SummaryStore {
-        async fn obj_states(&self, _objs: &[ObjKey]) -> Res<Vec<Option<ObjState>>> {
+    impl PartStoreRead<Local> for SummaryStore {
+        fn obj_states<'a>(
+            &'a self,
+            _objs: &'a [ObjKey],
+        ) -> <Local as FutureForm>::Future<'a, Res<Vec<Option<ObjState>>>> {
             unreachable!("filter_buckets does not read objects")
         }
 
-        async fn bucket_summaries(
-            &self,
-            _part: &PartKey,
-            ids: &[BuckId],
-        ) -> Res<Vec<BucketSummary>> {
-            Ok(ids
+        fn bucket_summaries<'a>(
+            &'a self,
+            _part: &'a PartKey,
+            ids: &'a [BuckId],
+        ) -> <Local as FutureForm>::Future<'a, Res<Vec<BucketSummary>>> {
+            Local::ready(Ok(ids
                 .iter()
                 .map(|id| {
                     self.summaries
@@ -670,22 +664,28 @@ mod tests {
                         .cloned()
                         .unwrap_or_else(|| panic!("no local summary for {id:?}"))
                 })
-                .collect())
+                .collect()))
         }
 
-        async fn member_count(&self, _part: &PartKey) -> Res<u64> {
+        fn member_count<'a>(
+            &'a self,
+            _part: &'a PartKey,
+        ) -> <Local as FutureForm>::Future<'a, Res<u64>> {
             unreachable!("filter_buckets does not count members")
         }
 
-        async fn peer_part_cursors(
-            &self,
-            _peer: &PeerKey,
-            _parts: &[PartKey],
-        ) -> Res<Vec<Option<Rev>>> {
+        fn peer_part_cursors<'a>(
+            &'a self,
+            _peer: &'a PeerKey,
+            _parts: &'a [PartKey],
+        ) -> <Local as FutureForm>::Future<'a, Res<Vec<Option<Rev>>>> {
             unreachable!("filter_buckets does not read peer cursors")
         }
 
-        async fn set_peer_part_cursors(&self, _cursors: &[(PeerKey, PartKey, Rev)]) -> Res<()> {
+        fn set_peer_part_cursors<'a>(
+            &'a self,
+            _cursors: &'a [(PeerKey, PartKey, Rev)],
+        ) -> <Local as FutureForm>::Future<'a, Res<()>> {
             unreachable!("filter_buckets does not write peer cursors")
         }
     }
@@ -718,7 +718,7 @@ mod tests {
         };
         let remote = vec![summary(clean, 5, 3, 7), summary(dirty, 5, 3, 7)];
 
-        match futures::executor::block_on(filter_buckets(part(), 1, remote, &store))
+        match futures::executor::block_on(filter_buckets::<Local, _>(part(), 1, remote, &store))
             .expect("the summary store reads infallibly")
         {
             FilteredBuckets::Handoff(out) => {
@@ -742,7 +742,7 @@ mod tests {
         };
         let remote = vec![summary(buck, 5, 3, 7)];
 
-        match futures::executor::block_on(filter_buckets(part(), 0, remote, &store))
+        match futures::executor::block_on(filter_buckets::<Local, _>(part(), 0, remote, &store))
             .expect("the summary store reads infallibly")
         {
             FilteredBuckets::Done => {}
@@ -753,5 +753,70 @@ mod tests {
                 panic!("identical bucket was not pruned, relisted {id:?}")
             }
         }
+    }
+
+    /// Leaf entries compare by payload digest, so a local object whose payload is withheld
+    /// matches a remote entry for the same content and is not fetched again; a different digest
+    /// is a change. Runs the memory part store through the `Local` form.
+    #[test]
+    fn filter_objects_compares_withheld_payloads_by_digest() {
+        use crate::part_store::PartStoreWrite;
+        use crate::part_store::PayloadDigest;
+        use crate::part_store::PayloadState;
+        use crate::part_store::memory::MemoryPartStore;
+        use crate::rpc::bucket::BucketObjPageEntry;
+
+        let store = MemoryPartStore::default();
+        let obj = ObjKey::new(&[7]);
+        let digest =
+            PayloadDigest::of(&serde_json::json!({"held": "elsewhere"})).expect(ERROR_IMPOSSIBLE);
+        let mut tx = store.begin();
+        futures::executor::block_on(PartStoreWrite::<Local>::set_payloads(
+            &store,
+            &mut tx,
+            vec![(obj.clone(), PayloadState::Withheld(digest))],
+        ))
+        .expect("staging is infallible");
+        futures::executor::block_on(PartStoreWrite::<Local>::add_members(
+            &store,
+            &mut tx,
+            &[(obj.clone(), part())],
+        ))
+        .expect("staging is infallible");
+        tx.commit();
+
+        let seed = FingerprintSeed::new(1, 2);
+        let leaf = |digest| {
+            Map::from([(
+                BuckId::ROOT,
+                RawLeafBucketPage {
+                    entries: vec![BucketObjPageEntry {
+                        obj_key: obj.clone(),
+                        dead: false,
+                        fp: BucketObjPageEntry::fingerprint(&seed, &obj, digest),
+                    }],
+                    next_after: None,
+                    done: true,
+                },
+            )])
+        };
+        let deltas = |bucks| {
+            futures::executor::block_on(filter_objects::<Local, _>(part(), bucks, seed, &store))
+                .expect("the memory store reads infallibly")
+                .remove(&BuckId::ROOT)
+                .expect("the bucket was asked for")
+                .entries
+                .into_iter()
+                .map(|entry| (entry.obj_key, entry.delta))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(deltas(leaf(digest)), vec![], "same content, held or not");
+        let other =
+            PayloadDigest::of(&serde_json::json!({"held": "changed"})).expect(ERROR_IMPOSSIBLE);
+        assert_eq!(
+            deltas(leaf(other)),
+            vec![(obj.clone(), PartObjDelta::Change)]
+        );
     }
 }

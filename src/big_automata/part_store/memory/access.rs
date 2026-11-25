@@ -83,8 +83,8 @@ impl State {
         let member_changes = self
             .members
             .range((part.clone(), 0, ObjKey::new(&[]))..)
-            .take_while(|(member_part, _, _)| member_part == part)
-            .filter(|(_, _, obj)| {
+            .take_while(|((member_part, _, _), _)| member_part == part)
+            .filter(|((_, _, obj), _)| {
                 let key = LogKey::Member {
                     obj: obj.clone(),
                     part: part.clone(),
