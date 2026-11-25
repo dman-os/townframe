@@ -148,6 +148,16 @@ $ day x intxt edit m --apply m.json       # or `-` for stdin; prints what change
 
 An agent never needs an interactive editor: it prints, edits the file with its own tools, and applies. `EDITOR=<script> day x intxt edit m` also works, as `GIT_SEQUENCE_EDITOR` does.
 
+### Friendly to agents, not only to scripts (operator, 2026-11-18)
+
+- **Partial documents:** `--apply` takes only the members being changed, plus `base`. An omitted member is unchanged; `{"remove": "<id>"}` and `{"add": {...}}` change entries. An agent never has to round-trip the whole intxt.
+- **Full ids in the document;** short ids are display only, since they can grow between print and apply.
+- **Stable formatting:** fixed key order, one entry per line, so text-edit tools match unique lines and diffs stay small.
+- **`--dry-run`** prints the plan and writes nothing.
+- **`--json` results:** `{changes, undo}`, or `{errors: [{path, message}]}` with JSON pointers. A stale base has its own exit code and returns the current document, so the agent can redo its change and retry.
+- **`edit --schema`** prints the JSON Schema, and the help ends with a full print → edit → apply example.
+- **No hidden interactivity:** without a TTY and without `--print`/`--apply`/`--schema`, `edit` fails at once and names the non-interactive commands.
+
 ### Grows to
 
 The same document gains `links` (stacks on, follows up, supersedes), `guide` (sections targeting commits, paths and turns), and carving (`split`: a new intxt from part of this one's entries). Each of these is a member of the document, not a new verb.

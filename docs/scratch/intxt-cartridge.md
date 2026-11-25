@@ -74,7 +74,7 @@ This retires the micro's config datum (`githubDrawer`, `intxtDrawers`, `docCap`)
 ## Open
 
 1. Does a cartridge reach the drawers it created through a `#drawers` create permbind without a grant datum, or does creation also write `grant/drawer/<id>`?
-2. How does the micro find the node's GitHub drawer once there's no config: a well-known datum the CLI writes, or by listing the drawers the cartridge is granted?
+2. How does the micro find the node's GitHub drawer once there's no config: a well-known datum the CLI writes, or by listing the drawers the cartridge is granted? **Answered 2026-11-18 (operator, ledger D67): neither.** The micro reads through `clay_docs` queries, which the host serves under its permissions: the PR list queries the PR kind over what the cartridge is granted, and an intxt reaches its other drawers as children.
 3. Is `#datum` narrowing inside granted drawers wired at node-47, or only in the ADR? If only in the ADR, the first version declares the kinds and enforcement follows.
 4. How the micro's bytes and description enter the cartridge version: the import path, or a component datum that intxt's install writes itself.
 
@@ -174,3 +174,15 @@ Notes:
 - **The routines still mint.** The handles are reachable from a guest (`Cx::config_capability`, `Cx::drawer_capability`, `Cx::blobs_capability`), but `createIntxt` writes the new drawer's descriptor, which no handle names (above), and `addToIntxt` reads a part's document in a drawer the cartridge was never granted and lends it through `listDocDrawers` and a drawer capability over a drawer it was not granted either. So `mintDocCapability` and `mintDrawerCapability` stay as interim `#method` permbinds, and the routines keep acting as their caller.
 - **Permbinds as built:** `#drawers` `intxts` and `pullRequests`; one `#datum` per kind a routine touches (`intxt`, `title`, `body`, the four `*Entry` kinds, `worktree`, `gitRepo`, `agentSession`, `githubPull`) and `blob`; `#method` `readDatums`, `writeDatums`, `createDrawer`, `addDoc`, `listDocDrawers` and the two interim mints. `pollDatums`, the annotation kinds and the capture-side kinds (`gitCommit`, `rewrite`, `rewrittenFrom`, `commitsDoc`) are not declared: nothing in the nodule uses them, and they join with the micro.
 - **Install** grants each method permbind as `grant/method/<nsid>` and each drawer the caller passes, and grants the ones missing when run again. `day x intxt install` passes none yet: with a drawer granted, the `docs` and `drawers` handles minted for `addToIntxt` and `summarizeIntxts` are refused (`Denied`, instrumented in `mint_missing_handles`), because the `nodules` service actor holds none of the operator's drawers (ADR 049 §6.1: it must hold every right it hands down; the big_nodule e2e grants it the drawer first). The CLI passes the node's intxts at Write and its GitHub drawer at Read once that lands.
+
+## The drawer document (nodules, 2026-11-18)
+
+A drawer reach (`DocScope.drawers`) covers the drawer's member documents, but not the drawer's own document, which is where an intxt's descriptor lives (marker, title, body, entries). Nodules confirms this is a gap and will fix it: a reach with `access >= Read` also reads the drawer document at the reach's kinds, so `grant/drawer/<X>`-derived handles cover it with nothing extra. Writes go to the operator as nodules' proposal: a Write reach writes the drawer document at the reach's write kinds, and system datums stay with the drawers service. intxt needs that, since `createIntxt`, `addToIntxt` and `edit` write the descriptor's kinds. Until then, intxt and the phone's interim docCap list the drawer document in `DocScope.read` (and `write`).
+
+## Runtime handles: two node-side gaps, for the operator (nodules, 2026-11-18)
+
+At node-52, intxt's routines keep minting their own capabilities (interim `mintDocCapability`/`mintDrawerCapability` permbinds, #197) because of two gaps nodules confirms and will put to the operator, with intxt as the use case:
+1. **A drawer the cartridge creates is unreachable by its handles.** A `#drawers` create use only sets the create flag, reaches come from the `grant/drawer` set at reconcile, and creating writes no grant. Nodules' proposal: the runtime writes `grant/drawer/<new>` at the permbind's declared access in the same step as the creation, and the reconcile re-mints. The create permission is the consent.
+2. **A granted drawer fails to mint.** Handles are minted from the `nodules` (and `micros`) service actor's identity, which must already hold the drawer (049 §6.1). The options are (a) the installer or operator adds the service actor to the drawer before or with the grant, using today's membership calls, or (b) `SetCartridgeGrant`/Allow delegates the person's drawer authority to the service actor in the same call. The hard case is a grant that syncs in from another device, since the service actor is per node.
+
+intxt switches to runtime handles once both are settled.
