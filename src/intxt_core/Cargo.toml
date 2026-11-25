@@ -25,6 +25,10 @@ cartridge = ["schemars", "dep:big_cartridges_core", "big_cartridges_core/test-su
 # it builds for a wasm guest as well as the host.
 client = ["dep:blake3", "dep:service_client_core_rs", "dep:service_core_rs"]
 
+# Host-only: installing the cartridge on a node over the client (`intxt_core::install`), the one
+# call both the CLI and a host that boots its own node make.
+install = ["cartridge", "client", "dep:big_blobs_core", "dep:big_nodule_core"]
+
 [dependencies]
 #
 # internal
@@ -47,7 +51,9 @@ thiserror.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 #
 # internal
+big_blobs_core = { workspace = true, optional = true }
 big_cartridges_core = { workspace = true, optional = true }
+big_nodule_core = { workspace = true, optional = true }
 method_lexicon = { workspace = true, optional = true }
 #
 # external

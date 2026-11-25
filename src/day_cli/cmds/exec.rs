@@ -1,5 +1,4 @@
 use crate::client::Raw;
-use crate::client::Upload;
 use crate::interlude::*;
 use crate::out::out;
 use method_core::HttpMethod;
@@ -36,7 +35,7 @@ pub async fn run(
             verb,
             &input,
             Raw {
-                upload: body.as_deref().map(Upload::File),
+                upload: body.as_deref(),
                 range: range.as_deref(),
                 download: output.as_deref(),
             },

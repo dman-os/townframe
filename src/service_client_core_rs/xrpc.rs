@@ -18,6 +18,7 @@ use method_core::XrpcMethod;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use service_core_rs::Body;
 use service_core_rs::ClientError;
 use service_core_rs::Envelope;
 use service_core_rs::HttpMetadata;
@@ -152,16 +153,45 @@ pub struct Xrpc<H>(pub H);
 impl<H: HttpTransport, P: Unary> UnaryTransport<P> for Xrpc<H> {
     async fn call(
         &self,
-        request: Envelope<P>,
+        mut request: Envelope<P>,
     ) -> Result<ResponseEnvelope<P::Output>, ClientError<P::Error>> {
+        let body = request.take_body();
         let Envelope {
             context,
             metadata,
             params,
             ..
         } = request;
-        let encoded = encode_request(P::XRPC, &context, &metadata, &params)
+        let mut encoded = encode_request(P::XRPC, &context, &metadata, &params)
             .map_err(XrpcClientError::<P::Error>::Encode)?;
+        // A bytes-input method's parameters are on the query string and its body is the stream
+        // the envelope carries, handed to the transport as it is (ADR 042). Any other body has
+        // no HTTP form for this method.
+        if let Some(body) = body {
+            let stream = match body {
+                Body::Bytes(stream) => stream,
+                other => {
+                    return Err(XrpcClientError::<P::Error>::Encode(format!(
+                        "{} takes no {} body over HTTP",
+                        P::XRPC.nsid,
+                        other.case()
+                    ))
+                    .into());
+                }
+            };
+            if !P::XRPC.input_encoding.is_bytes() {
+                return Err(XrpcClientError::<P::Error>::Encode(format!(
+                    "{} does not take a byte body",
+                    P::XRPC.nsid
+                ))
+                .into());
+            }
+            encoded.headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            encoded.body = XrpcBody::Bytes(stream);
+        }
         let outcome_unknown = P::XRPC.kind == MethodKind::Procedure;
         let response =
             self.0
