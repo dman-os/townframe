@@ -37,6 +37,11 @@
 //!   `content-type` and the wrapping sum of every octet. It reads the stream one chunk at a time.
 //! - `/xrpc/<nsid>.emit` answers a byte body of [`EMIT_CHUNKS`] chunks of [`EMIT_CHUNK_OCTETS`]
 //!   octets (chunk `i` is all `i as u8`) as `application/x-emit`, produced lazily.
+//! - `/xrpc/<nsid>.readfile` takes `{ path, write? }` and answers 200 with `{ found: true, length, sum }`
+//!   for a file it reads in full (the length and the wrapping sum of its octets), or `{ found: false,
+//!   kind }` where `kind` is the `std::io::ErrorKind` that stopped it. With `write` it only tries to
+//!   open the file for writing and answers `{ opened, kind }`. This is how a test sees what a
+//!   workload's working mount holds.
 //! - `/xrpc/<nsid>.panic` panics with [`PANIC_MESSAGE`]. A Wasm guest prints it to stderr and traps
 //!   on `unreachable`, which is what the host's guest-fault handling is tested against.
 //! - Any other `/xrpc/` operation answers 404 `{ "error": "UnknownOperation" }` and any other
@@ -114,6 +119,13 @@ struct Relay {
 #[serde(transparent)]
 struct Config(Value);
 
+#[derive(Debug, Serialize, Deserialize)]
+struct ReadFile {
+    path: String,
+    #[serde(default)]
+    write: bool,
+}
+
 // The NSIDs are bare route names: `Fixture::route` matches the last segment of whatever
 // authority the cartridge declared, so these `XRPC.nsid`s are never compared.
 method_core::methods! {
@@ -121,6 +133,7 @@ method_core::methods! {
     Echo => Value, procedure, "echo";
     Relay => Value, procedure, "relay";
     Config => Value, procedure, "config";
+    ReadFile => Value, procedure, "readfile";
 }
 
 /// `fetch`: one request to a URL that is not dispatch, through `Cx::fetch`.
@@ -339,8 +352,30 @@ impl Nodule for Fixture {
             "emit" => Some(emit()),
             "panic" => panic!("{PANIC_MESSAGE}"),
             "config" => Some(invoke::<Self, Config>(self, cx, body).await),
+            "readfile" => Some(invoke::<Self, ReadFile>(self, cx, body).await),
             _ => None,
         }
+    }
+}
+
+impl Handler<ReadFile> for Fixture {
+    async fn call(&self, _cx: &Cx, input: ReadFile) -> Result<Value, FixtureError> {
+        if input.write {
+            return Ok(
+                match std::fs::OpenOptions::new().write(true).open(&input.path) {
+                    Ok(_) => json!({ "opened": true }),
+                    Err(error) => json!({ "opened": false, "kind": format!("{:?}", error.kind()) }),
+                },
+            );
+        }
+        Ok(match std::fs::read(&input.path) {
+            Ok(bytes) => json!({
+                "found": true,
+                "length": bytes.len(),
+                "sum": bytes.iter().fold(0u64, |sum, octet| sum.wrapping_add(u64::from(*octet))),
+            }),
+            Err(error) => json!({ "found": false, "kind": format!("{:?}", error.kind()) }),
+        })
     }
 }
 
