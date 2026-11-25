@@ -18,7 +18,7 @@ default = ["schemars"]
 schemars = ["method_core/schemars"]
 # Host-only: the cartridge builder (`intxt_core::cartridge`), which admits these vocabularies and
 # the nodule's methods to a node. A wasm guest never enables it.
-cartridge = ["schemars", "dep:big_blobs_core", "dep:big_cartridges_core", "big_cartridges_core/test-support", "dep:indexmap", "dep:method_lexicon"]
+cartridge = ["schemars", "dep:blake3", "dep:big_blobs_core", "dep:big_cartridges_core", "big_cartridges_core/test-support", "dep:indexmap", "dep:method_lexicon"]
 
 # The client library (`intxt_core::client`): the recorder and the cabinet caller `createIntxt`,
 # `addToIntxt` and `intxt capture` share. It speaks XRPC over a caller-supplied `HttpTransport`, so

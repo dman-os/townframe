@@ -62,8 +62,8 @@ pub struct Installed {
 /// and enabled, and every one of `drawers` is already granted at its access, it answers that
 /// nodule's record without storing, publishing or granting anything. Drawers it is not yet
 /// granted are granted, so installing again after the node holds new intxts extends the grants.
-/// The handler's bytes do not enter that comparison, so a rebuilt handler under an unchanged
-/// version is not reinstalled; the cartridge's version moves with the handler.
+/// The version carries the handler's digest ([`crate::cartridge::cartridge`]), so a rebuilt
+/// handler is another version, and installing it upgrades the node.
 ///
 /// The envelope is signed as the fixture namespace's owner, the namespace intxt's cartridge sits
 /// under until it has its own (see [`crate::cartridge::cartridge`]).
