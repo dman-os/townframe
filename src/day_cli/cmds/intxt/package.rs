@@ -21,7 +21,9 @@ use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::CommandId;
+use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumRead;
+use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::MetaRoot;
 use big_cabinet_core::drawer::listing::KnownDrawers;
@@ -32,6 +34,7 @@ use big_cabinet_core::drawer::protocol::ForgetDrawer;
 use big_cabinet_core::drawer::protocol::ListKnownDrawers;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::drawer::protocol::RememberDrawer;
+use big_cabinet_core::drawer::protocol::drawer_placement;
 use big_cabinet_core::reference::DatumReference;
 use big_cabinet_core::reference::ReferenceDocId;
 use intxt_capture::git::Git;
@@ -369,24 +372,69 @@ impl<'a> Packaging<'a> {
         Ok(live)
     }
 
-    /// The intxt's commits document, made if the intxt has none yet: a meta document
-    /// (`metaDoc/commits/main`) of its drawer, like the notes document, so it is in the drawer
-    /// without an entry and `which` finds it by its datums, not by name. The command id is fixed
-    /// per drawer, so creating it again answers the first creation, and two writers converge on
-    /// one document.
-    async fn ensure_commits_doc(&self, drawer: &DrawerId) -> Res<DocId> {
-        Ok(self
+    /// The intxt's commits document, if it has one: the one its descriptor's `commitsDoc/main`
+    /// names.
+    pub(super) async fn commits_doc(&self, drawer: &DrawerId) -> Res<Option<DocId>> {
+        let (_, held) = self
             .caller
-            .call(CreateMetaDoc {
-                capability: self.drawer_capability(drawer).await?,
-                command: CommandId::try_from(format!("intxt-commits-{drawer}"))?,
-                drawer_id: drawer.clone(),
-                kind: "commits".into(),
-                name: "main".into(),
-                root: MetaRoot::Sensitive,
+            .try_read(drawer, &key(work::CommitsDoc::ID, "main")?)
+            .await?;
+        held.map(|value| {
+            let held: work::CommitsDoc = serde_json::from_value(value)?;
+            Ok(held.doc.parse()?)
+        })
+        .transpose()
+    }
+
+    /// The intxt's commits document, made if the intxt has none yet: a content document placed
+    /// in the intxt's drawer, so it is a document of the drawer like any other, and recorded in
+    /// the descriptor (`commitsDoc/main`) so the intxt finds it again; `which` finds it by its
+    /// datums, not by name. The command id is fixed per drawer, so creating it again answers the
+    /// first creation (a run that died before recording it finds the same document), and two
+    /// writers converge on one document.
+    pub(super) async fn ensure_commits_doc(&self, drawer: &DrawerId) -> Res<DocId> {
+        if let Some(doc) = self.commits_doc(drawer).await? {
+            return Ok(doc);
+        }
+        let placement = drawer_placement(drawer);
+        let capability = self
+            .caller
+            .doc_capability(DocScope {
+                create: [placement.clone()].into(),
+                ..DocScope::default()
+            })
+            .await?;
+        let doc = self
+            .caller
+            .call(CreateDoc {
+                capability,
+                command: CommandId::try_from(format!("intxt-commits-doc-{drawer}"))?,
+                placement,
+                datums: BTreeMap::new(),
             })
             .await?
-            .doc_id)
+            .doc_id;
+        self.record_commits_doc(drawer, &doc).await?;
+        Ok(doc)
+    }
+
+    /// Records `doc` as the intxt's commits document (`commitsDoc/main` in its descriptor).
+    pub(super) async fn record_commits_doc(&self, drawer: &DrawerId, doc: &DocId) -> Res<()> {
+        self.caller
+            .write_datums(
+                drawer,
+                [(
+                    key(work::CommitsDoc::ID, "main")?,
+                    to_value(&work::CommitsDoc {
+                        doc: doc.to_string(),
+                        extra: Default::default(),
+                    }),
+                )]
+                .into(),
+                BTreeSet::new(),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Writes a `gitCommit/<sha>` for every commit `resolved` names into the intxt's commits
@@ -609,12 +657,25 @@ impl<'a> Packaging<'a> {
 
     /// `day x intxt new`: creates an intxt, remembers it, and says its short id. Answers its
     /// drawer.
+    ///
+    /// With `with`, the intxt shares that intxt's commits document: the document is added to the
+    /// new drawer and the new descriptor names it as its commits document, so the two intxts
+    /// hold one set of `gitCommit` datums. The intxt named is resolved first, so a name that
+    /// resolves to none leaves nothing created.
     pub(crate) async fn create(
         &self,
         out: &mut impl Write,
         title: &str,
         description: Option<&str>,
+        with: Option<&str>,
     ) -> Res<DrawerId> {
+        let shared = match with {
+            Some(name) => {
+                let (related, _) = self.resolve(Some(name)).await?;
+                Some(self.ensure_commits_doc(&related).await?)
+            }
+            None => None,
+        };
         let IntxtCreated { drawer_id } = call(
             self.client,
             CreateIntxt {
@@ -624,10 +685,17 @@ impl<'a> Packaging<'a> {
         )
         .await?;
         self.remember(&drawer_id).await?;
+        if let Some(doc) = &shared {
+            self.caller.share(&drawer_id, doc, DrawerAccess::Write).await?;
+            self.record_commits_doc(&drawer_id, doc).await?;
+        }
         let live = self.live_intxts().await?;
         let ids = ShortIds::new(live.iter().map(ToString::to_string).collect::<Vec<_>>());
         let short = shown(&ids, &drawer_id.to_string());
         writeln!(out, "intxt {short} \"{title}\"")?;
+        if shared.is_some() {
+            writeln!(out, "  shares the commits document of {}", with.unwrap_or_default())?;
+        }
         if let Some(identity) = identity::resolve(self.cwd)? {
             host::put_on_intxt(&identity, Some(drawer_id.to_string()))?;
             writeln!(out, "  this worktree is on it now (day x intxt use)")?;
@@ -731,17 +799,18 @@ impl<'a> Packaging<'a> {
         Ok(View { title, entries })
     }
 
-    /// What capture holds for the worktree `identity` names, after recording the branch
-    /// `resolved` tracks if capture never saw it where it is now (FDR 008 W6): the work was done
-    /// before intxt was installed or on another machine, so no hook saw the branch move. The
-    /// commits are not recorded: they are in the local repository, `resolved` names them from
-    /// git, and `add` writes them into the intxt.
+    /// What capture holds for the worktree `identity` names, after recording what `resolved`
+    /// names if it was never recorded (FDR 008 W6): the work was done before intxt was installed
+    /// or on another machine, so no hook saw its commits or its branch move.
     ///
-    /// Recording is an observation under the host's worktree lock ([`host::prepare_observation`])
-    /// whose batch the recorder writes (the identity documents and the `gitRef`). The host commits
-    /// the recorder's answer as its state, the state hooks continue from, so a hook after it
-    /// reports only what moves later. No session is derived: none was recorded.
-    async fn recorded_with_ref(
+    /// The import is recording, through the path a hook's batch takes: the host observes the
+    /// worktree under its lock with the range's commits named explicitly
+    /// ([`host::prepare_import`], since the reflog never showed them) and the recorder writes
+    /// the identity documents, the `gitCommit` datums and the `gitRef`. The host commits the
+    /// recorder's answer as its state, the state hooks continue from, so a hook after the
+    /// import reports only what moves later. No session is derived: none was recorded, and the
+    /// ops of the worktree hold none for these commits.
+    async fn recorded_after_import(
         &self,
         identity: &Identity,
         resolved: &Resolved,
@@ -750,30 +819,46 @@ impl<'a> Packaging<'a> {
         // A jj change's commits live in jj's git directory, which the worktree's observation
         // does not read; its sessions come from what capture saw of the worktree.
         if resolved.git_dir != identity.root
-            || self.ref_recorded(&recorded, identity, resolved).await?
+            || self.is_recorded(&recorded, identity, resolved).await?
         {
             return Ok(recorded);
         }
-        let observed = identity.clone();
+        let (observed, commits) = (identity.clone(), resolved.commits.clone());
         let prepared =
-            tokio::task::spawn_blocking(move || host::prepare_observation(&observed)).await??;
+            tokio::task::spawn_blocking(move || host::prepare_import(&observed, &commits))
+                .await??;
         super::capture::record_prepared(self.client, self.node_dir, prepared).await?;
         host::recorded_worktree(identity).map_err(Into::into)
     }
 
-    /// Whether the clone's document holds the branch `resolved` tracks where it points now.
-    /// Without a tracked branch there is nothing to hold.
-    async fn ref_recorded(
+    /// Whether the clone and repository documents hold every commit `resolved` names and, for a
+    /// branch, where it points now.
+    async fn is_recorded(
         &self,
         recorded: &host::RecordedWorktree,
         identity: &Identity,
         resolved: &Resolved,
     ) -> Res<bool> {
+        let (Some(repo), Some(clone)) = (&recorded.docs.repo, &recorded.docs.clone) else {
+            return Ok(false);
+        };
+        let commits = resolved
+            .commits
+            .iter()
+            .map(|sha| key(work::GitCommit::ID, sha))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let (_, known) = self
+            .caller
+            .read_datums(&repo.parse()?, Some(commits))
+            .await?;
+        if !known
+            .values()
+            .all(|read| matches!(read, DatumRead::Accepted { .. }))
+        {
+            return Ok(false);
+        }
         let Some((reference, _)) = &resolved.tracked else {
             return Ok(true);
-        };
-        let Some(clone) = &recorded.docs.clone else {
-            return Ok(false);
         };
         let ref_key = key(
             work::GitRef::ID,
@@ -895,7 +980,7 @@ impl<'a> Packaging<'a> {
                 .push(format!("  ref        {reference} (already tracked)"));
             return Ok(());
         }
-        // `recorded_with_ref` recorded the clone and the branch's position if they were not.
+        // `recorded_after_import` recorded the clone and the branch's position if they were not.
         let clone_doc: DocId = recorded
             .docs
             .clone
@@ -987,7 +1072,7 @@ impl<'a> Packaging<'a> {
         let view = self.load(&drawer).await?;
         let identity = self.identity()?;
         let resolved = Resolved::new(&named, &identity)?;
-        let recorded = self.recorded_with_ref(&identity, &resolved).await?;
+        let recorded = self.recorded_after_import(&identity, &resolved).await?;
 
         let mut plan = Plan::default();
         let new_commits = self
@@ -1017,7 +1102,7 @@ impl<'a> Packaging<'a> {
                 .include(&drawer, plan.set, &plan.written)
                 .await?;
             for doc in &plan.shared {
-                self.caller.share(&drawer, doc).await?;
+                self.caller.share(&drawer, doc, DrawerAccess::Read).await?;
             }
         }
         for (part, described) in &sessions {

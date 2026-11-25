@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::btree_map::Entry;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -205,6 +206,8 @@ pub struct GitObserved {
     pub head: Head,
     /// In order, oldest first. A run of rebase steps is one move.
     pub moves: Vec<GitMove>,
+    /// sha → commit, for the commits the moves made and the one `HEAD` is at.
+    pub commits: BTreeMap<String, GitCommit>,
     /// Branch name (`refs/heads/…`) → ref, for the branches that are new or moved.
     pub refs: BTreeMap<String, GitRef>,
     /// The stored reflog position was not in the reflog any more (it expired or was rewritten).
@@ -472,6 +475,43 @@ fn ref_moves(
     Ok(moved_elsewhere)
 }
 
+/// The commits the moves made, and the one `HEAD` is at when it changed (or was first seen). A checkout or reset only arrives at its
+/// commit; the others made `to --not from`. `import` are commits to report whatever the moves
+/// were: history the reflog never showed (see [`observe`]).
+fn made_commits(
+    git: &Git,
+    head: &Head,
+    head_moved: bool,
+    moves: &[GitMove],
+    import: &[String],
+) -> Result<BTreeMap<String, GitCommit>, Error> {
+    let mut wanted: Vec<String> = import.to_vec();
+    if head_moved {
+        wanted.extend(head.target.iter().cloned());
+    }
+    let mut commits = BTreeMap::new();
+    for mv in moves {
+        let (Some(to), from) = (&mv.observation.to, &mv.observation.from) else {
+            continue;
+        };
+        match (&mv.kind, from) {
+            (OpKind::Checkout | OpKind::Reset, _) | (_, None) => wanted.push(to.clone()),
+            (_, Some(from)) => {
+                let listed = git.text(&["rev-list", to, "--not", from])?;
+                wanted.extend(listed.lines().map(str::to_owned));
+            }
+        }
+    }
+    for sha in wanted {
+        if let Entry::Vacant(slot) = commits.entry(sha) {
+            let datum = commit(git, slot.key())?;
+            slot.insert(datum);
+        }
+    }
+
+    Ok(commits)
+}
+
 /// The branches checked out in any worktree of the clone.
 fn checked_out_branches(git: &Git) -> Result<BTreeSet<String>, Error> {
     let listing = git.text(&["worktree", "list", "--porcelain"])?;
@@ -487,11 +527,18 @@ fn checked_out_branches(git: &Git) -> Result<BTreeSet<String>, Error> {
 ///
 /// The first observation (no stored reflog position) is a baseline: it reports where `HEAD` and
 /// the refs are, and no moves.
+///
+/// `import` are commits to report as made although no move in the reflog made them: history that
+/// predates the first observation (work done before capture was installed, or on another
+/// machine) which an intxt now needs recorded (FDR 008 W6). They are reported exactly as a move's
+/// commits are, as datums in `commits` and nothing else: no op, no change to the stored state,
+/// so what the next observation reports is what it would have reported without the import.
 pub fn observe(
     root: &Path,
     git_dir: &Path,
     common_dir: &Path,
     state: &GitState,
+    import: &[String],
 ) -> Result<(GitObserved, GitState), Error> {
     let git = Git::new(root);
     let head = Head {
@@ -553,6 +600,12 @@ pub fn observe(
         });
     }
     moves.extend(ref_moves(&git, common_dir, state, &refs, &head, &moves)?);
+    let head_moved = state
+        .head
+        .as_ref()
+        .is_none_or(|seen| seen.target != head.target);
+    let commits = made_commits(&git, &head, head_moved, &moves, import)?;
+
     let mut ref_datums = BTreeMap::new();
     for (name, target) in &refs {
         if state.refs.get(name) != Some(target) {
@@ -579,6 +632,7 @@ pub fn observe(
         GitObserved {
             head,
             moves,
+            commits,
             refs: ref_datums,
             reflog_gap,
         },

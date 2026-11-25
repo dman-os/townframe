@@ -130,13 +130,23 @@ pub enum IntxtCommands {
     /// Create an intxt and remember it, so it has a short id
     ///
     /// Prints the new intxt's short id, which names it in `add`, `show` and `rm`.
-    #[command(after_long_help = "Examples:\n  day x intxt new \"Datum refs move to dtxt\"")]
+    ///
+    /// With `--with`, the new intxt shares the named intxt's commits document, for a stack or a
+    /// follow-up: commits they have in common are stored once, and each holds the commits the
+    /// other added.
+    #[command(
+        after_long_help = "Examples:\n  day x intxt new \"Datum refs move to dtxt\"\n  day x intxt new \"Follow-up\" --with qx"
+    )]
     New {
         /// The intxt's title
         title: String,
         /// The intxt's description, in Markdown
         #[arg(long)]
         description: Option<String>,
+        /// A related intxt (its short id, or its full drawer id) whose commits document the new
+        /// intxt shares
+        #[arg(long)]
+        with: Option<String>,
     },
     /// Remove entries and comments from an intxt, by the short ids `show` and `comment` print
     ///
@@ -354,10 +364,19 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
             })
             .await
         }
-        IntxtCommands::New { title, description } => {
+        IntxtCommands::New {
+            title,
+            description,
+            with,
+        } => {
             with_packaging(async |packaging| {
                 packaging
-                    .create(&mut std::io::stdout(), &title, description.as_deref())
+                    .create(
+                        &mut std::io::stdout(),
+                        &title,
+                        description.as_deref(),
+                        with.as_deref(),
+                    )
                     .await
                     .map(|_| ())
             })
@@ -697,4 +716,36 @@ where
         reply.body
     );
     Ok(serde_json::from_value(reply.body)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, clap::Parser)]
+    struct Cli {
+        #[command(subcommand)]
+        command: IntxtCommands,
+    }
+
+    fn new_args(args: &[&str]) -> (String, Option<String>) {
+        let parsed = <Cli as clap::Parser>::try_parse_from(
+            ["intxt", "new"].into_iter().chain(args.iter().copied()),
+        )
+        .unwrap();
+        match parsed.command {
+            IntxtCommands::New { title, with, .. } => (title, with),
+            other => panic!("parsed {other:?}, not new"),
+        }
+    }
+
+    #[test]
+    fn new_takes_an_optional_related_intxt_with() {
+        assert_eq!(new_args(&["T"]), ("T".to_owned(), None));
+        assert_eq!(
+            new_args(&["T", "--with", "qx"]),
+            ("T".to_owned(), Some("qx".to_owned()))
+        );
+        assert!(<Cli as clap::Parser>::try_parse_from(["intxt", "new", "T", "--with"]).is_err());
+    }
 }

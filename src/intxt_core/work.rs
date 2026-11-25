@@ -193,10 +193,11 @@ pub struct File {
     pub extra: Extra,
 }
 
-/// A git commit (`gitCommit/<sha>`). `add` writes it into the commits document of the intxt that
-/// holds the commit (capture does not), the same value to the same slot, and none rewrites it: a
-/// later fact about a commit goes into its own datum. Holds no pins. The commit object itself travels in a pack (an entry's), where
-/// git checks it against its sha on import; this datum is the readable part.
+/// A git commit (`gitCommit/<sha>`). Capture writes it into the repository document, and `add`
+/// writes the commits an intxt references into the intxt's commits document; each writer puts the
+/// same value in the same slot, and none rewrites it: a later fact about a commit goes into its
+/// own datum. Holds no pins; the op that observed the commit does. The commit object itself
+/// travels in a pack (an entry's), where git checks it against its sha on import; this datum is the readable part.
 #[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -607,6 +608,21 @@ pub enum Priority {
 #[serde(rename_all = "camelCase")]
 pub struct RepoEntry {
     pub repo: DatumReference,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// An intxt's commits document (`commitsDoc/main`, on the intxt's descriptor): the content
+/// document, in the intxt's drawer, that holds `gitCommit/<sha>` for every commit the intxt
+/// references and the `rewrite`/`rewrittenFrom` links between them. It is not an entry: it is
+/// reached from the descriptor, not listed in the body. Related intxts name the same document
+/// (`day x intxt new --with`), which is then in each of their drawers. A document id is text, as
+/// in [`OpLogDoc`], because a datum reference names a datum and this names a whole document.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitsDoc {
+    pub doc: String,
     #[serde(flatten)]
     pub extra: Extra,
 }

@@ -99,6 +99,7 @@ fn every_datum_declares_publishes_and_admits() {
             "org.example.intxt.work.promptTurn",
             "org.example.intxt.work.plan",
             "org.example.intxt.work.repoEntry",
+            "org.example.intxt.work.commitsDoc",
             "org.example.intxt.work.worktreeEntry",
             "org.example.intxt.work.sessionEntry",
             "org.example.intxt.work.githubPullEntry",
@@ -292,6 +293,10 @@ fn the_adr_examples_are_valid_datums() {
     codec_round_trip::<work::JjChangeEntry>(
         json!({"pack": "dtxt:datum:self/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949"}),
     );
+    codec_round_trip::<work::CommitsDoc>(json!({
+        "doc": "z11111111111111111111111111111111",
+        "note": "carried"
+    }));
     codec_round_trip::<work::GithubPullEntry>(json!({
         "pull": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.githubPull/o/r/12",
         "note": "carried"

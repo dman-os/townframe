@@ -55,6 +55,7 @@ pub fn declarations() -> Universe {
         Declaration::of::<work::PromptTurn>().expect("PromptTurn declares a valid datum"),
         Declaration::of::<work::Plan>().expect("Plan declares a valid datum"),
         Declaration::of::<work::RepoEntry>().expect("RepoEntry declares a valid datum"),
+        Declaration::of::<work::CommitsDoc>().expect("CommitsDoc declares a valid datum"),
         Declaration::of::<work::WorktreeEntry>().expect("WorktreeEntry declares a valid datum"),
         Declaration::of::<work::SessionEntry>().expect("SessionEntry declares a valid datum"),
         Declaration::of::<work::GithubPullEntry>().expect("GithubPullEntry declares a valid datum"),
