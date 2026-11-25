@@ -76,6 +76,17 @@ impl Encoding {
     }
 }
 
+/// The media type without its parameters: `application/json; charset=utf-8` is
+/// `application/json`. Every site that decides JSON versus bytes goes through this.
+pub fn content_type_essence(mime: &str) -> &str {
+    mime.split(';').next().unwrap_or_default().trim()
+}
+
+/// Returns whether a media type's essence is `application/json`, ignoring parameters and ASCII case.
+pub fn is_json_content_type(mime: &str) -> bool {
+    content_type_essence(mime).eq_ignore_ascii_case("application/json")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XrpcMethod {
     pub nsid: &'static str,

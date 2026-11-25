@@ -12,6 +12,7 @@ use serde_json::Value;
 use serde_json::json;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
+use service_client_core_rs::xrpc::XrpcBody;
 use service_client_core_rs::xrpc::XrpcRequest;
 use service_client_core_rs::xrpc::XrpcResponse;
 use service_core_rs::ClientError;
@@ -97,13 +98,16 @@ async fn post(path: &str, headers: &[(&str, &str)], body: &str) -> (StatusCode, 
         &Method::POST,
         path,
         &map,
-        body.as_bytes(),
+        XrpcBody::json(body.as_bytes().to_vec()),
     )
     .await;
     let (parts, body) = response.into_parts();
     (
         parts.status,
-        serde_json::from_slice(&body).unwrap(),
+        match body {
+            XrpcBody::Json(body) => serde_json::from_slice(&body).unwrap(),
+            XrpcBody::Bytes(_) => panic!("JSON test response was bytes"),
+        },
         parts.headers,
     )
 }
@@ -158,7 +162,7 @@ async fn refusals_that_are_not_the_methods_are_bare_errors() {
         &Method::GET,
         "/xrpc/org.example.test.greet",
         &HeaderMap::new(),
-        b"",
+        XrpcBody::json(Vec::new()),
     )
     .await;
     assert_eq!(get.status(), StatusCode::NOT_FOUND);
@@ -224,7 +228,7 @@ impl HttpTransport for Recording {
         Ok(XrpcResponse {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
-            body: serde_json::to_vec("hello back").unwrap(),
+            body: XrpcBody::json(serde_json::to_vec("hello back").unwrap()),
         })
     }
 }

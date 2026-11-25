@@ -27,7 +27,10 @@ use big_cartridges_core::protocol::SetCartridgeGrant;
 use big_cartridges_core::registry::version_pin;
 use big_cartridges_core::test_support::FixtureCartridge;
 
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchError;
+use big_dispatch_core::HttpForm;
+
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
@@ -59,6 +62,24 @@ impl Spec {
 
     fn relay(&self) -> String {
         format!("{}.relay", self.authority)
+    }
+
+    pub(super) fn put(&self) -> String {
+        format!("{}.put", self.authority)
+    }
+
+    pub(super) fn read(&self) -> String {
+        format!("{}.read", self.authority)
+    }
+
+    /// Served by the guest: consumes a byte body and reports the chunks it saw.
+    fn ingest(&self) -> String {
+        format!("{}.ingest", self.authority)
+    }
+
+    /// Served by the guest: answers a multi-chunk byte body.
+    fn emit(&self) -> String {
+        format!("{}.emit", self.authority)
     }
 
     /// Implemented by the nodule but not served by the guest, which answers 404 for it.
@@ -113,6 +134,34 @@ fn procedure(nsid: &str) -> Value {
         }}
     })
 }
+/// A procedure with a byte (`*/*`) input and the given output encoding. As in atproto, a byte
+/// encoding has no `schema`; the guest's blob capability and blob id ride in `parameters`.
+fn bytes_procedure(nsid: &str, output: &str, parameters: &[&str]) -> Value {
+    let output = if output == "application/json" {
+        json!({
+            "encoding": output,
+            "schema": { "type": "object", "properties": {} }
+        })
+    } else {
+        json!({ "encoding": output })
+    };
+    let mut main = json!({
+        "type": "procedure",
+        "input": { "encoding": "*/*" },
+        "output": output,
+    });
+    if !parameters.is_empty() {
+        main["parameters"] = json!({
+            "type": "params",
+            "required": parameters,
+            "properties": parameters
+                .iter()
+                .map(|name| ((*name).to_owned(), json!({"type": "string"})))
+                .collect::<serde_json::Map<_, _>>(),
+        });
+    }
+    json!({ "lexicon": 1, "id": nsid, "defs": { "main": main } })
+}
 fn setting(nsid: &str) -> Value {
     json!({
         "lexicon": 1,
@@ -156,11 +205,31 @@ fn cartridge_requiring(
     bytes: &[u8],
     requires: Vec<FixtureRequest>,
 ) -> FixtureCartridge {
-    let operations = [spec.echo(), spec.relay(), spec.absent(), spec.config()];
+    let operations = [
+        spec.echo(),
+        spec.relay(),
+        spec.absent(),
+        spec.config(),
+        spec.put(),
+        spec.read(),
+        spec.ingest(),
+        spec.emit(),
+    ];
     let mut nodule = Nodule::default();
     let mut lexicons = Vec::new();
     for nsid in &operations {
-        lexicons.push(serde_json::from_value(procedure(nsid)).unwrap());
+        let output = if nsid == &spec.put() {
+            bytes_procedure(nsid, "application/json", &["capability"])
+        } else if nsid == &spec.read() {
+            bytes_procedure(nsid, "*/*", &["capability", "blobId"])
+        } else if nsid == &spec.ingest() {
+            bytes_procedure(nsid, "application/json", &[])
+        } else if nsid == &spec.emit() {
+            bytes_procedure(nsid, "*/*", &[])
+        } else {
+            procedure(nsid)
+        };
+        lexicons.push(serde_json::from_value(output).unwrap());
         nodule.routines.insert(
             nsid.clone(),
             Routine {
@@ -375,6 +444,34 @@ pub(super) async fn invoke(
     context: InvocationContext,
 ) -> Result<Value, DispatchError> {
     invoke_within(node, operation, input, context, RequestContext::root()).await
+}
+
+pub(super) async fn invoke_bytes(
+    node: &BigNode,
+    operation: &str,
+    parameters: Value,
+    query: String,
+    body: ByteBody,
+    mut context: InvocationContext,
+) -> Result<big_dispatch_core::InvokeOutput, DispatchError> {
+    context.http = Some(HttpForm::Post { query });
+    node.dispatch
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
+            Invoke {
+                operation: operation.to_owned(),
+                parameters,
+                body: Body::Bytes(body),
+                context,
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            ClientError::Method(error) => error,
+            ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
+        })
 }
 
 /// [`invoke`] under the caller's own request context: its budget, request id and trace.
@@ -657,6 +754,179 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
             .await
             .unwrap()["input"],
         json!({ "n": 2 })
+    );
+    shutdown(node, stop).await;
+}
+
+#[tokio::test]
+async fn a_wasm_guest_streams_blob_put_and_read_bodies() {
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let spec = caller();
+    let calls = vec![
+        "org.example.daybook.blobs.put".to_owned(),
+        "org.example.daybook.blobs.read".to_owned(),
+    ];
+    put(&node, &bytes).await;
+    let record = admit(&node, cartridge(&spec, &bytes, &calls)).await;
+    // The blobs handles are minted for the nodule's own actor: a handle is bound to its subject,
+    // and the guest's calls reach the blobs service as that actor.
+    let actor = record
+        .actor
+        .expect("an installed nodule has an actor")
+        .actor_id;
+    set_operations(
+        &node,
+        &spec,
+        DispatchScope {
+            operations: calls.iter().cloned().collect(),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        set_enabled(&node, &spec, true).await.readiness,
+        Readiness::Ready
+    );
+
+    let put_capability = blobs::put_cap_for(&node, Some(actor)).await;
+    let put_capability_text = serde_json::to_value(put_capability)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let payload: Vec<u8> = (0..150_000).map(|index| (index % 251) as u8).collect();
+    let put_output = invoke_bytes(
+        &node,
+        &spec.put(),
+        json!({"capability": put_capability}),
+        format!("capability={put_capability_text}"),
+        ByteBody::from_bytes(payload.clone()),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let info: big_blobs_core::BlobInfo =
+        serde_json::from_value(put_output.body.into_json()).unwrap();
+
+    let read_capability = blobs::read_cap_for(&node, &info.blob_id, Some(actor)).await;
+    let read_capability_text = serde_json::to_value(read_capability)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let read_output = invoke_bytes(
+        &node,
+        &spec.read(),
+        json!({
+            "capability": read_capability,
+            "blobId": info.blob_id,
+        }),
+        format!("capability={read_capability_text}&blobId={}", info.blob_id),
+        ByteBody::from_bytes(Vec::new()),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let body = match read_output.body {
+        Body::Bytes(body) => body.collect(u64::MAX).await.unwrap(),
+        Body::Json(_) => panic!("blob read returned JSON"),
+        #[cfg(unix)]
+        Body::Descriptors(_) => panic!("blob read returned descriptors"),
+    };
+    assert_eq!(body, payload);
+    shutdown(node, stop).await;
+}
+
+/// A guest that serves byte-bodied methods, called through dispatch from the host: the request
+/// body reaches it chunk by chunk, and its answer leaves the same way with its MIME.
+#[tokio::test]
+async fn a_wasm_guest_serves_byte_bodied_methods_as_streams() {
+    use futures::StreamExt;
+
+    // What the guest's `emit` produces (`test_nodule_handlers::EMIT_CHUNKS` and
+    // `EMIT_CHUNK_OCTETS`, which this crate does not depend on).
+    const EMIT_CHUNKS: usize = 4;
+    const EMIT_CHUNK_OCTETS: usize = 64 * 1024;
+
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let spec = caller();
+    put(&node, &bytes).await;
+    admit(&node, cartridge(&spec, &bytes, &[])).await;
+    assert_eq!(
+        set_enabled(&node, &spec, true).await.readiness,
+        Readiness::Ready
+    );
+
+    // The host sends the payload as many small chunks; the guest sees it in 64 KiB chunks, so
+    // more than one chunk arriving is the stream and not one collected buffer.
+    const GUEST_CHUNK_OCTETS: usize = 64 * 1024;
+    let payload: Vec<u8> = (0..GUEST_CHUNK_OCTETS * 3 + 1234)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let sent = payload
+        .chunks(10_000)
+        .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+        .collect::<Vec<std::io::Result<bytes::Bytes>>>();
+    let output = invoke_bytes(
+        &node,
+        &spec.ingest(),
+        json!({}),
+        String::new(),
+        ByteBody::new(futures::stream::iter(sent))
+            .with_mime("application/x-ingest")
+            .with_length(payload.len() as u64),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let report = output.body.into_json();
+    assert_eq!(report["octets"], payload.len() as u64);
+    assert_eq!(report["mime"], "application/x-ingest");
+    assert_eq!(
+        report["sum"],
+        payload.iter().map(|octet| u64::from(*octet)).sum::<u64>()
+    );
+    assert_eq!(
+        report["chunks"],
+        payload.len().div_ceil(GUEST_CHUNK_OCTETS) as u64,
+        "the guest should have read the body as a stream of 64 KiB chunks"
+    );
+    assert!(report["chunks"].as_u64().unwrap() > 1);
+
+    let output = invoke_bytes(
+        &node,
+        &spec.emit(),
+        json!({}),
+        String::new(),
+        ByteBody::from_bytes(Vec::new()),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let Body::Bytes(mut body) = output.body else {
+        panic!("the guest's byte answer arrived as JSON");
+    };
+    assert_eq!(body.mime.as_deref(), Some("application/x-emit"));
+    assert_eq!(body.length, Some((EMIT_CHUNKS * EMIT_CHUNK_OCTETS) as u64));
+    let (mut chunks, mut octets, mut sum) = (0, 0usize, 0u64);
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.unwrap();
+        chunks += 1;
+        octets += chunk.len();
+        sum += chunk.iter().map(|octet| u64::from(*octet)).sum::<u64>();
+    }
+    assert_eq!(octets, EMIT_CHUNKS * EMIT_CHUNK_OCTETS);
+    assert_eq!(
+        sum,
+        (0..EMIT_CHUNKS as u64).sum::<u64>() * EMIT_CHUNK_OCTETS as u64
+    );
+    assert!(
+        chunks > 1,
+        "the guest's answer was collected into one chunk"
     );
     shutdown(node, stop).await;
 }

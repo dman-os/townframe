@@ -161,11 +161,11 @@ pub use service_utils_rs::sample::service :: SampleHandler
 pub use service_utils_rs::sample::service :: SampleService
 pub use service_utils_rs::sample::service :: boot
 pub use service_utils_rs::service_client_native_rs as __client_native
-pub use service_utils_rs::service_core_rs :: descriptor
 pub use service_utils_rs::service_core_rs :: Protocol
 pub use service_utils_rs::service_core_rs :: ProtocolMethods
 pub use service_utils_rs::service_core_rs :: UnaryVisitor
 pub use service_utils_rs::service_core_rs :: declare_service_protocol
+pub use service_utils_rs::service_core_rs :: descriptor
 pub use service_utils_rs::service_core_rs :: service_method
 pub use service_utils_rs::xrpc :: XrpcRouter
 pub use service_utils_rs::xrpc::iroh :: IrohXrpcProtocolHandler

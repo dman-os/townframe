@@ -5,6 +5,7 @@ use service_client_core_rs::Client;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
 use service_client_core_rs::xrpc::Xrpc;
+use service_client_core_rs::xrpc::XrpcBody;
 use service_client_core_rs::xrpc::XrpcRequest;
 use service_client_core_rs::xrpc::XrpcResponse;
 use service_core_rs::ClientError;
@@ -242,7 +243,7 @@ impl Cx {
                 method: http::Method::POST,
                 path: format!("xrpc/{operation}"),
                 headers,
-                body: serde_json::to_vec(&body).expect("a JSON value serializes"),
+                body: XrpcBody::json(serde_json::to_vec(&body).expect("a JSON value serializes")),
             },
         )
         .await
@@ -250,11 +251,19 @@ impl Cx {
             message: error.message,
             outcome_unknown: true,
         })?;
-        let value =
-            serde_json::from_slice(&response.body).map_err(|error| ClientError::Transport {
-                message: format!("invalid JSON response: {error}"),
-                outcome_unknown: true,
-            })?;
+        let body = match response.body {
+            XrpcBody::Json(body) => body,
+            XrpcBody::Bytes(_) => {
+                return Err(ClientError::Transport {
+                    message: "configuration call returned a byte body".to_owned(),
+                    outcome_unknown: true,
+                });
+            }
+        };
+        let value = serde_json::from_slice(&body).map_err(|error| ClientError::Transport {
+            message: format!("invalid JSON response: {error}"),
+            outcome_unknown: true,
+        })?;
         if response.status.is_success() {
             Ok(value)
         } else {
