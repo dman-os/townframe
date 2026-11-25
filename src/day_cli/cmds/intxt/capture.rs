@@ -335,7 +335,10 @@ pub(super) async fn resume() -> Res<ExitCode> {
     match std::fs::remove_file(&marker) {
         Ok(()) => println!("recording resumed (removed {})", marker.display()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            println!("recording was already on (no marker at {})", marker.display());
+            println!(
+                "recording was already on (no marker at {})",
+                marker.display()
+            );
         }
         Err(error) => return Err(error).wrap_err_with(|| format!("removing {}", marker.display())),
     }

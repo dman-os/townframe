@@ -1136,10 +1136,12 @@ mod blackbox {
         let sandbox = Sandbox::new();
         assert!(sandbox.day(&["node", "init"]).status.success());
         let said = |args: &[&str]| {
-            let output = sandbox.day(&["x", "intxt", "record"]
-                .into_iter()
-                .chain(args.iter().copied())
-                .collect::<Vec<_>>());
+            let output = sandbox.day(
+                &["x", "intxt", "record"]
+                    .into_iter()
+                    .chain(args.iter().copied())
+                    .collect::<Vec<_>>(),
+            );
             assert!(output.status.success());
             String::from_utf8_lossy(&output.stdout).into_owned()
         };
@@ -1210,7 +1212,10 @@ mod blackbox {
         };
         let silent_success = |output: std::process::Output| {
             assert!(output.status.success(), "{output:?}");
-            assert!(output.stdout.is_empty() && output.stderr.is_empty(), "{output:?}");
+            assert!(
+                output.stdout.is_empty() && output.stderr.is_empty(),
+                "{output:?}"
+            );
         };
 
         assert!(hook(&["record", "pause"]).status.success());
