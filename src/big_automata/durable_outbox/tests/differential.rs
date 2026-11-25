@@ -210,7 +210,12 @@ impl Harness {
         let phases = self.oracle.phases();
         prop_assert_eq!(self.machine.len(), phases.len());
         for (obj, phase) in phases {
-            prop_assert_eq!(self.machine.phase_of(&obj), Some(phase), "phase of {:?}", obj);
+            prop_assert_eq!(
+                self.machine.phase_of(&obj),
+                Some(phase),
+                "phase of {:?}",
+                obj
+            );
         }
         prop_assert_eq!(self.machine.next_due(), self.oracle.next_due());
         prop_assert_eq!(self.machine.fetching(), self.calls.len());

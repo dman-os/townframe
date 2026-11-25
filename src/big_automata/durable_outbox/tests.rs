@@ -12,6 +12,7 @@ mod driver;
 mod laws;
 mod sim;
 mod table;
+mod world;
 
 pub(super) fn obj(n: u8) -> ObjKey {
     ObjKey::new(&[n])
