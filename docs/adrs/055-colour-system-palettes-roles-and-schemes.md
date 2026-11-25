@@ -1,6 +1,6 @@
 # ADR 055: Colour system: palettes, roles and schemes
 
-**Status:** Accepted (2026-11-25). Proposed by the claytxt lane in the design pairing and accepted by the operator the
+**Status:** Accepted (2026-11-25; the open mappings of §3.2 settled by the operator the same day). Proposed by the claytxt lane in the design pairing and accepted by the operator the
 same day. Nothing here is built. The exact step each role takes is tuned in the colour sitting on the theme lab's
 specimen board (§4 gives the starting mapping).
 
@@ -87,14 +87,26 @@ Role families follow Material's quartet, so every pair is readable by constructi
 `warning` text uses `on-warning-container` (step 11), which is readable on light surfaces, where today's `warning`
 fails AA.
 
-Surfaces become a ladder over the neutral ramp: `canvas` (1), `surface-sunken` (2), `surface` (3), `surface-raised` (4),
-plus state backgrounds from steps 4–5. Text: `text` (12), `text-muted` (11). Lines: `border` (6), `border-strong` (7),
-`focus` (primary 8). `scrim` is neutral 12 at the scrim alpha.
+Surfaces become a ladder over the neutral ramp: `canvas` (1), `surface` (3), `surface-raised` (4). Text: `text` (12),
+`text-muted` (11), `text-subtle` (11, the same step as `text-muted`). Lines: `border` (6), `border-strong` (7), `focus`
+(primary 9, the solid fill, so the ring is the brand colour and keeps the contrast of a fill).
+
+- **`surface-sunken` is the one exception to the ladder.** It is a value of its own per scheme (the neutral ramp's
+  `sunken`), not a step. A well is darker than the surface it sits in; in the light scheme that puts it below the
+  surface and canvas, which a ramp that runs monotonically from light to dark cannot also hold while step 3 is the
+  surface. (Dark has no such conflict; its sunken is the canvas colour, as it was under Material.) The check treats it as a surface
+  like the others.
+- **`scrim` is black at the scrim alpha (32%) in every scheme**, not neutral 12: in a dark scheme step 12 is a near-white
+  that would lighten what the scrim covers.
+- **State backgrounds** (steps 4-5, hover and pressed) get no role until a component needs one; the steps stay in the
+  palette.
 
 ### 3.3 Readable pairs are checked
 
 `x/design-tokens.ts` and the theme lab check every quartet and every text role against the surfaces it is meant for,
-at WCAG AA (4.5:1 for text, 3:1 for non-text UI), for every scheme and contrast level a sheet supports. The lab shows
+at WCAG AA (4.5:1 for text, 3:1 for non-text UI), for every scheme and contrast level a sheet supports. The more-contrast
+level is held to AA like the standard one, not to a stricter bar: it moves roles to darker or lighter steps, it does not
+change the threshold. The lab shows
 the ratio on each swatch and flags failures; the token check fails the shipped palette's build.
 
 ## 4. Schemes and contrast
@@ -116,7 +128,7 @@ The shell's settings hold two values, chosen by the user:
 - Contrast is not a CSS property, so the host sets `data-contrast="more"` on the root when the setting (or
   `prefers-contrast: more` under `system`) asks for it. The foundation's role mapping has a `more` variant (text 12 for
   muted text, `border-strong` for borders, step 10 for X), so a palette gets a high-contrast mode without the sheet
-  writing one. A sheet may override it under `[data-contrast="more"]`.
+  writing one. The variant is checked at AA like the standard mapping (§3.3), including the plain `border` at 3:1. A sheet may override it under `[data-contrast="more"]`.
 
 ### 4.3 Single-scheme sheets
 

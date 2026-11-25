@@ -473,13 +473,18 @@ type RampName = typeof rampNames[number];
 const schemes = ["light", "dark"] as const;
 type Scheme = typeof schemes[number];
 type ContrastLevel = "standard" | "more";
-type Step = number | "contrast";
+type Step = number | "contrast" | "sunken";
+/** The keys of a ramp: its twelve steps and `contrast`, plus the neutral's own `sunken` value. */
+const rampKeys = (ramp: RampName): string[] => [
+  ...Array.from({ length: 12 }, (_, index) => String(index + 1)),
+  "contrast",
+  ...(ramp === "neutral" ? ["sunken"] : []),
+];
 type Pair = Record<Scheme, string>;
 type Palette = Record<RampName, Record<string, Pair>>;
 /**
- * `scrim` is black at this alpha, in both schemes (the former overlay token's 32%). ADR 055 §3.2
- * says neutral 12, which in a dark scheme is a near-white that would lighten what the scrim covers;
- * see the open question on the layer that introduced this.
+ * `scrim` is black at this alpha, in both schemes (the former overlay token's 32%): neutral 12 in
+ * a dark scheme is a near-white that would lighten what the scrim covers (ADR 055 §3.2).
  */
 const scrimPercent = 32;
 
@@ -502,7 +507,8 @@ const statusFamilies = [
 ] as const;
 const roles: Role[] = [
   { name: "canvas", standard: { ramp: "neutral", step: 1 } },
-  { name: "surface-sunken", standard: { ramp: "neutral", step: 2 } },
+  // Not a ramp step: a monotone ramp cannot give a sunken that is darker than the surface in light.
+  { name: "surface-sunken", standard: { ramp: "neutral", step: "sunken" } },
   { name: "surface", standard: { ramp: "neutral", step: 3 } },
   { name: "surface-raised", standard: { ramp: "neutral", step: 4 } },
   { name: "text", standard: { ramp: "neutral", step: 12 } },
@@ -522,7 +528,7 @@ const roles: Role[] = [
     more: { ramp: "neutral", step: 7 },
   },
   { name: "border-strong", standard: { ramp: "neutral", step: 7 } },
-  { name: "focus", standard: { ramp: "primary", step: 8 } },
+  { name: "focus", standard: { ramp: "primary", step: 9 } },
   ...statusFamilies.flatMap((family): Role[] => [
     {
       name: family,
@@ -605,13 +611,10 @@ function parsePalette(source: unknown): Palette {
     !(rampNames as readonly string[]).includes(name)
   );
   if (unknown.length) fail(`${paletteSource} has unknown ramps ${unknown}`);
-  const keys = [
-    ...Array.from({ length: 12 }, (_, index) => String(index + 1)),
-    "contrast",
-  ];
   const palette = {} as Palette;
   for (const name of rampNames) {
     const ramp = ramps[name];
+    const keys = rampKeys(name);
     if (!isObject(ramp)) fail(`${paletteSource} lacks the ${name} ramp`);
     const extra = Object.keys(ramp).filter((key) => !keys.includes(key));
     if (extra.length) fail(`ramp ${name} has unknown steps ${extra}`);
@@ -711,11 +714,11 @@ function paletteName(ramp: RampName, step: Step): string {
 
 function generatePaletteCss(palette: Palette): string {
   const ramps = rampNames.flatMap((ramp) =>
-    [...Array.from({ length: 12 }, (_, index) => index + 1), "contrast"]
+    rampKeys(ramp)
       .map((step) => {
         const pair = palette[ramp][String(step)];
         return `    ${
-          paletteName(ramp, step as Step)
+          paletteName(ramp, (/^\d+$/.test(step) ? Number(step) : step) as Step)
         }: light-dark(${pair.light}, ${pair.dark});`;
       })
   );
