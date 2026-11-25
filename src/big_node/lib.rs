@@ -67,6 +67,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
 use utils_rs::prelude::Res;
+use utils_rs::prelude::eyre;
 
 /// What a nodule executor's factory returns: the executor and the token that stops it.
 pub type HostedExecutor = (Arc<dyn NoduleExecutor>, service_utils_rs::StopToken);
@@ -141,13 +142,58 @@ pub fn node_id(identity_seed: &[u8; 32]) -> String {
     )
 }
 
+/// The keyring service holding a node's identity seed. It is the node's own, apart from the
+/// services of the parts it hosts (`big_cabinet.authority` keeps the wrapping key).
+const IDENTITY_SERVICE: &str = "big_node.identity";
+
+fn identity_key_name(node_id: &str) -> String {
+    format!("seed.{node_id}")
+}
+
+/// A node's identity seed in the keyring, filed under the node id derived from it. The seed is
+/// created once at init and never regenerated; [`delete_secrets`] removes it with the node's
+/// other entries.
+pub struct IdentityKeyring<'a>(pub &'a SecretStore);
+
+impl IdentityKeyring<'_> {
+    /// Stores `identity_seed`. Storing the seed already there changes nothing.
+    pub async fn store(&self, identity_seed: &[u8; 32]) -> Res<()> {
+        self.0
+            .set_secret(
+                IDENTITY_SERVICE,
+                &identity_key_name(&node_id(identity_seed)),
+                identity_seed,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Loads the seed of the node `node_id`; an error when the keyring has none or it is damaged.
+    pub async fn load(&self, node_id: &str) -> Res<[u8; 32]> {
+        let seed = self
+            .0
+            .get_secret(IDENTITY_SERVICE, &identity_key_name(node_id))
+            .await?
+            .ok_or_else(|| {
+                eyre::eyre!("the identity key of node {node_id} is not in the keyring")
+            })?;
+        seed.try_into()
+            .map_err(|_| eyre::eyre!("the identity key of node {node_id} is not 32 bytes"))
+    }
+}
+
 /// Removes every keyring entry the node with `identity_seed` keeps in `secrets`, for tearing a
 /// node down for good: its actor keys can no longer be opened afterwards. The list of entries
 /// lives here, next to [`Config::secrets`], so a service that starts keeping one is added once.
 /// Returns how many entries existed and were removed.
 pub async fn delete_secrets(secrets: &SecretStore, identity_seed: &[u8; 32]) -> Res<usize> {
     let node_id = node_id(identity_seed);
-    let removed = [big_cabinet::authority::delete_wrapping_key(secrets, &node_id).await?];
+    let removed = [
+        secrets
+            .delete_secret(IDENTITY_SERVICE, &identity_key_name(&node_id))
+            .await?,
+        big_cabinet::authority::delete_wrapping_key(secrets, &node_id).await?,
+    ];
     Ok(removed.into_iter().filter(|removed| *removed).count())
 }
 
@@ -1094,6 +1140,27 @@ impl StopToken {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn delete_secrets_removes_the_identity_entry() {
+        let keyring = keyring_core::mock::Store::new().expect("mock keyring")
+            as Arc<keyring_core::CredentialStore>;
+        let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
+        let seed = [42_u8; 32];
+        let identity = IdentityKeyring(&secrets);
+        identity.store(&seed).await.unwrap();
+        assert_eq!(identity.load(&node_id(&seed)).await.unwrap(), seed);
+
+        assert_eq!(delete_secrets(&secrets, &seed).await.unwrap(), 1);
+        assert!(identity.load(&node_id(&seed)).await.is_err());
+        assert_eq!(delete_secrets(&secrets, &seed).await.unwrap(), 0);
+        secrets.stop().await.unwrap();
     }
 }
 

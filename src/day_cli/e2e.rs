@@ -49,10 +49,10 @@ mod library {
 
     /// An initialized node whose socket directory is `<sandbox>/run`, so no test touches the
     /// real runtime directory.
-    fn new_node() -> (tempfile::TempDir, NodeDir) {
+    async fn new_node() -> (tempfile::TempDir, NodeDir) {
         let tmp = short_tempdir();
         let dir = NodeDir::with_socket_dir(tmp.path().join("node"), tmp.path().join("run"));
-        dir.init().unwrap();
+        dir.init().await.unwrap();
         (tmp, dir)
     }
 
@@ -152,7 +152,7 @@ mod library {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn init_then_status_in_process() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         let client = connect(&dir).await.unwrap();
         assert_eq!(client.mode(), Mode::InProcess);
         assert_eq!(client.socket_state(), SocketState::Absent);
@@ -172,7 +172,7 @@ mod library {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_node_id_is_the_repos_peer_id() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         let lock = dir.try_lock(LockRole::Command).unwrap().unwrap();
         let booted = Booted::boot(&dir, lock, LockRole::Command).await.unwrap();
         let peer = booted.node.repo.local_peer_id().to_bytes32().unwrap();
@@ -185,7 +185,7 @@ mod library {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_same_calls_answer_the_same_in_process_and_over_the_daemon() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         let in_process = connect(&dir).await.unwrap();
         assert_eq!(in_process.mode(), Mode::InProcess);
         let mut local = Vec::new();
@@ -223,7 +223,7 @@ mod library {
         const MINT: &str = "org.example.daybook.blobs.mintCapability";
         const PUT: &str = "org.example.daybook.blobs.put";
         const READ: &str = "org.example.daybook.blobs.read";
-        let (tmp, dir) = new_node();
+        let (tmp, dir) = new_node().await;
         let upload = tmp.path().join("upload.bin");
         // Over the 64 KiB chunks a read yields, so it is several chunks long.
         let content: Vec<u8> = (0..300_000u32).map(|at| (at % 251) as u8).collect();
@@ -310,7 +310,7 @@ mod library {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_stale_socket_is_detected_then_replaced_by_the_next_daemon() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         dir.ensure_run_dir().unwrap();
         // A socket file nothing listens on: bind, then close without unlinking.
         drop(std::os::unix::net::UnixListener::bind(dir.socket_path().unwrap()).unwrap());
@@ -331,7 +331,7 @@ mod library {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn something_that_is_not_a_socket_at_the_socket_path_is_an_error() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         dir.ensure_run_dir().unwrap();
         std::fs::write(dir.socket_path().unwrap(), b"not a socket").unwrap();
         let error = dir.probe_socket().await.unwrap_err();
@@ -343,7 +343,7 @@ mod library {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn one_process_at_a_time_boots_a_node() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         let daemon = TestDaemon::start(&dir).await;
         let held = dir.try_lock(LockRole::Command).unwrap().unwrap_err();
         assert_eq!(held.pid, Some(std::process::id()));
@@ -376,7 +376,7 @@ mod library {
     /// client instead of fighting for the lock, and both are answered.
     #[tokio::test(flavor = "multi_thread")]
     async fn two_concurrent_commands_boot_the_node_once() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         let (first, second) = tokio::join!(connect(&dir), connect(&dir));
         let (first, second) = (first.unwrap(), second.unwrap());
         // The holder found no socket; the client found the holder's.
@@ -424,7 +424,7 @@ mod library {
     /// `node run` against a node a command has open waits for the command, instead of refusing.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_daemon_waits_for_a_command_that_has_the_node_open() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         let holder = connect(&dir).await.unwrap();
         let (ready, serving) = oneshot::channel();
         let (stop, stopped) = oneshot::channel::<()>();
@@ -456,7 +456,7 @@ mod library {
     /// answered once it is up.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_client_arriving_during_boot_waits_for_the_socket() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         let booting = dir.try_lock(LockRole::Command).unwrap().unwrap();
         let arriving = tokio::spawn({
             let dir = dir.clone();
@@ -480,17 +480,17 @@ mod library {
         holder.stop().await.unwrap();
     }
 
-    #[test]
-    fn init_refuses_an_existing_node_and_leaves_it_alone() {
-        let (_tmp, dir) = new_node();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn init_refuses_an_existing_node_and_leaves_it_alone() {
+        let (_tmp, dir) = new_node().await;
         let before = dir.settings().unwrap().node_id();
-        assert!(dir.init().is_err());
+        assert!(dir.init().await.is_err());
         assert_eq!(dir.settings().unwrap().node_id(), before);
     }
 
-    #[test]
-    fn a_socket_path_too_long_for_sun_path_is_refused() {
-        let (tmp, _) = new_node();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_socket_path_too_long_for_sun_path_is_refused() {
+        let (tmp, _) = new_node().await;
         let long = NodeDir::with_socket_dir(
             tmp.path().join("node"),
             std::path::PathBuf::from("/tmp").join("x".repeat(120)),
@@ -499,9 +499,9 @@ mod library {
         assert!(format!("{error:#}").contains("longer than a Unix socket path"));
     }
 
-    #[test]
-    fn the_socket_is_named_by_the_node_id_in_the_runtime_directory() {
-        let (tmp, dir) = new_node();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_socket_is_named_by_the_node_id_in_the_runtime_directory() {
+        let (tmp, dir) = new_node().await;
         assert_eq!(
             dir.socket_path().unwrap(),
             tmp.path()
@@ -511,7 +511,7 @@ mod library {
         // The node directory is not where the socket goes, so a long node path is fine.
         let far =
             NodeDir::with_socket_dir(tmp.path().join("x".repeat(200)), tmp.path().join("run"));
-        far.init().unwrap();
+        far.init().await.unwrap();
         far.socket_path().unwrap();
     }
 
@@ -530,10 +530,10 @@ mod library {
 
     /// A directory that is not the user's own is refused as a socket directory, whoever made
     /// it: here, one other users can enter.
-    #[test]
-    fn a_socket_directory_other_users_can_enter_is_refused() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_socket_directory_other_users_can_enter_is_refused() {
         use std::os::unix::fs::PermissionsExt;
-        let (tmp, dir) = new_node();
+        let (tmp, dir) = new_node().await;
         let run = tmp.path().join("run");
         std::fs::create_dir(&run).unwrap();
         std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -550,12 +550,10 @@ mod library {
     #[tokio::test(flavor = "multi_thread")]
     async fn two_nodes_on_one_machine_have_distinct_sockets_and_keyring_entries() {
         let tmp = short_tempdir();
-        let node = |name: &str| {
-            let dir = NodeDir::with_socket_dir(tmp.path().join(name), tmp.path().join("run"));
-            dir.init().unwrap();
-            dir
-        };
-        let (first, second) = (node("first"), node("second"));
+        let first = NodeDir::with_socket_dir(tmp.path().join("first"), tmp.path().join("run"));
+        let second = NodeDir::with_socket_dir(tmp.path().join("second"), tmp.path().join("run"));
+        first.init().await.unwrap();
+        second.init().await.unwrap();
         assert_ne!(first.socket_path().unwrap(), second.socket_path().unwrap());
         assert_eq!(
             first.socket_path().unwrap().parent(),
@@ -574,8 +572,8 @@ mod library {
         // The mock keyring is process-wide, as the platform keyring is machine-wide.
         let secrets = secrets_rs::SecretStore::boot().await.unwrap();
         for dir in [&first, &second] {
-            let seed = dir.settings().unwrap().seed();
-            assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 1);
+            let seed = dir.settings().unwrap().seed(&secrets).await.unwrap();
+            assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 2);
             assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 0);
         }
         secrets.stop().await.unwrap();
@@ -587,7 +585,7 @@ mod library {
     /// connected. Waiting is on the peers service's events.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_daemon_dials_its_bootstrap_peer_and_both_report_the_connection() {
-        let loopback = |dir: &NodeDir| {
+        let loopback = async |dir: &NodeDir| {
             dir.update_settings(|settings| {
                 settings.peers = Some(crate::context::PeerSettings {
                     loopback_only: true,
@@ -595,10 +593,11 @@ mod library {
                 });
                 Ok(())
             })
+            .await
             .unwrap();
         };
-        let (_dialed_tmp, dialed_dir) = new_node();
-        loopback(&dialed_dir);
+        let (_dialed_tmp, dialed_dir) = new_node().await;
+        loopback(&dialed_dir).await;
         let dialed = TestDaemon::start(&dialed_dir).await;
         let dialed_client = connect(&dialed_dir).await.unwrap();
         assert_eq!(dialed_client.mode(), Mode::Daemon);
@@ -611,8 +610,8 @@ mod library {
         );
         assert!(dialed_info.peers.as_ref().unwrap().connected.is_empty());
 
-        let (_dialer_tmp, dialer_dir) = new_node();
-        loopback(&dialer_dir);
+        let (_dialer_tmp, dialer_dir) = new_node().await;
+        loopback(&dialer_dir).await;
         let address = dialed_info.peers.unwrap().address;
         assert!(
             dialer_dir
@@ -621,6 +620,7 @@ mod library {
                     .as_mut()
                     .unwrap()
                     .add_bootstrap(&address))
+                .await
                 .unwrap()
         );
         // The same endpoint again replaces its entry instead of adding a second.
@@ -631,6 +631,7 @@ mod library {
                     .as_mut()
                     .unwrap()
                     .add_bootstrap(&address))
+                .await
                 .unwrap()
         );
         assert_eq!(
@@ -658,16 +659,19 @@ mod library {
         dialed.stop().await;
         let secrets = secrets_rs::SecretStore::boot().await.unwrap();
         for dir in [&dialer_dir, &dialed_dir] {
-            big_node::delete_secrets(&secrets, &dir.settings().unwrap().seed())
-                .await
-                .unwrap();
+            big_node::delete_secrets(
+                &secrets,
+                &dir.settings().unwrap().seed(&secrets).await.unwrap(),
+            )
+            .await
+            .unwrap();
         }
         secrets.stop().await.unwrap();
     }
 
-    #[test]
-    fn an_invalid_bootstrap_ticket_is_refused_and_writes_nothing() {
-        let (_tmp, dir) = new_node();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_invalid_bootstrap_ticket_is_refused_and_writes_nothing() {
+        let (_tmp, dir) = new_node().await;
         let error = dir
             .update_settings(|settings| {
                 settings
@@ -675,6 +679,7 @@ mod library {
                     .get_or_insert_with(default)
                     .add_bootstrap("not a ticket")
             })
+            .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("not an endpoint ticket"));
         assert!(
@@ -815,7 +820,7 @@ mod blackbox {
                 .unwrap()
                 .block_on(async {
                     let secrets = secrets_rs::SecretStore::boot_platform().await?;
-                    big_node::delete_secrets(&secrets, &settings.seed()).await?;
+                    big_node::delete_secrets(&secrets, &settings.seed(&secrets).await?).await?;
                     secrets.stop().await
                 });
             match cleaned {
