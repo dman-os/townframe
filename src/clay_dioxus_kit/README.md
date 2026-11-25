@@ -305,7 +305,7 @@ KIT-070 are enforced by the harness itself (`src/testing.rs`).
 | KIT-002 | `cargo x guardrails lint` (module item budgets); `conventions::a_component_is_a_public_headless_module_and_a_skin` (the headless module is declared and re-exported, its stylesheet exists, no styled Rust part, tests, README table row) |
 | KIT-010 | `conventions::headless_parts_hold_no_styling` (no class literal but the root's, no utility strings, no skin in `headless/`) |
 | KIT-102 | `conventions::skins_stack_on_the_layer_scale_and_never_name_a_z_index_number` |
-| KIT-040 | `conventions::breakpoints_live_in_width_rs_and_nothing_measures_the_dom` (no `600.0`/`840.0` outside `width.rs`; no `get_client_rect`, `onmounted`, `use_window`, `web_sys`, ...) |
+| KIT-040 | `conventions::breakpoints_live_in_width_rs_and_nothing_measures_the_dom` (no `600.0`/`840.0` outside `width.rs`; no `get_client_rect`, `MountedData`, `use_window`, `web_sys`, ...; `headless/scrub_strip.rs` alone measures its own overlay, gated on `Renderer::measures_layout`) |
 | KIT-052 | `conventions::tabindex_is_only_the_renderer_focus_gate` (`tabindex` only in `headless/sections.rs`, gated on `.takes_focus()`, and `-1` on the modal panels; focus moves only in `headless.rs`) |
 | KIT-053 | the harness panics on a tag, attribute or style property outside the guest vocabulary |
 | KIT-071 | `conventions::tests_neither_sleep_nor_wait` (no sleeps, timers, clocks, threads, async runtimes) |

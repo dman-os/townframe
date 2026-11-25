@@ -32,7 +32,6 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use super::Segmented;
-use crate::LabViewport;
 use clay_dioxus_kit::ScrubStrip;
 use review_mock::DiffOptions;
 use web_time::Instant;
@@ -291,7 +290,6 @@ fn PrCodeFiles(
         }
     });
     let scroll_root = use_context::<ScrollRoot>();
-    let viewport = use_context::<LabViewport>().0;
     let mut serial = use_signal(|| 0_u64);
     let mut reveal = use_signal(|| None::<ScrollRequest>);
     // The index's current file: the viewer's, as it scrolls.
@@ -354,7 +352,6 @@ fn PrCodeFiles(
             }
             if FILE_INDEX {
                 ScrubStrip {
-                    viewport: (viewport(), 860.0),
                     items: labels.to_vec(),
                     renderer: crate::renderer(),
                     label: "Files of the PR diff".to_string(),

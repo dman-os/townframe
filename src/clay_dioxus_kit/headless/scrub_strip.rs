@@ -82,8 +82,11 @@
 //!
 //! # Renderer limits
 //!
-//! * The viewport arrives as a prop and nothing here measures: a Blitz node has no layout to
-//!   measure at mount time, and its `get_client_rect` panics inside a handler.
+//! * The strip measures the box its overlay covers (`position: fixed; inset: 0`) with
+//!   `onmounted` and `onresize`, and reads pointer positions relative to that box, so a host
+//!   never tells it how big the window is. A Blitz node has no layout to measure at mount time
+//!   and its `get_client_rect` panics ([`Renderer::measures_layout`]), so there the box stays
+//!   zero-sized: the strip still picks, but its labels do not travel inboard.
 //! * Blitz does not implement pointer capture (a 1.0 item,
 //!   <https://github.com/DioxusLabs/blitz/issues/119>), so once a gesture starts the *whole
 //!   overlay* takes pointer input (`data-state="engaged"` turns its `pointer-events` on). Every
@@ -92,7 +95,12 @@
 //!   [`Renderer::takes_focus`]; elsewhere it is pointer-only.
 
 use super::sections::Renderer;
+use dioxus::html::geometry::ClientPoint;
+use dioxus::html::geometry::Pixels;
+use dioxus::html::geometry::PixelsRect;
+use dioxus::html::geometry::euclid::Point2D;
 use dioxus::prelude::*;
+use std::rc::Rc;
 
 // -- geometry knobs (tuned visually) -----------------------------------------
 
@@ -123,7 +131,7 @@ const REACH_BASE: f64 = 90.0;
 const REACH_RATIO: f64 = 0.7;
 /// Extra spacing applied while the strip is actively engaged.
 const ACTIVE_SPACING_MULTIPLIER: f64 = 1.35;
-/// Used until the window has been measured.
+/// Used until the overlay has been measured.
 const FALLBACK_HEIGHT: f64 = 860.0;
 
 /// Breakpoints. Niagara uses a star for "favourites" then an A–Z index.
@@ -405,7 +413,7 @@ impl StripState {
     }
 }
 
-/// What can happen to the strip. Positions are viewport coordinates in px.
+/// What can happen to the strip. Positions are in px from the measured box's origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum StripEvent {
     /// A press on the grab band.
@@ -442,8 +450,8 @@ enum StripEvent {
 
 impl StripState {
     /// The state after `event`, and the breakpoint to report through `on_select` if the event
-    /// moved the selection onto a new one. Pure: `viewport` and `count` are the props the strip
-    /// is laid out from.
+    /// moved the selection onto a new one. Pure: `viewport` (the measured box's size) and `count` are what the
+    /// strip is laid out from.
     fn next(
         &self,
         viewport: (f64, f64),
@@ -529,6 +537,17 @@ impl StripState {
     }
 }
 
+/// The width and height of the measured box.
+fn size_of(bounds: PixelsRect) -> (f64, f64) {
+    (bounds.size.width, bounds.size.height)
+}
+
+/// A pointer's client coordinates as a point in the measured box, which is where every position
+/// in the geometry is counted from.
+fn local(client: ClientPoint, bounds: PixelsRect) -> Point2D<f64, Pixels> {
+    Point2D::new(client.x - bounds.origin.x, client.y - bounds.origin.y)
+}
+
 /// The breakpoint step a key asks for, in breakpoints: the sign is the direction, `Home` and
 /// `End` ask for more than the list is long so the clamp lands them on the ends.
 fn key_step(key: &Key, count: usize) -> Option<f64> {
@@ -541,16 +560,11 @@ fn key_step(key: &Key, count: usize) -> Option<f64> {
     }
 }
 
-/// `viewport` is the window's inner size in logical px, supplied by the platform
-/// shell.
-///
-/// It is a prop rather than a measurement because a Blitz node has no layout to
-/// measure at mount time: the overlay's scroll size reads 0x0 then, and
-/// `get_client_rect` additionally panics (`doc_mut` while borrowed). Handing in
-/// plain numbers keeps this component free of any renderer dependency.
+/// The strip covers the window with a fixed overlay and measures that box itself: its size sets
+/// the spacing and how far the labels can travel, and its origin is subtracted from the
+/// pointer's client coordinates so both live in one space.
 #[component]
 pub fn ScrubStrip(
-    viewport: (f64, f64),
     items: Vec<&'static str>,
     on_select: EventHandler<usize>,
     /// The accessible name of the slider.
@@ -567,6 +581,27 @@ pub fn ScrubStrip(
     let count = items.len();
 
     let state = use_signal(StripState::default);
+    // The overlay's box in client coordinates, zero-sized until it is measured.
+    let mut bounds = use_signal(PixelsRect::default);
+    let mut mounted = use_signal(|| None::<Rc<MountedData>>);
+    let measure = use_callback(move |()| {
+        if !renderer.measures_layout() {
+            return;
+        }
+        let element = mounted
+            .peek()
+            .clone()
+            .expect("a measure follows the overlay's mount");
+        spawn(async move {
+            let measured = element
+                .get_client_rect()
+                .await
+                .expect("the strip's overlay is mounted and measurable");
+            if *bounds.peek() != measured {
+                bounds.set(measured);
+            }
+        });
+    });
     // The one place the state is written: copy it out, compute the successor, write it. The
     // `peek` guard ends with the statement that took the copy, so nothing is borrowed while
     // the transition runs or while the caller acts on the selection, which may do anything
@@ -574,7 +609,7 @@ pub fn ScrubStrip(
     let send = use_callback(move |event: StripEvent| {
         let mut state = state;
         let before = state.peek().clone();
-        let (after, selected) = before.next(viewport, count, event);
+        let (after, selected) = before.next(size_of(*bounds.peek()), count, event);
         if after != before {
             state.set(after);
         }
@@ -591,7 +626,7 @@ pub fn ScrubStrip(
 
     let view = state();
     let pressed = view.engaged();
-    let geometry = Geometry::new(viewport, &items, &view);
+    let geometry = Geometry::new(size_of(bounds()), &items, &view);
     let live = view
         .announced
         .and_then(|index| items.get(index).copied())
@@ -618,6 +653,11 @@ pub fn ScrubStrip(
         div {
             class: "ct-scrub-strip",
             "data-state": ui_state,
+            onmounted: move |event| {
+                mounted.set(Some(event.data()));
+                measure.call(());
+            },
+            onresize: move |_| measure.call(()),
             style: "--ct-strip-cell: {cell}px; --ct-strip-inset: {REST_INSET}px; --ct-strip-anchor: {anchor}px; --ct-strip-limit: {limit}px",
             onpointermove: move |event| {
                 // Only a pressed strip owns the move; otherwise there is no gesture to
@@ -627,7 +667,7 @@ pub fn ScrubStrip(
                 }
                 // Fixed-position overlays use viewport coordinates. Page coordinates
                 // include document scroll and would move the strip offscreen after scrolling.
-                let point = event.data().client_coordinates();
+                let point = local(event.data().client_coordinates(), *bounds.peek());
                 send.call(StripEvent::Drag { x: point.x, y: point.y });
             },
             onpointerup: move |_| send.call(StripEvent::Release),
@@ -655,14 +695,14 @@ pub fn ScrubStrip(
                 }
             }
 
-            // Where the thumb is picking, left of the strip: the furthest from the thumb.
-            if pressed {
-                div {
-                    "data-part": "bubble",
-                    "aria-hidden": "true",
-                    style: "--ct-strip-push: {bubble_push}px; --ct-strip-dy: {active_dy}px",
-                    "{active_label}"
-                }
+            // Where the thumb is picking, left of the strip. Always mounted: the stylesheet fades
+            // it and slides it back to the resting column when the finger lifts, which needs the
+            // element to still be there to transition.
+            div {
+                "data-part": "bubble",
+                "aria-hidden": "true",
+                style: "--ct-strip-push: {bubble_push}px; --ct-strip-dy: {active_dy}px",
+                "{active_label}"
             }
 
             // Pointer input starts here rather than on the labels: without pointer capture we
@@ -679,12 +719,13 @@ pub fn ScrubStrip(
                 "aria-valuetext": "{active_label}",
                 tabindex: if renderer.takes_focus() { Some("0") } else { None },
                 onpointermove: move |event| {
-                    send.call(StripEvent::Hover { y: event.data().client_coordinates().y });
+                    let point = local(event.data().client_coordinates(), *bounds.peek());
+                    send.call(StripEvent::Hover { y: point.y });
                 },
                 onpointerleave: move |_| send.call(StripEvent::HoverEnd),
                 onpointerdown: move |event| {
                     event.prevent_default();
-                    let point = event.data().client_coordinates();
+                    let point = local(event.data().client_coordinates(), *bounds.peek());
                     send.call(StripEvent::Press { x: point.x, y: point.y });
                 },
                 onkeydown: move |event| {

@@ -18,25 +18,11 @@ use clay_dioxus_kit::TabPanel;
 use clay_dioxus_kit::Tabs;
 use clay_dioxus_kit::ThemeMode;
 use clay_dioxus_kit::ThemeRoot;
-#[cfg(feature = "desktop")]
-use dioxus::desktop::tao::event::Event as DesktopEvent;
-#[cfg(feature = "desktop")]
-use dioxus::desktop::tao::event::WindowEvent as DesktopWindowEvent;
-#[cfg(feature = "desktop")]
-use dioxus::desktop::use_wry_event_handler;
-#[cfg(feature = "desktop")]
-use dioxus::desktop::DesktopContext;
 use dioxus::prelude::*;
-#[cfg(feature = "desktop")]
-use dioxus_native::winit::event::WindowEvent as NativeWindowEvent;
-#[cfg(feature = "desktop")]
-use dioxus_native::winit::window::Window;
 use pierre_diffs_dioxus::use_scroll_root;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::rc::Rc;
-#[cfg(feature = "desktop")]
-use std::sync::Arc;
 
 const MATERIAL_THEME_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -107,83 +93,6 @@ fn lab_setting(env: &str, query: &str) -> Option<String> {
     }
 }
 
-/// The width the lab's sections lay out in, kept current as the window resizes.
-#[cfg(feature = "desktop")]
-fn use_available_width() -> Signal<f64> {
-    let native_window: Option<Arc<dyn Window>> = use_hook(try_consume_context);
-    let desktop_window: Option<DesktopContext> = use_hook(try_consume_context);
-    let initial_width = native_window
-        .as_ref()
-        .map(showcase_content_width)
-        .or_else(|| desktop_window.as_ref().map(desktop_content_width))
-        .expect("showcase must run with a native or desktop window context");
-    let mut available_width = use_signal(|| initial_width);
-    if let Some(window) = native_window {
-        dioxus_native::use_window_event(move |event, _| match event {
-            NativeWindowEvent::SurfaceResized(_) | NativeWindowEvent::ScaleFactorChanged { .. } => {
-                available_width.set(showcase_content_width(&window));
-            }
-            _ => {}
-        });
-    }
-    if let Some(window) = desktop_window {
-        use_wry_event_handler(move |event, _| {
-            if matches!(
-                event,
-                DesktopEvent::WindowEvent {
-                    event: DesktopWindowEvent::Resized(_)
-                        | DesktopWindowEvent::ScaleFactorChanged { .. },
-                    ..
-                }
-            ) {
-                available_width.set(desktop_content_width(&window));
-            }
-        });
-    }
-    available_width
-}
-
-/// The width the lab's sections lay out in, kept current as the window resizes.
-#[cfg(target_arch = "wasm32")]
-fn use_available_width() -> Signal<f64> {
-    use wasm_bindgen::closure::Closure;
-    use wasm_bindgen::JsCast;
-
-    fn window_content_width() -> f64 {
-        content_width(
-            web_sys::window()
-                .expect("the lab runs in a window")
-                .inner_width()
-                .expect("a window has an inner width")
-                .as_f64()
-                .expect("a window's inner width is a number"),
-        )
-    }
-    let mut available_width = use_signal(window_content_width);
-    // Registered once and removed when the root unmounts: the closure lives exactly as long as
-    // its listener.
-    let listener = use_hook(|| {
-        let listener = Closure::<dyn FnMut()>::new(move || {
-            available_width.set(window_content_width());
-        });
-        web_sys::window()
-            .expect("the lab runs in a window")
-            .add_event_listener_with_callback("resize", listener.as_ref().unchecked_ref())
-            .expect("a window takes a resize listener");
-        Rc::new(listener)
-    });
-    use_drop(move || {
-        web_sys::window()
-            .expect("the lab runs in a window")
-            .remove_event_listener_with_callback(
-                "resize",
-                listener.as_ref().as_ref().unchecked_ref(),
-            )
-            .expect("a window drops a resize listener");
-    });
-    available_width
-}
-
 #[component]
 fn App() -> Element {
     let theme: MaterialTheme = serde_json::from_str(MATERIAL_THEME_JSON)
@@ -198,7 +107,6 @@ fn App() -> Element {
             })
             .unwrap_or(LabTab::Button)
     });
-    let available_width = use_available_width();
     // The page's scroller is the document: it is the one scroller that gets momentum scrolling in
     // every engine (WebKitGTK gives none to a nested `overflow: auto` element). `main` carries
     // `data-dioxus-scroll-proxy`, which makes it stand in for the document's scroller in the
@@ -208,7 +116,6 @@ fn App() -> Element {
     // and the sections reach it by context.
     let scroll_root = use_scroll_root();
     use_context_provider(|| scroll_root.clone());
-    use_context_provider(|| LabViewport(available_width));
     let diffs_view = use_signal(diffs::DiffsView::initial);
     use_context_provider(|| diffs_view);
     let photo_preloads = use_memo(|| {
@@ -285,9 +192,9 @@ fn App() -> Element {
                             if tab() == each {
                                 // The PR diff lists its own files in its index.
                                 if !(each == LabTab::Diffs && diffs_view() == diffs::DiffsView::Pr84) {
-                                    ThemeLabNav { viewport: (available_width(), 860.0), tab: each }
+                                    ThemeLabNav { tab: each }
                                 }
-                                {each.page(theme.clone(), available_width())}
+                                {each.page(theme.clone())}
                             }
                         }
                     }
@@ -296,10 +203,6 @@ fn App() -> Element {
         }
     }
 }
-
-/// The window size the showcase's overlays (the index) lay out against, from the root.
-#[derive(Clone, Copy)]
-struct LabViewport(Signal<f64>);
 
 /// The showcase's pages, one tab each: a specimen page per kit component, then the foundations
 /// and the diff view.
@@ -450,7 +353,7 @@ impl LabTab {
         }
     }
 
-    fn page(self, theme: MaterialTheme, available_width: f64) -> Element {
+    fn page(self, theme: MaterialTheme) -> Element {
         match self {
             LabTab::Button => rsx! { clay_dioxus_specimens::ButtonSpecimens {} },
             LabTab::Tabs => rsx! { clay_dioxus_specimens::TabsSpecimens {} },
@@ -459,7 +362,7 @@ impl LabTab {
             LabTab::Alert => rsx! { clay_dioxus_specimens::AlertSpecimens {} },
             LabTab::Chip => rsx! { clay_dioxus_specimens::ChipSpecimens {} },
             LabTab::ScrubStrip => {
-                rsx! { clay_dioxus_specimens::ScrubStripSpecimens { viewport: (available_width, 860.0) } }
+                rsx! { clay_dioxus_specimens::ScrubStripSpecimens {} }
             }
             LabTab::NavButton => rsx! { clay_dioxus_specimens::NavButtonSpecimens {} },
             LabTab::AppBar => rsx! { clay_dioxus_specimens::AppBarSpecimens {} },
@@ -490,35 +393,10 @@ impl LabTab {
     }
 }
 
-#[cfg(feature = "desktop")]
-fn logical_size(window: &Arc<dyn Window>) -> (f64, f64) {
-    let scale = window.scale_factor();
-    let size = window.surface_size();
-    (size.width as f64 / scale, size.height as f64 / scale)
-}
-
-#[cfg(feature = "desktop")]
-fn showcase_content_width(window: &Arc<dyn Window>) -> f64 {
-    content_width(logical_size(window).0)
-}
-
-#[cfg(feature = "desktop")]
-fn desktop_content_width(window: &DesktopContext) -> f64 {
-    let width = window
-        .inner_size()
-        .to_logical::<f64>(window.scale_factor())
-        .width;
-    content_width(width)
-}
-
-fn content_width(width: f64) -> f64 {
-    width - if width >= 1024.0 { 96.0 } else { 48.0 }
-}
-
 /// The index strip of a page with more than one section: it jumps between the sections the page
 /// lists, by the `FoundationSection` id they mount under. The `ScrubStrip` page mounts its own.
 #[component]
-fn ThemeLabNav(viewport: (f64, f64), tab: LabTab) -> Element {
+fn ThemeLabNav(tab: LabTab) -> Element {
     let anchors = use_context::<Signal<BTreeMap<String, Rc<MountedData>>>>();
     let sections = tab.sections();
     if sections.len() < 2 {
@@ -529,7 +407,6 @@ fn ThemeLabNav(viewport: (f64, f64), tab: LabTab) -> Element {
         // carry over to a list of another length.
         ScrubStrip {
             key: "{tab.value()}",
-            viewport,
             items: sections.iter().map(|(_, label)| *label).collect::<Vec<_>>(),
             renderer: renderer(),
             label: "Sections of this page".to_string(),

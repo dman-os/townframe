@@ -94,10 +94,7 @@ fn every_page_is_admitted_by_a_clay_surface() {
         ("sections", || rsx! { crate::SectionsSpecimens {} }),
         ("sheet", || rsx! { crate::SheetSpecimens {} }),
         ("drawer", || rsx! { crate::DrawerSpecimens {} }),
-        (
-            "scrub strip",
-            || rsx! { crate::ScrubStripSpecimens { viewport: (720.0, 860.0) } },
-        ),
+        ("scrub strip", || rsx! { crate::ScrubStripSpecimens {} }),
     ];
     let mut refused = Vec::new();
     for (name, page) in pages {
