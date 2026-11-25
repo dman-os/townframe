@@ -83,20 +83,17 @@ pub struct MemoryPartStore {
     state: Arc<surelock::mutex::Mutex<State>>,
     /// The log's watch: moved after each stamping commit, outside the lock.
     wakeups: watch::Sender<Rev>,
+    /// Where generations come from. `None` mints random ones, as every real store must: no two
+    /// stores may share a generation. `Some` counts up from a counter the caller owns, so a
+    /// simulation replays the same generations from the same seed; the counter is shared by the
+    /// store's snapshots, so a restored store never mints a generation an earlier one did.
+    mints: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl Default for MemoryPartStore {
     /// A new, empty store with a freshly minted generation.
     fn default() -> Self {
-        let (wakeups, _) = watch::channel(0);
-        let state = State {
-            generation: Generation::mint(),
-            ..default()
-        };
-        Self {
-            state: Arc::new(surelock::mutex::Mutex::new(state)),
-            wakeups,
-        }
+        Self::with_mints(None)
     }
 }
 
@@ -122,6 +119,39 @@ pub struct MemoryPartTx {
 
 impl MemoryPartStore {
     /// Start a transaction. It takes no lock.
+    /// A new, empty store whose generations are `1`, `2`, ... drawn from `mints`, which every
+    /// store of one simulated peer shares. For deterministic simulations; a real store mints
+    /// random generations ([`Default`]).
+    pub fn deterministic(mints: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        Self::with_mints(Some(mints))
+    }
+
+    fn with_mints(mints: Option<Arc<std::sync::atomic::AtomicU64>>) -> Self {
+        let (wakeups, _) = watch::channel(0);
+        let state = State {
+            generation: Self::mint_from(mints.as_deref()),
+            ..default()
+        };
+        Self {
+            state: Arc::new(surelock::mutex::Mutex::new(state)),
+            wakeups,
+            mints,
+        }
+    }
+
+    fn mint(&self) -> Generation {
+        Self::mint_from(self.mints.as_deref())
+    }
+
+    fn mint_from(mints: Option<&std::sync::atomic::AtomicU64>) -> Generation {
+        match mints {
+            None => Generation::mint(),
+            Some(mints) => Generation(Uuid::from_u128(u128::from(
+                mints.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+            ))),
+        }
+    }
+
     pub fn begin(&self) -> MemoryPartTx {
         MemoryPartTx {
             store: self.clone(),
@@ -139,6 +169,7 @@ impl MemoryPartStore {
         Self {
             state: Arc::new(surelock::mutex::Mutex::new(state)),
             wakeups,
+            mints: self.mints.clone(),
         }
     }
 
@@ -280,7 +311,7 @@ impl PartStoreWrite for MemoryPartStore {
     }
 
     fn mint_generation(&self) -> impl Future<Output = Res<Generation>> + Send {
-        let minted = Generation::mint();
+        let minted = self.mint();
         surelock::key::lock_scope(|key| {
             let (mut state, _key) = key.lock(&self.state);
             state.generation = minted;
