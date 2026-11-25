@@ -80,6 +80,7 @@ rand.workspace = true
 #
 # fs and os
 directories.workspace = true
+tempfile.workspace = true
 libc = "0.2"
 
 [build-dependencies]
@@ -94,5 +95,4 @@ big_blobs_core.workspace = true
 #
 # misc
 trycmd = "1.2.1"
-tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -4,16 +4,25 @@
 # exposed_external_crates: [serde_json]
 
 impl Default for intxt_core::generic::Intxt
+impl Deserialize < 'de > for intxt_core::edit::EditEntry
+impl Deserialize < 'de > for intxt_core::edit::EntryChange
 impl From < Included > for intxt_core::client::AddedToIntxt
+impl std :: fmt :: Display for intxt_core::edit::PlanError
 pub const intxt_core::cartridge::AUTHORITY: & str
 pub const intxt_core::cartridge::HANDLER_COMPONENT: & str
 pub const intxt_core::client::MAX_REWRITE_HOPS: usize
+pub const intxt_core::edit::EDIT_TYPE: & str
 pub const intxt_core::methods::MAX_SUMMARIZED: usize
 pub const intxt_core::methods::REQUIRED_OPERATIONS: [& str ; 7]
 pub enum intxt_core::annotation::Motivation { # [serde (rename = "assessing")] Assessing, # [serde (rename = "bookmarking")] Bookmarking, # [serde (rename = "classifying")] Classifying, # [serde (rename = "commenting")] Commenting, # [serde (rename = "describing")] Describing, # [serde (rename = "editing")] Editing, # [serde (rename = "highlighting")] Highlighting, # [serde (rename = "identifying")] Identifying, # [serde (rename = "linking")] Linking, # [serde (rename = "moderating")] Moderating, # [serde (rename = "questioning")] Questioning, # [serde (rename = "replying")] Replying, # [serde (rename = "tagging")] Tagging, # [datum (other)] Unknown (String) }
 pub enum intxt_core::annotation::Progress { # [serde (rename = "pending")] Pending, # [serde (rename = "in_progress")] InProgress, # [serde (rename = "completed")] Completed, # [datum (other)] Unknown (String) }
 pub enum intxt_core::annotation::StructureKind { # [serde (rename = "task")] Task, # [serde (rename = "decision")] Decision, # [serde (rename = "section")] Section, # [datum (other)] Unknown (String) }
 pub enum intxt_core::capture::ChangeKind { # [serde (rename = "added")] Added, # [serde (rename = "modified")] Modified, # [serde (rename = "deleted")] Deleted, # [datum (other)] Unknown (String) }
+pub enum intxt_core::edit::EditEntry { # [doc = " One the intxt holds."] Existing (ExistingEntry), # [doc = " `{ \"add\": { \"branch\": \"feat/x\" } }`: resolved in the worktree the command runs in, as"] # [doc = " `add` does."] Add { add : Named } }
+pub enum intxt_core::edit::EntryChange { # [doc = " `{ \"remove\": \"<id>\" }`: takes an existing entry out."] Remove { remove : String }, # [doc = " `{ \"add\": { \"branch\": \"feat/x\" } }`."] Add { add : Named } }
+pub enum intxt_core::edit::Named { # [doc = " A range (`main..feat/x`) or a single commit."] Commits (String), # [doc = " A local branch: its commits since the merge base with its upstream (or `main`), and the"] # [doc = " branch itself, tracked as this clone sees it."] Branch (String), # [doc = " A jj change, followed through its rewrites."] Change (String) }
+pub enum intxt_core::edit::Refusal { # [doc = " The intxt changed since the document was printed. The caller prints the current document."] Stale, # [doc = " The document cannot be applied as it is."] Invalid (Vec < PlanError >) }
+pub enum intxt_core::edit::Summary { # [doc = " A range of commits: `base..tip`, in short shas."] Commits (String), # [doc = " A jj change, by its change id."] Change (String), # [doc = " A ref tracked on a clone."] Ref (String), # [doc = " An agent session."] Session (String), # [doc = " A GitHub pull request."] GithubPull (String), # [doc = " An entry of a kind this version does not know, by its datum key."] Other (String) }
 pub enum intxt_core::generic::PrBlockError { # [doc = " The block is there but is not the shape: bad JSON, a missing `ref`, a `ref` that is not a"] # [doc = " `dtxt:doc:` URL."] # [error ("the intxt block in the PR description is malformed: {0}")] Malformed (# [from] serde_json :: Error), # [doc = " A `<details>` holding the block never closes, so there is no span to read or replace."] # [error ("the `<details>` holding the intxt block in the PR description is never closed")] Unterminated }
 pub enum intxt_core::methods::IntxtError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [doc = " A call the handler made was refused or failed; `reason` is what the callee answered."] # [error ("{operation} failed: {reason}")] Upstream { operation : String , reason : String }, # [doc = " The request named something an intxt cannot include or a document that is not what it"] # [doc = " was said to be."] # [error ("invalid request: {0}")] Invalid (String), # [doc = " The caller reaches the part through no drawer at Read or above, so there is nothing to"] # [doc = " lend the intxt's drawer."] # [error ("the part's document {0} is reached through no drawer at Read or above")] NotReachable (DocId) }
 pub enum intxt_core::methods::SummaryStatus { # [doc = " The drawer is an intxt the caller can read."] Found, # [doc = " The caller reads the drawer's descriptor and it holds no intxt marker."] NotFound, # [doc = " A read failed (the caller may not read it, or the node does not hold it) or the intxt's"] # [doc = " descriptor is malformed; `reason` says which."] Unreadable }
@@ -39,9 +48,22 @@ pub impl intxt_core::client::Caller < H >::async fn share (& self , intxt : & Dr
 pub impl intxt_core::client::Caller < H >::async fn try_read (& self , doc : & DocId , key : & DatumKey ,) -> Result < (Vec < ChangeHash > , Option < Value >) , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn write_capability < 'k > (& self , doc : & DocId , keys : impl IntoIterator < Item = & 'k DatumKey > ,) -> Result < CapId , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn write_datums (& self , doc : & DocId , set : BTreeMap < DatumKey , Value > , remove : BTreeSet < DatumKey > ,) -> Result < () , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn write_title (& self , intxt : & DrawerId , title : & generic :: Title ,) -> Result < () , IntxtError >
 pub impl intxt_core::client::Caller < H >::fn acting_as (mut self , actor : Uuid7) -> Self
 pub impl intxt_core::client::Caller < H >::fn command (& self , step : & str , content : & impl Serialize) -> Result < CommandId , IntxtError >
 pub impl intxt_core::client::Caller < H >::fn new (transport : H , context : RequestContext , capability : Option < & str > , command_base : String ,) -> Self
+pub impl intxt_core::edit::EditDocument::fn holds_in (& self , current : & Self) -> bool
+pub impl intxt_core::edit::EditDocument::fn json_schema () -> String
+pub impl intxt_core::edit::EditDocument::fn new (intxt : String , base : Vec < String > , title : String , description : Option < String > , entries : Vec < ExistingEntry > ,) -> Self
+pub impl intxt_core::edit::EditDocument::fn parse (mut value : Value) -> Result < Self , Vec < PlanError > >
+pub impl intxt_core::edit::EditDocument::fn plan (& self , current : & Self) -> Result < EditPlan , Refusal >
+pub impl intxt_core::edit::EditDocument::fn to_text (& self) -> String
+pub impl intxt_core::edit::EditPlan::fn is_empty (& self) -> bool
+pub impl intxt_core::edit::Named::fn flag (& self) -> String
+pub impl intxt_core::edit::Named::fn from_flags (commits : Option < String > , branch : Option < String > , change : Option < String > ,) -> Self
+pub impl intxt_core::edit::PlanError::fn new (path : impl Into < String > , message : impl Into < String >) -> Self
+pub impl intxt_core::edit::Summary::fn kind (& self) -> & 'static str
+pub impl intxt_core::edit::Summary::fn text (& self) -> & str
 pub impl intxt_core::generic::Intxt::fn reference (drawer : & DocId , via : impl IntoIterator < Item = MultibaseKey >) -> DocReference
 pub impl intxt_core::generic::PrLink::fn new (reference : DocReference) -> Self
 pub impl intxt_core::generic::PrLinks::fn block (& self) -> String
@@ -57,6 +79,7 @@ pub mod intxt_core::annotation
 pub mod intxt_core::capture
 pub mod intxt_core::cartridge
 pub mod intxt_core::client
+pub mod intxt_core::edit
 pub mod intxt_core::generic
 pub mod intxt_core::install
 pub mod intxt_core::methods
@@ -88,6 +111,13 @@ pub struct intxt_core::capture::WorktreeDocs  { worktree: Option < String >, clo
 pub struct intxt_core::capture::WorktreeIdentity  { root: String, clone_path: String, clone_id: String, worktree_id: String, remotes: Vec < String >, roots: Vec < String >, extra: Extra }
 pub struct intxt_core::client::Caller< H >  {  }
 pub struct intxt_core::client::Included  { entry: DatumReference, added: bool }
+pub struct intxt_core::edit::Applied  { changes: Vec < Change >, undo: Vec < String >, dry_run: bool }
+pub struct intxt_core::edit::Change  { op: String, text: String }
+pub struct intxt_core::edit::EditDocument  { schema: Option < String >, kind: Option < String >, intxt: Option < String >, base: Vec < String >, title: Option < String >, description: Option < Option < String > >, entries: Option < Vec < EditEntry > >, entry_changes: Option < Vec < EntryChange > >, errors: Vec < String > }
+pub struct intxt_core::edit::EditPlan  { remove: Vec < String >, add: Vec < (String , Named) >, title: Option < String >, description: Option < Option < String > > }
+pub struct intxt_core::edit::ExistingEntry  { id: String, summary: Summary }
+pub struct intxt_core::edit::Failed  { errors: Vec < PlanError >, current: Option < EditDocument > }
+pub struct intxt_core::edit::PlanError  { path: String, message: String }
 pub struct intxt_core::generic::Body  { order: Vec < DatumReference >, extra: Extra }
 pub struct intxt_core::generic::Intxt  { empty: Option < bool >, extra: Extra }
 pub struct intxt_core::generic::Note  { mime: String, content: String, extra: Extra }

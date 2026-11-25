@@ -21,6 +21,7 @@ use big_cabinet_core::DocReference;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumRead;
@@ -49,6 +50,8 @@ use intxt_core::client::Caller;
 use intxt_core::client::MAX_REWRITE_HOPS;
 use intxt_core::client::key;
 use intxt_core::client::to_value;
+use intxt_core::edit::Named;
+use intxt_core::edit::Summary;
 use intxt_core::generic;
 use intxt_core::methods::CreateIntxt;
 use intxt_core::methods::IntxtCreated;
@@ -68,38 +71,9 @@ const MAX_PACKED_BLOB_BYTES: u64 = 8 * 1024 * 1024;
 /// pack (ADR 040 §4); readers then parse the pack.
 const MAX_PATCH_BYTES: u64 = 8 * 1024 * 1024;
 
-/// What an `add` names: exactly one per call.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Named {
-    /// A range (`main..feat/x`) or a single commit.
-    Commits(String),
-    /// A local branch: its commits since the merge base with its upstream (or `main`), and the
-    /// branch itself, tracked as this clone sees it.
-    Branch(String),
-    /// A jj change, followed through its rewrites.
-    Change(String),
-}
-
-impl Named {
-    /// The one thing `add`'s `--commits`, `--branch` and `--change` flags name; clap requires
-    /// exactly one of them, so any other combination is a bug in the command's definition.
-    pub(crate) fn from_flags(
-        commits: Option<String>,
-        branch: Option<String>,
-        change: Option<String>,
-    ) -> Self {
-        match (commits, branch, change) {
-            (Some(range), None, None) => Self::Commits(range),
-            (None, Some(branch), None) => Self::Branch(branch),
-            (None, None, Some(change)) => Self::Change(change),
-            _ => unreachable!("clap requires exactly one of --commits, --branch and --change"),
-        }
-    }
-}
-
 /// What `add` named, resolved now: the entry that names the commits, the commits, and what the
 /// pack is made of.
-struct Resolved {
+pub(super) struct Resolved {
     entry: DatumKey,
     /// Where git can read the commits: the worktree, or jj's git directory.
     git_dir: PathBuf,
@@ -119,7 +93,7 @@ struct Resolved {
 }
 
 impl Resolved {
-    fn new(named: &Named, identity: &Identity) -> Res<Self> {
+    pub(super) fn new(named: &Named, identity: &Identity) -> Res<Self> {
         if let Named::Change(change) = named {
             let jj = revisions::resolve_jj_change(&identity.root, change)?;
             // The evolog lists the change's current commit first.
@@ -202,6 +176,17 @@ struct Plan {
     lines: Vec<String>,
 }
 
+/// What an `add` did, for the verb that reports it.
+pub(super) struct Added {
+    /// The intxt's title.
+    pub(super) title: String,
+    /// Whether anything was written.
+    pub(super) changed: bool,
+    pub(super) lines: Vec<String>,
+    /// The command that takes the new entries out again.
+    pub(super) undo: Option<String>,
+}
+
 /// A node, and the worktree and node directory a verb works against.
 pub(crate) struct Packaging<'a> {
     pub(super) client: &'a NodeClient,
@@ -214,6 +199,8 @@ pub(crate) struct Packaging<'a> {
 pub(super) struct View {
     pub(super) title: generic::Title,
     pub(super) entries: Vec<(DatumKey, Value)>,
+    /// The heads of the descriptor document the title and the entries were read at.
+    pub(super) heads: Vec<ChangeHash>,
 }
 
 impl View {
@@ -889,6 +876,29 @@ impl<'a> Packaging<'a> {
                 removed.insert(found);
             }
         }
+        self.remove_held(&drawer, &view, &removed).await?;
+        let removed_comments = self.remove_comments(&drawer, removed_comments).await?;
+        writeln!(
+            out,
+            "removed from {} \"{}\"",
+            shown(&intxts, &drawer.to_string()),
+            view.title.title
+        )?;
+        for entry in removed.iter().chain(&removed_comments) {
+            writeln!(out, "  {entry}")?;
+        }
+        Ok(())
+    }
+
+    /// Removes the entries `removed` from the intxt, and the packs only they referenced. The
+    /// documents lent to the intxt stay lent: whether another entry still needs one is not
+    /// derivable from the entries alone. `view` is the intxt as it was read for `removed`.
+    pub(super) async fn remove_held(
+        &self,
+        drawer: &DrawerId,
+        view: &View,
+        removed: &BTreeSet<DatumKey>,
+    ) -> Res<()> {
         // An entry's blobs: its pack and, when it has one, its patch.
         let pack_of = |value: &Value| -> Vec<DatumKey> {
             ["pack", "patch"]
@@ -913,25 +923,13 @@ impl<'a> Packaging<'a> {
             .filter(|pack| !kept.contains(pack))
             .collect();
         if !removed.is_empty() {
-            self.caller
-                .remove_entries(&drawer, &removed, &packs)
-                .await?;
-        }
-        let removed_comments = self.remove_comments(&drawer, removed_comments).await?;
-        writeln!(
-            out,
-            "removed from {} \"{}\"",
-            shown(&intxts, &drawer.to_string()),
-            view.title.title
-        )?;
-        for entry in removed.iter().chain(&removed_comments) {
-            writeln!(out, "  {entry}")?;
+            self.caller.remove_entries(drawer, removed, &packs).await?;
         }
         Ok(())
     }
 
     pub(super) async fn load(&self, drawer: &DrawerId) -> Res<View> {
-        let (_, mut datums) = self.caller.read_datums(drawer, None).await?;
+        let (heads, mut datums) = self.caller.read_datums(drawer, None).await?;
         let mut accepted = |key: &DatumKey| match datums.remove(key) {
             Some(DatumRead::Accepted { value, .. }) => Ok(value),
             other => Err(eyre::eyre!("{key} in {drawer} is not readable: {other:?}")),
@@ -943,7 +941,11 @@ impl<'a> Packaging<'a> {
         for reference in &body.order {
             entries.push((reference.key().clone(), accepted(reference.key())?));
         }
-        Ok(View { title, entries })
+        Ok(View {
+            title,
+            entries,
+            heads,
+        })
     }
 
     /// What capture holds for the worktree `identity` names, after recording what `resolved`
@@ -1256,20 +1258,51 @@ impl<'a> Packaging<'a> {
         full: bool,
     ) -> Res<()> {
         let (drawer, intxts) = self.resolve(intxt).await?;
-        let view = self.load(&drawer).await?;
+        let resolved = Resolved::new(&named, &self.identity()?)?;
+        let added = self.add_resolved(&drawer, &intxts, &resolved, full).await?;
+        writeln!(
+            out,
+            "{} {} \"{}\"",
+            if added.changed {
+                "added to"
+            } else {
+                "nothing to add to"
+            },
+            shown(&intxts, &drawer.to_string()),
+            added.title
+        )?;
+        for line in &added.lines {
+            writeln!(out, "{line}")?;
+        }
+        if let Some(undo) = &added.undo {
+            writeln!(out, "  undo: {undo}")?;
+        }
+        Ok(())
+    }
+
+    /// What `resolved` adds to `drawer`, with the sessions that produced it: writes it, and says
+    /// what was written and how to undo it. Something already in the intxt is left alone and said
+    /// so. The intxt is read afresh, so a call may follow another on the same intxt.
+    pub(super) async fn add_resolved(
+        &self,
+        drawer: &DrawerId,
+        intxts: &ShortIds<String>,
+        resolved: &Resolved,
+        full: bool,
+    ) -> Res<Added> {
+        let view = self.load(drawer).await?;
         let identity = self.identity()?;
-        let resolved = Resolved::new(&named, &identity)?;
-        let recorded = self.recorded_after_import(&identity, &resolved).await?;
+        let recorded = self.recorded_after_import(&identity, resolved).await?;
 
         let mut plan = Plan::default();
         let new_commits = self
-            .plan_commits(&mut plan, &drawer, &view, &resolved, full)
+            .plan_commits(&mut plan, drawer, &view, resolved, full)
             .await?;
-        self.plan_ref(&mut plan, &view, &resolved, &identity, &recorded)
+        self.plan_ref(&mut plan, &view, resolved, &identity, &recorded)
             .await?;
         // The sessions of commits already in the intxt were derived when they were added.
         let (sessions, present) = if new_commits {
-            self.following_sessions(&view, &resolved, &recorded).await?
+            self.following_sessions(&view, resolved, &recorded).await?
         } else {
             Default::default()
         };
@@ -1278,8 +1311,8 @@ impl<'a> Packaging<'a> {
         // its commits document existed gets its commits by adding the range again.
         let (wrote_commits, commit_lines) = self
             .write_commits(
-                &drawer,
-                &resolved,
+                drawer,
+                resolved,
                 recorded
                     .docs
                     .repo
@@ -1297,15 +1330,13 @@ impl<'a> Packaging<'a> {
         plan.lines.extend(commit_lines);
         let mut written = plan.written.clone();
         if !written.is_empty() {
-            self.caller
-                .include(&drawer, plan.set, &plan.written)
-                .await?;
+            self.caller.include(drawer, plan.set, &plan.written).await?;
             for doc in &plan.shared {
-                self.caller.share(&drawer, doc, DrawerAccess::Read).await?;
+                self.caller.share(drawer, doc, DrawerAccess::Read).await?;
             }
         }
         for (part, described) in &sessions {
-            let included = self.caller.add_part(&drawer, part).await?;
+            let included = self.caller.add_part(drawer, part).await?;
             written.push(included.entry.key().clone());
             plan.lines
                 .push(format!("  session    {described} (follows the commits)"));
@@ -1319,24 +1350,7 @@ impl<'a> Packaging<'a> {
                 .push("  sessions   none recorded for these commits".to_owned());
         }
 
-        let heading = format!(
-            "{} \"{}\"",
-            shown(&intxts, &drawer.to_string()),
-            view.title.title
-        );
-        writeln!(
-            out,
-            "{} {heading}",
-            if written.is_empty() && wrote_commits == 0 {
-                "nothing to add to"
-            } else {
-                "added to"
-            }
-        )?;
-        for line in &plan.lines {
-            writeln!(out, "{line}")?;
-        }
-        if !written.is_empty() {
+        let undo = (!written.is_empty()).then(|| {
             // Short ids among the intxt's items as they are now.
             let ids = ShortIds::new(
                 view.entries
@@ -1345,18 +1359,22 @@ impl<'a> Packaging<'a> {
                     .chain(written.iter().map(ToString::to_string))
                     .collect::<Vec<_>>(),
             );
-            writeln!(
-                out,
-                "  undo: day x intxt rm {} {}",
-                shown(&intxts, &drawer.to_string()),
+            format!(
+                "day x intxt rm {} {}",
+                shown(intxts, &drawer.to_string()),
                 written
                     .iter()
                     .map(|entry| shown(&ids, &entry.to_string()))
                     .collect::<Vec<_>>()
                     .join(" ")
-            )?;
-        }
-        Ok(())
+            )
+        });
+        Ok(Added {
+            title: view.title.title,
+            changed: !written.is_empty() || wrote_commits > 0,
+            lines: plan.lines,
+            undo,
+        })
     }
 
     /// `day x intxt which`: the intxts on this node that hold the commit `name` names in this
@@ -1390,6 +1408,78 @@ impl<'a> Packaging<'a> {
         Ok(())
     }
 
+    /// What `show` and `edit` say of an entry after its id: its kind and the summary of what
+    /// it holds. A session or a pull request is read from its own document, which may not have
+    /// synced yet.
+    pub(super) async fn describe(&self, entry: &DatumKey, value: &Value) -> Res<Summary> {
+        let tag = entry.tag().as_str();
+        let slot = String::from_utf8_lossy(entry.slot_bytes()).into_owned();
+        Ok(if tag == work::GitCommitEntry::ID {
+            let commit: work::GitCommitEntry = serde_json::from_value(value.clone())?;
+            Summary::Commits(format!(
+                "{}{}",
+                commit
+                    .base
+                    .as_deref()
+                    .map(|base| format!("{}..", short_sha(sha_of(base))))
+                    .unwrap_or_default(),
+                short_sha(sha_of(&commit.tip))
+            ))
+        } else if tag == work::JjChangeEntry::ID {
+            Summary::Change(slot[..slot.len().min(12)].to_owned())
+        } else if tag == work::GitRefEntry::ID {
+            let tracked: work::GitRefEntry = serde_json::from_value(value.clone())?;
+            let (clone, reference) = slot.split_once('/').unwrap_or(("", &slot));
+            Summary::Ref(format!(
+                "{reference}  (clone {}){}",
+                &clone[..clone.len().min(8)],
+                tracked
+                    .base
+                    .as_deref()
+                    .map(|base| format!("  base {}", short_sha(sha_of(base))))
+                    .unwrap_or_default()
+            ))
+        } else if tag == work::SessionEntry::ID {
+            let included: work::SessionEntry = serde_json::from_value(value.clone())?;
+            let session = match included.session.document() {
+                ReferenceDocId::Concrete(doc) => {
+                    self.caller.try_read(doc, included.session.key()).await?.1
+                }
+                ReferenceDocId::SelfDoc => None,
+            };
+            let described = match session {
+                Some(session) => {
+                    let session: work::AgentSession = serde_json::from_value(session)?;
+                    format!(
+                        "{}  {}",
+                        session.harness,
+                        session.title.unwrap_or_else(|| session.cwd.clone())
+                    )
+                }
+                None => "(document not synced)".to_owned(),
+            };
+            Summary::Session(format!("{slot}  {described}"))
+        } else if tag == work::GithubPullEntry::ID {
+            let included: work::GithubPullEntry = serde_json::from_value(value.clone())?;
+            let pull = match included.pull.document() {
+                ReferenceDocId::Concrete(doc) => {
+                    self.caller.try_read(doc, included.pull.key()).await?.1
+                }
+                ReferenceDocId::SelfDoc => None,
+            };
+            let described = match pull {
+                Some(pull) => {
+                    let pull: work::GithubPull = serde_json::from_value(pull)?;
+                    format!("{:?}  {}", pull.state, pull.title)
+                }
+                None => "(document not synced)".to_owned(),
+            };
+            Summary::GithubPull(format!("{slot}  {described}"))
+        } else {
+            Summary::Other(entry.to_string())
+        })
+    }
+
     /// `day x intxt show`: the title, the description, and the entries by kind, each with its
     /// short id among the intxt's entries.
     pub(crate) async fn show(&self, out: &mut impl Write, intxt: Option<&str>) -> Res<()> {
@@ -1419,72 +1509,14 @@ impl<'a> Packaging<'a> {
         let mut pulls = Vec::new();
         let mut others = Vec::new();
         for (entry, value) in &view.entries {
-            let id = shown(&ids, &entry.to_string());
-            let tag = entry.tag().as_str();
-            let slot = String::from_utf8_lossy(entry.slot_bytes()).into_owned();
-            if tag == work::GitCommitEntry::ID {
-                let commit: work::GitCommitEntry = serde_json::from_value(value.clone())?;
-                commits.push(format!(
-                    "  {id}  {}{}",
-                    commit
-                        .base
-                        .as_deref()
-                        .map(|base| format!("{}..", short_sha(sha_of(base))))
-                        .unwrap_or_default(),
-                    short_sha(sha_of(&commit.tip))
-                ));
-            } else if tag == work::JjChangeEntry::ID {
-                changes.push(format!("  {id}  {}", &slot[..slot.len().min(12)]));
-            } else if tag == work::GitRefEntry::ID {
-                let tracked: work::GitRefEntry = serde_json::from_value(value.clone())?;
-                let (clone, reference) = slot.split_once('/').unwrap_or(("", &slot));
-                refs.push(format!(
-                    "  {id}  {reference}  (clone {}){}",
-                    &clone[..clone.len().min(8)],
-                    tracked
-                        .base
-                        .as_deref()
-                        .map(|base| format!("  base {}", short_sha(sha_of(base))))
-                        .unwrap_or_default()
-                ));
-            } else if tag == work::SessionEntry::ID {
-                let included: work::SessionEntry = serde_json::from_value(value.clone())?;
-                let session = match included.session.document() {
-                    ReferenceDocId::Concrete(doc) => {
-                        self.caller.try_read(doc, included.session.key()).await?.1
-                    }
-                    ReferenceDocId::SelfDoc => None,
-                };
-                let described = match session {
-                    Some(session) => {
-                        let session: work::AgentSession = serde_json::from_value(session)?;
-                        format!(
-                            "{}  {}",
-                            session.harness,
-                            session.title.unwrap_or_else(|| session.cwd.clone())
-                        )
-                    }
-                    None => "(document not synced)".to_owned(),
-                };
-                sessions.push(format!("  {id}  {slot}  {described}"));
-            } else if tag == work::GithubPullEntry::ID {
-                let included: work::GithubPullEntry = serde_json::from_value(value.clone())?;
-                let pull = match included.pull.document() {
-                    ReferenceDocId::Concrete(doc) => {
-                        self.caller.try_read(doc, included.pull.key()).await?.1
-                    }
-                    ReferenceDocId::SelfDoc => None,
-                };
-                let described = match pull {
-                    Some(pull) => {
-                        let pull: work::GithubPull = serde_json::from_value(pull)?;
-                        format!("{:?}  {}", pull.state, pull.title)
-                    }
-                    None => "(document not synced)".to_owned(),
-                };
-                pulls.push(format!("  {id}  {slot}  {described}"));
-            } else {
-                others.push(format!("  {id}  {entry}"));
+            let line = format!("  {}  ", shown(&ids, &entry.to_string()));
+            match self.describe(entry, value).await? {
+                Summary::Commits(text) => commits.push(line + &text),
+                Summary::Change(text) => changes.push(line + &text),
+                Summary::Ref(text) => refs.push(line + &text),
+                Summary::Session(text) => sessions.push(line + &text),
+                Summary::GithubPull(text) => pulls.push(line + &text),
+                Summary::Other(text) => others.push(line + &text),
             }
         }
         // Commits imported from git history (FDR 008 W6) come with no sessions, none having been
