@@ -109,36 +109,16 @@
 }
 
 /*
- * The canvas-only scheme (ADR 055 §4.2). The frame sets its own `color-scheme`; a custom property
- * holding `light-dark()` is substituted where it is used, so the probe flips with the element it
- * sits in. The chrome probe outside the frame keeps the host's scheme.
+ * The canvas-only scheme (ADR 055 section 4.2). The frame sets its own `color-scheme`; the colour
+ * roles are `light-dark()` values carried unresolved from the root, so every role used inside the
+ * frame resolves against the frame's scheme while the lab's chrome keeps the host's.
  */
-.ct-theme-lab {
-  --ct-lab-probe-bg: light-dark(#fdfcf5, #1b1b1b);
-  --ct-lab-probe-fg: light-dark(#1b1b1b, #fdfcf5);
-}
-
 .ct-theme-lab [data-part="frame"][data-scheme="light"] {
   color-scheme: light;
 }
 
 .ct-theme-lab [data-part="frame"][data-scheme="dark"] {
   color-scheme: dark;
-}
-
-.ct-theme-lab [data-part="probe"] {
-  display: inline-block;
-  padding: var(--ct-dimension-spacing-2) var(--ct-dimension-spacing-3);
-  margin-top: var(--ct-dimension-spacing-3);
-  border: var(--ct-dimension-border-width-thin) solid var(--ct-color-border);
-  border-radius: var(--ct-dimension-radius-md);
-  background: var(--ct-lab-probe-bg);
-  color: var(--ct-lab-probe-fg);
-  font-size: var(--ct-dimension-font-size-sm);
-}
-
-.ct-theme-lab [data-part="toolbar"] [data-part="probe"] {
-  margin-top: 0;
 }
 
 .ct-theme-lab [data-part="sheets"] > p {
