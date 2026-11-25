@@ -198,6 +198,23 @@ pub(crate) fn is_data_attribute_name(name: &str) -> bool {
     })
 }
 
+/// Names the interpreter and the host own, which a guest may not write (ADR 059): `data-dioxus-*`
+/// is the interpreter's (`data-dioxus-id` routes events; `data-dioxus-shadow-sheet` is adopted as
+/// a constructable sheet that never passes the stylesheet sanitizer) and `data-ct-*` is the
+/// host's element machinery. Three of the interpreter's names stay writable because a guest that
+/// links Pierre's code view emits them for its own subtree: the shadow mark, its sheet (whose
+/// value [`attribute_value_policy`] holds to the no-fetch rule) and the scroll proxy. They become
+/// reserved too when Pierre moves onto the element mount (ADR 059, layer 3).
+fn is_reserved_attribute_name(name: &str) -> bool {
+    const GUEST_WRITABLE: &[&str] = &[
+        "data-dioxus-shadow",
+        "data-dioxus-shadow-sheet",
+        "data-dioxus-scroll-proxy",
+    ];
+    (name.starts_with("data-dioxus-") || name.starts_with("data-ct-"))
+        && !GUEST_WRITABLE.contains(&name)
+}
+
 /// Resolves a wire attribute to the names Dioxus needs. `Ok(None)` is an unsupported name;
 /// `Err` means a well-formed new `data-*` name would exceed the interner's bound.
 pub(crate) fn static_attribute(
@@ -212,6 +229,9 @@ pub(crate) fn static_attribute(
                 _ => None,
             }
         };
+    }
+    if namespace.is_none() && is_reserved_attribute_name(name) {
+        return Ok(None);
     }
     if namespace.is_none() && is_data_attribute_name(name) {
         return data_names
@@ -301,6 +321,11 @@ pub(crate) fn attribute_value_policy(
         }
     };
     match (name, namespace) {
+        // The sheet a shadow host adopts is applied as a constructable sheet, never as an element,
+        // so it is held to the same no-fetch rule as a guest's own stylesheet.
+        ("data-dioxus-shadow-sheet", None) => {
+            crate::stylesheet::refuse_fetching_stylesheet(text).map_err(Cow::Owned)?;
+        }
         // An SVG `<use>` instantiates the element its `href` names, and an external reference
         // makes the renderer fetch a document, so it takes only a same-document fragment (`#id`).
         // `xlink:href` is the legacy spelling of the same attribute and takes the same rule.
@@ -545,7 +570,7 @@ macro_rules! expand_surface_event_listener {
 dioxus_html::with_html_event_groups!(expand_surface_event_listener);
 
 /// The valid autonomous custom element names of the HTML Standard, narrowed to ASCII: a lowercase
-/// ASCII letter, then `[a-z0-9._-]`, containing a hyphen, at most
+/// ASCII letter, then `[a-z0-9._-]`, containing a hyphen, not starting `ct-`, at most
 /// [`MAX_CUSTOM_ELEMENT_NAME_BYTES`] long, and not one of the names the standard reserves for
 /// SVG and MathML elements (`annotation-xml`, `color-profile`, `font-face`, `font-face-*`,
 /// `missing-glyph`). The standard's non-ASCII "PCEN" characters are refused. The name is only a
@@ -565,6 +590,8 @@ pub(crate) fn is_custom_element_name(name: &str) -> bool {
             .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_'))
         && !RESERVED.contains(&name)
         && !name.starts_with("font-face-")
+        // The host generates `ct-` tags for its own bindings (ADR 059), so a guest cannot spell one.
+        && !name.starts_with("ct-")
 }
 
 /// Interns `name` as a custom element tag, leaking its template on first use. `name` must satisfy
