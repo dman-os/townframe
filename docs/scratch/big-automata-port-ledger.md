@@ -1146,6 +1146,44 @@ between record, fetch and land, providers connecting and leaving, and withdrawal
 fetches; planted-bug checks (a replacement running beside the old fetch, a crash losing a
 want, a landed fetch leaving its want).
 
+**Durable outbox: decisions after research (operator, 2026-11-25).** Research report in the lane
+scratchpad (`outbox-research.md`); it supersedes parts of the draft above.
+- **Keyed by object on okv.** A newer want overwrites the key (supersession in the store); a
+  withdrawal is a tombstone; the table is the pending set. Row values carry a version, first-seen
+  time (kept across overwrites), priority, identity and providers.
+- **Stopped before replaced.** A superseding want waits for the running fetch's terminal event;
+  `KeyedScheduler` gets a `Stopping` state (this fixes the `replace` race for its 10 users too).
+  An overwrite with the same identity (priority or providers only) never touches a running fetch.
+- **Memory:** an in-memory index of every live want; `M` bounds scheduled and running wants only.
+- **Priority, then age, with priority aging** (old low-priority wants eventually overtake).
+- **Landing:** delete the want only if its version matches what was fetched, after the content is
+  durable; one transaction when the store is shared, else one idempotent refetch after a crash.
+- **Walkers launch wflow jobs** instead of tokio tasks for multi-step crash-safe work (see
+  `docs/scratch/wflow-for-walker-jobs.md`: findings and what wflow must gain first); walkers
+  keep their own caps and priorities, orthogonal to any node-wide ones wflow adds.
+- **No materialization wakes:** walkers follow rev streams; a new row is the wake.
+
+**okv pruning by consumer cursors (operator, 2026-11-25).** okv keeps every tombstone forever
+today. Walkers that consume an okv table register and report the cursor they have gone past;
+tombstones at or below the lowest registered cursor can be pruned (live rows are state and are
+never pruned). A consumer that never reports holds pruning back, which is visible, not silent.
+The outbox then needs no floor rev of its own.
+
+**Browser runtime (operator, 2026-11-25).**
+- **Portable `service_utils`.** axum is not tied to tokio TCP (only `axum::serve` is); the iroh
+  handler already runs hyper's http1 server over `IrohHttpStream`. Swap the glue (tokio
+  `Semaphore`/`watch`/`JoinSet`/`select!`, the `tokio` features) for runtime-free parts and split
+  the crate into a portable core and native extras. Settle the iroh side first: a browser endpoint
+  accepts a connection through the relay, from native and from another page.
+- **Tabs:** Web Locks lease elects the leader tab, which runs the node in a dedicated worker
+  (OPFS sync handles live there); other tabs are clients over `BroadcastChannel`/`MessagePort`
+  speaking the service stack; a leadership epoch fences stale replies. No SharedWorker (no
+  Android Chrome, no OPFS sync handles). No read-only cache in follower tabs. This machinery is
+  for everything that runs on the web, so it is its own crate or package (TypeScript where the
+  Rust web APIs fall short).
+- **Follow-ups:** a two-tab spec (both pull from the native peer); `PageSession` as a long-poll
+  method so held rounds use the router's long-poll pool instead of handler slots.
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a

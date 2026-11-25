@@ -89,6 +89,8 @@
 
 use crate::interlude::*;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod backend_laws;
 mod facts;
 #[cfg(any(test, feature = "test-support"))]
 pub mod memory;

@@ -7,6 +7,7 @@ use crate::sync::cursor::JobKey::Sync;
 
 mod backoff;
 mod sim;
+mod tracked;
 
 fn obj(n: u8) -> ObjKey {
     ObjKey::new(&[n])
@@ -25,6 +26,7 @@ fn present(n: u64) -> Want {
 pub(super) fn config() -> Config {
     Config {
         window: 4,
+        max_tracked: 8,
         fetch_cap: 2,
         min_backoff: Duration::from_secs(2),
         max_backoff: Duration::from_secs(5),

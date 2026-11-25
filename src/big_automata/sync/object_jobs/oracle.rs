@@ -1,6 +1,6 @@
 //! The dumbest model of `ObjectJobs`: flat vectors of wants and owed cursors, scanned
 //! linearly, with no index and no state beyond them. It answers what a job must contain, who
-//! has settled, `room` and `part_outstanding`. It knows nothing of call ids or clocks; for
+//! has settled, `room`, `tracked` and `part_outstanding`. It knows nothing of call ids or clocks; for
 //! law 7 it is only told which lanes (a stage's lane: `Fresh` is the record lane, `NeedsFetch`
 //! the fetch lane) of an object have a call in flight and which last ended in a failure that
 //! no later issue or success has cleared, and it derives which objects wait out a backoff.
@@ -53,6 +53,7 @@ pub(super) struct OSnap {
 #[derive(Debug, Default)]
 pub(super) struct Oracle {
     window: usize,
+    max_tracked: usize,
     seq: u64,
     pairs: Vec<OPair>,
     rows: Vec<Row>,
@@ -74,9 +75,10 @@ pub(super) enum End {
 }
 
 impl Oracle {
-    pub(super) fn new(window: usize) -> Self {
+    pub(super) fn new(window: usize, max_tracked: usize) -> Self {
         Self {
             window,
+            max_tracked,
             ..default()
         }
     }
@@ -374,6 +376,16 @@ impl Oracle {
         waiting
     }
 
+    /// Objects with a want, a route (met or not) or a call in flight: what law 7's cap counts.
+    pub(super) fn tracked(&self) -> usize {
+        let mut objs: Vec<&ObjKey> = self.pairs.iter().map(|p| &p.obj).collect();
+        objs.extend(self.routes.iter().map(|(o, ..)| o));
+        objs.extend(self.flying.iter().map(|(o, _)| o));
+        objs.sort();
+        objs.dedup();
+        objs.len()
+    }
+
     pub(super) fn room(&self) -> usize {
         let mut unsettled: Vec<&ObjKey> = self.pairs.iter().map(|p| &p.obj).collect();
         unsettled.extend(
@@ -385,7 +397,9 @@ impl Oracle {
         unsettled.sort();
         unsettled.dedup();
         unsettled.retain(|obj| !self.backing_off(obj));
-        self.window.saturating_sub(unsettled.len())
+        self.window
+            .saturating_sub(unsettled.len())
+            .min(self.max_tracked.saturating_sub(self.tracked()))
     }
 
     pub(super) fn part_outstanding(&self, part: &PartKey) -> bool {

@@ -67,6 +67,10 @@ use crate::serve::ReplayBinding;
 use crate::serve::SyncRpcBinding;
 use crate::serve::boot;
 
+// Not `tests/service_load.rs`: a `tests/` directory beside `lib.rs` is Cargo's integration tests.
+#[path = "service_load_tests.rs"]
+mod service_load;
+
 /// The one principal every test client acts as, so the grants and revokes below are its own.
 fn client_principal() -> PeerKey {
     principal(0)
