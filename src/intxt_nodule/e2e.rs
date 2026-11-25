@@ -420,6 +420,7 @@ async fn two_writers_first_documents_are_both_found_and_nothing_is_orphaned() {
                     drawer_id: drawer.clone(),
                     subject_id: actor,
                     access: DrawerAccess::Write,
+                    durable: true,
                 },
             )
             .await

@@ -246,7 +246,7 @@ impl NodeSettings {
     /// relay it syncs through, `peers.bootstrap`). Read from `node.json`, so it names what the
     /// node is configured to sync with, not whoever is connected at the moment.
     pub fn via_keys(&self) -> Res<Vec<big_cabinet_core::dmeta::MultibaseKey>> {
-        let own = big_node::node_id(&self.seed());
+        let own = self.node_id();
         let own = data_encoding::HEXLOWER.decode(own.as_bytes())?;
         let bootstrap = self.peers.iter().flat_map(|peers| &peers.bootstrap);
         std::iter::once(Ok(own))

@@ -17,8 +17,8 @@
 //! never overwritten. The hooks call `intxt`, the name `day` answers to when linked as `intxt`
 //! (`ln -s "$(command -v day)" ~/.local/bin/intxt`; `day-intxt` likewise makes `day intxt` work); the install says so when either is not on
 //! the `PATH`. Add `--node <dir>` (or set `DAY_NODE`) to a hook's command to name the node, and
-//! `"timeout"` to a hook if a recording can take long. The command needs the node's daemon (`day
-//! node start`) and fails fast without one: booting the node in each hook's process would take
+//! `"timeout"` to a hook if a recording can take long. The command needs the node's server (`day
+//! node start --bg`) and fails fast without one: booting the node in each hook's process would take
 //! seconds, and parallel tool calls run parallel hooks. The configuration's shape was checked
 //! against Claude Code's hooks documentation (code.claude.com/docs/en/hooks).
 //!
@@ -29,7 +29,7 @@
 //! as capture's, that runs `day x intxt capture git-rewrite "$1"` (a spelling clones that have the hook keep calling, so `capture` stays as a hidden command). git then reports the exact old
 //! and new commit of every amend and rebase, which capture records beside the worktree's commits
 //! and `day x intxt add` copies into an intxt that holds the old one. The hook needs `day` on
-//! the `PATH` git runs with, and the node's daemon (set `DAY_NODE` in the environment if the node
+//! the `PATH` git runs with, and the node's server (set `DAY_NODE` in the environment if the node
 //! is not the default). A `post-rewrite` hook that is not capture's is never overwritten or
 //! chained: `day x intxt status` says "hook not installed: foreign post-rewrite", and rewrites are
 //! then matched by patch id only. `day x intxt capture install-git-hooks` installs it on request
@@ -60,7 +60,6 @@ use crate::interlude::*;
 use big_dispatch_core::Readiness;
 use intxt_core::client::Caller;
 use intxt_core::edit::Named;
-use method_core::Method;
 use service_utils_rs::RequestContext;
 
 #[derive(Debug, clap::Subcommand)]
@@ -390,7 +389,7 @@ pub enum RecordCommands {
     /// claude-code-acp`. It spawns the agent, forwards the client's stdin to it and its stdout to
     /// the client unchanged, and records the session's messages, tool calls and plan, and the edits
     /// each prompt turn made in the session's working directory, in the node's capture drawer.
-    /// Needs the node's daemon; without one the session runs unrecorded. A recording that fails
+    /// Needs the node's server; without one the session runs unrecorded. A recording that fails
     /// says why on stderr and stops, and the session goes on. Exits with the agent's status.
     Acp {
         /// Record the agent's thinking (`agent_thought_chunk`) as well
@@ -744,14 +743,14 @@ async fn with_packaging_exit(
     .await
 }
 
-/// Capture runs against the node's daemon only. Booting the node in the hook's own process costs
+/// Capture runs against the node's server only. Booting the node in the hook's own process costs
 /// seconds per hook, and parallel tool calls run parallel hooks, of which only one process can
 /// hold the node. The socket is probed, not connected to through [`NodeClient`], which would boot
 /// the node just to be refused.
 pub(crate) async fn require_daemon(dir: &crate::context::NodeDir) -> Res<()> {
     eyre::ensure!(
         dir.probe_socket().await? == crate::context::SocketState::Live,
-        "no daemon is serving the node at {}; start it with `day node start`",
+        "no server is running the node at {}; start one with `day node start --bg`",
         dir.root().display()
     );
     Ok(())
@@ -761,20 +760,13 @@ pub(crate) async fn require_daemon(dir: &crate::context::NodeDir) -> Res<()> {
 /// error, reported as the node gave it.
 pub(crate) async fn call<M>(client: &NodeClient, input: M) -> Res<M::Output>
 where
-    M: Method,
-    M::Output: serde::de::DeserializeOwned,
+    M: method_core::Unary,
+    M::Error: std::fmt::Display,
 {
-    let reply = client
-        .call(M::XRPC.nsid, M::XRPC.method, &serde_json::to_value(input)?)
-        .await?;
-    eyre::ensure!(
-        reply.is_success(),
-        "{} failed with {}: {}",
-        M::XRPC.nsid,
-        reply.status,
-        reply.body
-    );
-    Ok(serde_json::from_value(reply.body)?)
+    client
+        .call(input)
+        .await
+        .map_err(|error| eyre::eyre!("{} failed: {error}", M::XRPC.nsid))
 }
 
 #[cfg(test)]
