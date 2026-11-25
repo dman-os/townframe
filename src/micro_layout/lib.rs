@@ -16,6 +16,7 @@ use clay_dioxus_kit::Card;
 use clay_dioxus_kit::CardContent;
 use clay_dioxus_kit::CardVariant;
 use clay_dioxus_kit::PanelPage;
+use clay_dioxus_kit::use_pane_rack;
 use clay_mdk::Capability;
 use clay_mdk::Collection;
 use clay_mdk::Context;
@@ -66,6 +67,7 @@ fn view(
     config: Facet<LayoutConfig>,
     navigation_rack: Capability,
 ) -> Element {
+    use_pane_rack(rsx! { PresentationSlot { reference: navigation_rack } });
     let rows = use_rows(&panels);
     let snapshot = use_facet(&config);
     let mut failure = use_signal(|| None::<String>);
@@ -74,17 +76,13 @@ fn view(
     // navigation rack): without it a compact host has no way out of the panel.
     let arrangement = match snapshot.state {
         FacetState::Loading => {
-            return framed(
-                rsx! { PresentationSlot { reference: navigation_rack } },
-                rsx! { p { role: "status", "Loading layout…" } },
-            );
+            return framed(rsx! { p { role: "status", "Loading layout…" } });
         }
         // No document yet: nothing is shown (see `LayoutConfig`).
         FacetState::Absent => LayoutConfig::default(),
         FacetState::Present(arrangement) => arrangement,
     };
     framed(
-        rsx! { PresentationSlot { reference: navigation_rack } },
         rsx! {
             div { "data-part": "toggles", role: "toolbar", "aria-label": "Panels",
                 for row in rows.iter() {
@@ -153,11 +151,12 @@ fn view(
     )
 }
 
-/// The layout's frame: the app bar with `leading` (the shell's navigation rack), then `body`.
-/// Every state of the view goes through it, so no state leaves the panel without a way out.
-fn framed(leading: Element, body: Element) -> Element {
+/// The layout's frame: the app bar, then `body`, under the shell's navigation rack that
+/// `use_pane_rack` places at the top-left. Every state of the view goes through it, so no state
+/// leaves the panel without a way out.
+fn framed(body: Element) -> Element {
     rsx! {
-        PanelPage { app_bar: rsx! { AppBar { title: "Layout", leading } },
+        PanelPage { app_bar: rsx! { AppBar { title: "Layout" } },
             div { class: "ct-layout",
                 Stylesheet { css: STYLES }
                 {body}
@@ -172,15 +171,13 @@ mod tests {
     use dioxus_core::Mutation;
     use dioxus_core::VirtualDom;
 
-    // The app bar's leading button is rendered beside the body whatever the body is, which is
-    // what keeps the `Loading layout…` state from being a dead end on a compact host.
+    // The pane's rack is rendered beside the body whatever the body is, which is what keeps the
+    // `Loading layout…` state from being a dead end on a compact host.
     #[test]
-    fn the_frame_keeps_the_leading_button_beside_a_loading_body() {
+    fn the_frame_keeps_the_rack_beside_a_loading_body() {
         fn app() -> Element {
-            framed(
-                rsx! { button { "aria-label": "Open sidebar" } },
-                rsx! { p { role: "status", "Loading layout…" } },
-            )
+            use_pane_rack(rsx! { button { "aria-label": "Open sidebar" } });
+            framed(rsx! { p { role: "status", "Loading layout…" } })
         }
         let mut dom = VirtualDom::new(app);
         let edits = dom.rebuild_to_vec().edits;

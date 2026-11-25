@@ -1,7 +1,7 @@
 //! AppBar (`ct-app-bar`): the strip across the top of a panel (FDR 006 "a micro controls its own
 //! app bar").
 //!
-//! Parts: `leading` (conventionally the shell's sidebar/back button), `title` and `trailing`
+//! Parts: `leading` (a button that belongs in the bar itself; the shell's navigation rack floats over the page instead, see `PanelPage`), `title` and `trailing`
 //! (actions); a slot that is absent renders nothing. State: `data-state` is `leading` when the bar
 //! has a leading slot and `bare` when it does not, so a stylesheet can inset a title that has no
 //! button before it. The bar owns no behaviour beyond arranging them; it exists so panels stop

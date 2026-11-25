@@ -1,22 +1,45 @@
 /*
- * ct-panel-page (headless/panel_page.rs). Parts: bar, body. A micro's presentation root is exactly
- * its pane's size and clips what overflows it, so a body taller than the panel scrolls here or
- * nowhere: the page fills the root, the bar is pinned and the body takes the height the bar
- * leaves (min-height 0, or a flex column grows to its content instead of scrolling).
+ * ct-panel-page (headless/panel_page.rs). Parts: rack, bar, body. State: data-rack. A micro's
+ * presentation root is exactly its pane's size and clips what overflows it, so a body taller than
+ * the panel scrolls here or nowhere: the page fills the root, the bar is pinned and the body takes
+ * the height the bar leaves (min-height 0, or a flex column grows to its content instead of
+ * scrolling).
+ *
+ * The rack shares the bar's row: a grid of the rack's column, which is `auto`, and the bar's. The
+ * rack's content is a mount whose host is `display: contents`, so the column is as wide as the
+ * buttons the rack draws and 0 when it draws none (a docked sidebar, a details pane), with no
+ * flag crossing the mount's shadow root. The title therefore starts after the rack at its actual
+ * width. The rack keeps its place at the pane's top-left while the body scrolls, because it is in
+ * the pinned row.
  */
 .ct-panel-page {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   height: 100%;
   min-height: 0;
 }
 
+.ct-panel-page [data-part="rack"] {
+  display: flex;
+  grid-column: 1;
+  grid-row: 1;
+  align-items: center;
+  min-width: 0;
+}
+
 .ct-panel-page [data-part="bar"] {
-  flex: none;
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+.ct-panel-page[data-rack="true"] [data-part="bar"] {
+  grid-column: 2;
 }
 
 .ct-panel-page [data-part="body"] {
-  flex: 1 1 auto;
+  grid-column: 1 / -1;
+  grid-row: 2;
   min-height: 0;
   overflow-y: auto;
 }
