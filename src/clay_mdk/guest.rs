@@ -15,20 +15,22 @@
 //! resyncs do.
 pub use dom::GuestDom;
 pub(crate) use dom::Slots;
+#[cfg(test)]
+pub(crate) use dom::settle;
 
 use crate::Access;
 use crate::Capability;
 use crate::Config;
 use crate::Context;
+use crate::Endpoint;
 use crate::Error;
 use crate::FacetSnapshot;
 use crate::MicroManifest;
 use crate::OperationError;
 use crate::OperationReceipt;
 use crate::OperationStatus;
-use crate::PublicationKind;
 use crate::RefStatus;
-use crate::RowAttachment;
+use crate::RowLink;
 use crate::capability_bank;
 use crate::collection_registration;
 use crate::collections;
@@ -55,7 +57,21 @@ use clay_collection::Transaction;
 use clay_collection::Version;
 use clay_collection::WriteBasis;
 use dioxus::prelude::*;
+use method_core::ByteBody;
+use method_core::Method;
+use method_core::MethodKind;
+use method_core::Unary;
 use serde::de::DeserializeOwned;
+use service_client_core_rs::Client;
+use service_client_core_rs::xrpc::HttpTransport;
+use service_client_core_rs::xrpc::Xrpc;
+use service_client_core_rs::xrpc::XrpcBody;
+use service_client_core_rs::xrpc::XrpcClientError;
+use service_client_core_rs::xrpc::decode_response;
+use service_client_core_rs::xrpc::encode_request;
+use service_core_rs::ClientError;
+use service_core_rs::Envelope;
+use service_core_rs::RequestContext;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -64,11 +80,12 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::Poll;
 use std::task::Waker;
+use std::time::Duration;
 
 mod dom;
 
 /// One row value as a guest's page carries it: its body and the references the host minted for
-/// its attachments, already recipient-local to this incarnation.
+/// its links, already recipient-local to this incarnation.
 pub(crate) struct GuestValue {
     pub(crate) body: Vec<u8>,
     pub(crate) capabilities: Vec<Rc<capability_bank::CapabilityRef>>,
@@ -82,22 +99,6 @@ pub(crate) struct ChangeTick(pub(crate) Signal<u64>);
 struct Presentation {
     dom: GuestDom,
     tick: Rc<Cell<Option<Signal<u64>>>>,
-}
-
-#[derive(Clone)]
-struct RootProps {
-    tick: Rc<Cell<Option<Signal<u64>>>>,
-    render: Rc<dyn Fn() -> Element>,
-}
-
-fn root(props: RootProps) -> Element {
-    let tick = use_hook(|| {
-        let signal = Signal::new(0_u64);
-        props.tick.set(Some(signal));
-        signal
-    });
-    use_context_provider(|| ChangeTick(tick));
-    (props.render)()
 }
 
 /// Local tasks an incarnation owns. A task is dropped at its next poll once the incarnation is
@@ -324,12 +325,14 @@ impl Runtime {
                     })
                     .collect(),
                 calls: manifest
-                    .publications
+                    .endpoints
                     .iter()
-                    .filter_map(|publication| {
-                        let contract = publication.contract.as_ref()?;
-                        (publication.kind == PublicationKind::Call)
-                            .then(|| (publication.name.clone(), contract.clone()))
+                    .filter_map(|(name, endpoint)| match endpoint {
+                        Endpoint::Method { nsid: contract }
+                        | Endpoint::Callback {
+                            implements: contract,
+                        } => Some((name.clone(), contract.clone())),
+                        _ => None,
                     })
                     .collect(),
             },
@@ -584,13 +587,20 @@ impl Runtime {
         name: &str,
         render: Rc<dyn Fn() -> Element>,
     ) -> Result<(), Error> {
-        let tick = Rc::default();
-        let dom = GuestDom::new_with_props(
-            root,
-            RootProps {
-                tick: Rc::clone(&tick),
-                render,
+        let tick: Rc<Cell<Option<Signal<u64>>>> = Rc::default();
+        let root_tick = Rc::clone(&tick);
+        // The change tick is the presentation's one shared reactive source, so it lives in the
+        // root; `render` runs below it, once per mount, and reads it through context.
+        let dom = GuestDom::with_setup(
+            move || {
+                let tick = use_hook(|| {
+                    let signal = Signal::new(0_u64);
+                    root_tick.set(Some(signal));
+                    signal
+                });
+                use_context_provider(|| ChangeTick(tick));
             },
+            render,
         );
         let published = capability_bank::publish_presentation(name)?;
         assert!(
@@ -658,20 +668,18 @@ pub(crate) fn snapshot<T: DeserializeOwned>(facet: &Facet<T>) -> Result<FacetSna
     }
 }
 
-/// Write one row through the host's registration writer; each attachment names one of this
-/// micro's own declared publications, which the host turns into its endpoint.
+/// Write one row through the host's registration writer; each link names one of this
+/// micro's own declared endpoints, which the host turns into its endpoint.
 pub(crate) async fn put(
     writer: &collection_registration::RegistrationWriter,
     key: Vec<u8>,
     basis: WriteBasis,
     body: Vec<u8>,
-    attachments: Vec<RowAttachment>,
+    links: Vec<RowLink>,
 ) -> Result<Stamp, Error> {
-    let attachments = attachments
+    let attachments = links
         .into_iter()
-        .map(|attachment| {
-            collection_registration::RowAttachment::OwnPublication(attachment.into_name())
-        })
+        .map(|link| collection_registration::RowAttachment::OwnPublication(link.into_name()))
         .collect();
     Ok(writer
         .put(
@@ -843,6 +851,8 @@ impl From<collection_registration::MutationError> for Error {
             MutationError::KeyTooLarge | MutationError::ValueTooLarge => {
                 Self::Rejected("row exceeds the collection's size limits".into())
             }
+            // The host's rejection keeps the WIT's word, `attachment`, until the 0.5.0 bump: the
+            // in-process backend says the same and the conformance run asserts it for both.
             MutationError::InvalidAttachment => {
                 Self::Rejected("row names an attachment it does not carry".into())
             }
@@ -896,4 +906,72 @@ impl From<documents::OperationReceipt> for OperationReceipt {
             },
         }
     }
+}
+
+/// [`call`] for a method whose answer is a byte stream (`bytes_output`), handing the stream back
+/// unread. A success is the body as the transport received it; anything else is a JSON error
+/// envelope, which `decode_response` maps to the method's error exactly as for a unary call.
+pub(crate) async fn call_bytes<M>(input: M) -> Result<ByteBody, ClientError<M::Error>>
+where
+    M: Method<Output = ByteBody>,
+{
+    let Envelope {
+        context,
+        metadata,
+        params,
+        ..
+    } = Envelope::new(RequestContext::root(), input);
+    context.validate()?;
+    let request = encode_request(M::XRPC, &context, &metadata, &params)
+        .map_err(XrpcClientError::<M::Error>::Encode)?;
+    let response = big_ndk::WasiHttp
+        .send(request)
+        .await
+        .map_err(|error| XrpcClientError::<M::Error>::Transport {
+            message: error.message,
+            outcome_unknown: M::XRPC.kind == MethodKind::Procedure,
+        })?;
+    match response.body {
+        XrpcBody::Bytes(body) if response.status.is_success() => Ok(body),
+        other => {
+            // A byte stream is only a success; a JSON body is the error envelope, and a JSON
+            // success from a byte method is the node breaking its contract.
+            decode_response::<serde_json::Value, M::Error>(
+                M::XRPC,
+                context.request_id,
+                response.status,
+                &response.headers,
+                &other,
+            )
+            .map_err(ClientError::from)?;
+            Err(XrpcClientError::<M::Error>::Protocol {
+                message: format!("{} answered JSON where bytes were declared", M::XRPC.nsid),
+                outcome_unknown: false,
+            }
+            .into())
+        }
+    }
+}
+
+/// Calls node method `M` over `wasi:http` to `dispatch.local`: the transport a nodule's
+/// `big_ndk::Cx::call` uses, the same [`big_ndk::WasiHttp`] value. The request carries no
+/// credential: the host drops any `authorization` a guest sets and presents the micro's own
+/// capability as the micro's actor.
+pub(crate) async fn call<M: Unary>(input: M) -> Result<M::Output, ClientError<M::Error>> {
+    Client::new(Xrpc(big_ndk::WasiHttp))
+        .call(RequestContext::root(), input)
+        .await
+}
+
+/// Waits `duration` on the host's monotonic clock. The import is async, so this may only be
+/// polled inside a component-model task: [`Context::sleep`](crate::Context::sleep) runs it on an
+/// owned task.
+pub(crate) async fn sleep(duration: Duration) {
+    let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+    big_ndk::wit::wasi::clocks::monotonic_clock::wait_for(nanos).await;
+}
+
+/// The host's monotonic clock reading, from its own origin.
+pub(crate) fn now() -> Duration {
+    Duration::from_nanos(big_ndk::wit::wasi::clocks::monotonic_clock::now())
 }

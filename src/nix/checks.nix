@@ -13,7 +13,7 @@
 # tree, or facts about the host): `cargo x sql gen --check` and
 # `cargo x guardrails lint|api` (building xtask in the store would discard the
 # warm ./target), clippy/check-matrix/nextest (need ./target and the mbx
-# cache), tsc/detekt/gradle/playwright (node_modules or the
+# cache), tsc/playwright (node_modules) and the Android build (the
 # Android SDK), and `cargo x guardrails doctor` (asserts facts about the
 # invoking shell's environment, which a sandbox cannot represent). Those stay
 # as pre-commit hooks run inside the devshells.

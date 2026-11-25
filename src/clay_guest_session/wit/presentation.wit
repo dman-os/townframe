@@ -34,13 +34,73 @@ interface presentation {
         insert-before(u32),
         set-attribute(tuple<string, option<string>, attribute-value>),
         set-text(string),
+        set-style-sheet(string),
         add-event-listener(string),
         remove-event-listener(string),
         remove,
     }
 
+    enum scroll-behavior {
+        instant,
+        smooth,
+    }
+
+    /// Offsets of an element's own scrollable content, in CSS pixels.
+    record scroll-offsets {
+        left: f64,
+        top: f64,
+        behavior: scroll-behavior,
+    }
+
+    /// A geometry value the host reads from an element.
+    enum element-read {
+        /// `getBoundingClientRect`: left, top, width, height.
+        client-rect,
+        /// `scrollLeft` and `scrollTop`.
+        scroll-offset,
+        /// `scrollWidth` and `scrollHeight`.
+        scroll-size,
+    }
+
+    /// Where `scroll-to` aligns an element along one axis of its scroll container.
+    enum scroll-align {
+        start,
+        center,
+        end,
+        nearest,
+    }
+
+    /// Dioxus's `ScrollToOptions`.
+    record scroll-into-view {
+        behavior: scroll-behavior,
+        vertical: scroll-align,
+        horizontal: scroll-align,
+    }
+
+    /// What to do to an element: the imperative half of Dioxus's `MountedData`.
+    variant element-action {
+        /// `Element.scrollTo({ left, top, behavior })` on the element's own content.
+        scroll(scroll-offsets),
+        /// `Element.scrollIntoView(...)`.
+        scroll-into-view(scroll-into-view),
+        /// `focus()` for true, `blur()` for false.
+        set-focus(bool),
+        read(element-read),
+    }
+
+    /// A command to one element the guest was told is mounted. Every command is answered by
+    /// exactly one `element-reply` event carrying the same `request` id, a value or an error.
+    /// The host runs commands after the call returns; those issued while handling one event run
+    /// in the order issued, after that dispatch's mutations were applied.
+    record element-command {
+        request: u64,
+        action: element-action,
+    }
+
     resource surface {
         apply: func(edits: list<mutation>) -> result<u64, presentation-error>;
+        /// Send `command` to `element`, which must have announced `mounted` on this surface.
+        element-command: func(element: node-id, command: element-command) -> result<_, presentation-error>;
         retain: func() -> result<surface, presentation-error>;
         identity: func() -> u64;
     }

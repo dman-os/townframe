@@ -1,0 +1,20 @@
+version = 1
+role = "application"
+dependency_reason = "The node directory (node.json: node id, peers, dev hooks; the identity seed is in the keyring) and the one way a process boots a node from it, shared by the `day` CLI and the app shells that hold their own node."
+allowed_dependencies = [
+    "big_cabinet",
+    "big_cabinet_core",
+    "big_node",
+    "big_repo",
+    "secrets_rs",
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]

@@ -7,7 +7,7 @@ on:
   schedule:
     - cron: "0 3 * * *"
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
     inputs:
       tmate_enabled:
@@ -34,14 +34,64 @@ env:
   GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
 jobs:
-  nix-packages:
+  # Decides what the rest of the run needs; see .github/scripts/ci-scope.sh for the rules.
+  # Pushes to main, the nightly cron, manual dispatch and PRs labelled `full-ci` always get
+  # the full suites. Other PRs run only the affected crates' tests and target matrix, skip
+  # Rust jobs for docs-only changes, and run the heavy jobs (Nix packages, web E2E, CLI E2E)
+  # only when their paths change or a `nix-heavy` / `e2e` label asks for them.
+  changes:
     # Draft PRs skip CI; marking one ready for review runs it.
     if: github.event.pull_request.draft != true
-    name: Nix CLI package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+      full: ${{ steps.scope.outputs.full }}
+      tests: ${{ steps.scope.outputs.tests }}
+      packages: ${{ steps.scope.outputs.packages }}
+      test_args: ${{ steps.scope.outputs.test_args }}
+      nix: ${{ steps.scope.outputs.nix }}
+      e2e_web: ${{ steps.scope.outputs.e2e_web }}
+      e2e_cli: ${{ steps.scope.outputs.e2e_cli }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The three-dot diff against origin/main needs full history for the merge base.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Compute the CI scope
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PLAN_RUNNER: nix develop .#ci-rust --command
+        run: .github/scripts/ci-scope.sh
+  nix-packages:
+    needs: changes
+    # Draft PRs skip CI; marking one ready for review runs it. On PRs the heavy Nix builds also
+    # need a path trigger or the `nix-heavy` label (see `changes`).
+    if: github.event.pull_request.draft != true && needs.changes.outputs.nix == 'true'
+    name: Nix package ${{ matrix.attr }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The guest and web builds share one vendored dependency set (dioxus,
+          # wasmtime, blitz, ...) and compile wasmtime-environ for wasm, so a cold build
+          # is very heavy; the `changes` job keeps them off PRs that cannot affect them.
+          - attr: daytxt-packages
+          - attr: daytxt-web
     env:
       OLLAMA_URL: ""
       OLLAMA_USERNAME: ""
@@ -56,11 +106,14 @@ jobs:
       - uses: DeterminateSystems/flakehub-cache-action@v3
       # Source-only lint is not repeated here: `nix flake check` runs as a
       # pre-commit hook in the lint job. This job owns the package outputs.
-      - name: Build CLI and run its packaged round-trip test
-        run: nix build --print-build-logs --no-link .#daybook-cli.tests.round-trip
+      - name: Build ${{ matrix.attr }}
+        env:
+          ATTR: ${{ matrix.attr }}
+        run: nix build --print-build-logs --no-link ".#$ATTR"
   rust-target-matrix:
-    # Draft PRs skip CI; marking one ready for review runs it.
-    if: github.event.pull_request.draft != true
+    needs: changes
+    # Draft PRs skip CI; marking one ready for review runs it. Docs-only PRs skip it.
+    if: github.event.pull_request.draft != true && needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -82,14 +135,29 @@ jobs:
       - run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
       # Guardrail lint and formatting (all three workspaces) run once, in the
       # lint job; this matrix only compiles the per-target build contracts.
-      # `ci-desktop`, not `ci-rust`: the native contract includes `dayframe_desktop`, which
+      # `ci-desktop`, not `ci-rust`: the native contract includes `daytxt_desktop`, which
       # links the Linux GUI stack (glib/gtk/wayland) through its `desktop` renderer feature.
       # `ci-rust` carries no pkg-config-visible glib, so the native lane there fails in
-      # `glib-sys`' build script. This is the same reason the dayframe test lane below runs
+      # `glib-sys`' build script. This is the same reason the daytxt test lane below runs
       # in `ci-desktop`.
-      - run: nix develop .#ci-desktop --command cargo x guardrails check-matrix --target "${{ matrix.target }}"
+      # A full run checks every crate's contract; an affected-only PR run checks each affected
+      # crate (a crate with no contract for the target selects zero builds, which is fine when
+      # filtered by package).
+      - name: Check build contracts
+        env:
+          TARGET: ${{ matrix.target }}
+          FULL: ${{ needs.changes.outputs.full }}
+          PACKAGES: ${{ needs.changes.outputs.packages }}
+        run: |
+          if [ "$FULL" = true ]; then
+            nix develop .#ci-desktop --command cargo x guardrails check-matrix --target "$TARGET"
+          else
+            for package in $PACKAGES; do
+              nix develop .#ci-desktop --command cargo x guardrails check-matrix --target "$TARGET" --package "$package"
+            done
+          fi
       - name: Check browser wcmp adapter
-        if: matrix.target == 'wasm32-unknown-unknown'
+        if: matrix.target == 'wasm32-unknown-unknown' && (needs.changes.outputs.full == 'true' || contains(needs.changes.outputs.packages, 'clay_rt_wcmp_web'))
         run: nix develop .#ci-desktop --command cargo x guardrails check-matrix --target wasm32-unknown-unknown --package clay_rt_wcmp_web
   # The single lint job. Hooks that only read sources delegate to the
   # hermetic `nix flake check` hook (cache hits make an unchanged tree free);
@@ -121,8 +189,10 @@ jobs:
           nix develop .#ci-desktop --command prek --color=always run --all-files
   e2e-cli:
     name: E2E (CLI)
-    # Draft PRs skip CI; marking one ready for review runs it.
-    if: github.event.pull_request.draft != true
+    needs: changes
+    # Draft PRs skip CI; marking one ready for review runs it. On PRs it also needs a path
+    # trigger or the `e2e` label (see `changes`).
+    if: github.event.pull_request.draft != true && needs.changes.outputs.e2e_cli == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -152,17 +222,14 @@ jobs:
       - name: fetch WIT dependencies
         run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
 
-      - name: build test plug OCI artifact
-        run: nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_test_manifest
-
       - name: build the intxt handler component
         run: nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest --target wasm32-wasip3 --release
 
-      - name: build daybook_cli and day_cli
-        run: nix develop .#ci-rust --command cargo --color=always build -p daybook_cli -p day_cli
+      - name: build day_cli
+        run: nix develop .#ci-rust --command cargo --color=always build -p day_cli
 
       - name: CLI E2E tests
-        run: nix develop .#ci-rust --command cargo nextest run --color=always --profile "$NEXTEST_PROFILE" -p daybook_cli -p day_cli
+        run: nix develop .#ci-rust --command cargo nextest run --color=always --profile "$NEXTEST_PROFILE" -p day_cli
         env:
           UTILS_RS_TIMEOUT_MULTIPLIER: 3
 
@@ -175,10 +242,12 @@ jobs:
 
 
   tests:
-    # Draft PRs skip CI; marking one ready for review runs it.
-    if: github.event.pull_request.draft != true
+    needs: changes
+    # Draft PRs skip CI; marking one ready for review runs it. Docs-only PRs skip it; other PRs
+    # test only the affected crates (the full workspace on main, nightly and `full-ci`).
+    if: github.event.pull_request.draft != true && needs.changes.outputs.tests == 'true'
     runs-on: ubuntu-latest
-    # Preparing the Dayframe Wasm guest fixtures takes about 35 minutes on a cold runner before
+    # Preparing the daytxt Wasm guest fixtures takes about 35 minutes on a cold runner before
     # nextest starts, and the suite itself about 40; 90 cut the run off at the last test.
     timeout-minutes: 120
     steps:
@@ -225,40 +294,32 @@ jobs:
           nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p test_wflows --target wasm32-wasip3 --release
           nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p test_nodule_guest --target wasm32-wasip3 --release
 
-      - name: build plug OCI artifacts
-        run: |
-          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_test_manifest
-          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_plabels_manifest
-          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_dayledger_manifest
-
 
       - name: rust tests
         run: |
-          # Plug crates are excluded while automatic triage is broken. `daybook_cli` and `day_cli` are excluded
-          # because their e2e tests need the built binary (found at target/debug) and run in the dedicated CLI job.
-          # This lane runs in `ci-desktop` because the Dayframe Dioxus crates link the Linux GUI
+          # `day_cli` is excluded because its e2e tests need the built binary (found at target/debug)
+          # and run in the dedicated CLI job.
+          # This lane runs in `ci-desktop` because the daytxt Dioxus crates link the Linux GUI
           # stack (glib/wayland/wgpu) through the workspace, and `ci-rust` does not carry it.
           #
           # Prepare the wasm guest components first: the clay_*/micro_* tests read
-          # DAYFRAME_<NAME>_COMPONENT paths printed by the prepare step.
-          nix develop .#ci-desktop --command deno run --allow-all x/check-dayframe.ts --prepare-only > /tmp/dayframe-components.env
+          # DAYTXT_<NAME>_COMPONENT paths printed by the prepare step.
+          nix develop .#ci-desktop --command deno run --allow-all x/check-daytxt.ts --prepare-only > /tmp/daytxt-components.env
           # `set -a` exports every variable the prepare step prints, so a new fixture needs no
           # edit here (a hand-kept export list silently left new fixtures unset).
           set -a
-          source /tmp/dayframe-components.env
+          source /tmp/daytxt-components.env
           set +a
           #
           # `--no-report` accumulates llvm profile data across the nextest and doctest runs (it
           # implies `--no-clean`, so the earlier run's data survives) and the final `report`
           # invocation turns the whole lot into a single lcov file.
           nix develop .#ci-desktop --command cargo llvm-cov --no-report nextest \
-            --color=always --workspace --all-targets --profile "$NEXTEST_PROFILE" \
-            --user-config-file .config/nextest-user-ci.toml \
-            --exclude daybook_cli --exclude day_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
+            --color=always $TEST_ARGS --all-targets --profile "$NEXTEST_PROFILE" \
+            --user-config-file .config/nextest-user-ci.toml
           # nextest cannot run doctests, so they go through `cargo test --doc`. `--doc` implies
           # `--doctests`, which persists the doctest binaries the coverage report needs.
-          nix develop .#ci-desktop --command cargo llvm-cov --no-report --doc --workspace \
-            --exclude daybook_cli --exclude day_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
+          nix develop .#ci-desktop --command cargo llvm-cov --no-report --doc $TEST_ARGS
           # `report` only merges the collected profile data and writes lcov; it runs no tests.
           # `--doctests` is what lets the persisted doctest binaries be attributed to their sources.
           nix develop .#ci-rust --command cargo llvm-cov report --doctests --lcov --output-path lcov.info
@@ -266,6 +327,9 @@ jobs:
           # empty when the test runs and the report disagree about `--doctests`.
           grep -q '^SF:' lcov.info || { echo 'lcov.info has no coverage records' >&2; exit 1; }
         env:
+          # `--workspace --exclude day_cli` on a full run, `-p <crate> ...` for the affected
+          # crates on a PR (computed by the `changes` job).
+          TEST_ARGS: ${{ needs.changes.outputs.test_args }}
           UTILS_RS_TIMEOUT_MULTIPLIER: 3
           RUST_BACKTRACE: 1
           # info, not debug: nextest holds every running test's captured output in memory, and the
@@ -317,124 +381,12 @@ jobs:
         with:
           files: lcov.info
 
-  e2e-sysadmin-chromium:
-    name: E2E (sysadmin / chromium)
-    if: ${{ false }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      CI: "true"
-      DOCKER_CMD: docker
-      SMTP_HOST: 127.0.0.1
-      SMTP_PORT: "2500"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: DeterminateSystems/nix-installer-action@v16
-
-      - uses: DeterminateSystems/flakehub-cache-action@v3
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Setup wash CLI
-        uses: wasmCloud/setup-wash-action@v2.1.0
-        with:
-          wash-version: v2.6.1
-      - name: Resolve pnpm store path
-        id: pnpm-store
-        run: echo "path=$(nix develop .#default --command pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-      - name: Restore pnpm store
-        id: pnpm-store-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ steps.pnpm-store.outputs.path }}
-          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: |
-            pnpm-store-${{ runner.os }}-
-      - name: Install dependencies
-        run: nix develop .#default --command pnpm install --frozen-lockfile
-      - name: fetch WIT dependencies
-        run: nix develop .#default --command deno run -A ./x/wit-fetch.ts --clean --generate-auth-types
-      - name: Save pnpm store
-        if: github.ref == 'refs/heads/main' && steps.pnpm-store-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ steps.pnpm-store.outputs.path }}
-          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-      - name: Build workloads and host
-        run: |
-          nix develop .#default --command bash -lc '
-            set -euo pipefail
-            pnpm -C src/btress_auth run build
-            cd src/btress_sysadmin
-            cargo leptos build --release
-            cd ../..
-            cargo build --locked -p daybook_cli
-          '
-
-      - name: Run sysadmin e2e
-        run: |
-          nix develop .#default --command bash -lc '
-            set -euo pipefail
-
-            server_pid=""
-            static_pid=""
-            cleanup() {
-              status=$?
-              set +e
-              if [ -n "$static_pid" ]; then kill "$static_pid" 2>/dev/null || true; fi
-              if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; fi
-              docker compose -f tools/compose.yml --profile mail down -v
-              exit "$status"
-            }
-            trap cleanup EXIT
-
-            ./x/compose-up.ts mail
-            setsid env SMTP_HOST="$SMTP_HOST" SMTP_PORT="$SMTP_PORT" ./target/debug/daybook_cli server \
-              >/tmp/btress-server.log 2>&1 </dev/null &
-            server_pid=$!
-            setsid deno run --allow-all x/dev-btress-static.ts \
-              >/tmp/btress-static.log 2>&1 </dev/null &
-            static_pid=$!
-
-            wait_for() {
-              name="$1"
-              url="$2"
-              for _ in $(seq 1 90); do
-                if curl -fsS --max-time 5 -o /dev/null "$url"; then return 0; fi
-                sleep 2
-              done
-              echo "Timed out waiting for $name at $url"
-              tail -100 /tmp/btress-server.log /tmp/btress-static.log 2>/dev/null || true
-              return 1
-            }
-
-            wait_for Inbucket http://localhost:9020/
-            wait_for btress-auth http://localhost:8071/healthz
-            wait_for btress-sysadmin http://localhost:3000/
-            wait_for static-assets http://localhost:3001/pkg/btress_sysadmin.js
-            pnpm -C src/btress_sysadmin run e2e -- --project=chromium
-          '
-
-      - name: Upload e2e artifacts
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: btress-sysadmin-e2e-artifacts
-          path: |
-            src/btress_sysadmin/test-results/
-            src/btress_sysadmin/playwright-report/
-            /tmp/btress-server.log
-            /tmp/btress-static.log
-          retention-days: 14
-
-  e2e-dayframe-web-chromium:
-    name: E2E (dayframe web / chromium)
-    # Draft PRs skip CI; marking one ready for review runs it.
-    if: github.event.pull_request.draft != true
+  e2e-daytxt-web-chromium:
+    name: E2E (daytxt web / chromium)
+    needs: changes
+    # Draft PRs skip CI; marking one ready for review runs it. On PRs it also needs a path
+    # trigger or the `e2e` label (see `changes`).
+    if: github.event.pull_request.draft != true && needs.changes.outputs.e2e_web == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -461,20 +413,20 @@ jobs:
       - name: fetch WIT dependencies
         run: nix develop .#ci-desktop --command deno run -A ./x/wit-fetch.ts --clean
       - name: Install dependencies
-        run: nix develop .#ci-desktop --command pnpm install --frozen-lockfile --filter @townframe/dayframe_web
-      # ADR 018 migration steps 6–7: the shared composition + counter guest on `dayframe_web`.
-      # `x/dayframe-web.ts` prepares the guest component, builds the wasm32 host, runs
+        run: nix develop .#ci-desktop --command pnpm install --frozen-lockfile --filter @townframe/daytxt_web
+      # ADR 018 migration steps 6–7: the shared composition + counter guest on `daytxt_web`.
+      # `x/daytxt-web.ts` prepares the guest component, builds the wasm32 host, runs
       # wasm-bindgen, copies the guest asset (bundle size is printed there for the §7 budget),
       # and serves the site. Building here first keeps the cold compile, about 20 minutes on an
       # empty cache, out of Playwright's 20-minute webServer timeout: the webServer's own run of
-      # the script then finds every crate built. DAYFRAME_WEB_TRAPPER matches what
+      # the script then finds every crate built. DAYTXT_WEB_TRAPPER matches what
       # `playwright.config.ts` sets, so the build includes the same packages it serves.
-      - name: Build dayframe web
-        run: nix develop .#ci-desktop --command deno run --allow-all ./x/dayframe-web.ts --build
+      - name: Build daytxt web
+        run: nix develop .#ci-desktop --command deno run --allow-all ./x/daytxt-web.ts --build
         env:
-          DAYFRAME_WEB_TRAPPER: "1"
-      - name: Run dayframe web e2e
-        run: nix develop .#ci-desktop --command pnpm -C src/dayframe_web run e2e
+          DAYTXT_WEB_TRAPPER: "1"
+      - name: Run daytxt web e2e
+        run: nix develop .#ci-desktop --command pnpm -C src/daytxt_web run e2e
 
       # Bombadil property-based exploration of the same build (ADR 032 section 9): 60 s at a phone
       # width and 60 s at a desktop width by default (BOMBADIL_TIME_LIMIT), driving the pinned
@@ -484,15 +436,15 @@ jobs:
       # found (hiding a panel withdrew the layout; a synchronous cancel of a host call suspended a
       # sync export in the browser engine) is fixed in `wcmp` and held by a Playwright spec, and
       # ten consecutive 60 s runs at 420 px were green (docs/scratch/dayframe-shell-ledger.md, S8).
-      - name: Explore dayframe web with Bombadil
-        run: nix develop .#ci-desktop --command pnpm -C src/dayframe_web run bombadil
+      - name: Explore daytxt web with Bombadil
+        run: nix develop .#ci-desktop --command pnpm -C src/daytxt_web run bombadil
 
       - name: Upload e2e artifacts
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: dayframe-web-e2e-artifacts
+          name: daytxt-web-e2e-artifacts
           path: |
-            src/dayframe_web/test-results/
-            src/dayframe_web/playwright-report/
+            src/daytxt_web/test-results/
+            src/daytxt_web/playwright-report/
           retention-days: 14

@@ -3,7 +3,7 @@
 //! this crate and never on the Settings micro itself.
 //!
 //! A section row is keyed by the contributing micro's id (CBOR text) and holds a [`Section`]: a
-//! title, and an attachment for the section's detail presentation. A micro whose section should
+//! title, and a link for the section's detail presentation. A micro whose section should
 //! exist while it is stopped declares the row in its manifest, which stores an endpoint to its
 //! own presentation; a micro that only contributes while running writes the row at runtime with
 //! a bound reference. Settings treats both alike.
@@ -14,12 +14,12 @@
 //! back button, which Settings requires from it ([`SHELL_OPENED`], [`SHELL_NAV_BUTTON`]). Opening
 //! a row is the list scaffold's `ListRow`, which reaches the shell's navigation through the
 //! scaffold, so Settings never calls `navigate` itself.
-use clay_mdk::Attachment;
 use clay_mdk::CollectionCapability;
 use clay_mdk::CollectionDecl;
 use clay_mdk::ComponentDecl;
 use clay_mdk::ConfigDecl;
 use clay_mdk::DeclaredCollection;
+use clay_mdk::Link;
 use clay_mdk::ManifestBuilder;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
@@ -49,9 +49,9 @@ pub const SECTIONS: &str = "org.example.dayframe.settings.sections";
 pub const SECTIONS_BINDING: &str = "sections";
 /// The local binding name under which Settings contributes its panel to `shell.panels`.
 pub const PANELS_BINDING: &str = "panels";
-/// The local binding names under which Settings requires what it uses of the shell. Each is
-/// the name of the shell publication it binds, so a catalog satisfies all of them from one
-/// provider (`InstalledMicro::satisfied_by`).
+/// The local binding names under which Settings requires what it uses of the shell. They are
+/// local names: the catalog resolves each requirement by the contract it names to the micro
+/// serving it.
 pub const SHELL_OPENED: &str = micro_shell_manifest::OPENED;
 pub const SHELL_NAV_BUTTON: &str = micro_shell_manifest::NAV_BUTTON;
 /// Schema NSIDs of [`SECTIONS`] keys (the contributing micro's id, text) and values
@@ -61,11 +61,11 @@ pub const SECTION_VALUE_SCHEMA: &str = "org.example.dayframe.settings.section";
 pub const SECTION_SELECTOR_SCHEMA: &str = "org.example.dayframe.settings.sectionSelector";
 
 /// One Settings section: its title, and the presentation published for its detail, as an
-/// attachment of the row.
+/// link of the row.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Section {
     pub title: String,
-    pub detail: Attachment,
+    pub detail: Link,
 }
 
 /// The viewer's own preferences, kept in its configuration document: which sections are hidden
@@ -142,8 +142,8 @@ impl DeclaredCollection for SettingsSections {
 /// row to the shell.
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
-        .component::<SettingsListView>()
-        .component::<SettingsSectionView>()
+        .view::<SettingsListView>()
+        .view::<SettingsSectionView>()
         .requires(
             SHELL_OPENED,
             micro_shell_manifest::OPENED_CONTRACT,
@@ -196,7 +196,7 @@ mod tests {
         ciborium::into_writer(
             &Section {
                 title: "Counter (Wasm)".into(),
-                detail: Attachment::at(0),
+                detail: Link::at(0),
             },
             &mut bytes,
         )

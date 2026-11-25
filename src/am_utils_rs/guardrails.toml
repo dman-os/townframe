@@ -8,7 +8,7 @@ allow_external_api_types = false
 
 [builds.wasm32-wasip3]
 
-# daybook_types pulls this crate into the browser guest path (ADR 018).
+# The browser guest path (ADR 018) links this crate on wasm32-unknown-unknown.
 [builds.wasm32-unknown-unknown]
 
 [[exemptions]]

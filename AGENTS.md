@@ -47,9 +47,9 @@
 > Don't be lazy with solutions, you really are better than that.
 
 <!--FIXME: rewrite this in CONTRIBUTING.md -->
-- The Kotlin app (`./src/daybook_compose`) is off the validation path: don't type check or lint it as part of a change. It stays in the tree until its remaining claytext concerns are settled; `./x/check-dayb.ts` still type checks it when asked.
 - Source-only checks (nixfmt/statix/deadnix, rustfmt on every `.rs` file, deno fmt/lint/check of `x/`, biome, JSON/TOML/YAML validity) are hermetic Nix checks: run `nix flake check`, fix formatting with `nix fmt`. New files are invisible to the flake until tracked.
-- xtask groups its subcommands: `cargo x sql check|gen|migrate`, `cargo x plug build-oci`, `cargo x guardrails lint|api|doctor|check-matrix|plan|overlap|bless|...`.
+- The legacy daybook stack (`./src/daybook_*`, `./src/plug_*`, and the Kotlin app `./src/daybook_compose`) stays in the tree but is out of the Cargo workspaces and off the validation path: don't build, type check or lint it as part of a change. It stays until its remaining claytxt concerns are settled; `./x/check-dayb.ts` still type checks the Kotlin app when asked.
+- xtask groups its subcommands: `cargo x sql check|gen|migrate`, `cargo x guardrails lint|api|doctor|check-matrix|plan|overlap|bless|...`.
 - Prefer `cargo clippy --all-targets --all-features -p myCrate` over `cargo check`.
 - When working with rust, in addition to `cargo clippy`, small tests can be used to validate ideas.
 - Run `cargo x guardrails lint` (and `cargo x guardrails api --all --check`, `cargo x guardrails doctor`) to verify module/symbol budgets, crate-local `guardrails.toml` dependency & exemption policies, migration-history identities, documentation links/metadata, and public-API contracts.
@@ -100,9 +100,10 @@ Diagnose the keyhive pull pipeline first; the worker-side retry storm is only th
 - Keep instrumentation in its own commit, separate from fixes and pin bumps: the forks move and the logs must be droppable independently.
 - Diagnosis playbooks live in `.agents/skills/`: `stress-sync-investigation` (hunt loop, log triage, load-only hangs), `fork-pinning-and-upstream-sync` (patch/pin lifecycle, upstream PRs, CI), `rr-debugging` (deterministic repros only), `message-ordering-audit` (causal ordering across hub command/event/mailbox surfaces).
 - Performance and memory investigations have `.agents/skills/perf-investigation` (costs.rs harness, release wall vs CPU, census by operation, SQLite lease counters, `strace -c`, critical-path waits vs background load; `x/instr-summary.ts` summarizes INSTR samples).
-- Dayframe UI work has its own playbooks in `.agents/skills/`: `dayframe-design-language` (tokens, components, layout contract), `dayframe-signal-idioms` (runtime-borrow-proof state idioms, `dioxus_storm` event storms), `dayframe-native-dev-loop` (native build, screenshots, AT-SPI inspection), `blitz-dioxus-native-limits` (pinned Blitz capability bounds).
+- claytxt and daytxt UI work has its own playbooks in `.agents/skills/`: `claytxt-design-language` (tokens, components, layout contract), `claytxt-signal-idioms` (runtime-borrow-proof state idioms, `dioxus_storm` event storms), `daytxt-native-dev-loop` (native build, screenshots, AT-SPI inspection), `blitz-dioxus-native-limits` (pinned Blitz capability bounds).
 - Cabinet datum/Lexicon work has its own playbook in `.agents/skills/`: `lexicon-authoring` (open unions, string vocabularies, empty-member convention, unknown-member carrying, admission/codec test chain).
-- Browser automation has `.agents/skills/playwright` (flake-pinned browser farm, per-package `@playwright/test` pins, the `dayframe_web` e2e).
+- Agents looking at or driving the daytxt GUI use `.agents/skills/daytxt-gui-loop` by default (headless WebKit/Chromium on the web build; screenshots, element inspection, Playwright scripts; never the operator's desktop).
+- Browser automation has `.agents/skills/playwright` (flake-pinned browser farm, per-package `@playwright/test` pins, the `daytxt_web` e2e).
 - Every lane runs its work as one stack of small draft PRs: `.agents/skills/pr-stacks` (naming, bases, docs layers, CI on the tip only, backups; restacking optional, the operator merges with their own tooling).
 ## VCS
 

@@ -1,0 +1,369 @@
+//! Web composition shell for daytxt (ADR 018 §7): native built-ins linked by this
+//! shell plus every package in `packages/index.json`, written by `x/daytxt-web.ts` from
+//! each component's statically-read manifest. A package's bytes are fetched only when an
+//! instance activates, and their digest is verified against the index before the browser
+//! engine (`wcmp`) ever sees them.
+use clay_dioxus_kit::ThemeMode;
+use clay_dioxus_kit::ThemeRoot;
+use clay_mdk::host::factory;
+use daytxt_core::CompositionRuntime;
+use daytxt_core::HostInputs;
+use daytxt_core::Insets;
+use daytxt_core::InstalledMicro;
+use daytxt_core::Renderer;
+use dioxus::prelude::*;
+use serde::Deserialize;
+use std::rc::Rc;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::JsFuture;
+
+/// One entry of `packages/index.json`: where the component lives, the BLAKE3 digest the shell
+/// must verify after fetching, and the package's sidecar JSON (identity, authority, manifest).
+/// STAND-IN until `big_cartridges` delivers manifests.
+#[derive(Clone, Deserialize)]
+struct PackageIndexEntry {
+    location: String,
+    digest: String,
+    sidecar: clay_mdk::Sidecar,
+}
+
+async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let window = web_sys::window().expect("the shell runs in a window");
+    let response = JsFuture::from(window.fetch_with_str(url))
+        .await
+        .map_err(|error| format!("fetching {url}: {error:?}"))?
+        .dyn_into::<web_sys::Response>()
+        .expect("fetch resolves to a Response");
+    if !response.ok() {
+        return Err(format!("fetching {url}: HTTP {}", response.status()));
+    }
+    let buffer = JsFuture::from(
+        response
+            .array_buffer()
+            .map_err(|error| format!("reading {url}: {error:?}"))?,
+    )
+    .await
+    .map_err(|error| format!("reading {url}: {error:?}"))?;
+    Ok(js_sys::Uint8Array::new(&buffer).to_vec())
+}
+
+/// The page URL's query: the web build's counterpart of the desktop launcher's environment
+/// variables, for development and agent-driven runs (`x/daytxt-gui.ts`). `?open=<spec>` is
+/// `DAYTXT_SHELL_OPEN` (the shell's start stack) and `?enable=all` is `DAYTXT_ENABLE_MICROS=all`
+/// (every indexed package admitted enabled, so nothing needs clicking on a fresh browser store).
+fn page_query() -> web_sys::UrlSearchParams {
+    let search = web_sys::window()
+        .expect("the shell runs in a window")
+        .location()
+        .search()
+        .expect("a location has a search");
+    web_sys::UrlSearchParams::new_with_str(&search).expect("a location's search is a query string")
+}
+
+/// Fetch and compile one indexed package on the browser's `WebAssembly` engine through
+/// the shared `clay_rt_wcmp` seam. The fetched bytes must hash to the indexed digest; a
+/// mismatch is this micro's activation failure, reported in its status row while the rest
+/// of the shell keeps running.
+async fn indexed_package(entry: PackageIndexEntry) -> Result<clay_rt_wcmp::WcmpPackage, String> {
+    let bytes = fetch_bytes(&entry.location).await?;
+    let package = clay_mdk::package::Package::new(clay_mdk::LOCAL_NAMESPACE, entry.sidecar, bytes)?;
+    if package.digest() != entry.digest {
+        return Err(format!(
+            "package at {} hashes to {} but the index pins {}",
+            entry.location,
+            package.digest(),
+            entry.digest
+        ));
+    }
+    clay_rt_wcmp_web::load(package.bytes()).await
+}
+
+/// The shell's native built-ins. The shell micro is the frame: eager, and locked because nothing
+/// is usable without it. Settings is an on-demand panel: home lists its declared row, and
+/// opening it starts it. Toolbar is on-demand: its sidebar panel row starts it when the sidebar
+/// mounts it. Sample is eager so its section is written at boot. The lifecycle controls are the
+/// composition's own Settings section. Collection access is resolved
+/// by the composition from each manifest's requests and configuration, not hand-written here.
+fn native_micros() -> Vec<InstalledMicro> {
+    let shell = clay_mdk::MicroId::local(micro_shell_manifest::ID);
+    vec![
+        InstalledMicro {
+            eager: true,
+            locked: true,
+            ..InstalledMicro::new(
+                shell.clone(),
+                micro_shell_manifest::sidecar(),
+                |id, resources, bindings| {
+                    factory(
+                        resources,
+                        id,
+                        micro_shell_manifest::manifest(),
+                        bindings,
+                        micro_shell::activate,
+                    )
+                },
+            )
+        },
+        InstalledMicro {
+            enabled_on_admission: true,
+            ..InstalledMicro::new(
+                clay_mdk::MicroId::local(micro_settings_manifest::ID),
+                micro_settings_manifest::sidecar(),
+                |id, resources, bindings| {
+                    factory(
+                        resources,
+                        id,
+                        micro_settings_manifest::manifest(),
+                        bindings,
+                        micro_settings::activate,
+                    )
+                },
+            )
+        },
+        InstalledMicro {
+            enabled_on_admission: true,
+            ..InstalledMicro::new(
+                clay_mdk::MicroId::local(micro_toolbar_manifest::ID),
+                micro_toolbar_manifest::sidecar(),
+                |id, resources, bindings| {
+                    factory(
+                        resources,
+                        id,
+                        micro_toolbar_manifest::manifest(),
+                        bindings,
+                        micro_toolbar::activate,
+                    )
+                },
+            )
+        },
+        InstalledMicro {
+            eager: true,
+            enabled_on_admission: true,
+            ..InstalledMicro::new(
+                clay_mdk::MicroId::local(micro_sample::ID),
+                micro_sample::sidecar(),
+                |id, resources, bindings| {
+                    factory(
+                        resources,
+                        id,
+                        micro_sample::manifest(),
+                        bindings,
+                        micro_sample::activate,
+                    )
+                },
+            )
+        },
+        daytxt_core::lifecycle::micro(),
+    ]
+}
+
+/// Build the runtime once the package index arrives, over the browser's IndexedDB so manifest
+/// rows persist across reloads. An index that cannot be fetched or parsed is one installation
+/// error in the lifecycle panel; the native built-ins still run. A store that cannot open or
+/// load (blocked or full browser storage) is an error the caller shows instead of a shell.
+async fn web_runtime() -> Result<CompositionRuntime, String> {
+    let store = clay_store::IndexedDbStore::open("daytxt")
+        .await
+        .map_err(|error| format!("cannot open browser storage: {error}"))?;
+    let mut installed = native_micros();
+    let enable_all = page_query()
+        .get("enable")
+        .is_some_and(|value| value == "all");
+    let mut errors = Vec::new();
+    match fetch_bytes("packages/index.json").await {
+        Ok(bytes) => match serde_json::from_slice::<Vec<PackageIndexEntry>>(&bytes) {
+            Ok(entries) => {
+                for entry in entries {
+                    // Stand-in namespace until the node's DID installs packages (see
+                    // `clay_mdk::LOCAL_NAMESPACE`); a name that is not a plug name is this
+                    // entry's installation error.
+                    let id = match clay_mdk::MicroId::installed(
+                        clay_mdk::LOCAL_NAMESPACE,
+                        &entry.sidecar.id,
+                    ) {
+                        Ok(id) => id,
+                        Err(error) => {
+                            errors.push(format!("{}: {error}", entry.location));
+                            continue;
+                        }
+                    };
+                    let sidecar = entry.sidecar.clone();
+                    installed.push(InstalledMicro {
+                        enabled_on_admission: enable_all,
+                        ..InstalledMicro::new(
+                            id,
+                            sidecar.clone(),
+                            move |id, resources, bindings| {
+                                clay_mdk::host::wcmp_factory(
+                                    resources,
+                                    id,
+                                    sidecar.manifest,
+                                    bindings,
+                                    move || indexed_package(entry.clone()),
+                                )
+                            },
+                        )
+                    });
+                }
+            }
+            Err(error) => errors.push(format!("package index is not an index: {error}")),
+        },
+        Err(error) => errors.push(error),
+    }
+    let mut runtime = CompositionRuntime::new(std::sync::Arc::new(store), installed)
+        .await
+        .map_err(|error| format!("cannot load browser storage: {error}"))?;
+    runtime.installation_errors.extend(errors);
+    micro_sample::seed_mock_defaults(runtime.documents());
+    // Demo seed for the counter package `x/daytxt-web.ts` installs: start its config
+    // at zero so the guest renders its value instead of the absent-config notice.
+    runtime.documents().mock_documents().seed(
+        clay_docs::FacetRoute {
+            document: "counter-config".into(),
+            branch: "main".into(),
+            tag: micro_counter_manifest::CONFIG_TAG.into(),
+            key_id: micro_counter_manifest::CONFIG_KEY.into(),
+        },
+        serde_json::json!(0),
+    );
+    Ok(runtime)
+}
+
+pub fn main() {
+    console_error_panic_hook::set_once();
+    dioxus::launch(App);
+}
+
+#[component]
+fn ReadyApp(runtime: Signal<Option<CompositionRuntime>>) -> Element {
+    let initial = runtime
+        .read()
+        .clone()
+        .expect("ReadyApp mounts only with a built runtime");
+    let runtime = use_signal(|| initial);
+    let host = use_host_inputs();
+    // The signal `x/daytxt-gui.ts` waits on: the runtime is built and the shell is mounted.
+    use_hook(|| {
+        web_sys::window()
+            .expect("the shell runs in a window")
+            .document()
+            .expect("a window has a document")
+            .document_element()
+            .expect("a document has a root element")
+            .set_attribute("data-daytxt-ready", "")
+            .expect("the root element takes attributes");
+    });
+    rsx! { daytxt_core::Application { runtime, host } }
+}
+
+fn inner_size() -> (f64, f64) {
+    let window = web_sys::window().expect("the shell runs in a window");
+    let dimension = |value: Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>| {
+        value
+            .expect("a window has a size")
+            .as_f64()
+            .expect("a window size is a number")
+    };
+    (
+        dimension(window.inner_width()),
+        dimension(window.inner_height()),
+    )
+}
+
+/// What the page tells the shell: its size (the shell never measures the DOM), and the
+/// browser's back button.
+///
+/// The browser has no event for "back was pressed" that can be cancelled, only `popstate` after
+/// the history already moved. So while the shell has somewhere to go back to, the page keeps one
+/// extra history entry in front of the user: back consumes it and the shell goes back instead of
+/// the page leaving, and the entry is pushed again while the shell can still go back. The push
+/// is decided from the shell's state as it was when the entry was consumed, so the last back to
+/// home leaves one spare entry, and the press after that is a no-op before the next leaves the
+/// page.
+fn use_host_inputs() -> HostInputs {
+    let initial = inner_size();
+    let mut width = use_signal(|| initial.0);
+    let mut height = use_signal(|| initial.1);
+    let mut platform_back = use_signal(|| 0_u64);
+    let can_back = use_signal(|| false);
+    let mut guarded = use_signal(|| false);
+    // A browser viewport has no system chrome over it.
+    let insets = use_signal(Insets::default);
+    let listeners = use_hook(|| {
+        let window = web_sys::window().expect("the shell runs in a window");
+        let on_resize = Closure::<dyn FnMut()>::new(move || {
+            let (w, h) = inner_size();
+            width.set(w);
+            height.set(h);
+        });
+        let on_pop = Closure::<dyn FnMut()>::new(move || {
+            guarded.set(false);
+            platform_back += 1;
+        });
+        window
+            .add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref())
+            .expect("a window takes listeners");
+        window
+            .add_event_listener_with_callback("popstate", on_pop.as_ref().unchecked_ref())
+            .expect("a window takes listeners");
+        Rc::new((on_resize, on_pop))
+    });
+    use_drop(move || {
+        let window = web_sys::window().expect("the shell runs in a window");
+        window
+            .remove_event_listener_with_callback("resize", listeners.0.as_ref().unchecked_ref())
+            .expect("a window takes listeners");
+        window
+            .remove_event_listener_with_callback("popstate", listeners.1.as_ref().unchecked_ref())
+            .expect("a window takes listeners");
+    });
+    use_effect(move || {
+        if can_back() && !guarded() {
+            web_sys::window()
+                .expect("the shell runs in a window")
+                .history()
+                .expect("a window has a history")
+                .push_state(&wasm_bindgen::JsValue::NULL, "")
+                .expect("the page may push its own history");
+            guarded.set(true);
+        }
+    });
+    HostInputs {
+        width: width.into(),
+        height: height.into(),
+        insets: insets.into(),
+        platform_back,
+        can_back,
+        renderer: Renderer::Browser,
+        start: page_query().get("open"),
+    }
+}
+
+#[component]
+fn App() -> Element {
+    let mut runtime = use_signal(|| None::<CompositionRuntime>);
+    let mut failure = use_signal(|| None::<String>);
+    use_future(move || async move {
+        match web_runtime().await {
+            Ok(built) => runtime.set(Some(built)),
+            Err(error) => failure.set(Some(error)),
+        }
+    });
+    rsx! {
+        ThemeRoot {
+            family: "material".to_string(),
+            mode: ThemeMode::Dark,
+            main {
+                class: "bg-background font-sans text-foreground",
+                if let Some(error) = failure() {
+                    p { role: "alert", "daytxt cannot start: {error}" }
+                } else if runtime.read().is_some() {
+                    ReadyApp { runtime }
+                } else {
+                    p { role: "status", "Loading daytxt packages…" }
+                }
+            }
+        }
+    }
+}

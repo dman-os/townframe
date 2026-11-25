@@ -424,19 +424,21 @@ macro_rules! __export_guest_world {
 }
 
 mod manifest;
+pub use clay_collection::CollectionId;
 pub use manifest::Access;
-pub use manifest::AttachmentDeclaration;
-#[cfg(feature = "contract")]
-pub use manifest::Attachments;
 pub use manifest::BindingResolution;
 pub use manifest::CollectionCapability;
 pub use manifest::CollectionContract;
 pub use manifest::ConfigurationRequest;
 pub use manifest::ContributionDeclaration;
+pub use manifest::Endpoint;
 pub use manifest::Entrypoints;
 pub use manifest::FacetAccess;
 pub use manifest::InterfaceRef;
 pub use manifest::LOCAL_NAMESPACE;
+pub use manifest::LinkDeclaration;
+#[cfg(feature = "contract")]
+pub use manifest::Links;
 pub use manifest::MANIFEST_NSID;
 #[cfg(feature = "contract")]
 pub use manifest::ManifestBuilder;
@@ -444,8 +446,6 @@ pub use manifest::MicroId;
 pub use manifest::MicroManifest;
 pub use manifest::Necessity;
 pub use manifest::Nsid;
-pub use manifest::PublicationDeclaration;
-pub use manifest::PublicationKind;
 pub use manifest::Request;
 pub use manifest::SHELL_ROOTS;
 pub use manifest::Sidecar;
@@ -517,9 +517,9 @@ mod context_micro;
 mod native;
 
 #[cfg(feature = "contract")]
-mod attachment;
-#[cfg(feature = "contract")]
 mod decl;
+#[cfg(feature = "contract")]
+mod link;
 #[cfg(feature = "contract")]
 pub use decl::CollectionDecl;
 #[cfg(feature = "contract")]
@@ -536,12 +536,12 @@ pub use decl::RootRow;
 pub use decl::ShellRoots;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 mod context;
+// What a micro names to call a node method with [`Context::call`]: the method trait and the
+// error a call fails with, the same types a nodule uses.
+pub use method_core;
+pub use service_core_rs::ClientError;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 mod rows;
-#[cfg(feature = "contract")]
-pub use attachment::Attachment;
-#[cfg(feature = "contract")]
-pub use attachment::CAPABILITY_ATTACHMENT_TAG;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::CallBinding;
 #[cfg(any(feature = "in_process", feature = "guest"))]
@@ -571,9 +571,13 @@ pub use context::PresentationComponent;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::RefStatus;
 #[cfg(any(feature = "in_process", feature = "guest"))]
-pub use context::RowAttachment;
+pub use context::RowLink;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Stamp;
+#[cfg(feature = "contract")]
+pub use link::LINK_TAG;
+#[cfg(feature = "contract")]
+pub use link::Link;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use rows::Collection;
 #[cfg(any(feature = "in_process", feature = "guest"))]

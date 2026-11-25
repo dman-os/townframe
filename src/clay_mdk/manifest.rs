@@ -6,7 +6,7 @@
 //!
 //! Forward compatibility is part of the shape: the manifest and its entrypoints carry object
 //! members they do not know, open string vocabularies keep unknown strings as `Other`, and an
-//! unknown publication kind is kept verbatim. A newer manifest therefore round-trips through
+//! unknown endpoint member is kept verbatim. A newer manifest therefore round-trips through
 //! older tooling unchanged, while hosts act only on what they understand.
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -251,15 +251,6 @@ macro_rules! open_vocabulary {
 }
 
 open_vocabulary! {
-    /// The two behaviors a micro can publish (ADR 031 §5): a request/response operation, or a
-    /// mountable component. The set grows additively.
-    PublicationKind {
-        Call => "call",
-        Presentation => "presentation",
-    }
-}
-
-open_vocabulary! {
     /// Whether a configuration must supply a requirement before the micro can initialize.
     Necessity {
         Required => "required",
@@ -318,21 +309,79 @@ open_vocabulary! {
     }
 }
 
-/// A named publication this package can serve once initialized (ADR 031 §5, §8). `initialize`
-/// returns publications by `name`, and what it returns is admitted against this declaration.
-/// A `Call` names the contract (an NSID) of its request and response Lexicons; a `Presentation`
-/// has the one presentation-component contract, so it declares none.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PublicationDeclaration {
-    pub name: String,
-    pub kind: PublicationKind,
-    pub contract: Option<Nsid>,
+/// What a micro can serve under one endpoint name (ADR 031 §5, §8): the members of the
+/// `$type` union its manifest's `endpoints` map holds. `initialize` returns served endpoints
+/// by name, and what it returns is admitted against this declaration.
+///
+/// On the wire each member is an object tagged by its full Lexicon id, atproto style, the way
+/// the cartridge datums spell theirs: `org.example.clay.micro.manifest#methodEndpoint`,
+/// `#callbackEndpoint` and `#viewEndpoint` ([`MANIFEST_NSID`] is the Lexicon). A member whose
+/// `$type` this build does not know is kept verbatim as [`Endpoint::Other`]: hosts carry it
+/// without serving it. A known `$type` with malformed members is an error, never `Other`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "$type")]
+pub enum Endpoint {
+    /// A request/response operation, registered under `nsid` and routed by it to its one
+    /// provider (the same word as a nodule's methods).
+    #[serde(rename = "org.example.clay.micro.manifest#methodEndpoint")]
+    Method { nsid: Nsid },
+    /// A request/response operation that is never registered: it is reachable only through a
+    /// link or an endpoint reference a row carries. `implements` names the contract of its
+    /// request and response Lexicons, and many micros may implement the same one (every
+    /// toolbar action implements the toolbar's action contract). It is required: a served
+    /// call is keyed by its contract, so an anonymous callback is unrepresentable.
+    #[serde(rename = "org.example.clay.micro.manifest#callbackEndpoint")]
+    Callback { implements: Nsid },
+    /// A mountable presentation. Every view has the one presentation-component contract, so
+    /// `implements` only names the contract another micro requires it by (resolved to the
+    /// sole view implementing it, the way a method is resolved by its NSID); a view nobody
+    /// requires leaves it out.
+    #[serde(rename = "org.example.clay.micro.manifest#viewEndpoint")]
+    View {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        implements: Option<Nsid>,
+    },
+    /// A member of a newer manifest, kept as the object it was.
+    #[serde(untagged)]
+    Other(serde_json::Map<String, serde_json::Value>),
+}
+
+/// [`Endpoint`]'s known members in their wire form. Serde's `other` catches only a `$type`
+/// this build does not know, so a known one with malformed members stays an error.
+#[derive(Deserialize)]
+#[serde(tag = "$type")]
+enum KnownEndpoint {
+    #[serde(rename = "org.example.clay.micro.manifest#methodEndpoint")]
+    Method { nsid: Nsid },
+    #[serde(rename = "org.example.clay.micro.manifest#callbackEndpoint")]
+    Callback { implements: Nsid },
+    #[serde(rename = "org.example.clay.micro.manifest#viewEndpoint")]
+    View { implements: Option<Nsid> },
+    #[serde(other)]
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for Endpoint {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let members = serde_json::Value::deserialize(deserializer)?;
+        Ok(
+            match KnownEndpoint::deserialize(&members).map_err(serde::de::Error::custom)? {
+                KnownEndpoint::Method { nsid } => Self::Method { nsid },
+                KnownEndpoint::Callback { implements } => Self::Callback { implements },
+                KnownEndpoint::View { implements } => Self::View { implements },
+                KnownEndpoint::Unknown => match members {
+                    serde_json::Value::Object(members) => Self::Other(members),
+                    _ => unreachable!("a tagged enum only deserializes from an object"),
+                },
+            },
+        )
+    }
 }
 
 /// One thing this package asks for, in the one request shape every plug kind shares (ADR 028
 /// §4): `{binding, contract, access?, necessity, resolution, minRevision?}`. `contract` is the
-/// NSID of what is wanted (a collection contract, or the contract of a call or presentation
-/// another micro publishes) and never a concrete supplier: configuration resolves `binding`,
+/// NSID of what is wanted (a collection contract, or the NSID of a method or
+/// view another micro serves) and never a concrete supplier: configuration resolves `binding`,
 /// the plug-local name code uses, to one. Declaring a request grants no authority.
 ///
 /// The wire shape mirrors `big_cartridges_core::request::Request` member for member (camelCase,
@@ -362,7 +411,7 @@ pub struct Request {
 }
 
 /// One requested facet access right (manifest-as-allowlist, ADR 015 §8). Neutral data; the
-/// native backend lowers it into the node seam's `RoutineFacetAccess` vocabulary (D6). The
+/// native backend lowers it into `clay_docs::FacetAccess` (D6). The
 /// request names the facet's datum by NSID `tag` and never the plug or document that holds it:
 /// configuration picks the document, so a substituted plug keeps working (ADR 028 §4).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -398,14 +447,13 @@ pub struct CollectionContract {
     pub offered: Vec<CollectionCapability>,
 }
 
-/// A lazy endpoint attached to a contribution row: the value's attachment `index` refers to
-/// one of this package's own declared publications, which installation turns into a
-/// `LazyEndpoint` (ADR 031 §7). The row stores the endpoint as data; it never retains the
-/// provider.
+/// A lazy endpoint a contribution row links to: the value's link `index` refers to one of this
+/// package's own declared endpoints, which installation turns into a `LazyEndpoint` (ADR 031
+/// §7). The row stores the endpoint as data; it never retains the provider.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AttachmentDeclaration {
+pub struct LinkDeclaration {
     pub index: u32,
-    pub publication: String,
+    pub endpoint: String,
 }
 
 /// A row this package declares into a collection (ADR 031 §3, §7). Installation admits it and
@@ -413,15 +461,15 @@ pub struct AttachmentDeclaration {
 /// package is inactive. `binding` names one of the manifest's own
 /// [`MicroManifest::collection_requests`] with `write` access, and the row lands in whichever
 /// collection configuration resolved that binding to (a package never names a concrete
-/// collection, ADR 028 §4). `key` is the row's key and `payload` the static row body, which
+/// collection, ADR 028 §4). `key` is the row's key and `value` the static row body, which
 /// the collection's own contract interprets.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContributionDeclaration {
     pub id: String,
     pub binding: String,
     pub key: String,
-    pub payload: serde_json::Value,
-    pub attachments: Vec<AttachmentDeclaration>,
+    pub value: serde_json::Value,
+    pub links: Vec<LinkDeclaration>,
 }
 
 /// A package's full static declaration: what it can provide, require, request, serve,
@@ -433,7 +481,7 @@ pub struct ContributionDeclaration {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MicroManifest {
     pub entrypoints: Entrypoints,
-    pub publications: Vec<PublicationDeclaration>,
+    pub endpoints: BTreeMap<String, Endpoint>,
     pub requires: Vec<Request>,
     pub configuration_requests: Vec<ConfigurationRequest>,
     pub collection_contracts: Vec<CollectionContract>,
@@ -480,8 +528,8 @@ impl Sidecar {
     }
 
     /// [`MicroManifest::validate`] plus the authority rule: every NSID the package declares
-    /// lies under its authority, namely its collection contracts. The contract of a call the
-    /// package publishes is not declared by it and may be any NSID: implementing a contract is
+    /// lies under its authority, namely its collection contracts. The NSID of a method the
+    /// package serves, and the contract a callback implements, are not declared by it and may be any NSID: implementing a contract is
     /// not owning it (ADR 028 §5), and a fork or a provider implements the NSID of whoever
     /// defined the call (the toolbar owns its action contract, providers implement it).
     /// Implementing grants the implementer no access, so it needs no request. A declared contract's selector, key, value and write-context schemas may
@@ -528,12 +576,12 @@ impl Sidecar {
 
 impl MicroManifest {
     /// Check the manifest's internal references, which serde alone cannot: every named member
-    /// is unique within its list, a `call` publication names its contract and a
-    /// `presentation` publication names none, a requirement declares no access and a
-    /// collection request declares one, every contribution targets a `write` collection
-    /// request by binding, and every contribution attachment names one of the manifest's own
-    /// publications. Unknown publication kinds pass: hosts carry them without serving them. The
-    /// error names the offending member.
+    /// is unique within its list, a callback endpoint implements a contract (the runtime keys
+    /// every served call by one), a requirement declares no access and a collection request
+    /// declares one, every contribution targets a `write` collection request by binding, and
+    /// every contribution link names one of the manifest's own endpoints. Unknown endpoint
+    /// members pass: hosts carry them without serving them. The error names the offending
+    /// member.
     pub fn validate(&self) -> Result<(), String> {
         fn unique<'a>(member: &str, ids: impl Iterator<Item = &'a str>) -> Result<(), String> {
             let mut seen = BTreeSet::new();
@@ -545,10 +593,6 @@ impl MicroManifest {
             Ok(())
         }
 
-        unique(
-            "publications name",
-            self.publications.iter().map(|it| it.name.as_str()),
-        )?;
         unique(
             "requires binding",
             self.requires.iter().map(|it| it.binding.as_str()),
@@ -573,24 +617,6 @@ impl MicroManifest {
             "contributions id",
             self.contributions.iter().map(|it| it.id.as_str()),
         )?;
-        for publication in &self.publications {
-            match (&publication.kind, &publication.contract) {
-                (PublicationKind::Call, None) => {
-                    return Err(format!(
-                        "call publication {:?} declares no contract",
-                        publication.name
-                    ));
-                }
-                (PublicationKind::Presentation, Some(_)) => {
-                    return Err(format!(
-                        "presentation publication {:?} declares a contract; presentations \
-                         have the one presentation-component contract",
-                        publication.name
-                    ));
-                }
-                _ => {}
-            }
-        }
         for required in &self.requires {
             if required.access.is_some() {
                 return Err(format!(
@@ -625,15 +651,11 @@ impl MicroManifest {
                     contribution.id, contribution.binding
                 ));
             }
-            for attachment in &contribution.attachments {
-                if !self
-                    .publications
-                    .iter()
-                    .any(|publication| publication.name == attachment.publication)
-                {
+            for link in &contribution.links {
+                if !self.endpoints.contains_key(&link.endpoint) {
                     return Err(format!(
-                        "contribution {:?} attaches undeclared publication {:?}",
-                        contribution.id, attachment.publication
+                        "contribution {:?} links undeclared endpoint {:?}",
+                        contribution.id, link.endpoint
                     ));
                 }
             }
@@ -645,7 +667,7 @@ impl MicroManifest {
 #[cfg(feature = "contract")]
 mod builder;
 #[cfg(feature = "contract")]
-pub use builder::Attachments;
+pub use builder::Links;
 #[cfg(feature = "contract")]
 pub use builder::ManifestBuilder;
 

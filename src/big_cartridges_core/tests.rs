@@ -55,6 +55,7 @@ fn manifest_cartridge() -> Cartridge {
         description: [("entry".to_owned(), json!("gallery.js"))]
             .into_iter()
             .collect(),
+        uses: Default::default(),
         extra: Default::default(),
     });
     cartridge
@@ -278,6 +279,55 @@ fn net_permbinds_name_a_host_and_verbs_and_a_use_asks_for_nothing_more() {
         .write = true;
     cartridge.nodule = Some(nodule);
     let error = cartridge.validate().unwrap_err().to_string();
+    assert!(error.contains("does not declare"), "{error}");
+}
+
+#[test]
+fn micro_uses_are_admitted_by_the_routine_rule() {
+    let mut cartridge = manifest_cartridge();
+    cartridge
+        .permbinds
+        .insert("albums".into(), datum_permbind());
+    let micro = cartridge.micro.as_mut().unwrap();
+    micro.uses.insert(
+        "albums".into(),
+        RoutineUse {
+            read: true,
+            ..Default::default()
+        },
+    );
+    cartridge.validate().unwrap();
+    // `uses` round-trips and an empty one is not written.
+    let wire = serde_json::to_value(&cartridge).unwrap();
+    assert_eq!(wire["micro"]["uses"]["albums"]["read"], true);
+    assert_eq!(
+        serde_json::from_value::<Cartridge>(wire).unwrap(),
+        cartridge
+    );
+
+    let micro = cartridge.micro.as_mut().unwrap();
+    micro.uses.insert(
+        "missing".into(),
+        RoutineUse {
+            read: true,
+            ..Default::default()
+        },
+    );
+    let error = cartridge.validate().unwrap_err().to_string();
+    assert!(error.contains("micro.uses.missing"), "{error}");
+    assert!(error.contains("must name a permbind"), "{error}");
+
+    let micro = cartridge.micro.as_mut().unwrap();
+    micro.uses.remove("missing");
+    micro.uses.insert(
+        "albums".into(),
+        RoutineUse {
+            delete: true,
+            ..Default::default()
+        },
+    );
+    let error = cartridge.validate().unwrap_err().to_string();
+    assert!(error.contains("micro.uses.albums"), "{error}");
     assert!(error.contains("does not declare"), "{error}");
 }
 

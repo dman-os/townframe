@@ -24,6 +24,7 @@ mod tests;
 
 pub mod capabilities;
 pub mod collections;
+pub mod egress;
 #[cfg(feature = "test-utils")]
 pub mod lifecycle_conformance;
 pub mod presentation;
@@ -62,6 +63,9 @@ pub struct InitialContext {
     /// stored endpoints (see [`capabilities::CapabilitySession::mint_lazy`]). `None` where no
     /// supervisor runs (engine tests); minting a lazy reference then crashes.
     pub activator: Option<clay_host::Activator<capabilities::CapabilityPublication>>,
+    /// Where this micro's `wasi:http` requests to `dispatch.local` go. `None` leaves the guest
+    /// no way out at all: every request it makes is refused.
+    pub egress: Option<Arc<dyn egress::DispatchEgress>>,
 }
 
 /// A guest's own refusal to initialize, as opposed to a trap.

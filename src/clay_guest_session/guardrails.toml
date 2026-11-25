@@ -1,13 +1,12 @@
 version = 1
 role = "runtime"
-dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
+dependency_reason = "claytxt microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
 allowed_dependencies = [
     "clay_collection",
     "clay_docs",
     "clay_host",
     "clay_store",
     "clay_surface",
-    "daybook_types",
 ]
 allow_external_api_types = false
 
@@ -24,7 +23,7 @@ features = ["test-utils"]
 code = "ERROR_DEPENDENCY_GROUP"
 path = "src/clay_guest_session/Cargo.toml"
 symbol = "dependency-groups"
-ceiling = 6
+ceiling = 5
 class = "LEGACY_DEBT"
 reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
 reference = "docs/scratch/nodule-runtime-ledger.md"

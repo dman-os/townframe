@@ -1,4 +1,4 @@
-//! The `wasi:*` imports a dayframe guest pulls in when rustc targets
+//! The `wasi:*` imports a claytxt guest pulls in when rustc targets
 //! `wasm32-wasip3` (ADR 018 §Phase 1), defined on the polyfill
 //! [`Linker`].
 //!
@@ -16,20 +16,28 @@
 
 mod cli;
 mod clocks;
+mod http;
 mod io;
+mod random;
 
+use wcmp::Component;
 use wcmp::Error;
 use wcmp::InterfaceIdentifier;
 use wcmp::Linker;
 
 /// Define every `wasi:*` interface our wasip3 guests import on
 /// `linker`. Guest writes to stdout/stderr go to process stdio under
-/// `label`, which names the component.
+/// `label`, which names the component. `component` is the guest: the
+/// `wasi:http` interfaces are defined with the types it declares for them.
 ///
 /// # Errors
 ///
 /// The polyfill's error when it refuses a definition.
-pub fn define<T: 'static>(linker: &mut Linker<T>, label: &str) -> Result<(), Error> {
+pub fn define<T: 'static>(
+    linker: &mut Linker<T>,
+    component: &Component,
+    label: &str,
+) -> Result<(), Error> {
     cli::define_environment(linker)?;
     cli::define_exit(linker)?;
     linker.instance(&identifier(cli::CLI_TYPES));
@@ -41,7 +49,8 @@ pub fn define<T: 'static>(linker: &mut Linker<T>, label: &str) -> Result<(), Err
     clocks::define_monotonic_clock(linker)?;
     clocks::define_system_clock(linker)?;
     clocks::define_insecure_seed(linker)?;
-    Ok(())
+    random::define_random(linker)?;
+    http::define(linker, component)
 }
 
 fn identifier(interface: &str) -> InterfaceIdentifier {
@@ -62,11 +71,13 @@ mod tests {
     ///
     /// Every `func_wrap_concurrent` registration is a suspension point a guest can reach from
     /// inside a sync-typed presentation call, because the WASI imports are linked into the same
-    /// instance that serves `mount`/`dispatch`/`unmount`. Today that is exactly the
+    /// instance that serves `mount`/`dispatch`/`unmount`. Today that is the
     /// monotonic-clock pair — `wait-for` and `wait-until` (the world imports the whole
     /// interface, so both must be registered) — and the may-not-suspend rule makes blocking on
     /// them fail with `CannotBlock` instead of hanging (pinned behaviorally by the `sleeper`
-    /// fixture on both engines). Growing this set widens the surface where that runtime net is
+    /// fixture on both engines), and `wasi:http/client.send`, which is async-typed so the link
+    /// check demands a concurrent registration, but whose refusal is ready on its first poll so
+    /// it never suspends. Growing this set widens the surface where that runtime net is
     /// the only thing between a guest and a stalled presentation call, so the durable fix is the
     /// link-time split (a presentation world with no async imports). This test is the trigger:
     /// adding a third async import fails here and forces that split, or a deliberate ADR
@@ -102,7 +113,7 @@ mod tests {
         }
         assert_eq!(
             registrations,
-            [("clocks.rs".to_string(), 2)],
+            [("clocks.rs".to_string(), 2), ("http.rs".to_string(), 1)],
             "the async-linked WASI import set changed; see the doc comment on this test"
         );
     }

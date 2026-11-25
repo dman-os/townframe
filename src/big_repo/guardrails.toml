@@ -180,15 +180,6 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 
 [[exemptions]]
 code = "ERROR_INLINE_TEST_MOD"
-path = "src/big_repo/keyhive_storage.rs"
-symbol = "module::tests"
-ceiling = 447
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_INLINE_TEST_MOD"
 path = "src/big_repo/runtime2/doc_revision_store.rs"
 symbol = "module::tests"
 ceiling = 384

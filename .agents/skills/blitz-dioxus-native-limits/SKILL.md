@@ -1,6 +1,6 @@
 ---
 name: blitz-dioxus-native-limits
-description: Check and work around the upstream limits of Blitz / dioxus-native that constrain what dayframe_dx can build. Use when an app idea depends on pointer capture, DOM measurement, keyboard focus, CSS transforms, custom widgets, scrolling, or accessibility bounds, or when a Blitz/dioxus-native API panics or silently does nothing.
+description: Check and work around the upstream limits of Blitz / dioxus-native that constrain what daytxt can build. Use when an app idea depends on pointer capture, DOM measurement, keyboard focus, CSS transforms, custom widgets, scrolling, or accessibility bounds, or when a Blitz/dioxus-native API panics or silently does nothing.
 ---
 
 # Blitz / dioxus-native limits
@@ -63,7 +63,7 @@ Consequences and the pattern to use instead:
 
 ### `tabindex` and keyboard focus (corrected K7: no longer panics; see the dayframe-shell ledger "K7 Blitz focus")
 
-The old panic (`set_focus` taking `doc_mut()` while the document was borrowed during render) is fixed in the dioxus fork `a3e1e68` (regression test `task_polled_during_render_can_access_document`). Pinned Blitz `ffaf2bd` has: `MountedData::set_focus` (focus and blur, `dioxus-native-dom/src/events.rs:299`), Tab/Shift+Tab traversal in pure document order (`blitz-dom events/keyboard.rs:21`, `traversal.rs:195`), `:focus` styling, and focus/blur/focusin/focusout events for Tab and pointer focus. Still missing: events for programmatic focus (TODO at `events.rs:302`), `inert`, positive-`tabindex` ordering, `:focus-visible` and `:focus-within` (hard-coded false, `stylo.rs:477-478`), and `get_focussed_node_id` falls back to the root, so Tab with nothing focused lands on the first stop in the document. Tab can be contained by a `keydown` handler that `prevent_default`s and calls `set_focus`. Evidence and tests: ledger "K7 Blitz focus", `src/dayframe_desktop/e2e/blitz_limits.rs` `mod focus`. CSS animations and transitions run (`stylo.rs:83-120`) but no `transitionend`/`animationend` event exists.
+The old panic (`set_focus` taking `doc_mut()` while the document was borrowed during render) is fixed in the dioxus fork `a3e1e68` (regression test `task_polled_during_render_can_access_document`). Pinned Blitz `ffaf2bd` has: `MountedData::set_focus` (focus and blur, `dioxus-native-dom/src/events.rs:299`), Tab/Shift+Tab traversal in pure document order (`blitz-dom events/keyboard.rs:21`, `traversal.rs:195`), `:focus` styling, and focus/blur/focusin/focusout events for Tab and pointer focus. Still missing: events for programmatic focus (TODO at `events.rs:302`), `inert`, positive-`tabindex` ordering, `:focus-visible` and `:focus-within` (hard-coded false, `stylo.rs:477-478`), and `get_focussed_node_id` falls back to the root, so Tab with nothing focused lands on the first stop in the document. Tab can be contained by a `keydown` handler that `prevent_default`s and calls `set_focus`. Evidence and tests: ledger "K7 Blitz focus", `src/daytxt_desktop/e2e/blitz_limits.rs` `mod focus`. CSS animations and transitions run (`stylo.rs:83-120`) but no `transitionend`/`animationend` event exists.
 
 ### No pointer capture — a drag that leaves its box stops receiving events
 
@@ -101,13 +101,15 @@ units. Use `page_coordinates()` for anything that spans a gesture.
   text, same roles. As a bonus, layout cost falls as you zoom out, which is the opposite of the naive
   argument against a layout-space camera.
 - Because there is **no pointer capture and no pointer injection**, anything drag-shaped must be
-  verified by the operator. See `.agents/skills/dayframe-native-dev-loop` for the protocol.
+  verified by the operator. See `.agents/skills/daytxt-native-dev-loop` for the protocol.
 - A patch to `blitz`/`dioxus-native` is viable (local `[patch]` precedents exist), but the bar should
   be "this blocks two features", not "this is annoying".
 
 ## Related
 
-- `.agents/skills/dayframe-native-dev-loop` — how to build, screenshot and inspect the app.
+- `docs/wiki/blitz-gap-log.md`: the log of gaps that blocked or bent our work, kept for a focused
+  upstream push. When a gap here costs a feature, add it there too.
+- `.agents/skills/daytxt-native-dev-loop` — how to build, screenshot and inspect the app.
 - `docs/adrs/016-dayframe-dx-architecture.md` — renderer duality (Blitz ambition, wry prod) and the
   rule for when forking upstream is justified.
 

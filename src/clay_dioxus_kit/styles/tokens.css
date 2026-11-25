@@ -1,0 +1,75 @@
+/* Theme-provider adapter. Foundation defaults are generated from tokens/*.tokens.json. */
+
+/*
+ * Material remains an external theme provider during migration. It overrides
+ * only theme-dependent semantic color roles; dimensions, typography, and
+ * elevation come from tokens.generated.css.
+ *
+ * The roles are set on `:root`, the same element a theme sets them on, so a theme's
+ * `:root { --ct-color-primary: ... }` in the `user` layer replaces them. (On `.ct-theme`, an
+ * element closer to the content, the adapter shadowed every such override.) A `var()` in a custom
+ * property is resolved where it is declared, so the Material scheme the roles read has to be the
+ * root's own: material.css therefore also applies a scheme class that a descendant carries (the
+ * `.ct-theme` of `ThemeRoot`) to the root, as `:root:has(.dark)`.
+ */
+@layer tokens {
+  :root {
+    --ct-color-canvas: var(--scheme-color-background);
+    --ct-color-surface: var(--scheme-color-surface-container-low);
+    --ct-color-surface-raised: var(--scheme-color-surface-container);
+    --ct-color-surface-sunken: var(--scheme-color-surface-dim);
+    --ct-color-text: var(--scheme-color-on-background);
+    --ct-color-text-muted: var(--scheme-color-on-surface-variant);
+    --ct-color-text-subtle: var(--scheme-color-outline);
+    --ct-color-border: var(--scheme-color-outline-variant);
+    --ct-color-focus: var(--scheme-color-primary);
+    --ct-color-primary: var(--scheme-color-primary);
+    --ct-color-on-primary: var(--scheme-color-on-primary);
+    --ct-color-accent: var(--scheme-color-secondary);
+    --ct-color-on-accent: var(--scheme-color-on-secondary);
+    --ct-color-accent-container: var(--scheme-color-secondary-container);
+    --ct-color-on-accent-container: var(--scheme-color-on-secondary-container);
+    --ct-color-selected: var(--scheme-color-secondary-container);
+    --ct-color-on-selected: var(--scheme-color-on-secondary-container);
+    --ct-color-info: var(--scheme-color-secondary);
+    --ct-color-on-info: var(--scheme-color-on-secondary);
+    --ct-color-danger: var(--scheme-color-error);
+    --ct-color-on-danger: var(--scheme-color-on-error);
+
+    /* Compatibility aliases for existing utility and component vocabulary. */
+    --color-foreground-muted: var(--ct-color-text-muted);
+    --color-foreground-subtle: var(--ct-color-text-subtle);
+    --color-surface-raised: var(--ct-color-surface-raised);
+    --color-secondary: var(--ct-color-accent);
+    --color-secondary-foreground: var(--ct-color-on-accent);
+  }
+  /*
+   * The success role is authored for a light surface (green 600, 4.9:1 on the Material light
+   * surface) and is only 3.05 to 3.19:1 on the dark ones, under the 4.5:1 that text needs. Material
+   * has no success colour, so the dark schemes take the lighter green (6.3 to 6.6:1 on their
+   * surface) with the dark ink on it (6.3:1).
+   */
+  :root:has(.dark),
+  :root:has(.dark-medium-contrast),
+  :root:has(.dark-high-contrast) {
+    --ct-color-success: var(--ct-color-green-400);
+    --ct-color-on-success: var(--ct-color-neutral-900);
+  }
+
+  /*
+   * The document is the scroller of an app that lays out in the page, so what shows past its
+   * content (the touchpad's overscroll, a not-yet-rendered gap) is the root element's canvas: it
+   * takes the theme's page background and color scheme, not the browser's white. The roles are on
+   * `:root` already; the scheme's mode class is on the `ThemeRoot` below it, so the root reads it
+   * through `:has`.
+   */
+  :root {
+    background-color: var(--ct-color-canvas);
+  }
+  :root:has(.light) {
+    color-scheme: light;
+  }
+  :root:has(.dark) {
+    color-scheme: dark;
+  }
+}

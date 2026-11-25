@@ -1,16 +1,20 @@
 version = 1
 role = "interface"
-dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
+dependency_reason = "claytxt microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
 allowed_dependencies = [
+    "big_ndk",
     "clay_collection",
     "clay_dioxus",
+    "clay_dioxus_kit",
     "clay_docs",
     "clay_guest_session",
     "clay_host",
     "clay_rt_wasmtime",
     "clay_rt_wcmp",
     "clay_surface",
-    "daybook_types",
+    "method_core",
+    "service_client_core_rs",
+    "service_core_rs",
 ]
 allow_external_api_types = false
 
@@ -32,7 +36,7 @@ required_features = ["guest", "wit"]
 code = "ERROR_DEPENDENCY_GROUP"
 path = "src/clay_mdk/Cargo.toml"
 symbol = "dependency-groups"
-ceiling = 11
+ceiling = 1
 class = "LEGACY_DEBT"
 reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
 reference = "docs/scratch/nodule-runtime-ledger.md"

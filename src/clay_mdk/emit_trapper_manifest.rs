@@ -1,5 +1,5 @@
 //! Write the `trapper` fixture's serialized sidecar to the path given as the one argument: the
-//! `trapper.manifest.json` that `x/dayframe-packages.ts` places beside `trapper.component.wasm`
+//! `trapper.manifest.json` that `x/daytxt-packages.ts` places beside `trapper.component.wasm`
 //! (the counter's `emit_manifest` does the same for the counter).
 
 mod trapper_manifest;

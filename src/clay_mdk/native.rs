@@ -21,6 +21,7 @@ pub use declared::declared_rows;
 pub use declared::manifest_scope;
 pub use declared::runtime_scope;
 
+use clay_collection::CollectionId;
 use clay_collection::Nsid;
 use clay_collection::ReadError;
 use clay_collection::ReadLimits;
@@ -45,10 +46,9 @@ use crate::Error;
 use crate::context::Backend;
 use crate::context::RawHandler;
 use crate::context::Shared;
+use crate::manifest::Endpoint;
 use crate::manifest::FacetAccess;
 use crate::manifest::MicroManifest;
-use crate::manifest::PublicationDeclaration;
-use crate::manifest::PublicationKind;
 use crate::manifest::Request;
 use crate::rows::Feed;
 use crate::rows::Minter;
@@ -112,18 +112,18 @@ impl Resources {
 /// One local collection binding resolved to a declared collection (ADR 031 §11).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundCollection {
-    /// The declared collection's id.
-    pub id: Nsid,
+    /// The declared collection instance's id.
+    pub id: CollectionId,
     /// Whether the micro may also register rows; a writable binding is always readable.
     pub write: bool,
 }
 
 impl BoundCollection {
-    pub fn read(id: Nsid) -> Self {
+    pub fn read(id: CollectionId) -> Self {
         Self { id, write: false }
     }
 
-    pub fn write(id: Nsid) -> Self {
+    pub fn write(id: CollectionId) -> Self {
         Self { id, write: true }
     }
 }
@@ -514,7 +514,7 @@ pub fn factory<Fut: Future<Output = Result<(), Error>> + 'static>(
     bindings: CollectionBindings,
     activate: impl Fn(Context) -> Fut + 'static,
 ) -> Rc<dyn Factory<CapabilityPublication>> {
-    let declared = declared_publications(&manifest);
+    let declared = declared_endpoints(&manifest);
     Rc::new(NativeFactory {
         resources,
         micro: (&micro).into(),
@@ -695,33 +695,28 @@ pub(crate) fn grant_configs(
     Ok(configs)
 }
 
-/// The publications a manifest declares, in the session's terms. A kind this build does not
+/// The endpoints a manifest declares, in the session's terms. A member this build does not
 /// know is not declared here, so an incarnation that returns it fails admission.
-pub(crate) fn declared_publications(
+pub(crate) fn declared_endpoints(
     manifest: &MicroManifest,
 ) -> BTreeMap<String, DeclaredPublication> {
     manifest
-        .publications
+        .endpoints
         .iter()
-        .filter_map(|publication| {
-            let (kind, contract) = admitted_publication(publication)?;
-            Some((
-                publication.name.clone(),
-                DeclaredPublication { kind, contract },
-            ))
+        .filter_map(|(name, endpoint)| {
+            let (kind, contract) = admitted_endpoint(endpoint)?;
+            Some((name.clone(), DeclaredPublication { kind, contract }))
         })
         .collect()
 }
 
 pub(crate) fn routine_facets(
     facets: &[FacetAccess],
-) -> Vec<daybook_types::manifest::RoutineFacetAccess> {
+) -> Vec<clay_docs::FacetAccess> {
     facets
         .iter()
-        .map(|facet| daybook_types::manifest::RoutineFacetAccess {
-            // A manifest request never names the plug that owns the document (ADR 028 §4).
-            owner_plug_id: None,
-            tag: facet.tag.as_str().into(),
+        .map(|facet| clay_docs::FacetAccess {
+            tag: facet.tag.as_str().to_owned(),
             key_id: facet.key_id.clone(),
             read: facet.read,
             write: facet.write,
@@ -736,24 +731,22 @@ mod conformance_tests;
 #[cfg(test)]
 mod tests;
 
-/// The kind and contract the capability bank admits `publication` under, or `None` for a kind
-/// this build does not serve. Every Presentation shares the one presentation-component
-/// contract, so a contract alone tells a redeemer which kind to expect. Expects a validated
-/// manifest, which gives every Call a contract.
-pub(crate) fn admitted_publication(
-    publication: &PublicationDeclaration,
+/// The kind and contract the capability bank admits `endpoint` under, or `None` for a member
+/// this build does not serve. Every view shares the one presentation-component contract, so a
+/// contract alone tells a redeemer which kind to expect. A method is a call under its NSID and
+/// a callback a call under the contract it implements.
+pub(crate) fn admitted_endpoint(
+    endpoint: &Endpoint,
 ) -> Option<(clay_guest_session::capabilities::PublicationKind, Nsid)> {
     use clay_guest_session::capabilities::PublicationKind as Kind;
-    match (&publication.kind, &publication.contract) {
-        (PublicationKind::Presentation, _) => Some((
+    match endpoint {
+        Endpoint::View { .. } => Some((
             Kind::Presentation,
             clay_guest_session::capabilities::presentation_component(),
         )),
-        (PublicationKind::Call, Some(contract)) => Some((Kind::Call, contract.clone())),
-        (PublicationKind::Call, None) => {
-            unreachable!("a validated manifest gives every call a contract")
-        }
-        (PublicationKind::Other(_), _) => None,
+        Endpoint::Method { nsid } => Some((Kind::Call, nsid.clone())),
+        Endpoint::Callback { implements } => Some((Kind::Call, implements.clone())),
+        Endpoint::Other(_) => None,
     }
 }
 

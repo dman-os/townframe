@@ -1,6 +1,6 @@
-use crate::context::SocketState;
 use crate::interlude::*;
 use crate::out::out;
+use day_node::SocketState;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum PeersCommands {

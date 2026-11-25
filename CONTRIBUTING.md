@@ -10,20 +10,11 @@ appreciate help the most in design and research.
 nix develop .
 # show alternative dev shells
 nix flake show
-# run a hot reload instance daybook desktop
-./x/dev-d-dayb.ts
-# build and install to connected android device
-./x/build-a-dayb.ts
-# run the daybook cli
-DAYB_REPO_PATH=/tmp/repo1 cargo r -p daybook_cli -- --help
+# run the day cli
+cargo r -p day_cli -- --help
 # run the xtask CLI
 cargo x --help
 
-# build the daybook CLI as a sandboxed Nix package (no devshell, no .env)
-nix build .#daybook-cli
-./result/bin/daybook_cli --help
-# packaged CLI end-to-end test (init, documents, persistence) in an empty env
-nix build .#daybook-cli.tests.round-trip
 # hermetic source-only checks: nixfmt, statix/deadnix, rustfmt (every .rs
 # file), deno fmt/lint/check for ./x, biome, JSON/TOML/YAML validity. Runs as a
 # pre-commit hook; cache hits make an unchanged tree free. clippy, nextest and
@@ -46,10 +37,6 @@ cargo x guardrails check-matrix --target wasm32-wasip3
 cargo x guardrails check-matrix --target wasm32-unknown-unknown
 # run pre commit hooks
 prek -a
-
-# build a plug OCI package
-# goes into ./target/oci
-cargo x plug build-oci --plug-root ./src/plug_test_manifest/
 ```
 
 ## Dual targets: host vs guest
@@ -57,7 +44,7 @@ cargo x plug build-oci --plug-root ./src/plug_test_manifest/
 Two targets describe one product, not two products:
 
 - **Host** (`wasm32-unknown-unknown`): the browser-side modules —
-  `dayframe_web`, `clay_rt_wcmp_web`. They run the polyfill engine (`wcmp`) on the
+  `daytxt_web`, `clay_rt_wcmp_web`. They run the polyfill engine (`wcmp`) on the
   page's own `WebAssembly`. No WASI.
 - **Guest** (`wasm32-wasip3`): micro components (`micro_counter`, `clay_mdk`
   examples) that both engines instantiate. rustc emits a component directly (no
@@ -68,7 +55,7 @@ Native is the third lane: the same guest crates' host-side tests
 (`clay_rt_wasmtime`, `clay_rt_wcmp_wasmi`) drive the prepared components under
 nextest. Feature unification must stay isolated per target: guest builds and
 matrix checks pass `--config resolver.feature-unification="selected"`.
-`x/check-dayframe.ts --prepare-only` rebuilds and exports `DAYFRAME_*_COMPONENT`
+`x/check-daytxt.ts --prepare-only` rebuilds and exports `DAYTXT_*_COMPONENT`
 paths for tests and the web shell.
 
 ## Rust target contracts
@@ -91,7 +78,7 @@ Leptos SSR versus hydration. New features must be added to a contract or
 platforms are rejected (`ERROR_PLATFORM_FEATURE`): a platform is a target or a
 separate crate, never an additive feature. A Wasm build may only depend on
 crates whose contract covers that target (`ERROR_TARGET_BOUNDARY`); native
-dev-dependencies such as `daybook_core`'s test harness are exempt because they
+dev-dependencies such as a crate's native test harness are exempt because they
 are never built for the guest.
 
 Use `cargo x guardrails check-matrix --package utils_rs --dry-run` to inspect
@@ -108,12 +95,6 @@ workspace: cargo-leptos assumes each package lives under its workspace root and
 failed with "Could not remove base" when the crate was a member of
 `src/wasm_utils_rs`, whose root is a sibling directory.
 
-Each manifest crate declares
-`[package.metadata.townframe] routines = "../plug_name_routines"`.
-`cargo x plug build-oci --plug-root src/plug_name_manifest` runs its native
-`manifest` binary, builds the sibling routines component, and packages both
-under the existing logical plug ID. Wasmtime is not a dependency of xtask.
-
 ## Build directories and feature resolution
 
 Cargo runs through [mbx](https://mr-boxington.jdx.dev/) (mr-boxington), pinned
@@ -127,7 +108,7 @@ C/C++. Identical compilations running at the same time wait for one result, and
 a machine-wide scheduler admits work against the CPU count and a memory budget
 learned per compilation, holding new compilations while the kernel reports
 memory pressure. On a 2026-11-09 trial, `xtask` took 62s cold and 15s from a
-second path (290 hits, 2 misses), and the `plug_test_routines` guest 79s and 18s.
+second path (290 hits, 2 misses), and the `test_wflows` guest comparably.
 
 Each workspace root (the root, `src/wasm_utils_rs`, and `src/btress_sysadmin`)
 gets a managed target: `target` is a symlink into the mbx cache, which mbx
@@ -157,9 +138,8 @@ entrypoints live in their own workspace: unification would otherwise pull
 native-only features into `wasm32` builds. Unification still applies to every
 member of the workspace you invoke, so a portable crate checked _from the root
 workspace_ inherits the native closure —
-`cargo clippy -p daybook_types --target wasm32-wasip3 --no-default-features --features wit`
-fails in `uniffi_core`, and `-p utils_rs --target wasm32-unknown-unknown` fails
-in `mio`, because `daybook_core` enables those features. Two consequences: check
+`-p utils_rs --target wasm32-unknown-unknown` fails in `mio`, because a native
+member of the root workspace enables those features. Two consequences: check
 guest contracts through `cargo x guardrails check-matrix`, which passes
 `--config resolver.feature-unification="selected"` so each configuration is
 resolved in isolation, and build guests through `src/wasm_utils_rs/Cargo.toml`,
@@ -238,25 +218,6 @@ checking remains a tracked follow-up.
 - `./tools/compose.yml`: docker compose file for supporting services.
   - `profiles` are used to group services together and operate on the groups.
   - Scripts `./x/compose-up.ts` and `./x/compose-logs.ts` operate on this file.
-
-### Daybook
-
-- `./src/daybook_core/`: Rust core for daybook.
-  - `./src/daybook_core/rt/wash_plugin/`: Wash plugin for daybook host support.
-- `./src/daybook_types/`: Core types for daybook.
-- `./src/daybook_cli/`: CLI app for daybook.
-- `./src/daybook_compose/`: Compose multplatform app for daybook.
-  - Tested on desktop and android only.
-- `./src/daybook_ffi/`: [uniffi](https://mozilla.github.io/uniffi-rs/latest/)
-  based bindings for kotlin.
-  - `./x/gen-ffi-dayb.ts` to re-generate the bindings and build the library.
-- `./src/daybook_types/`: Core types for daybook.
-- `./src/plug_*_manifest/`: Portable plug types, shared logic, native `manifest`
-  binaries, and native e2e tests. Members of the native workspace.
-- `./src/plug_*_routines/`: Wasm WIT bindings and workflows. Members of the Wasm
-  workspace; depend on their manifest crate, never the reverse.
-- `./src/daybook_pdk/`: Plug development kit.
-  - Supporting code for writing plugs goes here.
 
 ## Style guide
 

@@ -37,12 +37,6 @@ repos:
         # that backlog is cleared.
         files: ^\.github/
         stages: [manual]
-      # - id: detekt-kotlin
-      #   name: detekt Kotlin
-      #   language: system
-      #   entry: ./x/gradle.ts detektMainDesktop --auto-correct --no-daemon
-      #   pass_filenames: false
-      #   files: ^src/daybook_compose/
       - id: syncpack-fmt
         name: syncpack format
         language: system
@@ -58,6 +52,14 @@ repos:
         language: system
         entry: pnpm install --frozen-lockfile
         pass_filenames: false
+      - id: kit-bundle
+        name: check the kit's token CSS and Tailwind bundle are regenerated
+        language: system
+        entry: deno run --allow-read --allow-write --allow-run x/check-kit-bundle.ts
+        pass_filenames: false
+        # The bundle is a function of the skins, the tokens and every class the sources name, so
+        # an edit to any `.rs` file can change it; it costs about a second.
+        files: \.(rs|css|json|ts)$
       - id: check-tsc
         name: check tsc
         language: system

@@ -7,9 +7,15 @@ edition = "2024"
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
+clay_dioxus_kit = { workspace = true }
 clay_mdk = { workspace = true, features = ["view"] }
 micro_layout_manifest = { workspace = true }
 micro_settings_manifest = { workspace = true }
+
+#
+# ui
 dioxus.workspace = true
 serde.workspace = true
 serde_json.workspace = true

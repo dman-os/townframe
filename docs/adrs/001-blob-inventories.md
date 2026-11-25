@@ -167,7 +167,7 @@ writers maintain one inventory, and a writer whose view lags must not delete pin
 facets it has not seen. Removals happen only on an observed cipherBlob removal or an
 observed removal of the doc from the drawer.
 
-A local background indexer worker ([`BlobPinWorker`](../../src/daybook_core/blobs/pin_worker.rs)):
+A local background indexer worker (`BlobPinWorker` (`src/daybook_core/blobs/pin_worker.rs`, removed with the legacy crates)):
 1. Observes document changes from the Drawer.
 2. Identifies `org.example.daybook.blob` facets on local documents.
 3. Resolves the corresponding representation multihash ($H_{rep}$):

@@ -1,0 +1,45 @@
+---
+source: src/micro_review_manifest/lib.rs
+expression: sidecar()
+---
+id: dayframe.review
+package_version: 1
+authority: org.example.dayframe.review
+entrypoints:
+  initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
+  presentation: "townframe:dayframe/presentation-events@0.4.0"
+  installer: ~
+endpoints:
+  view:
+    $type: "org.example.clay.micro.manifest#viewEndpoint"
+requires: []
+configuration_requests:
+  - binding: review
+    facets:
+      - tag: org.example.dayframe.review.config
+        key_id: main
+        read: true
+        write: true
+        create: false
+        delete: false
+collection_contracts: []
+collection_requests:
+  - binding: panels
+    contract: org.example.dayframe.layout.panels
+    access: write
+    necessity: optional
+contributions:
+  - id: layout-panel
+    binding: panels
+    key: dayframe.review
+    value:
+      content:
+        $link: 0
+      title: Review
+    links:
+      - index: 0
+        endpoint: view
+interimMethods:
+  - org.example.daybook.docs.readDatums
+  - org.example.daybook.docs.pollDatums
+  - org.example.daybook.blobs.read

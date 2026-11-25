@@ -19,8 +19,7 @@ Experimental.
 Daybook is an experiental attempt to build to build a "notes app" heavily informed by my tastes and capabilites.
 
 It currently consists of:
-- WIP CLI [^](./src/daybook_cli/)
-- WIP Compose Multiplatform app [^](./src/daybook_compose/)
+- WIP Dioxus app, daytxt [^](./src/daytxt_core/)
 
 ## Why?
 
@@ -32,7 +31,7 @@ Specifically, daybook design is informed by tech I find shiny, gaps I see in the
 - Shiny tech
   - Everything that is and around LLMs.
   - Uses Automerge for an offline and local-first experience.
-  - Uses Compose Multiplatform for a reliable experience on Android and desktop.
+  - Uses Dioxus for a reliable experience on Android, desktop and the web.
   - Leverage WASM for plugins. 
 - Gaps
   - Emacs/Vim

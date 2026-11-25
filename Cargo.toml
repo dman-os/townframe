@@ -25,18 +25,13 @@ members = [
   "./src/big_repo/",
   "./src/big_node/",
   "./src/day_cli",
-  "./src/daybook_cli",
-  "./src/daybook_core",
-  "./src/daybook_ffi",
-  "./src/daybook_pdk",
-  "./src/daybook_types",
+  "./src/day_node",
+  "./src/clay_node",
   "./src/macros",
-  "./src/mltools/",
+  "./src/pierre_diffs",
+  "./src/pierre_diffs_dioxus",
   "./src/pauperfuse/",
   "./src/native_utils_rs",
-  "./src/plug_test_manifest",
-  "./src/plug_plabels_manifest",
-  "./src/plug_dayledger_manifest",
   "./src/secrets_rs",
   "./src/method_core/",
   "./src/short_ids",
@@ -78,24 +73,43 @@ members = [
   "./src/micro_counter",
   "./src/micro_collection_probe",
   "./src/micro_counter_manifest",
-  "./src/ui",
+  "./src/micro_review_manifest",
+  "./src/micro_review",
+  "./src/micro_lab_manifest",
+  "./src/micro_lab",
+  "./src/micro_theme_lab_manifest",
+  "./src/micro_theme_lab",
+  "./src/review_mock",
   "./src/clay_dioxus_kit",
   "./src/dioxus_storm",
-  "./src/dayframe_composition",
-  "./src/dayframe_native",
-  "./src/dayframe_web",
-  "./src/dayframe_desktop",
-  "./src/dayframe_mobile",
-  "./src/dayframe_showcase",
+  "./src/daytxt_core",
+  "./src/daytxt_native",
+  "./src/daytxt_web",
+  "./src/daytxt_desktop",
+  "./src/daytxt_mobile",
+  "./src/claytxt_showcase",
 ]
 exclude = [
   "src/wasm_utils_rs",
   "src/clay_rt_wcmp_web",
-  "src/plug_test_routines",
-  "src/plug_plabels_routines",
-  "src/plug_dayledger_routines",
   "src/test_wflows",
   "src/btress_sysadmin",
+  # Legacy daybook stack, kept in the tree but out of the workspace: it does not
+  # build against the current workspace dependencies and nothing depends on it.
+  "src/daybook_cli",
+  "src/daybook_core",
+  "src/daybook_ffi",
+  "src/daybook_pdk",
+  "src/daybook_sdk",
+  "src/daybook_types",
+  # Only the legacy daybook crates above use it, and its live tests call paid cloud APIs.
+  "src/mltools",
+  "src/plug_dayledger_manifest",
+  "src/plug_dayledger_routines",
+  "src/plug_plabels_manifest",
+  "src/plug_plabels_routines",
+  "src/plug_test_manifest",
+  "src/plug_test_routines",
 ]
 
 [workspace.package]
@@ -118,7 +132,6 @@ sqlite_rs = { path = "./src/sqlite_rs", default-features = false }
 wasm_utils_rs = { path = "./src/wasm_utils_rs", default-features = false }
 am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
-daybook_core = { path = "./src/daybook_core", default-features = false }
 secrets_rs = { path = "./src/secrets_rs" }
 method_core = { path = "./src/method_core", default-features = false }
 short_ids = { path = "./src/short_ids" }
@@ -126,15 +139,8 @@ service_core_rs = { path = "./src/service_core_rs", default-features = false }
 service_client_core_rs = { path = "./src/service_client_core_rs", default-features = false }
 service_client_native_rs = { path = "./src/service_client_native_rs", default-features = false }
 service_utils_rs = { path = "./src/service_utils_rs", default-features = false }
-# daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
-daybook_types = { path = "./src/daybook_types", default-features = false }
-daybook_pdk = { path = "./src/daybook_pdk", default-features = false }
-mltools = { path = "./src/mltools", default-features = false }
-wflow = { path = "./src/wflow", default-features = false }
 wflow_core = { path = "./src/wflow_core", default-features = false }
 wflow_tokio = { path = "./src/wflow_tokio", default-features = false }
-wflow_sdk = { path = "./src/wflow_sdk", default-features = false }
-wash_plugin_sqlite = { path = "./src/wash_plugin_sqlite", default-features = false }
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
 big_sync_core = { path = "./src/big_sync_core/", default-features = false }
 datum_core = { path = "./src/datum_core", default-features = false }
@@ -160,19 +166,23 @@ test_nodule_handlers = { path = "./src/test_nodule_handlers/" }
 big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
 big_node = { path = "./src/big_node/" }
+day_node = { path = "./src/day_node" }
+clay_node = { path = "./src/clay_node" }
 clay_collection = { path = "./src/clay_collection" }
 clay_store = { path = "./src/clay_store" }
 clay_host = { path = "./src/clay_host" }
 clay_docs = { path = "./src/clay_docs" }
 clay_surface = { path = "./src/clay_surface" }
 clay_dioxus = { path = "./src/clay_dioxus" }
+pierre_diffs = { path = "./src/pierre_diffs" }
 clay_dioxus_kit = { path = "./src/clay_dioxus_kit" }
+pierre_diffs_dioxus = { path = "./src/pierre_diffs_dioxus" }
 dioxus_storm = { path = "./src/dioxus_storm" }
 clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
 clay_rt_wcmp = { path = "./src/clay_rt_wcmp" }
 clay_rt_wcmp_wasmi = { path = "./src/clay_rt_wcmp_wasmi" }
 # Lives in the `src/wasm_utils_rs` workspace (it is the only root-workspace consumer), but
-# `dayframe_web` links it as a plain path dependency.
+# `daytxt_web` links it as a plain path dependency.
 clay_rt_wcmp_web = { path = "./src/clay_rt_wcmp_web" }
 clay_guest_session = { path = "./src/clay_guest_session" }
 clay_mdk = { path = "./src/clay_mdk", default-features = false }
@@ -183,12 +193,15 @@ micro_shell = { path = "./src/micro_shell" }
 micro_toolbar_manifest = { path = "./src/micro_toolbar_manifest" }
 micro_toolbar = { path = "./src/micro_toolbar" }
 micro_layout_manifest = { path = "./src/micro_layout_manifest" }
+micro_lab_manifest = { path = "./src/micro_lab_manifest" }
+micro_theme_lab_manifest = { path = "./src/micro_theme_lab_manifest" }
+review_mock = { path = "./src/review_mock" }
 micro_sample = { path = "./src/micro_sample" }
 micro_counter = { path = "./src/micro_counter" }
 micro_counter_manifest = { path = "./src/micro_counter_manifest" }
-dayframe_composition = { path = "./src/dayframe_composition" }
-ui = { path = "./src/ui" }
-dayframe_native = { path = "./src/dayframe_native" }
+micro_review_manifest = { path = "./src/micro_review_manifest" }
+daytxt_core = { path = "./src/daytxt_core" }
+daytxt_native = { path = "./src/daytxt_native" }
 
 #
 # meta
@@ -214,7 +227,6 @@ once_cell = "1"
 parking_lot = "0.12"
 bytes = "1"
 url = { version = "2.5.7", features = ["serde"] }
-addr = "0.15.6"
 # scopeguard = "1.2.0"
 semver = { version = "1", features = ["serde"] }
 surelock = "0.1"
@@ -228,28 +240,24 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 ciborium = "0.2.2"
 postcard = { version = "1.1.3", features = ["alloc"] }
-serde_with = "3.16"
 multihash = "0.19.3"
 data-encoding = "2.10"
 bs58 = "0.5.1"
 blake3 = "1.8"
-zstd = "0.13"
-camino = { version = "1.2.2", features = ["serde1"] }
 atproto-dasl = "0.14.5"
 
 #
 # macros
 pastey = "0.1"
+cssparser = "0.38"
 displaydoc = "0.2"
 educe = "0.6"
-struct-patch = "0.10.4"
 structstruck = "0.5.1"
 
 #
 # errors
 thiserror = "2"
 anyhow = "1"
-garde = { version = "0.22", features = ["derive", "regex", "url", "email"] }
 
 #
 # logging
@@ -315,7 +323,6 @@ beekem = { version = "0.4.0", git = "https://github.com/dman-os/keyhive", rev = 
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
 nonempty = "0.12.0"
-qrcode = { version = "0.14.1", default-features = false }
 
 #
 # testing
@@ -329,13 +336,8 @@ loom = "0.7.2"
 sqlite-vec = "0.1.6" # "0.2.4-alpha"
 
 #
-# ffi
-uniffi = { version = "0.31.0" }
-# uniffi = { path = "../uniffi-rs/uniffi/" }
-
-#
 # wasm
-wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "a24366c874177c2beecd96c7dfae6754c847d361" }
+wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "38daa7ef0db706828c6fdfd87302fe00212db084" }
 # `default-features = false` matches wash-runtime's own wasmtime-wasi pin so the
 # two deps do not disagree on the p1/p2 (wiggle) surface; `p3` is what links the
 # WASI 0.3 imports a wasm32-wasip3 component brings in.
@@ -348,7 +350,7 @@ wasmtime-wasi-http = { version = "48.0.7", default-features = false }
 # async export task state in a libc `thread_local!`, which cannot be swapped per component-model
 # task. Without `std` it goes through the `wit_bindgen_0_62_0_{get,set}_task_context` hooks that
 # `clay_mdk` defines over context slot 0 (see `clay_mdk/lib.rs`). Each guest crate names the
-# features it needs; `x/check-dayframe.ts` fails if `std` comes back. The exact `=` pin is on
+# features it needs; `x/check-daytxt.ts` fails if `std` comes back. The exact `=` pin is on
 # purpose: `clay_mdk` defines `wit_bindgen_0_62_0_*` symbols, so a bump must be a visible edit there.
 wit-bindgen = { version = "=0.62.0", default-features = false }
 wstd = "0.6.8"
@@ -356,9 +358,9 @@ wstd = "0.6.8"
 # exactly; this fork moves only that pin to the 0.2.127 the Dioxus fork needs,
 # because one lockfile serves every target. It brings its own
 # `wasmtime-environ` 50 and `wasmparser` 0.261 next to wasmtime 48's.
-wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "da35a9b4e4cc71dacb57323b906093f9e18e78b6" }
-wcmp-wasm-core-wasmi = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "da35a9b4e4cc71dacb57323b906093f9e18e78b6" }
-wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "da35a9b4e4cc71dacb57323b906093f9e18e78b6" }
+wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "2a8d11a01d6630fabcca1730423e7103b4466d41" }
+wcmp-wasm-core-wasmi = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "2a8d11a01d6630fabcca1730423e7103b4466d41" }
+wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "2a8d11a01d6630fabcca1730423e7103b4466d41" }
 wasm-bindgen = "=0.2.127"
 wasm-bindgen-futures = "0.4.77"
 js-sys = "0.3.104"
@@ -388,21 +390,24 @@ irpc-iroh = "0.17.0"
 
 #
 # gui
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
-dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
-dioxus-html = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
-dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
-dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-core-template = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-html = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-desktop = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
 blitz-dom = "=0.3.0-beta.4"
 # xilem = { path = "../xilem/xilem/" }
 #
 
 [patch.crates-io]
-wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "a24366c874177c2beecd96c7dfae6754c847d361" }
+wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "38daa7ef0db706828c6fdfd87302fe00212db084" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
-dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
+dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3" }
 # blitz 0.3.0-beta.4 plus a fix: a form control added and dropped in one mutation batch stayed
 # queued and the mutator's flush indexed its freed node id. Every blitz crate comes from the same
 # rev, since blitz-dom reaches its siblings by path inside that workspace.
@@ -426,6 +431,9 @@ blitz-traits = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2c
 # gets its own slot, so in-process service hops (dispatch → drawers → docs → authority) piled
 # up frames of hundreds of KB: creating a drawer at boot peaked at 1.18 MB of a 2 MiB thread,
 # and 0.33 MB at opt-level 1.
+# Not day_cli: the binary crate is where edits land most, and at opt-level 1 a one-line edit
+# rebuilds it in about 55 s (LLVM passes and local ThinLTO) against about 20 s at opt-level 0.
+# The deep service hops whose frames needed slot reuse live in the crates below.
 [profile.dev.package.service_utils_rs]
 opt-level = 1
 [profile.dev.package.service_client_core_rs]
@@ -447,8 +455,6 @@ opt-level = 1
 [profile.dev.package.big_repo]
 opt-level = 1
 [profile.dev.package.big_sync]
-opt-level = 1
-[profile.dev.package.day_cli]
 opt-level = 1
 
 # Keep the application debuggable while optimizing the native UI hot path in dev.

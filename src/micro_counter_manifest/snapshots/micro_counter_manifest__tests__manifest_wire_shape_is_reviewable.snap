@@ -9,19 +9,17 @@ entrypoints:
   initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
   presentation: "townframe:dayframe/presentation-events@0.4.0"
   installer: ~
-publications:
-  - name: view
-    kind: presentation
-    contract: ~
-  - name: badge
-    kind: presentation
-    contract: ~
-  - name: count
-    kind: call
-    contract: org.example.dayframe.counter.count
-  - name: increment
-    kind: call
-    contract: org.example.dayframe.toolbar.action
+endpoints:
+  badge:
+    $type: "org.example.clay.micro.manifest#viewEndpoint"
+  count:
+    $type: "org.example.clay.micro.manifest#methodEndpoint"
+    nsid: org.example.dayframe.counter.count
+  increment:
+    $type: "org.example.clay.micro.manifest#callbackEndpoint"
+    implements: org.example.dayframe.toolbar.action
+  view:
+    $type: "org.example.clay.micro.manifest#viewEndpoint"
 requires: []
 configuration_requests:
   - binding: counter
@@ -50,31 +48,31 @@ contributions:
   - id: settings-section
     binding: sections
     key: dayframe.counter
-    payload:
+    value:
       detail:
-        $attachment: 0
+        $link: 0
       title: Counter (Wasm)
-    attachments:
+    links:
       - index: 0
-        publication: view
+        endpoint: view
   - id: toolbar-button
     binding: toolbar
     key: increment
-    payload:
+    value:
       action:
-        $attachment: 0
+        $link: 0
       icon: plus
       label: Increment
-    attachments:
+    links:
       - index: 0
-        publication: increment
+        endpoint: increment
   - id: layout-panel
     binding: panels
     key: dayframe.counter
-    payload:
+    value:
       content:
-        $attachment: 0
+        $link: 0
       title: Counter (Wasm)
-    attachments:
+    links:
       - index: 0
-        publication: view
+        endpoint: view

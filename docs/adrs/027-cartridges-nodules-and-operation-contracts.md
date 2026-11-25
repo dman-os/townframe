@@ -39,15 +39,15 @@ investments.
 The current plugin surface already distinguishes management from execution, but
 its contracts couple concerns that the new design separates:
 
-- [`CartridgeManifest`](../../src/daybook_types/manifest.rs) carries package identity,
+- `CartridgeManifest` (`src/daybook_types/manifest.rs`, removed with the legacy crates) carries package identity,
   facet schemas and display hints, local state, dependencies, workflow bundles,
   routines, views, commands, initializers, and processors.
-- [`PlugsRepo`](../../src/daybook_core/plugs.rs) combines cataloguing, pinned
+- `PlugsRepo` (`src/daybook_core/plugs.rs`, removed with the legacy crates) combines cataloguing, pinned
   enablement, manifest materialization, derived caches, and observation. Its
-  [OCI importer](../../src/daybook_core/plugs/oci.rs) obtains executable artifacts,
-  and its [validator](../../src/daybook_core/plugs/validation.rs) understands routines
+  OCI importer (`src/daybook_core/plugs/oci.rs`, removed with the legacy crates) obtains executable artifacts,
+  and its validator (`src/daybook_core/plugs/validation.rs`, removed with the legacy crates) understands routines
   and command targets.
-- [`Rt`](../../src/daybook_core/rt.rs) composes dispatch, workflow execution,
+- `Rt` (`src/daybook_core/rt.rs`, removed with the legacy crates) composes dispatch, workflow execution,
   initialization, Wasm host facilities, stateless views, and local state. These
   responsibilities are not all part of the package repository today either.
 - The old drawer consults cartridges for schema validation, while cartridges attach the
@@ -186,7 +186,7 @@ reason; it does not refuse the nodule either. The consumer of a binding validate
 
 **Initialization** is the one binding the runtime owns, because it is lifecycle: "on
 revision R, invoke operation X with run mode M". Its prior art is
-[`rt/init.rs`](../../src/daybook_core/rt/init.rs). The redesign of its identity,
+`rt/init.rs` (`src/daybook_core/rt/init.rs`, removed with the legacy crates). The redesign of its identity,
 modes and gating is under review (§10, proposals), but the shape above is settled.
 
 **Cross-nodule calls invoke operations, not commands.** A command is only a consumer's
@@ -294,7 +294,7 @@ rather than a separate plugin execution engine. A stateless presenter produces a
 portable description; it does not retain a frontend component instance. The feature
 itself may still use persistent state.
 
-[Today's ViewSpec](../../src/daybook_types/view.rs) demonstrates this boundary, not
+Today's ViewSpec (`src/daybook_types/view.rs`, removed with the legacy crates) demonstrates this boundary, not
 a frozen choice of representation. The portable vocabulary needs terminal rendering
 rules for visual elements and actions. Rendering must not invoke actions implicitly;
 actions go through the same authorized operation path as other invocations. This

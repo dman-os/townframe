@@ -1,0 +1,166 @@
+/*
+ * The review micro's own sheet: what the kit has no component or token for. Unlayered, so it sits
+ * above the host's kit layers; the end user's theme (the `user` layer) is not this sheet's to
+ * take. Rules are keyed on the root class and `data-part`, so a theme can target them. Parts:
+ * page, section, group, items, row, entry, name, headline, heading, secondary, prose, id, meta,
+ * empty, placeholder, detail, failure, unreadable, unlisted, code, diff. Axes on `row` and
+ * `items`: data-variant (outline, spaced).
+ */
+.micro-review {
+  height: 100%;
+  font-family: var(--ct-font-family);
+  color: var(--ct-color-text);
+}
+
+.micro-review [data-part="page"] {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--ct-spacing) * 6);
+  padding: 0 var(--ct-dimension-spacing-4) calc(var(--ct-spacing) * 6);
+}
+
+.micro-review [data-part="section"],
+.micro-review [data-part="group"],
+.micro-review [data-part="entry"],
+.micro-review [data-part="meta"],
+.micro-review [data-part="empty"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-dimension-spacing-2);
+}
+
+.micro-review [data-part="meta"] {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.micro-review [data-part="empty"] {
+  padding-block: calc(var(--ct-spacing) * 8);
+  text-align: center;
+}
+
+.micro-review [data-part="items"] {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.micro-review [data-part="items"][data-variant="spaced"] {
+  gap: var(--ct-dimension-spacing-2);
+}
+
+.micro-review [data-part="entry"] {
+  padding: var(--ct-dimension-spacing-3) var(--ct-dimension-spacing-2);
+}
+
+/* A row that opens something: a 48 px target, quiet until hovered or focused. */
+.micro-review [data-part="row"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-dimension-spacing-1);
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 3rem;
+  padding: var(--ct-dimension-spacing-3) var(--ct-dimension-spacing-2);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.micro-review [data-part="row"][data-variant="outline"] {
+  padding-inline: var(--ct-dimension-spacing-4);
+  border: var(--ct-dimension-border-width-hairline) solid var(--ct-color-border);
+  border-radius: var(--ct-dimension-radius-md);
+}
+
+.micro-review [data-part="row"]:hover {
+  background: var(--ct-color-surface-sunken);
+}
+
+.micro-review [data-part="row"]:focus-visible {
+  outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
+}
+
+.micro-review [data-part="name"] {
+  font-weight: var(--ct-font-weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.micro-review [data-part="headline"] {
+  margin: 0;
+  font-size: var(--ct-dimension-font-size-lg);
+  font-weight: var(--ct-font-weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.micro-review [data-part="heading"] {
+  margin: 0;
+  font-size: var(--ct-dimension-font-size-sm);
+  font-weight: var(--ct-font-weight-semibold);
+  color: var(--ct-color-text-muted);
+}
+
+.micro-review [data-part="secondary"] {
+  font-size: var(--ct-dimension-font-size-sm);
+  color: var(--ct-color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.micro-review [data-part="prose"] {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A machine identifier: a commit, a change id, an address. It breaks anywhere to fit a phone. */
+.micro-review [data-part="id"] {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  font-weight: var(--ct-font-weight-semibold);
+  word-break: break-all;
+}
+
+.micro-review [data-part="placeholder"] {
+  padding-block: calc(var(--ct-spacing) * 8);
+  text-align: center;
+  color: var(--ct-color-text-muted);
+}
+
+.micro-review [data-part="detail"] {
+  overflow-wrap: anywhere;
+}
+
+.micro-review [data-part="failure"] {
+  margin: 0;
+  font-size: var(--ct-dimension-font-size-sm);
+  font-weight: var(--ct-font-weight-semibold);
+  color: var(--ct-color-danger);
+}
+
+/* An unreadable thing is a failure for the reader, so its card takes the danger border. */
+.micro-review [data-part="unreadable"] > .ct-card {
+  border-color: var(--ct-color-danger);
+}
+
+.micro-review [data-part="unlisted"] {
+  color: var(--ct-color-text-muted);
+}
+
+.micro-review [data-part="code"] {
+  padding-inline: var(--ct-dimension-spacing-1);
+  border-radius: var(--ct-dimension-radius-sm);
+  background: var(--ct-color-surface-sunken);
+  color: var(--ct-color-text);
+}
+
+.micro-review [data-part="diff"] {
+  overflow-x: auto;
+  border: var(--ct-dimension-border-width-hairline) solid var(--ct-color-border);
+  border-radius: var(--ct-dimension-radius-md);
+}

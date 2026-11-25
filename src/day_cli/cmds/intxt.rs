@@ -747,9 +747,9 @@ async fn with_packaging_exit(
 /// seconds per hook, and parallel tool calls run parallel hooks, of which only one process can
 /// hold the node. The socket is probed, not connected to through [`NodeClient`], which would boot
 /// the node just to be refused.
-pub(crate) async fn require_daemon(dir: &crate::context::NodeDir) -> Res<()> {
+pub(crate) async fn require_daemon(dir: &day_node::NodeDir) -> Res<()> {
     eyre::ensure!(
-        dir.probe_socket().await? == crate::context::SocketState::Live,
+        dir.probe_socket().await? == day_node::SocketState::Live,
         "no server is running the node at {}; start one with `day node start --bg`",
         dir.root().display()
     );

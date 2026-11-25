@@ -7,23 +7,19 @@
     "presentation": "townframe:dayframe/presentation-events@0.4.0",
     "installer": null
   },
-  "publications": [
-    {
-      "name": "detail",
-      "kind": "presentation",
-      "contract": null
+  "endpoints": {
+    "detail": {
+      "$type": "org.example.clay.micro.manifest#viewEndpoint"
     },
-    {
-      "name": "echo",
-      "kind": "call",
-      "contract": "org.example.clay.test.context.echo"
+    "echo": {
+      "$type": "org.example.clay.micro.manifest#methodEndpoint",
+      "nsid": "org.example.clay.test.context.echo"
     },
-    {
-      "name": "relay",
-      "kind": "call",
-      "contract": "org.example.clay.test.context.relay"
+    "relay": {
+      "$type": "org.example.clay.micro.manifest#methodEndpoint",
+      "nsid": "org.example.clay.test.context.relay"
     }
-  ],
+  },
   "requires": [
     {
       "binding": "peer",

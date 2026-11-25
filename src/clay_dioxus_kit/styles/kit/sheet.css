@@ -1,0 +1,51 @@
+/*
+ * ct-sheet (headless/sheet.rs). Parts: scrim, panel (the dialog). State: data-state (open).
+ * Axes: data-placement (bottom|side) and data-width (compact|medium|expanded), the host's width
+ * class, which decides the placement and the size (KIT-104). Shares the scrim and the panel's
+ * surface with the drawer (overlay.css).
+ *
+ * No panel covers the whole host, so the scrim is always reachable: a bottom sheet is 5/6 of the
+ * host's height, a side sheet is at most 5/6 of its width and 24rem (medium) or 32rem (expanded)
+ * wide.
+ */
+.ct-sheet {
+  position: absolute;
+  inset: 0;
+  z-index: var(--ct-layer-sheet);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.ct-sheet[data-placement="side"] {
+  flex-direction: row;
+}
+
+.ct-sheet[data-placement="bottom"] [data-part="panel"] {
+  width: 100%;
+  height: 83.3333%;
+  border-top-left-radius: var(--ct-dimension-radius-xl);
+  border-top-right-radius: var(--ct-dimension-radius-xl);
+  animation: ct-overlay-slide-in-bottom var(--ct-motion-duration-enter)
+    var(--ct-motion-easing-enter) both;
+}
+
+.ct-sheet[data-placement="side"] [data-part="panel"] {
+  width: 24rem;
+  max-width: 83.3333%;
+  height: 100%;
+  border-top-left-radius: var(--ct-dimension-radius-xl);
+  border-bottom-left-radius: var(--ct-dimension-radius-xl);
+  animation: ct-overlay-slide-in-trailing var(--ct-motion-duration-enter)
+    var(--ct-motion-easing-enter) both;
+}
+
+.ct-sheet[data-placement="side"][data-width="expanded"] [data-part="panel"] {
+  width: 32rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ct-sheet [data-part="panel"] {
+    animation: none;
+  }
+}

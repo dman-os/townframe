@@ -9,8 +9,8 @@
 //!
 //! Calls are not declared here yet: they will implement the shared `Method` trait (the
 //! request type is the contract) once that trait is reachable from wasm micro crates, and
-//! `publish_call`, `require` and the `own_call` attachment keep their string forms until then.
-use crate::Attachment;
+//! `publish_call`, `require` and the `own_call` link keep their string forms until then.
+use crate::Link;
 use crate::manifest::CollectionCapability;
 use serde::Deserialize;
 use serde::Serialize;
@@ -58,19 +58,23 @@ pub trait ConfigDecl {
 
 /// A presentation a micro publishes, by the name `initialize` returns it under. What it
 /// presents (properties, events) is being designed separately, so the declaration names the
-/// publication only.
+/// view only.
 pub trait ComponentDecl {
     const NAME: &'static str;
+    /// The contract NSID another micro requires this view by, when one does: a requirement
+    /// of a view resolves to the sole micro whose view implements it, as a method does by its
+    /// NSID. A view nobody requires leaves it out.
+    const IMPLEMENTS: Option<&'static str> = None;
 }
 
 /// One [`crate::SHELL_ROOTS`] row, keyed by the registering micro's id: a title and the root
-/// presentation (an attachment of the row). The composition mounts every root it finds, each
+/// presentation (a link of the row). The composition mounts every root it finds, each
 /// filling the frame; arranging anything inside the frame is the root's own business (the shell
 /// micro's panels).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RootRow {
     pub title: String,
-    pub content: Attachment,
+    pub content: Link,
 }
 
 /// The runtime-defined collection shell micros register their roots into.

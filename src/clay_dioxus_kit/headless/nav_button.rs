@@ -1,4 +1,9 @@
-//! The sidebar/back button (FDR 006): one control with two meanings.
+//! The sidebar/back button (`ct-nav-button`, FDR 006): one control with two meanings.
+//!
+//! Parts: `icon` (decorative, `aria-hidden`), which holds the `glyph` of the back mode or the
+//! three `bar`s of the sidebar mode. State: `data-state` (`back`|`sidebar`), the mode. The glyphs
+//! are drawn by the stylesheet from boxes in `currentColor`; the accessible name is the mode's
+//! label, so the icon adds none.
 //!
 //! # Renderer limits
 //!
@@ -37,20 +42,26 @@ impl NavButtonMode {
 /// A native `<button>`: focusable and activatable by keyboard wherever the renderer has focus,
 /// and clickable everywhere (`KIT-052`; Blitz has no keyboard focus today).
 #[component]
-pub fn NavButton(
-    mode: NavButtonMode,
-    onclick: EventHandler<()>,
-    #[props(default)] class: &'static str,
-    children: Element,
-) -> Element {
+pub fn NavButton(mode: NavButtonMode, onclick: EventHandler<()>) -> Element {
     rsx! {
         button {
-            class,
+            class: "ct-nav-button",
             r#type: "button",
             "aria-label": mode.label(),
             "data-state": mode.state(),
             onclick: move |_| onclick.call(()),
-            {children}
+            span { "data-part": "icon", "aria-hidden": "true",
+                match mode {
+                    NavButtonMode::Back => rsx! {
+                        span { "data-part": "glyph" }
+                    },
+                    NavButtonMode::Sidebar => rsx! {
+                        for index in 0..3 {
+                            span { key: "{index}", "data-part": "bar" }
+                        }
+                    },
+                }
+            }
         }
     }
 }
@@ -75,7 +86,6 @@ mod tests {
             NavButton {
                 mode: probe.mode,
                 onclick: move |()| *clicks.borrow_mut() += 1,
-                "icon"
             }
         }
     }
@@ -99,6 +109,25 @@ mod tests {
     }
 
     #[test]
+    fn the_button_names_its_vocabulary_and_draws_its_glyph_from_parts() {
+        for (mode, state, glyph) in [
+            (NavButtonMode::Back, "back", vec!["glyph"]),
+            (NavButtonMode::Sidebar, "sidebar", vec!["bar", "bar", "bar"]),
+        ] {
+            let (page, _) = render(mode);
+            let button = page.by_class("ct-nav-button");
+            assert_eq!(page.attr(button, "type").as_deref(), Some("button"));
+            assert_eq!(page.attr(button, "data-state").as_deref(), Some(state));
+            assert_eq!(page.parts(button), ["icon"]);
+            let icon = page.children(button)[0];
+            assert_eq!(page.attr(icon, "aria-hidden").as_deref(), Some("true"));
+            assert_eq!(page.parts(icon), glyph);
+            // The glyph adds no accessible name of its own.
+            assert_eq!(page.text(button), "");
+        }
+    }
+
+    #[test]
     fn click_reports_once_per_press() {
         let (mut page, clicks) = render(NavButtonMode::Sidebar);
         let button = page.by_role("button", "Open sidebar");
@@ -118,7 +147,6 @@ mod tests {
                         NavButtonMode::Sidebar => NavButtonMode::Back,
                     });
                 },
-                "icon"
             }
         }
     }

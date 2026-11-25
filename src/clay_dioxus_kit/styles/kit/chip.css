@@ -1,0 +1,91 @@
+/*
+ * ct-chip (headless/chip.rs). Parts: label, remove. Axes: data-variant (filled|outline),
+ * data-status (info|success|warning|danger; absent is neutral). State on a toggle chip:
+ * data-state (on|off).
+ */
+.ct-chip {
+  --ct-chip-tone: var(--ct-color-border);
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ct-dimension-spacing-1);
+  min-height: 1.75rem;
+  padding-inline: var(--ct-dimension-spacing-3);
+  border: var(--ct-dimension-border-width-thin) solid var(--ct-chip-tone);
+  border-radius: var(--ct-dimension-radius-pill);
+  background: var(--ct-color-surface-sunken);
+  color: var(--ct-color-text);
+  font-family: var(--ct-font-family);
+  font-size: var(--ct-dimension-font-size-sm);
+  font-weight: var(--ct-font-weight-medium);
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.ct-chip[data-status="info"] {
+  --ct-chip-tone: var(--ct-color-info);
+}
+
+.ct-chip[data-status="success"] {
+  --ct-chip-tone: var(--ct-color-success);
+}
+
+.ct-chip[data-status="warning"] {
+  --ct-chip-tone: var(--ct-color-warning);
+}
+
+.ct-chip[data-status="danger"] {
+  --ct-chip-tone: var(--ct-color-danger);
+}
+
+.ct-chip[data-status] {
+  background: color-mix(
+    in srgb,
+    var(--ct-chip-tone) 18%,
+    var(--ct-color-surface)
+  );
+}
+
+.ct-chip[data-variant="outline"],
+.ct-chip[data-variant="outline"][data-status] {
+  background: transparent;
+}
+
+button.ct-chip {
+  cursor: pointer;
+}
+
+.ct-chip[data-state="on"] {
+  --ct-chip-tone: var(--ct-color-primary);
+  background: var(--ct-color-selected);
+  color: var(--ct-color-on-selected);
+}
+
+.ct-chip:focus-visible,
+.ct-chip [data-part="remove"]:focus-visible {
+  outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
+  outline-offset: 1px;
+}
+
+.ct-chip [data-part="remove"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-right: calc(var(--ct-spacing) * -1.5);
+  padding: 0;
+  border: 0;
+  border-radius: var(--ct-dimension-radius-pill);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.ct-chip [data-part="remove"]::before {
+  content: "\00d7";
+}
+
+.ct-chip [data-part="remove"]:hover {
+  background: color-mix(in srgb, currentColor 16%, transparent);
+}

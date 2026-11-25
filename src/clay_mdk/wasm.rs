@@ -12,14 +12,15 @@ use crate::native::CollectionBindings;
 use crate::native::Resources;
 use clay_guest_session::InitialContext;
 use clay_guest_session::capabilities::CapabilityPublication;
+use clay_guest_session::egress::DispatchEgress;
 use clay_host::ComponentRef;
 use clay_host::Factory;
 use clay_host::Host;
 use clay_host::Instance;
 use clay_host::LocalFuture;
 pub use clay_rt_wasmtime::WasmPackage;
-pub use clay_rt_wasmtime::set_component_cache_directory;
 use clay_rt_wasmtime::WasmRuntime;
+pub use clay_rt_wasmtime::set_component_cache_directory;
 use clay_surface::PresentationError;
 use clay_surface::SurfaceSession;
 use clay_surface::SurfaceSink;
@@ -30,7 +31,7 @@ use std::sync::Arc;
 
 /// The cached package for one prepared guest component. The host process compiles a component
 /// once and reuses the linker across incarnations, so composition code caches per guest name.
-/// `x/check-dayframe.ts` prepares the artifact and exports its path. Compilation happens
+/// `x/check-daytxt.ts` prepares the artifact and exports its path. Compilation happens
 /// outside the cache lock so concurrent activations do not serialize on it. A missing or
 /// invalid artifact is an initialization failure the supervisor records as `Faulted`, not a
 /// host panic: the shell stays up and reports it.
@@ -92,18 +93,23 @@ impl Engine for Wasmtime {
 /// source error (fetch, compile, missing artifact) is an initialization failure the supervisor
 /// retains as `Faulted` until retried, never a shell panic. The composition root calls this;
 /// micro crates never build factories themselves.
+///
+/// `egress` answers the guest's `wasi:http` requests to `dispatch.local` as this micro's actor
+/// (see [`DispatchEgress`]); with `None` every such request is refused and the micro can call no
+/// node method.
 pub fn factory<Fut>(
     resources: Resources,
     micro: MicroId,
     manifest: MicroManifest,
     bindings: CollectionBindings,
+    egress: Option<Arc<dyn DispatchEgress>>,
     package: impl Fn() -> Fut + 'static,
 ) -> Rc<dyn Factory<CapabilityPublication>>
 where
     Fut: Future<Output = Result<WasmPackage, String>> + 'static,
 {
     let package: PackageSource<Wasmtime> = Rc::new(move || Box::pin(package()));
-    crate::engine::factory::<Wasmtime>(resources, micro, manifest, bindings, package)
+    crate::engine::factory::<Wasmtime>(resources, micro, manifest, bindings, package, egress)
 }
 
 #[cfg(test)]

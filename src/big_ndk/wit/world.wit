@@ -5,5 +5,8 @@ package townframe:big-ndk@0.1.0;
 world nodule {
   import wasi:http/client@0.3.0;
   import wasi:random/random@0.3.0;
+  // The monotonic clock, for hosts of a guest that needs a timer (`clay_mdk::Context::sleep`); it
+  // leaks nothing, and every `wasm32-wasip3` std already imports it.
+  import wasi:clocks/monotonic-clock@0.3.0;
   export wasi:http/handler@0.3.0;
 }

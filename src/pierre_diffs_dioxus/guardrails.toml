@@ -1,0 +1,24 @@
+version = 1
+role = "interface"
+dependency_reason = "thin Dioxus web layer over the pure pierre_diffs port: DOM event, observer and measurement wiring for the Virtualizer; plain Dioxus, no Clay or micro dependency outside tests: clay_surface is a dev-dependency only, so the tests admit the view's output the way Clay admits a micro's"
+allowed_dependencies = [
+    "clay_surface",
+    "pierre_diffs",
+]
+allow_external_api_types = true
+
+[builds.native]
+
+[builds.wasm32-unknown-unknown]
+
+# The lab micro and the review mock link the diff view into their wasip3 guests.
+[builds.wasm32-wasip3]
+
+[[exemptions]]
+code = "ERROR_TYPE_ITEMS"
+path = "src/pierre_diffs_dioxus/host.rs"
+symbol = "module::DioxusHost"
+ceiling = 67
+class = "ARCHITECTURAL_EXCEPTION"
+reason = "the port's FileDiffHost is the conjunction of six platform traits (53 contract methods), and the code view's CodeViewHost adds 17 more (clock, observers, listeners, focus and the slab's three writes) over the same state; they must all be one type behind one Rc<Host>, because the managers, hub, render queue and viewer share it. The host's own methods are the registrations and cache writes the handlers need; the code view's state is its own type (host/code_view.rs) so this type takes only its constructor and accessors"
+reference = "docs/scratch/agent-guardrails-open-items.md"

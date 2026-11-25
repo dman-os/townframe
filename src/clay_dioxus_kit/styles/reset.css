@@ -1,0 +1,22 @@
+/* The reset layer: the first of the contract's layers (docs/design-language/styling-contract.md). */
+
+@layer reset {
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    min-width: 100%;
+    min-height: 100%;
+  }
+
+  /* A micro's mount root (`clay_dioxus`' `ShadowMount`) only hosts its shadow root. */
+  [data-dioxus-shadow] {
+    display: contents;
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+}

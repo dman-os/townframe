@@ -59,7 +59,7 @@ impl Incarnations for InProcess {
             // A guest engine is told what its package declares through `context.publications`
             // and admits against that, so this does too: the scenarios that make the two
             // disagree get the refusal a guest's sidecar mismatch gets.
-            let declared = declared_publications(&manifest);
+            let declared = declared_endpoints(&manifest);
             let capabilities =
                 CapabilitySession::new(host.clone(), instance.clone(), CapabilityLimits::default());
             capabilities.attach_activator(

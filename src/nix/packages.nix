@@ -1,6 +1,6 @@
-# Packaged outputs. `packages.daybook-cli` is a sandboxed, network-free (apart from
-# fixed-output fetches) build of the daybook CLI; see src/nix/wit-deps.nix for how
-# gitignored WIT dependencies enter the sandbox.
+# Packaged outputs: the pinned WIT dependency overlay and the vendored cargo
+# dependencies (the latter patched for wash-runtime's build.rs); see
+# src/nix/wit-deps.nix for how gitignored WIT dependencies enter the sandbox.
 { inputs, ... }:
 {
   perSystem =
@@ -17,15 +17,16 @@
       version = workspaceToml.workspace.package.version;
 
       # Sources the build actually needs: manifests, the workspace cargo config,
-      # and compilable/embedded inputs under src/. Kotlin and other languages are
-      # excluded by extension. wit/deps (gitignored fetch output) is subtracted so
+      # and compilable/embedded inputs under src/. Other languages are excluded by
+      # extension. wit/deps (gitignored fetch output) is subtracted so
       # a local fetch cannot change the derivation — the FOD overlay below is the
       # only source of those files. fileset.fileFilter predicates only see
       # name/type/hasExt, so the deps directories are removed with difference.
       srcDir = repoRoot + "/src";
       srcExtensions =
-        file:
-        file.hasExt "rs"
+        extra: file:
+        lib.any file.hasExt extra
+        || file.hasExt "rs"
         || file.hasExt "wit"
         || file.hasExt "toml"
         || file.hasExt "lock"
@@ -38,25 +39,36 @@
           )
         )
       );
-      srcWithoutWitDeps =
+      # `extra` names further extensions the build reads with include_str!/asset!
+      # (the wasm guests and the web shell embed .json fixtures and the .css bundle).
+      mkSrcWithWit =
+        extra:
         let
-          base = lib.fileset.fileFilter srcExtensions srcDir;
+          srcWithoutWitDeps =
+            let
+              base = lib.fileset.fileFilter (srcExtensions extra) srcDir;
+            in
+            if witDepsDirs == [ ] then base else lib.fileset.difference base (lib.fileset.unions witDepsDirs);
+          src = lib.fileset.toSource {
+            root = repoRoot;
+            fileset = lib.fileset.unions [
+              (repoRoot + "/Cargo.toml")
+              (repoRoot + "/Cargo.lock")
+              (repoRoot + "/.cargo")
+              srcWithoutWitDeps
+            ];
+          };
         in
-        if witDepsDirs == [ ] then base else lib.fileset.difference base (lib.fileset.unions witDepsDirs);
-      src = lib.fileset.toSource {
-        root = repoRoot;
-        fileset = lib.fileset.unions [
-          (repoRoot + "/Cargo.toml")
-          (repoRoot + "/Cargo.lock")
-          (repoRoot + "/.cargo")
-          srcWithoutWitDeps
-        ];
-      };
-      srcWithWit = pkgs.runCommand "townframe-src-with-wit-deps" { } ''
-        cp -r ${src} $out
-        chmod -R u+w $out
-        cp -r ${witDeps}/. $out/
-      '';
+        pkgs.runCommand "townframe-src-with-wit-deps" { } ''
+          cp -r ${src} $out
+          chmod -R u+w $out
+          cp -r ${witDeps}/. $out/
+        '';
+      srcWithWit = mkSrcWithWit [ ];
+      guestSrc = mkSrcWithWit [
+        "json"
+        "css"
+      ];
 
       # Cargo.lock pins git dependencies by raw revision. Some of those
       # revisions are orphaned commits (reachable by SHA, contained in no ref),
@@ -66,13 +78,24 @@
       # by building each fetchgit call with lib.fakeHash and recording `got`.
       # Refresh: fakeHash one of these, rebuild, copy the new value back.
       # FIXME: consider extracting this from the cargo.toml file
+      git = repo: rev: "git+https://github.com/dman-os/${repo}?rev=${rev}#${rev}";
       outputHashes = {
-        "git+https://github.com/dman-os/autosurgeon?rev=6a1df66f667667f1d14bc2272c4d426815de66b8#6a1df66f667667f1d14bc2272c4d426815de66b8" =
+        ${git "autosurgeon" "6a1df66f667667f1d14bc2272c4d426815de66b8"} =
           "sha256-dIhUdjaf/dlWufOu6X7694DqP7MHRpvOBdzXx6HFOi4=";
-        "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" =
-          "sha256-LoNc7m7mRsK/lEOfibaji+ya+PXk5GOkZzSpFQ1GSho=";
-        "git+https://github.com/dman-os/iroh-blobs?rev=b3d641036c807b30d9fc62fd22a83801a38386d3#b3d641036c807b30d9fc62fd22a83801a38386d3" =
+        ${git "dioxus" "49e05de24022388ee0e36802edf59897dbe41db3"} =
+          "sha256-yiNdFaKGLzjZxvh9GqdQ9QlUy1Bb3bxvyDKDg2BfmvM=";
+        ${git "iroh-blobs" "b3d641036c807b30d9fc62fd22a83801a38386d3"} =
           "sha256-9S3fDD2eMHVECWvnX32I+RnPUNd2lRp3S6+TPZRBYGw=";
+        ${git "wasmtime" "38daa7ef0db706828c6fdfd87302fe00212db084"} =
+          "sha256-XMnN2fcCym3pYd2ReATK/TjytsRGjQWVVsCJZWtB+9M=";
+        ${git "blitz" "ffaf2bd0518a2cf7571c43f08327bd580b1871ca"} =
+          "sha256-RK6XcHOCVl4qmlMnWl7q1bB27ynukmPxwx0j+5+MZhc=";
+        ${git "subduction" "5f418129c5188750a34847d2624ace583c192c59"} =
+          "sha256-4cvvJQol5wkeVJmW8wzUy7S8Qsdl8PYyH1y/K/eIjRU=";
+        ${git "wasm-component-model-polyfill" "2a8d11a01d6630fabcca1730423e7103b4466d41"} =
+          "sha256-Vqp3Je39JmnoRkBLmNTL3m6VmkcSsLBzV3UFKF1OVNI=";
+        ${git "keyhive" "a84137d1f2bdd81cc6c883253a534cc3f0380b5e"} =
+          "sha256-8Iok2MexAWnGFov2D+6jC+GsMhDLfOPlufYDRMLz9Ls=";
       };
       # wash-runtime comes from our fork (dman-os/wasmCloud, branch
       # townframe-changes); its pinned commit is on a branch, so it needs no
@@ -145,138 +168,216 @@
         fi
       '';
 
-      commonArgs = {
-        pname = "daybook-cli";
-        inherit version;
+      # The second guest workspace (src/wasm_utils_rs, builds intxt_nodule_guest)
+      # has its own lock and so its own vendor set. It shares the dioxus,
+      # autosurgeon and polyfill pins with the root lock but resolves to its own
+      # vendor directory; it has no wash-runtime, so crane's plain vendoring is
+      # enough.
+      guestVendorDir = craneLib.vendorCargoDeps {
         src = srcWithWit;
-        inherit cargoVendorDir;
-        cargoExtraArgs = "--locked -p daybook_cli";
-        doCheck = false;
-
-        # mltools embeds these with env!() at compile time (src/mltools/models.rs).
-        # Real credentials must never be derivation inputs — they would land in the
-        # world-readable Nix store — so the baked defaults are empty and a packaged
-        # binary has to take its cloud config from the runtime environment.
-        OLLAMA_URL = "";
-        OLLAMA_USERNAME = "";
-        OLLAMA_PASSWORD = "";
-
-        # ort-sys (via fastembed) probes ORT_LIB_LOCATION for a *static* archive
-        # by default, which nixpkgs does not ship; ORT_PREFER_DYNAMIC_LINK makes
-        # it link the provided shared library instead, keeping the build offline.
-        ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
-        ORT_PREFER_DYNAMIC_LINK = "1";
-        # ort-sys' copy-dylibs step symlinks the dylibs into OUT_DIR's third
-        # ancestor plus `examples/` and `deps/` subdirectories without creating
-        # them first, which panics with NotFound on a fresh target dir.
-        preBuild = "mkdir -p target/release/build/examples target/release/build/deps";
-
-        nativeBuildInputs = [
-          pkgs.pkg-config
-          pkgs.cmake
-          pkgs.protobuf
-          pkgs.llvmPackages.libclang
-        ];
-        buildInputs = [
-          pkgs.openssl
-          pkgs.sqlite
-          pkgs.onnxruntime
-        ]
-        ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.stdenv.cc.cc.lib ];
-
-        LIBCLANG_PATH = "${lib.getLib pkgs.llvmPackages.libclang}/lib";
-      }
-      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-        # Same headers bindgen sees inside the ci-rust shell.
-        BINDGEN_EXTRA_CLANG_ARGS = "-I${pkgs.linuxHeaders}/include -idirafter ${pkgs.stdenv.cc.libc.dev}/include";
+        cargoLock = repoRoot + "/src/wasm_utils_rs/Cargo.lock";
+        outputHashes = lib.getAttrs [
+          (git "autosurgeon" "6a1df66f667667f1d14bc2272c4d426815de66b8")
+          (git "dioxus" "49e05de24022388ee0e36802edf59897dbe41db3")
+          (git "wasm-component-model-polyfill" "2a8d11a01d6630fabcca1730423e7103b4466d41")
+        ] outputHashes;
       };
 
-      cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-      cliBuild = craneLib.buildPackage (
-        commonArgs
+      # Wasm guests. Guests resolve their features in isolation (CONTRIBUTING.md on
+      # `resolver.feature-unification`), as x/daytxt-packages.ts builds them.
+      isolated = "--config 'resolver.feature-unification=\"selected\"'";
+      microNames = [
+        "counter"
+        "layout"
+        "lab"
+        "review"
+        "theme_lab"
+      ];
+      # The package file name of a micro crate: `micro_theme_lab` ships as `theme-lab`.
+      microFile = lib.replaceStrings [ "_" ] [ "-" ];
+      # Build scripts and proc macros still run on the host, so the guests keep
+      # the host-side native tools the root workspace's build scripts expect.
+      guestNativeBuildInputs = [
+        pkgs.pkg-config
+        pkgs.cmake
+        pkgs.protobuf
+        pkgs.llvmPackages.libclang
+      ];
+      wasmArgs = {
+        version = version;
+        src = guestSrc;
+        inherit cargoVendorDir;
+        doCheck = false;
+        nativeBuildInputs = guestNativeBuildInputs;
+        LIBCLANG_PATH = "${lib.getLib pkgs.llvmPackages.libclang}/lib";
+      };
+
+      # The micro components, `wasm-release`, for wasm32-wasip3. rustc's target
+      # emits a component directly: no adapter step.
+      microsArgs = wasmArgs // {
+        pname = "daytxt-micros";
+        CARGO_BUILD_TARGET = "wasm32-wasip3";
+        CARGO_PROFILE = "wasm-release";
+        cargoExtraArgs = "--locked ${isolated} ${
+          lib.concatMapStringsSep " " (name: "-p micro_${name}") microNames
+        }";
+      };
+      daytxt-micros = craneLib.buildPackage (
+        microsArgs
         // {
-          inherit cargoArtifacts;
-          meta.mainProgram = "daybook_cli";
+          cargoArtifacts = craneLib.buildDepsOnly microsArgs;
+          doInstallCargoArtifacts = false;
+          installPhaseCommand = ''
+            mkdir -p $out
+            ${lib.concatMapStringsSep "\n" (
+              name:
+              "cp target/wasm32-wasip3/wasm-release/micro_${name}.wasm $out/${microFile name}.component.wasm"
+            ) microNames}
+          '';
         }
       );
-      # Exercises the installed binary end to end in an isolated HOME and
-      # repo with an empty environment: init, two documents, persistence across
-      # invocations and re-init, dump, and the uninitialized/missing-document
-      # failures. Lives in passthru.tests rather than `checks` so the
-      # `nix flake check` lint hook does not have to build the whole CLI; CI
-      # builds it with `nix build .#daybook-cli.tests.round-trip`.
-      roundTrip = pkgs.writeShellApplication {
-        name = "daybook-cli-round-trip";
-        runtimeInputs = [
-          pkgs.coreutils
-          pkgs.gnugrep
-          cliBuild
-        ];
-        text = ''
-          work=$(mktemp -d)
-          trap 'rm -rf "$work"' EXIT
-          export HOME="$work/home"
-          export XDG_CONFIG_HOME="$HOME/config"
-          export XDG_CACHE_HOME="$HOME/cache"
-          export DAYB_REPO_PATH="$work/repo"
-          export RUST_LOG=error,wflow::kvstore=off
-          export NO_COLOR=1
-          mkdir -p "$HOME"
-          cd "$work"
 
-          daybook_cli --help > help.txt
-          grep -F 'Usage: daybook_cli' help.txt
-          if daybook_cli ls > uninitialized.txt 2>&1; then
-            echo 'ls unexpectedly succeeded before initialization' >&2
-            exit 1
-          fi
-          daybook_cli init
-          daybook_cli ls > empty.txt
-          if grep -F 'Untitled' empty.txt; then
-            echo 'fresh repository contains a document' >&2
-            exit 1
-          fi
-          first=$(daybook_cli touch)
-          second=$(daybook_cli touch)
-          test -n "$first"
-          test -n "$second"
-          test "$first" != "$second"
-          daybook_cli init
-          daybook_cli ls > list.txt
-          grep -F -- "$first" list.txt
-          grep -F -- "$second" list.txt
-          for id in "$first" "$second"; do
-            daybook_cli cat "$id" > doc.txt
-            grep -F -- "$id" doc.txt
-            grep -F 'Untitled' doc.txt
-          done
-          daybook_cli dump > dump.txt
-          test -s dump.txt
-          if daybook_cli cat nonexistent-document > missing.txt 2>&1; then
-            echo 'cat unexpectedly succeeded for a missing document' >&2
-            exit 1
-          fi
-        '';
+      # The manifest sidecars the desktop shell pairs with each component: each
+      # micro's manifest crate emits its own through a native example (host build).
+      manifestsArgs = wasmArgs // {
+        pname = "daytxt-manifests";
+        # Host binaries: clay_store links the system sqlite.
+        buildInputs = [ pkgs.sqlite ];
+        # Isolated features: workspace unification would build the desktop
+        # renderer's GTK stack (glib-sys) for a manifest emitter.
+        cargoExtraArgs = "--locked ${isolated} ${
+          lib.concatMapStringsSep " " (name: "-p micro_${name}_manifest") microNames
+        }";
       };
-      daybook-cli = cliBuild.overrideAttrs (prev: {
-        passthru = (prev.passthru or { }) // {
-          tests.round-trip = pkgs.runCommand "daybook-cli-round-trip" { } ''
-            ${pkgs.coreutils}/bin/env -i ${lib.getExe roundTrip}
-            touch $out
+      daytxt-manifests = craneLib.buildPackage (
+        manifestsArgs
+        // {
+          cargoArtifacts = craneLib.buildDepsOnly manifestsArgs;
+          doInstallCargoArtifacts = false;
+          # The build phase runs the emitters, so there is no cargo build log.
+          doNotPostBuildInstallCargoBinaries = true;
+          buildPhaseCargoCommand = lib.concatMapStringsSep "\n" (name: ''
+            cargo run --release --locked ${isolated} -q -p micro_${name}_manifest --example emit_manifest -- $PWD/${microFile name}.manifest.json
+          '') microNames;
+          installPhaseCommand = ''
+            mkdir -p $out
+            cp *.manifest.json $out/
           '';
-        };
-      });
+        }
+      );
+
+      # intxt's nodule handler lives in the second guest workspace
+      # (src/wasm_utils_rs, own lock and vendor set), always `--release`; that
+      # workspace's profile strips this one guest's final link.
+      intxtGuestArgs = wasmArgs // {
+        pname = "intxt-guest";
+        cargoVendorDir = guestVendorDir;
+        CARGO_BUILD_TARGET = "wasm32-wasip3";
+        cargoExtraArgs = "--locked --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest";
+      };
+      intxt-guest = craneLib.buildPackage (
+        intxtGuestArgs
+        // {
+          cargoArtifacts = null;
+          doInstallCargoArtifacts = false;
+          # crane's post-build binary scan runs cargo against the root manifest,
+          # whose git sources are not in this workspace's vendor set.
+          doNotPostBuildInstallCargoBinaries = true;
+          installPhaseCommand = ''
+            mkdir -p $out
+            cp src/wasm_utils_rs/target/wasm32-wasip3/release/intxt_nodule_guest.wasm $out/intxt.guest.wasm
+          '';
+        }
+      );
+
+      # The directories DAYTXT_PACKAGE_DIR points at: <name>.manifest.json,
+      # <name>.component.wasm and intxt.guest.wasm. The shell micro is compiled
+      # into the host and ships no package file. The shipping set is the lab micro
+      # plus the intxt guest (the hosted desktop refuses to boot without
+      # intxt.guest.wasm); the dev set is every micro, which the web build and
+      # tests that open counter/layout/review read.
+      mkPackages =
+        name: names:
+        pkgs.runCommand name { } ''
+          mkdir -p $out
+          ${lib.concatMapStringsSep "\n" (n: ''
+            cp ${daytxt-micros}/${microFile n}.component.wasm ${daytxt-manifests}/${microFile n}.manifest.json $out/
+          '') names}
+          cp ${intxt-guest}/intxt.guest.wasm $out/
+        '';
+      daytxt-packages = mkPackages "daytxt-packages" [ "lab" ];
+      daytxt-packages-dev = mkPackages "daytxt-packages-dev" microNames;
+
+      # daytxt_web for the browser: the raw cargo wasm module, `wasm-release`,
+      # isolated features. wasm-bindgen and the site assembly are the next step.
+      webArgs = wasmArgs // {
+        pname = "daytxt-web-wasm";
+        CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+        CARGO_PROFILE = "wasm-release";
+        cargoExtraArgs = "--locked ${isolated} -p daytxt_web --bin daytxt_web";
+      };
+      daytxt-web-wasm = craneLib.buildPackage (
+        webArgs
+        // {
+          cargoArtifacts = craneLib.buildDepsOnly webArgs;
+          doInstallCargoArtifacts = false;
+          installPhaseCommand = ''
+            mkdir -p $out
+            cp target/wasm32-unknown-unknown/wasm-release/daytxt_web.wasm $out/
+          '';
+        }
+      );
+
+      # The static site, assembled by x/daytxt-site.ts: the same script
+      # x/daytxt-web.ts runs in the dev loop. Only static output; serving it
+      # (and its Content-Security-Policy header) is not part of this package.
+      daytxt-web =
+        let
+          siteSrc = lib.fileset.toSource {
+            root = repoRoot;
+            fileset = lib.fileset.unions [
+              (repoRoot + "/Cargo.lock")
+              (repoRoot + "/x/daytxt-site.ts")
+              (repoRoot + "/src/clay_dioxus_kit/assets/tailwind.css")
+            ];
+          };
+        in
+        pkgs.runCommand "daytxt-web"
+          {
+            nativeBuildInputs = [
+              pkgs.deno
+              # Must match the single wasm-bindgen crate in Cargo.lock; the site
+              # script asserts it. Same pin as the dev shells.
+              pkgs.wasm-bindgen-cli_0_2_127
+              pkgs.b3sum
+              pkgs.gzip
+            ];
+          }
+          ''
+            export DENO_DIR=$TMPDIR/deno
+            deno run --no-config --no-remote --allow-read --allow-write --allow-run \
+              ${siteSrc}/x/daytxt-site.ts \
+              --wasm ${daytxt-web-wasm}/daytxt_web.wasm \
+              --packages ${daytxt-packages-dev} \
+              --tailwind ${siteSrc}/src/clay_dioxus_kit/assets/tailwind.css \
+              --cargo-lock ${siteSrc}/Cargo.lock \
+              --out $out
+          '';
     in
     {
       packages = {
-        inherit daybook-cli;
+        guest-cargo-vendor-dir = guestVendorDir;
+        inherit
+          daytxt-micros
+          daytxt-manifests
+          intxt-guest
+          daytxt-packages
+          daytxt-packages-dev
+          daytxt-web-wasm
+          daytxt-web
+          ;
         wit-deps = witDeps;
         cargo-vendor-dir = cargoVendorDir;
-      };
-      apps.daybook-cli = {
-        type = "app";
-        program = lib.getExe daybook-cli;
-        meta.description = "Daybook local-first document CLI";
       };
     };
 }

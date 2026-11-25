@@ -34,6 +34,7 @@ pub use supervisor::Lease;
 pub use supervisor::LocalFuture;
 pub use supervisor::MicroId;
 pub use supervisor::MicroState;
+pub use supervisor::Necessity;
 pub use supervisor::Requirement;
 pub use supervisor::Root;
 pub use supervisor::StartError;

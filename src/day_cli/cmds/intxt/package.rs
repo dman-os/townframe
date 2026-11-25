@@ -352,7 +352,7 @@ impl<'a> Packaging<'a> {
     /// The text that names `drawer`'s intxt outside the node ([`generic::Intxt::reference`]),
     /// hinting at this node and the peers it is configured to sync with.
     pub(crate) fn reference(&self, drawer: &DocId) -> Res<DocReference> {
-        let via = crate::context::NodeDir::new(self.node_dir.to_owned())
+        let via = day_node::NodeDir::new(self.node_dir.to_owned())
             .settings()?
             .via_keys()?;
         Ok(generic::Intxt::reference(drawer, via))

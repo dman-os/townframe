@@ -87,23 +87,17 @@ pub struct Plan {
     pub commands: Vec<Vec<String>>,
 }
 
-const PILOT_API_PACKAGES: &[&str] = &[
-    "big_sync_core",
-    "daybook_ffi",
-    "daybook_pdk",
-    "daybook_types",
-    "wflow_sdk",
-];
+const PILOT_API_PACKAGES: &[&str] = &["big_sync_core", "wflow_sdk"];
 
 fn infer_role(name: &str) -> LayerRole {
     match name {
         "utils_rs" | "sqlite_rs" | "am_utils_rs" | "wasm_utils_rs" | "secrets_rs" => {
             LayerRole::Foundation
         }
-        "daybook_types" | "big_sync_core" | "wflow_core" => LayerRole::Domain,
-        "daybook_pdk" | "wflow_sdk" | "daybook_ffi" => LayerRole::Interface,
-        "plug_test" | "plug_plabels" | "plug_dayledger" | "test_wflows" => LayerRole::Plugin,
-        "daybook_cli" | "btress_sysadmin" => LayerRole::Application,
+        "big_sync_core" | "wflow_core" => LayerRole::Domain,
+        "wflow_sdk" => LayerRole::Interface,
+        "test_wflows" => LayerRole::Plugin,
+        "btress_sysadmin" => LayerRole::Application,
         "xtask" => LayerRole::Tooling,
         _ => LayerRole::Runtime,
     }
@@ -383,7 +377,7 @@ impl Repository {
                 role,
                 dependency_reason: reason.into(),
                 allowed_dependencies: report.dependencies.get(name).cloned().unwrap_or_default(),
-                allow_external_api_types: matches!(name.as_str(), "utils_rs" | "daybook_ffi"),
+                allow_external_api_types: name.as_str() == "utils_rs",
                 api,
                 builds: BTreeMap::new(),
                 exemptions: findings
@@ -539,7 +533,6 @@ pub fn files(root: &Path) -> Res<Vec<PathBuf>> {
                         | ".gradle"
                         | "build"
                         | ".agent-duel"
-                        | "daybook_compose"
                 )
             )
         })

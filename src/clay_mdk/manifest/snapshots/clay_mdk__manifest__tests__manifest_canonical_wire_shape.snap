@@ -8,18 +8,19 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
     "presentation": "townframe:dayframe/presentation-events@0.4.0",
     "installer": null
   },
-  "publications": [
-    {
-      "name": "view",
-      "kind": "presentation",
-      "contract": null
+  "endpoints": {
+    "count": {
+      "$type": "org.example.clay.micro.manifest#methodEndpoint",
+      "nsid": "org.example.test.counter.count"
     },
-    {
-      "name": "increment",
-      "kind": "call",
-      "contract": "org.example.test.counter.increment"
+    "increment": {
+      "$type": "org.example.clay.micro.manifest#callbackEndpoint",
+      "implements": "org.example.test.counter.increment"
+    },
+    "view": {
+      "$type": "org.example.clay.micro.manifest#viewEndpoint"
     }
-  ],
+  },
   "requires": [
     {
       "binding": "shelf",
@@ -68,7 +69,7 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
       "id": "toolbar-button",
       "binding": "tally-book",
       "key": "counter",
-      "payload": {
+      "value": {
         "badges": [
           1,
           null,
@@ -81,10 +82,10 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
         "order": 2,
         "slot": "toolbar"
       },
-      "attachments": [
+      "links": [
         {
           "index": 0,
-          "publication": "view"
+          "endpoint": "view"
         }
       ]
     }

@@ -20,6 +20,18 @@ crate-type = ["cdylib"]
 required-features = ["guest"]
 
 [[example]]
+name = "egress"
+path = "egress_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["guest"]
+
+[[example]]
+name = "dispatch"
+path = "dispatch_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["guest"]
+
+[[example]]
 name = "trapper"
 path = "trapper_fixture.rs"
 crate-type = ["cdylib"]
@@ -43,36 +55,60 @@ crate-type = ["cdylib"]
 required-features = ["guest"]
 
 [dependencies]
+#
+# internal
+method_core.workspace = true
+service_core_rs.workspace = true
+service_client_core_rs = { workspace = true, optional = true }
+# The guest's `Context::call` is the nodule transport itself: `big_ndk`'s `wasi:http` client to
+# `dispatch.local`, not a second implementation.
+big_ndk = { workspace = true, optional = true }
+# The guest's `Context::call` hands its answer from the incarnation's task to the caller.
+futures.workspace = true
+bytes.workspace = true
+
 clay_collection = { workspace = true }
 wit-bindgen = { workspace = true, features = ["async", "macros", "realloc", "async-spawn", "inter-task-wakeup"] }
 serde_json.workspace = true
 serde = { workspace = true, features = ["derive"] }
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "signals", "hooks", "html"], optional = true }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3", default-features = false, features = ["macro", "signals", "hooks", "html", "document"], optional = true }
 dioxus-core = { workspace = true, optional = true }
 dioxus-html = { workspace = true, optional = true }
 clay_host = { workspace = true, optional = true }
 clay_docs = { workspace = true, optional = true }
 clay_guest_session = { workspace = true, optional = true }
 ciborium = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["sync", "rt", "macros"], optional = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"], optional = true }
+# `Context::now` in-process: `std::time::Instant` on native, `performance.now()` in the browser.
+web-time = { version = "1.1.0", optional = true }
 thiserror = { workspace = true, optional = true }
 clay_dioxus = { workspace = true, optional = true }
 clay_surface = { workspace = true, optional = true }
 clay_rt_wcmp = { workspace = true, optional = true }
-daybook_types = { workspace = true, default-features = false, features = ["manifest"], optional = true }
 blake3 = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clay_rt_wasmtime = { workspace = true, optional = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# `Context::sleep` in-process in the browser, which has no tokio timer driver: `setTimeout`.
+gloo-timers = { version = "0.3.0", features = ["futures"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # The lifecycle fixture decodes its CBOR `initial-context.arguments`.
 ciborium.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+#
+# internal
 # The engine-conformance scenarios, which the in-process run (`native::conformance_tests`) joins.
 clay_guest_session = { workspace = true, features = ["test-utils"] }
 clay_surface = { workspace = true }
+# The counter fixture renders the kit's `Button`; the wire test renders the same one natively.
+clay_dioxus_kit = { workspace = true }
+
+#
+# misc
 insta.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 # Mirrors `clay_rt_wasmtime`: wasmtime reached only through wash-runtime's
@@ -94,7 +130,7 @@ wit = []
 # over the host sessions. A context publishes through the `clay_dioxus::NativeComponents`
 # registry its `Resources` carry. Micro crates depend on this, never on the host-side crates
 # directly.
-in_process = ["contract", "dep:clay_host", "dep:clay_docs", "dep:clay_guest_session", "dep:ciborium", "dep:tokio", "dep:daybook_types", "dep:dioxus-core", "dep:thiserror", "dep:clay_dioxus"]
+in_process = ["contract", "dep:web-time", "dep:gloo-timers", "dep:clay_host", "dep:clay_docs", "dep:clay_guest_session", "dep:ciborium", "dep:tokio", "dep:dioxus-core", "dep:thiserror", "dep:clay_dioxus"]
 # The Dioxus half of the in-process backend: the view-side slot components and hooks. Micros with a host-linked view need this; contract
 # crates and headless compositions do not.
 view = ["in_process", "dep:dioxus"]
@@ -112,7 +148,7 @@ package = ["dep:blake3"]
 # The guest backend: the same `Context` authoring surface over the WIT imports a wasm micro is
 # linked against, the Dioxus guest VirtualDom adapter (GuestDom, WireMutations), and the
 # `export_micro!` entry point.
-guest = ["wit", "contract", "dep:dioxus", "dep:dioxus-core", "dep:dioxus-html", "dep:ciborium", "dep:thiserror"]
+guest = ["wit", "contract", "dep:big_ndk", "dep:service_client_core_rs", "dep:clay_surface", "dep:dioxus", "dep:dioxus-core", "dep:dioxus-html", "dep:ciborium", "dep:thiserror"]
 
 [lints]
 workspace = true

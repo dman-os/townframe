@@ -160,25 +160,72 @@ fn panes_are_named_regions_and_the_handle_a_named_separator() {
     assert_eq!(page.attr(handle, "aria-valuemax").as_deref(), Some("100"));
     assert_eq!(page.attr(handle, "data-state").as_deref(), Some("idle"));
     let sidebar = page.by_role("region", "Sidebar");
-    assert_eq!(page.style(sidebar, "flex").as_deref(), Some("1 1 0px"));
+    assert_eq!(
+        page.custom_property(sidebar, "--ct-sections-weight")
+            .as_deref(),
+        Some("1")
+    );
 }
 
 #[test]
-fn panes_handles_and_the_gesture_overlay_stack_on_the_layer_scale() {
+fn the_sections_name_their_parts_and_hand_their_geometry_to_the_stylesheet() {
     let (mut page, _) = render(Renderer::Blitz);
-    let layer = |page: &Page, node| page.style(node, "z-index");
-    // A pane is a stacking context of its own, so what an app bar inside it does cannot
-    // climb over the handle that overlaps its edge.
-    let pane = page.by_role("region", "Sidebar");
-    assert_eq!(layer(&page, pane).as_deref(), Some(Layer::Content.css()));
+    let root = page.by_class("ct-sections");
+    // A pane, then the handle that divides it from the next: the seam is a part of the run.
+    assert_eq!(page.parts(root), ["pane", "handle", "pane"]);
+    let sidebar = page.by_role("region", "Sidebar");
+    assert_eq!(page.attr(sidebar, "data-state").as_deref(), Some("open"));
+    assert_eq!(
+        page.custom_property(sidebar, "--ct-sections-weight")
+            .as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        page.custom_property(sidebar, "--ct-sections-min")
+            .as_deref(),
+        Some("100px")
+    );
+    // No limit, no custom property: the stylesheet's own default is "none".
+    assert_eq!(page.custom_property(sidebar, "--ct-sections-max"), None);
     let handle = page.by_role("separator", "Resize Sidebar and Content");
-    assert_eq!(layer(&page, handle).as_deref(), Some(Layer::Raised.css()));
-    // 24 px wide, centred on the seam: the one pressable under 48 px (`KIT-106`).
-    assert_eq!(page.style(handle, "width").as_deref(), Some("24px"));
-    assert_eq!(page.style(handle, "margin").as_deref(), Some("0 -12px"));
+    assert_eq!(page.parts(handle), ["grip"]);
+    assert_eq!(page.attr(handle, "data-edge"), None);
     page.pointer(handle, "pointerdown", 200.0);
     let overlay = page.by_role("presentation", "");
-    assert_eq!(layer(&page, overlay).as_deref(), Some(Layer::Gesture.css()));
+    assert_eq!(page.attr(overlay, "data-part").as_deref(), Some("gesture"));
+    assert_eq!(page.parts(root), ["pane", "handle", "pane", "gesture"]);
+}
+
+#[test]
+fn a_limited_pane_hands_over_its_maximum_in_px() {
+    fn limited() -> Element {
+        rsx! {
+            Sections {
+                label: "Shell",
+                panes: vec![
+                    SectionPane { name: "Sidebar".into(), content: rsx! { "side" } },
+                    SectionPane { name: "Content".into(), content: rsx! { "main" } },
+                ],
+                split: Split::new(vec![1.0, 3.0], 800.0).rule(
+                    0,
+                    SizeRule { min: 160.0, max: 480.0, ..SizeRule::default() },
+                ),
+                on_resize: |_| {},
+            }
+        }
+    }
+    let page = Page::with_props(|()| limited(), ());
+    let sidebar = page.by_role("region", "Sidebar");
+    assert_eq!(
+        page.custom_property(sidebar, "--ct-sections-min")
+            .as_deref(),
+        Some("160px")
+    );
+    assert_eq!(
+        page.custom_property(sidebar, "--ct-sections-max")
+            .as_deref(),
+        Some("480px")
+    );
 }
 
 #[test]
@@ -191,7 +238,11 @@ fn a_drag_previews_live_and_reports_once_on_release() {
     let overlay = page.by_role("presentation", "");
     page.pointer(overlay, "pointermove", 260.0);
     let sidebar = page.by_role("region", "Sidebar");
-    assert_eq!(page.style(sidebar, "flex").as_deref(), Some("1.3 1 0px"));
+    assert_eq!(
+        page.custom_property(sidebar, "--ct-sections-weight")
+            .as_deref(),
+        Some("1.3")
+    );
     assert!(reports.borrow().is_empty(), "nothing is reported mid-drag");
     page.pointer(overlay, "pointerup", 260.0);
     assert_eq!(reported_sizes(&reports), [260.0, 540.0]);
@@ -262,7 +313,11 @@ fn a_cancelled_gesture_reports_nothing() {
     assert!(reports.borrow().is_empty());
     assert!(!page.has_role("presentation", ""));
     let sidebar = page.by_role("region", "Sidebar");
-    assert_eq!(page.style(sidebar, "flex").as_deref(), Some("1 1 0px"));
+    assert_eq!(
+        page.custom_property(sidebar, "--ct-sections-weight")
+            .as_deref(),
+        Some("1")
+    );
 }
 
 #[test]

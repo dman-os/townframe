@@ -3,7 +3,7 @@
 // The btress_sysadmin SSR HTML references its hydrate assets from
 // http://localhost:3001 (see app.rs HydrationScripts root) — the wasm
 // component's own /public volume serving does not work, so this static
-// server is the fallback. Run alongside `daybook_cli server`.
+// server is the fallback. Run alongside the btress server.
 
 const siteDir = new URL("../src/btress_sysadmin/target/site/", import.meta.url);
 const port = 3001;

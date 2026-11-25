@@ -36,6 +36,7 @@ pub struct ShellNavButton;
 
 impl ComponentDecl for ShellNavButton {
     const NAME: &'static str = NAV_BUTTON;
+    const IMPLEMENTS: Option<&'static str> = Some(NAV_BUTTON_CONTRACT);
 }
 
 /// The arrangement weights facet.

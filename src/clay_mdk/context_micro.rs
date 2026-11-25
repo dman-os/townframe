@@ -8,8 +8,8 @@
 //! declared presentation `detail` by name. Engine conformance runs it as `lifecycle_conformance::context_collections_and_calls`.
 //!
 //! It also follows another micro's presentation the way a slot does. The presentation `slot`
-//! renders a [`PresentationSlot`] over the attachment of the `feed` row keyed `view`; the call
-//! `follow` waits for that row, then redeems its attachment and reports each step (`mounted`
+//! renders a [`PresentationSlot`] over the link of the `feed` row keyed `view`; the call
+//! `follow` waits for that row, then redeems its link and reports each step (`mounted`
 //! when a redemption succeeded and the provider incarnation it holds then ended as `revoked`,
 //! `unavailable` for each failed redemption, after which it waits for the reference's status to
 //! change). Conformance runs it as `lifecycle_conformance::context_follows_a_provider`, the
@@ -17,7 +17,7 @@
 //!
 //! Its calls `hold` and `release` retain a row's call and drop that binding
 //! (`lifecycle_conformance::context_retains_a_call`). Its call `probe` reports what the guest sees
-//! through a row's attachment: the reference's status, then what a call and a `retain_call`
+//! through a row's link: the reference's status, then what a call and a `retain_call`
 //! through it answer (`lifecycle_conformance::context_sees_a_closed_provider_revoked`).
 //!
 //! Two of these micros can depend on each other (`lifecycle_conformance::context_peers_*`): the
@@ -47,81 +47,42 @@ use clay_mdk::Collection;
 use clay_mdk::CollectionDecl;
 use clay_mdk::ComponentDecl;
 use clay_mdk::Context;
+use clay_mdk::Endpoint;
 use clay_mdk::Entrypoints;
 use clay_mdk::Error;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
 use clay_mdk::Nsid;
 use clay_mdk::PresentationComponent;
-use clay_mdk::PublicationDeclaration;
-use clay_mdk::PublicationKind;
 use clay_mdk::Registration;
 use clay_mdk::Request;
-use clay_mdk::RowAttachment;
+use clay_mdk::RowLink;
 use clay_mdk::hooks::PresentationSlot;
 use clay_mdk::hooks::use_rows;
 use dioxus::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// The `feed` row whose attachment `slot` shows and `follow` waits for.
+/// The `feed` row whose link `slot` shows and `follow` waits for.
 const VIEW: &str = "view";
 
 pub fn manifest() -> MicroManifest {
     MicroManifest {
         entrypoints: Entrypoints::micro_client(),
-        publications: vec![
-            PublicationDeclaration {
-                name: "rows".into(),
-                kind: PublicationKind::Call,
-                contract: Some(Nsid::literal("org.example.clay.test.context.rows")),
-            },
-            PublicationDeclaration {
-                name: "attach".into(),
-                kind: PublicationKind::Call,
-                contract: Some(Nsid::literal("org.example.clay.test.context.attach")),
-            },
-            PublicationDeclaration {
-                name: "follow".into(),
-                kind: PublicationKind::Call,
-                contract: Some(Nsid::literal("org.example.clay.test.context.follow")),
-            },
-            PublicationDeclaration {
-                name: "hold".into(),
-                kind: PublicationKind::Call,
-                contract: Some(Nsid::literal("org.example.clay.test.context.hold")),
-            },
-            PublicationDeclaration {
-                name: "release".into(),
-                kind: PublicationKind::Call,
-                contract: Some(Nsid::literal("org.example.clay.test.context.release")),
-            },
-            PublicationDeclaration {
-                name: "echo".into(),
-                kind: PublicationKind::Call,
-                contract: Some(Nsid::literal("org.example.clay.test.context.echo")),
-            },
-            PublicationDeclaration {
-                name: "relay".into(),
-                kind: PublicationKind::Call,
-                contract: Some(Nsid::literal("org.example.clay.test.context.relay")),
-            },
-            PublicationDeclaration {
-                name: "probe".into(),
-                kind: PublicationKind::Call,
-                contract: Some(Nsid::literal("org.example.clay.test.context.probe")),
-            },
-            PublicationDeclaration {
-                name: "detail".into(),
-                kind: PublicationKind::Presentation,
-                contract: None,
-            },
-            PublicationDeclaration {
-                name: "slot".into(),
-                kind: PublicationKind::Presentation,
-                contract: None,
-            },
-        ],
+        endpoints: [
+            "rows", "attach", "follow", "hold", "release", "echo", "relay", "probe",
+        ]
+        .map(|name| {
+            (
+                name.into(),
+                Endpoint::Method {
+                    nsid: Nsid::literal(&format!("org.example.clay.test.context.{name}")),
+                },
+            )
+        })
+        .into_iter()
+        .chain(["detail", "slot"].map(|name| (name.into(), Endpoint::View { implements: None })))
+        .collect(),
         requires: ["presentation", "service", "peer"]
             .map(|binding| Request {
                 binding: binding.into(),
@@ -147,14 +108,14 @@ pub fn manifest() -> MicroManifest {
     }
 }
 
-/// The first attachment of the row `key`, once it exists.
-async fn attachment_of(
+/// The first link of the row `key`, once it exists.
+async fn link_of(
     collection: &mut Collection<String, String>,
     key: &str,
 ) -> Result<Capability, Error> {
     loop {
         if let Some(row) = collection.rows()?.iter().find(|row| row.key == key) {
-            return Ok(row.attachments[0].clone());
+            return Ok(row.links[0].clone());
         }
         collection.changed().await?;
     }
@@ -175,7 +136,7 @@ impl Drop for Held {
     }
 }
 
-/// The call `follow`: redeems the attachment of the `feed` row it is named, reporting each step
+/// The call `follow`: redeems the link of the `feed` row it is named, reporting each step
 /// as a `progress/<n>` row (see the module docs).
 fn publish_follow(context: &Context, feed: &Registration<String, String>) -> Result<(), Error> {
     context.publish_call("follow", {
@@ -184,7 +145,7 @@ fn publish_follow(context: &Context, feed: &Registration<String, String>) -> Res
             let feed = feed.clone();
             let mut collection = feed.collection().clone();
             async move {
-                let reference = attachment_of(&mut collection, &key).await?;
+                let reference = link_of(&mut collection, &key).await?;
                 let mut steps = Vec::new();
                 // Each step is also a row, so a host waiting on the collection learns the call
                 // got there.
@@ -222,7 +183,7 @@ fn publish_follow(context: &Context, feed: &Registration<String, String>) -> Res
     Ok(())
 }
 
-/// The calls `hold`, `probe` and `release` over the attachments of `collection`'s rows.
+/// The calls `hold`, `probe` and `release` over the links of `collection`'s rows.
 fn publish_retention(
     context: &Context,
     collection: &Collection<String, String>,
@@ -238,10 +199,7 @@ fn publish_retention(
             let mut collection = collection.clone();
             let held = Rc::clone(&held);
             async move {
-                let binding = attachment_of(&mut collection, &key)
-                    .await?
-                    .retain_call()
-                    .await?;
+                let binding = link_of(&mut collection, &key).await?.retain_call().await?;
                 let mut replies = Vec::new();
                 for text in ["one", "two"] {
                     replies.push(binding.call::<String, String>(&text.to_owned()).await?);
@@ -251,7 +209,7 @@ fn publish_retention(
             }
         }
     })?;
-    // `probe` reports the status of the row `key`'s attachment, then what a call and a
+    // `probe` reports the status of the row `key`'s link, then what a call and a
     // `retain_call` through it answer, each as the result's text: a reference the guest holds
     // must say `Revoked` and fail as `Revoked` once its provider incarnation closed, and neither
     // may start anything.
@@ -260,7 +218,7 @@ fn publish_retention(
         move |key: String| {
             let mut collection = collection.clone();
             async move {
-                let reference = attachment_of(&mut collection, &key).await?;
+                let reference = link_of(&mut collection, &key).await?;
                 let status = format!("{:?}", reference.status());
                 let call = reference.call::<String, String>(&"probe".to_owned()).await;
                 let retained = reference.retain_call().await.map(drop);
@@ -345,7 +303,7 @@ pub async fn activate(context: Context) -> Result<(), Error> {
         .rows()?
         .iter()
         .find(|row| row.key == "init")
-        .map(|row| row.attachments[0].clone());
+        .map(|row| row.links[0].clone());
     if let Some(peer) = init {
         peer.call::<String, String>(&"init".to_owned()).await?;
     }
@@ -372,7 +330,7 @@ pub async fn activate(context: Context) -> Result<(), Error> {
             let rows = use_rows(&collection);
             rsx! {
                 for row in rows.iter().filter(|row| row.key == VIEW) {
-                    PresentationSlot { key: "{row.key}", reference: row.attachments[0].clone() }
+                    PresentationSlot { key: "{row.key}", reference: row.links[0].clone() }
                 }
             }
         }
@@ -386,7 +344,7 @@ pub async fn activate(context: Context) -> Result<(), Error> {
             feed.put(
                 &"late".to_owned(),
                 &"late".to_owned(),
-                vec![RowAttachment::by_name(publication)],
+                vec![RowLink::by_name(publication)],
             )
             .await?;
             Ok(())

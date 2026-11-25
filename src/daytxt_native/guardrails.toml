@@ -1,0 +1,35 @@
+version = 1
+role = "application"
+dependency_reason = "claytxt microkernel layering: the native-engine half of the composition root (Wasmtime, SQLite, linked built-ins) shared by the desktop and mobile shells"
+allowed_dependencies = [
+    "big_cabinet",
+    "big_cabinet_core",
+    "clay_dioxus_kit",
+    "clay_docs",
+    "clay_guest_session",
+    "clay_host",
+    "clay_mdk",
+    "clay_node",
+    "clay_store",
+    "daytxt_core",
+    "intxt_core",
+    "micro_counter_manifest",
+    "micro_review_manifest",
+    "micro_sample",
+    "micro_settings",
+    "micro_settings_manifest",
+    "micro_shell",
+    "micro_shell_manifest",
+    "micro_theme_lab_manifest",
+    "micro_toolbar",
+    "micro_toolbar_manifest",
+    "service_utils_rs",
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+# The Wry-only build (no features: desktop must not compile Blitz), the Blitz build (Android, Blitz desktop), the Wry-hosted build (desktop and Android webviews) and both together.
+[builds.native]
+features = ["blitz", "wry"]
+powerset = true

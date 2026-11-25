@@ -1,6 +1,6 @@
 # clay_mdk — the Micro Development Kit
 
-The single authoring API every Dayframe micro compiles against (ADR 015 §5; collections per
+The single authoring API every claytxt micro compiles against (ADR 015 §5; collections per
 ADR 017). A micro is a **manifest** (`manifest.rs`) plus an **activation** (`activate(&Context)`)
 plus, usually, a published component. The MDK adds ergonomics, never authority: capabilities are still the
 host-issued resources, enforced by `clay_host`.
@@ -54,19 +54,19 @@ native, self-contained micro may keep `manifest()` inline (see `micro_sample`).
 
 1. Write the crate(s) following `micro_sample` (native) or `micro_counter` +
    `micro_counter_manifest` (guest).
-2. Append one entry to the shell's guest providers — `dayframe_desktop/composition.rs`
-   (`guest_providers`) for Wasmtime, `dayframe_web/main.rs` (`guest_providers`) for `wcmp` — a
+2. Append one entry to the shell's guest providers — `daytxt_desktop/composition.rs`
+   (`guest_providers`) for Wasmtime, `daytxt_web/main.rs` (`guest_providers`) for `wcmp` — a
    manifest plus its backend (`activate` fn, `component_package("name")`, or the `wcmp`
    package factory). Contribution targets are declared in *your* manifest; you never name
    another micro's contract from composition code.
 3. Add the instance's entry to the configuration maps in
-   `dayframe_composition::CompositionRuntime::new` (bindings route your requirements to
+   `daytxt_core::CompositionRuntime::new` (bindings route your requirements to
    providers by instance name).
 4. Name the crate `micro_<name>` (and `micro_<name>_manifest`) and it joins the gate
-   automatically: `x/check-dayframe.ts` derives its package list from `cargo metadata` by
+   automatically: `x/check-daytxt.ts` derives its package list from `cargo metadata` by
    prefix. A Wasm guest also gets one entry in the script's `components` table; load the prepared
    artifact with `component_package("<name>")` / `WasmPackage::from_env("<name>")`
-   (`DAYFRAME_<NAME>_COMPONENT`).
+   (`DAYTXT_<NAME>_COMPONENT`).
 
 ## Run
 
@@ -75,11 +75,11 @@ dependencies in a fresh checkout with `wash wit fetch` in `src/api_utils_rs`. Fr
 repository root, prepare the guest fixtures and run the scoped tests plus clippy:
 
 ```sh
-CARGO_BUILD_JOBS=2 nix develop --command deno run --allow-all x/check-dayframe.ts -j 2
+CARGO_BUILD_JOBS=2 nix develop --command deno run --allow-all x/check-daytxt.ts -j 2
 ```
 
 For a narrower run, use `--prepare-only`, export the printed absolute
-`DAYFRAME_*_COMPONENT` paths, then run e.g. `cargo nextest run -p clay_mdk` in the dev shell.
+`DAYTXT_*_COMPONENT` paths, then run e.g. `cargo nextest run -p clay_mdk` in the dev shell.
 Guest components are compiled only for Wasm: their WIT-qualified export names are not valid
 native shared-library export names, so native tests execute the actual Wasm component, never a
 native substitute for guest code.
@@ -115,7 +115,7 @@ owe these rules in return:
 
 wit-bindgen must stay `default-features = false` (no `std`) in every wasip3 guest crate, or
 this task state falls back to a libc thread-local and a second concurrent call aborts the
-instance. `x/check-dayframe.ts` fails when any guest closure resolves `std`, and the first async
+instance. `x/check-daytxt.ts` fails when any guest closure resolves `std`, and the first async
 export that suspends without using the MDK's task-context symbols panics with that explanation.
 
 ## The wire

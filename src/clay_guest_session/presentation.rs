@@ -12,6 +12,7 @@ use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_host::Instance;
 use clay_surface::AttributeValue;
+use clay_surface::ElementCommand;
 use clay_surface::Mutation;
 use clay_surface::PresentationError;
 use clay_surface::SurfaceSink;
@@ -236,6 +237,23 @@ impl PresentationHost {
         }
     }
 
+    /// Forward an element command to the surface's renderer, under the revocation checks `apply`
+    /// makes. Whether `element` announced `mounted` is the renderer's to decide, and a refusal
+    /// goes back to the caller without faulting the micro: unlike a malformed batch, a command
+    /// for an element that is gone is a race the guest can observe and report.
+    pub fn element_command(
+        &self,
+        surface: &Surface,
+        element: clay_surface::NodeId,
+        command: ElementCommand,
+    ) -> Result<(), PresentationError> {
+        self.check().map_err(|_| PresentationError::Revoked)?;
+        if surface.revoked.load(Ordering::Acquire) || !surface.writer.is_live() {
+            return Err(PresentationError::Revoked);
+        }
+        surface.writer.element_command(element, command)
+    }
+
     /// Retain a surface as an additional handle, under the same cap as `open`.
     pub fn retain(&mut self, surface: &Surface) -> Result<Surface, PresentationError> {
         self.check().map_err(|_| PresentationError::Revoked)?;
@@ -288,6 +306,7 @@ pub fn map_mutations<R, C, E>(
                 Mutation::InsertBefore(count) => Mutation::InsertBefore(count),
                 Mutation::SetAttribute(attribute) => Mutation::SetAttribute(attribute),
                 Mutation::SetText(text) => Mutation::SetText(text),
+                Mutation::SetStyleSheet(sheet) => Mutation::SetStyleSheet(sheet),
                 Mutation::AddEventListener(name) => Mutation::AddEventListener(name),
                 Mutation::RemoveEventListener(name) => Mutation::RemoveEventListener(name),
                 Mutation::Remove => Mutation::Remove,
@@ -309,6 +328,7 @@ pub fn ingress_budget<R>(edits: &[Mutation<R>]) -> Result<(), &'static str> {
             Mutation::CreateElement((tag, namespace)) => [Some(tag), namespace.as_deref(), None],
             Mutation::CreateText(text)
             | Mutation::SetText(text)
+            | Mutation::SetStyleSheet(text)
             | Mutation::AddEventListener(text)
             | Mutation::RemoveEventListener(text) => [Some(text), None, None],
             Mutation::SetAttribute((name, namespace, value)) => [

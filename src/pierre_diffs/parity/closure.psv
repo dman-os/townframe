@@ -1,0 +1,95 @@
+# FileDiff / VirtualizedFileDiff import closure (value imports, transitively down to ported code).
+# Columns: upstream file|LOC|class|slice|reason|first imported by
+# class: PORT (to be ported in the slice), ALREADY PORTED, DROP (not ported; reason recorded), DEFER.
+pierre/src/components/FileDiff.ts|4312|PORT|S12a|the component: logic against a host trait, then Dioxus rendering|-
+pierre/src/components/VirtualizedFileDiff.ts|2452|PORT|S12|the Virtualizer instance for a diff|-
+pierre/src/components/web-components.ts|39|DROP|-|custom element registration; the host element is the Dioxus component|src/components/FileDiff.ts
+pierre/src/constants.ts|108|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/highlighter/shared_highlighter.ts|166|DROP|-|highlighter loading/selection and worker timeouts: the highlights backend (S7) is synchronous behind DiffsHighlighter|src/components/FileDiff.ts
+pierre/src/managers/InteractionManager.ts|2510|PORT|S11b|PARTIAL (see closure notes): the methods and handlers FileDiff reaches, minus token, merge-conflict and editor paths|src/components/FileDiff.ts
+pierre/src/managers/ResizeManager.ts|494|PORT|S11a|behind ResizeManagerHost + ResizeObserverHub (managers/resize_manager.rs)|src/components/FileDiff.ts
+pierre/src/managers/ScrollSyncManager.ts|102|PORT|S11a|behind ScrollSyncHost (managers/scroll_sync_manager.rs); not in the brief list but FileDiff calls it for split-view scroll sync and it is 102 LOC|src/components/FileDiff.ts
+pierre/src/managers/UniversalRenderingManager.ts|48|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/renderers/DiffHunksRenderer.ts|2782|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/sprite.ts|149|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/style.css?inline.ts|?|PORT|S11a|exported from the pinned dist as assets/style.css, embedded by utils/dom/css_wrappers.rs|src/utils/cssWrappers.ts
+pierre/src/utils/areDiffLineAnnotationsEqual.ts|13|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/areDiffTargetsEqual.ts|14|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/utils/areFilesEqual.ts|14|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/areHunkDataEqual.ts|15|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/areObjectsEqual.ts|38|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/VirtualizedFileDiff.ts
+pierre/src/utils/areOptionsEqual.ts|41|PORT|S12a|maps FileDiffOptions, which ports with FileDiff; areObjectsEqual (its helper) is ported in S11a|src/components/VirtualizedFileDiff.ts
+pierre/src/utils/arePrePropertiesEqual.ts|46|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/areRenderRangesEqual.ts|17|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/areThemesEqual.ts|17|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/awaitWithTimeout.ts|19|DROP|-|highlighter loading/selection and worker timeouts: the highlights backend (S7) is synchronous behind DiffsHighlighter|src/components/FileDiff.ts
+pierre/src/utils/cloneFileDiffMetadata.ts|20|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/utils/computeEstimatedDiffHeights.ts|175|ALREADY PORTED|-||src/components/VirtualizedFileDiff.ts
+pierre/src/utils/computeVirtualFileMetrics.ts|56|ALREADY PORTED|-||src/components/VirtualizedFileDiff.ts
+pierre/src/utils/createAnnotationWrapperNode.ts|8|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/createGutterUtilityContentNode.ts|12|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/createUnsafeCSSStyleNode.ts|8|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/cssWrappers.ts|81|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/editSessionAnnotations.ts|121|DROP|-|edit mode is OUT for v1 (CM6 lane)|src/components/FileDiff.ts
+pierre/src/utils/editSessionHunks.ts|884|DROP|-|edit mode is OUT for v1 (CM6 lane)|src/components/FileDiff.ts
+pierre/src/utils/getDiffFileInput.ts|31|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/getDiffHunksRendererOptions.ts|41|PORT|S12a|maps FileDiffOptions, which ports with FileDiff; shouldUseTokenTransformer (its helper) is ported in S11a|src/components/FileDiff.ts
+pierre/src/utils/getFiletypeFromFileName.ts|460|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/utils/getHunkSideBoundaries.ts|9|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/utils/getLineAnnotationName.ts|8|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/utils/getOrCreateCodeNode.ts|36|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/getThemes.ts|16|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/guardWebKitScrollDuringRebuild.ts|33|DROP|-|Safari workaround for bulk innerHTML rebuilds, only reached through shouldGuardRebuildScroll (editor != null && isSafari()); edit mode is OUT and Dioxus does not rebuild columns by innerHTML|src/components/FileDiff.ts
+pierre/src/utils/hastToHtml.ts|182|DEFER|-|FileDiff uses it only to set innerHTML (column and header rebuilds, prerender); the Dioxus layer renders hast nodes directly, so it is not needed (also reachable from File.ts, which is DEFER)|src/components/FileDiff.ts
+pierre/src/utils/hostTheme.ts|34|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/hydratePartialDiff.ts|268|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/utils/includesFileAnnotations.ts|36|ALREADY PORTED|-||src/components/VirtualizedFileDiff.ts
+pierre/src/utils/isDefaultRenderRange.ts|11|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/isDiffPlainText.ts|11|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/utils/isStyleNode.ts|12|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/iterateOverDiff.ts|1045|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/utils/parseDiffFromFile.ts|85|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/utils/platform.ts|48|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/prerenderHTMLIfNecessary.ts|12|DROP|-|attaches a shadow root and sets innerHTML from server-rendered HTML; the Dioxus layer renders the hast, there is no HTML-string hydration|src/components/FileDiff.ts
+pierre/src/utils/resolvePreferredHighlighter.ts|14|DROP|-|highlighter loading/selection and worker timeouts: the highlights backend (S7) is synchronous behind DiffsHighlighter|src/components/FileDiff.ts
+pierre/src/utils/scrollbarGutter.ts|55|PORT|S11a|small util; utils/ (predicates, options, dom)|src/utils/cssWrappers.ts
+pierre/src/utils/setWrapperNodeProps.ts|65|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
+pierre/src/utils/shouldUseTokenTransformer.ts|25|PORT|S11a|small util; utils/ (predicates, options, dom)|src/utils/getDiffHunksRendererOptions.ts
+pierre/src/utils/splitFileContents.ts|13|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/utils/updateDiffHunks.ts|514|DROP|-|edit mode is OUT for v1 (CM6 lane)|src/components/FileDiff.ts
+pierre/src/utils/virtualDiffLayout.ts|485|ALREADY PORTED|-||src/components/FileDiff.ts
+pierre/src/worker/errors.ts|67|DROP|-|worker pool is OUT; the renderer's synchronous path is what S6 ported|src/components/FileDiff.ts
+# CodeView.ts closure (value imports, followed transitively until ported code). Slices C1-C6 are in the CodeView section of closure_notes.md.
+# Already classified above and shared with the FileDiff closure (not repeated): constants.ts, highlighter/shared_highlighter.ts (DROP: CodeView's isReady/isSharedHighlighterReady/preloadHighlighter path), managers/UniversalRenderingManager.ts, utils/areObjectsEqual.ts, utils/areOptionsEqual.ts, utils/areThemesEqual.ts, utils/getThemes.ts, utils/isStyleNode.ts, utils/platform.ts (isFirefox), utils/resolvePreferredHighlighter.ts (DROP), components/VirtualizedFileDiff.ts (advanced mode un-dropped in C1).
+pierre/src/components/CodeView.ts|4643|PORT|C2-C6|the component: a Rust `CodeView` over a `CodeViewHost` trait and the `Document`, split in four slices (items, scroll model, DOM shell, render pass); the Dioxus host (C6) is `pierre_diffs_dioxus`|-
+pierre/src/utils/areManagedSnapshotsEqual.ts|51|DROP|-|compares the React slot snapshot (`CodeViewSlotSnapshot`); Dioxus renders slot content from the Document through its observer, there is no snapshot to publish or compare|src/components/CodeView.ts
+pierre/src/utils/areSelectionsEqual.ts|14|ALREADY PORTED|-||src/components/CodeView.ts
+pierre/src/utils/createCodeViewHeaderFooterHostElement.ts|26|PORT|C4|creates, positions (before/after the container) and observes a header/footer host: Document edits plus a resize observation; 26 lines|src/components/CodeView.ts
+pierre/src/utils/createWindowFromScrollPosition.ts|50|ALREADY PORTED|-||src/components/CodeView.ts
+pierre/src/utils/getCodeViewItemRenderData.ts|37|DROP|-|feeds the React slot snapshot (`hasAnnotations` in `getSlotItems`) through `FileDiff.__getNextRenderData` (dropped.psv)|src/components/CodeView.ts
+pierre/src/utils/prefersReducedMotion.ts|10|PORT|C2|a `matchMedia` read: becomes `CodeViewHost::prefers_reduced_motion`|src/components/CodeView.ts
+pierre/src/utils/roundToDevicePixel.ts|14|PORT|C2|pure over a `window.devicePixelRatio` read, which becomes `CodeViewHost::device_pixel_ratio`|src/components/CodeView.ts
+pierre/src/components/VirtualizedFile.ts|1390|DEFER|-|single-file view (CodeView's `type: 'file'` items); recommendation in the CodeView notes is diff items only first|src/components/CodeView.ts
+pierre/src/components/File.ts|2370|DEFER|-|single-file view; FileDiff's sibling, 2,370 lines|src/components/VirtualizedFile.ts
+pierre/src/renderers/FileRenderer.ts|1219|DEFER|-|single-file renderer behind File.ts|src/components/File.ts
+pierre/src/utils/areFileTargetsEqual.ts|15|DEFER|-|File/VirtualizedFile only|src/components/VirtualizedFile.ts
+pierre/src/utils/areLineAnnotationsEqual.ts|12|DEFER|-|File.ts only|src/components/File.ts
+pierre/src/utils/getFileRendererOptions.ts|29|DEFER|-|File.ts only|src/components/File.ts
+pierre/src/utils/areFileRenderOptionsEqual.ts|14|DEFER|-|FileRenderer only|src/renderers/FileRenderer.ts
+pierre/src/utils/applyLineTextWithNewline.ts|20|DEFER|-|FileRenderer only|src/renderers/FileRenderer.ts
+pierre/src/utils/getHighlighterOptions.ts|31|DEFER|-|FileRenderer only|src/renderers/FileRenderer.ts
+pierre/src/utils/isFilePlainText.ts|7|DEFER|-|FileRenderer only|src/renderers/FileRenderer.ts
+pierre/src/utils/renderFileWithHighlighter.ts|104|DEFER|-|FileRenderer only (the diff path is renderDiffWithHighlighter, ported)|src/renderers/FileRenderer.ts
+pierre/src/highlighter/highlighterType.ts|46|DROP|-|highlighter loading types; the backend is behind DiffsHighlighter (S7)|src/utils/getHighlighterOptions.ts
+pierre/src/highlighter/languages/areLanguagesAttached.ts|16|DROP|-|highlighter loading (Shiki attachment state)|src/renderers/FileRenderer.ts
+pierre/src/highlighter/themes/areThemesAttached.ts|25|DROP|-|highlighter loading (Shiki attachment state)|src/renderers/FileRenderer.ts
+pierre/src/utils/computeFileOffsets.ts|100|ALREADY PORTED|-||src/renderers/FileRenderer.ts
+pierre/src/utils/createAnnotationElement.ts|23|ALREADY PORTED|-||src/renderers/FileRenderer.ts
+pierre/src/utils/createContentColumn.ts|18|ALREADY PORTED|-||src/renderers/FileRenderer.ts
+pierre/src/utils/createFileHeaderElement.ts|172|ALREADY PORTED|-||src/renderers/FileRenderer.ts
+pierre/src/utils/createPreElement.ts|47|ALREADY PORTED|-||src/renderers/FileRenderer.ts
+pierre/src/utils/hast_utils.ts|142|ALREADY PORTED|-||src/renderers/FileRenderer.ts
+pierre/src/utils/getHighlighterThemeStyles.ts|83|ALREADY PORTED|-||src/utils/renderFileWithHighlighter.ts
+pierre/src/utils/getTokenOptions.ts|24|ALREADY PORTED|-||src/utils/renderFileWithHighlighter.ts
+pierre/src/utils/renderTokenLines.ts|385|ALREADY PORTED|-||src/utils/renderFileWithHighlighter.ts
+pierre/src/utils/appendItems.ts|10|DROP|-|engine argument-count workaround for push(...items); Vec::extend (matrix: OUT)|src/utils/renderFileWithHighlighter.ts

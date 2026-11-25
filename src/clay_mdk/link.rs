@@ -1,0 +1,58 @@
+//! What a contract crate needs to describe row values without linking a backend: a value names
+//! one of its row's links by index under a reserved CBOR tag. Manifest crates (a
+//! micro's declared rows) use this, and so do both backends when they mint the link into
+//! a recipient-local [`crate::Capability`].
+use serde::Deserialize;
+use serde::Serialize;
+
+/// The CBOR tag a value uses to name one of its row's links by index. Equal to
+/// `clay_guest_session::collections::CAPABILITY_ATTACHMENT_TAG`, which the in-process backend
+/// asserts at compile time.
+pub const LINK_TAG: u64 = 43000;
+
+/// A value's reference to one of its row's links, written under the reserved CBOR tag.
+/// The body alone conveys no authority: the index names an entry of the row's link list,
+/// which the host mints into a recipient-local capability on read.
+///
+/// On the wire a row is CBOR and the link is the tagged index. In a human-readable
+/// format (the JSON value of a manifest's declared row) there are no tags, so it is written
+/// as the one-member object `{"$link": n}`, which `declared_rows` turns back into the tag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Link(ciborium::tag::Required<u64, LINK_TAG>);
+
+/// The human-readable form of a [`Link`].
+#[derive(Serialize, Deserialize)]
+struct HumanForm {
+    #[serde(rename = "$link")]
+    index: u64,
+}
+
+impl Serialize for Link {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            HumanForm { index: self.0.0 }.serialize(serializer)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Link {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            Ok(Self::at(HumanForm::deserialize(deserializer)?.index))
+        } else {
+            Ok(Self(Deserialize::deserialize(deserializer)?))
+        }
+    }
+}
+
+impl Link {
+    pub fn at(index: u64) -> Self {
+        Self(ciborium::tag::Required(index))
+    }
+
+    pub fn index(self) -> usize {
+        usize::try_from(self.0.0).expect("link index fits in memory")
+    }
+}

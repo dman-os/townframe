@@ -768,12 +768,7 @@ async fn read_loop(state: Rc<RefCell<State>>) {
 
         let (lease, ticket, committed) = {
             let state = state.borrow();
-            let lease = Rc::clone(
-                state
-                    .lease
-                    .as_ref()
-                    .expect("collection lease missing"),
-            );
+            let lease = Rc::clone(state.lease.as_ref().expect("collection lease missing"));
             let ticket = state.mirror.borrow_mut().begin_read();
             let committed = ticket.committed().cloned();
             (lease, ticket, committed)

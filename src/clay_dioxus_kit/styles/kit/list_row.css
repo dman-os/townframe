@@ -1,0 +1,33 @@
+/*
+ * ct-list-row (headless/list_row.rs). State: data-state (current|idle); the open row is also
+ * aria-current. The row is at least a touch target tall (KIT-106) and paints the open row with the
+ * `selected` colour roles (KIT-107).
+ */
+.ct-list-row {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-height: var(--ct-dimension-target-coarse);
+  padding: var(--ct-dimension-spacing-3) var(--ct-dimension-spacing-4);
+  border: 0;
+  border-radius: var(--ct-dimension-radius-md);
+  background: transparent;
+  color: var(--ct-color-text);
+  font-family: var(--ct-font-family);
+  font-size: var(--ct-dimension-font-size-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ct-list-row:hover {
+  background: var(--ct-color-surface-sunken);
+}
+
+.ct-list-row:focus-visible {
+  outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
+}
+
+.ct-list-row[data-state="current"] {
+  background: var(--ct-color-selected);
+  color: var(--ct-color-on-selected);
+}

@@ -27,28 +27,49 @@ use wit::wasi::http::types::Request;
 use wit::wasi::http::types::RequestOptions;
 use wit::wasi::http::types::Response;
 use wit::wasi::http::types::Scheme;
+use wit_bindgen::StreamReader;
+use wit_bindgen::StreamResult;
 
 /// The host's egress authority: the one place a nodule's outgoing requests can go, and which
 /// admits them through dispatch.
 const DISPATCH_AUTHORITY: &str = "dispatch.local";
 const BODY_CHUNK_SIZE: usize = 64 * 1024;
 
-fn byte_body<S>(stream: S, mime: Option<String>, length: Option<u64>) -> ByteBody
-where
-    S: futures::Stream<Item = u8> + 'static,
-{
+/// Forwards a `wasi:http` byte stream to `sender` in chunks of [`BODY_CHUNK_SIZE`] octets, the
+/// last one shorter. A `stream.read` appends into the buffer's spare capacity and returns as soon
+/// as the host has written anything, often far less than a chunk, so each chunk is filled by as
+/// many reads as it takes. Reading in bulk matters: `StreamReader::into_stream` reads one octet
+/// per host call, which spends a synchronous guest call's whole fuel budget on about a megabyte.
+/// Returns whether the stream ended; `false` means the receiver stopped reading first.
+async fn forward_body(
+    mut reader: StreamReader<u8>,
+    sender: &mut futures::channel::mpsc::Sender<io::Result<Bytes>>,
+) -> bool {
+    loop {
+        let mut chunk = Vec::with_capacity(BODY_CHUNK_SIZE);
+        let ended = loop {
+            let (result, filled) = reader.read(chunk).await;
+            chunk = filled;
+            match result {
+                StreamResult::Complete(_) if chunk.len() < BODY_CHUNK_SIZE => {}
+                StreamResult::Complete(_) => break false,
+                StreamResult::Dropped => break true,
+                StreamResult::Cancelled => unreachable!("nothing cancels a body read"),
+            }
+        };
+        if !chunk.is_empty() && sender.send(Ok(Bytes::from(chunk))).await.is_err() {
+            return false;
+        }
+        if ended {
+            return true;
+        }
+    }
+}
+
+fn byte_body(reader: StreamReader<u8>, mime: Option<String>, length: Option<u64>) -> ByteBody {
     let (mut sender, receiver) = futures::channel::mpsc::channel(1);
     wit_bindgen::spawn_local(async move {
-        let mut chunks = Box::pin(stream.chunks(BODY_CHUNK_SIZE));
-        while let Some(chunk) = chunks.next().await {
-            if sender
-                .send(Ok::<_, io::Error>(Bytes::from(chunk)))
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
+        forward_body(reader, &mut sender).await;
     });
     let mut body = ByteBody::new(receiver);
     if let Some(mime) = mime {
@@ -139,24 +160,28 @@ impl HttpTransport for WasiHttp {
 
         let body = request.body;
         wit_bindgen::spawn_local(async move {
+            // The host closes the body stream when it refuses the request before reading it (an
+            // origin it does not serve, or a micro it gave no egress). The refusal is the answer
+            // `send` returns, so a stream that closed early ends the upload instead of crashing
+            // the guest.
             match body {
                 XrpcBody::Json(body) => {
-                    let remaining = body_tx.write_all(body).await;
-                    assert!(remaining.is_empty(), "outgoing body stream closed early");
+                    if !body_tx.write_all(body).await.is_empty() {
+                        return;
+                    }
                 }
                 XrpcBody::Bytes(mut body) => {
                     while let Some(chunk) = body.next().await {
                         let chunk = chunk.expect("a byte request body stream cannot fail");
-                        let remaining = body_tx.write_all(chunk.to_vec()).await;
-                        assert!(remaining.is_empty(), "outgoing body stream closed early");
+                        if !body_tx.write_all(chunk.to_vec()).await.is_empty() {
+                            return;
+                        }
                     }
                 }
             }
             drop(body_tx);
-            trailers_tx
-                .write(Ok(None))
-                .await
-                .expect("outgoing trailers receiver disappeared");
+            // A host that stopped reading the request has dropped the trailers future too.
+            let _undelivered = trailers_tx.write(Ok(None)).await;
         });
 
         let response = client::send(outgoing)
@@ -201,15 +226,8 @@ impl HttpTransport for WasiHttp {
                 .and_then(|value| value.parse().ok());
             let (mut sender, receiver) = futures::channel::mpsc::channel(1);
             wit_bindgen::spawn_local(async move {
-                let mut chunks = body.into_stream().chunks(BODY_CHUNK_SIZE);
-                while let Some(chunk) = chunks.next().await {
-                    if sender
-                        .send(Ok::<_, io::Error>(Bytes::from(chunk)))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
+                if !forward_body(body, &mut sender).await {
+                    return;
                 }
                 result_tx
                     .write(Ok(()))
@@ -284,7 +302,7 @@ pub async fn serve_wasi<N: Nodule>(request: Request) -> Result<Response, ErrorCo
             .expect("request body receiver disappeared");
         XrpcBody::Json(body)
     } else {
-        XrpcBody::Bytes(byte_body(body.into_stream(), mime, length))
+        XrpcBody::Bytes(byte_body(body, mime, length))
     };
     let answer = serve(
         &N::default(),

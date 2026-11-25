@@ -1,0 +1,95 @@
+---
+source: src/clay_surface/stylesheet/tests.rs
+expression: sanitized
+---
+.kept {
+color: red;
+}
+.unquoted {
+margin: 1px;
+}
+.quoted {
+padding: 2px;
+}
+.escaped {
+border: 0;
+}
+.iset {
+top: 0;
+}
+.wiset {
+left: 0;
+}
+.srcf {
+right: 0;
+}
+.imgf {
+bottom: 0;
+}
+.xfade {
+width: 1px;
+}
+.nested-fn {
+height: 1px;
+}
+.cursor {
+display: block;
+}
+.mask {
+filter: blur(1px);
+}
+.custom {
+--safe: 3px;
+color: var(--safe);
+}
+.important {
+color: blue !important;
+}
+.block-in-value {
+--ok: 1;
+}
+@media (min-width: 10px) {
+.m {
+color: green;
+}
+}
+@supports (display: grid) {
+.s {
+display: grid;
+}
+}
+@container (min-width: 5px) {
+.c {
+color: red;
+}
+}
+@layer base, theme;
+@layer base {
+.l {
+margin: 0;
+}
+}
+@keyframes spin {
+from {
+transform: rotate(0);
+}
+to {
+transform: rotate(1turn);
+}
+}
+:host {
+display: block;
+--x: 1;
+}
+:host(.a) .b {
+color: red;
+}
+.parent {
+color: red;
+&:hover {
+color: blue;
+}
+@media (width > 1px) {
+margin: 0;
+}
+}

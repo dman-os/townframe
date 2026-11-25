@@ -16,10 +16,10 @@ micro_layout_manifest = { workspace = true }
 
 #
 # misc
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e36802edf59897dbe41db3", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+
 # One authored micro, two backends (isomorphic MDK): a wasm32-wasip3 build is the guest, every
 # other target links the in-process backend.
-
 [target.'cfg(target_os = "wasi")'.dependencies]
 #
 # internal

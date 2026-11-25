@@ -13,18 +13,18 @@ impl WcmpPackage {
             .map(Self)
     }
 
-    /// Load a component artifact prepared by `x/check-dayframe.ts`, named by the environment
-    /// variable `DAYFRAME_<name>_COMPONENT` (uppercased, `-` → `_`; e.g. `sleeper` →
-    /// `DAYFRAME_SLEEPER_COMPONENT`). Test and fixture code only: compositions that ship a package
+    /// Load a component artifact prepared by `x/check-daytxt.ts`, named by the environment
+    /// variable `DAYTXT_<name>_COMPONENT` (uppercased, `-` → `_`; e.g. `sleeper` →
+    /// `DAYTXT_SLEEPER_COMPONENT`). Test and fixture code only: compositions that ship a package
     /// embed or fetch it themselves.
     pub async fn from_env(name: &str) -> Result<Self, String> {
         let variable = format!(
-            "DAYFRAME_{}_COMPONENT",
+            "DAYTXT_{}_COMPONENT",
             name.to_uppercase().replace('-', "_")
         );
         let path = std::env::var(&variable).map_err(|_| {
             format!(
-                "{variable} must name a prepared {name} component; run deno run --allow-all x/check-dayframe.ts --prepare-only and export the printed path"
+                "{variable} must name a prepared {name} component; run deno run --allow-all x/check-daytxt.ts --prepare-only and export the printed path"
             )
         })?;
         let path = std::path::PathBuf::from(path);
@@ -46,6 +46,8 @@ impl WcmpPackage {
 
 #[cfg(test)]
 mod documents_tests;
+#[cfg(test)]
+mod http_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]

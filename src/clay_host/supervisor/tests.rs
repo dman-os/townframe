@@ -56,6 +56,8 @@ struct Script {
     /// The leases each micro's latest incarnation holds; its root drops them when it closes,
     /// as a guest's teardown drops what it retained.
     held: BTreeMap<String, Rc<RefCell<Vec<Lease<Provision>>>>>,
+    /// The requirement bindings each micro's latest incarnation was handed a publication for.
+    bound: BTreeMap<String, Vec<String>>,
 }
 
 struct Fake {
@@ -170,6 +172,11 @@ impl Factory<Provision> for Fake {
             for provision in requirements.values() {
                 assert_eq!(host.lifecycle(&provision.owner), Lifecycle::Active);
             }
+            controls
+                .0
+                .borrow_mut()
+                .bound
+                .insert(name.clone(), requirements.keys().cloned().collect());
             controls.record(format!("init {name}"));
             let held = Rc::<RefCell<Vec<Lease<Provision>>>>::default();
             let demands = {
@@ -280,10 +287,22 @@ fn requires(
     micro.requirements.insert(
         binding.to_owned(),
         Requirement {
-            provider: id(provider),
+            provider: Some(id(provider)),
             publication: PRESENTATION.to_owned(),
+            necessity: Necessity::Required,
         },
     );
+    micro
+}
+
+/// As [`requires`], but the consumer starts without the provider when it cannot be had.
+fn optionally_requires(
+    mut micro: ConfiguredMicro<Provision>,
+    binding: &str,
+    provider: &str,
+) -> ConfiguredMicro<Provision> {
+    micro = requires(micro, binding, provider);
+    micro.requirements.get_mut(binding).unwrap().necessity = Necessity::Optional;
     micro
 }
 
@@ -871,6 +890,214 @@ async fn a_failed_provider_blocks_its_consumer_and_leaves_nothing_live() {
         controls.log(),
         ["init provider", "init provider", "init consumer"]
     );
+}
+
+impl Controls {
+    fn bound(&self, micro: &str) -> Vec<String> {
+        self.0.borrow().bound[micro].clone()
+    }
+}
+
+#[tokio::test]
+async fn an_optional_provider_that_fails_does_not_block_its_consumer() {
+    let controls = Controls::default();
+    controls
+        .0
+        .borrow_mut()
+        .fail_init
+        .insert("provider".to_owned());
+    let host = Host::new();
+    let supervisor = Supervisor::new(
+        host.clone(),
+        [
+            controls.micro("provider"),
+            optionally_requires(controls.micro("consumer"), "presentation", "provider"),
+        ],
+    );
+    supervisor.start(&id("consumer")).await.unwrap();
+    assert_eq!(supervisor.state(&id("consumer")), MicroState::Active);
+    // The faulted supplier is its own business, and the consumer was handed nothing for it.
+    assert_eq!(
+        supervisor.state(&id("provider")),
+        MicroState::Faulted("provider refused".to_owned())
+    );
+    assert!(controls.bound("consumer").is_empty());
+    supervisor.shutdown().await.unwrap();
+    assert_quiescent(&host);
+}
+
+#[tokio::test]
+async fn an_optional_provider_that_is_disabled_does_not_block_its_consumer() {
+    let controls = Controls::default();
+    let mut provider = controls.micro("provider");
+    provider.enabled = false;
+    let host = Host::new();
+    let supervisor = Supervisor::new(
+        host.clone(),
+        [
+            provider,
+            optionally_requires(controls.micro("consumer"), "presentation", "provider"),
+        ],
+    );
+    supervisor.start(&id("consumer")).await.unwrap();
+    assert_eq!(supervisor.state(&id("provider")), MicroState::Disabled);
+    assert!(controls.bound("consumer").is_empty());
+    assert_eq!(controls.log(), ["init consumer"]);
+}
+
+#[tokio::test]
+async fn an_optional_provider_without_the_publication_is_released_and_not_bound() {
+    let controls = Controls::default();
+    controls
+        .0
+        .borrow_mut()
+        .withhold
+        .insert("provider".to_owned());
+    let host = Host::new();
+    let supervisor = Supervisor::new(
+        host.clone(),
+        [
+            controls.micro("provider"),
+            optionally_requires(controls.micro("consumer"), "presentation", "provider"),
+        ],
+    );
+    supervisor.start(&id("consumer")).await.unwrap();
+    assert_eq!(supervisor.state(&id("consumer")), MicroState::Active);
+    // It was started for this consumer and nothing retains it once the consumer is up, so it
+    // is closed again.
+    assert_eq!(supervisor.state(&id("provider")), MicroState::Idle);
+    assert!(controls.bound("consumer").is_empty());
+    assert_eq!(
+        controls.log(),
+        ["init provider", "init consumer", "close provider"]
+    );
+    supervisor.shutdown().await.unwrap();
+    assert_quiescent(&host);
+}
+
+#[tokio::test]
+async fn an_optional_provider_that_is_live_is_bound_and_a_required_failure_still_blocks() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let supervisor = Supervisor::new(
+        host.clone(),
+        [
+            controls.micro("provider"),
+            optionally_requires(controls.micro("consumer"), "presentation", "provider"),
+        ],
+    );
+    supervisor.start(&id("consumer")).await.unwrap();
+    assert_eq!(controls.bound("consumer"), ["presentation"]);
+    // The consumer retains the provider it bound: closing the consumer is what frees it.
+    supervisor.shutdown().await.unwrap();
+    assert_eq!(
+        controls.log(),
+        [
+            "init provider",
+            "init consumer",
+            "close consumer",
+            "close provider"
+        ]
+    );
+
+    // An optional requirement beside a required one does not soften the required one.
+    let controls = Controls::default();
+    controls
+        .0
+        .borrow_mut()
+        .fail_init
+        .insert("needed".to_owned());
+    let host = Host::new();
+    let supervisor = Supervisor::new(
+        host.clone(),
+        [
+            controls.micro("needed"),
+            controls.micro("nice"),
+            optionally_requires(
+                requires(controls.micro("consumer"), "needed", "needed"),
+                "nice",
+                "nice",
+            ),
+        ],
+    );
+    assert_eq!(
+        supervisor.start(&id("consumer")).await,
+        Err(StartError::Unavailable {
+            binding: "needed".to_owned(),
+            cause: Box::new(StartError::Faulted("needed refused".to_owned())),
+        })
+    );
+    assert_eq!(
+        supervisor.state(&id("consumer")),
+        MicroState::Blocked(vec!["needed".to_owned()])
+    );
+}
+
+/// `consumer` requires `binding`, which no installed micro supplies.
+fn requiring_unsupplied(
+    mut micro: ConfiguredMicro<Provision>,
+    binding: &str,
+    necessity: Necessity,
+) -> ConfiguredMicro<Provision> {
+    micro.requirements.insert(
+        binding.to_owned(),
+        Requirement {
+            provider: None,
+            publication: PRESENTATION.to_owned(),
+            necessity,
+        },
+    );
+    micro
+}
+
+#[tokio::test]
+async fn a_required_requirement_nothing_supplies_blocks_its_consumer_without_a_panic() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let supervisor = Supervisor::new(
+        host.clone(),
+        [
+            controls.micro("other"),
+            requiring_unsupplied(
+                requires(controls.micro("consumer"), "other", "other"),
+                "shell",
+                Necessity::Required,
+            ),
+        ],
+    );
+    assert_eq!(
+        supervisor.start(&id("consumer")).await,
+        Err(StartError::Unavailable {
+            binding: "shell".to_owned(),
+            cause: Box::new(StartError::Unsupplied),
+        })
+    );
+    assert_eq!(
+        supervisor.state(&id("consumer")),
+        MicroState::Blocked(vec!["shell".to_owned()])
+    );
+    // The supplied requirement started its provider first and releases it again.
+    assert_eq!(supervisor.state(&id("other")), MicroState::Idle);
+    assert_quiescent(&host);
+}
+
+#[tokio::test]
+async fn an_optional_requirement_nothing_supplies_is_left_unbound() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let supervisor = Supervisor::new(
+        host.clone(),
+        [requiring_unsupplied(
+            controls.micro("consumer"),
+            "shell",
+            Necessity::Optional,
+        )],
+    );
+    supervisor.start(&id("consumer")).await.unwrap();
+    assert_eq!(supervisor.state(&id("consumer")), MicroState::Active);
+    assert!(controls.bound("consumer").is_empty());
+    supervisor.shutdown().await.unwrap();
+    assert_quiescent(&host);
 }
 
 #[tokio::test]

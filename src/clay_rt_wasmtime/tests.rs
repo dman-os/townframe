@@ -1197,6 +1197,13 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
     });
     // Trap-equivalent: default response, surface withdrawn, instance closed.
     assert_eq!(response, EventResponse::default());
+    let fault = host
+        .fault(&owner)
+        .expect("a trapped dispatch records its cause");
+    assert!(
+        fault.starts_with("guest trapped during dispatch: ") && fault.len() > 40,
+        "the fault must carry the trap's reason, got: {fault}"
+    );
     assert!(
         !writer.is_live(),
         "a blocked dispatch withdraws the surface"
@@ -1218,6 +1225,76 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
         "wasmtime must fail a blocking sync-typed call with CannotBlock on the first poll, \
          not return Pending"
     );
+    drop(session);
+    drop(driver);
+    host.close();
+}
+
+/// The guest `WasiCtx` grants nothing (`WasmStoreState::new`), although the linker offers all of
+/// WASI p3 including sockets and filesystem. The `egress` fixture tries TCP, UDP, name lookup,
+/// directory listing, absolute and relative file opens when it mounts and renders what each
+/// returned; every channel must fail and the environment must be empty. Adding
+/// `inherit_network()`, `allow_*`, a preopen, or an env var to the context breaks this test.
+#[tokio::test]
+async fn guest_wasi_context_grants_no_network_filesystem_or_environment() {
+    struct CapturingSink(Mutex<Vec<String>>);
+
+    impl SurfaceSink<ComponentRef> for CapturingSink {
+        fn is_live(&self) -> bool {
+            true
+        }
+
+        fn apply(&self, edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
+            let mut texts = self.0.lock().unwrap();
+            for edit in edits {
+                if let Mutation::CreateText(text) = edit {
+                    texts.push(text.clone());
+                }
+            }
+            Ok(0)
+        }
+
+        fn withdraw(&self) {}
+    }
+
+    let host = Host::new();
+    let owner = host.start("egress");
+    let package = WasmPackage::from_env("egress")
+        .await
+        .expect("prepared egress component is valid");
+    let (runtime, driver) =
+        WasmRuntime::initialize(&host, owner.clone(), &package, InitialContext::default())
+            .await
+            .unwrap();
+    let sink = Arc::new(CapturingSink(Mutex::new(Vec::new())));
+    let session = runtime
+        .mount("view", Arc::clone(&sink) as _)
+        .unwrap_or_else(|error| {
+            panic!(
+                "the probe mounts: {error:?}, fault {:?}",
+                host.fault(&owner)
+            )
+        });
+    let reports = sink.0.lock().unwrap().clone();
+    let [report] = reports.as_slice() else {
+        panic!("the probe renders one report, got {reports:?}");
+    };
+    let attempts: std::collections::BTreeMap<&str, &str> = report
+        .split(';')
+        .map(|attempt| attempt.split_once('=').expect("name=outcome"))
+        .collect();
+    for channel in ["tcp", "udp", "dns", "read_dir", "open", "open_relative"] {
+        let outcome = attempts
+            .get(channel)
+            .unwrap_or_else(|| panic!("{channel} missing from {report}"));
+        assert!(
+            outcome.starts_with("err("),
+            "{channel} must fail inside the guest, got {outcome}: {report}"
+        );
+    }
+    assert_eq!(attempts["env"], "0", "{report}");
+    // The program name is the only argument a command-line guest sees; none are granted.
+    assert!(attempts["args"].parse::<usize>().unwrap() <= 1, "{report}");
     drop(session);
     drop(driver);
     host.close();
@@ -1329,8 +1406,8 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
             vec![DocumentGrant {
                 document: route.document.clone(),
                 branch: route.branch.clone(),
-                facets: vec![daybook_types::manifest::RoutineFacetAccess {
-                    tag: route.tag.clone().into(),
+                facets: vec![clay_docs::FacetAccess {
+                    tag: route.tag.clone(),
                     key_id: Some(route.key_id.clone()),
                     read: true,
                     write: true,
@@ -1389,6 +1466,13 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     );
     assert_eq!(*ended.borrow(), Some(clay_host::CloseReason::Requested));
     assert_eq!(host.check(&owner), Err(clay_host::AccessError::Revoked));
+    assert!(
+        host.fault(&owner).is_some_and(|fault| fault
+            .contains("guest trapped in a document delivery")
+            && fault.contains("all fuel consumed")),
+        "an event-loop trap records its reason: {:?}",
+        host.fault(&owner)
+    );
     assert!(!writer.is_live());
     drop(surface);
     host.close();
@@ -1849,8 +1933,8 @@ async fn packages_share_one_engine_and_one_linker() {
 
 #[tokio::test]
 async fn precompiled_artifacts_are_reused_by_content() {
-    let path = std::env::var("DAYFRAME_COUNTER_COMPONENT")
-        .expect("DAYFRAME_COUNTER_COMPONENT must name a prepared counter component");
+    let path = std::env::var("DAYTXT_COUNTER_COMPONENT")
+        .expect("DAYTXT_COUNTER_COMPONENT must name a prepared counter component");
     let bytes = std::fs::read(path).unwrap();
     let directory = std::env::temp_dir().join(format!(
         "clay-component-cache-{}-{}",
@@ -1893,8 +1977,8 @@ async fn precompiled_artifacts_are_reused_by_content() {
 /// payload, so its cache key is its own and a compile of it is cold even when the artifact cache
 /// is warm.
 fn uniquely_padded_counter() -> Vec<u8> {
-    let path = std::env::var("DAYFRAME_COUNTER_COMPONENT")
-        .expect("DAYFRAME_COUNTER_COMPONENT must name a prepared counter component");
+    let path = std::env::var("DAYTXT_COUNTER_COMPONENT")
+        .expect("DAYTXT_COUNTER_COMPONENT must name a prepared counter component");
     let mut bytes = std::fs::read(path).unwrap();
     // A trailing custom section (id 0, name "pad") with a unique payload gives these bytes a
     // cache key of their own, so the compile is cold even when the artifact cache is warm.

@@ -7,7 +7,6 @@ pub big_cartridges::async fn boot (config : CartridgesConfig) -> Res < (Cartridg
 pub big_cartridges::async fn ensure_registry_drawer (config : RegistryDrawerConfig < '_ >) -> Res < DrawerId >
 pub big_cartridges::fn schema_groups () -> [SchemaRegistrationGroup < 'static > ; 2]
 pub big_cartridges::import::async fn micro_pair (cartridges : & Client < CartridgesProtocol > , blobs : & BlobService , authorization : Authorization , component : Vec < u8 > , manifest_json : & [u8] ,) -> Result < PublishedCartridgeVersion , ImportError >
-pub const big_cartridges::import::CLAY_MICRO_MANIFEST_SCHEMA: & str
 pub const big_cartridges::import::MICRO_COMPONENT_ARTIFACT: & str
 pub enum big_cartridges::import::ImportError { # [error ("the manifest is not importable: {0}")] Manifest (String), # [error ("the component is not importable: {0}")] Component (String), # [error ("importing the component into the blob store failed: {0}")] Blob (String), # [error ("the registry refused the version: {0}")] Registry (# [from] CartridgesError), # [error ("the registry could not be reached: {0}")] Transport (String) }
 pub mod big_cartridges::import
@@ -18,3 +17,4 @@ pub struct big_cartridges::NodeKey  { public_key: [u8 ; 32], sign: NodeSigner }
 pub struct big_cartridges::RegistryDrawerConfig< 'a >  { drawers: & 'a Drawers, actor: & 'a OpenedActor, access: & 'a DrawerAccess, sql: Database }
 pub type big_cartridges::CartridgesHandler = Arc < CartridgeService >
 pub type big_cartridges::NodeSigner = Arc < dyn Fn (& [u8]) -> [u8 ; 64] + Send + Sync >
+pub use big_cartridges::import::big_cartridges_core :: CLAY_MICRO_MANIFEST_SCHEMA

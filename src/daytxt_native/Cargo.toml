@@ -1,0 +1,62 @@
+[package]
+name = "daytxt_native"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+#
+# internal
+clay_dioxus_kit = { workspace = true, features = ["host"] }
+clay_guest_session = { workspace = true }
+
+clay_docs = { workspace = true }
+clay_host = { workspace = true }
+clay_mdk = { workspace = true, features = ["in_process", "view", "wasmtime", "package"] }
+clay_store = { workspace = true }
+big_cabinet = { workspace = true }
+big_cabinet_core = { workspace = true }
+clay_node = { workspace = true }
+daytxt_core = { workspace = true }
+dioxus = { workspace = true }
+dioxus-native = { workspace = true, optional = true }
+dioxus-desktop = { workspace = true, optional = true }
+intxt_core = { workspace = true, features = ["install"] }
+micro_counter_manifest = { workspace = true }
+micro_review_manifest = { workspace = true }
+micro_sample = { workspace = true }
+micro_settings = { workspace = true }
+micro_settings_manifest = { workspace = true }
+micro_theme_lab_manifest = { workspace = true }
+micro_shell = { workspace = true }
+micro_shell_manifest = { workspace = true }
+micro_toolbar = { workspace = true }
+micro_toolbar_manifest = { workspace = true }
+serde_json = { workspace = true }
+service_utils_rs = { workspace = true }
+sqlite_rs = { workspace = true }
+utils_rs = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[features]
+# Blitz hosting: the winit window-event host inputs and the insets source. Off for a Wry-only
+# build, which must not compile Blitz.
+blitz = ["dep:dioxus-native"]
+# Wry hosting (desktop and Android webviews): the window-event host inputs, the insets source and
+# the Android system back, read from the webview's window rather than Blitz's.
+wry = ["dep:dioxus-desktop"]
+
+[dev-dependencies]
+#
+# internal
+clay_node = { workspace = true, features = ["test-support"] }
+
+#
+# misc
+bytes = { workspace = true }
+http = { workspace = true }
+http-body-util = "0.1"
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }

@@ -1,4 +1,11 @@
-//! ListDetails: the list/details scaffold.
+//! ListDetails (`ct-list-details`): the list/details scaffold.
+//!
+//! Parts: `list` and `details`. State: the root's `data-state` is `split` (side by side, the parts
+//! sit in the panes of a `ct-sections`) or `stacked` (compact); a stacked list is `data-state`
+//! `covered` while details lie over it, and `idle` otherwise. The skin layers a stacked pair:
+//! the list is one stacking context on the content layer, below the details on the raised one,
+//! and a covered list is out of hit-testing, which `inert` would do but the guest wire has no
+//! such attribute.
 //!
 //! Compact hosts show one pane at a time: the details come on top of the list, which stays
 //! mounted underneath (its scroll position and state survive) but is hidden from assistive
@@ -13,9 +20,7 @@
 //! rows read it through the same context to mark themselves (see [`ListRow`](super::list_row)).
 use super::sections::SectionPane;
 use super::sections::Sections;
-use super::sections::SectionsSkin;
 use super::sections::Split;
-use crate::Layer;
 use crate::WidthClass;
 use dioxus::prelude::*;
 
@@ -51,16 +56,6 @@ pub fn use_list_details() -> ListDetailsActions {
     use_context::<ListDetailsActions>()
 }
 
-/// The classes a skin gives each part of [`ListDetails`].
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ListDetailsSkin {
-    pub root: &'static str,
-    pub list: &'static str,
-    pub details: &'static str,
-    /// Used for the side-by-side arrangement.
-    pub sections: SectionsSkin,
-}
-
 #[component]
 pub fn ListDetails(
     width: WidthClass,
@@ -75,7 +70,6 @@ pub fn ListDetails(
     on_resize: EventHandler<Vec<f64>>,
     on_open: EventHandler<String>,
     on_back: EventHandler<()>,
-    #[props(default)] skin: ListDetailsSkin,
 ) -> Element {
     // Callbacks made with `use_callback` track the latest props, so the context value, which is
     // created once, never calls a stale `on_open`.
@@ -106,52 +100,41 @@ pub fn ListDetails(
         };
         let mut panes = vec![SectionPane {
             name: list_name.clone(),
-            content: rsx! { div { class: skin.list, style: "width:100%;height:100%", {list} } },
+            content: rsx! { div { "data-part": "list", {list} } },
         }];
         let (label, split) = match details {
             Some(details) => {
                 panes.push(SectionPane {
                     name: details_name.clone(),
-                    content: rsx! { div { class: skin.details, style: "width:100%;height:100%", {details} } },
+                    content: rsx! { div { "data-part": "details", {details} } },
                 });
                 (format!("{list_name} and {details_name}"), split)
             }
             None => (list_name, single),
         };
         return rsx! {
-            Sections { label, panes, split, on_resize, skin: skin.sections }
+            div { class: "ct-list-details", "data-state": "split",
+                Sections { label, panes, split, on_resize }
+            }
         };
     }
     let covered = details.is_some();
-    let raised = Layer::Raised.css();
-    let content = Layer::Content.css();
-    let list_events = if covered { "none" } else { "auto" };
     rsx! {
-        div {
-            class: skin.root,
-            style: "position:relative;width:100%;height:100%;min-width:0;min-height:0",
+        div { class: "ct-list-details", "data-state": "stacked",
             div {
-                class: skin.list,
+                "data-part": "list",
+                "data-state": if covered { "covered" } else { "idle" },
                 role: "region",
                 "aria-label": "{list_name}",
                 // Covered by the details, the list is out of reach of assistive technology.
                 "aria-hidden": covered.then_some("true"),
-                // A layer of its own makes the list one stacking context on `Content`, below the
-                // details on `Raised`. Without it the list's app bar (a positioned `AppBar`-layer
-                // element) took part in the root's stacking order, painted over the details and
-                // intercepted their pointer events.
-                // `pointer-events:none` while covered takes the list out of hit-testing outright
-                // (`inert` is not in the guest wire vocabulary), so nothing in it can take a
-                // click meant for the details even if it paints above them.
-                style: "position:relative;width:100%;height:100%;z-index:{content};pointer-events:{list_events}",
                 {list}
             }
             if let Some(details) = details {
                 div {
-                    class: skin.details,
+                    "data-part": "details",
                     role: "region",
                     "aria-label": "{details_name}",
-                    style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:{raised}",
                     {details}
                 }
             }
@@ -223,31 +206,47 @@ mod tests {
     }
 
     #[test]
-    fn compact_details_cover_the_list_on_the_raised_layer() {
-        let (page, _) = render(WidthClass::Compact, true);
-        let details = page.by_role("region", "Inbox settings");
-        assert_eq!(
-            page.style(details, "z-index").as_deref(),
-            Some(Layer::Raised.css())
-        );
+    fn the_scaffold_names_its_arrangement_and_parts() {
+        for (width, state, parts) in [
+            (WidthClass::Compact, "stacked", vec!["list", "details"]),
+            (WidthClass::Expanded, "split", vec![]),
+        ] {
+            let (page, _) = render(width, true);
+            let root = page.by_class("ct-list-details");
+            assert_eq!(page.attr(root, "data-state").as_deref(), Some(state));
+            if parts.is_empty() {
+                // Side by side the parts are in the panes of the one `ct-sections` it holds.
+                let sections = page.by_class("ct-sections");
+                assert_eq!(page.parent(sections), root);
+                for part in ["list", "details"] {
+                    let region = page.by_role(
+                        "region",
+                        if part == "list" {
+                            "Settings"
+                        } else {
+                            "Inbox settings"
+                        },
+                    );
+                    let inner = page.children(region)[0];
+                    assert_eq!(page.attr(inner, "data-part").as_deref(), Some(part));
+                }
+            } else {
+                assert_eq!(page.parts(root), parts);
+            }
+        }
     }
 
     #[test]
-    fn compact_covered_list_is_inert_and_on_a_layer_below_the_details() {
+    fn a_compact_list_is_covered_while_details_lie_over_it() {
         let (page, _) = render(WidthClass::Compact, true);
         let details = page.by_role("region", "Inbox settings");
         let list = page.children(page.parent(details))[0];
-        assert_eq!(page.style(list, "pointer-events").as_deref(), Some("none"));
+        assert_eq!(page.attr(list, "data-state").as_deref(), Some("covered"));
         assert_eq!(page.attr(list, "aria-hidden").as_deref(), Some("true"));
-        assert_eq!(page.style(list, "position").as_deref(), Some("relative"));
-        assert_eq!(
-            page.style(list, "z-index").as_deref(),
-            Some(Layer::Content.css())
-        );
-        assert!(Layer::Content < Layer::Raised);
         let (page, _) = render(WidthClass::Compact, false);
         let list = page.by_role("region", "Settings");
-        assert_eq!(page.style(list, "pointer-events").as_deref(), Some("auto"));
+        assert_eq!(page.attr(list, "data-state").as_deref(), Some("idle"));
+        assert_eq!(page.attr(list, "aria-hidden"), None);
     }
 
     #[test]

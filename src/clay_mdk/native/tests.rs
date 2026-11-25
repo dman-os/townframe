@@ -1,13 +1,12 @@
 use super::*;
 use crate::Access;
-use crate::Attachment;
 use crate::BindingResolution;
 use crate::CollectionDecl;
 use crate::ComponentDecl;
+use crate::Endpoint;
 use crate::Entrypoints;
+use crate::Link;
 use crate::Necessity;
-use crate::PublicationDeclaration;
-use crate::PublicationKind;
 use crate::Registration;
 use crate::Request;
 use crate::RootRow;
@@ -74,7 +73,7 @@ fn host_id(name: &str) -> clay_host::MicroId {
 
 #[derive(Default)]
 struct Spec {
-    publications: Vec<PublicationDeclaration>,
+    endpoints: BTreeMap<String, Endpoint>,
     requests: Vec<Request>,
     requires: Vec<Request>,
     bindings: CollectionBindings,
@@ -117,7 +116,7 @@ impl Rig {
     ) -> ConfiguredMicro<CapabilityPublication> {
         let manifest = MicroManifest {
             entrypoints: Entrypoints::micro_client(),
-            publications: spec.publications,
+            endpoints: spec.endpoints,
             requires: spec.requires,
             configuration_requests: vec![],
             collection_contracts: vec![],
@@ -143,20 +142,17 @@ impl Rig {
     }
 }
 
-fn presentation(name: &str) -> PublicationDeclaration {
-    PublicationDeclaration {
-        name: name.into(),
-        kind: PublicationKind::Presentation,
-        contract: None,
-    }
+fn view(name: &str) -> (String, Endpoint) {
+    (name.into(), Endpoint::View { implements: None })
 }
 
-fn call(name: &str) -> PublicationDeclaration {
-    PublicationDeclaration {
-        name: name.into(),
-        kind: PublicationKind::Call,
-        contract: Some(Nsid::literal(INCREMENT)),
-    }
+fn method(name: &str) -> (String, Endpoint) {
+    (
+        name.into(),
+        Endpoint::Method {
+            nsid: Nsid::literal(INCREMENT),
+        },
+    )
 }
 
 /// The binding name the test micros use for the `ROWS` collection.
@@ -179,7 +175,7 @@ fn writes_rows() -> Spec {
         requests: vec![rows_request(Access::Write, Necessity::Required)],
         bindings: CollectionBindings::new([(
             ROWS_BINDING.to_owned(),
-            BoundCollection::write(rows()),
+            BoundCollection::write(clay_collection::CollectionId::minted_for(&rows())),
         )]),
         ..Spec::default()
     }
@@ -190,7 +186,7 @@ fn reads_rows() -> Spec {
         requests: vec![rows_request(Access::Read, Necessity::Required)],
         bindings: CollectionBindings::new([(
             ROWS_BINDING.to_owned(),
-            BoundCollection::read(rows()),
+            BoundCollection::read(clay_collection::CollectionId::minted_for(&rows())),
         )]),
         ..Spec::default()
     }
@@ -216,7 +212,7 @@ async fn declared_presentations_are_published_by_name_and_leased() {
         let micro = rig.micro(
             "native.shelf",
             Spec {
-                publications: vec![presentation("view"), presentation("detail")],
+                endpoints: [view("view"), view("detail")].into(),
                 ..Spec::default()
             },
             |context| async move {
@@ -254,7 +250,7 @@ async fn publishing_an_undeclared_name_fails_initialization() {
         let micro = rig.micro(
             "native.rogue",
             Spec {
-                publications: vec![presentation("view")],
+                endpoints: [view("view")].into(),
                 ..reads_rows()
             },
             {
@@ -458,7 +454,7 @@ async fn a_requirement_resolves_to_a_live_reference_to_its_provider() {
         let provider = rig.micro(
             "native.provider",
             Spec {
-                publications: vec![presentation("view")],
+                endpoints: [view("view")].into(),
                 ..Spec::default()
             },
             |context| async move {
@@ -516,8 +512,9 @@ fn required(binding: &str, necessity: Necessity) -> Request {
 
 fn provides(provider: &str, publication: &str) -> Requirement {
     Requirement {
-        provider: host_id(provider),
+        provider: Some(host_id(provider)),
         publication: publication.into(),
+        necessity: clay_host::Necessity::Required,
     }
 }
 
@@ -528,7 +525,7 @@ async fn a_published_call_serves_typed_requests_and_reports_handler_rejections()
         let provider = rig.micro(
             "native.provider",
             Spec {
-                publications: vec![call("increment")],
+                endpoints: [method("increment")].into(),
                 ..Spec::default()
             },
             |context| async move {
@@ -585,17 +582,17 @@ async fn a_published_call_serves_typed_requests_and_reports_handler_rejections()
     .await;
 }
 
-/// A row may attach one of its writer's own declared publications at any time: the host stores
+/// A row may link one of its writer's own declared endpoints at any time: the host stores
 /// the endpoint, so no handle from `activate` is needed and a reader redeems the row's
 /// reference like a manifest row's. A name the manifest does not declare fails the write.
 #[tokio::test(flavor = "current_thread")]
-async fn a_row_written_after_activate_attaches_the_writers_own_declared_publication() {
+async fn a_row_written_after_activate_links_the_writers_own_declared_endpoint() {
     in_local_set(async {
         let rig = Rig::new();
         let writer = rig.micro(
             "native.late",
             Spec {
-                publications: vec![presentation("detail"), call("attach")],
+                endpoints: [view("detail"), method("attach")].into(),
                 ..writes_rows()
             },
             |context| async move {
@@ -608,7 +605,7 @@ async fn a_row_written_after_activate_attaches_the_writers_own_declared_publicat
                         rows.put(
                             &"late".to_owned(),
                             &"Late".to_owned(),
-                            vec![crate::RowAttachment::by_name(publication)],
+                            vec![crate::RowLink::by_name(publication)],
                         )
                         .await?;
                         Ok(())
@@ -661,10 +658,11 @@ async fn a_row_written_after_activate_attaches_the_writers_own_declared_publicat
             watch.changed().await.unwrap();
         }
         let rows = watch.rows().unwrap();
-        let detail = rows[0].attachments[0].redeem_presentation().await.unwrap();
+        let detail = rows[0].links[0].redeem_presentation().await.unwrap();
         assert!(detail.component().is_ok());
         drop(detail);
-        // Neither an undeclared name nor a declared call attaches as a presentation row.
+        // Neither an undeclared name nor a declared call links as a presentation row. The host's
+        // rejection keeps the WIT's word, `attachment`, until the 0.5.0 bump.
         assert!(matches!(
             attach.call::<String, ()>(&"nope".to_owned()).await,
             Err(Error::Rejected(message)) if message.contains("attachment")
@@ -701,7 +699,7 @@ async fn a_value_captured_by_a_view_is_dropped_inside_the_close() {
             "native.viewer",
             Spec {
                 eager: true,
-                publications: vec![presentation("view")],
+                endpoints: [view("view")].into(),
                 ..Spec::default()
             },
             {
@@ -740,22 +738,20 @@ async fn a_value_captured_by_a_view_is_dropped_inside_the_close() {
 }
 
 #[test]
-fn declared_publications_keep_the_manifest_contract_and_skip_unknown_kinds() {
+fn declared_endpoints_keep_the_manifest_contract_and_skip_unknown_members() {
     let manifest = MicroManifest {
         entrypoints: Entrypoints::micro_client(),
-        publications: vec![
-            presentation("view"),
-            PublicationDeclaration {
-                name: "echo".into(),
-                kind: PublicationKind::Call,
-                contract: Some(Nsid::literal("org.example.clay.test.lifecycle.echoV2")),
-            },
-            PublicationDeclaration {
-                name: "future".into(),
-                kind: PublicationKind::Other("stream".into()),
-                contract: None,
-            },
-        ],
+        endpoints: [
+            view("view"),
+            (
+                "echo".into(),
+                Endpoint::Method {
+                    nsid: Nsid::literal("org.example.clay.test.lifecycle.echoV2"),
+                },
+            ),
+            ("future".into(), Endpoint::Other(Default::default())),
+        ]
+        .into(),
         requires: vec![],
         configuration_requests: vec![],
         collection_contracts: vec![],
@@ -763,8 +759,8 @@ fn declared_publications_keep_the_manifest_contract_and_skip_unknown_kinds() {
         contributions: vec![],
         extra: BTreeMap::new(),
     };
-    let declared = declared_publications(&manifest);
-    assert_eq!(declared.len(), 2, "an unknown kind is not served");
+    let declared = declared_endpoints(&manifest);
+    assert_eq!(declared.len(), 2, "an unknown member is not served");
     assert_eq!(
         declared["echo"].contract,
         Nsid::literal("org.example.clay.test.lifecycle.echoV2")
@@ -773,16 +769,16 @@ fn declared_publications_keep_the_manifest_contract_and_skip_unknown_kinds() {
 }
 
 #[test]
-fn declared_rows_store_endpoints_and_tag_attachment_slots() {
-    use crate::AttachmentDeclaration;
+fn declared_rows_store_endpoints_and_tag_link_slots() {
     use crate::ContributionDeclaration;
+    use crate::LinkDeclaration;
 
     let mut sidecar = Sidecar::new(
         "native.declares",
         1,
         MicroManifest {
             entrypoints: Entrypoints::micro_client(),
-            publications: vec![presentation("view")],
+            endpoints: [view("view")].into(),
             requires: vec![],
             configuration_requests: vec![],
             collection_contracts: vec![],
@@ -798,10 +794,10 @@ fn declared_rows_store_endpoints_and_tag_attachment_slots() {
                 id: "root".into(),
                 binding: "roots".into(),
                 key: "native.declares".into(),
-                payload: serde_json::json!({"title": "Declared", "content": {"$attachment": 0}}),
-                attachments: vec![AttachmentDeclaration {
+                value: serde_json::json!({"title": "Declared", "content": {"$link": 0}}),
+                links: vec![LinkDeclaration {
                     index: 0,
-                    publication: "view".into(),
+                    endpoint: "view".into(),
                 }],
             }],
             extra: BTreeMap::new(),
@@ -817,7 +813,7 @@ fn declared_rows_store_endpoints_and_tag_attachment_slots() {
         row,
         RootRow {
             title: "Declared".into(),
-            content: Attachment::at(0),
+            content: Link::at(0),
         }
     );
     assert_eq!(
@@ -835,8 +831,8 @@ fn declared_rows_store_endpoints_and_tag_attachment_slots() {
         runtime_scope(&host_id(micro.name()))
     );
 
-    // An attachment index that the contribution does not declare is refused.
-    sidecar.manifest.contributions[0].attachments[0].index = 3;
+    // A link index that the contribution does not declare is refused.
+    sidecar.manifest.contributions[0].links[0].index = 3;
     assert!(
         declared_rows(&micro, &sidecar)
             .unwrap_err()

@@ -32,7 +32,7 @@ We have read these sources, not executed their examples or adopted their runtime
 
 ## Consequences for the current increment
 
-1. Keep Dayframe authority separate from web-platform vocabulary. A guest gets a placement-scoped
+1. Keep claytxt authority separate from web-platform vocabulary. A guest gets a placement-scoped
    surface, not a global `window`/`document` proxy. Adding a familiar DOM operation must not grant
    access to other micros, application roots, network access, or unrelated platform facilities.
 2. Use the existing Dioxus renderer and serialized event conventions before designing new ones.
@@ -42,7 +42,7 @@ We have read these sources, not executed their examples or adopted their runtime
 3. Keep synchronous event delivery for default-action decisions. An asynchronous event stream
    is useful for observation but cannot retroactively cancel a browser default action. The
    converter project's `EventHandler -> stream` suggestion alone does not solve that behavior.
-4. Host/guest resource lifetimes and guest-local data mirrors remain Dayframe contracts. They
+4. Host/guest resource lifetimes and guest-local data mirrors remain claytxt contracts. They
    must work through different component engines; neither Wasmtime objects nor JS objects define
    their portable identity.
 5. Incremental platform support needs explicit unsupported results. Blitz is not a complete

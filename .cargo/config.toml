@@ -28,8 +28,11 @@ rustflags = ["--cfg", "tokio_unstable"]
 # binary uncached. Line tables alone keep the embedded debuginfo small.
 debug = "line-tables-only"
 
+# Dependencies carry no debug info at all: measured on day_cli, it cuts the link step
+# 15%, link peak memory 21% and the binary 26% against line tables. To step into a
+# dependency, set `[profile.dev.package."<name>"] debug = "line-tables-only"` locally.
 [profile.dev.package."*"]
-debug = "line-tables-only"
+debug = false
 
 [unstable]
 feature-unification = true

@@ -7,7 +7,11 @@ allowed_dependencies = [
 # Every public prop is a Dioxus type (`Element`, `EventHandler`): the kit is a Dioxus library.
 allow_external_api_types = true
 
+# The host feature is the document-and-asset loader of a native or browser host: native builds it
+# with and without. The wasm targets are the guest builds, which never enable it.
 [builds.native]
+features = ["host"]
+powerset = true
 
 [builds.wasm32-unknown-unknown]
 

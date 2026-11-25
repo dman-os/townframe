@@ -30,10 +30,10 @@ pub fn runtime_scope(micro: &MicroId) -> Vec<u8> {
 pub type DeclaredRows = BTreeMap<String, BTreeMap<Vec<u8>, Option<CollectionValue>>>;
 
 /// The rows `sidecar` declares for the micro installed as `micro`, grouped by binding (validation guarantees each
-/// names a collection request with write access). A key is the CBOR text of the declared key. The payload is
-/// the row body as JSON; the one-member object `{"$attachment": n}` stands for the reserved
-/// attachment tag over index `n` (JSON has no tags). Each declared attachment becomes the
-/// endpoint of one of the package's own publications, so the stored row never retains the
+/// names a collection request with write access). A key is the CBOR text of the declared key. The value is
+/// the row body as JSON; the one-member object `{"$link": n}` stands for the reserved
+/// link tag over index `n` (JSON has no tags). Each declared link becomes the
+/// endpoint of one of the package's own endpoints, so the stored row never retains the
 /// provider (ADR 031 §7).
 pub fn declared_rows(
     micro: &crate::manifest::MicroId,
@@ -44,41 +44,40 @@ pub fn declared_rows(
     let manifest = &sidecar.manifest;
     let mut bindings = DeclaredRows::new();
     for contribution in &manifest.contributions {
-        let mut attachments = vec![None; contribution.attachments.len()];
-        for attachment in &contribution.attachments {
-            let publication = manifest
-                .publications
-                .iter()
-                .find(|publication| publication.name == attachment.publication)
-                .expect("validate checked that the attachment names a declared publication");
-            let Some((_, contract)) = super::admitted_publication(publication) else {
+        let mut attachments = vec![None; contribution.links.len()];
+        for link in &contribution.links {
+            let endpoint = manifest
+                .endpoints
+                .get(&link.endpoint)
+                .expect("validate checked that the link names a declared endpoint");
+            let Some((_, contract)) = super::admitted_endpoint(endpoint) else {
                 return Err(format!(
-                    "contribution {:?} attaches {:?}, which is not a servable publication",
-                    contribution.id, publication.name
+                    "contribution {:?} links {:?}, which is not a servable endpoint",
+                    contribution.id, link.endpoint
                 ));
             };
-            let slot = usize::try_from(attachment.index)
+            let slot = usize::try_from(link.index)
                 .ok()
                 .and_then(|index| attachments.get_mut(index))
                 .ok_or_else(|| {
                     format!(
-                        "contribution {:?} attaches index {} but declares {} attachments",
+                        "contribution {:?} links index {} but declares {} links",
                         contribution.id,
-                        attachment.index,
-                        contribution.attachments.len()
+                        link.index,
+                        contribution.links.len()
                     )
                 })?;
             if slot
                 .replace(RowAttachment::Endpoint(PublicationEndpoint {
                     micro: micro.clone(),
-                    publication: attachment.publication.clone(),
+                    publication: link.endpoint.clone(),
                     contract,
                 }))
                 .is_some()
             {
                 return Err(format!(
-                    "contribution {:?} attaches index {} twice",
-                    contribution.id, attachment.index
+                    "contribution {:?} links index {} twice",
+                    contribution.id, link.index
                 ));
             }
         }
@@ -87,12 +86,12 @@ pub fn declared_rows(
             .collect::<Option<_>>()
             .ok_or_else(|| {
                 format!(
-                    "contribution {:?} leaves an attachment index undeclared",
+                    "contribution {:?} leaves a link index undeclared",
                     contribution.id
                 )
             })?;
         let mut body = Vec::new();
-        ciborium::into_writer(&cbor(&contribution.payload), &mut body)
+        ciborium::into_writer(&cbor(&contribution.value), &mut body)
             .expect("CBOR encoding of an in-memory value");
         let mut key = Vec::new();
         ciborium::into_writer(&contribution.key, &mut key)
@@ -111,7 +110,7 @@ pub fn declared_rows(
     Ok(bindings)
 }
 
-/// A JSON payload as CBOR, with `{"$attachment": n}` as the attachment tag.
+/// A JSON value as CBOR, with `{"$link": n}` as the link tag.
 fn cbor(json: &serde_json::Value) -> Value {
     use serde_json::Value as Json;
     match json {
@@ -124,7 +123,7 @@ fn cbor(json: &serde_json::Value) -> Value {
         },
         Json::String(text) => Value::Text(text.clone()),
         Json::Array(items) => Value::Array(items.iter().map(cbor).collect()),
-        Json::Object(members) => match members.get("$attachment").and_then(Json::as_u64) {
+        Json::Object(members) => match members.get("$link").and_then(Json::as_u64) {
             Some(index) if members.len() == 1 => Value::Tag(
                 CAPABILITY_ATTACHMENT_TAG,
                 Box::new(Value::Integer(index.into())),

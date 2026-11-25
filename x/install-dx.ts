@@ -161,7 +161,7 @@ Deno.test("Dioxus CLI source rejects absent, ambiguous and unpinned patches", ()
 });
 
 Deno.test("Dioxus CLI installs the metadata-selected local package with spaced paths", async () => {
-  const temporary = await Deno.makeTempDir({ prefix: "dayframe-cli-" });
+  const temporary = await Deno.makeTempDir({ prefix: "dx-install-" });
   const priorTargetDir = Deno.env.get("CARGO_TARGET_DIR");
   try {
     const directory = $.path(temporary);

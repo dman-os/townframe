@@ -3,15 +3,15 @@
 //! shape holds, so entries come out in call order.
 //!
 //! Declaration mistakes (a contribution into a collection the manifest never requested for
-//! write, an attachment to an undeclared publication, any other [`MicroManifest::validate`]
+//! write, a link to an undeclared endpoint, any other [`MicroManifest::validate`]
 //! failure) are programming errors and panic at [`ManifestBuilder::build`], which a micro's own
 //! snapshot test reaches.
 use super::*;
-use crate::Attachment;
 use crate::CollectionDecl;
 use crate::ComponentDecl;
 use crate::ConfigDecl;
 use crate::DeclaredCollection;
+use crate::Link;
 use crate::PackageDecl;
 
 /// Builds a [`MicroManifest`] from declaration types.
@@ -19,34 +19,32 @@ pub struct ManifestBuilder {
     manifest: MicroManifest,
 }
 
-/// Hands out the attachments of one contribution's row: each call numbers the next attachment
-/// and records the publication it refers to, so a row never spells an index.
-pub struct Attachments<'a> {
-    publications: &'a [PublicationDeclaration],
-    declared: Vec<AttachmentDeclaration>,
+/// Hands out the links of one contribution's row: each call numbers the next link and records
+/// the endpoint it refers to, so a row never spells an index.
+pub struct Links<'a> {
+    endpoints: &'a BTreeMap<String, Endpoint>,
+    declared: Vec<LinkDeclaration>,
 }
 
-impl Attachments<'_> {
-    /// An attachment to the presentation `P` this manifest publishes.
-    pub fn own<P: ComponentDecl>(&mut self) -> Attachment {
+impl Links<'_> {
+    /// A link to the view `P` this manifest serves.
+    pub fn own<P: ComponentDecl>(&mut self) -> Link {
         self.by_name(P::NAME)
     }
 
-    /// An attachment to a publication named by string: a call publication (calls stay named by
+    /// A link to an endpoint named by string: a callback or a method (those stay named by
     /// string until they are declared by their `Method` request type).
-    pub fn by_name(&mut self, publication: &str) -> Attachment {
+    pub fn by_name(&mut self, endpoint: &str) -> Link {
         assert!(
-            self.publications
-                .iter()
-                .any(|declared| declared.name == publication),
-            "the row attaches {publication:?}, which the manifest does not publish"
+            self.endpoints.contains_key(endpoint),
+            "the row links {endpoint:?}, which the manifest does not declare"
         );
         let index = self.declared.len();
-        self.declared.push(AttachmentDeclaration {
-            index: u32::try_from(index).expect("a row has few attachments"),
-            publication: publication.into(),
+        self.declared.push(LinkDeclaration {
+            index: u32::try_from(index).expect("a row has few links"),
+            endpoint: endpoint.into(),
         });
-        Attachment::at(index as u64)
+        Link::at(index as u64)
     }
 }
 
@@ -62,7 +60,7 @@ impl ManifestBuilder {
         Self {
             manifest: MicroManifest {
                 entrypoints: Entrypoints::micro_client(),
-                publications: vec![],
+                endpoints: BTreeMap::new(),
                 requires: vec![],
                 configuration_requests: vec![],
                 collection_contracts: vec![],
@@ -73,28 +71,46 @@ impl ManifestBuilder {
         }
     }
 
-    /// Publish the presentation `P`.
-    pub fn component<P: ComponentDecl>(mut self) -> Self {
-        self.manifest.publications.push(PublicationDeclaration {
-            name: P::NAME.into(),
-            kind: PublicationKind::Presentation,
-            contract: None,
-        });
+    /// Serve the view `P`, under the contract `P::IMPLEMENTS` names when another micro requires
+    /// it.
+    pub fn view<P: ComponentDecl>(self) -> Self {
+        self.endpoint(
+            P::NAME,
+            Endpoint::View {
+                implements: P::IMPLEMENTS.map(Nsid::literal),
+            },
+        )
+    }
+
+    /// Serve a method `name` registered under the NSID `nsid`. Methods are named by string
+    /// until they are declared by their `Method` request type.
+    pub fn method(self, name: &str, nsid: &str) -> Self {
+        self.endpoint(
+            name,
+            Endpoint::Method {
+                nsid: Nsid::literal(nsid),
+            },
+        )
+    }
+
+    /// Serve a callback `name` implementing the contract `implements`: it is never
+    /// registered and is reached only through a link a row carries.
+    pub fn callback(self, name: &str, implements: &str) -> Self {
+        self.endpoint(
+            name,
+            Endpoint::Callback {
+                implements: Nsid::literal(implements),
+            },
+        )
+    }
+
+    fn endpoint(mut self, name: &str, endpoint: Endpoint) -> Self {
+        let previous = self.manifest.endpoints.insert(name.into(), endpoint);
+        assert!(previous.is_none(), "the manifest serves {name:?} twice");
         self
     }
 
-    /// Publish a call `name` under `contract`. Calls are named by string until they are
-    /// declared by their `Method` request type.
-    pub fn call(mut self, name: &str, contract: &str) -> Self {
-        self.manifest.publications.push(PublicationDeclaration {
-            name: name.into(),
-            kind: PublicationKind::Call,
-            contract: Some(Nsid::literal(contract)),
-        });
-        self
-    }
-
-    /// Require what another micro publishes (a call or a presentation) under the binding
+    /// Require what another micro serves (a method or a view) under the binding
     /// `binding`, naming the contract by string until calls are declared by their `Method`
     /// request type.
     pub fn requires(mut self, binding: &str, contract: &str, necessity: Necessity) -> Self {
@@ -168,13 +184,13 @@ impl ManifestBuilder {
     }
 
     /// Declare the row `key` of collection `C`, written through the manifest's write request
-    /// for `C`, which must come first. `row` builds the typed row and takes its attachments
-    /// from the [`Attachments`] it is handed.
+    /// for `C`, which must come first. `row` builds the typed row and takes its links from the
+    /// [`Links`] it is handed.
     pub fn contributes<C: CollectionDecl>(
         mut self,
         id: &str,
         key: &str,
-        row: impl FnOnce(&mut Attachments) -> C::Value,
+        row: impl FnOnce(&mut Links) -> C::Value,
     ) -> Self {
         let mut writes = self.manifest.collection_requests.iter().filter(|request| {
             request.contract.as_str() == C::NSID && request.access == Some(Access::Write)
@@ -189,18 +205,18 @@ impl ManifestBuilder {
             "contribution {id:?} is ambiguous: several write requests for {}",
             C::NSID
         );
-        let mut attachments = Attachments {
-            publications: &self.manifest.publications,
+        let mut links = Links {
+            endpoints: &self.manifest.endpoints,
             declared: vec![],
         };
-        let row = row(&mut attachments);
-        let attachments = attachments.declared;
+        let row = row(&mut links);
+        let links = links.declared;
         self.manifest.contributions.push(ContributionDeclaration {
             id: id.into(),
             binding,
             key: key.into(),
-            payload: serde_json::to_value(row).expect("a declared row is JSON data"),
-            attachments,
+            value: serde_json::to_value(row).expect("a declared row is JSON data"),
+            links,
         });
         self
     }

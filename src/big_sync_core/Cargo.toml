@@ -10,8 +10,7 @@ workspace = true
 path = "lib.rs"
 
 [features]
-default = ["uniffi", "test-support", "automerge"]
-uniffi = ["dep:uniffi"]
+default = ["test-support", "automerge"]
 automerge = ["dep:autosurgeon"]
 schemars = ["dep:schemars"]
 test-support = []
@@ -52,10 +51,6 @@ parking_lot.workspace = true
 #
 # logging
 tracing.workspace = true
-
-#
-# ffi
-uniffi = { workspace = true, optional = true }
 
 [dev-dependencies]
 futures.workspace = true

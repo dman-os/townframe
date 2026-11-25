@@ -25,6 +25,7 @@ pub mod executor;
 mod requests;
 pub use requests::MissingAuthorityLookup;
 mod state;
+pub use state::RoutineScopes;
 mod store;
 pub mod wire;
 

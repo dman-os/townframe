@@ -106,9 +106,8 @@ pub async fn node() -> Res<Arc<NodeClient>> {
     let owner = NODE
         .get_or_try_init(|| async {
             let conf = config().await?;
-            let client = Arc::new(
-                NodeClient::connect(&conf.node_dir, crate::client::CONNECT_DEADLINE).await?,
-            );
+            let client =
+                Arc::new(NodeClient::connect(&conf.node_dir, day_node::CONNECT_DEADLINE).await?);
             let weak = Arc::downgrade(&client);
             register_shutdown(move || async move {
                 Arc::try_unwrap(client)

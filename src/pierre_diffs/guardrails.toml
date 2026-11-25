@@ -1,0 +1,92 @@
+version = 1
+role = "foundation"
+dependency_reason = "pure port of @pierre/diffs and the jsdiff subset it uses: no engine, UI or I/O dependencies, so it links into native, browser host and wasip3 guest builds alike"
+allowed_dependencies = []
+allow_external_api_types = true
+
+[builds.native]
+
+[builds.wasm32-unknown-unknown]
+
+[builds.wasm32-wasip3]
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/pierre_diffs/components/code_view/item_options.rs"
+symbol = "module::CodeView < Host , Rendered , LAnnotation >::build_diff_options"
+ceiling = 166
+class = "ARCHITECTURAL_EXCEPTION"
+reason = "a line-by-line port of one upstream TS method, kept at parity so it can be diffed against upstream; splitting it would break the diff against upstream. Any helper extraction waits for the port to be settled"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/pierre_diffs/components/code_view/oracle_tests.rs"
+symbol = "module::World::apply"
+ceiling = 174
+class = "ARCHITECTURAL_EXCEPTION"
+reason = "the oracle test world applies the scenario steps in one dispatch (one arm per step), so the whole step set reads in one place next to the oracle it mirrors"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/pierre_diffs/components/code_view/render.rs"
+symbol = "module::CodeView < Host , Rendered , LAnnotation >::compute_render_range_and_emit"
+ceiling = 292
+class = "ARCHITECTURAL_EXCEPTION"
+reason = "a line-by-line port of one upstream TS method, kept at parity so it can be diffed against upstream; splitting it would break the diff against upstream. Any helper extraction waits for the port to be settled"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/pierre_diffs/components/code_view/shell_oracle_tests.rs"
+symbol = "module::World::apply"
+ceiling = 368
+class = "ARCHITECTURAL_EXCEPTION"
+reason = "the oracle test world applies the scenario steps in one dispatch (one arm per step), so the whole step set reads in one place next to the oracle it mirrors"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_MATCH_ARM_LENGTH"
+path = "src/pierre_diffs/components/code_view/oracle_tests.rs"
+symbol = "module::World::apply::match(Step :: Fire { id , key , range , line_number , )"
+ceiling = 98
+class = "ARCHITECTURAL_EXCEPTION"
+reason = "the oracle test world's step dispatch mirrors the oracle's scenario steps one arm each; the arm is the step's whole effect on the world"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_MODULE_ITEMS"
+path = "src/pierre_diffs/utils.rs"
+symbol = "module"
+ceiling = 41
+class = "ARCHITECTURAL_EXCEPTION"
+reason = "one `pub mod` per upstream utils file by design, so the module layout is the upstream layout"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_TYPE_ITEMS"
+path = "src/pierre_diffs/components/virtualized_file_diff/instance.rs"
+symbol = "module::VirtualizedFileDiff < Host , Rendered , LAnnotation >"
+ceiling = 47
+class = "ARCHITECTURAL_EXCEPTION"
+reason = "the type is a port of one upstream TS class, whose method surface is the contract the differential oracle checks; splitting it would diverge from upstream"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_TYPE_ITEMS"
+path = "src/pierre_diffs/document.rs"
+symbol = "module::Document"
+ceiling = 46
+class = "ARCHITECTURAL_EXCEPTION"
+reason = "the type is a port of one upstream TS class, whose method surface is the contract the differential oracle checks; splitting it would diverge from upstream"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_TYPE_ITEMS"
+path = "src/pierre_diffs/fake_virtualized_host.rs"
+symbol = "module::FakeDom"
+ceiling = 41
+class = "ARCHITECTURAL_EXCEPTION"
+reason = "the type is a port of one upstream TS class, whose method surface is the contract the differential oracle checks; splitting it would diverge from upstream"
+reference = "docs/scratch/agent-guardrails-open-items.md"

@@ -38,6 +38,15 @@ impl WidthClass {
         }
     }
 
+    /// The attribute value for `data-width`, which hands the class to a stylesheet.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Medium => "medium",
+            Self::Expanded => "expanded",
+        }
+    }
+
     /// Whether two panels (a list and its details) fit side by side. This is the single rule
     /// every adaptive component derives its arrangement from.
     pub fn fits_side_by_side(self) -> bool {
@@ -62,6 +71,13 @@ mod tests {
     #[should_panic(expected = "finite and non-negative")]
     fn rejects_a_nan_width() {
         WidthClass::from_px(f64::NAN);
+    }
+
+    #[test]
+    fn each_class_names_itself_for_a_stylesheet() {
+        assert_eq!(WidthClass::Compact.as_str(), "compact");
+        assert_eq!(WidthClass::Medium.as_str(), "medium");
+        assert_eq!(WidthClass::Expanded.as_str(), "expanded");
     }
 
     #[test]

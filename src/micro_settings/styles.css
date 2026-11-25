@@ -1,0 +1,36 @@
+/*
+ * The settings' own stylesheet (a micro's rules sit above the kit and the user's theme, so this
+ * sets layout only and names no colour). Parts are local to this micro: `.ct-settings` and its
+ * `data-part`s; its `data-state` is `list` (the sections list) or `section` (one open section).
+ */
+.ct-settings[data-state="list"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-dimension-spacing-4);
+}
+
+.ct-settings[data-state="section"] {
+  height: 100%;
+}
+
+.ct-settings [data-part="preferences"] {
+  margin: 0 var(--ct-dimension-spacing-4);
+}
+
+.ct-settings [data-part="preference"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ct-dimension-spacing-2);
+  margin-top: var(--ct-dimension-spacing-4);
+}
+
+.ct-settings [data-part="sections"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-dimension-spacing-1);
+  padding: 0 var(--ct-dimension-spacing-2);
+}
+
+.ct-settings [data-part="detail"] {
+  padding: 0 var(--ct-dimension-spacing-4) var(--ct-dimension-spacing-4);
+}

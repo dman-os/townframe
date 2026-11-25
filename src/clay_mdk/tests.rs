@@ -33,12 +33,12 @@ fn engine() -> wasmtime::Result<Engine> {
 }
 
 fn counter_component() -> Vec<u8> {
-    let variable = "DAYFRAME_COUNTER_COMPONENT";
+    let variable = "DAYTXT_COUNTER_COMPONENT";
     let path = std::env::var_os(variable).unwrap_or_else(|| {
-        panic!("{variable} must name a prepared counter component; run deno run --allow-all x/check-dayframe.ts --prepare-only and export the printed path")
+        panic!("{variable} must name a prepared counter component; run deno run --allow-all x/check-daytxt.ts --prepare-only and export the printed path")
     });
     std::fs::read(&path).unwrap_or_else(|error| {
-        panic!("cannot read {variable}: {error}; run deno run --allow-all x/check-dayframe.ts --prepare-only")
+        panic!("cannot read {variable}: {error}; run deno run --allow-all x/check-daytxt.ts --prepare-only")
     })
 }
 
@@ -92,6 +92,9 @@ fn replay(batch: &[presentation::Mutation], to: &mut impl WriteMutations) {
             Mutation::CreateElement((tag, ns)) => to.create_element(tag, ns.as_deref()),
             Mutation::CreateText(value) => to.create_text(value),
             Mutation::MountComponent(_) => unreachable!("counter fixture has no component grants"),
+            // The counter's own stylesheet (`document::Style`) is a mount-level sheet, not a node
+            // of the tree: these replays assert tree structure, which it does not touch.
+            Mutation::SetStyleSheet(_) => {}
             Mutation::CloneNode => to.clone(),
             Mutation::AppendChildren(m) => to.append_children(*m as usize),
             Mutation::ReplaceWith(m) => to.replace_with(*m as usize),
@@ -827,6 +830,17 @@ impl presentation::HostSurface for TestHost {
             }
         }
     }
+    fn element_command(
+        &mut self,
+        _surface: Resource<Surface>,
+        _element: u32,
+        _command: presentation::ElementCommand,
+    ) -> wasmtime::Result<Result<(), PresentationError>> {
+        Ok(Err(PresentationError::Unsupported(
+            "element commands".into(),
+        )))
+    }
+
     fn retain(
         &mut self,
         surface: Resource<Surface>,
@@ -914,52 +928,74 @@ fn sdk_click(dom: &mut crate::GuestDom, target: dioxus_core::RenderTargetId) {
 }
 
 #[test]
-fn sdk_one_root_shares_state_across_targets_and_survives_all_mounts_closing() {
+fn sdk_each_mount_runs_its_own_render_scope_and_mounting_one_does_not_rerun_another() {
     use dioxus::prelude::*;
     use std::cell::Cell;
     use std::rc::Rc;
 
-    fn counter(initializations: Rc<Cell<usize>>) -> Element {
-        use_hook(move || initializations.set(initializations.get() + 1));
+    /// Runs once per render of a mount's scope, so it counts how often any mount re-rendered.
+    fn counter(renders: Rc<Cell<usize>>) -> Element {
+        renders.set(renders.get() + 1);
         let mut count = use_signal(|| 0_u64);
         rsx! { button { onclick: move |_| count += 1, "{count}" } }
     }
 
-    let initializations = Rc::new(Cell::new(0));
-    let mut dom = crate::GuestDom::new_with_props(counter, Rc::clone(&initializations));
-    assert_eq!(initializations.get(), 1);
+    let renders = Rc::new(Cell::new(0));
+    let mut dom = crate::GuestDom::new_with_props(counter, Rc::clone(&renders));
+    // No mount, no render: a presentation is rendered only for the surfaces that show it.
+    assert_eq!(renders.get(), 0);
     let first = dom.mount_target(100);
     dom.render().unwrap();
     assert_eq!(sdk_text_edits(&mut dom, first), ["0"]);
+    assert_eq!(renders.get(), 1);
     let second = dom.mount_target(101);
     dom.render().unwrap();
     assert!(sdk_text_edits(&mut dom, first).is_empty());
     assert_eq!(sdk_text_edits(&mut dom, second), ["0"]);
+    assert_eq!(
+        renders.get(),
+        2,
+        "mounting a surface renders only that surface"
+    );
 
+    // A hook in the render closure is the mount's own: a click moves only its mount.
     sdk_click(&mut dom, second);
-    assert_eq!(sdk_text_edits(&mut dom, first), ["1"]);
+    assert!(sdk_text_edits(&mut dom, first).is_empty());
     assert_eq!(sdk_text_edits(&mut dom, second), ["1"]);
-    dom.unmount_target(100);
-    assert!(sdk_text_edits(&mut dom, second).is_empty());
-    assert!(!dom.edits.contains_key(&first));
-    let third = dom.mount_target(102);
-    dom.render().unwrap();
-    assert_eq!(sdk_text_edits(&mut dom, third), ["1"]);
-    sdk_click(&mut dom, third);
+    assert_eq!(renders.get(), 3);
+    sdk_click(&mut dom, second);
     assert_eq!(sdk_text_edits(&mut dom, second), ["2"]);
-    assert_eq!(sdk_text_edits(&mut dom, third), ["2"]);
+    sdk_click(&mut dom, first);
+    assert_eq!(sdk_text_edits(&mut dom, first), ["1"]);
+    assert!(sdk_text_edits(&mut dom, second).is_empty());
+    assert_eq!(renders.get(), 5);
 
     dom.unmount_target(101);
+    assert!(sdk_text_edits(&mut dom, first).is_empty());
+    assert_eq!(
+        renders.get(),
+        5,
+        "unmounting a surface does not re-render its siblings"
+    );
+    assert!(!dom.edits.contains_key(&second));
+
+    // A fresh mount starts from fresh hook state, not the state a sibling or a predecessor left.
+    let third = dom.mount_target(102);
+    dom.render().unwrap();
+    assert_eq!(sdk_text_edits(&mut dom, third), ["0"]);
+    assert!(sdk_text_edits(&mut dom, first).is_empty());
+    assert_eq!(renders.get(), 6);
+
+    dom.unmount_target(100);
     dom.unmount_target(102);
     assert!(dom.edits.is_empty());
     for identity in 103..111 {
         let target = dom.mount_target(identity);
         dom.render().unwrap();
-        assert_eq!(sdk_text_edits(&mut dom, target), ["2"]);
+        assert_eq!(sdk_text_edits(&mut dom, target), ["0"]);
         dom.unmount_target(identity);
         assert!(dom.edits.is_empty());
     }
-    assert_eq!(initializations.get(), 1);
 }
 
 #[test]
@@ -1000,14 +1036,26 @@ fn sdk_external_updates_render_into_live_mounts_and_later_mounts() {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    fn app(external: Rc<Cell<Option<Signal<u64>>>>) -> Element {
-        let count = use_signal(|| 0_u64);
-        external.set(Some(count));
-        rsx! { button { "{count}" } }
-    }
+    /// What the guest runtime provides at the root of a presentation, as its change tick.
+    #[derive(Clone, Copy)]
+    struct Shared(Signal<u64>);
 
     let external = Rc::new(Cell::new(None));
-    let mut dom = crate::GuestDom::new_with_props(app, Rc::clone(&external));
+    let published = Rc::clone(&external);
+    let mut dom = crate::GuestDom::with_setup(
+        move || {
+            let count = use_hook(|| {
+                let count = Signal::new(0_u64);
+                published.set(Some(count));
+                count
+            });
+            use_context_provider(|| Shared(count));
+        },
+        Rc::new(|| {
+            let count = use_context::<Shared>().0;
+            rsx! { button { "{count}" } }
+        }),
+    );
     let mut count = external.get().unwrap();
     count.set(17);
     dom.render().unwrap();
@@ -1028,6 +1076,33 @@ fn sdk_external_updates_render_into_live_mounts_and_later_mounts() {
     assert_eq!(sdk_text_edits(&mut dom, second), ["19"]);
     assert!(!dom.edits.contains_key(&first));
     dom.unmount_target(11);
+}
+
+/// A read the host cannot answer comes back as an error reply, which the guest surfaces as the
+/// standard Dioxus `MountedError`, and a value reply decodes. Drives the guest's reply plumbing
+/// directly: a native test has no surface to send a command over.
+#[tokio::test]
+async fn sdk_element_replies_complete_reads_and_surface_errors_as_mounted_errors() {
+    fn offset_x(value: &serde_json::Value) -> f64 {
+        value["x"].as_f64().unwrap()
+    }
+    fn app() -> dioxus_core::Element {
+        dioxus_core::VNode::empty()
+    }
+    let dom = crate::GuestDom::new(app);
+
+    let (answered, wait) = dom.replies.begin();
+    dom.complete_reply(&serde_json::json!({"request": answered, "value": {"x": 3.0, "y": 4.0}}));
+    assert_eq!(crate::guest::settle(wait, offset_x).await.unwrap(), 3.0);
+
+    let (refused, wait) = dom.replies.begin();
+    assert_ne!(answered, refused);
+    dom.complete_reply(&serde_json::json!({"request": refused, "error": "not measurable"}));
+    let error = crate::guest::settle(wait, offset_x).await.unwrap_err();
+    assert!(
+        matches!(error, dioxus_html::MountedError::OperationFailed(ref cause) if cause.to_string() == "not measurable"),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -1132,12 +1207,15 @@ fn expected_counter_batches(event_count: u64) -> Vec<Vec<Mutation>> {
         let mut count = use_signal(|| Some(0_u64));
         let current = count();
         rsx! {
-            div { class: "flex flex-col gap-4",
-                button {
-                    class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                    "aria-label": "Increment Wasm counter",
+            div { class: "ct-counter",
+                // The guest sets its stylesheet through `document::Style`; here there is no
+                // document, so it renders nothing, as it does in the guest's tree.
+                document::Style { "" }
+                clay_dioxus_kit::Button {
+                    variant: clay_dioxus_kit::ButtonVariant::Outline,
+                    label: "Increment Wasm counter".to_owned(),
                     disabled: current.is_none(),
-                    onclick: move |_| count.set(Some(count().unwrap() + 1)),
+                    onclick: move |()| count.set(Some(count().unwrap() + 1)),
                     if let Some(count) = current { "{count}" } else { "Loading counter" }
                 }
                 {Option::<VNode>::None}
@@ -1573,6 +1651,8 @@ async fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts()
     assert_eq!(rig.store.data().routes[&second_identity].len(), 2);
     let first_button = rig.buttons(&first_placement)[0];
     let second_button = rig.buttons(&second_placement)[0];
+    // The standalone count is the micro's data and the counter's global signal notifies the
+    // presentation, so a click in one mount re-renders the other with the new count.
     rig.click(&guest, first_button).await?;
     assert_eq!(rig.counter_text(&first_placement), "1");
     assert_eq!(rig.counter_text(&second_placement), "1");
@@ -1679,6 +1759,8 @@ async fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasm
     rig.click(&guest, button).await?;
     assert_eq!(rig.counter_text(&second_placement), "1");
     assert_eq!(rig.counter_text(&first_placement), "0");
+    // The click re-renders every mount of the presentation, so the revoked surface is written
+    // to, found revoked, and dropped without touching its live sibling.
     assert_eq!(rig.store.data().routes[&first_identity].len(), 1);
     rig.click(&guest, button).await?;
     assert_eq!(rig.counter_text(&second_placement), "2");
@@ -1781,4 +1863,99 @@ async fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_sibli
     rig.click(&second, second_button).await?;
     assert_eq!(rig.counter_text(&second_placement), "1");
     Ok(())
+}
+
+/// Standard `document::Style` with inline text becomes the guest's stylesheet, the text a mount
+/// is sent as `set-style-sheet`; `document::Stylesheet` (a `<link>`) is egress and the next
+/// flush refuses it. A native test has no surface to send the mutation over, so this reads the
+/// guest document where `GuestDom::render` takes it from.
+#[test]
+fn sdk_document_style_sets_the_stylesheet_and_stylesheet_links_are_refused() {
+    use dioxus::document::Style;
+    use dioxus::document::Stylesheet;
+    use dioxus::prelude::*;
+
+    fn styled() -> Element {
+        rsx! {
+            Style { ":host {{ display: block }}" }
+            p { "content" }
+        }
+    }
+    let mut dom = crate::GuestDom::new(styled);
+    dom.mount_target(1);
+    dom.render().unwrap();
+    assert_eq!(
+        dom.head.sheet.borrow().as_deref(),
+        Some(":host { display: block }")
+    );
+
+    fn linked() -> Element {
+        rsx! { Stylesheet { href: "https://example.invalid/a.css" } }
+    }
+    let mut dom = crate::GuestDom::new(linked);
+    dom.mount_target(1);
+    let error = dom.render().unwrap_err();
+    assert!(
+        matches!(&error, crate::presentation::PresentationError::InvalidBatch(reason) if reason.contains("<link>")),
+        "{error:?}"
+    );
+    assert!(dom.head.sheet.borrow().is_none());
+}
+
+/// `document::Style { media }` wraps the sheet in `@media`, a malformed query is refused, `title`
+/// and `nonce` are ignored, and any other attribute refuses the flush.
+#[test]
+fn sdk_document_style_attributes_are_honoured_ignored_or_refused() {
+    use dioxus::document::Style;
+    use dioxus::prelude::*;
+
+    fn flush(
+        app: fn() -> Element,
+    ) -> (
+        crate::GuestDom,
+        Result<(), crate::presentation::PresentationError>,
+    ) {
+        let mut dom = crate::GuestDom::new(app);
+        dom.mount_target(1);
+        let result = dom.render();
+        (dom, result)
+    }
+
+    let (dom, result) =
+        flush(|| rsx! { Style { media: "(min-width: 600px)", "a {{ color: red }}" } });
+    result.unwrap();
+    assert_eq!(
+        dom.head.sheet.borrow().as_deref(),
+        Some("@media (min-width: 600px) {\na { color: red }\n}")
+    );
+
+    let (dom, result) = flush(|| rsx! { Style { title: "t", nonce: "n", "a {{ color: red }}" } });
+    result.unwrap();
+    assert_eq!(dom.head.sheet.borrow().as_deref(), Some("a { color: red }"));
+
+    for (label, app) in [
+        (
+            "malformed media",
+            (|| rsx! { Style { media: "a }} @import x {{", "a {{ color: red }}" } })
+                as fn() -> Element,
+        ),
+        (
+            "empty media",
+            || rsx! { Style { media: "  ", "a {{ color: red }}" } },
+        ),
+        (
+            "unknown attribute",
+            || rsx! { Style { class: "x", "a {{ color: red }}" } },
+        ),
+    ] {
+        let (dom, result) = flush(app);
+        assert!(
+            matches!(
+                &result,
+                Err(crate::presentation::PresentationError::InvalidBatch(_))
+            ),
+            "{label}: {result:?}"
+        );
+        assert!(dom.head.sheet.borrow().is_none(), "{label}");
+    }
 }

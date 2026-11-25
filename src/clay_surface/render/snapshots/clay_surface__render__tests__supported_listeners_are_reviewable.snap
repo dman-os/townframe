@@ -87,3 +87,4 @@ expression: supported
 - error
 - mounted
 - resize
+- visible

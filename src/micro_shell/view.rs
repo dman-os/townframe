@@ -7,10 +7,14 @@ use crate::State;
 use crate::navigation::Entry;
 use crate::navigation::Overlay;
 use clay_dioxus_kit::AppBar;
+use clay_dioxus_kit::Button;
+use clay_dioxus_kit::ButtonVariant;
 use clay_dioxus_kit::Drawer;
 use clay_dioxus_kit::ListDetails;
 use clay_dioxus_kit::NavButton;
 use clay_dioxus_kit::NavButtonMode;
+use clay_dioxus_kit::PanelPage;
+use clay_dioxus_kit::Renderer;
 use clay_dioxus_kit::SectionPane;
 use clay_dioxus_kit::Sections;
 use clay_dioxus_kit::Sheet;
@@ -21,8 +25,10 @@ use clay_mdk::FacetSnapshot;
 use clay_mdk::FacetState;
 use clay_mdk::Row;
 use clay_mdk::hooks::PresentationSlot;
+use clay_mdk::hooks::Stylesheet;
 use clay_mdk::hooks::use_facet;
 use clay_mdk::hooks::use_rows;
+use clay_mdk::host::UserStylesheet;
 use dioxus::prelude::*;
 use micro_shell_manifest::NavigateRequest;
 use micro_shell_manifest::Panel;
@@ -52,7 +58,10 @@ const DETAILS_RULE: SizeRule = SizeRule {
     collapse_past: None,
 };
 
-const BUTTON: &str = "rounded-md border border-border px-4 py-2 text-left focus-visible:outline";
+/// The shell's own stylesheet: the layout of its frame, sidebar and home, which the kit has no
+/// component for. It names no colour, so a theme restyles the shell through the kit's tokens and
+/// parts.
+const STYLES: &str = include_str!("styles.css");
 
 /// Where in the arrangement a mounted panel sits. The sidebar/back button reads it: a details
 /// panel beside its list has no use for a second back button, but one over a compact list is the
@@ -85,19 +94,19 @@ fn PlacedSlot(
     rsx! { PresentationSlot { reference, placeholder_chrome } }
 }
 
-/// `row`'s `attachment` mounted in `placement`, keyed by `key` (a different key is a fresh mount).
+/// `row`'s `link` mounted in `placement`, keyed by `key` (a different key is a fresh mount).
 fn placed_slot(
     shell: &Shell,
     placement: Placement,
     key: String,
     row: &Row<String, Panel>,
-    attachment: clay_mdk::Attachment,
+    link: clay_mdk::Link,
 ) -> Element {
     rsx! {
         PlacedSlot {
             key: "{key}",
             placement,
-            reference: row.attachments[attachment.index()].clone(),
+            reference: row.links[link.index()].clone(),
             title: row.value.title.clone(),
             shell: shell.clone(),
         }
@@ -176,8 +185,8 @@ fn with_inner_weights(config: ShellConfig, weights: &[f64]) -> ShellConfig {
     }
 }
 
-fn panel_slot(row: &Row<String, Panel>, attachment: clay_mdk::Attachment) -> Element {
-    rsx! { PresentationSlot { reference: row.attachments[attachment.index()].clone() } }
+fn panel_slot(row: &Row<String, Panel>, link: clay_mdk::Link) -> Element {
+    rsx! { PresentationSlot { reference: row.links[link.index()].clone() } }
 }
 
 /// The panels that are destinations: the home panel first, then every other list panel by
@@ -244,7 +253,7 @@ fn use_start(shell: &Shell, host: &HostInputs, failure: Signal<Option<String>>) 
             if let Some(spec) = start
                 && let Err(problem) = shell.start_on(&spec).await
             {
-                failure.set(Some(format!("DAYFRAME_SHELL_OPEN: {problem}")));
+                failure.set(Some(format!("DAYTXT_SHELL_OPEN: {problem}")));
             }
         }
     });
@@ -278,15 +287,15 @@ fn sheet_element(
 /// The details position's mounted panel and its accessible name.
 fn details_pane(
     shell: &Shell,
-    details: Option<(&Row<String, Panel>, Option<&str>, clay_mdk::Attachment)>,
+    details: Option<(&Row<String, Panel>, Option<&str>, clay_mdk::Link)>,
 ) -> (Option<Element>, String) {
-    let slot = details.map(|(row_panel, row, attachment)| {
+    let slot = details.map(|(row_panel, row, link)| {
         placed_slot(
             shell,
             Placement::Details,
             format!("{}/{row:?}", row_panel.key),
             row_panel,
-            attachment,
+            link,
         )
     });
     let name = details.map_or_else(
@@ -296,9 +305,88 @@ fn details_pane(
     (slot, name)
 }
 
+/// What the frame applies of the end user's theme, checked once per change.
+struct AppliedTheme {
+    /// The CSS the facet held when it was last checked.
+    raw: String,
+    /// `raw` in `@layer user`, or empty when it is empty or was refused: the frame's copy.
+    layered: Rc<str>,
+}
+
+/// Applies the end user's theme (see [`Shell::set_theme`]) host-wide and live: returns the
+/// `@layer user` sheet the frame adds to its own mount's stylesheet (the frame is a mount like
+/// any other, so no `<style>` reaches the host's document), and provides every mount below it the same
+/// CSS as [`UserStylesheet`], which a mount adopts as the last layer of its shadow root. The
+/// facet is document-backed and so can arrive from another device, so what it holds is
+/// checked again here, once per change rather than per render, and a sheet that could make the
+/// host fetch is not applied.
+fn use_theme(shell: &Shell) -> Rc<str> {
+    let snapshot = use_facet(&shell.theme);
+    let raw = match &snapshot.state {
+        FacetState::Present(sheet) => sheet.css.as_str(),
+        FacetState::Loading | FacetState::Absent => "",
+    };
+    let mut mounts = use_signal(String::new);
+    use_context_provider(|| UserStylesheet(mounts.into()));
+    let applied = use_hook(|| {
+        Rc::new(std::cell::RefCell::new(AppliedTheme {
+            raw: String::new(),
+            layered: Rc::from(""),
+        }))
+    });
+    let mut applied = applied.borrow_mut();
+    if applied.raw != raw {
+        let accepted = clay_mdk::host::refuse_fetching_stylesheet(raw).is_ok() && !raw.is_empty();
+        applied.raw = raw.to_owned();
+        applied.layered = if accepted {
+            Rc::from(format!("@layer user {{\n{raw}\n}}"))
+        } else {
+            Rc::from("")
+        };
+        mounts.set(if accepted {
+            raw.to_owned()
+        } else {
+            String::new()
+        });
+    }
+    Rc::clone(&applied.layered)
+}
+
+/// The frame's two splits: the sidebar against the content, and, inside the content pane, the
+/// list against the details.
+fn splits(
+    config: &ShellConfig,
+    renderer: Renderer,
+    width_px: f64,
+    sidebar_visible: bool,
+) -> (Split, Split) {
+    let outer = Split::new(vec![config.sidebar, config.list + config.details], width_px)
+        .rule(0, SIDEBAR_RULE)
+        .renderer(renderer);
+    // The list/details split lays out inside the content pane, so its extent is that pane's.
+    let content_px = if sidebar_visible {
+        outer.sizes()[1]
+    } else {
+        width_px
+    };
+    let inner = Split::new(vec![config.list, config.details], content_px)
+        .rule(0, LIST_RULE)
+        .rule(1, DETAILS_RULE)
+        .renderer(renderer);
+    (outer, inner)
+}
+
 #[component]
 fn Frame(shell: Shell) -> Element {
     let host = use_context::<HostInputs>();
+    let theme = use_theme(&shell);
+    // The frame's own sheet, then the theme in `@layer user`. No mount is above the frame to
+    // supply the theme (the frame is where it comes from), so the frame's mount takes it here.
+    let own_sheet = if theme.is_empty() {
+        std::borrow::Cow::Borrowed(STYLES)
+    } else {
+        std::borrow::Cow::Owned(format!("{STYLES}\n{theme}"))
+    };
     let width_px = *host.width.read();
     let width = WidthClass::from_px(width_px);
     let state = use_state(&shell);
@@ -326,11 +414,11 @@ fn Frame(shell: Shell) -> Element {
     // the shell prunes it.
     let details = frame.details.and_then(|(panel, row)| {
         let row_panel = find(panel)?;
-        let attachment = match row {
+        let link = match row {
             Some(_) => row_panel.value.details?,
             None => row_panel.value.content,
         };
-        Some((row_panel, row, attachment))
+        Some((row_panel, row, link))
     });
 
     let on_open = {
@@ -347,19 +435,7 @@ fn Frame(shell: Shell) -> Element {
 
     let wide = width.fits_side_by_side();
     let sidebar_visible = wide && !state.sidebar_hidden;
-    let outer = Split::new(vec![config.sidebar, config.list + config.details], width_px)
-        .rule(0, SIDEBAR_RULE)
-        .renderer(host.renderer);
-    // The list/details split lays out inside the content pane, so its extent is that pane's.
-    let content_px = if sidebar_visible {
-        outer.sizes()[1]
-    } else {
-        width_px
-    };
-    let inner = Split::new(vec![config.list, config.details], content_px)
-        .rule(0, LIST_RULE)
-        .rule(1, DETAILS_RULE)
-        .renderer(host.renderer);
+    let (outer, inner) = splits(&config, host.renderer, width_px, sidebar_visible);
 
     let main_slot = placed_slot(
         &shell,
@@ -410,8 +486,8 @@ fn Frame(shell: Shell) -> Element {
     let drawer_open = matches!(frame.overlay, Some(Overlay::Sidebar));
 
     rsx! {
-        div {
-            style: "position:relative;width:100%;height:100%;min-width:0;min-height:0",
+        div { class: "ct-shell",
+            Stylesheet { css: own_sheet }
             if let Some(problem) = failure() {
                 p { role: "alert", "{problem}" }
             }
@@ -475,40 +551,38 @@ fn Sidebar(shell: Shell) -> Element {
                 .map(|row| row.key.clone())
         });
     rsx! {
-        nav { class: "flex flex-col gap-2", "aria-label": "Sidebar",
-            AppBar { title: "Dayframe" }
+        nav { "data-part": "sidebar", "aria-label": "Sidebar",
+            AppBar { title: "daytxt" }
             if wide {
-                button {
-                    class: "{BUTTON} mx-2",
-                    r#type: "button",
-                    "aria-label": "Hide sidebar",
+                Button {
+                    variant: ButtonVariant::Outline,
+                    label: "Hide sidebar".to_owned(),
                     onclick: {
                         let shell = shell.clone();
-                        move |_| shell.set_sidebar_hidden(true)
+                        move |()| shell.set_sidebar_hidden(true)
                     },
                     "Hide sidebar"
                 }
             }
             for row in destinations(&panels) {
-                button {
+                Button {
                     key: "{row.key}",
-                    class: "{BUTTON} mx-2",
-                    r#type: "button",
-                    "aria-label": "Show {row.value.title}",
-                    "aria-current": (current.as_deref() == Some(row.key.as_str())).then_some("page"),
+                    variant: ButtonVariant::Outline,
+                    label: format!("Show {}", row.value.title),
+                    current: current.as_deref() == Some(row.key.as_str()),
                     onclick: {
                         let shell = shell.clone();
                         let key = row.key.clone();
-                        move |_| open_panel(&shell, key.clone(), None, failure)
+                        move |()| open_panel(&shell, key.clone(), None, failure)
                     },
                     "{row.value.title}"
                 }
             }
             if let Some(problem) = failure() {
-                p { class: "px-2", role: "alert", "{problem}" }
+                p { "data-part": "problem", role: "alert", "{problem}" }
             }
             for row in panels.iter().filter(|row| row.value.sockets.contains(&Socket::Sidebar)) {
-                div { key: "sidebar-{row.key}", class: "px-2", {panel_slot(row, row.value.content)} }
+                div { key: "sidebar-{row.key}", "data-part": "slot", {panel_slot(row, row.value.content)} }
             }
         }
     }
@@ -522,30 +596,33 @@ fn Home(shell: Shell) -> Element {
     let failure = use_signal(|| None::<String>);
     rsx! {
         // The frame's region already carries the panel's title as its accessible name.
-        div { class: "flex flex-col gap-4",
-            AppBar {
-                title: "Home",
-                leading: rsx! { NavigationButton { shell: shell.clone() } },
-            }
-            nav { class: "flex flex-col gap-2 px-4", "aria-label": "Entry points",
+        PanelPage {
+            app_bar: rsx! {
+                AppBar {
+                    title: "Home",
+                    leading: rsx! { NavigationButton { shell: shell.clone() } },
+                }
+            },
+        div { "data-part": "home",
+            nav { "data-part": "entries", "aria-label": "Entry points",
                 for row in destinations(&panels).into_iter().filter(|row| !row.value.home) {
-                    button {
+                    Button {
                         key: "{row.key}",
-                        class: BUTTON,
-                        r#type: "button",
-                        "aria-label": "Open {row.value.title}",
+                        variant: ButtonVariant::Outline,
+                        label: format!("Open {}", row.value.title),
                         onclick: {
                             let shell = shell.clone();
                             let key = row.key.clone();
-                            move |_| open_panel(&shell, key.clone(), None, failure)
+                            move |()| open_panel(&shell, key.clone(), None, failure)
                         },
                         "{row.value.title}"
                     }
                 }
             }
             if let Some(problem) = failure() {
-                p { class: "px-4", role: "alert", "{problem}" }
+                p { "data-part": "problem", role: "alert", "{problem}" }
             }
+        }
         }
     }
 }

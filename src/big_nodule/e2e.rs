@@ -2073,6 +2073,7 @@ fn cartridge_with_micro(id: &str, version: &str) -> FixtureCartridge {
         component: "micro".into(),
         schema: "org.example.clay.micro".into(),
         description: Default::default(),
+        uses: Default::default(),
         extra: Default::default(),
     });
     cartridge

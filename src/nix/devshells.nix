@@ -56,6 +56,10 @@ _: {
         CARGO_BUILD_JOBS = "8";
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "${pkgs.clang}/bin/clang";
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=${pkgs.mold}/bin/mold --cfg tokio_unstable";
+        # The aarch64 build machine (mothership) links with mold too; without these it falls
+        # back to GNU ld, which is several times slower and holds gigabytes per link.
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "${pkgs.clang}/bin/clang";
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=${pkgs.mold}/bin/mold --cfg tokio_unstable";
       };
 
       ghjkDevEnv = {
@@ -63,7 +67,7 @@ _: {
       };
 
       # Every shell that drives a browser (the dev shell, and `ci-desktop` for the
-      # dayframe web e2e) points playwright at the farm above instead of letting
+      # daytxt web e2e) points playwright at the farm above instead of letting
       # it download its own builds.
       playwrightEnv = {
         PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
@@ -171,10 +175,13 @@ _: {
         curl
         mold
         deno
+        b3sum
 
         pnpm
         nodejs_24
         biome
+        # The kit's bundle check (`x/check-kit-bundle.ts`) regenerates the stylesheet.
+        tailwindcss_4
         playwright-driver
         playwrightBrowsers
 
@@ -216,9 +223,6 @@ _: {
         # file
         # patchelf
         # binutils
-        appimage-run
-        v4l-utils
-        libv4l
       ];
 
       devTools = with pkgs; [
@@ -237,7 +241,6 @@ _: {
         wasm-tools
         cargo-leptos
         trunk
-        tailwindcss_4
         watchexec
 
         # maestro
@@ -248,8 +251,6 @@ _: {
         # did an llm strip comments?
         # go
         # (pkgs.android-studio.withSdk androidSdkOnly.androidsdk)
-        v4l-utils
-        libv4l
         gh
       ];
 
@@ -345,8 +346,7 @@ _: {
               wasmBindgenCli
             ];
           shellHook = ''
-            # bindgen (v4l2-sys-mit under daybook_ffi's nokhwa) searches the host's LLVM installs
-            # when LIBCLANG_PATH is unset, and a GitHub runner's /usr/lib/llvm-* libclang cannot
+            # bindgen searches the host's LLVM installs when LIBCLANG_PATH is unset, and a GitHub runner's /usr/lib/llvm-* libclang cannot
             # load inside this shell (it misses the host libstdc++). Point it at the flake's.
             export LIBCLANG_PATH="${pkgs.lib.getLib pkgs.llvmPackages.libclang}/lib"
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''

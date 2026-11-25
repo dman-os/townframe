@@ -1,0 +1,45 @@
+/*
+ * ct-list-details (headless/list_details.rs). Parts: list, details. State: the root's data-state
+ * (split|stacked), the arrangement the host's width class chose; a stacked list is data-state
+ * covered while details lie over it. Wide, the parts sit in the panes of a ct-sections; compact,
+ * the details cover the list, which stays mounted beneath them.
+ */
+.ct-list-details {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: var(--ct-color-canvas);
+  color: var(--ct-color-text);
+}
+
+.ct-list-details [data-part="list"],
+.ct-list-details [data-part="details"] {
+  width: 100%;
+  height: 100%;
+  background: var(--ct-color-surface);
+  color: var(--ct-color-text);
+}
+
+/* A layer of its own makes the list one stacking context on the content layer, below the details
+   on the raised one. Without it the list's app bar (a positioned element on the app bar layer)
+   would take part in the root's stacking order, paint over the details and take their pointer
+   events. */
+.ct-list-details[data-state="stacked"] [data-part="list"] {
+  position: relative;
+  z-index: var(--ct-layer-content);
+}
+
+/* Covered, the list is out of hit-testing outright (`inert` is not in the guest wire
+   vocabulary), so nothing in it can take a click meant for the details. */
+.ct-list-details [data-part="list"][data-state="covered"] {
+  pointer-events: none;
+}
+
+.ct-list-details[data-state="stacked"] [data-part="details"] {
+  position: absolute;
+  inset: 0;
+  z-index: var(--ct-layer-raised);
+}

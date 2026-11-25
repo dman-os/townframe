@@ -1,0 +1,31 @@
+/*
+ * ct-drawer (headless/drawer.rs). Parts: scrim, panel (the dialog). State: data-state (open, the
+ * only one that renders). Axis: data-placement (leading). Shares the scrim and the panel's surface
+ * with the sheet (overlay.css).
+ *
+ * The overlay fills its nearest positioned ancestor, so the panel that owns it decides what it
+ * covers. The panel is 20rem wide but never more than 5/6 of the host, so on the narrowest compact
+ * host (a 320px phone: a 267px panel) the rest stays a scrim strip to tap (KIT-103).
+ */
+.ct-drawer {
+  position: absolute;
+  inset: 0;
+  z-index: var(--ct-layer-drawer);
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-start;
+}
+
+.ct-drawer [data-part="panel"] {
+  width: 20rem;
+  max-width: 83.3333%;
+  height: 100%;
+  animation: ct-overlay-slide-in-leading var(--ct-motion-duration-enter)
+    var(--ct-motion-easing-enter) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ct-drawer [data-part="panel"] {
+    animation: none;
+  }
+}

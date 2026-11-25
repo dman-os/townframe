@@ -341,8 +341,8 @@ async fn document_driver_delivers_neutral_updates() {
             vec![DocumentGrant {
                 document: route.document.clone(),
                 branch: route.branch.clone(),
-                facets: vec![daybook_types::manifest::RoutineFacetAccess {
-                    tag: route.tag.clone().into(),
+                facets: vec![clay_docs::FacetAccess {
+                    tag: route.tag.clone(),
                     key_id: Some(route.key_id.clone()),
                     read: true,
                     write: true,

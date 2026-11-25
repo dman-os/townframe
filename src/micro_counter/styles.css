@@ -1,0 +1,9 @@
+/*
+ * The counter's own stylesheet (a micro's rules sit above the kit and the user's theme, so this
+ * sets layout only and names no colour). Parts are local to this micro: `.ct-counter`.
+ */
+.ct-counter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-dimension-spacing-4);
+}

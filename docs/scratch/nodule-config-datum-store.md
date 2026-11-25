@@ -53,7 +53,7 @@ Scope: ADR 027 host-side nodule management, node config drawer, portable desired
 ## Existing reference points
 
 The north star is specifically `FacetStore` / `FacetStoreHandle` in
-[`stores.rs`](../../src/daybook_core/stores.rs), starting at line 340, rather than
+`stores.rs` (`src/daybook_core/stores.rs`, removed with the legacy crates), starting at line 340, rather than
 copying the older `AmStore` abstraction. Keep the typed projection, queries,
 mutations that flush through a domain, and reads at explicit document heads.
 Do not copy the old whole-facet replacement, shared asynchronous lock, or the

@@ -10,6 +10,12 @@
 //! provider. A configured id with no row, or whose provider is unavailable, is a placeholder in
 //! its place; nothing here ever edits the configured list except the viewer's own toggles.
 use clay_dioxus_kit::AppBar;
+use clay_dioxus_kit::Button;
+use clay_dioxus_kit::ButtonVariant;
+use clay_dioxus_kit::Card;
+use clay_dioxus_kit::CardContent;
+use clay_dioxus_kit::CardVariant;
+use clay_dioxus_kit::PanelPage;
 use clay_mdk::Capability;
 use clay_mdk::Collection;
 use clay_mdk::Context;
@@ -17,6 +23,7 @@ use clay_mdk::Error;
 use clay_mdk::Facet;
 use clay_mdk::FacetState;
 use clay_mdk::hooks::PresentationSlot;
+use clay_mdk::hooks::Stylesheet;
 use clay_mdk::hooks::use_facet;
 use clay_mdk::hooks::use_rows;
 use dioxus::prelude::*;
@@ -48,7 +55,11 @@ async fn activate(context: Context) -> Result<(), Error> {
 
 clay_mdk::export_micro!(activate, micro_layout_manifest::manifest);
 
-/// The layout's model and view in one root-scope render. First the app bar, then the toggles, one
+/// The layout's own stylesheet: the layout of its parts, which the kit has no component for. It
+/// names no colour, so a theme restyles the layout through the kit's tokens and parts.
+const STYLES: &str = include_str!("styles.css");
+
+/// The layout's model and view in one render. First the app bar, then the toggles, one
 /// per installed panel (the viewer's way to edit the arrangement), then the arrangement itself.
 fn view(
     panels: Collection<String, Panel>,
@@ -75,7 +86,7 @@ fn view(
     framed(
         rsx! { PresentationSlot { reference: nav_button } },
         rsx! {
-            div { class: "mx-4 flex flex-wrap gap-2", role: "toolbar", "aria-label": "Panels",
+            div { "data-part": "toggles", role: "toolbar", "aria-label": "Panels",
                 for row in rows.iter() {
                     {
                         let shown = arrangement.visible.contains(&row.key);
@@ -88,12 +99,12 @@ fn view(
                         let arrangement = arrangement.clone();
                         let config = config.clone();
                         rsx! {
-                            button {
+                            Button {
                                 key: "toggle-{row.key}",
-                                class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                                "aria-label": "{label}",
-                                "aria-pressed": "{shown}",
-                                onclick: move |_| {
+                                variant: ButtonVariant::Outline,
+                                label: label.clone(),
+                                pressed: Some(shown),
+                                onclick: move |()| {
                                     let mut next = arrangement.clone();
                                     if shown {
                                         next.visible.retain(|id| *id != key);
@@ -109,7 +120,7 @@ fn view(
                 }
             }
             if let Some(problem) = failure() {
-                p { class: "mx-4", role: "alert", "{problem}" }
+                p { "data-part": "problem", role: "alert", "{problem}" }
             }
             for id in arrangement.visible.iter() {
                 {
@@ -118,17 +129,21 @@ fn view(
                     rsx! {
                         section {
                             key: "panel-{id}",
-                            class: "mx-4 rounded-md border border-border p-4",
+                            "data-part": "slot",
                             "aria-label": "{title} panel",
-                            match row {
-                                Some(row) => rsx! {
-                                    PresentationSlot {
-                                        reference: row.attachments[row.value.content.index()].clone(),
+                            Card { variant: CardVariant::Outline,
+                                CardContent {
+                                    match row {
+                                        Some(row) => rsx! {
+                                            PresentationSlot {
+                                                reference: row.links[row.value.content.index()].clone(),
+                                            }
+                                        },
+                                        None => rsx! {
+                                            p { role: "status", "Panel {id} is not installed." }
+                                        },
                                     }
-                                },
-                                None => rsx! {
-                                    p { role: "status", "Panel {id} is not installed." }
-                                },
+                                }
                             }
                         }
                     }
@@ -142,9 +157,11 @@ fn view(
 /// Every state of the view goes through it, so no state leaves the panel without a way out.
 fn framed(leading: Element, body: Element) -> Element {
     rsx! {
-        div { class: "flex flex-col gap-4",
-            AppBar { title: "Layout", leading }
-            {body}
+        PanelPage { app_bar: rsx! { AppBar { title: "Layout", leading } },
+            div { class: "ct-layout",
+                Stylesheet { css: STYLES }
+                {body}
+            }
         }
     }
 }

@@ -1,0 +1,9 @@
+[application]
+name = "daytxt"
+android_main_activity = "MainActivity.kt"
+android_manifest = "AndroidManifest.xml"
+
+[android]
+compile_sdk = 36
+target_sdk = 36
+min_sdk = 28

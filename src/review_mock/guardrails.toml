@@ -1,0 +1,14 @@
+version = 1
+role = "interface"
+dependency_reason = "the intxt review loop's mock journeys as one plain Dioxus component over the kit and the diff view, rendered by the lab micro (a Clay guest) and the theme lab alike; no Clay or micro dependency"
+allowed_dependencies = [
+    "clay_dioxus_kit",
+    "pierre_diffs_dioxus",
+]
+allow_external_api_types = true
+
+[builds.native]
+
+[builds.wasm32-unknown-unknown]
+
+[builds.wasm32-wasip3]

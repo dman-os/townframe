@@ -175,7 +175,7 @@ impl std::str::FromStr for ByteKey {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         // The inverse of `Display`, and deliberately not total: this parse is an external
-        // boundary — a blob hash out of a URL or blob metadata, a uniffi caller, an id read
+        // boundary — a blob hash out of a URL or blob metadata, an id read
         // back from storage — where text that is not a key has to be an error rather than a
         // fresh identity. A key is a `z`-prefixed multibase base58btc string and nothing else:
         // a name like `/seds` is a label for a key, not its text form.
@@ -429,7 +429,7 @@ mod tests {
     }
 
     /// Text that is not a key is an error. This parse is an external boundary — a blob
-    /// hash out of a URL or blob metadata, a uniffi caller, an id read back from storage —
+    /// hash out of a URL or blob metadata, an id read back from storage —
     /// so a typo has to fail rather than become an identity of its own.
     #[test]
     fn text_that_is_not_a_key_is_rejected() {

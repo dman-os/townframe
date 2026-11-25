@@ -26,11 +26,14 @@ use clay_mdk::Collection;
 use clay_mdk::Context;
 use clay_mdk::Error;
 use clay_mdk::Facet;
+use clay_mdk::FacetState;
+use clay_mdk::OperationStatus;
 use contract::NavigateRequest;
 use contract::OpenSheetRequest;
 use contract::Panel;
 use contract::ShellConfig;
 use contract::Socket;
+use contract::ThemeSheet;
 use dioxus::prelude::*;
 use navigation::Entry;
 use navigation::Navigation;
@@ -82,7 +85,7 @@ pub struct HostInputs {
     /// Comma-separated entries opened in order: `panel` opens a panel, `panel/row` opens one of
     /// its rows, `@sidebar` opens the compact sidebar. A name without a dot is shorthand for
     /// `dayframe.<name>`, so `settings,settings/counter` starts on the counter's Settings
-    /// section. The desktop launcher fills it from `DAYFRAME_SHELL_OPEN`.
+    /// section. The desktop launcher fills it from `DAYTXT_SHELL_OPEN`.
     pub start: Option<String>,
 }
 
@@ -100,6 +103,8 @@ struct Shell {
     state: Rc<watch::Sender<State>>,
     panels: Collection<String, Panel>,
     config: Facet<ShellConfig>,
+    /// The end user's theme: the one place the applied CSS is stored (see [`Shell::set_theme`]).
+    theme: Facet<ThemeSheet>,
     /// Whether the development seed ([`HostInputs::start`]) has been applied: the frame remounts
     /// when the window crosses a breakpoint, and that must not reset the user's place.
     started: Rc<Cell<bool>>,
@@ -159,6 +164,39 @@ impl Shell {
         self.config
             .write(next)
             .expect("the shell may write its own configuration");
+    }
+
+    /// The theme the host applies now: an absent facet is no theme. A facet still loading is
+    /// [`Error::Unavailable`], not an empty theme, so a caller that reads before it writes
+    /// cannot mistake loading for "nothing applied".
+    fn theme(&self) -> Result<ThemeSheet, Error> {
+        Ok(match self.theme.current()?.state {
+            FacetState::Loading => return Err(Error::Unavailable),
+            FacetState::Absent => ThemeSheet::default(),
+            FacetState::Present(sheet) => sheet,
+        })
+    }
+
+    /// Apply `sheet` to the host and every micro's mount, and keep it. CSS that could make the
+    /// host fetch anything is refused (the guest stylesheet rule, applied to a theme without the
+    /// repair), and refused before anything is stored. The frame observes the facet, so the
+    /// write is what applies the theme live; this returns once it is settled, so an `Ok` is a
+    /// theme that will survive a restart.
+    async fn set_theme(&self, sheet: ThemeSheet) -> Result<(), Error> {
+        clay_mdk::host::refuse_fetching_stylesheet(&sheet.css).map_err(Error::Rejected)?;
+        let operation = self.theme.write(sheet)?;
+        // Revision 0 is the local application; the next receipt is the settlement.
+        let settled = operation
+            .next(0)
+            .await?
+            .expect("a pending operation delivers its settlement");
+        match settled.status {
+            OperationStatus::Accepted => Ok(()),
+            OperationStatus::RolledBack(failure) => Err(Error::Rejected(failure.to_string())),
+            OperationStatus::LocallyApplied => {
+                unreachable!("a settlement receipt is not the local application")
+            }
+        }
     }
 
     /// Fold the sidebar of a wide host away (the "Hide sidebar" button, dragging it shut) or
@@ -299,11 +337,15 @@ pub async fn activate(context: Context) -> Result<(), Error> {
     let config = context
         .config::<contract::ShellArrangement>()?
         .expect("manifest declares the shell configuration");
+    let theme = context
+        .config::<contract::ShellTheme>()?
+        .expect("manifest declares the theme configuration");
     let (state, _) = watch::channel(State::default());
     let shell = Shell {
         state: Rc::new(state),
         panels,
         config,
+        theme,
         started: Rc::default(),
     };
 
@@ -349,6 +391,21 @@ pub async fn activate(context: Context) -> Result<(), Error> {
         move |panel: String| {
             let shell = shell.clone();
             async move { Ok(shell.opened(&panel)) }
+        }
+    })?;
+
+    context.publish_call(contract::GET_THEME, {
+        let shell = shell.clone();
+        move |(): ()| {
+            let shell = shell.clone();
+            async move { shell.theme() }
+        }
+    })?;
+    context.publish_call(contract::SET_THEME, {
+        let shell = shell.clone();
+        move |sheet: ThemeSheet| {
+            let shell = shell.clone();
+            async move { shell.set_theme(sheet).await }
         }
     })?;
 
