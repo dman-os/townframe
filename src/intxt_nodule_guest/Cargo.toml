@@ -1,0 +1,18 @@
+[package]
+name = "intxt_nodule_guest"
+workspace = "../wasm_utils_rs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "lib.rs"
+
+[dependencies]
+#
+# internal
+big_ndk.workspace = true
+intxt_nodule.workspace = true

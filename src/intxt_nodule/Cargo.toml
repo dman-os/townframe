@@ -1,0 +1,42 @@
+[package]
+name = "intxt_nodule"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+#
+# internal
+big_cabinet_core.workspace = true
+big_ndk.workspace = true
+intxt_core = { workspace = true, features = ["client"] }
+method_core.workspace = true
+#
+# external
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+#
+# internal
+big_blobs_core.workspace = true
+big_cabinet_core.workspace = true
+big_dispatch.workspace = true
+big_dispatch_core.workspace = true
+big_ndk_testing.workspace = true
+intxt_capture.workspace = true
+intxt_core = { workspace = true, features = ["cartridge", "client"] }
+service_client_core_rs.workspace = true
+service_utils_rs.workspace = true
+#
+# external
+axum.workspace = true
+http.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true, features = ["util"] }
