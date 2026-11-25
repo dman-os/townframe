@@ -81,6 +81,11 @@ pub struct PeersConfig {
     /// Bind the endpoint to the loopback interface only, with relays off. For tests and for
     /// nodes that are only ever reached by an address handed to them.
     pub loopback_only: bool,
+    /// The UDP port the endpoint binds, on every interface (IPv4 and IPv6), or on loopback with
+    /// [`Self::loopback_only`]. `None` takes a free port at each start: the node's address, and so
+    /// the ticket peers dial, then changes on every restart, which strands a peer that only holds
+    /// the old ticket. A node others dial directly pins it.
+    pub listen_port: Option<u16>,
     pub policy: PolicyChoice,
     /// The first redial delay of a dial target; each consecutive failure doubles it.
     pub initial_backoff: Duration,
@@ -95,6 +100,7 @@ impl Default for PeersConfig {
     fn default() -> Self {
         Self {
             loopback_only: false,
+            listen_port: None,
             policy: PolicyChoice::default(),
             initial_backoff: Duration::from_millis(250),
             max_backoff: Duration::from_secs(60),
@@ -326,22 +332,39 @@ impl ProtocolHandler for ServeBlobs {
     }
 }
 
+/// The node's Iroh endpoint, keyed by its identity: on loopback only with relays off for
+/// [`PeersConfig::loopback_only`], on every interface at a fixed port for
+/// [`PeersConfig::listen_port`], and otherwise on the preset's transports at a free port.
+async fn bind_endpoint(
+    config: &PeersConfig,
+    seed: [u8; 32],
+    lookup: &iroh::address_lookup::MemoryLookup,
+) -> Res<iroh::Endpoint> {
+    let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .address_lookup(lookup.clone())
+        .secret_key(iroh::SecretKey::from_bytes(&seed));
+    let port = config.listen_port.unwrap_or(0);
+    if config.loopback_only {
+        builder = builder
+            .clear_ip_transports()
+            .bind_addr((std::net::Ipv4Addr::LOCALHOST, port))?
+            .relay_mode(iroh::RelayMode::Disabled);
+    } else if config.listen_port.is_some() {
+        builder = builder
+            .clear_ip_transports()
+            .bind_addr((std::net::Ipv4Addr::UNSPECIFIED, port))?
+            .bind_addr((std::net::Ipv6Addr::UNSPECIFIED, port))?;
+    }
+    Ok(builder.bind().await?)
+}
+
 pub(crate) async fn boot(
     node: Node<'_>,
     config: PeersConfig,
     seed: [u8; 32],
 ) -> Res<(Peers, PeersStop)> {
     let lookup = iroh::address_lookup::MemoryLookup::new();
-    let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-        .address_lookup(lookup.clone())
-        .secret_key(iroh::SecretKey::from_bytes(&seed));
-    if config.loopback_only {
-        builder = builder
-            .clear_ip_transports()
-            .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
-            .relay_mode(iroh::RelayMode::Disabled);
-    }
-    let endpoint = builder.bind().await?;
+    let endpoint = bind_endpoint(&config, seed, &lookup).await?;
     debug_assert_eq!(
         endpoint.id().as_bytes(),
         &node.repo.local_peer_id().to_bytes32()?,
