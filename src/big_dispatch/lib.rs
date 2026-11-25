@@ -25,6 +25,7 @@ pub use router::ProviderState;
 pub use router::Router;
 pub use service::ServiceProvider;
 pub use xrpc::Anonymous;
+pub use xrpc::Edge;
 pub use xrpc::xrpc_router;
 
 use big_cabinet::authority::DomainAuthority;
@@ -38,16 +39,21 @@ use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::dmeta::Uuid7;
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchMessage;
 use big_dispatch_core::DispatchProtocol;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::HttpForm;
+use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
 use big_dispatch_core::InvokeOutput;
 use big_dispatch_core::MintDispatchCapability;
 use big_dispatch_core::NotReadyReason;
+use method_core::ByteBody;
+use method_core::CollectError;
 use method_core::ContextError;
+use method_core::Encoding;
 use method_lexicon::MethodContract;
 use serde_json::Value;
 use service_client_native_rs::Client;
@@ -64,6 +70,10 @@ use std::time::Duration;
 
 /// The prefix of every capability object this domain mints; the scope follows it as JSON.
 const SCOPE_PREFIX: &str = "DispatchService/scope/v1/";
+
+/// The most a JSON request body may be when dispatch gathers it from a raw HTTP body: JSON is a
+/// whole value in memory, unlike a byte body, which is streamed and has no limit here.
+pub const MAX_JSON_BODY_OCTETS: u64 = 16 * 1024 * 1024;
 
 /// What the embedder hands the service: the authority it verifies and mints capabilities
 /// through, the operations namespace it mints in, and the operator whose identity may invoke
@@ -150,10 +160,16 @@ impl DispatchService {
         // the handle id (the signer is always the nodule's own actor there).
         let presenter = verified.signer.actor_id;
         let scope = self.scope_of(&verified)?;
+        let Invoke {
+            operation,
+            parameters,
+            body,
+            context: invocation,
+        } = params;
         // Denied is settled before the lookup so an unauthorized caller cannot probe which
         // operations exist.
         if let Some(scope) = scope
-            && !scope.permits(&params.operation)
+            && !scope.permits(&operation)
         {
             return Err(DispatchError::Denied);
         }
@@ -162,14 +178,20 @@ impl DispatchService {
             actor: presenter,
             scope: scope.cloned(),
         };
-        let entry = self.router.resolve(&params.operation)?;
+        let entry = self.router.resolve(&operation)?;
         // Privilege is a property of the method's declaration, which only the resolved entry
         // knows, so it is checked here: a scope that names the method still needs
         // `privileged` to reach one that is.
         if let Some(scope) = scope
-            && !scope.admits(&params.operation, entry.privileged)
+            && !scope.admits(&operation, entry.privileged)
         {
             return Err(DispatchError::Denied);
+        }
+        // Local-only is an exposure rule, not authority (ADR 042 §3): it follows admission, so a
+        // caller dispatch would deny learns nothing, and it is read from the origin the edge
+        // transport set, never from anything the caller sent.
+        if entry.local_only && !invocation.origin.is_local() {
+            return Err(DispatchError::LocalOnly);
         }
         let kind = match &entry.state {
             ProviderState::Ready(kind) => kind,
@@ -180,10 +202,17 @@ impl DispatchService {
             }
         };
         let contract = entry.contract.as_deref().map(Contract::compiled);
-        let input = admit_input(&params, entry.operation_kind, contract)?;
-        let call =
-            kind.provider()
-                .call(&caller, &params.operation, context, &params.context, input);
+        // Reading a raw HTTP body into JSON is part of the call, so it runs under the budget too.
+        let admitted = admit_input(&invocation, parameters, body, &entry, contract);
+        let (input, bytes) = match budget {
+            Some(budget) => tokio::time::timeout(budget, admitted)
+                .await
+                .map_err(|_| DispatchError::from(ContextError::DeadlineExceeded))??,
+            None => admitted.await?,
+        };
+        let call = kind
+            .provider()
+            .call(&caller, &operation, context, &invocation, input, bytes);
         let result = match budget {
             Some(budget) => tokio::time::timeout(budget, call)
                 .await
@@ -191,7 +220,7 @@ impl DispatchService {
             None => call.await,
         };
         match result {
-            Ok(output) => {
+            Ok(Body::Json(output)) if entry.output == Encoding::Json => {
                 // atproto's xrpc-server validates every response against the method's Lexicon
                 // (unless `validateResponse` is turned off) and fails the call with
                 // `InternalServerError` (500) when the handler's output departs from it: the
@@ -202,17 +231,34 @@ impl DispatchService {
                 {
                     let violations = violations.join("; ");
                     tracing::error!(
-                        operation = %params.operation,
+                        operation = %operation,
                         provider = %entry.provider_id,
                         %violations,
                         "a provider answered off its method's Lexicon"
                     );
                     return Err(DispatchError::InvalidOutput(format!(
-                        "{} answered off its Lexicon: {violations}",
-                        params.operation
+                        "{operation} answered off its Lexicon: {violations}",
                     )));
                 }
-                Ok(InvokeOutput { output })
+                Ok(InvokeOutput {
+                    body: Body::Json(output),
+                })
+            }
+            // A byte output has no Lexicon schema to check; its declared encoding is the contract.
+            Ok(body @ Body::Bytes(_)) if entry.output.is_bytes() => Ok(InvokeOutput { body }),
+            Ok(body) => {
+                tracing::error!(
+                    %operation,
+                    provider = %entry.provider_id,
+                    answered = body.case(),
+                    declared = ?entry.output,
+                    "a provider answered a body its method's output encoding does not declare"
+                );
+                Err(DispatchError::InvalidOutput(format!(
+                    "{operation} answered a {} body, its method declares {:?}",
+                    body.case(),
+                    entry.output
+                )))
             }
             Err(ProviderError::InvalidInput(reason)) => Err(DispatchError::InvalidInput(reason)),
             Err(ProviderError::Failed { status, body }) => {
@@ -247,41 +293,45 @@ impl DispatchService {
     }
 }
 
-/// The input a provider is called with. An HTTP call is first held to the method's kind, as
-/// atproto holds it (`@atproto/xrpc-server` answers `InvalidRequest`, "Incorrect HTTP method
-/// (POST) expected GET", for the wrong verb): a GET names a query and builds its input from the
-/// query string through the Lexicon's `parameters` (undeclared names ignored, defaults applied),
-/// a POST names a procedure and its body is the input. Then the input must conform to the
-/// Lexicon's `input` (a query's `parameters`): atproto's `InvalidRequest`, 400. A method with no
-/// Lexicon here (a foreign contract no Lexicon states, a query like `getNodeInfo` that has none)
-/// is passed through as given, with a GET's input empty.
-fn admit_input(
-    params: &Invoke,
-    kind: Option<OperationKind>,
+/// The input a provider is called with: the JSON its typed request is built from, and the byte
+/// body when the method's input encoding is bytes.
+///
+/// An HTTP call is first held to the method's kind, as atproto holds it
+/// (`@atproto/xrpc-server` answers `InvalidRequest`, "Incorrect HTTP method (POST) expected GET",
+/// for the wrong verb): a GET names a query and builds its input from the query string through
+/// the Lexicon's `parameters` (undeclared names ignored, defaults applied), a POST names a
+/// procedure. The edge cannot know what the procedure's body is, so a POST arrives with the raw
+/// request body: for a JSON method it is read here, whole and bounded, as JSON (and must say
+/// `application/json`); for a byte method it is the stream the provider reads, and the query
+/// string carries the parameters. A call that did not come over HTTP already has the right case
+/// and is refused when it does not.
+///
+/// Then the input must conform to the Lexicon's `input` (a query's, or a byte procedure's,
+/// `parameters`): atproto's `InvalidRequest`, 400. A method with no Lexicon here (a foreign
+/// contract no Lexicon states, a query like `getNodeInfo` that has none) is passed through as
+/// given, with a GET's input empty.
+async fn admit_input(
+    invocation: &InvocationContext,
+    parameters: Value,
+    body: Body,
+    entry: &ProviderEntry,
     contract: Option<&MethodContract>,
-) -> Res<Value> {
+) -> Res<(Value, Option<ByteBody>)> {
     let refuse = |message: String| Err(DispatchError::InvalidInput(message));
-    let is_query = kind == Some(OperationKind::Query);
-    let input = match &params.context.http {
-        Some(HttpForm::Get { .. }) if !is_query => {
-            return refuse("Incorrect HTTP method (GET) expected POST".to_owned());
-        }
-        Some(HttpForm::Post) if is_query => {
-            return refuse("Incorrect HTTP method (POST) expected GET".to_owned());
-        }
-        Some(HttpForm::Get { query }) => {
-            let query: Vec<(String, String)> =
-                serde_urlencoded::from_str(query).map_err(|error| {
-                    DispatchError::InvalidInput(format!("invalid query string: {error}"))
-                })?;
-            match contract {
-                None => Value::Object(Default::default()),
-                Some(contract) => {
-                    let query: Vec<(&str, &str)> = query
-                        .iter()
-                        .map(|(name, value)| (name.as_str(), value.as_str()))
-                        .collect();
-                    Value::Object(contract.coerce_query(&query).map_err(|errors| {
+    let is_query = entry.operation_kind == Some(OperationKind::Query);
+    let coerce = |query: &str| -> Res<Value> {
+        let query: Vec<(String, String)> = serde_urlencoded::from_str(query).map_err(|error| {
+            DispatchError::InvalidInput(format!("invalid query string: {error}"))
+        })?;
+        match contract {
+            None => Ok(Value::Object(Default::default())),
+            Some(contract) => {
+                let query: Vec<(&str, &str)> = query
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str()))
+                    .collect();
+                Ok(Value::Object(contract.coerce_query(&query).map_err(
+                    |errors| {
                         DispatchError::InvalidInput(
                             errors
                                 .iter()
@@ -289,11 +339,51 @@ fn admit_input(
                                 .collect::<Vec<_>>()
                                 .join("; "),
                         )
-                    })?)
-                }
+                    },
+                )?))
             }
         }
-        Some(HttpForm::Post) | None => params.input.clone(),
+    };
+    match &invocation.http {
+        Some(HttpForm::Get { .. }) if !is_query => {
+            return refuse("Incorrect HTTP method (GET) expected POST".to_owned());
+        }
+        Some(HttpForm::Post { .. }) if is_query => {
+            return refuse("Incorrect HTTP method (POST) expected GET".to_owned());
+        }
+        _ => {}
+    }
+    let mismatch = |expected: &str, body: &Body| DispatchError::BodyMismatch {
+        expected: expected.to_owned(),
+        found: body.case().to_owned(),
+    };
+    let (input, bytes) = match (entry.input, &invocation.http, body) {
+        (Encoding::Json, Some(HttpForm::Get { query }), _) => (coerce(query)?, None),
+        (Encoding::Json, _, _) if !parameters.is_null() => {
+            return refuse("a method with a JSON body takes no separate parameters".to_owned());
+        }
+        (Encoding::Json, Some(HttpForm::Post { .. }), Body::Bytes(raw)) => {
+            (decode_json(raw).await?, None)
+        }
+        (Encoding::Json, _, Body::Json(input)) => (input, None),
+        (Encoding::Json, _, body @ Body::Bytes(_)) => return Err(mismatch("JSON", &body)),
+        (Encoding::Bytes { mime }, http, Body::Bytes(raw)) => {
+            if let (Some(declared), Some(sent)) = (mime, raw.mime.as_deref())
+                && !essence(sent).eq_ignore_ascii_case(declared)
+            {
+                return Err(DispatchError::BodyMismatch {
+                    expected: declared.to_owned(),
+                    found: sent.to_owned(),
+                });
+            }
+            let input = match http {
+                Some(HttpForm::Post { query }) => coerce(query)?,
+                _ if parameters.is_null() => Value::Object(Default::default()),
+                _ => parameters,
+            };
+            (input, Some(raw))
+        }
+        (Encoding::Bytes { .. }, _, body @ Body::Json(_)) => return Err(mismatch("bytes", &body)),
     };
     if let Some(contract) = contract
         && let Err(violations) = contract.check_request(&input)
@@ -303,7 +393,47 @@ fn admit_input(
             violations.join("; ")
         ));
     }
-    Ok(input)
+    Ok((input, bytes))
+}
+
+/// The media type without its parameters: `application/json; charset=utf-8` is
+/// `application/json`.
+fn essence(mime: &str) -> &str {
+    mime.split(';').next().unwrap_or_default().trim()
+}
+
+/// A raw HTTP request body read as the JSON input of a procedure.
+async fn decode_json(raw: ByteBody) -> Res<Value> {
+    let Some(mime) = raw.mime.as_deref() else {
+        return Err(DispatchError::BodyMismatch {
+            expected: "application/json".to_owned(),
+            found: "no Content-Type".to_owned(),
+        });
+    };
+    if !essence(mime).eq_ignore_ascii_case("application/json") {
+        return Err(DispatchError::BodyMismatch {
+            expected: "application/json".to_owned(),
+            found: mime.to_owned(),
+        });
+    }
+    let bytes = raw
+        .collect(MAX_JSON_BODY_OCTETS)
+        .await
+        .map_err(|error| match error {
+            CollectError::TooLarge { limit } => DispatchError::TooLarge {
+                limit_octets: limit,
+            },
+            CollectError::Io(error) => {
+                DispatchError::InvalidInput(format!("the request body failed: {error}"))
+            }
+        })?;
+    if bytes.is_empty() {
+        return Err(DispatchError::InvalidInput(
+            "procedure requires a JSON body".to_owned(),
+        ));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| DispatchError::InvalidInput(format!("invalid JSON body: {error}")))
 }
 
 macro_rules! handlers {

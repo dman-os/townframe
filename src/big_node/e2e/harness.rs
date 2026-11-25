@@ -21,8 +21,6 @@ use crate::peers::PolicyChoice;
 use big_blobs::InventorySelection;
 use big_blobs_core::Blob;
 use big_blobs_core::BlobId;
-use big_blobs_core::PutBlob;
-use big_blobs_core::ReadBlob;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::BranchDoc;
 use big_cabinet_core::doc::MergeDoc;
@@ -34,6 +32,7 @@ use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::drawer::protocol::RememberDrawer;
 use big_sync_core::PeerKey;
+use method_core::ByteBody;
 use service_utils_rs::ClientError;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -637,13 +636,10 @@ impl Cluster {
         let put = put_cap(node).await;
         let info = node
             .blobs
-            .client
-            .call(
+            .put(
                 RequestContext::root(),
-                PutBlob {
-                    capability: put,
-                    bytes: bytes.to_vec().into(),
-                },
+                put,
+                ByteBody::from_bytes(bytes.to_vec()),
             )
             .await
             .unwrap();
@@ -757,21 +753,12 @@ impl Cluster {
             Err(ClientError::Method(big_blobs_core::BlobsError::NotFound)) => return None,
             Err(error) => panic!("stat {blob} on {}: {error:?}", self.members[index].nickname),
         };
-        let range = node
+        let body = node
             .blobs
-            .client
-            .call(
-                RequestContext::root(),
-                ReadBlob {
-                    capability: read,
-                    blob_id: blob,
-                    offset: 0,
-                    length: u32::try_from(length).unwrap(),
-                },
-            )
+            .read(RequestContext::root(), read, blob, None)
             .await
             .unwrap();
-        Some(range.bytes.as_slice().to_vec())
+        Some(body.collect(length).await.unwrap().to_vec())
     }
 
     /// Waits until `condition` holds, re-checking it whenever a node reports a peers event or

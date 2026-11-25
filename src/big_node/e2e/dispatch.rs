@@ -61,14 +61,10 @@ async fn call(
         .call_with(
             RequestContext::root(),
             authorization.metadata(),
-            big_dispatch_core::Invoke {
-                operation: operation.to_owned(),
-                input,
-                context: Default::default(),
-            },
+            big_dispatch_core::Invoke::json(operation, input, Default::default()),
         )
         .await
-        .map(|output| output.output)
+        .map(|output| output.body.into_json())
         .map_err(|error| match error {
             ClientError::Method(error) => error,
             ClientError::Transport { message, .. } => panic!("transport failed: {message}"),

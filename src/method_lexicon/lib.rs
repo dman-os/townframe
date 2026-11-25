@@ -332,9 +332,14 @@ impl MethodContract {
             Some("subscription") => OperationKind::Subscription,
             other => unreachable!("a method Lexicon's main is an operation, not {other:?}"),
         };
+        // A procedure whose body is bytes states only the body's encoding, so what dispatch checks
+        // of its request is the parameters, as for a query.
+        let json_body = main["input"]["encoding"].as_str() == Some("application/json");
         let request = match kind {
-            OperationKind::Procedure => Position::Input,
-            OperationKind::Query | OperationKind::Subscription => Position::Parameters,
+            OperationKind::Procedure if json_body => Position::Input,
+            OperationKind::Procedure | OperationKind::Query | OperationKind::Subscription => {
+                Position::Parameters
+            }
         };
         Ok(Self {
             kind,
@@ -419,21 +424,36 @@ pub fn lexicon<M: MethodSchema>() -> Result<Value, MethodLexiconError> {
     if let Some(description) = request_object.get("description") {
         main.insert("description".to_owned(), description.clone());
     }
+    // A byte body (ADR 042 §1) is stated by its encoding alone, `*/*` for any media type, and
+    // its method keeps JSON-shaped parameters, which are the request type's fields.
+    let encoding = |encoding: method_core::Encoding| match encoding {
+        method_core::Encoding::Json => None,
+        method_core::Encoding::Bytes { mime } => Some(json!({ "encoding": mime.unwrap_or("*/*") })),
+    };
     match kind {
-        OperationKind::Procedure => {
-            let schema = project(nsid, "request", &request, &definitions, &mut carried)?;
-            main.insert(
-                "input".to_owned(),
-                json!({ "encoding": "application/json", "schema": schema }),
-            );
-        }
+        OperationKind::Procedure => match encoding(M::XRPC.input_encoding) {
+            None => {
+                let schema = project(nsid, "request", &request, &definitions, &mut carried)?;
+                main.insert(
+                    "input".to_owned(),
+                    json!({ "encoding": "application/json", "schema": schema }),
+                );
+            }
+            Some(input) => {
+                let parameters = parameters(nsid, request_object, &definitions)?;
+                main.insert("parameters".to_owned(), parameters);
+                main.insert("input".to_owned(), input);
+            }
+        },
         OperationKind::Query | OperationKind::Subscription => {
             let parameters = parameters(nsid, request_object, &definitions)?;
             main.insert("parameters".to_owned(), parameters);
         }
     }
     let body = resolve(&output, &definitions);
-    if body.get("type") != Some(&json!("null")) {
+    if let Some(output) = encoding(M::XRPC.output_encoding) {
+        main.insert("output".to_owned(), output);
+    } else if body.get("type") != Some(&json!("null")) {
         if body.get("type") != Some(&json!("object")) && body.get("oneOf").is_none() {
             return Err(MethodLexiconError::NotAnObject {
                 nsid,

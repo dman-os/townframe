@@ -11,6 +11,7 @@
 
 use big_cabinet_core::authority::Authorization;
 use big_dispatch::Anonymous;
+use big_dispatch::Edge;
 use big_dispatch_core::DispatchProtocol;
 use service_client_native_rs::Client;
 use service_utils_rs::xrpc::AcceptFuture;
@@ -26,8 +27,6 @@ use utils_rs::prelude::Res;
 use utils_rs::prelude::eyre::WrapErr;
 use utils_rs::prelude::eyre::bail;
 
-/// Bound on one request body served over a listener.
-const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 256;
 
 /// Where the node listens. Both are optional and a node with neither is complete. On a booted
@@ -82,7 +81,7 @@ impl Listener {
             .await
             .wrap_err_with(|| format!("binding {address}"))?;
         let bound = listener.local_addr()?;
-        let router = big_dispatch::xrpc_router(dispatch, Anonymous::Refused, MAX_BODY_BYTES);
+        let router = big_dispatch::xrpc_router(dispatch, Anonymous::Refused, Edge::Tcp);
         let (task, shutdown) = service_utils_rs::xrpc::serve_with_connection_limit(
             listener,
             router.into_router(),
@@ -115,7 +114,7 @@ impl Listener {
         // The socket file belongs to the uid the node runs as, which is how that uid is
         // learned without a syscall of its own.
         let owner_uid = std::fs::symlink_metadata(path)?.uid();
-        let router = big_dispatch::xrpc_router(dispatch, Anonymous::Acts(operator), MAX_BODY_BYTES);
+        let router = big_dispatch::xrpc_router(dispatch, Anonymous::Acts(operator), Edge::Unix);
         let (task, shutdown) = service_utils_rs::xrpc::serve_with_acceptor(
             OwnerOnly {
                 owner_uid,

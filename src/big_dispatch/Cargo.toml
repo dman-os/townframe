@@ -43,6 +43,12 @@ sqlite_rs.workspace = true
 secrets_rs.workspace = true
 
 #
+# http, to serve the router in process without a socket
+axum = { workspace = true }
+bytes.workspace = true
+tower = { workspace = true, features = ["util"] }
+
+#
 # misc
 keyring-core = { version = "1.0", default-features = false }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

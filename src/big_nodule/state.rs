@@ -256,7 +256,14 @@ impl InitRoute {
         let input = serde_json::json!({});
         match self {
             Self::Local { provider, caller } => provider
-                .call(&caller, target, &RequestContext::root(), &context, input)
+                .call(
+                    &caller,
+                    target,
+                    &RequestContext::root(),
+                    &context,
+                    input,
+                    None,
+                )
                 .await
                 .map(drop)
                 .map_err(|error| match error {
@@ -271,11 +278,7 @@ impl InitRoute {
                 .call_with(
                     RequestContext::root(),
                     authorization.metadata(),
-                    Invoke {
-                        operation: target.to_owned(),
-                        input,
-                        context,
-                    },
+                    Invoke::json(target, input, context),
                 )
                 .await
                 .map(drop)
@@ -2227,9 +2230,8 @@ fn claims(installed: &InstalledNodule, state: &ProviderState) -> Vec<(String, Op
             (
                 nsid.clone(),
                 Operation {
-                    kind: *kind,
                     lexicon,
-                    privileged: false,
+                    ..Operation::unchecked(*kind)
                 },
             )
         })

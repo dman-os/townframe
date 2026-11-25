@@ -19,6 +19,11 @@ use uuid::Uuid;
 pub struct HttpMetadata {
     pub authorization: Option<String>,
     pub idempotency_key: Option<String>,
+    /// The `Range` of a request for part of a byte body (ADR 042 §2). Only a method whose
+    /// output is bytes reads it, so a method that does not ignores it, as a server may ignore
+    /// a `Range` it cannot honour.
+    #[serde(default)]
+    pub range: Option<method_core::ByteRange>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
