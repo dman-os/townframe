@@ -994,3 +994,33 @@ sqlite_rs).
   wasm32-unknown-unknown backend when we reach it.
 - **Testing:** a wasm-bindgen-test lane in the Playwright browser farm for drivers.
 
+
+## Service transports and codecs (operator, 2026-11-25)
+
+- **`Transport::Irpc` is removed.** It was only `irpc::Client::local`, an in-process queue that
+  duplicated `Direct`, with no production caller. ADR 016's plan, irpc spanning in-process and
+  daemon calls with postcard-typed contracts, broke at the daemon hop:
+  - irpc's remote half is bound to QUIC. `RemoteConnection::open_bi` returns
+    `noq::SendStream`/`noq::RecvStream` (irpc 0.17, `src/lib.rs:2009`), so it can't run over a
+    Unix socket.
+  - ADR 033 put the daemon on XRPC over UDS, for kernel peer-credential auth.
+- **Deferred: a same-build binary codec on XRPC.** Services and the XRPC router share the same
+  Rust types, and lexicons are generated from them, so the only cost difference is serde_json
+  vs postcard plus HTTP framing. A same-build fast path would negotiate a build/protocol hash on
+  connect, use postcard (or rkyv for large payloads) when the hash matches, and fall back to
+  JSON otherwise. Postcard isn't self-describing, so it is safe only between identical types.
+  It is built only if the service-stack audit or the benchmarks show JSON costing real time on
+  the socket path.
+- **Declarations move toward `structstruck`-style.** Method metadata sits on the struct, the
+  NSID suffix is inferred from the ident, and the authority is declared once as a const. Design
+  doc: `docs/scratch/service-macro-rework.md` (in progress).
+- **SQLite okv lives in `big_automata_sqlite`.** It shares the part store's database and
+  transaction (outbox law 12).
+- **Payload convergence:** the memory backend adopts big_sync's LWW payload (`written_at`, then
+  `writer_id`). The `SyncBackend` contract requires that applying a peer payload converges
+  (merge or LWW), never a blind overwrite.
+- **Benchmarks:** GitHub CI gates on deterministic counts (instructions via valgrind,
+  allocations). Config sweeps run in simulated time. Wall clock is exploration only, local or
+  on trusted machines. Cross-build tracking is `x/bench.ts`; the skill is
+  `.agents/skills/benchmarking`.
+- **At most 5 lanes run at once.**
