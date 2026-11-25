@@ -19,6 +19,7 @@ pub mod durable_outbox;
 pub mod fingerprint;
 mod ids;
 mod kit;
+pub mod long_poll;
 pub mod okv;
 pub mod part_store;
 pub mod replay;
