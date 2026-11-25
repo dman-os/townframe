@@ -133,10 +133,10 @@ D-numbers are stable names; the archive holds each one's original text.
 
 ## Handoff (2026-11-25 night)
 
-- **#381 node-97, micros nodule** (on #379): draft. Owes the wire bless (the `DispatchScope` privileged set and the `capability` field on four mint methods). `cargo x` hits the mbx rmeta "not writeable" fault on mothership-alpha even in a separate worktree (`~/scratch/wt-97x`); report it to claytxt (mbx). claytxt swaps `clay_node` onto `micros.handles`. Follow-up: drawer mirroring (ADR 052 §2 step 4).
-- **#382 node-101, blob-binding crash** (on #94 lineup): a pin test plus the fix (a stale cipherBlob is replaced or deferred). Still owes: whether the operator's node at `~/.local/share/day` boots cleanly or needs a repair (don't run one), and the ping to intxt (it restores the hooks, reinstalls `day`, re-runs `intxt install`).
-- **#383 node-102, gate verdicts** (on #361): only the cost split and per-phase INSTR exist. The profile run on alpha left an empty log. Still owed: the profile (`BIG_CABINET_KNOWN=300 cargo nextest run --release -p big_cabinet -E 'test(long_test_mirrored_cost)'`), then `docs/scratch/gate-verdicts-in-the-index.md`, then the operator's go.
-- Line-up into stack #101 is still owed for #360 #361 #362 #364 #379 #381 #382 #383, then `gh stack link`, after claytxt's three main PRs (facet port, legacy exclusion, mltools).
+- **#381 node-97, micros nodule** (on #379, tip `13048322`): verified on alpha. The wire is blessed, and the narrow 33/33 passes, the micros e2e included. claytxt has both mbx faults, the rmeta one and the nested-build target one; the workaround is `mbx clean` before the run. claytxt swaps `clay_node` onto `micros.handles`. Follow-up: drawer mirroring (ADR 052 §2 step 4).
+- **#382 node-101, blob-binding crash** (on #94 lineup, tip `71ca81b5`): verified (big_blobs 197/197). The operator's node needs no repair, because the failed upsert rolled back. intxt has been pinged to restore the hooks and reinstall. Left open: the short-stale-ciphertext error in `CipherReader::open`, and the `setup_tracing` double panic.
+- **#383 node-102, gate verdicts** (on #361): the design note `docs/scratch/gate-verdicts-in-the-index.md` is in, with six open questions. It waits on the operator's go.
+- claytxt's cuts to main are ready: #384 (facet) → #385 (legacy exclude) → #386 (mltools). After they merge, line up #360 #361 #362 #364 #379 #381 #382 #383 into stack #101, rebase it onto main, and run `gh stack link`.
 
 ## To do
 
