@@ -103,6 +103,9 @@ pub struct SessionSummary {
     pub span: Option<(Timestamp, Timestamp)>,
     pub turns: usize,
     pub tool_calls: usize,
+    /// Turns the host could not read (absent, not accepted yet, or not a turn). They are in none
+    /// of the other numbers, and the page says so.
+    pub unreadable: usize,
     /// Tool calls by `ToolKind` (`edit`, `execute`, ...), as the harness spelled it.
     pub tools: BTreeMap<String, usize>,
     /// The paths an edit, delete or move call touched, at most [`Self::MAX_EDITED_TRACKED`].

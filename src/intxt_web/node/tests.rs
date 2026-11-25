@@ -168,6 +168,11 @@ impl FakeNode {
             key("org.example.intxt.work.agentSession", "main"),
             json!({"harness": "claude-code", "sessionId": "s1", "cwd": "/w"}),
         );
+        // A turn that is not a turn: counted as unreadable, the rest still summarized.
+        session.insert(
+            key("org.example.intxt.work.promptTurn", "zz-bad"),
+            json!({"seq": "not a number"}),
+        );
         session.insert(
             key("org.example.intxt.work.plan", "main"),
             json!({"entries": []}),
@@ -495,6 +500,7 @@ fn an_intxt_loads_with_its_commits_patch_comments_and_pull_request() {
     assert_eq!(session.kind, EntryKind::Session);
     let summary = session.session.as_ref().expect("a session has its summary");
     assert_eq!(summary.turns, TURNS);
+    assert_eq!(summary.unreadable, 1);
     assert_eq!(summary.tool_calls, TURNS);
     assert_eq!(summary.tools["edit"], TURNS);
     // Folded across batches whatever the order the node listed the turns in.
@@ -536,7 +542,7 @@ fn the_node_is_asked_only_what_the_page_needs() {
     // The pointer, the index, the PR document, the patch's blob datum, the commits document and
     // the notes document; the session's own datum, and its turns read in batches (the plan and
     // the session datum are not asked for).
-    let batches = TURNS.div_ceil(TURNS_PER_READ);
+    let batches = (TURNS + 1).div_ceil(TURNS_PER_READ);
     assert_eq!(count("readDatums"), 7 + batches, "{calls:?}");
     // One poll for the commits documents (read once for every entry that needs them), one for
     // the notes documents and one for the session's turn keys.

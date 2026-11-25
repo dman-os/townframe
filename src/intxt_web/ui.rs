@@ -174,6 +174,11 @@ fn Session(summary: SessionSummary) -> Element {
                     ", {when(first)} to {when(last)} UTC"
                 }
             }
+            if summary.unreadable > 0 {
+                p { class: "intxt-muted intxt-small",
+                    "{summary.unreadable} turns could not be read and are not counted."
+                }
+            }
             if !tools.is_empty() {
                 p { class: "intxt-muted intxt-small", "tools: {tools}" }
             }

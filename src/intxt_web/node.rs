@@ -431,13 +431,16 @@ impl<H: HttpTransport> NodeSource<H> {
             .collect();
         let mut summary = SessionSummary::default();
         for batch in keys.chunks(TURNS_PER_READ) {
-            for (key, value) in self
+            let mut read = self
                 .read(session_doc, Some(batch.iter().cloned().collect()))
-                .await?
-            {
-                let turn: PromptTurn = serde_json::from_value(value)
-                    .map_err(|error| unreadable(format!("{key} in {session_doc}: {error}")))?;
-                summary.add(&turn);
+                .await?;
+            // A turn that is not there to read (not accepted here yet) or is not a turn is
+            // said so in the summary; it does not fail the page.
+            for key in batch {
+                match read.remove(key).map(serde_json::from_value::<PromptTurn>) {
+                    Some(Ok(turn)) => summary.add(&turn),
+                    Some(Err(_)) | None => summary.unreadable += 1,
+                }
             }
         }
         Ok(summary)
