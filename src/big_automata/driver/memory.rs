@@ -154,7 +154,7 @@ impl LwwPayload {
     /// writer does not stamp two payloads alike), which is asserted. A payload that is not an
     /// [`LwwPayload`] panics: the memory backend is a test backend that merges only what it
     /// can order, and an unstamped payload would have to overwrite, which does not converge.
-    fn wins(incoming: &ObjPayload, held: &ObjPayload) -> bool {
+    pub fn wins(incoming: &ObjPayload, held: &ObjPayload) -> bool {
         let stamped = |payload| {
             Self::deserialize(payload).unwrap_or_else(|err| {
                 panic!("the memory backend takes only LwwPayloads, got {payload}: {err}")

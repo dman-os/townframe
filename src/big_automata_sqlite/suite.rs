@@ -23,6 +23,7 @@ mod cursors;
 mod invariants;
 mod okv;
 mod plans;
+mod stress;
 
 pub(crate) type Store = SqlitePartStore<Database>;
 

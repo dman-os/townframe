@@ -1480,11 +1480,13 @@ dependencies = [
  "big_automata",
  "futures",
  "proptest",
+ "rand 0.9.5",
  "serde_json",
  "sqlite_rs",
  "tempfile",
  "tokio",
  "utils_rs",
+ "web-time",
 ]
 
 [[package]]
