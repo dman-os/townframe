@@ -69,7 +69,7 @@ impl Sim {
         // law 7's cap on tracked objects, backing off or not: admission stops at it, and what
         // goes past it is a revision's overshoot and the routed objects, which are not
         // admitted through `room`
-        let tracked_bound = jobs.max_tracked + MAX_BATCH - 1 + self.shape.obj_routes;
+        let tracked_bound = jobs.max_tracked + MAX_BATCH - 1 + usize::from(self.shape.obj_routes);
         assert!(
             self.sync.jobs.tracked() <= tracked_bound,
             "{} objects tracked, the cap is {} and a revision brings up to {MAX_BATCH}",

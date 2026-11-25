@@ -434,7 +434,14 @@ impl Sim {
             self.oracle.quiet(),
             "a want or an owed cursor was left behind"
         );
-        assert_eq!(self.jobs.room(), Self::config().window);
+        // met routes stay tracked (and count against the cap) until they are switched off
+        let config = Self::config();
+        assert_eq!(
+            self.jobs.room(),
+            config
+                .window
+                .min(config.max_tracked - self.oracle.tracked())
+        );
         assert!(
             self.jobs
                 .objs
