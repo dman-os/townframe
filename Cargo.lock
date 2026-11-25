@@ -8710,6 +8710,7 @@ dependencies = [
  "clay_dioxus_kit",
  "clay_mdk",
  "dioxus",
+ "dioxus-ssr",
  "micro_shell_manifest",
  "tokio",
 ]

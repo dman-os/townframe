@@ -29,8 +29,8 @@ pub struct ShellHandles {
     /// Which row of the Settings list the shell has open (`String` panel key in, `Option<String>`
     /// out). The section presentation takes no parameters, so it asks.
     pub opened: Capability,
-    /// The sidebar/back button presentation, mounted in the list's app bar.
-    pub nav_button: Capability,
+    /// The navigation rack presentation, mounted in the list's app bar.
+    pub navigation_rack: Capability,
 }
 
 /// What the Settings views read: the sections collection, its preferences, the shell, and the
@@ -88,7 +88,7 @@ pub async fn activate(context: Context) -> Result<(), Error> {
             .expect("manifest declares Settings configuration"),
         shell: ShellHandles {
             opened: required(contract::SHELL_OPENED),
-            nav_button: required(contract::SHELL_NAV_BUTTON),
+            navigation_rack: required(contract::SHELL_NAVIGATION_RACK),
         },
     };
     context.publish::<contract::SettingsListView>({
@@ -149,7 +149,7 @@ mod tests {
             entrypoints: clay_mdk::Entrypoints::micro_client(),
             endpoints: [
                 (
-                    micro_shell_manifest::NAV_BUTTON.into(),
+                    micro_shell_manifest::NAVIGATION_RACK.into(),
                     Endpoint::View { implements: None },
                 ),
                 (
@@ -181,7 +181,7 @@ mod tests {
                 CollectionBindings::new([]),
                 |context| async move {
                     use dioxus::prelude::*;
-                    context.publish::<micro_shell_manifest::ShellNavButton>(|| {
+                    context.publish::<micro_shell_manifest::ShellNavigationRack>(|| {
                         rsx! { button { "back" } }
                     })?;
                     context.publish_call(micro_shell_manifest::OPENED, |_: String| async {
@@ -225,7 +225,7 @@ mod tests {
                     identity: MicroId::from(&clay_mdk::MicroId::local(contract::ID)),
                     eager: false,
                     enabled: true,
-                    requirements: [contract::SHELL_OPENED, contract::SHELL_NAV_BUTTON]
+                    requirements: [contract::SHELL_OPENED, contract::SHELL_NAVIGATION_RACK]
                         .map(|publication| {
                             (
                                 publication.to_owned(),

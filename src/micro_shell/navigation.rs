@@ -88,10 +88,14 @@ impl Navigation {
         self.active = self.entries.len();
     }
 
-    /// Whether back has somewhere to go: this is what makes the sidebar/back button read
-    /// **back**.
+    /// Whether back has somewhere to go: this is what enables the rack's back button.
     pub fn can_back(&self) -> bool {
         self.active > 0
+    }
+
+    /// Whether forward has an entry back left: this is what enables the rack's forward button.
+    pub fn can_forward(&self) -> bool {
+        self.active < self.entries.len()
     }
 
     /// Step back, or dismiss the overlay on top. `false` when there is nothing to go back to.
@@ -191,8 +195,29 @@ mod tests {
         let mut navigation = Navigation::default();
         assert_eq!(navigation.frame(), Frame::default());
         assert!(!navigation.can_back());
+        assert!(!navigation.can_forward());
         assert!(!navigation.back());
         assert!(!navigation.forward());
+    }
+
+    #[test]
+    fn can_forward_follows_the_entries_back_left() {
+        let mut navigation = Navigation::default();
+        navigation.push(main("a"));
+        navigation.push(main("b"));
+        assert!(navigation.can_back() && !navigation.can_forward());
+        navigation.back();
+        assert!(navigation.can_back() && navigation.can_forward());
+        navigation.back();
+        assert!(!navigation.can_back() && navigation.can_forward());
+        navigation.forward();
+        navigation.forward();
+        assert!(!navigation.can_forward());
+        // A push discards what back left, and a dismissed sheet is never a forward entry.
+        navigation.back();
+        navigation.push(Entry::Sheet("picker".into()));
+        navigation.back();
+        assert!(!navigation.can_forward());
     }
 
     #[test]

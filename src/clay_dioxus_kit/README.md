@@ -24,7 +24,8 @@ renders structure, ARIA and behaviour, and `styles/kit/<name>.css` is the whole 
 | `Sections` (resizable split) | `headless::sections` | `styles/kit/sections.css` | `specimens/sections.rs` |
 | `ListDetails` (list/details scaffold) | `headless::list_details` | `styles/kit/list_details.css` | `specimens/list_details.rs` |
 | `Sheet` (bottom/side sheet) | `headless::sheet` | `styles/kit/sheet.css` | `specimens/sheet.rs` |
-| `NavButton` (back / open sidebar) | `headless::nav_button` | `styles/kit/nav_button.css` | `specimens/nav_button.rs` |
+| `NavButton` (sidebar toggle, back, forward) | `headless::nav_button` | `styles/kit/nav_button.css` | `specimens/nav_button.rs` |
+| `NavRack` (the group of nav buttons) | `headless::nav_rack` | `styles/kit/nav_rack.css` | `specimens/nav_button.rs` |
 | `PanelPage` (app bar pinned over a scrolling body) | `headless::panel_page` | `styles/kit/panel_page.css` | `specimens/panel_page.rs` |
 | `AppBar` (leading slot, title, trailing actions) | `headless::app_bar` | `styles/kit/app_bar.css` | `specimens/app_bar.rs` |
 | `Drawer` (left drawer of a compact host) | `headless::drawer` | `styles/kit/drawer.css` | `specimens/drawer.rs` |
@@ -49,7 +50,7 @@ the rest are enforced by review.
   stylesheet `styles/kit/<name>.css`. There is no styled Rust part: nothing visual lives in Rust.
   Module item budgets (40) are the pressure against piling components into one file. Checked:
   `cargo x guardrails lint`, `conventions::a_component_is_a_public_headless_module_and_a_skin`.
-- **KIT-003** Types a caller needs to drive a component (`Split`, `NavButtonMode`, `WidthClass`,
+- **KIT-003** Types a caller needs to drive a component (`Split`, `NavButtonKind`, `WidthClass`,
   ...) are re-exported at the root, so callers never import from `headless` for them.
 
 ### Behaviour
@@ -68,7 +69,7 @@ enforces them. They apply to every component.
   stylesheet reads; an inline declaration of any other property is refused at run time by the
   test harness (a guest's wire would admit it, so the harness is the check) and by
   `conventions::contract_parts_set_only_custom_properties_inline`.
-  Variants are explicit enum props (`NavButtonMode`, `ButtonVariant`, `WidthClass`); a component
+  Variants are explicit enum props (`NavButtonKind`, `ButtonVariant`, `WidthClass`); a component
   takes no `class` or `style` pass-through (COMPOSE-003). Geometry the host can only classify is
   px (FOUND-008) and reaches CSS through a custom property or a data attribute, never a number in
   Rust that is a layout decision.

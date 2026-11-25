@@ -44,10 +44,11 @@ export const oneMainRegion = always(() => {
   );
 });
 
-// Why it must hold: the sidebar/back button is the only way to move between contexts and has no
+// Why it must hold: the navigation rack is the only way to move between contexts and has no
 // bottom bar to fall back on (FDR 006, "Phone and desktop": back inside list-and-details, open
 // the sidebar otherwise). A wide window with the sidebar visible shows "Hide sidebar" in it; a
-// hidden sidebar must always leave "Open sidebar" or "Back" in the panel's app bar.
+// hidden sidebar must always leave the rack (an enabled "Open sidebar" and, with
+// somewhere to go, "Back") in the panel's app bar.
 export const navigationAlwaysReachable = always(() => {
   const current = frame.current;
   if (!current.booted) return true;

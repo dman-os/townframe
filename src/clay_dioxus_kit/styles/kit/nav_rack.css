@@ -1,0 +1,8 @@
+/*
+ * ct-nav-rack (headless/nav_rack.rs): a row of nav buttons. It takes no position of its own.
+ */
+.ct-nav-rack {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+}

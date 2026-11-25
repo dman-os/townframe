@@ -98,7 +98,7 @@ test("home, Settings and a section unwind with back at a compact and a wide widt
 });
 
 // A panel whose micro has no presentation (packages are admitted disabled, so the layout is one
-// on a fresh install) shows a placeholder, and the micro that would place the sidebar/back button
+// on a fresh install) shows a placeholder, and the micro that would place the navigation rack
 // is the one that is absent. The shell supplies the button then, or a compact window is a dead
 // end that only the platform back leaves. Found by the Bombadil exploration (`bombadil/shell.ts`).
 test("a panel that is unavailable still offers the way back or the sidebar", async ({ page }) => {

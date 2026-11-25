@@ -1,0 +1,26 @@
+thread 'main' panicked at /rustc/923c95cdf5ba65cea505aa2ea829f578e1506ed8/library/std/src/thread/lifecycle.rs:224:14:
+threads should not terminate unexpectedly
+stack backtrace:
+   0:     0x7ffff444e5d5 - <std[8fd34585b57e1999]::backtrace::Backtrace>::create
+   1:     0x7ffff444e525 - <std[8fd34585b57e1999]::backtrace::Backtrace>::force_capture
+   2:     0x7ffff31771e5 - std[8fd34585b57e1999]::panicking::update_hook::<alloc[c40a817d20076bfb]::boxed::Box<rustc_driver_impl[77ef37714d3f7f1d]::install_ice_hook::{closure#1}>>::{closure#0}
+   3:     0x7ffff44649c2 - std[8fd34585b57e1999]::panicking::panic_with_hook
+   4:     0x7ffff4442b32 - std[8fd34585b57e1999]::panicking::panic_handler::{closure#0}
+   5:     0x7ffff4439959 - std[8fd34585b57e1999]::sys::backtrace::__rust_end_short_backtrace::<std[8fd34585b57e1999]::panicking::panic_handler::{closure#0}, !>
+   6:     0x7ffff444470d - __rustc[1bf7dbdacb2d1810]::rust_begin_unwind
+   7:     0x7ffff0eb45dc - core[2af8eeb7381d530c]::panicking::panic_fmt
+   8:     0x7ffff1a74ad4 - core[2af8eeb7381d530c]::option::expect_failed
+   9:     0x7ffff5dbc35e - rustc_driver_impl[77ef37714d3f7f1d]::run_compiler
+  10:     0x555555baf054 - clippy_driver[d16e0367e376e4c1]::main
+  11:     0x555555bad7d3 - std[8fd34585b57e1999]::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std[8fd34585b57e1999]::process::ExitCode, std[8fd34585b57e1999]::process::ExitCode>
+  12:     0x555555bad7c9 - std[8fd34585b57e1999]::rt::lang_start::<std[8fd34585b57e1999]::process::ExitCode>::{closure#0}
+  13:     0x7ffff5dbf6da - std[8fd34585b57e1999]::rt::lang_start_internal
+  14:     0x555555c0c7d7 - main
+  15:     0x7fffeec2b391 - __libc_start_call_main
+  16:     0x7fffeec2b4a8 - __libc_start_main_impl
+  17:     0x555555bde4f6 - <unknown>
+  18:                0x0 - <unknown>
+
+
+rustc version: 1.100.0-nightly (923c95cdf 2026-09-16)
+platform: x86_64-unknown-linux-gnu

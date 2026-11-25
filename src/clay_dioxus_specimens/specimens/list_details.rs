@@ -7,7 +7,7 @@ use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::ListDetails;
 use clay_dioxus_kit::ListRow;
 use clay_dioxus_kit::NavButton;
-use clay_dioxus_kit::NavButtonMode;
+use clay_dioxus_kit::NavButtonKind;
 use clay_dioxus_kit::SizeRule;
 use clay_dioxus_kit::Split;
 use clay_dioxus_kit::WidthClass;
@@ -53,7 +53,7 @@ fn SettingsDetails(title: String, with_back: bool) -> Element {
         AppBar {
             title: title.clone(),
             leading: with_back.then(|| rsx! {
-                NavButton { mode: NavButtonMode::Back, onclick: move |_| actions.back() }
+                NavButton { kind: NavButtonKind::Back, onclick: move |_| actions.back() }
             }),
         }
         p { class: "p-4 text-foreground-muted", "Settings for {title}." }

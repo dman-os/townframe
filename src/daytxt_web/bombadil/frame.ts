@@ -13,9 +13,9 @@ export type Frame = {
   lists: string[];
   /// Names of the outermost panel regions that are details ("<list> details").
   details: string[];
-  /// Bounds of every on-screen button that reads "Back".
+  /// Bounds of every enabled on-screen button that reads "Back".
   backs: Rect[];
-  /// On-screen buttons that move between positions: "Back", "Open sidebar", "Hide sidebar".
+  /// On-screen buttons that move between positions: "Back", "Forward", "Open sidebar", "Hide sidebar" (a disabled one is listed as such).
   navigation: { name: string; enabled: boolean }[];
   /// On-screen dialogs (the compact sidebar drawer and sheets).
   dialogs: {
@@ -35,7 +35,7 @@ export type Frame = {
 /// Playwright pin can serialise it into a page with `page.evaluate`, as Bombadil runs it.
 ///
 /// Every Clay presentation (a guest's panel, the layout's app bar with the shell's
-/// sidebar/back button) mounts inside a `data-dioxus-shadow` root, which neither
+/// navigation rack) mounts inside a `data-dioxus-shadow` root, which neither
 /// `document.querySelectorAll` nor `closest` crosses. A hidden sidebar's only way back is that
 /// button, living in the layout's shadow root, so a reading that stopped at the document edge saw
 /// "no navigation" for a screen that had it. All queries and ancestor walks therefore go
@@ -118,11 +118,13 @@ export function readFrame(document: Document, window: Window): Frame {
     mains: all("main").length,
     lists: names.filter((name) => !name.endsWith(" details")),
     details: names.filter((name) => name.endsWith(" details")),
-    backs: buttonsNamed("Back").map((button) => {
+    backs: buttonsNamed("Back")
+      .filter((button) => !(button as HTMLButtonElement).disabled)
+      .map((button) => {
       const { left, top, right, bottom } = button.getBoundingClientRect();
       return { left, top, right, bottom };
     }),
-    navigation: buttonsNamed("Back", "Open sidebar", "Hide sidebar").map(
+    navigation: buttonsNamed("Back", "Forward", "Open sidebar", "Hide sidebar").map(
       (button) => ({
         name: nameOf(button),
         enabled: !(button as HTMLButtonElement).disabled,
