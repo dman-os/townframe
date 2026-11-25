@@ -33,7 +33,7 @@ pub impl service_utils_rs::admission::TaskActivity::fn spawned (self : & Arc < S
 pub impl service_utils_rs::admission::TaskActivity::fn spawned_count (& self) -> usize
 pub impl service_utils_rs::admission::TaskActivity::fn stream_pump (self : & Arc < Self >) -> TaskGuard
 pub impl service_utils_rs::admission::TaskActivity::fn stream_pump_count (& self) -> usize
-pub impl service_utils_rs::host::Host < H >::async fn invoke < P > (& self , request : Envelope < P > ,) -> Result < crate :: ResponseEnvelope < P :: Output > , P :: Error > where P : Method , H : Handler < P > ,
+pub impl service_utils_rs::host::Host < H >::async fn invoke < P > (self : & Arc < Self > , request : Envelope < P > ,) -> Result < crate :: ResponseEnvelope < P :: Output > , P :: Error > where P : Method , H : Handler < P > ,
 pub impl service_utils_rs::host::Host < H >::async fn stream < P , Proto > (self : Arc < Self > , dispatch : Dispatch , message : WithChannels < Envelope < P > , Proto > ,) where P : Subscription , Proto : Service , Envelope < P > : Channels < Proto , Tx = EventReply < P > > , H : Handler < P > ,
 pub impl service_utils_rs::host::Host < H >::async fn unary < P , Proto > (self : Arc < Self > , dispatch : Dispatch , message : WithChannels < Envelope < P > , Proto > ,) where P : Unary , Proto : Service , Envelope < P > : Channels < Proto , Tx = Reply < P > > , H : Handler < P > ,
 pub impl service_utils_rs::host::Host < H >::fn new (handler : H) -> (Arc < Self > , StopToken)
