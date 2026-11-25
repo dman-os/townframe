@@ -36,7 +36,3 @@ quote = "1"
 syn = { workspace = true, features = ["full", "visit", "extra-traits"] }
 toml = "0.9"
 walkdir = "2"
-
-oci-spec = "0.8.4"
-sha2 = "0.10.9"
-url.workspace = true

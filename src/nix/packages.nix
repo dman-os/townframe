@@ -1,5 +1,5 @@
-# Packaged outputs. `packages.daybook-cli` is a sandboxed, network-free (apart from
-# fixed-output fetches) build of the daybook CLI; see src/nix/wit-deps.nix for how
+# Packaged outputs: the pinned WIT dependency overlay and the vendored cargo
+# dependencies (patched for wash-runtime's build.rs); see src/nix/wit-deps.nix for how
 # gitignored WIT dependencies enter the sandbox.
 { inputs, ... }:
 {
@@ -12,9 +12,6 @@
       repoRoot = ../..;
 
       craneLib = (inputs.crane.mkLib pkgs).overrideToolchain (_: tools.rustRust);
-
-      workspaceToml = builtins.fromTOML (builtins.readFile (repoRoot + "/Cargo.toml"));
-      version = workspaceToml.workspace.package.version;
 
       # Sources the build actually needs: manifests, the workspace cargo config,
       # and compilable/embedded inputs under src/. Kotlin and other languages are
@@ -144,139 +141,11 @@
           exit 1
         fi
       '';
-
-      commonArgs = {
-        pname = "daybook-cli";
-        inherit version;
-        src = srcWithWit;
-        inherit cargoVendorDir;
-        cargoExtraArgs = "--locked -p daybook_cli";
-        doCheck = false;
-
-        # mltools embeds these with env!() at compile time (src/mltools/models.rs).
-        # Real credentials must never be derivation inputs — they would land in the
-        # world-readable Nix store — so the baked defaults are empty and a packaged
-        # binary has to take its cloud config from the runtime environment.
-        OLLAMA_URL = "";
-        OLLAMA_USERNAME = "";
-        OLLAMA_PASSWORD = "";
-
-        # ort-sys (via fastembed) probes ORT_LIB_LOCATION for a *static* archive
-        # by default, which nixpkgs does not ship; ORT_PREFER_DYNAMIC_LINK makes
-        # it link the provided shared library instead, keeping the build offline.
-        ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
-        ORT_PREFER_DYNAMIC_LINK = "1";
-        # ort-sys' copy-dylibs step symlinks the dylibs into OUT_DIR's third
-        # ancestor plus `examples/` and `deps/` subdirectories without creating
-        # them first, which panics with NotFound on a fresh target dir.
-        preBuild = "mkdir -p target/release/build/examples target/release/build/deps";
-
-        nativeBuildInputs = [
-          pkgs.pkg-config
-          pkgs.cmake
-          pkgs.protobuf
-          pkgs.llvmPackages.libclang
-        ];
-        buildInputs = [
-          pkgs.openssl
-          pkgs.sqlite
-          pkgs.onnxruntime
-        ]
-        ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.stdenv.cc.cc.lib ];
-
-        LIBCLANG_PATH = "${lib.getLib pkgs.llvmPackages.libclang}/lib";
-      }
-      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-        # Same headers bindgen sees inside the ci-rust shell.
-        BINDGEN_EXTRA_CLANG_ARGS = "-I${pkgs.linuxHeaders}/include -idirafter ${pkgs.stdenv.cc.libc.dev}/include";
-      };
-
-      cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-      cliBuild = craneLib.buildPackage (
-        commonArgs
-        // {
-          inherit cargoArtifacts;
-          meta.mainProgram = "daybook_cli";
-        }
-      );
-      # Exercises the installed binary end to end in an isolated HOME and
-      # repo with an empty environment: init, two documents, persistence across
-      # invocations and re-init, dump, and the uninitialized/missing-document
-      # failures. Lives in passthru.tests rather than `checks` so the
-      # `nix flake check` lint hook does not have to build the whole CLI; CI
-      # builds it with `nix build .#daybook-cli.tests.round-trip`.
-      roundTrip = pkgs.writeShellApplication {
-        name = "daybook-cli-round-trip";
-        runtimeInputs = [
-          pkgs.coreutils
-          pkgs.gnugrep
-          cliBuild
-        ];
-        text = ''
-          work=$(mktemp -d)
-          trap 'rm -rf "$work"' EXIT
-          export HOME="$work/home"
-          export XDG_CONFIG_HOME="$HOME/config"
-          export XDG_CACHE_HOME="$HOME/cache"
-          export DAYB_REPO_PATH="$work/repo"
-          export RUST_LOG=error,wflow::kvstore=off
-          export NO_COLOR=1
-          mkdir -p "$HOME"
-          cd "$work"
-
-          daybook_cli --help > help.txt
-          grep -F 'Usage: daybook_cli' help.txt
-          if daybook_cli ls > uninitialized.txt 2>&1; then
-            echo 'ls unexpectedly succeeded before initialization' >&2
-            exit 1
-          fi
-          daybook_cli init
-          daybook_cli ls > empty.txt
-          if grep -F 'Untitled' empty.txt; then
-            echo 'fresh repository contains a document' >&2
-            exit 1
-          fi
-          first=$(daybook_cli touch)
-          second=$(daybook_cli touch)
-          test -n "$first"
-          test -n "$second"
-          test "$first" != "$second"
-          daybook_cli init
-          daybook_cli ls > list.txt
-          grep -F -- "$first" list.txt
-          grep -F -- "$second" list.txt
-          for id in "$first" "$second"; do
-            daybook_cli cat "$id" > doc.txt
-            grep -F -- "$id" doc.txt
-            grep -F 'Untitled' doc.txt
-          done
-          daybook_cli dump > dump.txt
-          test -s dump.txt
-          if daybook_cli cat nonexistent-document > missing.txt 2>&1; then
-            echo 'cat unexpectedly succeeded for a missing document' >&2
-            exit 1
-          fi
-        '';
-      };
-      daybook-cli = cliBuild.overrideAttrs (prev: {
-        passthru = (prev.passthru or { }) // {
-          tests.round-trip = pkgs.runCommand "daybook-cli-round-trip" { } ''
-            ${pkgs.coreutils}/bin/env -i ${lib.getExe roundTrip}
-            touch $out
-          '';
-        };
-      });
     in
     {
       packages = {
-        inherit daybook-cli;
         wit-deps = witDeps;
         cargo-vendor-dir = cargoVendorDir;
-      };
-      apps.daybook-cli = {
-        type = "app";
-        program = lib.getExe daybook-cli;
-        meta.description = "Daybook local-first document CLI";
       };
     };
 }

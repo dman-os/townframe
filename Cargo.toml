@@ -22,18 +22,10 @@ members = [
   "./src/big_repo/",
   "./src/big_node/",
   "./src/day_cli",
-  "./src/daybook_cli",
-  "./src/daybook_core",
-  "./src/daybook_ffi",
-  "./src/daybook_pdk",
-  "./src/daybook_types",
   "./src/macros",
   "./src/mltools/",
   "./src/pauperfuse/",
   "./src/native_utils_rs",
-  "./src/plug_test_manifest",
-  "./src/plug_plabels_manifest",
-  "./src/plug_dayledger_manifest",
   "./src/secrets_rs",
   "./src/method_core/",
   "./src/method_lexicon/",
@@ -87,11 +79,22 @@ members = [
 exclude = [
   "src/wasm_utils_rs",
   "src/clay_rt_wcmp_web",
-  "src/plug_test_routines",
-  "src/plug_plabels_routines",
-  "src/plug_dayledger_routines",
   "src/test_wflows",
   "src/btress_sysadmin",
+  # Legacy daybook stack, kept in the tree but out of the workspace: it does not
+  # build against the current workspace dependencies and nothing depends on it.
+  "src/daybook_cli",
+  "src/daybook_core",
+  "src/daybook_ffi",
+  "src/daybook_pdk",
+  "src/daybook_sdk",
+  "src/daybook_types",
+  "src/plug_dayledger_manifest",
+  "src/plug_dayledger_routines",
+  "src/plug_plabels_manifest",
+  "src/plug_plabels_routines",
+  "src/plug_test_manifest",
+  "src/plug_test_routines",
 ]
 
 [workspace.package]
@@ -114,7 +117,6 @@ sqlite_rs = { path = "./src/sqlite_rs", default-features = false }
 wasm_utils_rs = { path = "./src/wasm_utils_rs", default-features = false }
 am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
-daybook_core = { path = "./src/daybook_core", default-features = false }
 secrets_rs = { path = "./src/secrets_rs" }
 method_core = { path = "./src/method_core", default-features = false }
 service_core_rs = { path = "./src/service_core_rs", default-features = false }
@@ -122,8 +124,6 @@ service_client_core_rs = { path = "./src/service_client_core_rs", default-featur
 service_client_native_rs = { path = "./src/service_client_native_rs", default-features = false }
 service_utils_rs = { path = "./src/service_utils_rs", default-features = false }
 # daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
-daybook_types = { path = "./src/daybook_types", default-features = false }
-daybook_pdk = { path = "./src/daybook_pdk", default-features = false }
 mltools = { path = "./src/mltools", default-features = false }
 wflow = { path = "./src/wflow", default-features = false }
 wflow_core = { path = "./src/wflow_core", default-features = false }
