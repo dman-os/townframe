@@ -32,11 +32,6 @@ impl BucketFingerprint {
     fn remove<T: core::hash::Hash>(&mut self, seed: &FingerprintSeed, value: &T) {
         self.0 = self.0.wrapping_sub(Fingerprint::new(seed, value).as_u64());
     }
-
-    #[cfg(test)]
-    fn as_u64(&self) -> u64 {
-        self.0
-    }
 }
 
 /// A member's place in its bucket: a live member counts by its payload digest (stored when the

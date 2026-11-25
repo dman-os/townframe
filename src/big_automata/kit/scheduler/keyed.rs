@@ -324,10 +324,6 @@ where
         self.tasks.drain_spawn_queue()
     }
 
-    pub fn requeue_spawned(&mut self, tasks: impl IntoIterator<Item = TaskSeed<Seed>>) {
-        self.tasks.requeue_spawned(tasks);
-    }
-
     /// Tasks the driver must abort. It reports each one back through [`Self::stopped`] once it
     /// has ended.
     pub fn drain_stop_queue(&mut self) -> std::vec::Drain<'_, TaskId> {

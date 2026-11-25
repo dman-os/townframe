@@ -351,11 +351,6 @@ impl Rig {
         self.flush()
     }
 
-    pub(super) fn fetch_done(&mut self, call: CallId) -> Cmds {
-        self.sync.fetch_ended(call, Outcome::Succeeded(()));
-        self.flush()
-    }
-
     /// Drive part `n` to a cursor catch-up whose first round is answered drained at `resume`
     /// with no events: the part is `Synced`.
     pub(super) fn synced_at(&mut self, n: u8, resume: Rev) -> (CallId, Lane, PageSession) {
