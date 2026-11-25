@@ -85,6 +85,10 @@ decision is made or a finding turns up. Findings go here, not only in chat.
   the live-object property. Remote commits arriving over subduction already skip the doc
   worker; they're a pure storage operation (`hub.rs:2957`: no materialization retry without an
   existing worker).
+  **Correction (2026-11-26, big-repo-port-ledger §2):** that holds only for CGKA notifications.
+  Remote *content* from a sync session is routed to a doc worker that is spawned lazily if none
+  exists (`route_sync_session_apply`, `hub.rs:2356-2380`). On writable nodes it hydrates, and it
+  may mint checkpoints (`doc_worker.rs:1508`).
 - 2026-11-17: **Multiple principals per connection: next week.** The operator is talking to
   upstream. This week has no bandwidth to reach Keyline.
 - 2026-11-17: The lane owns its stack. Pushing needs no permission. No attribution trailers.
