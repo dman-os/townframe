@@ -211,6 +211,33 @@ code {
   background: var(--iw-removed);
 }
 
+/* A session's summary: prompts fold to their first line, the full text wraps inside the page. */
+.intxt-session p {
+  margin: 0.25rem 0;
+}
+
+.intxt-session .intxt-session-files li {
+  padding: 0;
+  border: 0;
+}
+
+.intxt-prompt {
+  margin: 0.25rem 0;
+}
+
+.intxt-prompt summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.intxt-prompt-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0.25rem 0 0.25rem 0.75rem;
+  padding-left: 0.5rem;
+  border-left: 2px solid var(--iw-border);
+}
+
 /* Comments: a thread is set in from the page edge, replies a little further, by a rule. */
 .intxt-thread {
   border-left: 2px solid var(--iw-border);

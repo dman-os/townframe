@@ -9,6 +9,7 @@ use crate::view::CommitDatum;
 use crate::view::EntryDatum;
 use crate::view::IntxtView;
 use crate::view::PatchDatum;
+use crate::view::SessionSummary;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
@@ -25,6 +26,7 @@ use intxt_core::work::GithubPull;
 use intxt_core::work::GithubPullEntry;
 use intxt_core::work::JjChange;
 use intxt_core::work::JjChangeEntry;
+use intxt_core::work::PromptTurn;
 use intxt_core::work::SessionEntry;
 use serde_json::json;
 
@@ -202,6 +204,55 @@ fn fixture() -> IntxtView {
     }))
     .unwrap();
 
+    // Three turns, given out of `seq` order the way a document lists them by key.
+    let turn = |value| -> PromptTurn { serde_json::from_value(value).unwrap() };
+    let turns = [
+        turn(json!({
+            "seq": 2, "at": "2026-11-23T11:30:00Z", "stopReason": "end_turn",
+            "messages": [
+                {"id": "m3", "seq": 1, "at": "2026-11-23T11:30:00Z", "kind": "userMessage",
+                 "text": "Now the phone layout.\n\nNo horizontal scroll, <b>please</b>."},
+                {"id": "m4", "seq": 2, "at": "2026-11-23T11:31:00Z", "kind": "agentMessage",
+                 "text": "Done."}
+            ],
+            "toolCalls": [
+                {"id": "c4", "seq": 3, "title": "Edit intxt_web.css", "kind": "edit",
+                 "status": "completed",
+                 "diffs": [{"path": "src/intxt_web/intxt_web.css", "patch": "@@"}]}
+            ]
+        })),
+        turn(json!({
+            "seq": 1, "at": "2026-11-23T10:00:00Z", "stopReason": "end_turn",
+            "messages": [
+                {"id": "m1", "seq": 1, "at": "2026-11-23T10:00:00Z", "kind": "userMessage",
+                 "text": "Render the session's turns in the viewer."},
+                {"id": "m2", "seq": 4, "at": "2026-11-23T10:20:00Z", "kind": "agentMessage",
+                 "text": "Reading the datums first."}
+            ],
+            "toolCalls": [
+                {"id": "c1", "seq": 2, "title": "Read view.rs", "kind": "read", "status": "completed"},
+                {"id": "c2", "seq": 3, "title": "Edit ui.rs", "kind": "edit", "status": "completed",
+                 "diffs": [{"path": "src/intxt_web/ui.rs", "patch": "@@"}]},
+                {"id": "c3", "seq": 5, "title": "cargo test", "kind": "execute", "status": "failed"}
+            ]
+        })),
+        turn(json!({
+            "seq": 3, "at": "2026-11-23T12:15:00Z",
+            "messages": [
+                {"id": "m5", "seq": 1, "at": "2026-11-23T12:15:00Z", "kind": "userMessage",
+                 "text": "Ship it."}
+            ],
+            "toolCalls": [
+                {"id": "c5", "seq": 2, "title": "Edit ui.rs", "kind": "edit", "status": "completed",
+                 "locations": [{"path": "src/intxt_web/ui.rs"}]}
+            ]
+        })),
+    ];
+    let mut summary = SessionSummary::default();
+    for turn in &turns {
+        summary.add(turn);
+    }
+
     let sibling_drawer: DocId = "z11111111111111111111111111111112"
         .parse()
         .expect("fixture drawer id");
@@ -298,6 +349,7 @@ fn fixture() -> IntxtView {
             EntryDatum::Session {
                 entry: &session_entry,
                 session: &session,
+                summary: &summary,
             },
             EntryDatum::GithubPull {
                 entry: &pull_entry,

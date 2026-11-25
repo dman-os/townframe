@@ -16,6 +16,7 @@ use crate::view::CommitDatum;
 use crate::view::EntryDatum;
 use crate::view::IntxtView;
 use crate::view::PatchDatum;
+use crate::view::SessionSummary;
 use crate::view::sha_of;
 use big_blobs_core::Blob;
 use big_blobs_core::BlobId;
@@ -23,6 +24,7 @@ use big_blobs_core::BlobsError;
 use big_blobs_core::ReadBlob;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumReference;
+use big_cabinet_core::DatumTag;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
@@ -54,6 +56,7 @@ use intxt_core::work::GithubPull;
 use intxt_core::work::GithubPullEntry;
 use intxt_core::work::JjChange;
 use intxt_core::work::JjChangeEntry;
+use intxt_core::work::PromptTurn;
 use intxt_core::work::SessionEntry;
 use method_core::ByteRange;
 use method_core::Method;
@@ -69,6 +72,9 @@ use service_core_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
+
+/// How many `promptTurn` datums one read asks for: the most turns whole the viewer holds at once.
+const TURNS_PER_READ: usize = 16;
 
 /// The environment variables the handler reads its configuration from.
 pub const NODE_VAR: &str = "INTXT_WEB_NODE";
@@ -326,7 +332,22 @@ impl<H: HttpTransport> NodeSource<H> {
             tags: BTreeSet::new(),
             keys: [marker.clone()].into(),
         };
-        let mut docs = BTreeSet::new();
+        let present = self
+            .poll_present(predicate, datums, &marker.to_string())
+            .await?;
+        Ok(present.into_iter().map(|(doc, _)| doc).collect())
+    }
+
+    /// The `(document, key)` rows a poll from the start delivers and that are present once it is
+    /// caught up, paged. A poll carries keys and versions, never values. `what` names the poll
+    /// in the error for one that stalls.
+    async fn poll_present(
+        &self,
+        predicate: Predicate,
+        datums: DatumSelection,
+        what: &str,
+    ) -> Result<BTreeSet<(DocId, DatumKey)>, Failure> {
+        let mut rows = BTreeSet::new();
         let mut after = 0;
         loop {
             let page = self
@@ -339,36 +360,87 @@ impl<H: HttpTransport> NodeSource<H> {
                     hold_ms: 0,
                 })
                 .await?;
-            // Events are in revision order, so the last word per document stands.
+            // Events are in revision order, so the last word per row stands.
             for event in page.events {
                 match event {
                     DatumEvent::Datum {
                         doc_id,
+                        datum_key,
                         datum: ObservedDatum::Present { .. },
                         ..
                     } => {
-                        docs.insert(doc_id);
+                        rows.insert((doc_id, datum_key));
                     }
                     DatumEvent::Datum {
                         doc_id,
+                        datum_key,
                         datum: ObservedDatum::Removed { .. },
                         ..
+                    } => {
+                        rows.remove(&(doc_id, datum_key));
                     }
-                    | DatumEvent::Leave { doc_id, .. } => {
-                        docs.remove(&doc_id);
+                    DatumEvent::Leave { doc_id, .. } => {
+                        rows.retain(|(doc, _)| *doc != doc_id);
                     }
                 }
             }
             if page.caught_up {
-                return Ok(docs);
+                return Ok(rows);
             }
             if page.through <= after {
                 return Err(unreadable(format!(
-                    "the poll for {marker} is not caught up and made no progress past {after}"
+                    "the poll for {what} is not caught up and made no progress past {after}"
                 )));
             }
             after = page.through;
         }
+    }
+
+    /// What happened in the session whose document is `session_doc`, folded from its
+    /// `promptTurn` datums. The node has no projection: a datum is read whole, so a turn's
+    /// messages and tool outputs come over the wire in full. What the viewer controls is what it
+    /// holds: the turns' keys come from a poll (no values), the turns are read
+    /// [`TURNS_PER_READ`] at a time, and each batch is folded into the summary and dropped.
+    async fn session_summary(
+        &self,
+        drawer: &DocId,
+        session_doc: &DocId,
+    ) -> Result<SessionSummary, Failure> {
+        let tag = DatumTag::new(PromptTurn::ID).expect("the turn tag is valid");
+        let predicate = Predicate::And {
+            clauses: vec![
+                Predicate::InDrawer {
+                    drawer_id: drawer.clone(),
+                    transitive: true,
+                    at_least: DrawerAccess::Read,
+                },
+                Predicate::IsDoc {
+                    doc_id: session_doc.clone(),
+                },
+            ],
+        };
+        let datums = DatumSelection::Of {
+            tags: [tag.clone()].into(),
+            keys: BTreeSet::new(),
+        };
+        let keys: Vec<DatumKey> = self
+            .poll_present(predicate, datums, PromptTurn::ID)
+            .await?
+            .into_iter()
+            .map(|(_, key)| key)
+            .collect();
+        let mut summary = SessionSummary::default();
+        for batch in keys.chunks(TURNS_PER_READ) {
+            for (key, value) in self
+                .read(session_doc, Some(batch.iter().cloned().collect()))
+                .await?
+            {
+                let turn: PromptTurn = serde_json::from_value(value)
+                    .map_err(|error| unreadable(format!("{key} in {session_doc}: {error}")))?;
+                summary.add(&turn);
+            }
+        }
+        Ok(summary)
     }
 
     /// The first octets (at most [`MAX_RENDERED_OCTETS`]) of a blob, none when the node does not
@@ -580,7 +652,14 @@ impl<H: HttpTransport> NodeSource<H> {
                 SessionEntry::ID => {
                     let entry: SessionEntry = serde_json::from_value(value).map_err(malformed)?;
                     let session = self.read_referenced(&index, &entry.session).await?;
-                    resolved.push(Resolved::Session { entry, session });
+                    let summary = self
+                        .session_summary(drawer, &entry.session.document().resolve(&index))
+                        .await?;
+                    resolved.push(Resolved::Session {
+                        entry,
+                        session,
+                        summary,
+                    });
                 }
                 GithubPullEntry::ID => {
                     let entry: GithubPullEntry =
@@ -636,6 +715,7 @@ enum Resolved {
     Session {
         entry: SessionEntry,
         session: AgentSession,
+        summary: SessionSummary,
     },
     Pull {
         entry: GithubPullEntry,
@@ -667,7 +747,15 @@ impl Resolved {
                 commits,
                 patch: patch.as_ref(),
             },
-            Self::Session { entry, session } => EntryDatum::Session { entry, session },
+            Self::Session {
+                entry,
+                session,
+                summary,
+            } => EntryDatum::Session {
+                entry,
+                session,
+                summary,
+            },
             Self::Pull { entry, pull } => EntryDatum::GithubPull { entry, pull },
         }
     }

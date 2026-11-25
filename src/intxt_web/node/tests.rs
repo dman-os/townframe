@@ -36,6 +36,9 @@ const INDEX: u8 = 2;
 const COMMITS: u8 = 3;
 const NOTES: u8 = 4;
 const PULL: u8 = 5;
+const SESSION: u8 = 6;
+/// More turns than one read takes, so the summary is folded across batches.
+const TURNS: usize = 40;
 
 const TIP: &str = "bbbbbbbbbbbbbbbb";
 const BASE: &str = "aaaaaaaaaaaaaaaa";
@@ -95,6 +98,11 @@ impl FakeNode {
             serde_json::to_value(DatumReference::new(ReferenceDocId::SelfDoc, entry.clone()))
                 .unwrap()
         };
+        let session_entry = key("org.example.intxt.work.sessionEntry", "s1");
+        let session_ref = format!(
+            "dtxt:datum:{}/org.example.intxt.work.agentSession/main",
+            doc(SESSION)
+        );
         let mut docs = node.docs.borrow_mut();
         docs.insert(
             doc(DRAWER),
@@ -113,7 +121,7 @@ impl FakeNode {
                 ),
                 (
                     key("org.example.intxt.body", "main"),
-                    json!({"order": [self_ref(&tip_entry), self_ref(&pull_entry)]}),
+                    json!({"order": [self_ref(&tip_entry), self_ref(&pull_entry), self_ref(&session_entry)]}),
                 ),
                 (
                     tip_entry,
@@ -125,9 +133,46 @@ impl FakeNode {
                     }),
                 ),
                 (pull_entry, json!({"pull": pull_ref})),
+                (session_entry, json!({"session": session_ref})),
             ]
             .into(),
         );
+        // The turns' ids sort the other way round from their `seq`, as a real document's may.
+        let mut session: BTreeMap<DatumKey, Value> = (0..TURNS)
+            .map(|seq| {
+                (
+                    key(
+                        "org.example.intxt.work.promptTurn",
+                        &format!("t{:02}", TURNS - seq),
+                    ),
+                    json!({
+                        "seq": seq,
+                        "at": format!("2026-11-03T10:{seq:02}:00Z"),
+                        "stopReason": "end_turn",
+                        "messages": [
+                            {"id": format!("m{seq}"), "seq": 1, "at": "2026-11-03T10:00:00Z",
+                             "kind": "userMessage", "text": format!("prompt {seq}\nmore")},
+                            {"id": format!("a{seq}"), "seq": 2, "at": "2026-11-03T10:00:00Z",
+                             "kind": "agentMessage", "text": "x".repeat(10_000)}
+                        ],
+                        "toolCalls": [
+                            {"id": format!("c{seq}"), "seq": 3, "title": "Edit", "kind": "edit",
+                             "status": "completed",
+                             "diffs": [{"path": format!("src/f{}.rs", seq % 3), "patch": "@@"}]}
+                        ]
+                    }),
+                )
+            })
+            .collect();
+        session.insert(
+            key("org.example.intxt.work.agentSession", "main"),
+            json!({"harness": "claude-code", "sessionId": "s1", "cwd": "/w"}),
+        );
+        session.insert(
+            key("org.example.intxt.work.plan", "main"),
+            json!({"entries": []}),
+        );
+        docs.insert(doc(SESSION), session);
         docs.insert(
             doc(COMMITS),
             [
@@ -321,23 +366,39 @@ impl HttpTransport for Wire {
                 let Predicate::And { clauses } = poll.predicate else {
                     panic!("the viewer anchors its polls on a drawer");
                 };
-                let marker = clauses
-                    .into_iter()
-                    .find_map(|clause| match clause {
-                        Predicate::HasKey { key } => Some(key),
-                        _ => None,
-                    })
-                    .expect("a marker clause");
-                let events = self
+                // A poll names either the one document it wants or a marker key's holders.
+                let named = clauses.iter().find_map(|clause| match clause {
+                    Predicate::IsDoc { doc_id } => Some(doc_id.clone()),
+                    _ => None,
+                });
+                let marker = clauses.iter().find_map(|clause| match clause {
+                    Predicate::HasKey { key } => Some(key.clone()),
+                    _ => None,
+                });
+                let rows: Vec<(DocId, DatumKey)> = self
                     .docs
                     .borrow()
                     .iter()
-                    .filter(|(_, datums)| datums.contains_key(&marker))
+                    .filter(|(doc_id, datums)| {
+                        named.as_ref().is_none_or(|named| named == *doc_id)
+                            && marker
+                                .as_ref()
+                                .is_none_or(|marker| datums.contains_key(marker))
+                    })
+                    .flat_map(|(doc_id, datums)| {
+                        datums
+                            .keys()
+                            .filter(|key| poll.datums.selects(key))
+                            .map(|key| (doc_id.clone(), key.clone()))
+                    })
+                    .collect();
+                let events = rows
+                    .into_iter()
                     .enumerate()
-                    .map(|(revision, (doc_id, _))| DatumEvent::Datum {
+                    .map(|(revision, (doc_id, datum_key))| DatumEvent::Datum {
                         revision: revision as u64 + 1,
-                        doc_id: doc_id.clone(),
-                        datum_key: marker.clone(),
+                        doc_id,
+                        datum_key,
                         datum: ObservedDatum::Present {
                             doc_heads: vec![],
                             version: DatumVersion {
@@ -410,7 +471,7 @@ fn an_intxt_loads_with_its_commits_patch_comments_and_pull_request() {
         view.description.as_deref(),
         Some("A **bold** claim <script>x</script>")
     );
-    assert_eq!(view.entries.len(), 2);
+    assert_eq!(view.entries.len(), 3);
 
     let range = &view.entries[0];
     assert_eq!(range.kind, EntryKind::Commits);
@@ -429,6 +490,27 @@ fn an_intxt_loads_with_its_commits_patch_comments_and_pull_request() {
     assert_eq!(pull.kind, EntryKind::GithubPull);
     // The description is shown without the intxt block.
     assert_eq!(pull.description.as_deref(), Some("Does a thing."));
+
+    let session = &view.entries[2];
+    assert_eq!(session.kind, EntryKind::Session);
+    let summary = session.session.as_ref().expect("a session has its summary");
+    assert_eq!(summary.turns, TURNS);
+    assert_eq!(summary.tool_calls, TURNS);
+    assert_eq!(summary.tools["edit"], TURNS);
+    // Folded across batches whatever the order the node listed the turns in.
+    let prompts: Vec<&str> = summary.prompts().map(|p| p.headline.as_str()).collect();
+    assert_eq!(
+        prompts.len(),
+        crate::view::SessionSummary::MAX_PROMPTS.min(TURNS)
+    );
+    assert_eq!(&prompts[..3], ["prompt 0", "prompt 1", "prompt 2"]);
+    assert_eq!(
+        summary.edited_files().collect::<Vec<_>>(),
+        ["src/f0.rs", "src/f1.rs", "src/f2.rs"]
+    );
+    let (first, last) = summary.span.unwrap();
+    assert_eq!(first.to_string(), "2026-11-03T10:00:00Z");
+    assert_eq!(last.to_string(), "2026-11-03T10:39:00Z");
 
     assert_eq!(view.threads.len(), 1);
     assert_eq!(view.threads[0].root.body, "Why?");
@@ -452,11 +534,13 @@ fn the_node_is_asked_only_what_the_page_needs() {
     let calls = node.calls.borrow();
     let count = |nsid: &str| calls.iter().filter(|call| call.ends_with(nsid)).count();
     // The pointer, the index, the PR document, the patch's blob datum, the commits document and
-    // the notes document.
-    assert_eq!(count("readDatums"), 6, "{calls:?}");
-    // One poll for the commits documents (read once for every entry that needs them) and one for
-    // the notes documents.
-    assert_eq!(count("pollDatums"), 2, "{calls:?}");
+    // the notes document; the session's own datum, and its turns read in batches (the plan and
+    // the session datum are not asked for).
+    let batches = TURNS.div_ceil(TURNS_PER_READ);
+    assert_eq!(count("readDatums"), 7 + batches, "{calls:?}");
+    // One poll for the commits documents (read once for every entry that needs them), one for
+    // the notes documents and one for the session's turn keys.
+    assert_eq!(count("pollDatums"), 3, "{calls:?}");
     assert_eq!(count("blobs.read"), 1, "{calls:?}");
 }
 
