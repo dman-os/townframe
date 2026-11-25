@@ -927,7 +927,10 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
             ..Default::default()
         },
         DocScope {
-            write: [doc.clone()].into(),
+            write: std::collections::BTreeMap::from([(
+                doc.clone(),
+                big_cabinet_core::doc::DatumKinds::All,
+            )]),
             ..Default::default()
         },
         DocScope {
@@ -1606,7 +1609,10 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
             &context,
             caller.via,
             DocScope {
-                write: [doc.clone()].into(),
+                write: std::collections::BTreeMap::from([(
+                    doc.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..Default::default()
             },
             |authorization| {

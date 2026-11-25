@@ -183,7 +183,10 @@ impl Node {
                         .mint_doc(
                             actor,
                             DocScope {
-                                write: [doc.clone()].into(),
+                                write: std::collections::BTreeMap::from([(
+                                    doc.clone(),
+                                    big_cabinet_core::doc::DatumKinds::All,
+                                )]),
                                 ..Default::default()
                             },
                         )
