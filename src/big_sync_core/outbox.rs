@@ -130,7 +130,7 @@ mod tests {
 
         // queued()/iter() observe without mutating; front is untouched.
         assert_eq!(outbox.queued().count(), 2);
-        assert_eq!(outbox.iter().count(), 2);
+        assert_eq!(outbox.len(), 2);
         assert!(matches!(
             outbox.front(),
             Some((_, Cmd::PersistCursor { .. }))
