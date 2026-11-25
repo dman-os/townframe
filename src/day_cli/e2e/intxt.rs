@@ -43,7 +43,7 @@ pub(super) async fn with_intxt_node(body: impl AsyncFnOnce(&tempfile::TempDir, &
     });
     let client = connect(&dir).await.unwrap();
     let outcome = std::panic::AssertUnwindSafe(async {
-        let installed = intxt_core::install::install(&operator(&client), &wasm)
+        let installed = intxt_core::install::install(&operator(&client), &wasm, &[])
             .await
             .unwrap();
         assert!(!installed.already_installed);
@@ -200,7 +200,7 @@ async fn installing_intxt_twice_changes_nothing() {
         )
         .await
         .unwrap();
-        let again = intxt_core::install::install(&operator(client), &wasm)
+        let again = intxt_core::install::install(&operator(client), &wasm, &[])
             .await
             .unwrap();
         assert!(again.already_installed);

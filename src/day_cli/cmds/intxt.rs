@@ -627,7 +627,10 @@ async fn install(handler: &std::path::Path) -> Res<ExitCode> {
         None,
         "intxt-install".to_owned(),
     );
-    let installed = intxt_core::install::install(&caller, &wasm).await?;
+    // No drawers yet: at node-52 the nodules service actor holds none of the operator's drawers,
+    // so the handles minted for a granted drawer are refused (`Denied`) and the install fails.
+    // The intxts and the GitHub drawer are passed here once the service actor can hand them down.
+    let installed = intxt_core::install::install(&caller, &wasm, &[]).await?;
     eyre::ensure!(
         installed.record.readiness == Readiness::Ready,
         "intxt is installed but not ready: {:?}",
