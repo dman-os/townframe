@@ -782,11 +782,11 @@ impl DocumentBlobs {
     ) -> Attempt<TempTag> {
         let keys = MapKeySource([(ciphertext, key.clone())].into());
         let (tag, actual) = if length == 0 {
-            let size = self.ciphertext_length(ciphertext).await?;
-            eyre::ensure!(
-                size <= (1 << 20) + 276,
-                "empty plaintext has more than one bounded ciphertext record"
-            );
+            // The empty plaintext encrypts to one bounded record, so a longer
+            // ciphertext was made from other content (a re-pinned slot).
+            if self.ciphertext_length(ciphertext).await? > (1 << 20) + 276 {
+                return Ok(Err(DeferralReason::RepresentationMismatch));
+            }
             let bytes = get_decrypted(&self.store, &keys, ciphertext).await?;
             // The key authenticated these bytes, so they are a real plaintext
             // that is not the empty one the Blob names: the cipherBlob
@@ -796,7 +796,12 @@ impl DocumentBlobs {
             }
             ensure_stored(&self.store, futures::stream::iter([Ok(Bytes::from(bytes))])).await?
         } else {
-            let reader = CipherReader::open(&self.store, &keys, ciphertext, length).await?;
+            // A ciphertext that can't hold the Blob's length, or whose final
+            // record puts the end elsewhere, describes other content.
+            let Some(reader) = CipherReader::open(&self.store, &keys, ciphertext, length).await?
+            else {
+                return Ok(Err(DeferralReason::RepresentationMismatch));
+            };
             let stream =
                 futures::stream::try_unfold((reader, 0u64), |(reader, offset)| async move {
                     if offset == reader.plaintext_len() {

@@ -717,7 +717,9 @@ async fn cipher_reader_reads_plaintext_windows() -> Res<()> {
         let mut keys = MapKeySource::default();
         keys.0.insert(c_hash, key.clone());
 
-        let reader = CipherReader::open(&store, &keys, c_hash, p_len).await?;
+        let reader = CipherReader::open(&store, &keys, c_hash, p_len)
+            .await?
+            .expect("the true length opens");
         assert_eq!(reader.plaintext_len(), p_len);
 
         let want = |offset: u64, size: usize| -> Vec<u8> {
@@ -755,22 +757,21 @@ async fn cipher_reader_reads_plaintext_windows() -> Res<()> {
             );
         }
 
-        // A length the ciphertext cannot hold is rejected at open.
+        // A length the ciphertext cannot hold doesn't open.
         assert!(
             CipherReader::open(&store, &keys, c_hash, p_len + 4096)
-                .await
-                .is_err(),
+                .await?
+                .is_none(),
             "a ciphertext too short for the claimed plaintext must not open"
         );
-        // A length that is too *small* can still fit the wire - the body
-        // only bounds it from below - so it has to be caught by the final
-        // record's own extent when the tail is read.
-        let short = CipherReader::open(&store, &keys, c_hash, 4 * payload_max as u64).await?;
+        // A length that is too *small* still fits the wire - the body only
+        // bounds it from below - so open checks it against the final record's
+        // own extent.
         assert!(
-            short
-                .read_plaintext_at(4 * payload_max as u64 - 1, 1)
-                .is_err(),
-            "a length that contradicts the final record must fail"
+            CipherReader::open(&store, &keys, c_hash, 4 * payload_max as u64)
+                .await?
+                .is_none(),
+            "a length that contradicts the final record must not open"
         );
     }
     Ok(())
@@ -1193,5 +1194,38 @@ async fn resume_with_final_record_already_spilled() -> Res<()> {
     assert_eq!(get_decrypted(&store_b, &keys_map, c_hash).await?, plaintext);
 
     tokio::try_join!(r_a.shutdown(), r_b.shutdown())?;
+    Ok(())
+}
+
+/// A plaintext stream that fails part way must fail the import, not leave it
+/// waiting: the blob worker's decrypt pass feeds `ensure_stored` a stream that
+/// errors when the ciphertext contradicts the claimed length. Checked on both
+/// stores, since production runs the filesystem one.
+#[tokio::test(flavor = "multi_thread")]
+async fn ensure_stored_fails_when_its_stream_fails() -> Res<()> {
+    let failing = || {
+        futures::stream::iter([
+            Ok(bytes::Bytes::from_static(b"first chunk")),
+            Err(std::io::Error::other("decode failed")),
+        ])
+    };
+    let dir = tempfile::tempdir()?;
+    let (filesystem, _fs_virtuals) = iroh_blobs::store::fs::FsStore::load_with_virtuals(
+        dir.path().join("blobs.db"),
+        iroh_blobs::store::fs::options::Options::new(dir.path()),
+    )
+    .await?;
+    let filesystem = Store::from(filesystem);
+    let fs = tokio::time::timeout(std::time::Duration::from_secs(20), ensure_stored(&filesystem, failing())).await;
+    let (memory, _mem_virtuals) =
+        iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
+    let memory = Store::from(memory);
+    let mem = tokio::time::timeout(std::time::Duration::from_secs(20), ensure_stored(&memory, failing())).await;
+    assert!(
+        matches!(fs, Ok(Err(_))) && matches!(mem, Ok(Err(_))),
+        "fs store: {}, mem store: {}",
+        if fs.is_err() { "hangs" } else if matches!(fs, Ok(Ok(_))) { "succeeds" } else { "fails" },
+        if mem.is_err() { "hangs" } else if matches!(mem, Ok(Ok(_))) { "succeeds" } else { "fails" },
+    );
     Ok(())
 }

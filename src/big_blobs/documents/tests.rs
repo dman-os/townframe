@@ -1635,3 +1635,66 @@ fn command_identity_is_stable_for_exact_requests_and_changes_with_guard_or_paylo
     assert_ne!(command_id(&request)?, original);
     Ok(())
 }
+
+/// A node that synced a slot's ciphertext from a peer, but holds neither its
+/// old nor its new plaintext, sees the peer re-pin the Blob to new bytes while
+/// the slot's cipherBlob still names the old ciphertext. The only thing to try
+/// is decrypting that stale ciphertext under the Blob's new length and digest.
+/// Whatever the lengths, the outcome must be a deferral (or, for the empty
+/// plaintext every store holds, a repaired cipherBlob), never an error that
+/// takes the blob worker down.
+async fn stale_cipher_without_plaintexts(old: &[u8], new: &[u8]) -> Res<DocumentReconcile> {
+    let harness = Harness::new(new).await?;
+    let key = MasterKey::random();
+    let encoding = EncodingParams::DEFAULT;
+    let ciphertext = encrypt_bytes(&key, old);
+    let _ciphertext_tag = harness.put(&ciphertext).await?;
+    let (jwk_key, cipher_key) = representation_keys(&blob_key())?;
+    harness.replace(
+        jwk_key.clone(),
+        accepted(serde_json::to_value(JwkOct::from_master_key(&key))?),
+    );
+    harness.replace(
+        cipher_key,
+        accepted(serde_json::json!({
+            "representation": {"digest": BlobId::new(*Hash::new(&ciphertext).as_bytes()).digest_str(), "lengthOctets": ciphertext.len()},
+            "contentEncoding": CONTENT_ENCODING_AES128GCM,
+            "encodingParameters": encoding.to_encoding_parameters(),
+            "keyRef": format!("dtxt:datum:self/{jwk_key}"),
+            "keyRefHeads": [ChangeHash([1; 32]).to_string()],
+        })),
+    );
+    harness.reconcile().await
+}
+
+/// The stale ciphertext is too short to hold the new plaintext length
+/// (`CipherReader::open`'s length bound).
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_cipher_blob_too_short_for_the_new_bytes_defers() -> Res<()> {
+    let report = stale_cipher_without_plaintexts(b"handler build one", &[7u8; 200 * 1024]).await?;
+    assert!(report.retained.is_empty(), "{:?}", report.retained);
+    assert_eq!(report.deferred.len(), 1, "{:?}", report.deferred);
+    Ok(())
+}
+
+/// The stale ciphertext is longer than the new plaintext needs, so the length
+/// contradiction surfaces only at its final record.
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_cipher_blob_longer_than_the_new_bytes_defers() -> Res<()> {
+    let report = stale_cipher_without_plaintexts(&[7u8; 200 * 1024], b"handler build two").await?;
+    assert!(report.retained.is_empty(), "{:?}", report.retained);
+    assert_eq!(report.deferred.len(), 1, "{:?}", report.deferred);
+    Ok(())
+}
+
+/// The Blob is re-pinned to the empty plaintext while the stale ciphertext
+/// spans more than one record. Every store holds the empty plaintext, so the
+/// slot's cipherBlob is rebuilt for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_cipher_blob_behind_an_empty_blob_is_rebuilt() -> Res<()> {
+    let report = stale_cipher_without_plaintexts(&vec![7u8; (1 << 20) + 4096], b"").await?;
+    assert!(report.deferred.is_empty(), "{:?}", report.deferred);
+    assert_eq!(report.retained.len(), 1, "{:?}", report.retained);
+    assert_eq!(report.retained[0].plaintext, BlobId::new(*Hash::EMPTY.as_bytes()));
+    Ok(())
+}

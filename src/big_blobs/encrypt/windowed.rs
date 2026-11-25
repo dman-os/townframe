@@ -72,14 +72,18 @@ impl CipherReader {
     /// Open a reader over the stored ciphertext `ct_hash`, which the caller's
     /// metadata says decrypts to `p_len` plaintext octets.
     ///
-    /// Fails if `ct_hash` has no readable local data, or if that data is too short to
-    /// hold `p_len` octets under its own framing.
+    /// `None` when the ciphertext contradicts `p_len`: it is too short to hold
+    /// `p_len` octets under its own framing, or its final record isn't where
+    /// `p_len` puts it, or holds a different tail. That is a claim that doesn't
+    /// describe this ciphertext (a document can pair any length with any
+    /// digest), not a fault on this node, so the caller decides what it means.
+    /// Fails if `ct_hash` has no readable local data or its framing is malformed.
     pub async fn open(
         store: &Store,
         keys: &dyn CipherKeySource,
         ct_hash: Hash,
         p_len: u64,
-    ) -> Res<Self> {
+    ) -> Res<Option<Self>> {
         let key = keys.key_for(&ct_hash).await?;
         let Some(reader) = store.sync_reader(ct_hash).await? else {
             eyre::bail!("cannot read {ct_hash}: no readable stored data");
@@ -117,13 +121,11 @@ impl CipherReader {
             + (minimum_records - 1) * rs
             + (p_len - (minimum_records - 1) * payload_max)
             + RECORD_OVERHEAD as u64;
-        eyre::ensure!(
-            reader.len() >= shortest,
-            "ciphertext {ct_hash} holds {} octets, too few for {p_len} plaintext octets",
-            reader.len()
-        );
+        if reader.len() < shortest {
+            return Ok(None);
+        }
 
-        Ok(Self {
+        let this = Self {
             reader,
             cipher: cipher_from_ikm(&key.0, &salt),
             records_start,
@@ -132,7 +134,25 @@ impl CipherReader {
             n_records,
             p_len,
             c_hash: ct_hash,
-        })
+        };
+        // The lower bound above can't catch a `p_len` that is too small: the
+        // wire only bounds it from below. The final record is the one place the
+        // wire states the plaintext length, so decrypting it here settles the
+        // claim in both directions before anyone streams the body, instead of
+        // a reader failing part way through.
+        let last = n_records - 1;
+        let ct_start = records_start + last * rs;
+        // Padding can put the final record past where the lower bound reaches.
+        if ct_start >= this.reader.len() {
+            return Ok(None);
+        }
+        let take = rs.min(this.reader.len() - ct_start) as usize;
+        let ct = this.reader.read_bytes_at(ct_start, take)?;
+        let (payload, is_final) = this.cipher.decrypt_record(last, &ct)?;
+        if !is_final || payload.len() as u64 != p_len.saturating_sub(last * payload_max) {
+            return Ok(None);
+        }
+        Ok(Some(this))
     }
 
     /// Plaintext octets this reader reports, as given to [`CipherReader::open`].
