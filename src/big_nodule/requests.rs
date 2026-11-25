@@ -266,14 +266,21 @@ impl GrantRequests {
     }
 
     /// The requests, and the receivers of the queue and of the grants feed the service follows.
-    pub(crate) fn new() -> (Self, watch::Receiver<Requests>, watch::Receiver<GrantsFeed>) {
+    ///
+    /// The grants the node makes its core cartridge start out held for the boot, made here
+    /// directly rather than through `setCartridgeGrant`, which refuses every caller on the core
+    /// cartridge. Held like an "only this time" answer, a privileged one never reaches a
+    /// document.
+    pub(crate) fn new(
+        core: &crate::CoreCartridge,
+    ) -> (Self, watch::Receiver<Requests>, watch::Receiver<GrantsFeed>) {
         let (queue, receiver) = watch::channel(Requests::new());
         let (grants, grants_receiver) = watch::channel(GrantsFeed::new());
         (
             Self {
                 queue,
                 grants,
-                boot_grants: BTreeMap::new(),
+                boot_grants: BTreeMap::from([(core.id.clone(), core.grants.clone())]),
                 declined: BTreeSet::new(),
                 declared: BTreeMap::new(),
             },

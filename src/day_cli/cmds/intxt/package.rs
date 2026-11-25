@@ -373,8 +373,15 @@ impl<'a> Packaging<'a> {
         Ok(self
             .caller
             .call(MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
-                    drawers: [(info.known_drawers_id, DrawerAccess::Admin)].into(),
+                    drawers: [(
+                        info.drawers
+                            .config(big_node::ConfigDrawerRole::KnownDrawers)
+                            .clone(),
+                        DrawerAccess::Admin,
+                    )]
+                    .into(),
                     create: false,
                 },
                 rights: Rights::USE,
@@ -389,6 +396,7 @@ impl<'a> Packaging<'a> {
         Ok(self
             .caller
             .call(MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     drawers: [(drawer.clone(), DrawerAccess::Admin)].into(),
                     create: false,

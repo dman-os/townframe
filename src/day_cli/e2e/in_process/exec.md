@@ -1,20 +1,21 @@
 # `exec` with no server
 
 The raw dispatch porcelain: the answer is the operation's JSON output. `x` is the short
-spelling of `exec`.
+spelling of `exec`. The probe is `listCartridgeGrantRequests`, whose answer on a fresh node is fixed;
+`listNodules` would name the node's own core nodule, whose actor differs per node.
 
 ```console
 $ day node init
 initialized node [..] at [..]/node
 
-$ day exec --get org.example.daybook.nodules.listNodules
+$ day exec --get org.example.daybook.cartridges.listCartridgeGrantRequests
 {
-  "nodules": []
+  "requests": []
 }
 
-$ day x --get org.example.daybook.nodules.listNodules
+$ day x --get org.example.daybook.cartridges.listCartridgeGrantRequests
 {
-  "nodules": []
+  "requests": []
 }
 
 $ day exec --help

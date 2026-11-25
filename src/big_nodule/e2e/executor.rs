@@ -120,6 +120,10 @@ struct FakeState {
     ensures: usize,
     /// The routine capabilities of the last `ensure`, and which routine serves each operation.
     routine_capabilities: BTreeMap<String, RoutineCapabilities>,
+    /// The routine capabilities each cartridge was last `ensure`d with: a reconcile of another
+    /// cartridge replaces [`Self::routine_capabilities`], and this is what a test with two hosted
+    /// cartridges reads.
+    capabilities_of: BTreeMap<CartridgeId, BTreeMap<String, RoutineCapabilities>>,
     routine_of: BTreeMap<String, String>,
     /// The refusal attribution of the last `ensure`d cartridge.
     missing_authority: Option<MissingAuthorityLookup>,
@@ -167,6 +171,14 @@ impl FakeExecutor {
     /// The routine capabilities the last `ensure` was handed, by routine key.
     pub(super) fn routine_capabilities(&self) -> BTreeMap<String, RoutineCapabilities> {
         self.state.lock().unwrap().routine_capabilities.clone()
+    }
+
+    /// The routine capabilities the last `ensure` of `cartridge_id` was handed, by routine key.
+    pub(super) fn routine_capabilities_of(
+        &self,
+        cartridge_id: &CartridgeId,
+    ) -> BTreeMap<String, RoutineCapabilities> {
+        self.state.lock().unwrap().capabilities_of[cartridge_id].clone()
     }
 
     /// The refusal attribution the last `ensure` was handed, which the host's egress refines a
@@ -232,6 +244,9 @@ impl NoduleExecutor for FakeExecutor {
         let mut state = self.state.lock().unwrap();
         state.ensures += 1;
         state.routine_capabilities = spec.routine_capabilities.clone();
+        state
+            .capabilities_of
+            .insert(spec.cartridge_id.clone(), spec.routine_capabilities.clone());
         state.missing_authority = Some(spec.missing_authority.clone());
         state.routine_of = spec
             .routines
@@ -487,6 +502,7 @@ async fn a_config_change_reconciles_once_and_a_change_from_elsewhere_reconciles_
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     write: std::collections::BTreeMap::from([(
                         config_doc.clone(),
@@ -547,6 +563,7 @@ async fn config_blobs(node: &Node) -> BTreeMap<DatumKey, DatumRead> {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([config_doc.clone()]),
                     ..DocScope::default()
@@ -600,6 +617,7 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     write: std::collections::BTreeMap::from([(
                         config_doc.clone(),

@@ -25,8 +25,8 @@ members = [
     "../test_wflows",
     "../test_nodule_guest",
     "../intxt_nodule_guest",
+    "../micros_nodule_guest",
     "../clay_rt_wcmp_web",
-    "../intxt_nodule_guest",
 ]
 default-members = [".", "../test_wflows", "../test_nodule_guest", "../intxt_nodule_guest"]
 
@@ -42,6 +42,12 @@ wasm_utils_rs = { path = "." }
 big_ndk = { path = "../big_ndk" }
 test_nodule_handlers = { path = "../test_nodule_handlers" }
 intxt_nodule = { path = "../intxt_nodule" }
+micros_nodule = { path = "../micros_nodule" }
+big_blobs_core = { path = "../big_blobs_core" }
+big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
+big_cartridges_core = { path = "../big_cartridges_core", default-features = false }
+big_dispatch_core = { path = "../big_dispatch_core" }
+big_nodule_core = { path = "../big_nodule_core", default-features = false }
 method_core = { path = "../method_core", default-features = false }
 service_core_rs = { path = "../service_core_rs", default-features = false }
 service_client_core_rs = { path = "../service_client_core_rs", default-features = false }
@@ -52,6 +58,7 @@ wflow_sdk = { path = "../wflow_sdk", default-features = false }
 sqlite_rs = { path = "../sqlite_rs", default-features = false }
 #
 # external
+futures = "0.3"
 wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "2a8d11a01d6630fabcca1730423e7103b4466d41" }
 wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "2a8d11a01d6630fabcca1730423e7103b4466d41" }
 automerge = "0.11.0"

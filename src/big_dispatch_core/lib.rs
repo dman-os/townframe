@@ -11,6 +11,7 @@
 //! themselves are the host's.
 
 use big_cabinet_core::authority::AuthorityServiceError;
+use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Uuid7;
@@ -28,9 +29,11 @@ use std::collections::BTreeSet;
 /// prefixes that cover every NSID at or under them (`org.example.photos` covers
 /// `org.example.photos.list`, not `org.example.photosynthesis.list`). The authority
 /// [`Self::ALL_AUTHORITIES`] covers every NSID. A scope reaches a privileged method (see
-/// [`method_core::XrpcMethod::privileged`]) only when `privileged` is set, whatever its names
-/// cover: privilege is a separate bit rather than a list of excluded names, so attenuation stays
-/// monotone (a scope covers another only when it holds every bit the other does).
+/// [`method_core::XrpcMethod::privileged`]) only when `privileged` names it, whatever the names
+/// above cover: privilege is a set of the privileged methods the scope reaches, each of which
+/// must also be permitted by `operations` or `authorities`, so a privileged grant covers exactly
+/// its method (node-91's rule) and attenuation stays monotone (a scope covers another only when
+/// it holds every method the other does).
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -39,8 +42,9 @@ pub struct DispatchScope {
     pub operations: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub authorities: BTreeSet<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub privileged: bool,
+    /// The privileged methods this scope reaches, by NSID.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub privileged: BTreeSet<String>,
 }
 
 impl DispatchScope {
@@ -48,7 +52,7 @@ impl DispatchScope {
     pub const ALL_AUTHORITIES: &'static str = "*";
 
     pub fn is_empty(&self) -> bool {
-        self.operations.is_empty() && self.authorities.is_empty() && !self.privileged
+        self.operations.is_empty() && self.authorities.is_empty() && self.privileged.is_empty()
     }
 
     /// Whether `nsid` is `authority` itself or lives under `authority.`: the one NSID-prefix
@@ -84,15 +88,15 @@ impl DispatchScope {
     }
 
     /// Whether a holder of this scope may invoke the method `nsid`, whose declaration says
-    /// whether it is `privileged`.
+    /// whether it is `privileged`: a privileged method must also be named in `privileged`.
     pub fn admits(&self, nsid: &str, privileged: bool) -> bool {
-        self.permits(nsid) && (!privileged || self.privileged)
+        self.permits(nsid) && (!privileged || self.privileged.contains(nsid))
     }
 
     /// Whether everything `other` permits is also permitted here: the attenuation check a mint
     /// applies, so a handle can only hand out a narrower scope than it holds.
     pub fn covers(&self, other: &Self) -> bool {
-        (!other.privileged || self.privileged)
+        other.privileged.is_subset(&self.privileged)
             && other.operations.iter().all(|nsid| self.permits(nsid))
             && other.authorities.iter().all(|authority| {
                 self.authorities
@@ -106,6 +110,13 @@ impl DispatchScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintDispatchCapability {
+    /// The handle to mint from, a body capability like every resource method's: it must be live,
+    /// bound to the presenting actor (ADR 037, #348) and carry `Rights::NARROW`, and the new scope
+    /// must be covered by its own. `None` mints from the request's `Authorization` credential.
+    /// A nodule's credential is its own dispatch handle (dispatch forwards it), so a nodule
+    /// that mints names the handle to mint from here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<CapId>,
     pub scope: DispatchScope,
     pub rights: Rights,
     /// The actor the new handle is bound to; `None` binds it to the presented handle's own
@@ -369,7 +380,7 @@ mod tests {
         DispatchScope {
             operations: operations.iter().map(|s| (*s).to_owned()).collect(),
             authorities: authorities.iter().map(|s| (*s).to_owned()).collect(),
-            privileged: false,
+            privileged: BTreeSet::new(),
         }
     }
 
@@ -394,23 +405,30 @@ mod tests {
     }
 
     #[test]
-    fn privilege_is_a_separate_monotone_bit() {
-        let mut all = scope(&[], &[DispatchScope::ALL_AUTHORITIES]);
+    fn privilege_is_a_set_of_methods_each_of_which_must_also_be_named() {
+        const ADMIT: &str = "org.example.daybook.nodules.admitNodule";
+        const OTHER: &str = "org.example.daybook.nodules.setMethodRoute";
+        let all = scope(&[], &[DispatchScope::ALL_AUTHORITIES]);
         assert!(all.admits("org.example.daybook.blobs.put", false));
-        assert!(!all.admits("org.example.daybook.nodules.admitNodule", true));
+        assert!(!all.admits(ADMIT, true));
         let mut privileged = all.clone();
-        privileged.privileged = true;
-        assert!(privileged.admits("org.example.daybook.nodules.admitNodule", true));
+        privileged.privileged.insert(ADMIT.to_owned());
+        assert!(privileged.admits(ADMIT, true));
+        // It reaches exactly the method it names.
+        assert!(!privileged.admits(OTHER, true));
         // Privilege alone names nothing.
         let bare = DispatchScope {
-            privileged: true,
+            privileged: [ADMIT.to_owned()].into(),
             ..Default::default()
         };
-        assert!(!bare.admits("org.example.daybook.nodules.admitNodule", true));
+        assert!(!bare.admits(ADMIT, true));
         assert!(privileged.covers(&all));
         assert!(!all.covers(&privileged));
-        all.privileged = true;
-        assert!(all.covers(&privileged));
+        // A scope covers another's privilege only as a subset.
+        let mut both = privileged.clone();
+        both.privileged.insert(OTHER.to_owned());
+        assert!(both.covers(&privileged));
+        assert!(!privileged.covers(&both));
     }
 
     #[test]

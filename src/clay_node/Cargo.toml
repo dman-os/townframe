@@ -11,7 +11,7 @@ path = "lib.rs"
 
 [features]
 # `test_support`: the fixtures a host's tests boot a node with.
-test-support = ["dep:bytes", "dep:http-body-util", "dep:method_core"]
+test-support = ["dep:bytes", "dep:http-body-util"]
 
 [dependencies]
 #
@@ -27,7 +27,8 @@ big_nodule.workspace = true
 big_nodule_core.workspace = true
 clay_guest_session.workspace = true
 day_node.workspace = true
-method_core = { workspace = true, optional = true }
+method_core.workspace = true
+micros_nodule.workspace = true
 service_client_core_rs.workspace = true
 service_client_native_rs.workspace = true
 service_core_rs.workspace = true
@@ -54,7 +55,6 @@ clay_host.workspace = true
 clay_rt_wasmtime.workspace = true
 clay_surface.workspace = true
 intxt_core = { workspace = true, features = ["install"] }
-method_core.workspace = true
 secrets_rs = { workspace = true, features = ["test-support"] }
 sqlite_rs.workspace = true
 

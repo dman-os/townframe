@@ -202,6 +202,7 @@ impl<H: HttpTransport> Caller<H> {
     pub async fn doc_capability(&self, scope: DocScope) -> Result<CapId, IntxtError> {
         Ok(self
             .call(MintDocCapability {
+                capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: self.subject,
@@ -696,6 +697,7 @@ impl<H: HttpTransport> Caller<H> {
             .drawer_id;
         let drawers = self
             .call(MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     drawers: [(intxt.clone(), DrawerAccess::Write), (from, access)].into(),
                     create: false,

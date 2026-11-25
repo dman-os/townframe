@@ -89,6 +89,8 @@ mod library {
         task: tokio::task::JoinHandle<Res<()>>,
         /// The server's peers service, when its `node.json` configures one.
         peers: Option<Peers>,
+        /// The address the server's TCP listener bound, when its `node.json` configures one.
+        tcp: Option<std::net::SocketAddr>,
     }
 
     impl TestServer {
@@ -102,7 +104,7 @@ mod library {
                     &dir,
                     |booted| {
                         ready_tx
-                            .send(booted.node().peers.clone())
+                            .send((booted.node().peers.clone(), booted.node().listeners.tcp))
                             .map_err(|_| eyre::eyre!("test is gone"))
                     },
                     async {
@@ -113,14 +115,15 @@ mod library {
                 )
                 .await
             });
-            let peers = match ready_rx.await {
-                Ok(peers) => peers,
+            let (peers, tcp) = match ready_rx.await {
+                Ok(ready) => ready,
                 Err(_) => panic!("the server failed before it was serving: {:?}", task.await),
             };
             Self {
                 shutdown,
                 task,
                 peers,
+                tcp,
             }
         }
 
@@ -157,20 +160,26 @@ mod library {
         ]
     }
 
+    /// A fresh node answers `listNodules` with only its own core cartridge's nodule, which the
+    /// node installs at boot (ADR 053).
+    async fn assert_fresh(client: &NodeClient) {
+        let nodules = client.call(ListNodules {}).await.unwrap().nodules;
+        assert_eq!(
+            nodules
+                .iter()
+                .map(|nodule| nodule.cartridge_id.name.as_str())
+                .collect::<Vec<_>>(),
+            ["core"]
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn init_then_status_in_process() {
         let (_tmp, dir) = new_node().await;
         let client = connect(&dir).await.unwrap();
         assert_eq!(client.mode(), Mode::InProcess);
         assert_eq!(client.socket_state(), SocketState::Absent);
-        assert!(
-            client
-                .call(ListNodules {})
-                .await
-                .unwrap()
-                .nodules
-                .is_empty()
-        );
+        assert_fresh(&client).await;
         client.stop().await.unwrap();
         // Stopping released the node: it can be booted again by the next command.
         connect(&dir).await.unwrap().stop().await.unwrap();
@@ -244,6 +253,7 @@ mod library {
             let mint = async |scope: BlobsScope| {
                 let minted = client
                     .call(MintBlobsCapability {
+                        capability: None,
                         scope,
                         rights: big_cabinet_core::authority::Rights::USE,
                         subject: None,
@@ -407,14 +417,7 @@ mod library {
         states.sort_by_key(|state| matches!(state, SocketState::Live));
         assert_eq!(states, [SocketState::Absent, SocketState::Live]);
         for client in [&first, &second] {
-            assert!(
-                client
-                    .call(ListNodules {})
-                    .await
-                    .unwrap()
-                    .nodules
-                    .is_empty()
-            );
+            assert_fresh(client).await;
         }
         let (holder, client) = if first.socket_state() == SocketState::Live {
             (second, first)
@@ -429,14 +432,7 @@ mod library {
             tokio::task::yield_now().await;
         }
         assert!(!holder_stopped.is_finished());
-        assert!(
-            client
-                .call(ListNodules {})
-                .await
-                .unwrap()
-                .nodules
-                .is_empty()
-        );
+        assert_fresh(&client).await;
         client.stop().await.unwrap();
         holder_stopped.await.unwrap().unwrap();
         assert_eq!(dir.probe_socket().await.unwrap(), SocketState::Absent);
@@ -496,14 +492,7 @@ mod library {
         .unwrap();
         let client = arriving.await.unwrap().unwrap();
         assert_eq!(client.socket_state(), SocketState::Live);
-        assert!(
-            client
-                .call(ListNodules {})
-                .await
-                .unwrap()
-                .nodules
-                .is_empty()
-        );
+        assert_fresh(&client).await;
         client.stop().await.unwrap();
         holder.stop().await.unwrap();
     }
@@ -591,6 +580,38 @@ mod library {
             assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 2);
             assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 0);
         }
+        secrets.stop().await.unwrap();
+    }
+
+    /// A server whose `node.json` has `listen.tcp` serves XRPC there. TCP carries no peer
+    /// credential, so a request without a bearer is refused as unauthenticated rather than
+    /// admitted as the operator, as the Unix socket admits its own uid.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_server_listens_on_its_configured_tcp_address_and_refuses_anonymous_calls() {
+        let (_tmp, dir) = new_node().await;
+        dir.update_settings(|settings| {
+            settings.listen.tcp = Some("127.0.0.1:0".parse().unwrap());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let server = TestServer::start(&dir).await;
+        let address = server
+            .tcp
+            .expect("the server binds its configured TCP address");
+        assert_ne!(address.port(), 0, "the bound address names the picked port");
+        let response = reqwest::get(format!("http://{address}/xrpc/{}", big_node::GET_NODE_INFO))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        server.stop().await;
+        let secrets = secrets_rs::SecretStore::boot().await.unwrap();
+        big_node::delete_secrets(
+            &secrets,
+            &dir.settings().unwrap().seed(&secrets).await.unwrap(),
+        )
+        .await
+        .unwrap();
         secrets.stop().await.unwrap();
     }
 
@@ -954,7 +975,11 @@ mod blackbox {
                     .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
                     .arg("--node")
                     .arg(sandbox.node())
-                    .args(["exec", "--get", "org.example.daybook.nodules.listNodules"])
+                    .args([
+                        "exec",
+                        "--get",
+                        "org.example.daybook.cartridges.listCartridgeGrantRequests",
+                    ])
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .spawn()
@@ -969,7 +994,7 @@ mod blackbox {
                 String::from_utf8_lossy(&output.stderr)
             );
             let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(answer, json!({"nodules": []}));
+            assert_eq!(answer, json!({"requests": []}));
         }
         assert!(
             !sandbox.socket().exists(),

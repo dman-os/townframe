@@ -152,6 +152,7 @@ impl Node {
                 RequestContext::root(),
                 Authorization::identity(self.authority.root).metadata(),
                 MintDocCapability {
+ capability: None,
                     scope,
                     rights: Rights::USE,
                     subject: None,
@@ -354,6 +355,7 @@ async fn denied_queries_disclose_neither_known_nor_unknown_documents() {
             service
                 .availability(
                     &RequestContext::root(),
+                    &Default::default(),
                     GetDocAvailability {
                         capability: empty,
                         doc_id

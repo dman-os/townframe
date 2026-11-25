@@ -7,7 +7,6 @@ use big_cabinet::authority::DomainAuthority;
 use big_cabinet::capability::DomainCapabilities;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
-use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
@@ -40,6 +39,7 @@ use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
 use service_utils_rs::Host;
+use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
 use service_utils_rs::ResponseEnvelope;
 use service_utils_rs::StopToken;
@@ -50,6 +50,8 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 use tokio::sync::Notify;
 use utils_rs::prelude::Res;
+
+pub mod mount;
 
 #[derive(Clone)]
 pub struct ImportedBlob {
@@ -86,6 +88,8 @@ impl std::fmt::Debug for ImportedBlob {
 /// opens the store ([`Storage::memory`] or [`Storage::filesystem`]) and passes it in.
 pub struct Storage {
     store: Store,
+    /// The directory a filesystem store lives in; `None` for a memory store.
+    root: Option<PathBuf>,
     provider: Arc<CipherBlobProvider>,
     /// Holds the exclusive owner lock of a filesystem store for as long as the store lives.
     owner: Option<std::fs::File>,
@@ -100,6 +104,7 @@ impl Storage {
         provider.register(&providers)?;
         Ok(Self {
             store: Store::from(memory),
+            root: None,
             provider,
             owner: None,
         })
@@ -135,6 +140,7 @@ impl Storage {
         provider.register(&providers)?;
         Ok(Self {
             store: Store::from(filesystem),
+            root: Some(root),
             provider,
             owner: Some(owner),
         })
@@ -190,6 +196,13 @@ impl SqliteFrontierCodec for AvailabilityCodec {
 
 pub struct BlobService {
     store: Store,
+    /// Where a filesystem store keeps its files (`<root>/data/<hex>.data`), which a working mount
+    /// hard-links from. `None` for a memory store, whose blobs are always copied out.
+    root: Option<PathBuf>,
+    /// The working mounts of this node's workloads (ADR 051 §2).
+    mounts: mount::WorkingMounts,
+    /// Spawns the tasks that follow handles materialized into a mount.
+    tasks: service_utils_rs::Spawner,
     pub provider: Arc<CipherBlobProvider>,
     pub roots: PairRoots,
     pub(crate) ownership: ByteOwnership,
@@ -266,7 +279,7 @@ impl Blobs {
         self.client
             .call_with_metadata(Envelope::with_metadata(
                 context,
-                service_utils_rs::HttpMetadata {
+                HttpMetadata {
                     range,
                     ..Default::default()
                 },
@@ -283,10 +296,13 @@ impl Blobs {
 pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
     let Storage {
         store,
+        root,
         provider,
         owner,
     } = config.storage;
     let prepared = async {
+        // Opening the working mounts removes the ones a previous run left behind.
+        let mounts = mount::WorkingMounts::open(root.as_deref()).await?;
         let roots = PairRoots::boot(config.sql.clone()).await?;
         provider.restore(&store, &roots).await?;
         let availability = SqliteKeyedFrontier::new(
@@ -298,18 +314,28 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
         .await?;
         let (ownership, ownership_stop) =
             ByteOwnership::boot(config.sql.clone(), store.clone(), Arc::clone(&provider)).await?;
-        Ok::<_, utils_rs::prelude::eyre::Report>((roots, ownership, availability, ownership_stop))
+        Ok::<_, utils_rs::prelude::eyre::Report>((
+            mounts,
+            roots,
+            ownership,
+            availability,
+            ownership_stop,
+        ))
     }
     .await;
-    let (roots, ownership, availability, ownership_stop) = match prepared {
+    let (mounts, roots, ownership, availability, ownership_stop) = match prepared {
         Ok(value) => value,
         Err(error) => {
             store.shutdown().await?;
             return Err(error);
         }
     };
+    let (store_stop, tasks) = StopToken::new();
     let service = Arc::new(BlobService {
         store,
+        root,
+        mounts,
+        tasks: tasks.clone(),
         provider,
         roots,
         ownership,
@@ -321,7 +347,6 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
             .unwrap_or(DEFAULT_UPLOAD_HOLD_GRACE),
         _owner: owner,
     });
-    let (store_stop, tasks) = StopToken::new();
     let shutdown = Arc::clone(&service);
     let cancellation = tasks.clone();
     tasks
@@ -351,18 +376,25 @@ impl BlobService {
         &self.store
     }
 
+    /// The node's working mounts, from which each workload takes one.
+    pub fn working_mounts(&self) -> &mount::WorkingMounts {
+        &self.mounts
+    }
+
     /// Resolves `capability` to the scope its handle was minted with and requires `permits` to
     /// hold of it, answering that scope. Only a handle this domain minted resolves: an identity,
-    /// or a capability from any other namespace, is `Denied`.
+    /// or a capability from any other namespace, is `Denied`, and so is one bound to an actor other
+    /// than the request's presenter ([`DomainCapabilities::resolve`]).
     async fn authorize(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         capability: CapId,
         permits: impl FnOnce(&BlobsScope) -> bool,
     ) -> Result<BlobsScope, BlobsError> {
         let invocation = self
             .capabilities
-            .resolve::<BlobsScope>(context, capability)
+            .resolve::<BlobsScope>(context, metadata, capability)
             .await
             .map_err(authority_error)?;
         let DomainAuthority::Scoped(scope) = invocation.authority else {
@@ -640,10 +672,9 @@ impl Handler<MintBlobsCapability> for BlobService {
         request: Envelope<MintBlobsCapability>,
     ) -> Result<ResponseEnvelope<Capability>, BlobsError> {
         let params = request.params;
-        let authorization = Authorization::from_metadata(&request.metadata)?;
         let caller = self
             .capabilities
-            .source::<BlobsScope>(&request.context, authorization)
+            .minter::<BlobsScope>(&request.context, &request.metadata, params.capability)
             .await
             .map_err(authority_error)?;
         if !caller.rights.contains(Rights::USE) {
@@ -681,9 +712,12 @@ impl Handler<PutBlob> for BlobService {
         &self,
         mut request: Envelope<PutBlob>,
     ) -> Result<ResponseEnvelope<BlobInfo>, BlobsError> {
-        self.authorize(&request.context, request.params.capability, |scope| {
-            scope.put
-        })
+        self.authorize(
+            &request.context,
+            &request.metadata,
+            request.params.capability,
+            |scope| scope.put,
+        )
         .await?;
         let body = request
             .take_body()
@@ -702,9 +736,12 @@ impl Handler<ImportFile> for BlobService {
         &self,
         mut request: Envelope<ImportFile>,
     ) -> Result<ResponseEnvelope<ImportFileOutput>, BlobsError> {
-        self.authorize(&request.context, request.params.capability, |scope| {
-            scope.put
-        })
+        self.authorize(
+            &request.context,
+            &request.metadata,
+            request.params.capability,
+            |scope| scope.put,
+        )
         .await?;
         let body = request
             .take_body()
@@ -736,7 +773,12 @@ impl Handler<ReadBlob> for BlobService {
     ) -> Result<ResponseEnvelope<ByteBody>, BlobsError> {
         let params = request.params;
         let scope = self
-            .authorize(&request.context, params.capability, |_| true)
+            .authorize(
+                &request.context,
+                &request.metadata,
+                params.capability,
+                |_| true,
+            )
             .await?;
         self.authorize_read(&scope, &params.blob_id).await?;
         let info = self
@@ -801,7 +843,12 @@ impl Handler<StatBlob> for BlobService {
         request: Envelope<StatBlob>,
     ) -> Result<ResponseEnvelope<BlobStat>, BlobsError> {
         let scope = self
-            .authorize(&request.context, request.params.capability, |_| true)
+            .authorize(
+                &request.context,
+                &request.metadata,
+                request.params.capability,
+                |_| true,
+            )
             .await?;
         self.authorize_read(&scope, &request.params.blob_id).await?;
         Ok(BlobStat {

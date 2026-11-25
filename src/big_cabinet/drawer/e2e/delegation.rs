@@ -621,6 +621,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
             }
             .metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: scope.clone(),
                 rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
                 subject: Some(cartridge.actor.actor_id),
@@ -636,6 +637,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
             AttenuateCapability {
                 capability: bound.capability_id,
                 rights: Rights::USE | Rights::DELEGATE,
+                subject: None,
             },
         )
         .await
@@ -643,7 +645,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
         .capability_id;
     let caller = node
         .core()
-        .invocation(&RequestContext::root(), delegated)
+        .invocation(&RequestContext::root(), &Default::default(), delegated)
         .await
         .unwrap();
     assert_eq!(caller.signer, cartridge.actor);
@@ -738,6 +740,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
                 }
                 .metadata(),
                 MintDrawerCapability {
+                    capability: None,
                     scope: DrawerScope {
                         drawers: [(drawer.clone(), Access::Admin)].into(),
                         create: false
@@ -826,6 +829,7 @@ async fn a_drawer_handle_presented_by_an_actor_it_is_not_bound_to_is_refused() {
                 RequestContext::root(),
                 stolen.clone(),
                 MintDrawerCapability {
+                    capability: None,
                     scope,
                     rights: Rights::USE,
                     subject: None,
@@ -847,6 +851,67 @@ async fn a_drawer_handle_presented_by_an_actor_it_is_not_bound_to_is_refused() {
             )
             .await
             .map_err(op)
+            .unwrap_err(),
+        DrawersError::Denied
+    );
+}
+
+/// A drawer handle named in the body is the mint's parent, as dispatch's credential never is
+/// one: its holder narrows it, a wider scope is refused, and another actor naming it is refused.
+#[tokio::test]
+async fn a_drawer_handle_named_in_the_body_narrows_and_never_widens() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let bob = node.actor("bob").await;
+    let drawer = node.collection(&alice, "workspace").await;
+    node.grant(&alice, &drawer, &bob, Access::Write).await;
+    let held = node
+        .mint_drawer(
+            &bob,
+            DrawerScope {
+                drawers: [(drawer.clone(), Access::Write)].into(),
+                create: false,
+            },
+        )
+        .await
+        .unwrap();
+    let mint_from_body = async |signer: CapId, scope: DrawerScope| {
+        node.drawers()
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(signer).metadata(),
+                MintDrawerCapability {
+                    capability: Some(held),
+                    scope,
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+            .map_err(op)
+    };
+    let narrower = DrawerScope {
+        drawers: [(drawer.clone(), Access::Read)].into(),
+        create: false,
+    };
+    mint_from_body(bob.capability, narrower.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        mint_from_body(
+            bob.capability,
+            DrawerScope {
+                drawers: [(drawer, Access::Write)].into(),
+                create: true,
+            }
+        )
+        .await
+        .unwrap_err(),
+        DrawersError::Denied
+    );
+    assert_eq!(
+        mint_from_body(alice.capability, narrower)
+            .await
             .unwrap_err(),
         DrawersError::Denied
     );
@@ -881,6 +946,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
             AttenuateCapability {
                 capability: admin,
                 rights: Rights::USE | Rights::NARROW,
+                subject: None,
             },
         )
         .await
@@ -1117,6 +1183,7 @@ async fn a_durable_drawer_grant_outlives_its_capability_and_a_restart_until_revo
             AttenuateCapability {
                 capability: admin,
                 rights: Rights::USE | Rights::NARROW,
+                subject: None,
             },
         )
         .await
@@ -1418,6 +1485,7 @@ async fn create_self_doc_signs_the_descriptor_as_the_caller() {
             RequestContext::root(),
             Authorization::identity(own).metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: Some(cartridge.actor.actor_id),
@@ -1478,6 +1546,7 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
             }
             .metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: Some(cartridge.actor.actor_id),
@@ -1620,6 +1689,7 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
             }
             .metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: Some(cartridge.actor.actor_id),
@@ -1628,7 +1698,11 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
         .await
         .unwrap()
         .capability_id;
-    let caller = node.core().invocation(&context, delegated).await.unwrap();
+    let caller = node
+        .core()
+        .invocation(&context, &Default::default(), delegated)
+        .await
+        .unwrap();
     assert_eq!(caller.signer, cartridge.actor);
     assert_eq!(caller.originating_actor, Some(alice.actor.actor_id));
     drop(

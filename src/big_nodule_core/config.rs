@@ -662,6 +662,14 @@ impl CartridgeConfig {
             self.grants.remove(&grant);
             return Ok(());
         };
+        if body.privileged {
+            return Err(InventoryError::InvalidGrant {
+                grant: grant.to_string(),
+                reason: "privilege is the node's own: it holds it for its core cartridge for \
+                         the boot and never writes it to a config document"
+                    .to_owned(),
+            });
+        }
         if !grant.accepts(&body) {
             return Err(InventoryError::InvalidGrant {
                 grant: grant.to_string(),
@@ -721,7 +729,13 @@ impl CartridgeConfig {
                 }
                 DatumSlot::Accepted { value, .. } => value,
             };
-            resolved.apply(grant, body)?;
+            // A datum may state `privileged` (a sister's write, a hand edit), but privilege is
+            // never read from a document: it is the node's own, held below as a boot grant.
+            let unprivileged = GrantBody {
+                privileged: false,
+                ..body.clone()
+            };
+            resolved.apply(grant, &unprivileged)?;
         }
         // A boot grant is one this node built, so it states a value its kind takes; one that
         // gives more than the datum grant of the same thing widens it, never narrows it.
@@ -746,17 +760,22 @@ pub struct ResolvedGrants {
 }
 
 impl ResolvedGrants {
-    /// What `grants` give, as [`CartridgeConfig::resolve_grants`] resolves a document's: for a
-    /// holder that reads a cartridge's grants over the wire (`ListCartridgeGrants`) instead of
-    /// holding its config document, such as a micro host. A grant that states a value its kind
-    /// does not take, or an access level this build does not know, refuses the lot with the
-    /// reason.
+    /// What `grants` give, for a runtime that reads a cartridge's grants through the install
+    /// surface and not from its config document (the micros nodule). Privilege is never read from
+    /// a grant here, as `resolve_grants` never reads it from a document: it is the node's own, and
+    /// a micro's handles are not privileged.
     pub fn from_grants<'a>(
         grants: impl IntoIterator<Item = (&'a GrantKey, &'a GrantBody)>,
     ) -> Result<Self, String> {
         let mut resolved = Self::default();
         for (grant, body) in grants {
-            resolved.apply(grant, body)?;
+            resolved.apply(
+                grant,
+                &GrantBody {
+                    privileged: false,
+                    ..body.clone()
+                },
+            )?;
         }
         Ok(resolved)
     }
@@ -795,6 +814,11 @@ impl ResolvedGrants {
             }
             GrantKey::Method(nsid) => {
                 self.operations.operations.insert(nsid.clone());
+                // A privileged grant reaches exactly its method (node-91's rule): the scope's
+                // privilege set names it, and the names stay what bounds it.
+                if body.privileged {
+                    self.operations.privileged.insert(nsid.clone());
+                }
             }
             GrantKey::Authority(prefix) => {
                 self.operations.authorities.insert(prefix.clone());
@@ -1597,7 +1621,7 @@ fn substituted_grants(
             .map(|request| request.contract.clone())
             .collect(),
         authorities: BTreeSet::new(),
-        privileged: granted.privileged,
+        privileged: granted.privileged.clone(),
     }
 }
 

@@ -15,7 +15,10 @@
           "type": "array"
         },
         "privileged": {
-          "type": "boolean"
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -223,6 +226,10 @@
         },
         {
           "name": "UnknownCartridge"
+        },
+        {
+          "description": "See [`CartridgesError::CoreCartridge`].",
+          "name": "CoreCartridge"
         }
       ],
       "output": {

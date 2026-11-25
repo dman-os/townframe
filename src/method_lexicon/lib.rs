@@ -216,6 +216,16 @@ pub fn builtin_method(nsid: &str) -> Option<method_core::XrpcMethod> {
         .map(|(method, _, _, _)| *method)
 }
 
+/// The NSIDs of the built-in methods that are `privileged`: the most a dispatch handle's
+/// privilege can name, so the delegators every nodule's handles are minted from carry this set.
+pub fn privileged_methods() -> std::collections::BTreeSet<String> {
+    builtin_list()
+        .iter()
+        .filter(|(method, _, _, _)| method.privileged)
+        .map(|(method, _, _, _)| method.nsid.to_owned())
+        .collect()
+}
+
 type Builtin = (
     method_core::XrpcMethod,
     &'static str,

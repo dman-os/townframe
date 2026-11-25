@@ -199,6 +199,7 @@ impl Packaging<'_> {
             let creating = self
                 .caller
                 .call(MintDrawerCapability {
+                    capability: None,
                     scope: DrawerScope {
                         drawers: Default::default(),
                         create: true,

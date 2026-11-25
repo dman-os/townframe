@@ -1,7 +1,7 @@
 # ADR 051: Guest files: the working mount, local state and on-demand dpath lenses
 
-**Status:** Draft (2026-11-19). Proposed by the nodules lane from the operator's direction of 2026-11-19; nothing here is
-built. Decisions marked **To confirm** need the operator.
+**Status:** Accepted (2026-11-24). Proposed by the nodules lane from the operator's direction of 2026-11-19; §2 is built
+(order of work 2) and the rest is not. Decisions marked **To confirm** need the operator.
 
 **Amends:** ADR 047 (its proposed, never accepted sandbox/volume `localState` is replaced by §3), ADR 042 §4 (`importFile`
 gains the working mount as its natural source), ADR 049 and ADR 050 (§5 adds visibility to what a cartridge provides).
@@ -41,17 +41,30 @@ returns that path. This is the presigned-URL shape: an authorized request yields
 
 - **Authorization** is the existing one: the routine's blobs handle (ADR 049 §6.2, now with drawer reaches) decides what
   it may materialize. The working mount gains nothing the capability does not already allow.
-- **Fetching.** If the blob is not local, the host fetches it from peers first; the call resolves only when the bytes are
-  complete. Partial blobs never appear.
+- **Interface** (built). A guest reaches `materialize` as it reaches every host service, an XRPC request to
+  `dispatch.local`, not a WIT import: `POST /xrpc/org.example.daybook.blobs.materialize` with `{ "capability", "blobId" }`
+  or `{ "capability", "blob" }` (a `Blob` datum, whose `digest` is used), answered `{ "path", "info" }` with `path` under
+  `/work`, the guest path of the working mount. The executor serves it itself rather than through dispatch, because the
+  destination is the calling workload's own mount, which only it knows; the handle is checked as a `blobs.read` of that
+  blob is, with the workload's actor as the presenter. The working mount is preopened through wash's `hostPath` volume,
+  limited to the mounts' root, so no wash-runtime change was needed.
+- **Immutability, enforced.** The host makes a store file read-only before linking it, so a guest cannot open its link
+  for writing (this does not bind a process that ignores file permissions, such as root).
+- **Fetching.** The call resolves only when the bytes are complete; partial blobs never appear. A blob the node does not
+  hold yet is waited for on the blob availability feed (the blob workers fetch what a drawer inventory pins) until the
+  call's deadline. There is no on-demand fetch from peers yet.
 - **Placement.** Blobs live in iroh-blobs' file store as plaintext `<root>/data/<blake3>.data` files (ciphertext is
   virtual). A complete blob is **hard-linked** into the working mount; blobs of 16 KiB or less live inline in the store's
   database and are **copied** (write a temp name, then rename). If the working mount is on another filesystem, the host
   reflinks or copies. The working mount therefore lives under the blob store's root by default.
 - **Immutability.** Hard links share an inode, so the host never opens a store file for writing (complete iroh-blobs
   files are write-once today; this ADR makes it a rule). The guest's own writes go to new names it creates.
-- **Live view.** Files can appear (materialized) and disappear (unlinked on revocation) while an instance runs. A guest
-  that opened a file keeps reading it; a later open fails. **To confirm:** whether a revocation should only take effect
-  between invocations, for deterministic routines.
+- **Live view.** Files can appear (materialized) and disappear (unlinked on revocation) while an instance runs.
+  Revocation acts **per mount and immediately** (decided, operator, 2026-11-24): when a blobs handle is retracted, the
+  host unlinks from every mount the files that only that handle placed, at once, whether the workload is a routine or a
+  long-running instance (the two are treated alike). A new open of such a file fails as "not found". A file the guest
+  already has open keeps reading until it is closed, as a hard-linked file does when one of its names is removed; there is
+  no new error model. A blob another live handle also placed stays.
 - **Writing back** already exists: ADR 042's `importFile` takes a descriptor, so a guest writes a file in its working
   mount and imports it as a blob.
 - **Native local clients** (the CLI, a desktop host on the same machine) can get the same file route as a local-only

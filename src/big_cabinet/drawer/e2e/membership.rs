@@ -1415,7 +1415,7 @@ async fn metadata_protocol_respects_root_and_child_audiences() {
             .unwrap();
         let narrowed = node
             .core()
-            .invocation(&RequestContext::root(), scoped)
+            .invocation(&RequestContext::root(), &Default::default(), scoped)
             .await
             .unwrap()
             .authority;
@@ -1568,6 +1568,7 @@ async fn metadata_only_capability_does_not_grant_drawer_or_content() {
                 }
                 .metadata(),
                 MintDocCapability {
+ capability: None,
                     scope: DocScope {
                         read: DocScope::read_all([created.doc_id.clone()]),
                         ..Default::default()
@@ -1675,6 +1676,7 @@ async fn metadata_only_capability_does_not_grant_drawer_or_content() {
                             }
                             .metadata(),
                             MintDocCapability {
+ capability: None,
                                 scope,
                                 rights: Rights::USE,
                                 subject: Some(holder.actor.actor_id),

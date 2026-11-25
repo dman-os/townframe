@@ -13,6 +13,7 @@ use super::init::init_cartridge;
 use super::init::necessity;
 use super::init::node_hosting;
 use super::init::with_requests;
+use super::routing::NATIVE;
 use big_cartridges_core::test_support::FixtureCartridge;
 
 use big_cartridges_core::example_cartridge;
@@ -146,6 +147,68 @@ async fn a_required_request_waits_for_its_provider_and_becomes_ready_when_one_is
     assert_eq!(record.readiness, Readiness::Ready);
     assert_eq!(record.requests[BETA_PING], resolved(BETA, "1.0.0", None));
     node.invoke(operator, PING, json!({})).await.unwrap();
+    node.shutdown().await;
+}
+
+/// The node registers some providers after the nodule service has booted and reconciled (see
+/// `BigNode::register_late_built_ins`): a request that named one at that time was `noProvider`
+/// and is resolved when the provider registers, without any config change.
+#[tokio::test]
+async fn a_required_request_resolves_when_its_provider_registers_after_the_nodule_service_booted() {
+    let node = node_with_alpha(vec![necessity(BETA_PING, Necessity::Required)]).await;
+    let record = node.set_enabled_record(ALPHA).await;
+    assert_eq!(record.readiness, Readiness::ProviderMissing);
+    assert_eq!(
+        record.requests[BETA_PING],
+        unresolved(None, Unresolved::NoProvider)
+    );
+
+    node.register_native();
+    // The state actor follows the router's claims, so the nodule becomes ready with nothing else
+    // asking it to. Yielding lets that task run; the test's own timeout bounds the wait.
+    while node.invoke(node.operator(), PING, json!({})).await.is_err() {
+        tokio::task::yield_now().await;
+    }
+    let record = node.record(ALPHA).await;
+    assert_eq!(record.readiness, Readiness::Ready);
+    assert_eq!(
+        record.requests[BETA_PING],
+        RequestStatus {
+            contract: BETA_PING.to_owned(),
+            locked: Some(LockedProvider {
+                contract: BETA_PING.to_owned(),
+                provider: NATIVE.to_owned(),
+                version: None,
+                lexicon_revision: None,
+            }),
+            unresolved: None,
+        }
+    );
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_optional_request_resolves_when_its_provider_registers_and_a_read_after_it_sees_so() {
+    let node = node_with_alpha(vec![necessity(BETA_PING, Necessity::Optional)]).await;
+    let record = node.set_enabled_record(ALPHA).await;
+    assert_eq!(record.readiness, Readiness::Ready);
+    assert_eq!(
+        record.requests[BETA_PING],
+        unresolved(None, Unresolved::NoProvider)
+    );
+
+    // No yielding: a read ordered after the registration answers from after it, whether or not
+    // the state actor has handled the claims change yet.
+    node.register_native();
+    let record = node.record(ALPHA).await;
+    assert_eq!(
+        record.requests[BETA_PING]
+            .locked
+            .as_ref()
+            .map(|locked| locked.provider.as_str()),
+        Some(NATIVE)
+    );
+    assert_eq!(record.requests[BETA_PING].unresolved, None);
     node.shutdown().await;
 }
 

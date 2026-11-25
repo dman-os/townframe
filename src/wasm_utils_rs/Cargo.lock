@@ -200,6 +200,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "big_blobs_core"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet_core",
+ "big_sync_core",
+ "bs58",
+ "irpc",
+ "macros",
+ "method_core",
+ "schemars",
+ "serde",
+ "serde_json",
+ "service_core_rs",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "big_cabinet_core"
 version = "0.1.0"
 dependencies = [
@@ -233,6 +251,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "big_cartridges_core"
+version = "0.1.0"
+dependencies = [
+ "big_blobs_core",
+ "big_cabinet_core",
+ "blake3",
+ "ed25519-dalek",
+ "indexmap",
+ "irpc",
+ "json-canon",
+ "macros",
+ "method_core",
+ "semver",
+ "serde",
+ "serde_json",
+ "service_core_rs",
+ "thiserror 2.0.20",
+ "tracing",
+ "utils_rs",
+]
+
+[[package]]
+name = "big_dispatch_core"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet_core",
+ "irpc",
+ "method_core",
+ "serde",
+ "serde_json",
+ "service_core_rs",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "big_ndk"
 version = "0.1.0"
 dependencies = [
@@ -245,6 +299,26 @@ dependencies = [
  "service_client_core_rs",
  "service_core_rs",
  "wit-bindgen 0.62.0",
+]
+
+[[package]]
+name = "big_nodule_core"
+version = "0.1.0"
+dependencies = [
+ "big_blobs_core",
+ "big_cabinet_core",
+ "big_cartridges_core",
+ "big_dispatch_core",
+ "blake3",
+ "indexmap",
+ "irpc",
+ "macros",
+ "method_core",
+ "serde",
+ "serde_json",
+ "service_core_rs",
+ "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
@@ -2709,6 +2783,31 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "micros_nodule"
+version = "0.1.0"
+dependencies = [
+ "big_blobs_core",
+ "big_cabinet_core",
+ "big_cartridges_core",
+ "big_dispatch_core",
+ "big_ndk",
+ "big_nodule_core",
+ "futures",
+ "method_core",
+ "serde",
+ "serde_json",
+ "service_core_rs",
+]
+
+[[package]]
+name = "micros_nodule_guest"
+version = "0.1.0"
+dependencies = [
+ "big_ndk",
+ "micros_nodule",
 ]
 
 [[package]]

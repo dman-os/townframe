@@ -79,10 +79,13 @@ impl DrawerService {
     async fn remember(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: RememberDrawer,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core
+            .invocation(context, metadata, params.capability)
+            .await?;
         core.authorize(
             context,
             &caller.authority,
@@ -116,10 +119,13 @@ impl DrawerService {
     async fn forget(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: ForgetDrawer,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core
+            .invocation(context, metadata, params.capability)
+            .await?;
         core.authorize(
             context,
             &caller.authority,
@@ -143,10 +149,13 @@ impl DrawerService {
     async fn list_known(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: ListKnownDrawers,
     ) -> Result<Vec<KnownDrawer>, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core
+            .invocation(context, metadata, params.capability)
+            .await?;
         core.authorize(
             context,
             &caller.authority,
@@ -168,10 +177,13 @@ impl DrawerService {
     async fn set_policy(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: SetDrawerPolicy,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core
+            .invocation(context, metadata, params.capability)
+            .await?;
         core.authorize(
             context,
             &caller.authority,
@@ -188,6 +200,7 @@ impl DrawerService {
         }
         self.remember(
             context,
+            metadata,
             RememberDrawer {
                 capability: params.capability,
                 drawer_id: params.drawer_id,
@@ -204,7 +217,7 @@ impl Handler<RememberDrawer> for DrawerService {
         request: Envelope<RememberDrawer>,
     ) -> Result<ResponseEnvelope<()>, DrawersError> {
         Ok(self
-            .remember(&request.context, request.params)
+            .remember(&request.context, &request.metadata, request.params)
             .await?
             .into())
     }
@@ -215,7 +228,10 @@ impl Handler<ForgetDrawer> for DrawerService {
         &self,
         request: Envelope<ForgetDrawer>,
     ) -> Result<ResponseEnvelope<()>, DrawersError> {
-        Ok(self.forget(&request.context, request.params).await?.into())
+        Ok(self
+            .forget(&request.context, &request.metadata, request.params)
+            .await?
+            .into())
     }
 }
 
@@ -224,7 +240,9 @@ impl Handler<ListKnownDrawers> for DrawerService {
         &self,
         request: Envelope<ListKnownDrawers>,
     ) -> Result<ResponseEnvelope<KnownDrawers>, DrawersError> {
-        let drawers = self.list_known(&request.context, request.params).await?;
+        let drawers = self
+            .list_known(&request.context, &request.metadata, request.params)
+            .await?;
         Ok(KnownDrawers { drawers }.into())
     }
 }
@@ -235,7 +253,7 @@ impl Handler<SetDrawerPolicy> for DrawerService {
         request: Envelope<SetDrawerPolicy>,
     ) -> Result<ResponseEnvelope<()>, DrawersError> {
         Ok(self
-            .set_policy(&request.context, request.params)
+            .set_policy(&request.context, &request.metadata, request.params)
             .await?
             .into())
     }

@@ -81,6 +81,7 @@ pub async fn create_drawer(node: &big_node::BigNode, name: &str) -> DrawerId {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     create: true,
                     ..DrawerScope::default()
@@ -117,6 +118,7 @@ pub async fn create_note(node: &big_node::BigNode, drawer: &DrawerId, text: &str
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     create: BTreeSet::from([placement.clone()]),
                     ..DocScope::default()

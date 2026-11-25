@@ -36,6 +36,7 @@ mod harness;
 mod ladder;
 mod listeners;
 mod many_nodes;
+mod micros;
 mod network;
 mod nodule_wasm;
 mod peers;
@@ -99,13 +100,31 @@ fn config(secrets: Arc<SecretStore>, sql: Database, storage: big_repo::Storage) 
     }
 }
 
+/// A docs handle bound to the drawers actor. Only a call that reaches the docs service
+/// directly, with no credential, may present it: through dispatch the presenter is the caller,
+/// and a handle bound to another actor is refused (ADR 037 §2). Use [`operator_capability`] there.
 async fn capability(node: &BigNode, scope: DocScope) -> CapId {
+    mint_capability(
+        node,
+        Authorization::identity(node.drawers_actor.capability),
+        scope,
+    )
+    .await
+}
+
+/// A docs handle bound to the operator, for calls that present the operator's credential.
+async fn operator_capability(node: &BigNode, scope: DocScope) -> CapId {
+    mint_capability(node, Authorization::identity(node.authority.root), scope).await
+}
+
+async fn mint_capability(node: &BigNode, minter: Authorization, scope: DocScope) -> CapId {
     node.docs
         .client
         .call_with(
             RequestContext::root(),
-            Authorization::identity(node.drawers_actor.capability).metadata(),
+            minter.metadata(),
             MintDocCapability {
+                capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: None,

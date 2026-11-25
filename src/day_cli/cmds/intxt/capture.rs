@@ -210,6 +210,7 @@ async fn capture_node(client: &NodeClient, node_dir: &Path) -> Res<CaptureNode> 
     let creating = call(
         client,
         MintDrawerCapability {
+            capability: None,
             scope: DrawerScope {
                 drawers: Default::default(),
                 create: true,

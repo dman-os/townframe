@@ -14,7 +14,7 @@ impl DocsService {
         params: MergeDoc,
     ) -> Result<WriteReceipt, DocsError> {
         let caller = self
-            .signing_invocation(context, metadata, params.capability)
+            .invocation(context, metadata, params.capability)
             .await?;
         let actor = &caller.signer;
         // A merge is held to what it changes, not to the whole documents: each datum it changes

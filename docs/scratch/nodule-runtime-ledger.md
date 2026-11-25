@@ -105,6 +105,19 @@ D-numbers are stable names; the archive holds each one's original text.
 - PRs open as soon as possible. Push everything from the laptop and mothership, WIP included. Mothership is being retired for an x86 device. Each stack layer is the lane's own place to push freely.
 - The lesson: 13 layers sat unpushed from 2026-11-19 to 2026-11-24.
 
+### Operator decisions (2026-11-24, micros and the node SDK)
+
+- **The micros layer is a cartridge (ADR 052 rewrite).** "Let us indeed try to make the micros layer itself a cartridge." The `micros` service is a nodule in the core cartridge, not native node code. It opens `micros/<cartridge>/<micro>` actors under its own actor (one segment per open) and mints narrowed dispatch, docs and blobs handles from handles it holds: ADR 049 §6.1's "a runtime grants itself first, then its children". What stays native: the authority, dispatch, the cabinet and the `nodules` host. Kept from the claytxt agreement: the `attach` batch form, `awaitHandles` over a set, mounts that never block, the actor capability staying in the host, the separate guest-egress listener stamping `Origin::Remote`, the daytxt cartridge for built-in micros, `review.json` going away. Re-mint is lazy: `awaitHandles` long-polls the grant feed and re-mints itself (no background follower); a native follower is the fallback if the trial fails. ADR 052 is the amended text; it carries the To-confirm list.
+- **The core cartridge (ADR 053, new, draft).** The node's built-in surfaces ship as one preinstalled cartridge pinned to the node build, which cannot be uninstalled or disabled; its Lexicons become the source `node_type_libraries()` reads (admission, dispatch and `big_nodule_core` validation, the schema compiler, the wire-surface snapshot). Bootstrap rule proposed: admission reads the copy embedded in the binary, never the store; the store's record is for audit and is rewritten when it differs. Upgrades follow the monotone rule; a binary older than the install refuses to boot. Catalogue of what else moves (host-internal datum tags, built-in methods' Lexicons) is in the ADR. Supersedes the "core cartridge" to-do below. Open: who signs the preinstall, embedding vs fetching the micros component.
+- **Descendant-scoped authority (node-78).** `openActor` and `mintCapability` stop being `privileged` when the new actor or the `subject` is strictly under the caller's own actor (`attenuateCapability` and `retractCapability` are already unprivileged). Plus an explicit runtime permbind, granted once at install of the core cartridge, that lets the micros nodule read other cartridges' installs and grants (`listCartridgeGrants`/`awaitCartridgeGrants`). Open: pinning `mintCapability`'s free-form `object` to a held handle.
+- **`getNodeInfo` reports drawer ids (node-79).** Present, originated and config drawer ids, so `day dump node` can walk them (this is the existing to-do, now a layer).
+- **ADR 053 accepted (2026-11-24, relayed by claytxt).** The micros component is embedded in the node binary (the GUI must work standalone, no network at startup). The core cartridge's id is `<node publisher DID>/core`, signed by the node's own key (`big_cartridges` publish signs unsigned envelopes in the node's namespace), so no build-time key exists and the id differs per node; nothing references it by id. A downgrade falls out of the registry's `Downgrade` rule.
+- **Micros actors (2026-11-24, operator).** One subsystem actor per runtime: `micros` → `micros/<cartridge>` → `micros/<cartridge>/<micro>`, a sibling of `nodules/<cartridge>`. The node opens `micros` at boot and the core cartridge's nodule acts as it, so its micros are its own subtree and node-78's `openActor`/`attenuateCapability { subject }` reach them with no new privilege (holder binding is why it must be the nodule's own actor, not a handle it holds). A privileged micros subsystem was the rejected alternative. ADR 052 is reframed: the node manages micro installs and authority, Clay runs the micros; `micros.attach` is renamed `micros.handles` (node-82).
+- **D83. No CLI-extension surface.** The node is a shared service plus an SDK; products (`day-intxt` and the like) are clients of the node, not extensions of `day`.
+- **D84. Git-style plugins.** Standalone product binaries are `day-<name>` executables found on PATH; built-in subcommands win over a same-named plugin.
+- **The SDK builds on `day_node`.** claytxt's `day_node` crate (`origin/stack/claytxt-55-ledger`, commit `99e39289`) already holds the node dir, `node.json`, the boot lock, booting in process and finding a running node's socket (`Reached::Attached`), shared by `day` and the GUI. What is left in `day_cli` is the typed client (`NodeClient`, `call<M: Unary>`); it goes into or beside `day_node` (proposed: a `client` module). The `big_node_client` crate proposal and lifting everything out of `day_cli` are withdrawn. Merge hazard: #239 (seed keyring) and #250 (CLI conventions) changed `day_cli/context.rs`, which claytxt moved into `day_node`; the second to land moves those hunks by hand.
+- **The GUI attach plan.** The GUI is a client of whoever holds the node: `find_or_hold` attaches to a running `day` node's socket (operator authority over the Unix socket's peer credentials), or, with no holder, boots in process and serves the socket so `day` run next attaches to the GUI. It calls `micros.handles` and `awaitHandles` and signs for each micro with the `actor` capability the host keeps; micro calls go over the separate guest-egress listener. A holder handoff was rejected (ADR 052 §10). Order of work is ADR 052 §11.
+
 ### Shelved to this week (D50/D56)
 
 - The atmosphere border (D48, ADR 048 draft, the spaces experiment) and dpaths (FDR 001). The operator will talk to the other lanes before starting.
@@ -122,7 +135,13 @@ D-numbers are stable names; the archive holds each one's original text.
 
 Items are open unless noted; verify against the stack before starting.
 
-- `getNodeInfo` reports drawer ids (present, originated, config) and `day dump node` walks them.
+- Done 2026-11-24: `getNodeInfo` drawer ids and `day dump node` (node-79, #326); `openActor` unprivileged and `attenuateCapability { subject }` (node-78, #325); `node.json` `listen.tcp` (node-80, intxt C15).
+- intxt citizenship C16-C18 (2026-11-24, from the web viewer #310 reading a node over TCP XRPC):
+  - C16: there is no operator path to mint a dispatch capability (`dispatch.mintCapability` is not on XRPC), so the viewer carries three shared-secret handles per node.
+  - C17: anonymous XRPC reads (readDatums/pollDatums/blobs.read) of drawers granted Read to keyhive's Public agent, with no bearer. Folded into C11.
+  - C18: handles die at restart. This is by design (ADR 037 §4-5, no sturdyrefs). A viewer holding bearer handles across restarts is the sturdyref case ADR 037 says needs an operator decision. The leaning is C17 for public drawers, or an admitted viewer actor with a durable grant that authenticates its channel and gets handles minted on connect. This is an operator question; see below.
+  - A 403 (not 404) for an unknown drawer under a handle that does not reach it is intended: a 404 would be an existence oracle.
+- The typed client in `day_node`, the micros nodule (ADR 052 §11).
 - Follow-ups queued in #252 from the #106-#114 review threads (answered 2026-11-24): an inline-SQL guardrail; the upload grace period as a node setting; `private_state` to `local_state` and dropping `Kv`; operation to method in the grant docs; a protocol header catalog, moving the `x-nodule-*` headers out of `service_core_rs`; NSID eradication (audit at `docs/scratch/nsid-audit.md`), its own layer later; a native local-client read path for blobs, added to ADR 051 §2.
 - Cut the v1 seed migration (operator question below).
 - Historical causal checkpoints log WARN "missing entry encryption key" and return a `MissingDocumentKeys` blocker even for checkpoint ids (`try_causal_decrypt`, `big_repo/runtime2/native.rs` ~1100); for `is_causal_checkpoint_id` ids log at debug and return no blocker. Same family as the relay's warn.
@@ -130,8 +149,9 @@ Items are open unless noted; verify against the stack before starting.
 - A typed initializer input record (trigger install/upgrade/start; previous and current revision) for ADR 047 initializers; they receive `{}` today.
 - A test that an any-JSON record (an `unknown`-valued Lexicon) round-trips through writeDatums/readDatums and `day`.
 - `blobs.mintCapability`: a nodule actor with a method permbind on `blobs.put` cannot mint a blobs handle (only the operator or a blobs handle can); the guest-bodies test mints from the harness.
-- A core cartridge: the node's built-in type library (`org.example.daybook.defs`, hardcoded `node_type_libraries()`) ships as a cartridge so core contracts obey the same versioning rules. Open: boot order. After ADR 050.
-- Attach: a GUI host using a daemon-held node (claytxt's write-up, `feat/desktop-node`): the daemon ensures micro actors, the GUI channel acts as the micro actor (ADR 037 q2), per-micro config datum, intxt installed by the daemon, durable micro actors. Check whether ADR 037 (b) channel identity is built.
+- The core cartridge (ADR 053): node-81 publishes and installs it at boot (defs Lexicon, a routine-less core nodule) and the nodules service refuses changes to it (`CoreCartridge`); node-84 makes its nodule act as `micros` and enables it at install. Next, the micros nodule layer: the guest crate, embedding it, the core grants the node writes at install (dispatch to `openActor`/`attenuateCapability` and the read-only runtime permbind to `listCartridgeGrants`/`awaitCartridgeGrants`), handing the guest its identity capability id, `micros.handles`/`awaitHandles`. The `uses` lowering moves to `big_nodule_core` in node-83; it still needs a wasm build of `big_nodule_core` and its deps for the guest.
+- ADR 053 step 1 (`TypeLibraries` passed as a value) is skipped for now: the defs are one compile-time declaration both the binary and the core cartridge read, so passing it through four crates changes nothing. Revisit if a second provided library appears.
+- Attach (now ADR 052's micros nodule, 2026-11-24; the list below is claytxt's original write-up): a GUI host using a daemon-held node (claytxt's write-up, `feat/desktop-node`): the daemon ensures micro actors, the GUI channel acts as the micro actor (ADR 037 q2), per-micro config datum, intxt installed by the daemon, durable micro actors. Check whether ADR 037 (b) channel identity is built.
 - Host-side collection and document cache with preload hinting for the Clay host (the host warms its cache; nothing lands in a micro's address space until used).
 - Concurrent meta-doc creation design (see Standing decisions), and an ADR 019 amendment (it documents LWW today).
 - `day` boots with an empty `SchemaRepo`: no user datums without a cartridge.
@@ -157,17 +177,43 @@ Items are open unless noted; verify against the stack before starting.
 - Not offering node-local methods to other nodes at all (ADR 042 §3 only refuses at call time): mount them only on local transports' routers vs one router filtering by origin; ties into a "list providers/methods" operation and network exposure.
 - Shelved to this week: the atmosphere border and dpaths (above).
 
+### Operator review session (2026-11-24, deep work)
+
+- **ADR 052:** the six proposals stand (trial of the micros nodule in the core cartridge with lazy re-mint, the runtime permbind, the guest-egress listener, `handles` returning the micro's actor, one daytxt cartridge for built-in micros, the typed client as a `day_node` module). The operator wants the point made explicit: most `big_*` crates except the cabinet, blobs and nodules should become cartridges, and the micros nodule is the pilot. The runtime changes it needs are few and general (a nodule learns its own actor capability; the node writes a preinstalled cartridge's grants; privileged reads trust a privileged grant). The real limit is that nodules are request handlers: anything that must observe (sync policy, sister mirroring, processors, index workers) waits for a long-lived nodule mode or tasks/wflow.
+- **ADR 053:** go ahead; the bootstrap rule (admission reads the binary) is accepted. What the operator cares about most is the core cartridge as a **nameable dependency target** through the standard mechanism (`dependencies`, Lexicon resolution), not the provided-library special case. The per-node id built in #333 conflicts with that (see open question below).
+- **ADR 051:** accepted; build it next. Revocation is per **mount** and immediate: a new open fails with "not found" (already modeled); files already open keep reading until closed (no new error model, the same as a container volume). Routines and long-running instances are treated alike. Defaults as proposed (`private`; micros' collections public).
+- **Guest faults and logs:** keep it simple and mechanical; another layer comes on top later. Cartridge side landed as #342 (stdio tails stay node-side, out of the 502 body).
+- **ADR 047 amendments:** lineage accepted; fork grant narrowing dropped; `localState` lives in ADR 051; `#hosted` folds into the system-cartridge design (open question below). Keep the permbind vocabulary small.
+- **CLI:** Ctrl-C exits 130 for commands and 0 for a foreground server; `--version` comes from shadow-rs. No deployed nodes: no back-compat, so the v1 seed migration is cut.
+- **Sharp edges (#249):** as recommended (ids on `UnrelatedHistory`/`Conflict`, keep `CommandId`, location/backtrace only under RUST_BACKTRACE).
+- **Node-local methods:** mounted only on local transports' routers.
+- **Next features:** land the dpaths datum and its semantics (from `feat/dpaths`, no FUSE or materialization), then the query language for permbinds: a permbind carries an ADR 025 predicate (drawers holding docs tagged X, docs under a dpath) and the consent UI shows it. Needs a dpath predicate and index, a drawer-level predicate form, and an ADR before building.
+- **The header catalog** the operator asked for (#252 follow-ups) is not built yet; it is owed.
+
+### Dependencies and substitution (operator, 2026-11-24, after the catalogue #345)
+
+- **Requiring every dependency through a substitutable NSID was premature** (it amends ADR 028 §4; an ADR follows, with end-user cartridge authoring, next week). Its likely motive was patching or replacing a whole cartridge, which is a separate subsystem from configuring one resource.
+- **Default: a dependency names the cartridge it depends on.** Substitution has two use cases so far:
+  - **Hooks:** dev takeover and routes as a hook system, usually a proxy or middleware over methods.
+  - **Whole-cartridge replacement:** an explicit local action, like Cargo's `[patch]`, through which dependents of the original reach the replacement.
+- **Local state and collections:** no per-resource substitution. They are the owner's, reached by naming the owner, and replaced only by replacing the whole cartridge. Open: can a cartridge depend on another's local state while the owner is not enabled?
+- **Grants on replacement:** they don't carry over automatically. The replacement UX asks, at replacement time, what carries over.
+- **Byte-level artifact reuse:** dropped. Blobs are deduplicated by hash already, and no signature layer is needed.
+- **Co-provision:** deferred until the replacement use cases are worked out.
+- **Lexicon substitution:** open. When several unrelated cartridges refer to the same Lexicon and one is substituted, what about incompatibilities?
+- **NSIDs:** an NSID names a Lexicon, nothing else (ADR 050 §2). Non-schema names (permbind keys, bindings, slots) get local names.
+- **ADR 051 accepted, and `#hosted` parked**, as recorded above.
+- **Identity work:** the identity-to-drawer-grant design is in progress (`docs/scratch/identity-drawer-grants.md`, node-93). Its requirements: method-agnostic DIDs (AT Protocol on a PDS, maybe a keyhive-backed DID later); resolving a DID to the principals that act for it; a group per context instead of one public device list (metadata privacy); offline granting through contact cards and prekeys.
+- **Public reads redefined:** there's no anonymous or Public-agent path. "Public" means the relay hosting the viewer has read access, and the viewer is an ordinary client of that relay, with its own identity through ADR 043 pairing.
+- **Security:** body capabilities weren't holder-checked (ADR 037 §2). Fixed in #348.
+
 ## Open questions for the operator
 
-They will come back to these.
-
-- **ADR 051:** are micros' collections public by construction, and does revocation reach a running instance?
-- **CLI:** Ctrl-C exit codes (130 for commands, 0 for a foreground server), and dropping the build time from `--version`.
-- **Cut the v1 seed migration?**
-- **Sisters and grants (ADR 038, D56):** a grant datum syncs through the shared config drawer but the node-local grant to each node's service actor does not; who grants it on a sister?
-- **Sharp-edges (#249):** ids on `UnrelatedHistory` and `Conflict` (recommended yes); keep the `CommandId` name (recommended); location/backtrace only under RUST_BACKTRACE.
-- **The atmosphere border (shelved):** run the spaces experiment and review draft ADR 048 (three tiers, inward direction).
-- **Not offering node-local methods** (see Deferred).
+- **Stable core id:** one reserved id on every node whose provenance is the node binary (the registry accepts it only from the binary), so cartridges depend on it through `dependencies` and resolve Lexicons through them; changes #333's per-node id.
+- **System cartridges:** generalize the core special cases into "the build preinstalls N cartridges, the node writes their grants, each may name a subsystem actor", with privileged methods trusting a privileged grant instead of only the operator root.
+- **Remote readers over TCP (intxt C16/C18):** explained 2026-11-24 (a web viewer reading drawers over HTTP, its handles dying at restart); recommendation: an admitted viewer actor with a durable grant plus anonymous reads of Public drawers, not a sturdyref. Not yet decided.
+- **Sisters and grants (ADR 038):** only the relay orientation is built; sister re-granting is not. It cannot be a nodule (it observes); the operator wants to discuss it with processors and tasks.
+- **The atmosphere border (shelved):** ADR 048, dpaths' FUSE side and the spaces experiment wait for the lanes' talk.
 
 ## Archive index
 

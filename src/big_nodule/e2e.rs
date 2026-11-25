@@ -29,6 +29,7 @@ use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
@@ -124,6 +125,7 @@ mod dev_takeover;
 mod dispatch;
 mod executor;
 mod init;
+mod installs;
 mod resolution;
 mod routing;
 mod schemas;
@@ -262,8 +264,8 @@ fn test_schemas() -> Arc<SchemaRepo> {
     )
 }
 
-/// The operator introduces the nodule service to dispatch over every authority, privileged
-/// methods excepted, as `big_node` boots it: a handle
+/// The operator introduces the nodule service to dispatch over every authority, privilege
+/// included (only a grant the node itself makes carries it on), as `big_node` boots it: a handle
 /// bound to `nodules_actor`, with `DELEGATE` so the service can bind each nodule's own handle
 /// to that nodule.
 async fn grant_nodule_dispatch(
@@ -277,8 +279,10 @@ async fn grant_nodule_dispatch(
             RequestContext::root(),
             Authorization::identity(authority.root).metadata(),
             MintDispatchCapability {
+                capability: None,
                 scope: DispatchScope {
                     authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
+                    privileged: method_lexicon::privileged_methods(),
                     ..Default::default()
                 },
                 rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
@@ -326,11 +330,15 @@ struct Node {
     dispatch: Dispatch,
     dispatch_stop: StopToken,
     /// What the nodule service mints every nodule's dispatch handle from: the operator's grant of
-    /// every method that is not privileged.
+    /// every method, privileged ones included.
     dispatch_authority: CapId,
     nodules: Nodules,
     executor: Option<Arc<dyn NoduleExecutor>>,
     allow_slot_takeover: bool,
+    /// The grants the node makes its core cartridge at each boot (see
+    /// [`crate::CoreCartridge::grants`]): [`installs::core_grants`] unless a test sets others
+    /// before it restarts the service.
+    core_grants: BTreeMap<GrantKey, GrantBody>,
     stop: Option<StopToken>,
 }
 
@@ -469,6 +477,7 @@ async fn node_with_takeover(
         &schemas,
         executor.clone(),
         allow_slot_takeover,
+        installs::core_grants(),
     )
     .await
     .expect("nodule service boot");
@@ -501,6 +510,7 @@ async fn node_with_takeover(
         nodules,
         executor,
         allow_slot_takeover,
+        core_grants: installs::core_grants(),
         stop: Some(stop),
     }
 }
@@ -566,6 +576,7 @@ async fn grant_drawer(
             RequestContext::root(),
             Authorization::identity(grantor.capability).metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
                     create: false,
@@ -612,6 +623,7 @@ async fn boot_nodules(
     schemas: &Arc<SchemaRepo>,
     executor: Option<Arc<dyn NoduleExecutor>>,
     allow_slot_takeover: bool,
+    core_grants: BTreeMap<GrantKey, GrantBody>,
 ) -> Result<(Nodules, StopToken), NodulesError> {
     // As `big_node` does: the operator introduces the service's delegator blobs handle.
     let blobs_capability = blobs
@@ -620,6 +632,7 @@ async fn boot_nodules(
             RequestContext::root(),
             Authorization::identity(authority.root).metadata(),
             MintBlobsCapability {
+                capability: None,
                 scope: BlobsScope {
                     put: true,
                     ..Default::default()
@@ -636,6 +649,64 @@ async fn boot_nodules(
         .open_namespace(nodules_actor.actor.actor_id)
         .await
         .expect("nodules namespace");
+    // The micros subsystem actor the core nodule acts as, and the delegators the operator
+    // introduces to it, opened and minted as `big_node` does: the nodule service's own are bound
+    // to `nodules`, of which `micros` is no descendant.
+    let micros = authority
+        .client
+        .call(
+            RequestContext::root(),
+            OpenActor {
+                parent: authority.root,
+                path: "micros".into(),
+                rights: Rights::all(),
+            },
+        )
+        .await
+        .expect("micros actor");
+    let micros_subject = micros.actor.actor_id;
+    let delegators = crate::CoreDelegators {
+        dispatch: grant_nodule_dispatch(authority, dispatch, micros_subject).await,
+        docs: docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(authority.root).metadata(),
+                MintDocCapability {
+                    capability: None,
+                    scope: DocScope {
+                        drawers: BTreeMap::from([(
+                            shared_config_drawer.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(DrawerAccess::Write),
+                        )]),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                    subject: Some(micros_subject),
+                },
+            )
+            .await
+            .expect("the operator mints the micros docs delegator")
+            .capability_id,
+        blobs: blobs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(authority.root).metadata(),
+                MintBlobsCapability {
+                    capability: None,
+                    scope: BlobsScope {
+                        put: true,
+                        ..Default::default()
+                    },
+                    rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                    subject: Some(micros_subject),
+                },
+            )
+            .await
+            .expect("the operator mints the micros blobs delegator")
+            .capability_id,
+    };
     boot(NodulesConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
@@ -656,7 +727,15 @@ async fn boot_nodules(
         executor,
         schemas: Arc::clone(schemas),
         allow_slot_takeover,
+        core_cartridge: crate::CoreCartridge {
+            id: installs::core_cartridge_id(),
+            version: installs::CORE_VERSION.parse().unwrap(),
+            actor: micros,
+            delegators,
+            grants: core_grants,
+        },
         sql: (**sql).clone(),
+        granted: cartridges.granted.clone(),
     })
     .await
 }
@@ -811,6 +890,7 @@ impl Node {
                 RequestContext::root(),
                 Authorization::identity(self.drawers_actor.capability).metadata(),
                 MintDocCapability {
+                    capability: None,
                     scope: DocScope {
                         write: std::collections::BTreeMap::from([(
                             config_doc.clone(),
@@ -855,6 +935,7 @@ impl Node {
                 RequestContext::root(),
                 self.operator().metadata(),
                 MintDocCapability {
+                    capability: None,
                     scope: DocScope {
                         write: std::collections::BTreeMap::from([(
                             doc_id.clone(),
@@ -923,6 +1004,7 @@ impl Node {
             &self.schemas,
             self.executor.clone(),
             self.allow_slot_takeover,
+            self.core_grants.clone(),
         )
         .await?;
         self.nodules = nodules;
@@ -980,6 +1062,7 @@ impl Node {
                 RequestContext::root(),
                 self.operator().metadata(),
                 MintBlobsCapability {
+                    capability: None,
                     scope: BlobsScope {
                         put: true,
                         ..Default::default()
@@ -1106,6 +1189,7 @@ impl Node {
                 RequestContext::root(),
                 self.operator().metadata(),
                 MintDocCapability {
+                    capability: None,
                     scope: DocScope {
                         read: DocScope::read_all([doc_id.clone()]),
                         ..DocScope::default()
@@ -1227,6 +1311,26 @@ impl Node {
         self.get(self.operator(), cartridge_id).await.unwrap()
     }
 
+    /// The `micros` subsystem actor: opening a path that exists opens the same actor.
+    async fn micros_actor(&self) -> OpenedActor {
+        self.authority
+            .client
+            .call(
+                RequestContext::root(),
+                OpenActor {
+                    parent: self.authority.root,
+                    path: "micros".into(),
+                    rights: Rights::all(),
+                },
+            )
+            .await
+            .expect("micros actor")
+    }
+
+    async fn micros_actor_id(&self) -> Uuid7 {
+        self.micros_actor().await.actor.actor_id
+    }
+
     async fn get(
         &self,
         authorization: Authorization,
@@ -1296,7 +1400,10 @@ impl Node {
                     parent: self.nodules_actor.capability,
                     path: format!(
                         "{NODULES_PATH}/{}",
-                        crate::store::actor_segment(cartridge_id)
+                        big_nodule_core::actor_segment(
+                            &cartridge_id.name,
+                            &cartridge_id.to_string()
+                        )
                     ),
                     rights: Rights::USE | Rights::NARROW,
                 },
@@ -1709,56 +1816,94 @@ fn cartridge_with_undeclared_settings(id: &str, version: &str) -> FixtureCartrid
     cartridge
 }
 
+/// `micros` is the micro runtime as the service is the nodule runtime (ADR 049 section 6.1): the
+/// actor the delegators of everything a micro can be granted are bound to, which proves a
+/// reach over a drawer against its own standing. So a drawer granted to a cartridge that ships a
+/// micro is held by `micros` until the grant is revoked, and one granted to a cartridge with no
+/// micro is not.
 #[tokio::test]
-async fn an_upgrade_that_fails_admission_is_rejected_and_a_good_one_keeps_actor_and_grants() {
+async fn micros_stands_on_a_drawer_granted_to_a_cartridge_with_a_micro_until_it_is_revoked() {
     let node = node().await;
     let operator = node.operator();
     let present = node.drawers.local().present_id.clone();
-    let installed = node
-        .admit(
-            operator,
-            cartridge(example_cartridge!("photos"), "1.0.0", true),
-        )
-        .await
-        .unwrap();
-    let v1 = node
-        .set_drawers(
-            example_cartridge!("photos"),
-            BTreeMap::from([(present.clone(), DrawerAccess::Write)]),
-        )
-        .await;
-    assert_eq!(v1.error, None);
-    assert!(v1.drawers[&present].granted);
-    assert_eq!(v1.actor, installed.actor);
-
-    // A version admission refuses is never pinned: the install keeps running 1.0.0.
-    assert!(matches!(
-        node.admit(
-            operator,
-            cartridge_with_undeclared_settings(example_cartridge!("photos"), "2.0.0"),
-        )
-        .await,
-        Err(CartridgesError::Rejected(reason)) if reason.contains("org.example.photos.missing")
-    ));
-    assert_eq!(
-        node.get(operator, example_cartridge!("photos"))
+    let micros = node.micros_actor().await;
+    let reach = || DocScope {
+        drawers: BTreeMap::from([(
+            present.clone(),
+            big_cabinet_core::doc::DrawerReach::all_kinds(DrawerAccess::Read),
+        )]),
+        ..DocScope::default()
+    };
+    let micros_mints = async || {
+        node.docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(micros.capability).metadata(),
+                MintDocCapability {
+                    capability: None,
+                    scope: reach(),
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
             .await
-            .unwrap(),
-        v1
-    );
+            .map(|_| ())
+    };
+    node.admit(
+        operator,
+        cartridge_with_micro(example_cartridge!("photos"), "1.0.0"),
+    )
+    .await
+    .unwrap();
+    node.admit(
+        operator,
+        cartridge(example_cartridge!("schema"), "1.0.0", true),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        micros_mints().await,
+        Err(ClientError::Method(DocsError::Denied))
+    ));
 
-    // A good upgrade keeps the durable actor and the grants, which live in the config document.
-    let upgraded = node
-        .admit(
-            operator,
-            cartridge(example_cartridge!("photos"), "2.1.0", true),
-        )
-        .await
-        .unwrap();
-    assert_eq!(upgraded.version, Some("2.1.0".parse().unwrap()));
-    assert_eq!(upgraded.actor, v1.actor, "the durable actor is kept");
-    assert_eq!(upgraded.error, None);
-    assert!(upgraded.drawers[&present].granted);
+    // A cartridge with no micro gets the service its drawer and `micros` nothing.
+    node.set_grant(
+        operator,
+        example_cartridge!("schema"),
+        GrantKey::Drawer(present.clone()),
+        Some(GrantBody::access(DrawerAccess::Read.into())),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        micros_mints().await,
+        Err(ClientError::Method(DocsError::Denied))
+    ));
+
+    node.set_grant(
+        operator,
+        example_cartridge!("photos"),
+        GrantKey::Drawer(present.clone()),
+        Some(GrantBody::access(DrawerAccess::Read.into())),
+    )
+    .await
+    .unwrap();
+    micros_mints().await.expect("micros stands on the drawer");
+
+    // The standing ends with the last grant of the drawer to a cartridge that ships a micro.
+    node.set_grant(
+        operator,
+        example_cartridge!("photos"),
+        GrantKey::Drawer(present.clone()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        micros_mints().await,
+        Err(ClientError::Method(DocsError::Denied))
+    ));
     node.shutdown().await;
 }
 
@@ -1786,6 +1931,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
                 RequestContext::root(),
                 Authorization::identity(actor.capability).metadata(),
                 MintDocCapability {
+                    capability: None,
                     scope: DocScope {
                         create: BTreeSet::from([placement.clone()]),
                         ..DocScope::default()
@@ -1826,6 +1972,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
             RequestContext::root(),
             Authorization::identity(actor.capability).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     create: BTreeSet::from([placement.clone()]),
                     ..DocScope::default()
@@ -1895,6 +2042,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
             RequestContext::root(),
             Authorization::identity(actor.capability).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([receipt.doc_id.clone()]),
                     ..DocScope::default()
@@ -2086,103 +2234,6 @@ fn photos_settings_key() -> DatumKey {
 
 fn photos_settings(thumbnails: bool) -> Value {
     json!({ "$type": "org.example.photos.settings", "thumbnails": thumbnails })
-}
-
-#[tokio::test]
-async fn install_creates_the_cartridge_config_document_and_reinstall_reuses_it_with_its_settings() {
-    let mut node = node().await;
-    let operator = node.operator();
-    let photos = example_cartridge!("photos");
-    node.admit(operator, cartridge(photos, "1.0.0", true))
-        .await
-        .unwrap();
-    node.admit(
-        operator,
-        cartridge(example_cartridge!("schema"), "0.1.0", false),
-    )
-    .await
-    .unwrap();
-
-    // The install names a document in the shared config drawer that is the cartridge's own: it
-    // says whose it is, and another cartridge has another.
-    let installed = node.install_of(photos).await;
-    let schema_doc = node
-        .install_of(example_cartridge!("schema"))
-        .await
-        .config_doc;
-    assert_ne!(installed.config_doc, schema_doc);
-    let doc = node.cartridge_doc(photos).await;
-    let DatumRead::Accepted { value, .. } =
-        &doc.datums[&big_cartridges_core::config::config_identity_key()]
-    else {
-        panic!("the document names its cartridge");
-    };
-    assert_eq!(value["cartridge"], json!(photos));
-    assert!(
-        installed.nodule.is_some() && installed.micro.is_none(),
-        "{installed:?}"
-    );
-
-    // Settings are ordinary datums in the document, written once the nodule's Lexicon is
-    // registered (when it is enabled), and a grant is a datum of its own beside them.
-    node.call(
-        operator,
-        SetCartridgeEnabled {
-            cartridge_id: id(photos),
-            component: Component::Nodule,
-            enabled: true,
-        },
-    )
-    .await
-    .unwrap();
-    node.write_cartridge_datums(
-        photos,
-        BTreeMap::from([(photos_settings_key(), photos_settings(false))]),
-    )
-    .await;
-    let grant = GrantKey::Method("org.example.remote.ping".to_owned());
-    node.set_grant(operator, photos, grant.clone(), Some(GrantBody::present()))
-        .await
-        .unwrap();
-
-    // Uninstalling keeps the document, so a reinstall (this node's, or a sister's) finds the
-    // settings and the grant where they were left, in the same document.
-    node.call(
-        operator,
-        UninstallCartridge {
-            cartridge_id: id(photos),
-        },
-    )
-    .await
-    .unwrap();
-    assert!(
-        node.list(operator)
-            .await
-            .unwrap()
-            .contains(&id(example_cartridge!("schema")))
-    );
-    let left = node.read_doc(installed.config_doc.clone()).await;
-    assert!(left.datums.contains_key(&photos_settings_key()));
-    assert!(left.datums.contains_key(&grant.datum_key()));
-
-    node.restart_nodules().await.unwrap();
-    node.admit(operator, cartridge(photos, "1.0.0", true))
-        .await
-        .unwrap();
-    let reinstalled = node.install_of(photos).await;
-    assert_eq!(
-        reinstalled.config_doc, installed.config_doc,
-        "the document is reused"
-    );
-    let doc = node.cartridge_doc(photos).await;
-    let DatumRead::Accepted { value, .. } = &doc.datums[&photos_settings_key()] else {
-        panic!("the settings survived the uninstall");
-    };
-    assert_eq!(value["thumbnails"], json!(false));
-    assert!(doc.datums.contains_key(&grant.datum_key()));
-    // The reinstall starts disabled, as any install does: enablement is per node and per install.
-    assert!(!node.get(operator, photos).await.unwrap().enabled);
-    node.shutdown().await;
 }
 
 #[tokio::test]

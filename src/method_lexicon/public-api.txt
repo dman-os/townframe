@@ -16,6 +16,7 @@ pub method_lexicon::fn builtin_methods () -> impl Iterator < Item = (& 'static s
 pub method_lexicon::fn coerce_parameters (parameters : & Value , query : & [(& str , & str)] ,) -> Result < Map < String , Value > , Vec < ParameterError > >
 pub method_lexicon::fn lexicon < M : MethodSchema > () -> Result < Value , MethodLexiconError >
 pub method_lexicon::fn position_validator (file : & Value , carried : & [& Value] , position : Position ,) -> Result < Option < PositionValidator > , LexiconAdmissionError >
+pub method_lexicon::fn privileged_methods () -> std :: collections :: BTreeSet < String >
 pub struct method_lexicon::DeclaredBody  { encoding: method_core :: Encoding, mime: Option < String > }
 pub struct method_lexicon::MethodContract  {  }
 pub struct method_lexicon::ParameterError  { name: String, reason: String }

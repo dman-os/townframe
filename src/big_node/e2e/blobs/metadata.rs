@@ -15,6 +15,7 @@ async fn drawer_capability(node: &BigNode, scope: DrawerScope) -> CapId {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
+ capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: None,

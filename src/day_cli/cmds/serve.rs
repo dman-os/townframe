@@ -77,14 +77,17 @@ async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
     serve(
         dir,
         |booted| {
-            let socket = booted
-                .node()
-                .listeners
+            let listeners = &booted.node().listeners;
+            let socket = listeners
                 .unix_socket
                 .as_ref()
                 .expect("the server boots with its socket attached");
             let mut out = out();
-            writeln!(out, "{READY_PREFIX}{}", socket.display())?;
+            // One line, so `day node start` relays the TCP address too: it reads only the first.
+            match listeners.tcp {
+                Some(tcp) => writeln!(out, "{READY_PREFIX}{} and tcp {tcp}", socket.display())?,
+                None => writeln!(out, "{READY_PREFIX}{}", socket.display())?,
+            }
             out.flush()?;
             Ok(())
         },

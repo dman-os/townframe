@@ -13,4 +13,3 @@ features = []
 features = ["schemars"]
 
 [builds.wasm32-wasip3]
-features = []

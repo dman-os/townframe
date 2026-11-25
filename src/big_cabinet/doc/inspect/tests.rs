@@ -643,6 +643,7 @@ async fn capability_checks_precede_any_repository_lookup() {
             AttenuateCapability {
                 capability: fixture.issuer.capability,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -722,6 +723,7 @@ async fn inspection_scope_is_distinct_and_retracting_the_introduced_actor_revoke
             }
             .metadata(),
             MintDocCapability {
+ capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([document.clone()]),
                     ..DocScope::default()
@@ -835,6 +837,7 @@ async fn boot_requires_exact_actor_association_and_shutdown_closes_inspection_an
             AttenuateCapability {
                 capability: fixture.issuer.capability,
                 rights: Rights::all(),
+                subject: None,
             },
         )
         .await

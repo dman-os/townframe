@@ -7,10 +7,11 @@ impl DrawerService {
     async fn list(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: ListDrawers,
     ) -> Result<Vec<ListedDrawer>, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core.invocation(context, metadata, params.capability).await?;
         core.sync_discovered(context).await?;
         let DomainAuthority::Scoped(scope) = &caller.authority else {
             return Err(DrawersError::Denied);
@@ -84,7 +85,7 @@ impl Handler<ListDrawers> for DrawerService {
         &self,
         request: Envelope<ListDrawers>,
     ) -> Result<ResponseEnvelope<ListedDrawers>, DrawersError> {
-        let drawers = self.list(&request.context, request.params).await?;
+        let drawers = self.list(&request.context, &request.metadata, request.params).await?;
         Ok(ListedDrawers { drawers }.into())
     }
 }

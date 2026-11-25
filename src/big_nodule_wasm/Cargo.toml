@@ -24,12 +24,14 @@ big_nodule_core = { workspace = true, features = ["schemars"] }
 big_cartridges_core.workspace = true
 big_sync_core.workspace = true
 service_client_native_rs.workspace = true
+service_core_rs.workspace = true
 service_utils_rs.workspace = true
 utils_rs.workspace = true
 
 #
 # wasm host
 wash-runtime.workspace = true
+wasmtime-wasi.workspace = true
 wasmtime-wasi-http.workspace = true
 hyper.workspace = true
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio"] }

@@ -43,6 +43,7 @@ pub(super) async fn boot(
             RequestContext::root(),
             Authorization::identity(signer).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     drawers: BTreeMap::from([
                         (
@@ -175,6 +176,7 @@ pub(super) fn metadata_capability(
                 RequestContext::root(),
                 Authorization::identity(signer).metadata(),
                 MintDocCapability {
+                    capability: None,
                     scope,
                     rights: Rights::USE,
                     subject: None,

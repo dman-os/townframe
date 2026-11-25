@@ -1387,6 +1387,7 @@ impl Registry {
                 RequestContext::root(),
                 Authorization::identity(self.import.actor).metadata(),
                 MintDrawerCapability {
+                    capability: None,
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(self.drawer.clone(), DrawerAccess::Write)]),
                         create: false,

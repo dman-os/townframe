@@ -62,9 +62,10 @@ impl DocsService {
     async fn query_datum_refs(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: QueryDatumRefs,
     ) -> Result<Vec<QueriedDatumRef>, DocsError> {
-        let caller = self.invocation(context, params.capability).await?;
+        let caller = self.invocation(context, metadata, params.capability).await?;
         use big_cabinet_core::drawer::DrawerAccess;
         if let Some(drawer_id) = &params.drawer_id {
             DocsError::ensure_doc_id(drawer_id)?;
@@ -174,7 +175,7 @@ impl Handler<QueryDatumRefs> for DocsService {
         request: Envelope<QueryDatumRefs>,
     ) -> Result<ResponseEnvelope<QueriedDatumRefs>, DocsError> {
         let refs = self
-            .query_datum_refs(&request.context, request.params)
+            .query_datum_refs(&request.context, &request.metadata, request.params)
             .await?;
         Ok(QueriedDatumRefs { refs }.into())
     }

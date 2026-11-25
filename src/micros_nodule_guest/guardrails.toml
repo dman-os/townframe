@@ -1,0 +1,7 @@
+version = 1
+role = "plugin"
+dependency_reason = "the core cartridge's micros nodule (ADR 052) as a wasi:http component, written on the nodule development kit"
+allowed_dependencies = ["big_ndk", "micros_nodule"]
+allow_external_api_types = false
+
+[builds.wasm32-wasip3]

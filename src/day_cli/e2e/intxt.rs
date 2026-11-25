@@ -88,6 +88,7 @@ pub(super) async fn doc_capability(
     Ok(crate::cmds::intxt::call(
         client,
         big_cabinet_core::doc::MintDocCapability {
+            capability: None,
             scope,
             rights: big_cabinet_core::authority::Rights::USE,
             subject: None,
@@ -443,6 +444,7 @@ async fn capture_records_a_session_and_stores_a_binary_file_as_a_blob() {
         let listing = crate::cmds::intxt::call(
             client,
             MintDrawerCapability {
+                capability: None,
                 scope: big_cabinet_core::drawer::protocol::DrawerScope {
                     drawers: [(drawer.clone(), DrawerAccess::Read)].into(),
                     create: false,
@@ -1734,6 +1736,7 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
         let listing = intxt::call(
             client,
             MintDrawerCapability {
+                capability: None,
                 scope: big_cabinet_core::drawer::protocol::DrawerScope {
                     drawers: [(review.clone(), DrawerAccess::Read)].into(),
                     create: false,
@@ -1903,8 +1906,9 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
                 MintDrawerCapability::XRPC.nsid,
                 MintDrawerCapability::XRPC.method,
                 &serde_json::to_value(MintDrawerCapability {
+                    capability: None,
                     scope: DrawerScope {
-                        drawers: [(info.known_drawers_id, DrawerAccess::Admin)].into(),
+                        drawers: [(info.drawers.config(big_node::ConfigDrawerRole::KnownDrawers).clone(), DrawerAccess::Admin)].into(),
                         create: false,
                     },
                     rights: Rights::USE,
