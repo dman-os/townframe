@@ -97,10 +97,20 @@ pub(in crate::sync::object_jobs::tests) struct Sim {
 }
 
 impl Sim {
+    /// A window of 2 and a cap of 3 over the 3 objects the ops touch: persistently failing
+    /// objects fill the cap while backing off outside the window, so both bind.
+    pub(in crate::sync::object_jobs::tests) fn config() -> Config {
+        Config {
+            window: 2,
+            max_tracked: 3,
+            ..config()
+        }
+    }
+
     pub(in crate::sync::object_jobs::tests) fn new() -> Self {
-        let config = config();
+        let config = Self::config();
         Self {
-            oracle: Oracle::new(config.window),
+            oracle: Oracle::new(config.window, config.max_tracked),
             jobs: ObjectJobs::new(config),
             now: Instant::now(),
             calls: default(),
@@ -325,7 +335,10 @@ impl Sim {
                         .values()
                         .filter(|c| c.kind == CallKind::Fetch)
                         .count();
-                    assert!(fetching <= config().fetch_cap, "law 7: {fetching} fetches");
+                    assert!(
+                        fetching <= Self::config().fetch_cap,
+                        "law 7: {fetching} fetches"
+                    );
                 }
                 JobsCommand::Cancel { call } => {
                     let sim = self.calls.get(&call).expect("a cancel for an unknown call");
@@ -381,6 +394,7 @@ impl Sim {
     fn check(&mut self) {
         self.oracle.prune();
         assert_eq!(self.jobs.room(), self.oracle.room());
+        assert_eq!(self.jobs.tracked(), self.oracle.tracked());
         for p in 0..3 {
             assert_eq!(
                 self.jobs.part_outstanding(&part(p)),
@@ -420,7 +434,7 @@ impl Sim {
             self.oracle.quiet(),
             "a want or an owed cursor was left behind"
         );
-        assert_eq!(self.jobs.room(), config().window);
+        assert_eq!(self.jobs.room(), Self::config().window);
         assert!(
             self.jobs
                 .objs

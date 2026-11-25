@@ -159,6 +159,7 @@ fn lanes_a_live_write_is_applied_within_a_few_live_rounds_of_a_backlog_drain() {
     shape.objs = 60;
     shape.obj_routes = 0;
     shape.config.jobs.window = 5;
+    shape.config.jobs.max_tracked = 5;
     shape.config.jobs.fetch_cap = 2;
     shape.config.lanes.live_limit = 2;
     let mut sim = Sim::new(shape, 1);
@@ -211,6 +212,7 @@ fn lanes_a_backlog_drains_in_about_n_over_limit_bulk_rounds() {
     shape.objs = 60;
     shape.obj_routes = 0;
     shape.config.jobs.window = 8;
+    shape.config.jobs.max_tracked = 8;
     shape.config.jobs.fetch_cap = 2;
     shape.config.lanes.live_limit = 2;
     let mut sim = Sim::new(shape, 1);
@@ -792,6 +794,44 @@ fn persistently_failing_objects_do_not_stop_other_parts_and_hold_only_their_own_
     assert_eq!(sim.local_members(0), (0..3).map(obj).collect());
     assert_eq!(sim.local_members(1), healthy);
     assert!(sim.local.persisted[&part(0)].rev > before);
+}
+
+/// Law 7 of ObjectJobs, the cap: a backend that fails every object keeps them all tracked
+/// outside the window, so admission stops at `max_tracked` (plus one revision's overshoot)
+/// instead of taking in the whole part. When the failure ends, everything converges.
+#[test]
+fn persistently_failing_objects_stall_admission_at_the_tracked_cap() {
+    let mut shape = Shape::small();
+    shape.parts = 1;
+    shape.objs = 8;
+    shape.obj_routes = 0;
+    shape.config.jobs.max_tracked = shape.config.jobs.window;
+    let cap = shape.config.jobs.max_tracked;
+    let mut sim = Sim::new(shape, 11);
+    sim.remote.commit(vec![laws::grant(&[(0, 0)])]);
+    sim.want(&[0]);
+    sim.quiesce();
+
+    sim.step(Op::Poison(0xFF));
+    // one revision per object, so no page overshoots the cap by more than one object
+    for o in 0..8 {
+        sim.members(&[o], 0);
+    }
+    let mut most = 0;
+    for _ in 0..200 {
+        sim.cycle();
+        most = most.max(sim.sync.jobs.tracked());
+    }
+    assert!(
+        most >= cap && most <= cap + 1,
+        "{most} objects tracked while everything fails, the cap is {cap}: {}",
+        sim.dump()
+    );
+    assert!(sim.local_members(0).is_empty());
+
+    sim.step(Op::Poison(0));
+    sim.quiesce();
+    assert_eq!(sim.local_members(0), (0..8).map(obj).collect());
 }
 
 // # Store generations (`PartLifecycle` law 10)

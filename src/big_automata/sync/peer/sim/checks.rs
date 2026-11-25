@@ -66,6 +66,16 @@ impl Sim {
              revision brings up to {MAX_BATCH}",
             jobs.window
         );
+        // law 7's cap on tracked objects, backing off or not: admission stops at it, and what
+        // goes past it is a revision's overshoot and the routed objects, which are not
+        // admitted through `room`
+        let tracked_bound = jobs.max_tracked + MAX_BATCH - 1 + self.shape.obj_routes;
+        assert!(
+            self.sync.jobs.tracked() <= tracked_bound,
+            "{} objects tracked, the cap is {} and a revision brings up to {MAX_BATCH}",
+            self.sync.jobs.tracked(),
+            jobs.max_tracked
+        );
         // a reset session leaves the old session's rounds in flight; they are answered stale
         let session = self.sync.client.session_id();
         let rounds = self

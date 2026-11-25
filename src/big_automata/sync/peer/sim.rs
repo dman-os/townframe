@@ -134,6 +134,7 @@ impl Shape {
                 },
                 jobs: object_jobs::Config {
                     window: 3,
+                    max_tracked: 5,
                     fetch_cap: 1,
                     min_backoff: Duration::from_secs(2),
                     max_backoff: Duration::from_secs(5),
