@@ -29,6 +29,7 @@ use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
@@ -124,6 +125,7 @@ mod dev_takeover;
 mod dispatch;
 mod executor;
 mod init;
+mod installs;
 mod resolution;
 mod routing;
 mod schemas;
@@ -656,20 +658,26 @@ async fn boot_nodules(
         executor,
         schemas: Arc::clone(schemas),
         allow_slot_takeover,
-        core_cartridge: core_cartridge(),
+        // The micros subsystem actor the core nodule acts as, opened as `big_node` does.
+        core_cartridge: crate::CoreCartridge {
+            id: installs::core_cartridge_id(),
+            version: installs::CORE_VERSION.parse().unwrap(),
+            actor: authority
+                .client
+                .call(
+                    RequestContext::root(),
+                    OpenActor {
+                        parent: authority.root,
+                        path: "micros".into(),
+                        rights: Rights::all(),
+                    },
+                )
+                .await
+                .expect("micros actor"),
+        },
         sql: (**sql).clone(),
     })
     .await
-}
-
-/// The cartridge these nodes treat as their core cartridge: a fixture id, so a test can publish
-/// versions of it as the example namespace. (A real node's is under its own publisher DID and
-/// is installed by `big_node` at boot.)
-fn core_cartridge() -> crate::CoreCartridge {
-    crate::CoreCartridge {
-        id: big_cartridges_core::test_support::cartridge_id("core"),
-        version: "1.0.0".parse().unwrap(),
-    }
 }
 
 impl Node {
@@ -1238,6 +1246,24 @@ impl Node {
         self.get(self.operator(), cartridge_id).await.unwrap()
     }
 
+    /// The `micros` subsystem actor's id: opening a path that exists opens the same actor.
+    async fn micros_actor_id(&self) -> Uuid7 {
+        self.authority
+            .client
+            .call(
+                RequestContext::root(),
+                OpenActor {
+                    parent: self.authority.root,
+                    path: "micros".into(),
+                    rights: Rights::all(),
+                },
+            )
+            .await
+            .expect("micros actor")
+            .actor
+            .actor_id
+    }
+
     async fn get(
         &self,
         authorization: Authorization,
@@ -1414,93 +1440,6 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
         .await
         .unwrap();
     assert!(!schema.enabled);
-    node.shutdown().await;
-}
-
-/// The core cartridge's install is the node's (ADR 053 §3 item 5): only the version the node's
-/// build carries installs, so a person cannot move it to another, and once installed it cannot be
-/// uninstalled, disabled, granted or cleared, by the operator either.
-#[tokio::test]
-async fn the_core_cartridge_installs_only_at_its_build_version_and_its_install_cannot_change() {
-    let node = node().await;
-    let operator = node.operator();
-    let core = core_cartridge();
-    let version = |label: &str| {
-        let mut cartridge =
-            FixtureCartridge::new(Cartridge::new(core.id.clone(), label.parse().unwrap()));
-        cartridge.nodule = Some(Default::default());
-        cartridge
-    };
-    let refused = CartridgesError::CoreCartridge(core.id.clone());
-
-    node.install_cartridge(operator, version("1.0.0"))
-        .await
-        .unwrap();
-    // Installing the build's version again is the node's idempotent boot step.
-    node.install_cartridge(operator, version("1.0.0"))
-        .await
-        .unwrap();
-    assert_eq!(
-        node.install_cartridge(operator, version("1.0.1"))
-            .await
-            .map(|_| ()),
-        Err(refused.clone())
-    );
-    assert_eq!(
-        node.call(
-            operator,
-            SetCartridgeEnabled {
-                cartridge_id: core.id.clone(),
-                component: Component::Nodule,
-                enabled: false,
-            },
-        )
-        .await
-        .map(|_| ()),
-        Err(refused.clone())
-    );
-    assert_eq!(
-        node.set_grant(
-            operator,
-            &core.id.to_string(),
-            GrantKey::Drawer(node.drawers.local().present_id.clone()),
-            None
-        )
-        .await,
-        Err(refused.clone())
-    );
-    assert_eq!(
-        node.call(
-            operator,
-            ClearCartridgeConfig {
-                cartridge_id: core.id.clone(),
-            }
-        )
-        .await,
-        Err(refused.clone())
-    );
-    assert_eq!(
-        node.call(
-            operator,
-            UninstallCartridge {
-                cartridge_id: core.id.clone(),
-            }
-        )
-        .await,
-        Err(refused)
-    );
-    let installs = node
-        .call(operator, ListCartridgeInstalls {})
-        .await
-        .unwrap()
-        .installs;
-    assert_eq!(
-        installs
-            .iter()
-            .map(|record| &record.cartridge_id)
-            .collect::<Vec<_>>(),
-        vec![&core.id]
-    );
     node.shutdown().await;
 }
 
@@ -1805,59 +1744,6 @@ fn cartridge_with_undeclared_settings(id: &str, version: &str) -> FixtureCartrid
         .settings
         .insert("org.example.photos.missing".parse().unwrap());
     cartridge
-}
-
-#[tokio::test]
-async fn an_upgrade_that_fails_admission_is_rejected_and_a_good_one_keeps_actor_and_grants() {
-    let node = node().await;
-    let operator = node.operator();
-    let present = node.drawers.local().present_id.clone();
-    let installed = node
-        .admit(
-            operator,
-            cartridge(example_cartridge!("photos"), "1.0.0", true),
-        )
-        .await
-        .unwrap();
-    let v1 = node
-        .set_drawers(
-            example_cartridge!("photos"),
-            BTreeMap::from([(present.clone(), DrawerAccess::Write)]),
-        )
-        .await;
-    assert_eq!(v1.error, None);
-    assert!(v1.drawers[&present].granted);
-    assert_eq!(v1.actor, installed.actor);
-
-    // A version admission refuses is never pinned: the install keeps running 1.0.0.
-    assert!(matches!(
-        node.admit(
-            operator,
-            cartridge_with_undeclared_settings(example_cartridge!("photos"), "2.0.0"),
-        )
-        .await,
-        Err(CartridgesError::Rejected(reason)) if reason.contains("org.example.photos.missing")
-    ));
-    assert_eq!(
-        node.get(operator, example_cartridge!("photos"))
-            .await
-            .unwrap(),
-        v1
-    );
-
-    // A good upgrade keeps the durable actor and the grants, which live in the config document.
-    let upgraded = node
-        .admit(
-            operator,
-            cartridge(example_cartridge!("photos"), "2.1.0", true),
-        )
-        .await
-        .unwrap();
-    assert_eq!(upgraded.version, Some("2.1.0".parse().unwrap()));
-    assert_eq!(upgraded.actor, v1.actor, "the durable actor is kept");
-    assert_eq!(upgraded.error, None);
-    assert!(upgraded.drawers[&present].granted);
-    node.shutdown().await;
 }
 
 #[tokio::test]
@@ -2183,103 +2069,6 @@ fn photos_settings_key() -> DatumKey {
 
 fn photos_settings(thumbnails: bool) -> Value {
     json!({ "$type": "org.example.photos.settings", "thumbnails": thumbnails })
-}
-
-#[tokio::test]
-async fn install_creates_the_cartridge_config_document_and_reinstall_reuses_it_with_its_settings() {
-    let mut node = node().await;
-    let operator = node.operator();
-    let photos = example_cartridge!("photos");
-    node.admit(operator, cartridge(photos, "1.0.0", true))
-        .await
-        .unwrap();
-    node.admit(
-        operator,
-        cartridge(example_cartridge!("schema"), "0.1.0", false),
-    )
-    .await
-    .unwrap();
-
-    // The install names a document in the shared config drawer that is the cartridge's own: it
-    // says whose it is, and another cartridge has another.
-    let installed = node.install_of(photos).await;
-    let schema_doc = node
-        .install_of(example_cartridge!("schema"))
-        .await
-        .config_doc;
-    assert_ne!(installed.config_doc, schema_doc);
-    let doc = node.cartridge_doc(photos).await;
-    let DatumRead::Accepted { value, .. } =
-        &doc.datums[&big_cartridges_core::config::config_identity_key()]
-    else {
-        panic!("the document names its cartridge");
-    };
-    assert_eq!(value["cartridge"], json!(photos));
-    assert!(
-        installed.nodule.is_some() && installed.micro.is_none(),
-        "{installed:?}"
-    );
-
-    // Settings are ordinary datums in the document, written once the nodule's Lexicon is
-    // registered (when it is enabled), and a grant is a datum of its own beside them.
-    node.call(
-        operator,
-        SetCartridgeEnabled {
-            cartridge_id: id(photos),
-            component: Component::Nodule,
-            enabled: true,
-        },
-    )
-    .await
-    .unwrap();
-    node.write_cartridge_datums(
-        photos,
-        BTreeMap::from([(photos_settings_key(), photos_settings(false))]),
-    )
-    .await;
-    let grant = GrantKey::Method("org.example.remote.ping".to_owned());
-    node.set_grant(operator, photos, grant.clone(), Some(GrantBody::present()))
-        .await
-        .unwrap();
-
-    // Uninstalling keeps the document, so a reinstall (this node's, or a sister's) finds the
-    // settings and the grant where they were left, in the same document.
-    node.call(
-        operator,
-        UninstallCartridge {
-            cartridge_id: id(photos),
-        },
-    )
-    .await
-    .unwrap();
-    assert!(
-        node.list(operator)
-            .await
-            .unwrap()
-            .contains(&id(example_cartridge!("schema")))
-    );
-    let left = node.read_doc(installed.config_doc.clone()).await;
-    assert!(left.datums.contains_key(&photos_settings_key()));
-    assert!(left.datums.contains_key(&grant.datum_key()));
-
-    node.restart_nodules().await.unwrap();
-    node.admit(operator, cartridge(photos, "1.0.0", true))
-        .await
-        .unwrap();
-    let reinstalled = node.install_of(photos).await;
-    assert_eq!(
-        reinstalled.config_doc, installed.config_doc,
-        "the document is reused"
-    );
-    let doc = node.cartridge_doc(photos).await;
-    let DatumRead::Accepted { value, .. } = &doc.datums[&photos_settings_key()] else {
-        panic!("the settings survived the uninstall");
-    };
-    assert_eq!(value["thumbnails"], json!(false));
-    assert!(doc.datums.contains_key(&grant.datum_key()));
-    // The reinstall starts disabled, as any install does: enablement is per node and per install.
-    assert!(!node.get(operator, photos).await.unwrap().enabled);
-    node.shutdown().await;
 }
 
 #[tokio::test]

@@ -192,11 +192,13 @@ pub struct NodulesConfig {
     pub sql: Database,
 }
 
-/// The id of the node's core cartridge and the version the node's build carries (ADR 053).
+/// The id of the node's core cartridge, the version the node's build carries (ADR 053), and the
+/// actor its nodule acts as: the `micros` subsystem actor, with the rights to open children.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreCartridge {
     pub id: CartridgeId,
     pub version: big_cartridges_core::Version,
+    pub actor: OpenedActor,
 }
 
 /// The hosted surface: it settles who the caller is and what they may touch, then hands the

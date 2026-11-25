@@ -158,20 +158,26 @@ mod library {
         ]
     }
 
+    /// A fresh node answers `listNodules` with only its own core cartridge's nodule, which the
+    /// node installs at boot (ADR 053).
+    async fn assert_fresh(client: &NodeClient) {
+        let nodules = client.call(ListNodules {}).await.unwrap().nodules;
+        assert_eq!(
+            nodules
+                .iter()
+                .map(|nodule| nodule.cartridge_id.name.as_str())
+                .collect::<Vec<_>>(),
+            ["core"]
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn init_then_status_in_process() {
         let (_tmp, dir) = new_node().await;
         let client = connect(&dir).await.unwrap();
         assert_eq!(client.mode(), Mode::InProcess);
         assert_eq!(client.socket_state(), SocketState::Absent);
-        assert!(
-            client
-                .call(ListNodules {})
-                .await
-                .unwrap()
-                .nodules
-                .is_empty()
-        );
+        assert_fresh(&client).await;
         client.stop().await.unwrap();
         // Stopping released the node: it can be booted again by the next command.
         connect(&dir).await.unwrap().stop().await.unwrap();
@@ -401,14 +407,7 @@ mod library {
         states.sort_by_key(|state| matches!(state, SocketState::Live));
         assert_eq!(states, [SocketState::Absent, SocketState::Live]);
         for client in [&first, &second] {
-            assert!(
-                client
-                    .call(ListNodules {})
-                    .await
-                    .unwrap()
-                    .nodules
-                    .is_empty()
-            );
+            assert_fresh(client).await;
         }
         let (holder, client) = if first.socket_state() == SocketState::Live {
             (second, first)
@@ -423,14 +422,7 @@ mod library {
             tokio::task::yield_now().await;
         }
         assert!(!holder_stopped.is_finished());
-        assert!(
-            client
-                .call(ListNodules {})
-                .await
-                .unwrap()
-                .nodules
-                .is_empty()
-        );
+        assert_fresh(&client).await;
         client.stop().await.unwrap();
         holder_stopped.await.unwrap().unwrap();
         assert_eq!(dir.probe_socket().await.unwrap(), SocketState::Absent);
@@ -485,14 +477,7 @@ mod library {
             .unwrap();
         let client = arriving.await.unwrap().unwrap();
         assert_eq!(client.socket_state(), SocketState::Live);
-        assert!(
-            client
-                .call(ListNodules {})
-                .await
-                .unwrap()
-                .nodules
-                .is_empty()
-        );
+        assert_fresh(&client).await;
         client.stop().await.unwrap();
         holder.stop().await.unwrap();
     }
@@ -934,7 +919,11 @@ mod blackbox {
                     .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
                     .arg("--node")
                     .arg(sandbox.node())
-                    .args(["exec", "--get", "org.example.daybook.nodules.listNodules"])
+                    .args([
+                        "exec",
+                        "--get",
+                        "org.example.daybook.cartridges.listCartridgeGrantRequests",
+                    ])
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .spawn()
@@ -949,7 +938,7 @@ mod blackbox {
                 String::from_utf8_lossy(&output.stderr)
             );
             let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(answer, json!({"nodules": []}));
+            assert_eq!(answer, json!({"requests": []}));
         }
         assert!(
             !sandbox.socket().exists(),

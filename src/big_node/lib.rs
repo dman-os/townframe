@@ -956,6 +956,21 @@ where
         )
         .await?
         .capability_id;
+    // The micros runtime's subsystem actor, beside `nodules`: the core cartridge's nodule acts as
+    // it (ADR 052 §2), so each micro's actor, `micros/<cartridge>/<micro>`, is in its own
+    // subtree. No namespace: the micros nodule mints through the services' own namespaces, as
+    // every nodule does.
+    let micros_actor = authority
+        .client
+        .call(
+            RequestContext::root(),
+            OpenActor {
+                parent: authority.root,
+                path: "micros".into(),
+                rights: Rights::all(),
+            },
+        )
+        .await?;
     let (nodules, nodules_stop) = big_nodule::boot(NodulesConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
@@ -979,7 +994,7 @@ where
         executor: Some(Arc::clone(&executor)),
         schemas,
         allow_slot_takeover,
-        core_cartridge: core_cartridge::pin(&cartridges.publisher),
+        core_cartridge: core_cartridge::pin(&cartridges.publisher, micros_actor),
         sql,
     })
     .await?;
