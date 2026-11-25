@@ -493,10 +493,28 @@ impl DocsService {
             }
         }
         if !candidates.is_empty() {
-            reached.extend(
+            let mut through_drawers =
                 Self::reach_drawers(access_policy, context, &scope.drawers, &candidates, needed)
-                    .await?,
-            );
+                    .await?;
+            // A drawer's own document is its public root (ADR 019): the descriptor and roster its
+            // Read participants receive. It is not a member of its own drawer, so membership
+            // never covers it; a reach that reads the drawer reads it too, at the reach's
+            // readable kinds. Writing it is not reached this way.
+            if needed == DrawerAccess::Read {
+                for doc in &candidates {
+                    let Some(reach) = scope.drawers.get(doc).filter(|reach| {
+                        reach.access >= DrawerAccess::Read && !reach.readable().admits_nothing()
+                    }) else {
+                        continue;
+                    };
+                    let kinds = match through_drawers.remove(doc) {
+                        Some(held) => held.union(reach.readable().clone()),
+                        None => reach.readable().clone(),
+                    };
+                    through_drawers.insert(doc.clone(), kinds);
+                }
+            }
+            reached.extend(through_drawers);
         }
         Ok(reached)
     }
