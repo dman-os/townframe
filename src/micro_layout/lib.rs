@@ -14,7 +14,6 @@ use clay_dioxus_kit::Button;
 use clay_dioxus_kit::ButtonVariant;
 use clay_dioxus_kit::Card;
 use clay_dioxus_kit::CardContent;
-use clay_dioxus_kit::CardVariant;
 use clay_dioxus_kit::PanelPage;
 use clay_mdk::Capability;
 use clay_mdk::Collection;
@@ -131,7 +130,7 @@ fn view(
                             key: "panel-{id}",
                             "data-part": "slot",
                             "aria-label": "{title} panel",
-                            Card { variant: CardVariant::Outline,
+                            Card {
                                 CardContent {
                                     match row {
                                         Some(row) => rsx! {

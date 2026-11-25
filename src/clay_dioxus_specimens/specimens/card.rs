@@ -10,19 +10,20 @@ use clay_dioxus_kit::CardVariant;
 use clay_dioxus_kit::Status;
 use dioxus::prelude::*;
 
-/// `Card`: the three variants with all three parts, and a card with only its content.
+/// `Card`: the four variants side by side with all three parts, and a card with only its content.
 #[component]
 pub fn CardSpecimens() -> Element {
     rsx! {
         FoundationSection {
             id: "card-variants".to_string(),
             title: "Variants".to_string(),
-            description: "data-variant outline|raised|plain; data-part header|content|footer.".to_string(),
+            description: "data-variant tonal|sunken|plain|outlined; data-part header|content|footer.".to_string(),
             div { class: "grid grid-cols-[repeat(auto-fit,minmax(16rem,1fr))] gap-4",
                 for (variant , name) in [
-                    (CardVariant::Outline, "Outline"),
-                    (CardVariant::Raised, "Raised"),
+                    (CardVariant::Tonal, "Tonal"),
+                    (CardVariant::Sunken, "Sunken"),
                     (CardVariant::Plain, "Plain"),
+                    (CardVariant::Outlined, "Outlined"),
                 ] {
                     Card { key: "{name}", variant,
                         CardHeader { "{name}" }
@@ -61,7 +62,7 @@ pub fn CardSpecimens() -> Element {
                 Card {
                     CardContent { "Only content." }
                 }
-                Card { variant: CardVariant::Raised,
+                Card { variant: CardVariant::Sunken,
                     CardHeader { "Header and content" }
                     CardContent { "No footer." }
                 }

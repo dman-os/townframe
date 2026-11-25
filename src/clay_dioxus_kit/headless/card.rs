@@ -1,30 +1,34 @@
 //! A bounded group of related content (`ct-card`).
 //!
 //! Parts: `header`, `content`, `footer`, each optional and in that order. Axis: `data-variant`
-//! (`outline`, `raised`, `plain`) and `data-status` (`info`, `success`, `warning`, `danger`, the
+//! (`tonal`, `sunken`, `plain`, `outlined`) and `data-status` (`info`, `success`, `warning`, `danger`, the
 //! same axis and colour roles as `Alert`; absent is neutral). A card has no role of its own: it is a visual grouping, and a
 //! caller who wants it announced names it with a heading inside the header.
 use super::Status;
 use dioxus::prelude::*;
 
-/// How a card sets itself off from its surroundings.
+/// How a card sets itself off from its surroundings: by fill, one step on the surface ladder, never
+/// by a shadow (a card does not float). A card nested in a card takes the next step.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum CardVariant {
-    /// A hairline border.
+    /// The surface one step above its background.
     #[default]
-    Outline,
-    /// A raised surface with elevation.
-    Raised,
-    /// No boundary of its own: only its padding and parts.
+    Tonal,
+    /// The sunken surface, for a well that holds other content.
+    Sunken,
+    /// No fill: it only groups and pads.
     Plain,
+    /// A hairline border, opt-in for a container on a busy background where fill is not enough.
+    Outlined,
 }
 
 impl CardVariant {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Outline => "outline",
-            Self::Raised => "raised",
+            Self::Tonal => "tonal",
+            Self::Sunken => "sunken",
             Self::Plain => "plain",
+            Self::Outlined => "outlined",
         }
     }
 }
@@ -85,12 +89,12 @@ mod tests {
 
     #[test]
     fn a_card_is_a_root_with_its_parts_in_order() {
-        let page = Page::with_props(app, CardVariant::Raised);
+        let page = Page::with_props(app, CardVariant::Sunken);
         let heading = page.by_role("heading", "Title");
         let header = page.parent(heading);
         let card = page.parent(header);
         assert_eq!(page.attr(card, "class").as_deref(), Some("ct-card"));
-        assert_eq!(page.attr(card, "data-variant").as_deref(), Some("raised"));
+        assert_eq!(page.attr(card, "data-variant").as_deref(), Some("sunken"));
         let parts: Vec<_> = page
             .children(card)
             .into_iter()
@@ -124,9 +128,10 @@ mod tests {
     #[test]
     fn every_variant_names_itself_for_the_stylesheet() {
         for (variant, name) in [
-            (CardVariant::Outline, "outline"),
-            (CardVariant::Raised, "raised"),
+            (CardVariant::Tonal, "tonal"),
+            (CardVariant::Sunken, "sunken"),
             (CardVariant::Plain, "plain"),
+            (CardVariant::Outlined, "outlined"),
         ] {
             let page = Page::with_props(app, variant);
             let card = page.parent(page.parent(page.by_role("heading", "Title")));

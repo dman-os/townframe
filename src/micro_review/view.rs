@@ -29,7 +29,6 @@ use clay_dioxus_kit::Button;
 use clay_dioxus_kit::ButtonVariant;
 use clay_dioxus_kit::Card;
 use clay_dioxus_kit::CardContent;
-use clay_dioxus_kit::CardVariant;
 use clay_dioxus_kit::Chip;
 use clay_dioxus_kit::ChipVariant;
 use clay_dioxus_kit::PanelPage;
@@ -270,7 +269,7 @@ fn Unreadable(what: String, name: String, reason: String) -> Element {
             role: "group",
             "aria-label": "{what} cannot be read",
             "data-part": "unreadable",
-            Card { variant: CardVariant::Outline,
+            Card { status: Some(Status::Danger),
                 CardContent {
                     if !name.is_empty() {
                         p { "data-part": "id", "{name}" }
@@ -367,7 +366,7 @@ fn link_row(row: LinkRow, on_open: EventHandler<Screen>) -> Element {
         },
         LinkOutcome::NotFound => rsx! {
             div { role: "group", "aria-label": "Not an intxt", "data-part": "unlisted",
-                Card { variant: CardVariant::Outline,
+                Card {
                     CardContent {
                         p { "data-part": "id", "{name}" }
                         p { "data-part": "secondary", "Not an intxt" }

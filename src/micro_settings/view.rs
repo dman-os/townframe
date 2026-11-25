@@ -7,7 +7,6 @@ use clay_dioxus_kit::Button;
 use clay_dioxus_kit::ButtonVariant;
 use clay_dioxus_kit::Card;
 use clay_dioxus_kit::CardContent;
-use clay_dioxus_kit::CardVariant;
 use clay_dioxus_kit::ListRow;
 use clay_dioxus_kit::PanelPage;
 use clay_mdk::Error;
@@ -83,7 +82,7 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
         div { class: "ct-settings", "data-state": "list",
             Stylesheet { css: STYLES }
             div { "data-part": "preferences",
-              Card { variant: CardVariant::Outline,
+              Card {
                 CardContent {
                   details {
                     summary { "Choose settings sections" }
