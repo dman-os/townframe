@@ -117,6 +117,23 @@ Datum tags are NSID-shaped identifiers, but this decision does not adopt ATProto
 keys, TIDs, PDS repositories, DNS resolution, or XRPC. Those are independent publication
 and node-interface designs.
 
+### A stored sidecar is JSON text (amended 2026-11-17, operator)
+
+The sidecar is the full JSON Schema the Rust declaration renders, not only what the Lexicon cannot
+state, so it can carry JSON Schema features (typed maps and the like) that Lexicon never will. A
+cartridge publishes it as a datum, and a JSON Schema document is not atproto data: a bytes
+position's schema names a `$bytes` property and a union branch's schema a `$type` property, which
+the data model reads as a malformed bytes value and a non-string type. So a stored sidecar
+(`org.example.daybook.lexicon.sidecar`) holds the document as its JSON text, `{ schema }`.
+
+The text is a hole the Lexicon can only call a `string`, and the tag's own sidecar says what fills
+it: `contentMediaType: application/schema+json` with `contentSchema` set to the JSON Schema 2020-12
+meta-schema. A supplement may state those two on a string position, and the node enforces
+`contentSchema` (JSON Schema leaves it an annotation): the text must parse to JSON the content
+schema accepts, so a stored sidecar is checked by the sidecar that describes it. Lexicons are
+unaffected: they are stored as `com.atproto.lexicon.schema` records, and a Lexicon spells bytes
+`{"type": "bytes"}` and unions with `refs`.
+
 ## 3a. Enforcement is rejection, not rewriting
 
 A macro in this design states a fact or refuses a declaration. It never transforms what the author

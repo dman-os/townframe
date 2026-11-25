@@ -29,6 +29,12 @@ mod integers;
 
 pub(super) const KEYWORD: &str = "x-cabinet-lexicon";
 pub(super) const DATA: &str = "x-cabinet-lexicon-data";
+/// The assertion a JSON-carrying string position makes about its content: the JSON Schema its
+/// text must parse to a valid instance of. JSON Schema's own `contentSchema` is only an
+/// annotation, so the overlay copies the declared one here, where [`Content`] enforces it.
+pub(super) const CONTENT: &str = "x-cabinet-content";
+/// The media types whose content is JSON, so a `contentSchema` can check it.
+const JSON_MEDIA_TYPES: [&str; 2] = ["application/json", "application/schema+json"];
 /// Stamped on every compiled definition: the Lexicon identity (`<nsid>#<def>`, or the bare NSID for
 /// `main`) it was compiled from. Compiled names are positional (`L0`, `L1`, …), so this is how a
 /// walker that reached a definition through `$ref` knows which Lexicon type the position declares;
@@ -573,6 +579,8 @@ const SUPPLEMENT_KEYS: &[&str] = &[
     "x-lexicon-id",
     "format",
     "contentEncoding",
+    "contentMediaType",
+    "contentSchema",
     "default",
     "pattern",
     "enum",
@@ -1334,6 +1342,35 @@ impl Overlay<'_> {
                 "contentEncoding is only a canonical bytes representation annotation",
             ));
         }
+        // A string that carries a JSON document (a stored schema, say) states its media type and
+        // the schema its content must satisfy. Both stay as the declaration's annotations, and the
+        // schema is also compiled here, once, so an uncompilable one is refused at admission
+        // rather than when a value is checked.
+        match (object.get("contentMediaType"), object.get("contentSchema")) {
+            (None, None) => {}
+            (Some(media), Some(content))
+                if kind == "string"
+                    && media
+                        .as_str()
+                        .is_some_and(|media| JSON_MEDIA_TYPES.contains(&media)) =>
+            {
+                if let Err(error) = jsonschema::validator_for(content) {
+                    return Err(invalid(
+                        path,
+                        format!("contentSchema does not compile: {error}"),
+                    ));
+                }
+                primary["contentMediaType"] = media.clone();
+                primary["contentSchema"] = content.clone();
+                primary[CONTENT] = content.clone();
+            }
+            _ => {
+                return Err(invalid(
+                    path,
+                    "contentSchema is admitted only with a JSON contentMediaType, on a string",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -1656,6 +1693,36 @@ pub(super) fn options() -> jsonschema::ValidationOptions {
             Ok(Box::new(Constraint(value.clone())))
         })
         .with_keyword(DATA, |_, _, _| Ok(Box::new(Data)))
+        .with_keyword(CONTENT, |_, value, _| {
+            Ok(Box::new(Content(jsonschema::validator_for(value).expect(
+                "a content schema is compiled once at admission before it is stored",
+            ))))
+        })
+}
+
+/// A string whose text must parse as JSON that the declared content schema accepts.
+struct Content(jsonschema::Validator);
+
+impl jsonschema::Keyword for Content {
+    fn validate<'i>(
+        &self,
+        instance: &'i Value,
+    ) -> std::result::Result<(), jsonschema::ValidationError<'i>> {
+        if self.is_valid(instance) {
+            Ok(())
+        } else {
+            Err(jsonschema::ValidationError::custom(
+                "the string is not JSON its contentSchema accepts",
+            ))
+        }
+    }
+
+    fn is_valid(&self, instance: &Value) -> bool {
+        instance
+            .as_str()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .is_some_and(|content| self.0.is_valid(&content))
+    }
 }
 
 struct Constraint(Value);
