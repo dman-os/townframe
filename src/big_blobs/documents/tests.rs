@@ -40,9 +40,20 @@ impl GcControl {
         }
     }
 
+    /// Drives the collector through one cycle that marks after everything the caller has
+    /// already written.
+    ///
+    /// Since iroh-blobs v0.104 (#240) the protect callback runs after the mark phase, just before
+    /// the sweep, so the cycle the collector is parked in was marked before this call. Blobs
+    /// written since are kept by that cycle (#324) and its sweep leaves any garbage alone. The
+    /// first release therefore only retires the parked cycle, and the second releases the cycle
+    /// that marked after it, which is the one that can sweep garbage and would sweep anything the
+    /// caller failed to protect.
     async fn run_once(&self) {
-        self.request.notify_one();
-        self.complete.notified().await;
+        for _ in 0..2 {
+            self.request.notify_one();
+            self.complete.notified().await;
+        }
     }
 }
 
