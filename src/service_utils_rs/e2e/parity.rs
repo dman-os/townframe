@@ -59,6 +59,7 @@ async fn metadata_reaches_the_handler_on_every_transport() {
     let metadata = HttpMetadata {
         authorization: Some("Bearer capability".into()),
         idempotency_key: Some("command-1".into()),
+        range: None,
     };
     for (name, client) in stack.transports() {
         let read = client

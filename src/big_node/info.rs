@@ -17,7 +17,9 @@ use big_dispatch::ProviderError;
 use big_dispatch::ProviderKind;
 use big_dispatch::ProviderState;
 use big_dispatch::Router;
+use big_dispatch_core::Body;
 use big_dispatch_core::InvocationContext;
+use method_core::ByteBody;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -92,7 +94,8 @@ impl Provider for NodeInfoProvider {
         _request: &RequestContext,
         _context: &InvocationContext,
         _input: Value,
-    ) -> Result<Value, ProviderError> {
+        _body: Option<ByteBody>,
+    ) -> Result<Body, ProviderError> {
         assert_eq!(
             operation, GET_NODE_INFO,
             "the router only resolves NSIDs this provider registered"
@@ -120,11 +123,13 @@ impl Provider for NodeInfoProvider {
                 })
             }
         };
-        Ok(serde_json::to_value(NodeInfo {
-            node_id: self.node_id.clone(),
-            known_drawers_id: self.known_drawers_id.clone(),
-            peers,
-        })
-        .expect("node info serializes"))
+        Ok(Body::Json(
+            serde_json::to_value(NodeInfo {
+                node_id: self.node_id.clone(),
+                known_drawers_id: self.known_drawers_id.clone(),
+                peers,
+            })
+            .expect("node info serializes"),
+        ))
     }
 }

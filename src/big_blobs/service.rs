@@ -12,7 +12,6 @@ use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::Rights;
-use big_cabinet_core::dmeta::Bytes as BytesObject;
 use big_cabinet_core::dmeta::Uuid7;
 use big_sync::keyed_frontier::SqliteFrontierCodec;
 use big_sync::keyed_frontier::SqliteFrontierSelector;
@@ -23,9 +22,13 @@ use big_sync_core::revisioned_store::KeyedFrontierRevisionReader;
 use bytes::Bytes;
 use fs4::fs_std::FileExt;
 use futures::Stream;
+use futures::StreamExt;
 use iroh_blobs::Hash;
 use iroh_blobs::api::Store;
+use iroh_blobs::api::TempTag;
 use iroh_blobs::api::proto::BlobStatus;
+use method_core::ByteBody;
+use method_core::ByteSpan;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
@@ -201,6 +204,46 @@ pub struct Blobs {
     pub client: Client<BlobsProtocol>,
 }
 
+impl Blobs {
+    /// [`PutBlob`] through the in-process client, whose envelope carries the byte `body`.
+    pub async fn put(
+        &self,
+        context: RequestContext,
+        capability: CapId,
+        body: ByteBody,
+    ) -> Result<BlobInfo, ClientError<BlobsError>> {
+        self.client
+            .call_with_metadata(Envelope::new(context, PutBlob { capability }).with_body(body))
+            .await
+            .map(|response| response.output)
+    }
+
+    /// [`ReadBlob`] through the in-process client: the blob's bytes as a stream, or the part of
+    /// them `range` selects.
+    pub async fn read(
+        &self,
+        context: RequestContext,
+        capability: CapId,
+        blob_id: BlobId,
+        range: Option<method_core::ByteRange>,
+    ) -> Result<ByteBody, ClientError<BlobsError>> {
+        self.client
+            .call_with_metadata(Envelope::with_metadata(
+                context,
+                service_utils_rs::HttpMetadata {
+                    range,
+                    ..Default::default()
+                },
+                ReadBlob {
+                    capability,
+                    blob_id,
+                },
+            ))
+            .await
+            .map(|response| response.output)
+    }
+}
+
 pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
     let Storage {
         store,
@@ -321,9 +364,9 @@ impl BlobService {
     }
 
     /// The whole of a complete local blob, or `None` while it is not (or not readable) here.
-    /// In-process only, for hosts that need the bytes themselves: the `ReadBlob` wire operation
-    /// is range-capped. A blob longer than `max_octets` is an error rather than a truncation, so
-    /// a caller never holds a partial blob and the allocation is bounded by the caller's cap.
+    /// In-process only, for hosts that need the bytes themselves in one buffer: `ReadBlob`
+    /// streams them. A blob longer than `max_octets` is an error rather than a truncation, so a
+    /// caller never holds a partial blob and the allocation is bounded by the caller's cap.
     pub async fn read_all(&self, blob_id: &BlobId, max_octets: u64) -> Res<Option<Vec<u8>>> {
         let Some(info) = self.stat(blob_id).await? else {
             return Ok(None);
@@ -377,6 +420,11 @@ impl BlobService {
         S: Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
     {
         let (tag, hash) = crate::encrypt::ensure_stored(&self.store, stream).await?;
+        self.stage_stored(tag, hash).await
+    }
+
+    /// Takes the upload hold on bytes `ensure_stored` just stored, and announces them.
+    async fn stage_stored(&self, tag: TempTag, hash: Hash) -> Res<ImportedBlob> {
         let blob_id = BlobId::new(*hash.as_bytes());
         let imported = ImportedBlob::new(
             self.stat(&blob_id)
@@ -386,6 +434,57 @@ impl BlobService {
         self.ownership.stage(imported.clone(), tag).await?;
         self.announce(blob_id).await?;
         Ok(imported)
+    }
+
+    /// Reads `body` into the store, whatever it is, and returns what the store now holds: the id
+    /// is the one this hashes, never one the caller says, and putting what the store already
+    /// holds is a cheap no-op that returns the same [`BlobInfo`] and adds an upload hold (the
+    /// previous ones, if any, expire on their own). An item over `limit` octets is
+    /// [`BlobsError::TooLarge`], counted as it streams in so a body of unknown length is refused
+    /// as soon as it is seen to be too long.
+    async fn put(&self, body: ByteBody, limit: u64) -> Result<BlobInfo, BlobsError> {
+        let too_large = BlobsError::TooLarge {
+            limit_octets: limit,
+        };
+        if body.length.is_some_and(|length| length > limit) {
+            return Err(too_large);
+        }
+        // What stopped the body, if it stopped early. The store's importer never finishes when
+        // its source yields an error (it keeps waiting for the end of a stream that has already
+        // failed), so a body that fails or runs over the limit ends the stream instead, and what
+        // was stored of it is dropped here without ever being held or announced.
+        let stopped = Arc::new(std::sync::Mutex::new(None));
+        let counted = body.scan((0u64, Arc::clone(&stopped)), move |(seen, cause), chunk| {
+            std::future::ready(match chunk {
+                Ok(chunk) => {
+                    *seen += chunk.len() as u64;
+                    if *seen > limit {
+                        *cause.lock().expect("cause lock") = Some(too_large.clone());
+                        None
+                    } else {
+                        Some(Ok(chunk))
+                    }
+                }
+                Err(error) => {
+                    *cause.lock().expect("cause lock") = Some(BlobsError::Unreadable {
+                        reason: error.to_string(),
+                    });
+                    None
+                }
+            })
+        });
+        let (tag, hash) = crate::encrypt::ensure_stored(&self.store, counted)
+            .await
+            .map_err(storage_error)?;
+        if let Some(cause) = stopped.lock().expect("cause lock").take() {
+            drop(tag);
+            return Err(cause);
+        }
+        Ok(self
+            .stage_stored(tag, hash)
+            .await
+            .map_err(storage_error)?
+            .info)
     }
 
     pub async fn adopt_import(
@@ -467,69 +566,83 @@ impl Handler<MintBlobsCapability> for BlobService {
 impl Handler<PutBlob> for BlobService {
     async fn call(
         &self,
-        request: Envelope<PutBlob>,
+        mut request: Envelope<PutBlob>,
     ) -> Result<ResponseEnvelope<BlobInfo>, BlobsError> {
         self.authorize(&request.context, request.params.capability, |scope| {
             scope.put
         })
         .await?;
-        let bytes = request.params.bytes.as_slice();
-        if bytes.len() > MAX_PUT_BYTES {
-            return Err(BlobsError::InvalidInput {
-                reason: format!(
-                    "put exceeds {MAX_PUT_BYTES} bytes; use the native streaming import for large content"
-                ),
-            });
-        }
-        let stream = futures::stream::iter([Ok(Bytes::copy_from_slice(bytes))]);
-        Ok(self
-            .import_stream(stream)
-            .await
-            .map_err(storage_error)?
-            .info
-            .into())
+        let body = request
+            .take_body()
+            .expect("a method with a byte input is called with its body");
+        Ok(self.put(body, MAX_PUT_OCTETS).await?.into())
     }
 }
+
+/// How many octets a read pulls from the store at a time, which is the chunk a reader sees.
+const READ_CHUNK_OCTETS: usize = 64 * 1024;
 
 impl Handler<ReadBlob> for BlobService {
     async fn call(
         &self,
         request: Envelope<ReadBlob>,
-    ) -> Result<ResponseEnvelope<BlobRange>, BlobsError> {
+    ) -> Result<ResponseEnvelope<ByteBody>, BlobsError> {
         let params = request.params;
         self.authorize(&request.context, params.capability, |scope| {
             scope.read.contains(&params.blob_id)
         })
         .await?;
-        if params.length > MAX_READ_BYTES {
-            return Err(BlobsError::InvalidInput {
-                reason: format!("read exceeds {MAX_READ_BYTES} bytes"),
-            });
-        }
         let info = self
             .stat(&params.blob_id)
             .await
             .map_err(storage_error)?
             .ok_or(BlobsError::NotFound)?;
-        if params.offset > info.length_octets {
-            return Err(BlobsError::InvalidInput {
-                reason: "offset exceeds blob length".into(),
-            });
-        }
-        let length = u64::from(params.length).min(info.length_octets - params.offset) as usize;
-        let mut bytes = vec![0; length];
+        // Any byte range of a local blob, which the store's reader seeks to (ADR 042 §2). A
+        // range reaching past the end is cut at it, and one that selects nothing is refused.
+        let (start, length, span) = match request.metadata.range {
+            None => (0, info.length_octets, None),
+            Some(range) => {
+                let (start, length) =
+                    range
+                        .resolve(info.length_octets)
+                        .ok_or(BlobsError::RangeNotSatisfiable {
+                            total_octets: info.length_octets,
+                        })?;
+                (
+                    start,
+                    length,
+                    Some(ByteSpan {
+                        start,
+                        total: info.length_octets,
+                    }),
+                )
+            }
+        };
         let mut reader = self
             .store
             .blobs()
             .reader(Hash::from(params.blob_id.to_bytes32()));
         reader
-            .seek(std::io::SeekFrom::Start(params.offset))
+            .seek(std::io::SeekFrom::Start(start))
             .await
             .map_err(storage_error)?;
-        reader.read_exact(&mut bytes).await.map_err(storage_error)?;
-        Ok(BlobRange {
-            bytes: BytesObject::from(bytes),
-            length_octets: info.length_octets,
+        // Pulled chunk by chunk as the consumer reads, never the blob in one buffer. A blob
+        // that ends before the length `stat` promised is an error mid-stream, which a transport
+        // reports as a broken response, not a short success.
+        let chunks =
+            futures::stream::try_unfold((reader, length), |(mut reader, remaining)| async move {
+                if remaining == 0 {
+                    return Ok::<_, std::io::Error>(None);
+                }
+                let mut chunk = vec![0; remaining.min(READ_CHUNK_OCTETS as u64) as usize];
+                reader.read_exact(&mut chunk).await?;
+                let read = chunk.len() as u64;
+                Ok(Some((Bytes::from(chunk), (reader, remaining - read))))
+            });
+        let body = ByteBody::new(chunks).with_length(length);
+        Ok(match span {
+            Some(span) => body.with_span(span),
+            None => body,
         }
         .into())
     }

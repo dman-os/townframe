@@ -4,6 +4,7 @@
 # exposed_external_crates: []
 
 pub big_dispatch::fn boot (config : DispatchConfig) -> (Dispatch , StopToken)
+pub const big_dispatch::MAX_JSON_BODY_OCTETS: u64
 pub struct big_dispatch::Dispatch  { host: Arc < Host < DispatchHandler > >, client: Client < DispatchProtocol >, router: Arc < Router > }
 pub struct big_dispatch::DispatchConfig  { authority: Client < AuthorityProtocol >, namespace: Namespace, operator: Uuid7 }
 pub struct big_dispatch::DispatchService  {  }
@@ -21,4 +22,5 @@ pub use big_dispatch::router :: ProviderState
 pub use big_dispatch::router :: Router
 pub use big_dispatch::service :: ServiceProvider
 pub use big_dispatch::xrpc :: Anonymous
+pub use big_dispatch::xrpc :: Edge
 pub use big_dispatch::xrpc :: xrpc_router
