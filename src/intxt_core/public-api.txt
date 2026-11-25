@@ -79,7 +79,9 @@ pub impl intxt_core::generic::PrLinks::fn block (& self) -> String
 pub impl intxt_core::generic::PrLinks::fn read (description : & str) -> Result < Self , PrBlockError >
 pub impl intxt_core::generic::PrLinks::fn split (description : & str) -> Result < (String , Self) , PrBlockError >
 pub impl intxt_core::generic::PrLinks::fn write_into (& self , description : & str) -> Result < String , PrBlockError >
-pub intxt_core::cartridge::fn cartridge (wasm : & [u8]) -> FixtureCartridge
+pub intxt_core::cartridge::fn build_of (version : & Version) -> & str
+pub intxt_core::cartridge::fn cartridge (wasm : & [u8] , patch : u64) -> FixtureCartridge
+pub intxt_core::cartridge::fn next_version (running : Option < & Version > , build : & str) -> Version
 pub intxt_core::cartridge::fn requested_methods (cartridge : & FixtureCartridge) -> impl Iterator < Item = & str >
 pub intxt_core::client::fn key (tag : & str , slot : & str) -> Result < DatumKey , IntxtError >
 pub intxt_core::client::fn to_value (value : & impl Serialize) -> Value
