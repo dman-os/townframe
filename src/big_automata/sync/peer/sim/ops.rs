@@ -353,7 +353,7 @@ fn write_of(kind: u8, obj: u8, part: u8, val: u8) -> PartWrite {
     }
 }
 
-fn op() -> impl Strategy<Value = Op> {
+pub(super) fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         5 => (any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>())
             .prop_map(|(kind, obj, part, val)| Op::Write { kind, obj, part, val }),

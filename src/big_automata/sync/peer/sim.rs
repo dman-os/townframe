@@ -85,6 +85,8 @@ use crate::sync::bucket::filter_buckets;
 use crate::sync::bucket::filter_objects;
 
 mod checks;
+#[cfg(test)]
+mod determinism;
 mod driver;
 mod local;
 mod net;
