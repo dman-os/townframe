@@ -1158,3 +1158,17 @@ inside the transaction. This ties together:
 - **Scalar dmeta signatures:** deferred.
 - **Study in progress:** upstream keyhive/automerge-repo integration, checkpointing ("nudge
   edits"), author-filtered materialization, and automerge main since 0.11.
+- **Reads can see non-durable writes (operator: "a big flaw", 2026-11-26).** The sync lock covers
+  only the mutation, so a reader sees a change before it is durable, and keeps seeing it if the
+  persist fails.
+  - **Fix: persist, then apply.** Build the change in a transaction, take its bytes, roll back,
+    persist (encrypt, CGKA, store), and only then `apply_changes` to the live doc under the lock.
+    The cabinet's dry-run (`write.rs:108-136`) already does half of this. `Failure::Ambiguous`
+    disappears.
+  - **CGKA:** ops and secrets are already in SQLite (keyhive event log, `secret_blobs`). The
+    defect is ordering: apply in memory, then persist one transaction per event. Same fix: a
+    keyhive "prepare an op" API with no mutation, persist the op and secret in the write
+    transaction, apply after commit.
+- **Checkpoints without hydration (an obvious optimization).** A checkpoint concerns keys and
+  heads, not content. Settle whether its parents must be automerge heads or can be sedimentree
+  heads; the study lane covers upstream.
