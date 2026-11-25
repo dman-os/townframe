@@ -11,13 +11,16 @@
 
 use tokio::sync::watch;
 
+use crate::Clock;
 use crate::interlude::*;
+use crate::long_poll::LongPollHub;
 use crate::okv::memory::OkvTable;
 use crate::part_store::AccessLevel;
 use crate::part_store::AuthorizedPage;
 use crate::part_store::Generation;
 use crate::part_store::LeafPage;
 use crate::part_store::LogEntry;
+use crate::part_store::LogInterest;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
 use crate::part_store::LogSelector;
@@ -74,6 +77,8 @@ strike! {
         buckets: BTreeMap<(PartKey, BuckId), BucketSummaryState>,
         /// Scratch for an object's parts while its rows are rewritten.
         part_buf: Vec<PartKey>,
+        /// The log rows the commit in progress has stamped, for the long-poll hub.
+        stamped: Vec<LogKey>,
     }
 }
 
@@ -83,20 +88,15 @@ pub struct MemoryPartStore {
     state: Arc<surelock::mutex::Mutex<State>>,
     /// The log's watch: moved after each stamping commit, outside the lock.
     wakeups: watch::Sender<Rev>,
+    /// The long-poll hub: told after each stamping commit, outside the lock.
+    polls: LongPollHub<LogInterest>,
 }
 
 impl Default for MemoryPartStore {
-    /// A new, empty store with a freshly minted generation.
+    /// A new, empty store with a freshly minted generation, whose long-polls run on the wall
+    /// clock.
     fn default() -> Self {
-        let (wakeups, _) = watch::channel(0);
-        let state = State {
-            generation: Generation::mint(),
-            ..default()
-        };
-        Self {
-            state: Arc::new(surelock::mutex::Mutex::new(state)),
-            wakeups,
-        }
+        Self::with_clock(Arc::new(crate::kit::scheduler::Instant::now))
     }
 }
 
@@ -121,6 +121,20 @@ pub struct MemoryPartTx {
 }
 
 impl MemoryPartStore {
+    /// A new, empty store whose long-poll hub reads `clock`: for tests that own time.
+    pub fn with_clock(clock: Clock) -> Self {
+        let (wakeups, _) = watch::channel(0);
+        let state = State {
+            generation: Generation::mint(),
+            ..default()
+        };
+        Self {
+            state: Arc::new(surelock::mutex::Mutex::new(state)),
+            wakeups,
+            polls: LongPollHub::new(clock),
+        }
+    }
+
     /// Start a transaction. It takes no lock.
     pub fn begin(&self) -> MemoryPartTx {
         MemoryPartTx {
@@ -139,6 +153,7 @@ impl MemoryPartStore {
         Self {
             state: Arc::new(surelock::mutex::Mutex::new(state)),
             wakeups,
+            polls: LongPollHub::new(self.polls.clock()),
         }
     }
 
@@ -170,16 +185,28 @@ impl MemoryPartTx {
             for batch in staged {
                 stamped |= state.apply(rev, batch);
             }
-            if stamped {
-                state.log.publish(rev);
+            if !stamped {
+                assert!(state.stamped.is_empty(), "rows were stamped by no batch");
+                return None;
             }
-            stamped.then_some(rev)
+            state.log.publish(rev);
+            Some((rev, std::mem::take(&mut state.stamped)))
         });
         // After the lock is released: a woken reader must find the commit in place.
-        if let Some(rev) = stamped {
-            store.wakeups.send_replace(rev);
+        let (rev, rows) = stamped?;
+        store.wakeups.send_replace(rev);
+        // A transaction can stamp one key twice (an add then a remove): the log keeps one row.
+        let mut rows = rows;
+        rows.sort_unstable();
+        rows.dedup();
+        let mut changes = BTreeMap::<LogInterest, u64>::new();
+        for key in &rows {
+            for interest in key.interests() {
+                *changes.entry(interest).or_default() += 1;
+            }
         }
-        stamped
+        store.polls.committed(rev, changes);
+        Some(rev)
     }
 }
 
@@ -219,6 +246,7 @@ impl State {
         if is_member {
             row.latest_cursor = rev;
         }
+        self.stamped.push(key.clone());
         self.log.write(rev, key, value);
     }
 }
@@ -390,6 +418,10 @@ impl PartStoreServe for MemoryPartStore {
     /// The log's own watch: the one [`RevSource::watch`] hands out.
     fn watch(&self) -> RevWatch {
         RevWatch::new(self.wakeups.subscribe())
+    }
+
+    fn long_poll(&self) -> LongPollHub<LogInterest> {
+        self.polls.clone()
     }
 
     fn generation(&self) -> impl Future<Output = Res<Generation>> + Send {

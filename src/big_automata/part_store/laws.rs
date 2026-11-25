@@ -20,6 +20,7 @@
 //! | an authorized read carries, from its snapshot, one payload per object with a live row in it, and no other | [`authorized_reads_carry_their_payloads`], every check, [`differential`] |
 //! | a store has a generation from its creation, stable across writes and reads, new after a mint, and carried by every summary | [`generations_identify_the_log`], every check, [`differential`] |
 //! | the responder's rev and watch follow commits like the log's | every commit and rollback |
+//! | the long-poll hub is told, per commit, the interests of the rows it stamped with their counts, and nothing for a commit that stamped none | every commit ([`feed`]) |
 //! | an authorized read equals the oracle's filter of current access | every check, every authorized read in [`differential`] |
 //! | a route delivers every removal above its bound, whatever the membership's `added_at` | [`removals_reach_every_route_above_its_bound`], every route read in [`differential`] |
 //! | incremental bucket summaries equal a recompute | every check |
@@ -86,6 +87,7 @@ pub use crowd::crowded_buckets_count_and_list_every_member;
 pub use crowd::crowded_differential;
 pub use crowd::obj_in_bucket;
 mod edges;
+mod feed;
 pub use edges::a_listing_ends_at_the_last_bucket_of_a_level;
 mod generators;
 pub use generators::part_ops;
@@ -204,8 +206,10 @@ impl<B: Backend> Harness<B> {
         }
         assert_eq!(self.watch.latest(), before, "the watch moved before commit");
         assert_eq!(self.serve_watch.latest(), before);
+        let probes = feed::Probes::park(&self.store, &self.objs, before);
         self.backend.commit(tx).await?;
         let stamped = self.oracle.commit(writes);
+        probes.check(&self.store, before, stamped).await?;
         self.check_revs().await?;
         self.check().await?;
         Ok(stamped)

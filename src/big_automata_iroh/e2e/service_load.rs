@@ -18,9 +18,11 @@ use std::sync::atomic::Ordering;
 use big_automata::BuckId;
 use big_automata::BuckLevel;
 use big_automata::ObjKey;
+use big_automata::long_poll::LongPollHub;
 use big_automata::part_store::AuthorizedPage;
 use big_automata::part_store::Generation;
 use big_automata::part_store::LeafPage;
+use big_automata::part_store::LogInterest;
 use big_automata::part_store::LogRoutes;
 use big_automata::part_store::ObjState;
 use big_automata::part_store::PartStoreServe;
@@ -35,7 +37,7 @@ use utils_rs::prelude::Res;
 
 use super::*;
 
-/// A [`MemoryPartStore`] that counts the watches taken on it: one per started handler that
+/// A [`MemoryPartStore`] that counts the long-poll hubs taken from it: one per started handler that
 /// builds a responder (an update, a round).
 #[derive(Clone, Default)]
 struct Watched {
@@ -49,8 +51,12 @@ impl PartStoreServe for Watched {
     }
 
     fn watch(&self) -> RevWatch {
-        self.watches.fetch_add(1, Ordering::SeqCst);
         self.inner.watch()
+    }
+
+    fn long_poll(&self) -> LongPollHub<LogInterest> {
+        self.watches.fetch_add(1, Ordering::SeqCst);
+        self.inner.long_poll()
     }
 
     fn generation(&self) -> impl Future<Output = Res<Generation>> + Send {
