@@ -33,6 +33,7 @@ use intxt_core::client::key;
 use intxt_core::client::to_value;
 use intxt_core::generic;
 use intxt_core::work;
+use intxt_core::methods::{SummarizeIntxts, SummaryStatus};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -255,6 +256,91 @@ impl Packaging<'_> {
         node.pulls.insert(pull.name(), doc.clone());
         self.save_github(node)?;
         Ok(doc)
+    }
+
+    async fn read_github_pull(&self, doc: &DocId, pull: &PullRef) -> Res<work::GithubPull> {
+        let slot = key(work::GithubPull::ID, &pull.slot())?;
+        let value = self.caller.try_read(doc, &slot).await?.1;
+        let value = value.ok_or_else(|| eyre::eyre!("githubPull datum is absent"))?;
+        serde_json::from_value(value).wrap_err("decoding the githubPull datum")
+    }
+
+    /// `day x intxt github ls`: lists every pull request remembered in the node's GitHub state.
+    pub(crate) async fn github_ls(&self, out: &mut impl Write) -> Res<()> {
+        let Some(node) = self.load_github()? else {
+            return Ok(());
+        };
+        for (name, doc) in &node.pulls {
+            let line = match PullRef::parse(name) {
+                Ok(pull) => match self.read_github_pull(doc, &pull).await {
+                    Ok(datum) => format!("{name}  {:?}  \"{}\"", datum.state, datum.title),
+                    Err(error) => format!("{name}  (unreadable: {error})"),
+                },
+                Err(error) => format!("{name}  (unreadable: {error})"),
+            };
+            writeln!(out, "{line}")?;
+        }
+        Ok(())
+    }
+
+    /// `day x intxt github show`: prints an imported pull request and summarizes its named intxts.
+    pub(crate) async fn github_show(
+        &self,
+        out: &mut impl Write,
+        target: &str,
+    ) -> Res<()> {
+        let pull = PullRef::parse(target)?;
+        let node = self.load_github()?.ok_or_else(|| {
+            eyre::eyre!(
+                "pull request {} was never imported; run `day x intxt github pull`",
+                pull.name()
+            )
+        })?;
+        let doc = node.pulls.get(&pull.name()).cloned().ok_or_else(|| {
+            eyre::eyre!(
+                "pull request {} was never imported; run `day x intxt github pull`",
+                pull.name()
+            )
+        })?;
+        let datum = self.read_github_pull(&doc, &pull).await?;
+        writeln!(out, "{}  {:?}  \"{}\"", pull.name(), datum.state, datum.title)?;
+        writeln!(out, "url: {}", datum.url)?;
+        writeln!(out, "{}", datum.body)?;
+
+        let named = generic::PrLinks::read(&datum.body)
+            .map_err(|error| eyre::eyre!("intxt block: {error}"))?;
+        if named.intxts.is_empty() {
+            writeln!(out, "intxts: none named")?;
+            return Ok(());
+        }
+        writeln!(out, "intxts:")?;
+        let drawers = named
+            .intxts
+            .iter()
+            .map(|link| link.reference.document().clone())
+            .collect();
+        let summarized = super::call(self.client, SummarizeIntxts { drawers }).await?;
+        for (link, summary) in named.intxts.iter().zip(summarized.results) {
+            match summary.status {
+                SummaryStatus::Found => writeln!(
+                    out,
+                    "{}  \"{}\"  {} entries",
+                    summary.link.expect("found intxt summaries have a link"),
+                    summary.title.expect("found intxt summaries have a title"),
+                    summary.entries.expect("found intxt summaries have an entry count")
+                )?,
+                SummaryStatus::NotFound => {
+                    writeln!(out, "{}  not an intxt", link.reference)?;
+                }
+                SummaryStatus::Unreadable => writeln!(
+                    out,
+                    "{}  unreadable: {}",
+                    link.reference,
+                    summary.reason.expect("unreadable intxt summaries have a reason")
+                )?,
+            }
+        }
+        Ok(())
     }
 
     /// `day x intxt github pull`: fetches the pull request with `fetch` (in the CLI, `gh`) and
