@@ -559,16 +559,21 @@ impl<H: HttpTransport> NodeSource<H> {
                 if tag != Comment::ID && tag != Structure::ID {
                     continue;
                 }
-                let malformed =
-                    |error: serde_json::Error| unreadable(format!("{key} in {doc}: {error}"));
-                if tag == Comment::ID {
-                    let comment = serde_json::from_value(value).map_err(malformed)?;
-                    let id = DatumReference::new(ReferenceDocId::Concrete(doc.clone()), key);
-                    notebook.comments.push((id, comment));
+                // A peer's comment or structure that is not one is said as a gap (D95), where
+                // the rest of the notes still stand.
+                let id = DatumReference::new(ReferenceDocId::Concrete(doc.clone()), key.clone());
+                let read = if tag == Comment::ID {
+                    serde_json::from_value(value)
+                        .map(|comment| notebook.comments.push((id, comment)))
                 } else {
-                    let structure = serde_json::from_value(value).map_err(malformed)?;
-                    let id = DatumReference::new(ReferenceDocId::Concrete(doc.clone()), key);
-                    notebook.structures.push((id, structure));
+                    serde_json::from_value(value)
+                        .map(|structure| notebook.structures.push((id, structure)))
+                };
+                if let Err(error) = read {
+                    notebook.gaps.push(Resolved::Gap {
+                        key: key.to_string(),
+                        reason: format!("in {doc}: {error}"),
+                    });
                 }
             }
         }
@@ -719,7 +724,8 @@ impl<H: HttpTransport> NodeSource<H> {
             }
         }
 
-        let notebook = self.notes(drawer).await?;
+        let mut notebook = self.notes(drawer).await?;
+        resolved.append(&mut notebook.gaps);
         let entries: Vec<EntryDatum<'_>> = resolved.iter().map(Resolved::datum).collect();
         let comments: Vec<CommentDatum<'_>> = notebook
             .comments
@@ -797,6 +803,8 @@ enum Resolved {
 struct Notebook {
     comments: Vec<(DatumReference, Comment)>,
     structures: Vec<(DatumReference, Structure)>,
+    /// Comments and structures that could not be read, as gap entries.
+    gaps: Vec<Resolved>,
 }
 
 impl Resolved {

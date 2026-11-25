@@ -674,6 +674,37 @@ fn an_entry_that_cannot_be_read_is_a_gap_and_the_rest_of_the_page_stands() {
 }
 
 #[test]
+fn a_comment_or_structure_that_is_not_one_is_a_gap_and_the_rest_stands() {
+    let node = Rc::new(FakeNode::with_intxt());
+    {
+        let mut docs = node.docs.borrow_mut();
+        let notes = docs.get_mut(&doc(NOTES)).unwrap();
+        notes.insert(
+            key("org.example.intxt.comment", "0192-bad"),
+            json!({"body": 3}),
+        );
+        notes.insert(
+            key("org.example.intxt.structure", "0192-bad"),
+            json!({"kind": "section"}),
+        );
+    }
+    let view = load(&node, DRAWER).unwrap();
+    assert_eq!(view.threads.len(), 1);
+    let gaps: Vec<_> = view
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::Gap)
+        .map(|entry| entry.label.as_str())
+        .collect();
+    assert_eq!(gaps.len(), 2, "{gaps:?}");
+    assert!(gaps.iter().any(|label| label.contains("comment/0192-bad")));
+    assert!(
+        gaps.iter()
+            .any(|label| label.contains("structure/0192-bad"))
+    );
+}
+
+#[test]
 fn an_entry_of_an_unknown_kind_is_kept_as_a_generic_datum() {
     let node = Rc::new(FakeNode::with_intxt());
     add_entries(

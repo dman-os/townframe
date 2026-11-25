@@ -217,7 +217,7 @@ fn fixture() -> IntxtView {
             EntryDatum::JjChange {
                 entry: &work.jj_entry,
                 change: &work.jj_change,
-                commits: &[],
+                commits: &work.jj_commits,
                 patch: None,
             },
             EntryDatum::Session {
@@ -257,10 +257,13 @@ struct FixtureWork {
     git_ref: GitRef,
     jj_entry: JjChangeEntry,
     jj_change: JjChange,
+    /// The change's working-copy states, newest first: on the Commits tab, out of the feed.
+    jj_commits: Vec<CommitDatum>,
 }
 
 /// Four commits: Ada's from the day before, then three by dman, each within 30 minutes of the
-/// last (a burst), the newest at 14:05.
+/// last (a burst), the newest at 14:05; and two working-copy states of a jj change in the middle
+/// of that burst, which the feed leaves out.
 fn fixture_work() -> FixtureWork {
     let pack = format!(
         "dtxt:datum:{}/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949",
@@ -311,7 +314,26 @@ fn fixture_work() -> FixtureWork {
             "src/intxt_web/view.rs",
         ),
     ];
+    let jj_commits = vec![
+        commit(
+            "77b2e0aa11223344",
+            "4c1f0a9b55667788",
+            "dman",
+            "2026-11-23T13:58:00Z",
+            "wip: a diff per file",
+            "src/intxt_web/diff.rs",
+        ),
+        commit(
+            "4c1f0a9b55667788",
+            "cc0fcdcc77a1b2c3",
+            "dman",
+            "2026-11-23T13:55:00Z",
+            "wip: a diff per file",
+            "src/intxt_web/diff.rs",
+        ),
+    ];
     FixtureWork {
+        jj_commits,
         commits: serde_json::from_value(json!({
             "base": "org.example.intxt.work.gitCommit/43f9b548c0de1234",
             "tip": "org.example.intxt.work.gitCommit/aa0fcdcc77a1b2c3",

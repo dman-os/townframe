@@ -680,13 +680,28 @@ fn participant(participant: &Participant) -> String {
         .unwrap_or_else(|| spelling(&participant.kind).to_lowercase())
 }
 
+/// What a reader calls the kind of datum a target points at, from the datum's tag.
+fn target_noun(tag: &str) -> &'static str {
+    match tag.rsplit('.').next().unwrap_or(tag) {
+        "comment" => "a comment",
+        "promptTurn" => "a session message",
+        "agentSession" => "a session",
+        "gitCommit" => "a commit",
+        "gitRef" => "a branch",
+        "githubPull" => "a pull request",
+        "worktreeOp" => "a working-copy change",
+        "structure" => "a guide section",
+        _ => "a datum",
+    }
+}
+
 pub(crate) fn target_view(target: &Target) -> TargetView {
-    let location = target.source.location().to_string();
+    let noun = target_noun(target.source.location().reference().key().tag().as_str());
     let label = match (&target.path, &target.lines) {
         (Some(path), Some(lines)) => format!("{path}:{}-{}", lines.start, lines.end),
         (Some(path), None) => path.clone(),
-        (None, Some(lines)) => format!("{location} lines {}-{}", lines.start, lines.end),
-        (None, None) => location,
+        (None, Some(lines)) => format!("{noun}, lines {}-{}", lines.start, lines.end),
+        (None, None) => noun.to_owned(),
     };
     TargetView {
         label,

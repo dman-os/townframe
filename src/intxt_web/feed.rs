@@ -61,7 +61,14 @@ impl IntxtView {
         let mut seen = BTreeSet::new();
         let mut items = Vec::new();
         for (index, entry) in self.entries.iter().enumerate() {
-            for commit in &entry.commits {
+            // A jj change's commits are working-copy states of one change, not commits of the
+            // work: they are on the Commits tab and out of the conversation (and its bursts).
+            let commits: &[_] = if entry.kind == EntryKind::JjChange {
+                &[]
+            } else {
+                &entry.commits
+            };
+            for commit in commits {
                 if seen.insert(commit.sha.as_str()) {
                     items.push(FeedItem {
                         at: Some(commit.at),
@@ -262,5 +269,35 @@ mod tests {
         ]);
         assert_eq!(items[0].what, FeedKind::Entry(1));
         assert_eq!(items[1].what, FeedKind::Entry(2));
+    }
+
+    #[test]
+    fn the_fixture_feed_leaves_out_a_jj_changes_states_and_keeps_the_burst_whole() {
+        use crate::source::FixtureSource;
+        let view = FixtureSource::view();
+        let feed = view.feed();
+        let shown: Vec<&str> = feed
+            .iter()
+            .filter_map(|item| match &item.what {
+                FeedKind::Commits(commits) => Some(commits),
+                _ => None,
+            })
+            .flatten()
+            .map(|commit| commit.sha.as_str())
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "aa0fcdcc77a1b2c3",
+                "bb0fcdcc77a1b2c3",
+                "cc0fcdcc77a1b2c3",
+                "dd0fcdcc77a1b2c3"
+            ]
+        );
+        // The states are still on the Commits tab's revision.
+        let revision = view
+            .revisions()
+            .find(|(_, entry)| entry.kind == EntryKind::JjChange);
+        assert_eq!(revision.unwrap().1.commits.len(), 2);
     }
 }
