@@ -225,7 +225,8 @@ pub async fn sync_backend_laws<R: BackendRig>(rig: &R) -> Res<()> {
     let (held, stamp) = (p.held(&obj(1)).await?, rig.stamp(&p.backend).await?);
     let job = Probe::<R>::job(1, &[2, 3], &[1], 11);
     rig.fail_next_write(&p.backend);
-    p.pass(&job)
+    let _failure = p
+        .pass(&job)
         .await
         .expect_err("a write told to fail succeeded");
     assert_eq!(p.held(&obj(1)).await?, held, "a failed job left a trace");
@@ -254,7 +255,8 @@ pub async fn sync_backend_laws<R: BackendRig>(rig: &R) -> Res<()> {
                 "a downloading backend fetches {job:?}"
             );
             let (held, stamp) = (p.held(&obj(1)).await?, rig.stamp(&p.backend).await?);
-            p.backend
+            let _failure = p
+                .backend
                 .fetch(job)
                 .await
                 .expect_err("a fetch of content the peer dropped succeeded");
@@ -269,7 +271,8 @@ pub async fn sync_backend_laws<R: BackendRig>(rig: &R) -> Res<()> {
         p.peer(2, None).await?;
         let job = Probe::<R>::job(2, &[1], &[], 12);
         assert_eq!(p.backend.record(job.clone()).await?, Settle::Fetch);
-        p.backend
+        let _failure = p
+            .backend
             .fetch(job.clone())
             .await
             .expect_err("a fetch of an object the peer never held succeeded");
