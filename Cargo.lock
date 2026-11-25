@@ -2769,6 +2769,7 @@ dependencies = [
  "intxt_core",
  "keyring-core",
  "method_core",
+ "micros_nodule",
  "secrets_rs",
  "serde_json",
  "service_client_core_rs",

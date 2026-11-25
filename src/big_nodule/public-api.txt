@@ -40,4 +40,3 @@ pub type big_nodule::NodulesHandler = Arc < NoduleService >
 pub type big_nodule::egress::HttpBody = UnsyncBoxBody < Bytes , std :: io :: Error >
 pub use big_nodule::requests :: MissingAuthorityLookup
 pub use big_nodule::service_client_core_rs :: xrpc :: XrpcBody
-pub use big_nodule::state :: RoutineScopes

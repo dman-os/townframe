@@ -17,8 +17,9 @@ pub impl day_node::PeerSettings::fn peers_config (& self , relay : bool) -> Res 
 pub struct day_node::BlobSettings  { upload_hold_grace_secs: Option < u64 > }
 pub struct day_node::DevSettings  { allow_slot_takeover: bool }
 pub struct day_node::HeldNode  { node: BigNode }
+pub struct day_node::ListenSettings  { tcp: Option < std :: net :: SocketAddr > }
 pub struct day_node::NetSettings  { allow_host_loopback: bool }
-pub struct day_node::NodeSettings  { peers: Option < PeerSettings >, relay: bool, dev: DevSettings, net: NetSettings, blobs: BlobSettings }
+pub struct day_node::NodeSettings  { peers: Option < PeerSettings >, relay: bool, dev: DevSettings, net: NetSettings, blobs: BlobSettings, listen: ListenSettings }
 pub struct day_node::PeerSettings  { bootstrap: Vec < String >, loopback_only: bool, listen_port: Option < u16 > }
 pub use day_node::holder :: Attached
 pub use day_node::holder :: Booted
