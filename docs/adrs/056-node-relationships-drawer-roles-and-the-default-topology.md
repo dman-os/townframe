@@ -48,6 +48,9 @@ K1-K3 trade against K4-K5. The default keeps the eager set small and owner-chose
 through always-on nodes: mothers and anchors. Every e2e scenario for the topology reports the indicators it
 moves.
 
+The target is parity with standard applications (a chat or notes app on the same device). There are no numbers
+yet; they come from experiments, measured per profile, because a web node, a phone and a laptop differ.
+
 ### 2. Relationships and profiles are separate axes
 
 Two separate questions:
@@ -67,13 +70,19 @@ These hold between nodes, and they live in the owner's root (configuration) draw
 share (F6).
 - **Twin:** another node of the same owner.
   - It learns the owner's configuration (F6, F7) and holds plaintext.
-  - It may dial its twins at any time.
+  - It may dial its twins and is always let in by them, but it doesn't have to: twins normally meet through their
+    mothers (§5).
   - This is ADR 038's sister, renamed: two twins are peers of equal standing, and neither is primary.
 - **Mother:** an always-on node the owner backs up to and rendezvous through (F2, F9).
   - The owner's nodes dial it, and it never dials them. It pulls their uploads over the connection they opened.
   - By default it gets `relay` on every drawer the owner creates, and is an anchor of each.
   - An owner may have several mothers. A node dials them in the owner's order and falls back to the next one
     when a mother is unreachable.
+  - Several mothers can also serve separate purposes, e.g. one per privacy context, so that the people who know
+    one of my mothers don't learn the others. A mother is not *the* home server; an owner has as many as its
+    contexts need.
+  - An invitation to me is left at one of my mothers, the one for the context I gave out (identity-drawer-grants.md
+    §"A public front group").
 
 ### 4. Drawer roles
 
@@ -108,15 +117,27 @@ Dialing out:
 
 | Moment | Dial out to | Why |
 |---|---|---|
-| Boot | my mothers, then my twins | the whole eager set: bounded and owner-chosen (K2, K4, K5) |
+| Boot | my mothers | the whole eager set: bounded and owner-chosen (K2, K4, K5) |
 | A drawer becomes active (opened in a UI, or a processor, routine or micro subscribes) | that drawer's anchors | lazy; kept while active, then for a linger period (K1, K4) |
 | A drawer marked keep-warm | its anchors, at boot | an opt-in per drawer, for drawers I follow while they're closed |
 | A local write | the drawer's anchors, plus my mothers if they hold the drawer | over open connections, dialing an anchor if none is open (K2) |
-| Twins | each other, opportunistically | configuration and shared drawers; mothers cover them while they sleep |
+| Twins | each other only when it pays (below) | twins normally exchange through their mothers |
 
 Drawers often share anchors (the same owner's mothers), so dialing is per anchor, not per drawer. One connection to an
 anchor serves every active drawer it anchors. A node caps its lazy connections globally and evicts the
 least recently active anchor first.
+
+By default a node talks only to its mothers (operator, 2026-11-25). Twins reach each other through a shared mother,
+so a twin connection is an optimisation, decided by policy rather than made at boot:
+- **Direction follows profile.** The less capable node dials the more capable one (the phone dials the laptop, the
+  laptop doesn't dial the phone).
+- **Locality.** A periodic check looks for twins on the same local network and prefers a direct connection there.
+  Across a WAN, twins go through the mother.
+- **Staleness.** A twin not seen through any path for a long time (say a day) is worth a direct attempt.
+
+Drawer policy refines the defaults per drawer, as a later policy layer:
+- a sensitive drawer may never be placed on a mother or any `relay`-only member;
+- a drawer that wants live updates keeps its anchors warm (the keep-warm row above).
 
 Inbound:
 
@@ -174,13 +195,20 @@ Inbound:
 
 ## Open questions
 
-1. Which two indicators dominate the defaults? The proposal says K2 and K4. Are there target numbers?
+1. Which indicators dominate the defaults? The proposal says K2 and K4. The target is parity with standard
+   applications; the numbers come from experiments per profile (web node, phone, laptop).
 2. ~~Is "sister" retired?~~ Retired for now (operator, 2026-11-25), and kept free for a relationship that may need it soon.
-3. The default linger period after a drawer goes inactive, and the global cap on lazy connections to anchors.
+3. The default linger period after a drawer goes inactive, and the global cap on lazy connections to anchors:
+   set from experiments.
 4. Keep-warm: is it set per drawer, or per class of drawer (e.g. every drawer shared by a given person)?
 5. Is "members dial anchors, anchors never dial members" a hard rule? Or may an anchor wake a sleeping
-   member, e.g. through a mobile push channel?
+   member, e.g. through a mobile push channel? A chat-style use needs a notification system; the operator's
+   direction is a notification service a relay offers, like ATSMS's, designed later.
 6. Does adding a mother backfill it as an anchor of existing drawers, or only new ones (ADR 038 open
-   question 2)? Republishing anchors on old drawers changes what their members dial.
-7. Is a deny list needed beside the allow-only inbound rule (Matrix applies server ACLs to every inbound request),
-   for anchors or members a node no longer trusts?
+   question 2)? Republishing anchors on old drawers changes what their members dial. The operator's direction
+   (2026-11-25), to settle when it's built: an owner (their recovery principal) keeps one **super drawer** that
+   holds every drawer meant for a mother, and most drawers go into it by default. The super drawer is what a
+   mother holds. Adding a mother then means one grant on the super drawer, not a sweep over every drawer.
+   Drawers kept off mothers stay outside it, and further super drawers can split what goes where.
+7. ~~Is a deny list needed?~~ No (operator, 2026-11-25): inbound is allow-only, so leaving a node off the allow
+   list is the denial.
