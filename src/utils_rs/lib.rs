@@ -1,3 +1,4 @@
+pub mod alloc_count;
 pub mod batching;
 pub mod census;
 pub mod lru;

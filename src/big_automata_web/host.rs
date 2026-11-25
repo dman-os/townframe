@@ -138,9 +138,11 @@ async fn run_accept() {
                 .expect("accepting an incoming connection")
                 .await
                 .expect("completing the handshake");
-            let (mut send, mut recv) =
-                connection.accept_bi().await.expect("the dialer's stream");
-            let request = recv.read_to_end(1 << 16).await.expect("reading the request");
+            let (mut send, mut recv) = connection.accept_bi().await.expect("the dialer's stream");
+            let request = recv
+                .read_to_end(1 << 16)
+                .await
+                .expect("reading the request");
             send.write_all(&request).await.expect("echoing");
             send.finish().expect("finishing the echo");
             let (echoed, closed) = counters.get();
@@ -182,6 +184,29 @@ async fn run_dial(target: iroh::EndpointId) {
     show("echo", &String::from_utf8(echo).expect("the echo is text"));
 }
 
+// Counts the allocations of `?mode=bench`; costs one thread-local read per allocation otherwise.
+#[global_allocator]
+static HEAP: utils_rs::alloc_count::CountingAllocator = utils_rs::alloc_count::CountingAllocator;
+
+/// `?mode=bench&n=<objects>&rtt_ms=<ms>`: the whole-sync workload of `big_automata::bench` with
+/// two in-memory nodes in this page, timed by `performance.now()` (what `web_time` reads) and
+/// reported, never gated: a browser has no instruction counter. `#bench` holds one
+/// `BENCH_RECORD` line per measurement.
+async fn run_bench(objects: usize, rtt_ms: u64) {
+    let clock: big_automata::Clock = Arc::new(web_time::Instant::now);
+    let report = big_automata::bench::sync_once(
+        objects,
+        std::time::Duration::from_millis(rtt_ms),
+        |_| {},
+        clock,
+    )
+    .await;
+    show(
+        "bench",
+        &report.record_lines("big_automata::whole_sync").join("\n"),
+    );
+}
+
 pub fn main() {
     console_error_panic_hook::set_once();
     let search = web_sys::window()
@@ -203,6 +228,15 @@ pub fn main() {
             let target = param("target").expect("dial mode takes target=<endpoint id>");
             wasm_bindgen_futures::spawn_local(run_dial(
                 target.parse().expect("target is an endpoint id"),
+            ));
+        }
+        Some("bench") => {
+            let number = |name: &str, default: u64| {
+                param(name).map_or(default, |value| value.parse().expect("a number"))
+            };
+            wasm_bindgen_futures::spawn_local(run_bench(
+                usize::try_from(number("n", 1000)).expect("fits"),
+                number("rtt_ms", 0),
             ));
         }
         Some(other) => panic!("unknown mode {other}"),
