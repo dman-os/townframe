@@ -675,6 +675,7 @@ impl Node {
         big_dispatch::boot(DispatchConfig {
             authority: authority.client.clone(),
             namespace,
+            activity: utils_rs::activity::Activity::new(),
         })
     }
 

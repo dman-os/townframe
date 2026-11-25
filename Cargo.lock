@@ -1501,6 +1501,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "utils_rs",
 ]
 
 [[package]]
