@@ -105,10 +105,14 @@ static REGISTRY_UNIVERSE: LazyLock<Universe> = LazyLock::new(registry_universe);
 
 /// The schema registration groups for the registry's datums: the envelope and the cartridge
 /// identity (declared by the registry's own universe), and the payload tags a version's pins name
-/// (Lexicons, sidecars and typed components). The payload tags are open objects: a Lexicon is
-/// validated by Lexicon admission and a sidecar or component by the typed view the registry
-/// resolves it through, so the datum schema only has to admit the write. The `Blob` Lexicon the
-/// artifact references use is registered beside them by big_blobs.
+/// (Lexicons, sidecars and typed components). Lexicons and components are open objects: a Lexicon
+/// is validated by Lexicon admission and a component by the typed view the registry resolves it
+/// through, so the datum schema only has to admit the write. A sidecar is a JSON Schema document,
+/// so it is stored as its JSON text (`{ schema }`): stored as an object, its `$bytes` and `$type`
+/// property names would be read as the atproto values they describe. The text is a hole the
+/// Lexicon cannot type, and the tag's own supplement says what fills it: JSON that the JSON Schema
+/// 2020-12 meta-schema accepts. The `Blob` Lexicon the artifact references use is registered beside
+/// them by big_blobs.
 pub fn schema_groups() -> [SchemaRegistrationGroup<'static>; 2] {
     use big_cartridges_core::registry::COMPONENT_TAG;
     use big_cartridges_core::registry::LEXICON_TAG;
@@ -118,7 +122,7 @@ pub fn schema_groups() -> [SchemaRegistrationGroup<'static>; 2] {
     let registrations = lexicons
         .into_iter()
         .map(|lexicon| SchemaRegistration::new(lexicon.id, lexicon.file));
-    let payloads = [LEXICON_TAG, SIDECAR_TAG, COMPONENT_TAG].map(|tag| {
+    let open = |tag: &str| {
         SchemaRegistration::new(
             tag,
             serde_json::json!({
@@ -127,7 +131,32 @@ pub fn schema_groups() -> [SchemaRegistrationGroup<'static>; 2] {
                 "defs": { "main": { "type": "object", "properties": {} } }
             }),
         )
-    });
+    };
+    let sidecar = SchemaRegistration::new(
+        SIDECAR_TAG,
+        serde_json::json!({
+            "lexicon": 1,
+            "id": SIDECAR_TAG,
+            "defs": { "main": {
+                "type": "object",
+                "required": ["schema"],
+                "properties": { "schema": { "type": "string" } }
+            } }
+        }),
+    )
+    .with_supplement(serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": "#/$defs/Sidecar",
+        "$defs": { "Sidecar": {
+            "type": "object",
+            "properties": { "schema": {
+                "type": "string",
+                "contentMediaType": "application/schema+json",
+                "contentSchema": { "$ref": "https://json-schema.org/draft/2020-12/schema" }
+            } }
+        } }
+    }));
+    let payloads = [open(LEXICON_TAG), sidecar, open(COMPONENT_TAG)];
     [
         SchemaRegistrationGroup::new(Some(bundle), registrations, Vec::new()),
         SchemaRegistrationGroup::new(None, payloads, Vec::new()),
