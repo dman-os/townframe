@@ -1177,13 +1177,23 @@
       min-height: var(--ct-dimension-target-coarse);
     }
   }
-  .ct-tabs [data-part="tab"]:hover:not(:disabled) {
+  .ct-tabs [data-part="tab"][data-state="inactive"]:hover:not(:disabled) {
     background: var(--ct-color-canvas);
+    color: var(--ct-color-text);
+  }
+  .ct-tabs [data-part="tab"][data-state="inactive"]:active:not(:disabled) {
+    background: var(--ct-color-surface-raised);
     color: var(--ct-color-text);
   }
   .ct-tabs [data-part="tab"][data-state="active"] {
     background: var(--ct-color-accent-container);
     color: var(--ct-color-on-accent-container);
+  }
+  .ct-tabs [data-part="tab"][data-state="active"]:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+  .ct-tabs [data-part="tab"][data-state="active"]:active:not(:disabled) {
+    filter: brightness(0.94);
   }
   .ct-tabs [data-part="tab"]:focus-visible {
     outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
