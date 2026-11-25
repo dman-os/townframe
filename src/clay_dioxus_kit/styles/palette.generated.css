@@ -13,13 +13,14 @@
     --ct-palette-neutral-4: light-dark(#efedf4, #1f1f25);
     --ct-palette-neutral-5: light-dark(#e9e7ef, #29292f);
     --ct-palette-neutral-6: light-dark(#c7c5d0, #46464f);
-    --ct-palette-neutral-7: light-dark(#85838d, #6d6d76);
-    --ct-palette-neutral-8: light-dark(#767680, #90909a);
+    --ct-palette-neutral-7: light-dark(#767680, #6d6d76);
+    --ct-palette-neutral-8: light-dark(#6f6f79, #90909a);
     --ct-palette-neutral-9: light-dark(#66666f, #a2a1ac);
     --ct-palette-neutral-10: light-dark(#56565f, #b4b3be);
     --ct-palette-neutral-11: light-dark(#46464f, #c7c5d0);
     --ct-palette-neutral-12: light-dark(#1b1b21, #e4e1e9);
     --ct-palette-neutral-contrast: light-dark(#ffffff, #131318);
+    --ct-palette-neutral-sunken: light-dark(#dbd9e0, #131318);
     --ct-palette-primary-1: light-dark(#f0f1fa, #131623);
     --ct-palette-primary-2: light-dark(#eaebfa, #1f2339);
     --ct-palette-primary-3: light-dark(#dee0ff, #3a4379);
@@ -100,7 +101,7 @@
     --ct-palette-info-contrast: light-dark(#ffffff, #2d2f42);
 
     --ct-color-canvas: var(--ct-palette-neutral-1);
-    --ct-color-surface-sunken: var(--ct-palette-neutral-2);
+    --ct-color-surface-sunken: var(--ct-palette-neutral-sunken);
     --ct-color-surface: var(--ct-palette-neutral-3);
     --ct-color-surface-raised: var(--ct-palette-neutral-4);
     --ct-color-text: var(--ct-palette-neutral-12);
@@ -108,7 +109,7 @@
     --ct-color-text-subtle: var(--ct-palette-neutral-11);
     --ct-color-border: var(--ct-palette-neutral-6);
     --ct-color-border-strong: var(--ct-palette-neutral-7);
-    --ct-color-focus: var(--ct-palette-primary-8);
+    --ct-color-focus: var(--ct-palette-primary-9);
     --ct-color-primary: var(--ct-palette-primary-9);
     --ct-color-on-primary: var(--ct-palette-primary-contrast);
     --ct-color-primary-container: var(--ct-palette-primary-3);
