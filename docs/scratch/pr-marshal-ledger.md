@@ -27,6 +27,9 @@ Scope: what lands on main, in what order, and what the operator reviews next, ac
 
 - **M6 (2026-11-25):** building ADR 056 (topology, anchors, peer policy) and the grant/invite system (invite tickets, `day peers add-card`) waits until the automata lane delivers keyline, i.e. the upstream keyhive/keyline move. The nodules lane builds it afterwards, along with the topology experiments harness.
 
+- **M7 (2026-11-26):** the #114 header move goes to automata's cut A: a `nodule_wire` contract crate with the six header names and a typed `GuestAuthority`; service_core_rs keeps only generic named request metadata. The wire is unchanged.
+- **M8 (2026-11-26):** dpaths is the focus. Slots use ADR 035's Go string-literal escaping (decided in the 2026-10-14 session; URL encoding was only a leaning in #47's FDR). The last dpaths working session was atuin 01a12c3170da7a6ebba4b41f1c08dbaa (2026-10-11/12).
+
 ## How to land a stack (learned 2026-11-25)
 
 - A PR that belongs to a native GitHub stack can't be merged per PR: `PUT /pulls/{n}/merge` answers 403, "use the asynchronous merge endpoint".
@@ -40,6 +43,8 @@ Scope: what lands on main, in what order, and what the operator reviews next, ac
 - **A PR record stuck on an old head** (pushes dropped during a GitHub incident): push the branch back to the head GitHub has on record, then forward to the real tip. Each push is then processed. Moving the branch back one commit (`tip^`) is the dangerous variant above.
 - **Closing and reopening a PR to resync it** fails once the branch has moved ("force-pushed or recreated"). Reopening needs the branch at the PR's recorded head.
 - **When a native stack is wedged:** `gh stack unstack <n>` (merged PRs stay stacked), land one PR at a time with the normal merge endpoint (scratch `land2.sh`: rebase onto the new main, tree check before and after), then `gh stack link` the rest as a fresh stack.
+- **Un-drafting for a landing starts full CI on every PR in the range** (`ready_for_review`). Cancel those runs as soon as the PRs merge. On 2026-11-25 the 46 un-drafted node PRs held the repo's runners for 3 hours (184 runs), and #386 sat queued behind them.
+- **A run whose jobs never get a runner** (queued for hours, no runner assigned, while GitHub reports Actions operational) is cleared by cancelling it and starting `gh run rerun`. Check first that stale runs aren't holding the runners.
 - Verify every landing by tree: each squash commit's tree must equal its layer's reviewed branch tree.
 
 ## Landing log
