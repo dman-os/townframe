@@ -133,8 +133,13 @@ D-numbers are stable names; the archive holds each one's original text.
 
 Items are open unless noted; verify against the stack before starting.
 
-- `getNodeInfo` reports drawer ids (present, originated, config) and `day dump node` walks them (node-79).
-- Descendant-scoped `openActor`/`mintCapability` (node-78), the typed client in `day_node`, the micros nodule (ADR 052 §11).
+- Done 2026-11-24: `getNodeInfo` drawer ids and `day dump node` (node-79, #326); `openActor` unprivileged and `attenuateCapability { subject }` (node-78, #325); `node.json` `listen.tcp` (node-80, intxt C15).
+- intxt citizenship C16-C18 (2026-11-24, from the web viewer #310 reading a node over TCP XRPC):
+  - C16: there is no operator path to mint a dispatch capability (`dispatch.mintCapability` is not on XRPC), so the viewer carries three shared-secret handles per node.
+  - C17: anonymous XRPC reads (readDatums/pollDatums/blobs.read) of drawers granted Read to keyhive's Public agent, with no bearer. Folded into C11.
+  - C18: handles die at restart. This is by design (ADR 037 §4-5, no sturdyrefs). A viewer holding bearer handles across restarts is the sturdyref case ADR 037 says needs an operator decision. The leaning is C17 for public drawers, or an admitted viewer actor with a durable grant that authenticates its channel and gets handles minted on connect. This is an operator question; see below.
+  - A 403 (not 404) for an unknown drawer under a handle that does not reach it is intended: a 404 would be an existence oracle.
+- The typed client in `day_node`, the micros nodule (ADR 052 §11).
 - Follow-ups queued in #252 from the #106-#114 review threads (answered 2026-11-24): an inline-SQL guardrail; the upload grace period as a node setting; `private_state` to `local_state` and dropping `Kv`; operation to method in the grant docs; a protocol header catalog, moving the `x-nodule-*` headers out of `service_core_rs`; NSID eradication (audit at `docs/scratch/nsid-audit.md`), its own layer later; a native local-client read path for blobs, added to ADR 051 §2.
 - Cut the v1 seed migration (operator question below).
 - Historical causal checkpoints log WARN "missing entry encryption key" and return a `MissingDocumentKeys` blocker even for checkpoint ids (`try_causal_decrypt`, `big_repo/runtime2/native.rs` ~1100); for `is_causal_checkpoint_id` ids log at debug and return no blocker. Same family as the relay's warn.
@@ -180,6 +185,7 @@ They will come back to these.
 - **Sharp-edges (#249):** ids on `UnrelatedHistory` and `Conflict` (recommended yes); keep the `CommandId` name (recommended); location/backtrace only under RUST_BACKTRACE.
 - **The atmosphere border (shelved):** run the spaces experiment and review draft ADR 048 (three tiers, inward direction).
 - **Not offering node-local methods** (see Deferred).
+- **Remote readers over TCP (intxt C16/C18):** a sturdyref (a durable bearer handle) for the web viewer, or an admitted viewer actor that authenticates its channel and holds a durable grant? The nodules lane recommends the actor, plus C17's anonymous public reads.
 
 ## Archive index
 
