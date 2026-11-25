@@ -43,7 +43,7 @@ impl DocsService {
         let (heads, mut fork) = source
             .with_document_read(|doc| -> Result<_, DocsError> {
                 context.validate()?;
-                let heads = resolve(doc, &params.at)?;
+                let heads = resolve(&params.source_id, doc, &params.at)?;
                 // A merge brings the source's history into the target unexamined, so it is held to
                 // what a write's base is held to: every datum it brings — including one whose
                 // content was removed but whose signatures remain — must be accepted.

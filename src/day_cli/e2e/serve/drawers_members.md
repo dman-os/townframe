@@ -19,14 +19,12 @@ has not met 5866666666666666666666666666666666666666666666666666666666666666: co
 
 $ day drawers add-member nonsense 5866666666666666666666666666666666666666666666666666666666666666 --access read
 ? 1
-Error:[..]
-   0: `nonsense` is not a drawer id[..]
+Error: `nonsense` is not a drawer id[..]
 ...
 
 $ day drawers add-member z11111111111111111111111111111111 nonsense --access read
 ? 1
-Error:[..]
-   0: `nonsense` is not a node id[..]
+Error: `nonsense` is not a node id[..]
 ...
 
 $ sh -c '"$DAY" drawers revoke-member z11111111111111111111111111111111 5866666666666666666666666666666666666666666666666666666666666666 2>&1 | grep -o "the node refused the revocation: UnknownDrawer" | head -1'
@@ -34,8 +32,7 @@ the node refused the revocation: UnknownDrawer
 
 $ day drawers revoke-member nonsense 5866666666666666666666666666666666666666666666666666666666666666
 ? 1
-Error:[..]
-   0: `nonsense` is not a drawer id[..]
+Error: `nonsense` is not a drawer id[..]
 ...
 
 $ day node stop

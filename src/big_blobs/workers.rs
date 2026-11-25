@@ -394,7 +394,7 @@ fn spawn_worker(
                             }
                         }
                         Err(ClientError::Method(error @ (DocsError::Denied | DocsError::Access(_)))) => { tracing::info!(target: "instr", %document, ?error, inventory_doc, "INSTR blob worker read denied; parking"); /* INSTR */ (Vec::new(), BTreeMap::new(), true) }
-                        Err(ClientError::Method(error @ (DocsError::DocNotFound | DocsError::Pending { .. } | DocsError::UnknownHeads { .. } | DocsError::AuthorityUnavailable(_)))) => {
+                        Err(ClientError::Method(error @ (DocsError::DocNotFound { .. } | DocsError::Pending { .. } | DocsError::UnknownHeads { .. } | DocsError::AuthorityUnavailable(_)))) => {
                             tracing::info!(target: "instr", %document, ?error, inventory_doc, "INSTR blob worker read not ready; parking"); // INSTR
                             queue.finish(&document, generation, true).await?;
                             continue;
@@ -593,7 +593,7 @@ async fn poll_document(
             Ok(page) => page,
             Err(ClientError::Method(
                 DocsError::Denied
-                | DocsError::DocNotFound
+                | DocsError::DocNotFound { .. }
                 | DocsError::Pending { .. }
                 | DocsError::UnknownHeads { .. }
                 | DocsError::AuthorityUnavailable(_)
@@ -728,7 +728,7 @@ async fn enqueue_root_members(
                 | DrawersError::Docs(
                     DocsError::Denied
                     | DocsError::Access(_)
-                    | DocsError::DocNotFound
+                    | DocsError::DocNotFound { .. }
                     | DocsError::Pending { .. }
                     | DocsError::UnknownHeads { .. }
                     | DocsError::AuthorityUnavailable(_),

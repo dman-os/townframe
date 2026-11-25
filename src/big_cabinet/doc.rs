@@ -297,23 +297,26 @@ fn sorted(mut heads: Vec<ChangeHash>) -> Vec<ChangeHash> {
 
 /// Existence is read from change metadata: `get_change_by_hash` re-encodes the change by scanning
 /// every operation in the document.
-fn check_heads(doc: &Automerge, heads: &[ChangeHash]) -> Result<(), DocsError> {
+fn check_heads(doc_id: &DocId, doc: &Automerge, heads: &[ChangeHash]) -> Result<(), DocsError> {
     let unknown: Vec<_> = heads
         .iter()
         .copied()
         .filter(|head| doc.get_change_meta_by_hash(head).is_none())
         .collect();
     if !unknown.is_empty() {
-        return Err(DocsError::UnknownHeads { heads: unknown });
+        return Err(DocsError::UnknownHeads {
+            doc_id: doc_id.clone(),
+            heads: unknown,
+        });
     }
     Ok(())
 }
 
-fn resolve(doc: &Automerge, at: &At) -> Result<Vec<ChangeHash>, DocsError> {
+fn resolve(doc_id: &DocId, doc: &Automerge, at: &At) -> Result<Vec<ChangeHash>, DocsError> {
     match at {
         At::Current => Ok(sorted(doc.get_heads())),
         At::Heads(heads) => {
-            check_heads(doc, heads)?;
+            check_heads(doc_id, doc, heads)?;
             Ok(sorted(heads.clone()))
         }
     }
@@ -643,9 +646,11 @@ impl DocsService {
 
     async fn handle(&self, doc_id: &DocId) -> Result<BigDocHandle, DocsError> {
         match self.big_repo.get_doc(doc_id).await.map_err(repository)? {
-            DocLookup::Missing => Err(DocsError::DocNotFound),
+            DocLookup::Missing => Err(DocsError::DocNotFound {
+                doc_id: doc_id.clone(),
+            }),
             DocLookup::PendingMaterialization => Err(DocsError::Pending {
-                reason: "document materialization".into(),
+                reason: format!("materialization of document {doc_id}"),
             }),
             DocLookup::Ready(document) => Ok(document),
         }

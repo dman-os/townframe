@@ -9,8 +9,7 @@ initialized node [..] at [..]/node
 
 $ day peers add nonsense
 ? 1
-Error:[..]
-   0: `nonsense` is not an endpoint ticket
+Error: `nonsense` is not an endpoint ticket[..]
 ...
 
 $ day peers ls

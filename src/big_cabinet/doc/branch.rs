@@ -68,7 +68,7 @@ impl DocsService {
         let fork = origin
             .with_document_read(|doc| -> Result<Automerge, DocsError> {
                 context.validate()?;
-                let heads = resolve(doc, &params.at)?;
+                let heads = resolve(&params.doc_id, doc, &params.at)?;
                 doc.fork_at(&heads).map_err(repository)
             })
             .await?;

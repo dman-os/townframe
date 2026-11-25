@@ -35,6 +35,12 @@ pub use inspection::UnsafeDatumInspection;
 pub use inspection::UnsafeInspectDatum;
 pub use inspection::VerifiedSignatureEvidence;
 
+/// A caller-chosen retry key. It deduplicates retries of one request **on the node that received
+/// it, and only there**: the command ledger is per node, never replicated. A command id is not a
+/// global name. Two nodes that run the same id each execute the command, so a create under a
+/// fixed id on two nodes makes two documents; to converge on one document across nodes, use a
+/// name that is resolved in replicated state (for example a metadata document's `kind`/`name`
+/// slot), not a command id.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
@@ -246,10 +252,11 @@ pub enum DocsError {
     Access(String),
     #[error("document repository failed: {0}")]
     Repository(String),
-    #[error("document is not locally available")]
-    DocNotFound,
-    #[error("requested heads are unknown: {heads:?}")]
+    #[error("document {doc_id} is not locally available")]
+    DocNotFound { doc_id: DocId },
+    #[error("requested heads are unknown in document {doc_id}: {heads:?}")]
     UnknownHeads {
+        doc_id: DocId,
         #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
         heads: Vec<ChangeHash>,
     },
@@ -464,6 +471,8 @@ pub struct MintDocCapability {
 #[serde(rename_all = "camelCase")]
 pub struct CreateDoc {
     pub capability: CapId,
+    /// Deduplicates retries of this create on this node only. Another node given the same id
+    /// creates its own, different document.
     pub command: CommandId,
     pub placement: String,
     pub datums: BTreeMap<DatumKey, Json>,
@@ -696,6 +705,25 @@ declare_service_protocol! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_errors_name_their_document() {
+        let doc_id = DocId::new([7; 32]);
+        for error in [
+            DocsError::DocNotFound {
+                doc_id: doc_id.clone(),
+            },
+            DocsError::UnknownHeads {
+                doc_id: doc_id.clone(),
+                heads: vec![],
+            },
+        ] {
+            assert!(
+                error.to_string().contains(&doc_id.to_string()),
+                "{error} does not name {doc_id}"
+            );
+        }
+    }
 
     fn only(tags: &[&str]) -> DatumKinds {
         DatumKinds::Only(

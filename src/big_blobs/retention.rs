@@ -180,7 +180,7 @@ impl Retention {
             Ok(read) => Ok(Some(read)),
             Err(ClientError::Method(
                 DocsError::Denied
-                | DocsError::DocNotFound
+                | DocsError::DocNotFound { .. }
                 | DocsError::Pending { .. }
                 | DocsError::UnknownHeads { .. }
                 | DocsError::AuthorityUnavailable(_)
@@ -627,7 +627,7 @@ impl Retention {
             Err(ClientError::Method(
                 DocsError::Conflict { .. }
                 | DocsError::Denied
-                | DocsError::DocNotFound
+                | DocsError::DocNotFound { .. }
                 | DocsError::Pending { .. }
                 | DocsError::UnknownHeads { .. }
                 | DocsError::AuthorityUnavailable(_)

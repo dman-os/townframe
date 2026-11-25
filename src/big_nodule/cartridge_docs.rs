@@ -390,7 +390,7 @@ impl CartridgeDocs {
         for (cartridge_id, doc) in wanted {
             match self.handle(cartridge_id, doc).await {
                 Ok(_) => {}
-                Err(StoreError::Docs(DocsError::DocNotFound)) => {
+                Err(StoreError::Docs(DocsError::DocNotFound { .. })) => {
                     tracing::warn!(%cartridge_id, %doc, "a cartridge config document is not on this node yet");
                 }
                 Err(error) => return Err(crate::store_error(error)),
