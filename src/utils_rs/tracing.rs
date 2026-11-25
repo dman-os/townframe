@@ -132,9 +132,11 @@ pub fn setup_tracing_at(default_level: &str, file: Option<LogFile>) -> Res<()> {
     let (eyre_panic_hook, eyre_hook) = eyre_hook_builder().try_into_hooks()?;
     std::panic::set_hook(Box::new(move |panic_info| {
         let report = eyre_panic_hook.panic_report(panic_info);
-        println!("{report}");
-        // The panic is an event too, so the log file has it, and the file is flushed before the
-        // exit below, which runs no destructors.
+        // The report goes out as an error event only: the stderr layer prints it and the log
+        // file keeps it, and the file is flushed before the exit below, which runs no
+        // destructors. Never stdout: a background server's stdout is the pipe its starter read
+        // the readiness line from, and the starter has gone, so printing there panicked inside
+        // this hook and aborted with the report lost.
         ::tracing::error!(target: "panic", "{report}");
         #[cfg(not(target_arch = "wasm32"))]
         drop(
@@ -190,6 +192,52 @@ mod tests {
             count.load(std::sync::atomic::Ordering::Relaxed)
         };
         (run(true), run(false))
+    }
+
+    /// A process whose stdout is a pipe nobody reads any more (a background server after its
+    /// starter has read the readiness line) still reports a panic: on stderr, and with the exit
+    /// status the hook chooses, not an abort from a second panic inside the hook. The test runs
+    /// its own binary again as the panicking process.
+    #[test]
+    fn a_panic_with_a_closed_stdout_is_reported_on_stderr() {
+        const CHILD: &str = "UTILS_RS_PANIC_HOOK_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            // Waits for the parent to close the pipe, so the write would fail.
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).unwrap();
+            super::setup_tracing_at("info", None).unwrap();
+            panic!("the child panics on purpose");
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tracing::tests::a_panic_with_a_closed_stdout_is_reported_on_stderr",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // The test harness prints its header to stdout before the child test runs; once that is
+        // read, the pipe is closed, and the child is let go to panic.
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut header = String::new();
+        while !header.contains("running") {
+            header.clear();
+            assert!(
+                std::io::BufRead::read_line(&mut stdout, &mut header).unwrap() > 0,
+                "the child exited before its harness started"
+            );
+        }
+        drop(stdout);
+        drop(child.stdin.take());
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("the child panics on purpose"), "{stderr}");
     }
 
     #[test]
