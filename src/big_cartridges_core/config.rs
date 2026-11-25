@@ -223,18 +223,37 @@ pub struct AuthorityGrant {
 pub struct GrantBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<EntryAccess>,
+    /// A method grant that reaches methods declared `privileged` (`XrpcMethod::privileged`), which
+    /// no other grant can. Only the node makes one, and only for its core cartridge, as a grant
+    /// held for the boot (ADR 052 §2.2 item 2, ADR 053 §3): the runtime ignores the member on a
+    /// grant read from a config document, and `setCartridgeGrant` refuses it, so a person or a
+    /// sister node cannot confer it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub privileged: bool,
 }
 
 impl GrantBody {
     pub fn access(access: EntryAccess) -> Self {
         Self {
             access: Some(access),
+            privileged: false,
         }
     }
 
     /// The value of a grant that states nothing.
     pub fn present() -> Self {
-        Self { access: None }
+        Self {
+            access: None,
+            privileged: false,
+        }
+    }
+
+    /// The value of a method grant that reaches a privileged method. See [`Self::privileged`].
+    pub fn privileged() -> Self {
+        Self {
+            access: None,
+            privileged: true,
+        }
     }
 }
 
@@ -302,11 +321,12 @@ impl GrantKey {
     }
 
     /// Whether `body` has the shape this kind of grant stores: a drawer or cartridge grant states
-    /// its access, every other kind states none.
+    /// its access, every other kind states none, and only a method grant may be privileged.
     pub fn accepts(&self, body: &GrantBody) -> bool {
         match self {
-            Self::Drawer(_) | Self::Cartridge(_) => body.access.is_some(),
-            Self::Net(_) | Self::Method(_) | Self::Authority(_) => body.access.is_none(),
+            Self::Drawer(_) | Self::Cartridge(_) => body.access.is_some() && !body.privileged,
+            Self::Net(_) | Self::Authority(_) => body.access.is_none() && !body.privileged,
+            Self::Method(_) => body.access.is_none(),
         }
     }
 }

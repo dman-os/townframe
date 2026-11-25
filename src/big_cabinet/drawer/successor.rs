@@ -115,10 +115,11 @@ impl DrawerService {
     async fn set_successor(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: SetDrawerSuccessor,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core.invocation(context, metadata, params.capability).await?;
         // Write+ on the old drawer's descriptor-bearing doc: the pointer is discovery, not a
         // grant, and the successor is never touched by this write.
         core.authorize(context, &caller.authority, &params.drawer_id, Access::Write)
@@ -152,10 +153,11 @@ impl DrawerService {
     async fn resolve(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: ResolveDrawerSuccessor,
     ) -> Result<SuccessorResolution, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core.invocation(context, metadata, params.capability).await?;
         core.resolve_successor(context, &caller.authority, &params.drawer_id)
             .await
     }
@@ -167,7 +169,7 @@ impl Handler<SetDrawerSuccessor> for DrawerService {
         request: Envelope<SetDrawerSuccessor>,
     ) -> Result<ResponseEnvelope<()>, DrawersError> {
         Ok(self
-            .set_successor(&request.context, request.params)
+            .set_successor(&request.context, &request.metadata, request.params)
             .await?
             .into())
     }
@@ -178,7 +180,7 @@ impl Handler<ResolveDrawerSuccessor> for DrawerService {
         &self,
         request: Envelope<ResolveDrawerSuccessor>,
     ) -> Result<ResponseEnvelope<SuccessorResolution>, DrawersError> {
-        Ok(self.resolve(&request.context, request.params).await?.into())
+        Ok(self.resolve(&request.context, &request.metadata, request.params).await?.into())
     }
 }
 

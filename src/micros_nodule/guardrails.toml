@@ -1,0 +1,9 @@
+version = 1
+role = "plugin"
+dependency_reason = "the micros nodule of the core cartridge (ADR 052): opens each micro's actor and mints its handles from the cartridge's grants, written on the nodule development kit and shared by the wasm guest and the native test harness"
+allowed_dependencies = ["big_blobs_core", "big_cabinet_core", "big_cartridges_core", "big_dispatch_core", "big_ndk", "big_nodule_core", "method_core", "service_core_rs"]
+allow_external_api_types = false
+
+[builds.native]
+
+[builds.wasm32-wasip3]

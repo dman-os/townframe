@@ -27,10 +27,13 @@
 // for `ensure` deeper than the default limit (rust-lang/rust#159228).
 #![recursion_limit = "256"]
 
+mod materialize;
 mod net;
+mod stdio;
 
 use async_trait::async_trait;
 use big_blobs::BlobService;
+use big_blobs::service::mount::WorkingMount;
 use big_blobs_core::BlobId;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Component as ManifestComponent;
@@ -67,6 +70,8 @@ use http_body_util::Limited;
 use http_body_util::StreamBody;
 use method_core::ByteBody;
 
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use service_client_native_rs::Client;
 use service_utils_rs::RequestContext;
@@ -91,9 +96,15 @@ use wash_runtime::host::http::Router;
 use wash_runtime::host::http::SendFuture;
 use wash_runtime::host::http::SendResult;
 use wash_runtime::types::Component;
+use wash_runtime::types::HostPathVolume;
+use wash_runtime::types::LocalResources;
+use wash_runtime::types::Volume;
+use wash_runtime::types::VolumeMount;
+use wash_runtime::types::VolumeType;
 use wash_runtime::types::Workload;
 use wash_runtime::types::WorkloadStartRequest;
 use wash_runtime::types::WorkloadStopRequest;
+use wash_runtime::wasmtime::WasmBacktrace;
 use wash_runtime::wit::WitInterface;
 use wasmtime_wasi_http::Error as WasiHttpError;
 use wasmtime_wasi_http::RequestOptions;
@@ -161,8 +172,63 @@ fn component_digest(component: &ManifestComponent) -> Digest {
 /// anything bigger belongs in a blob that the operation passes or returns an id for.
 const MAX_MESSAGE_OCTETS: usize = 4 * 1024 * 1024;
 
+/// Where every workload's working mount appears in the guest, preopened read-write (ADR 051 §2).
+/// [`materialize`] answers paths under it.
+const WORKING_MOUNT: &str = "/work";
+
 /// The authority a guest addresses dispatch at. It resolves nowhere: [`Egress`] answers it.
 const DISPATCH_AUTHORITY: &str = "dispatch.local";
+
+/// Why a guest failed a call, as data. A call that fails this way is answered `502 BadGateway`
+/// whose JSON body is `{ "error": "GuestFault", "message", "fault": <this> }`, and the same
+/// record is logged at `error` with the cartridge id, so it is in the log file beside the
+/// host's own events.
+///
+/// The stdio tails are node-side only: they are neither serialized into the body nor logged
+/// anywhere a caller reads. A guest instance serves many callers, so its recent output can hold
+/// another caller's data; they appear in the node's own `error` event and in this struct for
+/// in-process consumers, and a deserialized body has them empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestFault {
+    pub kind: FaultKind,
+    /// One line: the trap's cause, or what the host failed at.
+    pub message: String,
+    /// The digest of the component that faulted, which is the identity of the debug side file
+    /// its frames resolve against.
+    pub component_hash: BlobId,
+    /// The guest's frames at a trap, innermost first, as raw data. They are `file:line` only
+    /// after a lookup against the side file: the shipped component carries no DWARF.
+    pub frames: Vec<FaultFrame>,
+    /// The last 16 KiB the workload wrote to its stdout and stderr, lossily decoded. A Rust
+    /// guest prints its panic message to stderr just before it traps, so it is in
+    /// `stderr_tail`. Guest-written: render it as text, never as markup.
+    #[serde(skip_serializing, default)]
+    pub stdout_tail: String,
+    #[serde(skip_serializing, default)]
+    pub stderr_tail: String,
+}
+
+/// What failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FaultKind {
+    /// The guest trapped: a panic, an `unreachable`, an out-of-bounds access and the like.
+    Trap,
+    /// The host failed to run the guest (no workload bound, an instance that stopped, a body
+    /// that failed to arrive), with nothing of the guest's to show.
+    Host,
+}
+
+/// One frame of a guest backtrace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FaultFrame {
+    /// The function's index in its core module.
+    pub func_index: u32,
+    /// The function's name from the component's `name` section; `None` when it has none.
+    pub func_name: Option<String>,
+    /// The offset of the frame's instruction in the core module's original bytes, the address
+    /// DWARF line tables are keyed by.
+    pub module_offset: Option<usize>,
+}
 
 /// Hosts nodule handlers as wash workloads. Built by [`boot`].
 pub struct WasmExecutor {
@@ -175,6 +241,11 @@ pub struct WasmExecutor {
     hosted: Mutex<BTreeMap<CartridgeId, Running>>,
     /// The signer of each running workload's outgoing calls, shared with [`Egress`].
     signers: Signers,
+    /// Each running workload's working mount, shared with [`Egress`], which materializes blobs
+    /// into it.
+    mounts: Mounts,
+    /// Each running workload's captured stdout and stderr.
+    pipes: stdio::Pipes,
     /// The cartridges waiting on a blob that was not in the store, to be woken on its arrival.
     arrivals: Arc<Mutex<BTreeMap<BlobId, BTreeMap<CartridgeId, Reensure>>>>,
 }
@@ -204,11 +275,15 @@ pub async fn boot(
     allow_host_loopback: bool,
 ) -> Res<(Arc<WasmExecutor>, StopToken)> {
     let signers = Signers::default();
+    let mounts = Mounts::default();
+    let pipes = stdio::Pipes::default();
     let ingress = Arc::new(
         Ingress::builder(Sealed, "127.0.0.1:0".parse().expect("literal address"))
             .outgoing_handler(Egress {
                 dispatch,
                 signers: Arc::clone(&signers),
+                mounts: Arc::clone(&mounts),
+                blobs: Arc::clone(&blobs),
                 net: Arc::new(net::NetClients::new(allow_host_loopback)),
             })
             .build()
@@ -216,7 +291,14 @@ pub async fn boot(
             .to_eyre()?,
     );
     let host = HostBuilder::new()
-        .with_engine(Engine::builder().build().to_eyre()?)
+        .with_engine(
+            Engine::builder()
+                .with_guest_stdio(Arc::new(stdio::Stdio(Arc::clone(&pipes))))
+                // The one place a workload's host directory may come from: its working mount.
+                .with_allowed_host_paths([blobs.working_mounts().root().to_owned()])
+                .build()
+                .to_eyre()?,
+        )
         .with_friendly_name("nodules-wasm")
         .with_http_handler(Arc::clone(&ingress) as Arc<dyn HostHandler>)
         .build()
@@ -231,10 +313,17 @@ pub async fn boot(
     // because `StopToken` joins tasks and a failing host stop must crash the node, not vanish.
     let stopper = spawner.clone();
     let stopping = Arc::clone(&host);
+    let stopped_mounts = Arc::clone(&mounts);
     spawner
         .spawn(async move {
             stopper.cancelled().await;
             stopping.stop().await.expect("stopping the wash host");
+            // The host stopped the workloads that were still running without going through
+            // `stop_workload`, so their mounts are removed here.
+            let remaining = std::mem::take(&mut *stopped_mounts.lock().expect("mounts lock"));
+            for mount in remaining.into_values() {
+                mount.remove().await.expect("removing a working mount");
+            }
         })
         .expect("a fresh stop token accepts tasks");
 
@@ -280,6 +369,8 @@ pub async fn boot(
             blobs,
             hosted: Mutex::default(),
             signers,
+            mounts,
+            pipes,
             arrivals,
         }),
         stop,
@@ -304,6 +395,7 @@ impl WasmExecutor {
                     RoutineTarget {
                         routine_key: routine.routine_key.clone(),
                         workload_id: component.workload_id.clone(),
+                        artifact: component.artifact,
                         // The current nodule guest exposes one `wasi:http/handler#handle` entry
                         // point; every fixture routine names that export. Keep the declared export
                         // beside the route so a future component ABI can call it directly.
@@ -328,6 +420,102 @@ impl WasmExecutor {
             .lock()
             .expect("signers lock")
             .remove(&running.workload_id);
+        self.pipes
+            .lock()
+            .expect("pipes lock")
+            .remove(&running.workload_id);
+        self.remove_mount(&running.workload_id).await;
+    }
+
+    /// Registers a component's signer, stdio pipes and working mount, then starts its workload,
+    /// and answers the workload's id. A failed start leaves none of the registrations behind.
+    async fn start_component(
+        &self,
+        spec: &HandlerSpec,
+        key: &str,
+        component_bytes: Vec<u8>,
+    ) -> wash_runtime::wasmtime::anyhow::Result<String> {
+        let workload_id = format!("nodule/{}/{}/{}", spec.cartridge_id, spec.revision, key);
+        self.signers.lock().expect("signers lock").insert(
+            workload_id.clone(),
+            WorkloadCaller {
+                signer: spec.actor.capability,
+                missing_authority: Some(spec.missing_authority.clone()),
+            },
+        );
+        // The host asks for the workload's stdio while starting it, so the pipes exist first.
+        self.pipes.lock().expect("pipes lock").insert(
+            workload_id.clone(),
+            Arc::new(stdio::WorkloadPipes::new(&spec.cartridge_id)),
+        );
+        // And it opens the workload's volumes then, so the mount exists first too.
+        let mount = self
+            .blobs
+            .working_mounts()
+            .create()
+            .await
+            .expect("creating a working mount");
+        let mount_dir = mount
+            .dir()
+            .to_str()
+            .expect("a working mount's path is UTF-8 because wash volumes are strings")
+            .to_owned();
+        self.mounts
+            .lock()
+            .expect("mounts lock")
+            .insert(workload_id.clone(), mount);
+        let started = self
+            .host
+            .workload_start(WorkloadStartRequest {
+                workload_id: workload_id.clone(),
+                workload: Workload {
+                    namespace: spec.cartridge_id.to_string(),
+                    name: format!("{}-{key}", spec.revision),
+                    annotations: Default::default(),
+                    service: None,
+                    components: vec![Component {
+                        name: key.to_owned(),
+                        bytes: component_bytes.into(),
+                        pool_size: 0,
+                        local_resources: LocalResources {
+                            volume_mounts: vec![VolumeMount {
+                                name: "work".to_owned(),
+                                mount_path: WORKING_MOUNT.to_owned(),
+                                read_only: false,
+                            }],
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }],
+                    host_interfaces: vec![WitInterface::from("wasi:http/handler@0.3.0")],
+                    volumes: vec![Volume {
+                        name: "work".to_owned(),
+                        volume_type: VolumeType::HostPath(HostPathVolume {
+                            local_path: mount_dir,
+                        }),
+                    }],
+                },
+            })
+            .await;
+        if let Err(error) = started {
+            self.signers
+                .lock()
+                .expect("signers lock")
+                .remove(&workload_id);
+            self.pipes.lock().expect("pipes lock").remove(&workload_id);
+            self.remove_mount(&workload_id).await;
+            return Err(error);
+        }
+        Ok(workload_id)
+    }
+
+    /// Removes a workload's working mount, after its instances are gone or never started. A file
+    /// the guest still had open keeps reading until closed.
+    async fn remove_mount(&self, workload_id: &str) {
+        let mount = self.mounts.lock().expect("mounts lock").remove(workload_id);
+        if let Some(mount) = mount {
+            mount.remove().await.expect("removing a working mount");
+        }
     }
 }
 
@@ -409,50 +597,21 @@ impl NoduleExecutor for WasmExecutor {
 
         let mut components = BTreeMap::new();
         for (key, (artifact, component_bytes)) in bytes {
-            let workload_id = format!("nodule/{}/{}/{}", spec.cartridge_id, spec.revision, key);
-            self.signers.lock().expect("signers lock").insert(
-                workload_id.clone(),
-                WorkloadCaller {
-                    signer: spec.actor.capability,
-                    missing_authority: Some(spec.missing_authority.clone()),
-                },
-            );
-            let started = self
-                .host
-                .workload_start(WorkloadStartRequest {
-                    workload_id: workload_id.clone(),
-                    workload: Workload {
-                        namespace: spec.cartridge_id.to_string(),
-                        name: format!("{}-{key}", spec.revision),
-                        annotations: Default::default(),
-                        service: None,
-                        components: vec![Component {
-                            name: key.clone(),
-                            bytes: component_bytes.into(),
-                            pool_size: 0,
-                            ..Default::default()
-                        }],
-                        host_interfaces: vec![WitInterface::from("wasi:http/handler@0.3.0")],
-                        volumes: vec![],
-                    },
-                })
-                .await;
-            if let Err(error) = started {
-                self.signers
-                    .lock()
-                    .expect("signers lock")
-                    .remove(&workload_id);
-                for component in components.values() {
-                    self.stop_workload(component).await;
+            let workload_id = match self.start_component(spec, &key, component_bytes).await {
+                Ok(workload_id) => workload_id,
+                Err(error) => {
+                    for component in components.values() {
+                        self.stop_workload(component).await;
+                    }
+                    tracing::warn!(
+                        cartridge = %spec.cartridge_id,
+                        revision = %spec.revision,
+                        component = key,
+                        "nodule component workload failed to start: {error:#}"
+                    );
+                    return Hosted::NotReady(Readiness::ExecutorUnavailable);
                 }
-                tracing::warn!(
-                    cartridge = %spec.cartridge_id,
-                    revision = %spec.revision,
-                    component = key,
-                    "nodule component workload failed to start: {error:#}"
-                );
-                return Hosted::NotReady(Readiness::ExecutorUnavailable);
-            }
+            };
             self.arrivals
                 .lock()
                 .expect("arrivals lock")
@@ -469,6 +628,8 @@ impl NoduleExecutor for WasmExecutor {
 
         let routines = Self::route_table(spec, &components);
         let provider = Arc::new(WasmProvider {
+            cartridge: spec.cartridge_id.clone(),
+            pipes: Arc::clone(&self.pipes),
             ingress: Arc::clone(&self.ingress),
             routines,
             routine_capabilities: Mutex::new(spec.routine_capabilities.clone()),
@@ -516,12 +677,16 @@ impl NoduleExecutor for WasmExecutor {
 /// attached to each route so a component-specific ABI can use it without changing dispatch.
 struct RoutineTarget {
     workload_id: String,
+    /// The component the workload runs, which a fault names.
+    artifact: BlobId,
     routine_key: String,
     export: String,
 }
 
 /// Calls one running routine component workload over in-process `wasi:http`.
 struct WasmProvider {
+    cartridge: CartridgeId,
+    pipes: stdio::Pipes,
     ingress: Arc<Ingress<Sealed, Egress>>,
     routines: BTreeMap<String, RoutineTarget>,
     routine_capabilities: Mutex<BTreeMap<String, RoutineCapabilities>>,
@@ -538,6 +703,68 @@ impl WasmProvider {
 
     fn set_config(&self, doc_id: big_cabinet_core::dmeta::DocId) {
         *self.config.lock().expect("config lock") = doc_id;
+    }
+
+    /// The answer to a call the guest or its host failed. The error is not flattened: a trap
+    /// carries a [`WasmBacktrace`] in its chain, whose frames are kept as data in the
+    /// [`GuestFault`] the body holds, and the fault is logged at `error`.
+    fn fault(
+        &self,
+        routine: &RoutineTarget,
+        error: wash_runtime::wasmtime::anyhow::Error,
+    ) -> ProviderError {
+        let (kind, frames) = match error.downcast_ref::<WasmBacktrace>() {
+            Some(backtrace) => (
+                FaultKind::Trap,
+                backtrace
+                    .frames()
+                    .iter()
+                    .map(|frame| FaultFrame {
+                        func_index: frame.func_index(),
+                        func_name: frame.func_name().map(str::to_owned),
+                        module_offset: frame.module_offset(),
+                    })
+                    .collect(),
+            ),
+            None => (FaultKind::Host, Vec::new()),
+        };
+        // A call still draining after its workload was stopped has no pipes left, so its tails
+        // are empty.
+        let (stdout_tail, stderr_tail) = self
+            .pipes
+            .lock()
+            .expect("pipes lock")
+            .get(&routine.workload_id)
+            .map(|pipes| pipes.tails())
+            .unwrap_or_default();
+        // The root cause is the trap's own text ("wasm trap: wasm `unreachable` instruction
+        // executed"); the outer layers are the host's context and the backtrace.
+        let fault = GuestFault {
+            kind,
+            message: error.root_cause().to_string(),
+            component_hash: routine.artifact,
+            frames,
+            stdout_tail,
+            stderr_tail,
+        };
+        tracing::error!(
+            cartridge = %self.cartridge,
+            kind = ?fault.kind,
+            component_hash = %fault.component_hash,
+            frames = ?fault.frames,
+            stdout_tail = fault.stdout_tail,
+            stderr_tail = fault.stderr_tail,
+            "{}",
+            fault.message
+        );
+        ProviderError::Failed {
+            status: 502,
+            body: json!({
+                "error": "GuestFault",
+                "message": fault.message,
+                "fault": fault,
+            }),
+        }
     }
 }
 
@@ -610,7 +837,7 @@ impl Provider for WasmProvider {
             .ingress
             .dispatch_request(workload_id, request)
             .await
-            .map_err(gateway_error)?;
+            .map_err(|error| self.fault(routine, error))?;
         let (parts, body) = response.into_parts();
         let status = parts.status;
         let mime = parts
@@ -630,7 +857,12 @@ impl Provider for WasmProvider {
             let body = Limited::new(body, MAX_MESSAGE_OCTETS)
                 .collect()
                 .await
-                .map_err(gateway_error)?
+                .map_err(|error| {
+                    self.fault(
+                        routine,
+                        wash_runtime::wasmtime::anyhow::Error::from_boxed(error),
+                    )
+                })?
                 .to_bytes();
             provider_result(status, &body).map(Body::Json)
         } else if status.is_success() {
@@ -702,6 +934,9 @@ impl Router for Sealed {
 /// makes it the caller identity of a nested call.
 type Signers = Arc<Mutex<BTreeMap<String, WorkloadCaller>>>;
 
+/// Each running workload's working mount, by workload id.
+type Mounts = Arc<Mutex<BTreeMap<String, Arc<WorkingMount>>>>;
+
 /// The `dispatch.local` egress of the wash host: adapts a workload's outgoing `wasi:http`
 /// request to [`big_nodule::egress::call`], which authorizes it for every executor alike. What
 /// is specific to this executor is the signer: the workload's own actor, found by the host's
@@ -710,6 +945,10 @@ type Signers = Arc<Mutex<BTreeMap<String, WorkloadCaller>>>;
 struct Egress {
     dispatch: Client<DispatchProtocol>,
     signers: Signers,
+    /// The working mount of each workload, which `materialize` places files in.
+    mounts: Mounts,
+    /// What a workload's `materialize` reads from.
+    blobs: Arc<BlobService>,
     /// Performs the requests [`egress::authorize_net`] allowed, refusing the addresses they
     /// resolve to that no `#net` grant could open.
     net: Arc<net::NetClients>,
@@ -737,6 +976,13 @@ impl Egress {
         workload_id: &str,
         request: hyper::Request<WasiBody>,
     ) -> (hyper::StatusCode, XrpcBody) {
+        // The one method the executor serves itself instead of dispatching: its destination is
+        // this workload's own mount.
+        if request.method() == hyper::Method::POST
+            && request.uri().path().strip_prefix("/xrpc/") == Some(materialize::NSID)
+        {
+            return self.materialize(workload_id, request).await;
+        }
         let caller = self
             .signers
             .lock()

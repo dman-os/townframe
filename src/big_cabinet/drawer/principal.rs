@@ -143,10 +143,11 @@ impl DrawerService {
     async fn invite(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: InvitePrincipal,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core.invocation(context, metadata, params.capability).await?;
         let actor = &caller.signer;
         core.authorize(context, &caller.authority, &params.drawer_id, Access::Admin)
             .await?;
@@ -177,10 +178,11 @@ impl DrawerService {
     async fn revoke_principal(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: RevokePrincipal,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core.invocation(context, metadata, params.capability).await?;
         let actor = &caller.signer;
         core.authorize(context, &caller.authority, &params.drawer_id, Access::Admin)
             .await?;
@@ -210,7 +212,7 @@ impl Handler<InvitePrincipal> for DrawerService {
         &self,
         request: Envelope<InvitePrincipal>,
     ) -> Result<ResponseEnvelope<()>, DrawersError> {
-        Ok(self.invite(&request.context, request.params).await?.into())
+        Ok(self.invite(&request.context, &request.metadata, request.params).await?.into())
     }
 }
 
@@ -220,7 +222,7 @@ impl Handler<RevokePrincipal> for DrawerService {
         request: Envelope<RevokePrincipal>,
     ) -> Result<ResponseEnvelope<()>, DrawersError> {
         Ok(self
-            .revoke_principal(&request.context, request.params)
+            .revoke_principal(&request.context, &request.metadata, request.params)
             .await?
             .into())
     }

@@ -16,7 +16,7 @@ impl DocsService {
     ) -> Result<WriteReceipt, DocsError> {
         let instr_start = std::time::Instant::now(); // INSTR
         let caller = self
-            .signing_invocation(context, metadata, params.capability)
+            .invocation(context, metadata, params.capability)
             .await?;
         let actor = &caller.signer;
         let kinds = self

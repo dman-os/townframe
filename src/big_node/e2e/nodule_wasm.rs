@@ -81,6 +81,12 @@ impl Spec {
         format!("{}.fetch", self.authority)
     }
 
+    /// Served by the guest: opens an actor under the nodule's own actor and narrows its docs
+    /// handle onto it, through dispatch.
+    fn adopt(&self) -> String {
+        format!("{}.adopt", self.authority)
+    }
+
     /// Served by the guest: consumes a byte body and reports the chunks it saw.
     fn ingest(&self) -> String {
         format!("{}.ingest", self.authority)
@@ -89,6 +95,16 @@ impl Spec {
     /// Served by the guest: answers a multi-chunk byte body.
     fn emit(&self) -> String {
         format!("{}.emit", self.authority)
+    }
+
+    /// Served by the guest: reads a file of its working mount, or tries to open it for writing.
+    fn readfile(&self) -> String {
+        format!("{}.readfile", self.authority)
+    }
+
+    /// Served by the guest: panics, which traps the guest.
+    fn panic(&self) -> String {
+        format!("{}.panic", self.authority)
     }
 
     /// Implemented by the nodule but not served by the guest, which answers 404 for it.
@@ -219,11 +235,14 @@ fn cartridge_requiring(
         spec.relay(),
         spec.absent(),
         spec.config(),
+        spec.adopt(),
         spec.put(),
         spec.read(),
         spec.ingest(),
         spec.emit(),
         spec.fetch(),
+        spec.readfile(),
+        spec.panic(),
     ];
     let settings = format!("{}.settings", spec.authority);
     // Each routine holds its own capability, built from what it uses: the settings kind it
@@ -804,6 +823,79 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
 }
 
 #[tokio::test]
+async fn a_trapping_guest_answers_with_a_fault_naming_its_frames_component_and_stderr() {
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let spec = caller();
+    // The node's own `error` event for the fault is captured on this thread (a current-thread
+    // runtime serves the call here), where the tails are allowed to appear.
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let _logging = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer({
+                let log = std::sync::Arc::clone(&log);
+                move || LogWriter(std::sync::Arc::clone(&log))
+            })
+            .with_ansi(false)
+            .finish(),
+    );
+    put(&node, &bytes).await;
+    admit(&node, cartridge(&spec, &bytes, &[])).await;
+    assert_eq!(
+        set_enabled(&node, &spec, true).await.readiness,
+        Readiness::Ready
+    );
+
+    let Err(DispatchError::Provider { status: 502, body }) =
+        invoke(&node, &spec.panic(), json!({}), Default::default()).await
+    else {
+        panic!("a trapping guest answers a bad gateway");
+    };
+    assert_eq!(body["error"], "GuestFault");
+    let fault: big_nodule_wasm::GuestFault = serde_json::from_value(body["fault"].clone()).unwrap();
+    assert_eq!(fault.kind, big_nodule_wasm::FaultKind::Trap, "{fault:?}");
+    assert_eq!(
+        fault.component_hash.to_string(),
+        big_blobs_core::BlobId::new(big_cartridges_core::Digest::of(&bytes).0).to_string()
+    );
+    assert!(
+        fault.frames.iter().any(|frame| frame.func_name.is_some()),
+        "the guest keeps its name section, so a frame is named: {:?}",
+        fault.frames
+    );
+    // The guest prints its panic message to stderr just before it traps. The tail is another
+    // caller's data as far as this caller is concerned, so it is not in the body, only in the
+    // node's own log.
+    assert!(
+        body["fault"].get("stderr_tail").is_none() && body["fault"].get("stdout_tail").is_none(),
+        "the body carries no stdio tail: {body}"
+    );
+    assert!(!body.to_string().contains("panicked on purpose"));
+    let log = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+    assert!(log.contains("stderr_tail"), "the fault is logged: {log}");
+    assert!(
+        log.contains("the nodule fixture panicked on purpose"),
+        "the panic message is in the logged stderr tail: {log}"
+    );
+    shutdown(node, stop).await;
+}
+
+/// Collects what a test subscriber writes.
+struct LogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
 async fn a_wasm_guest_streams_blob_put_and_read_bodies() {
     let bytes = guest_bytes();
     let secrets = secrets().await;
@@ -1148,6 +1240,87 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
         record(&node, &a).await.methods.map(|status| status.granted),
         Some(false)
     );
+    shutdown(node, stop).await;
+}
+
+/// Every nodule is told its own actor identity capability (`x-nodule-actor-capability`) and can
+/// present it through dispatch as the `parent` of `openActor` and the `capability` of
+/// `attenuateCapability`, signing as the same actor. What it may then do is bounded by the rights
+/// the actor was opened with: an ordinary nodule's is `use` alone, which opens no child (the
+/// `micros` actor of the core cartridge has `mintChild`, which `big_nodule`'s core-like e2e
+/// opens children with).
+#[tokio::test]
+async fn a_wasm_guest_is_told_its_actor_capability_and_presents_it_through_dispatch() {
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let a = caller();
+    put(&node, &bytes).await;
+    let calls = [
+        big_cabinet_core::authority::OpenActor::XRPC.nsid,
+        big_cabinet_core::authority::AttenuateCapability::XRPC.nsid,
+    ]
+    .map(str::to_owned);
+    admit(&node, cartridge(&a, &bytes, &calls)).await;
+    assert_eq!(
+        set_enabled(&node, &a, true).await.readiness,
+        Readiness::Ready
+    );
+    set_operations(
+        &node,
+        &a,
+        DispatchScope {
+            operations: calls.into_iter().collect(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // The header carries the identity capability of the nodule's own actor.
+    let echoed = invoke(&node, &a.echo(), json!({}), Default::default())
+        .await
+        .unwrap();
+    let actor_capability: big_cabinet_core::authority::CapId =
+        serde_json::from_value(echoed["actorCapability"].clone())
+            .expect("the guest is told its actor capability");
+    let held = node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            big_cabinet_core::authority::InspectCapability {
+                capability: actor_capability,
+            },
+        )
+        .await
+        .unwrap();
+    let actor = record(&node, &a)
+        .await
+        .actor
+        .expect("a nodule has an actor");
+    assert_eq!(held.subject, Some(actor.actor_id));
+    assert_ne!(
+        echoed["actorCapability"], echoed["noduleCapability"],
+        "the actor capability is not the dispatch handle"
+    );
+
+    // The guest presents it as `parent` and the call passes holder binding (ADR 037: the
+    // egress signs as the nodule's own actor), so the refusal is the rights check on the
+    // capability, not a refusal of its presenter. No child is opened, so nothing is narrowed.
+    let adopted = invoke(
+        &node,
+        &a.adopt(),
+        json!({ "path": "nodules/child" }),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        adopted["open"]["status"].as_u64().unwrap() >= 400
+            && adopted["open"]["body"].to_string().contains("Unauthorized"),
+        "{adopted}"
+    );
+    assert_eq!(adopted["attenuate"], Value::Null, "{adopted}");
     shutdown(node, stop).await;
 }
 
@@ -1613,5 +1786,204 @@ async fn a_nodule_requiring_built_in_methods_is_ready_after_a_restart() {
             .unwrap()["input"],
         json!({ "n": 1 })
     );
+    shutdown(node, stop).await;
+}
+
+/// A blob as a file in the workload's working mount: the guest asks for it through `dispatch.local`
+/// with a blobs handle that reaches it and reads it at the path it is answered, a handle that does
+/// not reach a blob gets no file, a retracted handle takes its files away without disturbing a file
+/// that is open, and the mount is removed with the workload.
+#[tokio::test]
+async fn a_wasm_guest_materializes_blobs_into_its_working_mount() {
+    use big_cabinet_core::authority::RetractCapability;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("blobs");
+    let mounts = store.join("mounts");
+    // A mount an earlier run left behind is reaped when the node boots.
+    std::fs::create_dir_all(mounts.join("mount-left-behind/nested")).unwrap();
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let mut cfg = config(
+        Arc::clone(&secrets),
+        runtime.ephemeral(&[]).unwrap(),
+        big_repo::Storage::memory(&runtime).unwrap(),
+    );
+    cfg.blob_storage = big_blobs::Storage::filesystem(store.clone()).await.unwrap();
+    let (node, stop) = BigNode::boot(cfg).await.unwrap();
+    // The mount left behind is gone, and what is there is the core nodule's own workload's: it
+    // runs for the node's life (ADR 052), so its mount is the baseline the test's is counted from.
+    assert!(!mounts.join("mount-left-behind").exists());
+    let listing = || {
+        std::fs::read_dir(&mounts)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>()
+    };
+    let core_mounts = listing();
+    assert_eq!(core_mounts.len(), 1, "{core_mounts:?}");
+
+    let spec = caller();
+    put(&node, &bytes).await;
+    let record = admit(&node, cartridge(&spec, &bytes, &[])).await;
+    let actor = record
+        .actor
+        .expect("an installed nodule has an actor")
+        .actor_id;
+    assert_eq!(
+        set_enabled(&node, &spec, true).await.readiness,
+        Readiness::Ready
+    );
+    let mount: Vec<_> = listing()
+        .into_iter()
+        .filter(|path| !core_mounts.contains(path))
+        .collect();
+    let [mount] = mount.as_slice() else {
+        panic!("one workload has one working mount, found {mount:?}");
+    };
+
+    // 40 000 octets is a file in the store, and a few is inline in the store's database.
+    let sum = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .fold(0u64, |sum, octet| sum + u64::from(*octet))
+    };
+    let large: Vec<u8> = (0..40_000).map(|index| (index % 251) as u8).collect();
+    let small = b"inline in the store's database".to_vec();
+    let outside = b"no handle reaches this".to_vec();
+    let mut infos = Vec::new();
+    for blob in [&large, &small, &outside] {
+        infos.push(
+            node.blobs
+                .put(
+                    RequestContext::root(),
+                    blobs::put_cap(&node).await,
+                    ByteBody::from_bytes(blob.clone()),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let [large_info, small_info, outside_info] = infos.as_slice() else {
+        unreachable!("three blobs were put")
+    };
+    let large_handle = blobs::read_cap_for(&node, &large_info.blob_id, Some(actor)).await;
+    let small_handle = blobs::read_cap_for(&node, &small_info.blob_id, Some(actor)).await;
+
+    let file_name = |blob_id: &big_blobs_core::BlobId| {
+        blob_id
+            .to_bytes32()
+            .iter()
+            .map(|octet| format!("{octet:02x}"))
+            .collect::<String>()
+    };
+    let materialize = async |handle: CapId, blob_id: &big_blobs_core::BlobId| {
+        let answer = invoke(
+            &node,
+            &spec.relay(),
+            json!({
+                "operation": "org.example.daybook.blobs.materialize",
+                "input": { "capability": handle, "blobId": blob_id },
+            }),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        (answer["status"].as_u64().unwrap(), answer["body"].clone())
+    };
+    let readfile = async |path: &str, write: bool| {
+        invoke(
+            &node,
+            &spec.readfile(),
+            json!({ "path": path, "write": write }),
+            Default::default(),
+        )
+        .await
+        .unwrap()
+    };
+
+    let (status, answered) = materialize(large_handle, &large_info.blob_id).await;
+    assert_eq!(status, 200, "{answered}");
+    let large_name = file_name(&large_info.blob_id);
+    let large_path = format!("/work/{large_name}");
+    assert_eq!(answered["path"], json!(large_path));
+    assert_eq!(answered["info"]["lengthOctets"], json!(large.len()));
+    assert_eq!(
+        readfile(&large_path, false).await,
+        json!({ "found": true, "length": large.len(), "sum": sum(&large) })
+    );
+    // The guest's file is the store's own inode, and the guest cannot write through it.
+    let linked = mount.join(&large_name);
+    let stored = store.join("data").join(format!("{large_name}.data"));
+    assert_eq!(
+        std::fs::metadata(&linked).unwrap().ino(),
+        std::fs::metadata(&stored).unwrap().ino()
+    );
+    assert_eq!(
+        readfile(&large_path, true).await,
+        json!({ "opened": false, "kind": "PermissionDenied" })
+    );
+
+    let (status, answered) = materialize(small_handle, &small_info.blob_id).await;
+    assert_eq!(status, 200, "{answered}");
+    let small_name = file_name(&small_info.blob_id);
+    let small_path = format!("/work/{small_name}");
+    assert_eq!(
+        readfile(&small_path, false).await,
+        json!({ "found": true, "length": small.len(), "sum": sum(&small) })
+    );
+    assert_eq!(
+        std::fs::metadata(mount.join(&small_name)).unwrap().nlink(),
+        1
+    );
+
+    // A handle reaches only the blobs it names, and a blob that no handle reaches is no file.
+    let (status, denied) = materialize(large_handle, &outside_info.blob_id).await;
+    assert_eq!(status, 403, "{denied}");
+    assert_eq!(denied["error"], json!("Denied"));
+    let outside_path = format!("/work/{}", file_name(&outside_info.blob_id));
+    assert_eq!(
+        readfile(&outside_path, false).await,
+        json!({ "found": false, "kind": "NotFound" })
+    );
+    // A handle bound to another actor is not the guest's to present.
+    let strangers = blobs::read_cap_for(&node, &outside_info.blob_id, None).await;
+    let (status, denied) = materialize(strangers, &outside_info.blob_id).await;
+    assert_eq!(status, 403, "{denied}");
+
+    // Retracting the handle removes what only it reached, at once. The file the host holds open
+    // keeps reading, and a file another handle reached stays.
+    let held = std::fs::File::open(&linked).unwrap();
+    node.authority
+        .client
+        .call(
+            RequestContext::root(),
+            RetractCapability {
+                via: node.blobs_namespace.capability,
+                capability: large_handle,
+            },
+        )
+        .await
+        .unwrap();
+    while linked.exists() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        readfile(&large_path, false).await,
+        json!({ "found": false, "kind": "NotFound" })
+    );
+    let mut contents = Vec::new();
+    std::io::Read::read_to_end(&mut { held }, &mut contents).unwrap();
+    assert_eq!(contents, large);
+    assert_eq!(
+        readfile(&small_path, false).await,
+        json!({ "found": true, "length": small.len(), "sum": sum(&small) })
+    );
+
+    // Stopping the workload removes its mount.
+    set_enabled(&node, &spec, false).await;
+    assert_eq!(listing(), core_mounts);
     shutdown(node, stop).await;
 }

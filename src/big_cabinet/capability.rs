@@ -5,9 +5,11 @@ use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
+use big_cabinet_core::authority::CapabilityStatus;
 use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::MintCapability;
 use big_cabinet_core::authority::Namespace;
+use big_cabinet_core::authority::ObserveCapability;
 use big_cabinet_core::authority::ResolveActor;
 use big_cabinet_core::authority::ResolveAuthority;
 use big_cabinet_core::authority::RetractCapability;
@@ -18,10 +20,58 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
+use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::Weak;
 
 type Error = ClientError<AuthorityServiceError>;
+
+/// Who presents a call whose credential is not one of this domain's handles.
+pub enum Presenter {
+    /// The operator, presenting its root capability.
+    Operator,
+    /// An actor holding a handle bound to it, which for a call through dispatch is a nodule's
+    /// actor presenting the handle dispatch minted for it.
+    Actor(Uuid7),
+}
+
+/// Whether the cartridge `actor` runs for holds a privileged grant of exactly `method` from the
+/// node itself (a boot grant, never one written to a config document). The nodule service
+/// answers it, because it holds the grants and knows which actor runs which cartridge.
+pub trait PrivilegedGrants: Send + Sync {
+    fn holds<'a>(&'a self, actor: Uuid7, method: &'a str) -> futures::future::BoxFuture<'a, bool>;
+}
+
+/// The nodule service's [`PrivilegedGrants`], bound after it boots, for a service that boots
+/// before it (the cartridges registry the nodule service installs from) and so cannot hold it.
+/// Held weakly: the nodule service stops first and owns its own lifetime.
+#[derive(Clone, Default)]
+pub struct GrantedMethods(Arc<Mutex<Option<Weak<dyn PrivilegedGrants>>>>);
+
+impl GrantedMethods {
+    /// Binds the nodule service, replacing an earlier one: a service restarted in place (a test's
+    /// reboot of it) binds again.
+    pub fn bind(&self, holder: Weak<dyn PrivilegedGrants>) {
+        *self.0.lock().expect("the grants binding lock") = Some(holder);
+    }
+
+    async fn holds(&self, actor: Uuid7, method: &str) -> bool {
+        let holder = self
+            .0
+            .lock()
+            .expect("the grants binding lock")
+            .as_ref()
+            .and_then(Weak::upgrade);
+        match holder {
+            Some(holder) => holder.holds(actor, method).await,
+            // Before the nodule service is up, or after it stopped, nobody holds a grant.
+            None => false,
+        }
+    }
+}
 
 /// The object a domain capability carries. Who the handle is bound to is not part of it: that
 /// is the capability's `subject`, which the authority records and enforces.
@@ -151,32 +201,59 @@ impl DomainCapabilities {
             .await
     }
 
-    /// A bare handle, presented with no separate signer: it is its own `handle` and signs as the
-    /// actor it is bound to.
+    /// A resource handle this domain minted, carried in a request body, resolved for the call
+    /// whose HTTP `metadata` it arrived with. The handle decides scope and rights; who may
+    /// present it is decided by the credential the transport attached (ADR 037 §1, §2):
+    ///
+    /// - No credential: an in-process built-in service presenting a handle it holds itself
+    ///   (ADR 037's "in-process built-in service: its own actor"). The handle signs as the actor
+    ///   it is bound to. Every external channel reaches a service through dispatch, which always
+    ///   attaches the caller's credential, so an outside caller cannot take this branch.
+    /// - A credential whose `authority` is this very handle: a service signing on behalf of its
+    ///   caller through a handle it minted for that call. The call signs through the credential's
+    ///   `signer`, exactly as wide as the handle the caller presented.
+    /// - Any other credential (dispatch forwards its caller's): the presenter is the actor the
+    ///   credential's `signer` is bound to, and a handle bound to anyone else is `Unauthorized`.
+    ///   A leaked handle id is a dead number under another actor's signer.
+    ///
+    /// A header that is present but unparseable is never read as "no credential".
     pub async fn resolve<S: DeserializeOwned>(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         capability: CapId,
-    ) -> Result<Invocation<S>, Error> {
-        self.resolve_signed(context, capability, capability).await
-    }
-
-    /// A handle this domain minted, signing through `signer` instead of through itself. The
-    /// handle decides scope and rights, and `signer` (live, `USE`, bound to an actor) decides
-    /// whose signature the call carries, exactly as wide as the handle the caller presented.
-    /// Unlike [`Self::source`] the authority must be a scoped handle, never an identity.
-    pub async fn resolve_signed<S: DeserializeOwned>(
-        &self,
-        context: &RequestContext,
-        capability: CapId,
-        signer: CapId,
     ) -> Result<Invocation<S>, Error> {
         let cap = self.inspect(context, capability).await?;
-        let (bound, _) = self.bound(&cap)?;
-        let signing = if signer == capability {
-            cap.clone()
-        } else {
-            self.inspect(context, signer).await?
+        let (bound, subject) = self.bound(&cap)?;
+        let credential = match metadata.authorization {
+            None => None,
+            Some(_) => Some(
+                Authorization::from_metadata(metadata)
+                    .map_err(|_| ClientError::Method(AuthorityServiceError::Unauthorized))?,
+            ),
+        };
+        let (signer, signing) = match credential {
+            Some(credential) if credential.authority == capability => (
+                credential.signer,
+                self.inspect(context, credential.signer).await?,
+            ),
+            Some(credential) => {
+                let presenter = self.inspect(context, credential.signer).await?;
+                if !presenter.rights.contains(Rights::USE) || presenter.subject != Some(subject) {
+                    tracing::info!(
+                        target: "instr",
+                        ?capability,
+                        signer_cap = ?credential.signer,
+                        presenter_subject = ?presenter.subject,
+                        handle_subject = ?subject,
+                        presenter_rights = ?presenter.rights,
+                        "INSTR domain resolve: holder check refused the presenter"
+                    ); // INSTR
+                    return Err(ClientError::Method(AuthorityServiceError::Unauthorized));
+                }
+                (capability, cap.clone())
+            }
+            None => (capability, cap.clone()),
         };
         let signer_actor = self.signing_actor(context, &signing, None).await?;
         Ok(Invocation {
@@ -214,6 +291,15 @@ impl DomainCapabilities {
             )
             .await?;
         let is_operator_root = resolved.is_operator_root();
+        tracing::info!(
+            target: "instr",
+            authority = ?authorization.authority,
+            signer_cap = ?authorization.signer,
+            is_operator_root,
+            resolved_actor = ?resolved.actor.as_ref().map(|actor| actor.actor_id),
+            resolved_subject = ?resolved.capability.subject,
+            "INSTR domain source resolved authority"
+        ); // INSTR
         let signing = if authorization.signer == authorization.authority {
             resolved.capability.clone()
         } else {
@@ -236,8 +322,27 @@ impl DomainCapabilities {
                 rights: resolved.capability.rights,
             }),
             None => {
-                let (bound, bound_subject) = self.bound(&resolved.capability)?;
+                let (bound, bound_subject) =
+                    self.bound(&resolved.capability).inspect_err(|error| {
+                        tracing::info!(
+                            target: "instr",
+                            authority = ?authorization.authority,
+                            ?error,
+                            issuer = ?resolved.capability.issuer_id,
+                            object = %resolved.capability.object,
+                            rights = ?resolved.capability.rights,
+                            "INSTR domain source: capability is not a handle of this domain"
+                        ); // INSTR
+                    })?;
                 if bound_subject != signer.actor_id {
+                    tracing::info!(
+                        target: "instr",
+                        authority = ?authorization.authority,
+                        signer_cap = ?authorization.signer,
+                        ?bound_subject,
+                        signer_actor = ?signer.actor_id,
+                        "INSTR domain source: scoped handle presented under another actor's signer"
+                    ); // INSTR
                     return Err(ClientError::Method(AuthorityServiceError::Unauthorized));
                 }
                 Ok(Invocation {
@@ -249,6 +354,108 @@ impl DomainCapabilities {
                     originating_actor: bound.originating_actor,
                 })
             }
+        }
+    }
+
+    /// The caller of a mint: the body `capability` when the request names one, else the request's
+    /// `Authorization` credential.
+    ///
+    /// A body capability is either a handle this domain minted, resolved as any resource handle
+    /// is ([`Self::resolve`]), or an actor's identity capability, which mints as that actor
+    /// (`DomainAuthority::Identity`) and so proves what the actor itself stands on. An identity
+    /// capability is nobody's handle in the way a scoped one is (`source` lets a descendant's signer
+    /// present one), so here the presenter must be the identity's own actor, exactly as for a
+    /// scoped handle: without that check, a leaked identity id would let any actor mint with
+    /// the standing of the actor it names (`micros` holds the standing of every drawer granted to
+    /// a micro's cartridge).
+    pub async fn minter<S: DeserializeOwned>(
+        &self,
+        context: &RequestContext,
+        metadata: &HttpMetadata,
+        capability: Option<CapId>,
+    ) -> Result<Invocation<S>, Error> {
+        let credential = Authorization::from_metadata(metadata)
+            .map_err(|error| ClientError::Method(AuthorityServiceError::Context(error)))?;
+        let Some(capability) = capability else {
+            return self.source(context, credential).await;
+        };
+        let resolved = self
+            .authority
+            .call(context.child(), ResolveAuthority { capability })
+            .await?;
+        match resolved.actor {
+            // The operator's root capability mints through the credential alone.
+            Some(_) if resolved.is_operator_root() => {
+                Err(ClientError::Method(AuthorityServiceError::Unauthorized))
+            }
+            Some(actor) => {
+                let presenter = self.inspect(context, credential.signer).await?;
+                if !presenter.rights.contains(Rights::USE)
+                    || presenter.subject != Some(actor.actor_id)
+                {
+                    return Err(ClientError::Method(AuthorityServiceError::Unauthorized));
+                }
+                self.source(
+                    context,
+                    Authorization {
+                        authority: capability,
+                        signer: credential.signer,
+                    },
+                )
+                .await
+            }
+            None => self.resolve(context, metadata, capability).await,
+        }
+    }
+
+    /// Who presents `authorization` when it is not one of this domain's handles: the operator,
+    /// or the actor a handle (a nodule's dispatch handle, as dispatch forwards it) is bound to,
+    /// accepted only when the signer is bound to that same actor (holder binding, ADR 037), the
+    /// check dispatch itself ran before admitting the call.
+    pub async fn presenter(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+    ) -> Result<Presenter, Error> {
+        let resolved = self
+            .authority
+            .call(
+                context.child(),
+                ResolveAuthority {
+                    capability: authorization.authority,
+                },
+            )
+            .await?;
+        if resolved.is_operator_root() {
+            return Ok(Presenter::Operator);
+        }
+        let actor = resolved
+            .actor
+            .map(|actor| actor.actor_id)
+            .or(resolved.capability.subject)
+            .ok_or(ClientError::Method(AuthorityServiceError::Unauthorized))?;
+        let signer = self.inspect(context, authorization.signer).await?;
+        if !signer.rights.contains(Rights::USE) || signer.subject != Some(actor) {
+            return Err(ClientError::Method(AuthorityServiceError::Unauthorized));
+        }
+        Ok(Presenter::Actor(actor))
+    }
+
+    /// Admits a presenter that is not a handle of this domain to read through the privileged
+    /// `method`: the operator, or an actor whose cartridge holds a privileged boot grant of
+    /// exactly that method (see [`PrivilegedGrants`]). A privileged method trusts a privileged
+    /// grant of itself and no other, and nothing here names a cartridge.
+    pub async fn admit_privileged(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        granted: &GrantedMethods,
+        method: &str,
+    ) -> Result<(), Error> {
+        match self.presenter(context, authorization).await? {
+            Presenter::Operator => Ok(()),
+            Presenter::Actor(actor) if granted.holds(actor, method).await => Ok(()),
+            Presenter::Actor(_) => Err(ClientError::Method(AuthorityServiceError::Unauthorized)),
         }
     }
 
@@ -290,6 +497,35 @@ impl DomainCapabilities {
                 },
             )
             .await
+    }
+
+    /// Resolves when `capability` is no longer live: retracted itself, or under a retracted
+    /// ancestor. A handle that is already dead resolves at once, because the authority refuses to
+    /// observe it. The authority's change stream ends only with a retraction, so a stream that
+    /// ends without one means the authority itself went away, which is an error.
+    pub async fn retracted(
+        &self,
+        context: &RequestContext,
+        capability: CapId,
+    ) -> Result<(), Error> {
+        use futures::StreamExt as _;
+        let mut changes = match self
+            .authority
+            .subscribe(context.child(), ObserveCapability { capability })
+            .await
+        {
+            Ok(changes) => changes,
+            Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        while let Some(change) = changes.next().await {
+            if change?.status == CapabilityStatus::Retracted {
+                return Ok(());
+            }
+        }
+        Err(ClientError::Method(AuthorityServiceError::Storage(
+            "the observation of a capability ended without its retraction".to_owned(),
+        )))
     }
 
     /// Retract a handle this domain minted. The handle is its own `via`, so this needs no
@@ -379,6 +615,7 @@ mod tests {
                 AttenuateCapability {
                     capability: authority.root,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await

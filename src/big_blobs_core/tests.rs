@@ -522,6 +522,7 @@ fn protocol_requests_results_and_errors_round_trip() {
     }));
     assert!(!BlobsScope::default().covers(&scope));
     protocol_json(MintBlobsCapability {
+ capability: None,
         scope,
         rights: big_cabinet_core::authority::Rights::USE,
         subject: None,

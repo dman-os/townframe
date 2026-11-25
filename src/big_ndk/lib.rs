@@ -26,7 +26,8 @@
 //! The wire contract is the one every XRPC hop speaks (`service_core_rs::xrpc`): the host
 //! delivers `authorization: Bearer <caller capability id>`, `idempotency-key`, the remaining
 //! budget as a relative `x-timeout-ms`, `x-request-id` and `traceparent`/`tracestate`, plus
-//! `x-nodule-capability` (the nodule's own dispatch capability as a bare id). [`Cx`] is those
+//! `x-nodule-capability` (the nodule's own dispatch capability as a bare id) and
+//! `x-nodule-actor-capability` (its own actor identity capability). [`Cx`] is those
 //! headers, parsed once. Outgoing calls go to `http://dispatch.local` over `wasi:http/client`
 //! ([`WasiHttp`]) with the nodule's own capability.
 //!

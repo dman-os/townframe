@@ -60,6 +60,7 @@
       "type": "array"
     },
     "main": {
+      "description": "Open (or reopen) the child actor at `path` under the actor `parent` is the identity\ncapability of. Unprivileged, because it can reach only the parent's own children: `parent`\nmust be an identity capability carrying `MINT_CHILD` (`UnrecognizedActor` or `Unauthorized`),\n`path` must be the parent actor's path plus exactly one segment (`InvalidActorPath`, which\nis what keeps siblings, ancestors and unrelated actors out of reach), and `rights` must be a\nsubset of the parent's (`Escalation`).",
       "errors": [
         {
           "name": "InvalidCapability"

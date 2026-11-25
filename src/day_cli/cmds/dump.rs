@@ -25,13 +25,12 @@ use std::collections::BTreeSet;
 ///
 /// Every command reads through the node's existing methods as the operator, minting the
 /// narrowest handle each read needs. What no method exposes is absent from the output, not
-/// guessed at: the node's own local drawers (present, originated, config) are not listed by
-/// any method, and drawers that are not on the known-drawers list are unreachable to `node`
-/// (name them to `drawer`).
+/// guessed at: drawers that are neither the node's own (`getNodeInfo`) nor on the known-drawers
+/// list are unreachable to `node` (name them to `drawer`).
 #[derive(Debug, clap::Subcommand)]
 pub enum DumpCommands {
-    /// Everything: node info, installed cartridges and their grants, and every known drawer with
-    /// its documents and their datums
+    /// Everything: node info, installed cartridges and their grants, and every drawer the node
+    /// holds, uses or knows (with its role) with its documents and their datums
     Node,
     /// One drawer: its descriptor, members, documents and their datums
     Drawer {
@@ -87,6 +86,10 @@ fn parse_doc(doc: &str) -> Res<DocId> {
 
 /// Everything the operator reaches. A drawer that cannot be read is reported in its place in the
 /// output, so one unsynced drawer does not hide the rest.
+///
+/// The drawers are the node's own (`getNodeInfo`: present, originated, and the config drawers
+/// with their roles) and then the known ones, each listed once under its id with the `roles` it
+/// plays on this node and, for a known drawer, its `mirror` setting.
 async fn node(client: &NodeClient) -> Res<serde_json::Value> {
     let info = super::status::node_info(client).await?;
     let known = client
@@ -95,15 +98,29 @@ async fn node(client: &NodeClient) -> Res<serde_json::Value> {
         })
         .await
         .wrap_err("listing the known drawers failed")?;
-    let mut drawers = serde_json::Map::new();
+    // Insertion order of the ids is the report order: the node's own first, then the known ones.
+    let mut entries: Vec<(DocId, Vec<&'static str>, Option<bool>)> = vec![
+        (info.drawers.present.clone(), vec!["present"], None),
+        (info.drawers.originated.clone(), vec!["originated"], None),
+    ];
+    for config in &info.drawers.config {
+        entries.push((config.drawer_id.clone(), vec![config.role.as_str()], None));
+    }
     for drawer in &known.drawers {
-        let dump = match drawer_dump(client, &drawer.drawer_id).await {
+        match entries.iter_mut().find(|(id, ..)| *id == drawer.drawer_id) {
+            Some((.., mirror)) => *mirror = Some(drawer.mirror),
+            None => entries.push((drawer.drawer_id.clone(), vec![], Some(drawer.mirror))),
+        }
+    }
+    let mut drawers = serde_json::Map::new();
+    for (id, roles, mirror) in entries {
+        let dump = match drawer_dump(client, &id).await {
             Ok(dump) => dump,
             Err(error) => json!({ "error": format!("{error:#}") }),
         };
         drawers.insert(
-            drawer.drawer_id.to_string(),
-            json!({ "mirror": drawer.mirror, "dump": dump }),
+            id.to_string(),
+            json!({ "roles": roles, "mirror": mirror, "dump": dump }),
         );
     }
     Ok(json!({
@@ -119,6 +136,7 @@ async fn node(client: &NodeClient) -> Res<serde_json::Value> {
 async fn drawer_dump(client: &NodeClient, drawer: &DocId) -> Res<serde_json::Value> {
     let capability = client
         .call(MintDrawerCapability {
+ capability: None,
             scope: DrawerScope {
                 drawers: [(drawer.clone(), DrawerAccess::Admin)].into(),
                 create: false,
@@ -173,6 +191,7 @@ async fn drawer_dump(client: &NodeClient, drawer: &DocId) -> Res<serde_json::Val
 async fn mint_read(client: &NodeClient, docs: impl IntoIterator<Item = DocId>) -> Res<CapId> {
     Ok(client
         .call(MintDocCapability {
+ capability: None,
             scope: DocScope {
                 read: DocScope::read_all(docs),
                 ..default()

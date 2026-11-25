@@ -6,8 +6,9 @@
 //! The host dispatches XRPC calls to this component as plain HTTP requests, and the header
 //! contract is the one every XRPC hop speaks (see `big_ndk::Cx`): `authorization: Bearer <caller
 //! capability id>`, `idempotency-key`, the relative `x-timeout-ms` budget, `x-request-id`,
-//! `traceparent`/`tracestate`, and `x-nodule-capability` (the nodule's own dispatch capability
-//! as a bare id, which the guest presents on its outgoing calls).
+//! `traceparent`/`tracestate`, `x-nodule-capability` (the nodule's own dispatch capability
+//! as a bare id, which the guest presents on its outgoing calls) and `x-nodule-actor-capability`
+//! (its own actor identity capability, which it names in the calls that act as its actor).
 //!
 //! Routes (all `POST`), served for any NSID whose last segment is the route's name, so one
 //! component can stand in for several nodules. `big_ndk::export_nodule!` routes by exact NSID,
@@ -15,8 +16,8 @@
 //! matches the suffix itself:
 //! - `/xrpc/<nsid>.echo` answers 200 with
 //!   `{ input, authorization, idempotencyKey, timeoutMs, requestId, traceparent,
-//!   noduleCapability }`, where the header members are `null` when absent and `timeoutMs` is
-//!   the remaining budget in milliseconds as text.
+//!   noduleCapability, actorCapability }`, where the header members are `null` when absent and
+//!   `timeoutMs` is the remaining budget in milliseconds as text.
 //! - `/xrpc/<nsid>.relay` takes `{ operation, authority?, input }` and POSTs `input` to
 //!   `http://dispatch.local/xrpc/<operation>` with `authorization: Bearer <authority>`, where
 //!   `authority` defaults to the capability id in `x-nodule-capability`. The operation is
@@ -27,6 +28,10 @@
 //!   body is not JSON; `authority` is the capability id the call presented), or the `UpstreamFailed` domain error when the outgoing request fails. With a
 //!   `query` it sends `GET /xrpc/<operation>?<query>` with no body instead, which is how a
 //!   query is called.
+//! - `/xrpc/<nsid>.adopt` takes `{ path }`: it opens the actor at `path` under the nodule's own
+//!   actor (`openActor` with `x-nodule-actor-capability` as `parent`) and, when that opens,
+//!   narrows the nodule's docs handle onto the new actor (`attenuateCapability { subject }`), both
+//!   through dispatch. It answers 200 `{ open: { status, body }, attenuate: { status, body } | null }`.
 //! - `/xrpc/<nsid>.fetch` takes `{ url, method?, headers? }` (`method` defaults to `GET`) and sends
 //!   that request to the URL with `Cx::fetch`, answering 200 `{ status, body }` (`body` is the
 //!   upstream JSON, or its text when it is not JSON), or the `UpstreamFailed` domain error when
@@ -37,6 +42,13 @@
 //!   `content-type` and the wrapping sum of every octet. It reads the stream one chunk at a time.
 //! - `/xrpc/<nsid>.emit` answers a byte body of [`EMIT_CHUNKS`] chunks of [`EMIT_CHUNK_OCTETS`]
 //!   octets (chunk `i` is all `i as u8`) as `application/x-emit`, produced lazily.
+//! - `/xrpc/<nsid>.readfile` takes `{ path, write? }` and answers 200 with `{ found: true, length, sum }`
+//!   for a file it reads in full (the length and the wrapping sum of its octets), or `{ found: false,
+//!   kind }` where `kind` is the `std::io::ErrorKind` that stopped it. With `write` it only tries to
+//!   open the file for writing and answers `{ opened, kind }`. This is how a test sees what a
+//!   workload's working mount holds.
+//! - `/xrpc/<nsid>.panic` panics with [`PANIC_MESSAGE`]. A Wasm guest prints it to stderr and traps
+//!   on `unreachable`, which is what the host's guest-fault handling is tested against.
 //! - Any other `/xrpc/` operation answers 404 `{ "error": "UnknownOperation" }` and any other
 //!   path answers 404 `{ "error": "NotFound" }`.
 
@@ -108,9 +120,23 @@ struct Relay {
     query: Option<String>,
 }
 
+/// Opens the actor at `path` under the nodule's own actor and narrows the nodule's docs handle
+/// onto it, both through dispatch.
+#[derive(Debug, Serialize, Deserialize)]
+struct Adopt {
+    path: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 struct Config(Value);
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ReadFile {
+    path: String,
+    #[serde(default)]
+    write: bool,
+}
 
 // The NSIDs are bare route names: `Fixture::route` matches the last segment of whatever
 // authority the cartridge declared, so these `XRPC.nsid`s are never compared.
@@ -119,6 +145,8 @@ method_core::methods! {
     Echo => Value, procedure, "echo";
     Relay => Value, procedure, "relay";
     Config => Value, procedure, "config";
+    ReadFile => Value, procedure, "readfile";
+    Adopt => Value, procedure, "adopt";
 }
 
 /// `fetch`: one request to a URL that is not dispatch, through `Cx::fetch`.
@@ -191,6 +219,9 @@ async fn fetch(cx: &Cx, body: XrpcBody) -> Reply {
         ),
     }
 }
+
+/// What the `panic` route panics with.
+pub const PANIC_MESSAGE: &str = "the nodule fixture panicked on purpose";
 
 /// How many chunks `emit` answers, and how long each is.
 pub const EMIT_CHUNKS: usize = 4;
@@ -332,9 +363,33 @@ impl Nodule for Fixture {
             "fetch" => Some(fetch(cx, body).await),
             "ingest" => Some(ingest(body).await),
             "emit" => Some(emit()),
+            "panic" => panic!("{PANIC_MESSAGE}"),
             "config" => Some(invoke::<Self, Config>(self, cx, body).await),
+            "readfile" => Some(invoke::<Self, ReadFile>(self, cx, body).await),
+            "adopt" => Some(invoke::<Self, Adopt>(self, cx, body).await),
             _ => None,
         }
+    }
+}
+
+impl Handler<ReadFile> for Fixture {
+    async fn call(&self, _cx: &Cx, input: ReadFile) -> Result<Value, FixtureError> {
+        if input.write {
+            return Ok(
+                match std::fs::OpenOptions::new().write(true).open(&input.path) {
+                    Ok(_) => json!({ "opened": true }),
+                    Err(error) => json!({ "opened": false, "kind": format!("{:?}", error.kind()) }),
+                },
+            );
+        }
+        Ok(match std::fs::read(&input.path) {
+            Ok(bytes) => json!({
+                "found": true,
+                "length": bytes.len(),
+                "sum": bytes.iter().fold(0u64, |sum, octet| sum.wrapping_add(u64::from(*octet))),
+            }),
+            Err(error) => json!({ "found": false, "kind": format!("{:?}", error.kind()) }),
+        })
     }
 }
 
@@ -349,6 +404,7 @@ impl Handler<Echo> for Fixture {
             "requestId": request.request_id,
             "traceparent": request.trace.traceparent(),
             "noduleCapability": cx.nodule_capability(),
+            "actorCapability": cx.actor_capability(),
         }))
     }
 }
@@ -399,6 +455,44 @@ impl Handler<Config> for Fixture {
     }
 }
 
+/// Sends `request` through `dispatch.local` and reads the upstream answer as `{ status, body }`,
+/// the body being its JSON or, when it is not JSON, its text.
+async fn send_to_dispatch(cx: &Cx, request: XrpcRequest) -> Result<(u16, Value), FixtureError> {
+    let response = cx
+        .transport()
+        .send(request)
+        .await
+        .map_err(|error| FixtureError::UpstreamFailed(error.message))?;
+    let body = match response.body {
+        XrpcBody::Json(body) => serde_json::from_slice::<Value>(&body)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned())),
+        XrpcBody::Bytes(_) => {
+            return Err(FixtureError::UpstreamFailed(
+                "the fixture cannot relay a byte body yet".to_owned(),
+            ));
+        }
+    };
+    Ok((response.status.as_u16(), body))
+}
+
+/// The headers of a hop to dispatch presenting `authority` as the bearer, forwarding the incoming
+/// idempotency key.
+fn dispatch_headers(cx: &Cx, authority: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    write_context_headers(
+        &mut headers,
+        &cx.next_hop(),
+        &HttpMetadata {
+            authorization: Some(bearer_header_value(authority)),
+            idempotency_key: cx.idempotency_key().map(str::to_owned),
+            range: None,
+        },
+    )
+    .expect("context headers are valid HTTP");
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers
+}
+
 impl Handler<Relay> for Fixture {
     async fn call(&self, cx: &Cx, input: Relay) -> Result<Value, FixtureError> {
         if input.operation.is_empty() {
@@ -413,18 +507,7 @@ impl Handler<Relay> for Fixture {
             .ok_or_else(|| {
                 FixtureError::InvalidRequest("no authority and no nodule capability".to_owned())
             })?;
-        let mut headers = HeaderMap::new();
-        write_context_headers(
-            &mut headers,
-            &cx.next_hop(),
-            &HttpMetadata {
-                authorization: Some(bearer_header_value(authority)),
-                idempotency_key: cx.idempotency_key().map(str::to_owned),
-                range: None,
-            },
-        )
-        .expect("context headers are valid HTTP");
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let headers = dispatch_headers(cx, authority);
         let request = match &input.query {
             Some(query) => XrpcRequest {
                 method: Method::GET,
@@ -442,24 +525,62 @@ impl Handler<Relay> for Fixture {
                 ),
             },
         };
-        let response = cx
-            .transport()
-            .send(request)
-            .await
-            .map_err(|error| FixtureError::UpstreamFailed(error.message))?;
-        let body = match response.body {
-            XrpcBody::Json(body) => serde_json::from_slice::<Value>(&body)
-                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned())),
-            XrpcBody::Bytes(_) => {
-                return Err(FixtureError::UpstreamFailed(
-                    "the fixture cannot relay a byte body yet".to_owned(),
-                ));
-            }
-        };
+        let (status, body) = send_to_dispatch(cx, request).await?;
         Ok(json!({
-            "status": response.status.as_u16(),
+            "status": status,
             "body": body,
             "authority": authority,
+        }))
+    }
+}
+
+impl Handler<Adopt> for Fixture {
+    async fn call(&self, cx: &Cx, input: Adopt) -> Result<Value, FixtureError> {
+        let (Some(actor), Some(authority), Some(docs)) = (
+            cx.actor_capability(),
+            cx.nodule_capability(),
+            cx.config_capability(),
+        ) else {
+            return Err(FixtureError::InvalidRequest(
+                "no actor, nodule and docs capabilities".to_owned(),
+            ));
+        };
+        // Both calls present the nodule's dispatch handle as the authority. The actor identity
+        // capability is the `parent` of the open, and the docs handle is what the attenuation
+        // narrows onto the child. The egress signs as the same actor, so the authority's holder
+        // binding passes.
+        let post = |operation: &'static str, body: Value| {
+            send_to_dispatch(
+                cx,
+                XrpcRequest {
+                    method: Method::POST,
+                    path: format!("xrpc/org.example.daybook.authority.{operation}"),
+                    headers: dispatch_headers(cx, authority),
+                    body: XrpcBody::json(
+                        serde_json::to_vec(&body).expect("serializing a Value cannot fail"),
+                    ),
+                },
+            )
+        };
+        let (status, opened) = post(
+            "openActor",
+            json!({ "parent": actor, "path": input.path, "rights": ["use"] }),
+        )
+        .await?;
+        let attenuated = match opened.get("actorId") {
+            Some(child) => {
+                let (status, body) = post(
+                    "attenuateCapability",
+                    json!({ "capability": docs, "rights": ["use"], "subject": child }),
+                )
+                .await?;
+                Some(json!({ "status": status, "body": body }))
+            }
+            None => None,
+        };
+        Ok(json!({
+            "open": { "status": status, "body": opened },
+            "attenuate": attenuated,
         }))
     }
 }

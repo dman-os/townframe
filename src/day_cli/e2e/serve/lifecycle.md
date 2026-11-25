@@ -14,7 +14,8 @@ node      [..]
 path      [..]/node
 mode      in-process
 socket    [..]/run/day/[..].sock (absent)
-nodules   0 enabled of 0
+nodules   1 enabled of 1
+  did:key:[..]/core  enabled  ready
 services  not exposed by the node
 peers     none attached (only a server attaches peers)
 
@@ -29,13 +30,14 @@ node      [..]
 path      [..]/node
 mode      serving
 socket    [..]/run/day/[..].sock (live)
-nodules   0 enabled of 0
+nodules   1 enabled of 1
+  did:key:[..]/core  enabled  ready
 services  not exposed by the node
 peers     none attached (the server's node.json has no peers section)
 
-$ day exec --get org.example.daybook.nodules.listNodules
+$ day exec --get org.example.daybook.cartridges.listCartridgeGrantRequests
 {
-  "nodules": []
+  "requests": []
 }
 
 $ day node stop
@@ -47,7 +49,8 @@ node      [..]
 path      [..]/node
 mode      in-process
 socket    [..]/run/day/[..].sock (absent)
-nodules   0 enabled of 0
+nodules   1 enabled of 1
+  did:key:[..]/core  enabled  ready
 services  not exposed by the node
 peers     none attached (only a server attaches peers)
 

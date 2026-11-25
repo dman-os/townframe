@@ -78,10 +78,11 @@ impl DrawerService {
     async fn remove_child(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: RemoveChild,
     ) -> Result<WriteReceipt, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core.invocation(context, metadata, params.capability).await?;
         let actor = &caller.signer;
         core.authorize(context, &caller.authority, &params.parent_id, Access::Write)
             .await?;
@@ -111,7 +112,7 @@ impl Handler<RemoveChild> for DrawerService {
         request: Envelope<RemoveChild>,
     ) -> Result<ResponseEnvelope<WriteReceipt>, DrawersError> {
         Ok(self
-            .remove_child(&request.context, request.params)
+            .remove_child(&request.context, &request.metadata, request.params)
             .await?
             .into())
     }

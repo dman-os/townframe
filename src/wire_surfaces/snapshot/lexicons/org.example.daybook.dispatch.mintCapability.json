@@ -45,16 +45,23 @@
           "type": "array"
         },
         "privileged": {
-          "type": "boolean"
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object"
     },
     "MintDispatchCapability": {
       "nullable": [
+        "capability",
         "subject"
       ],
       "properties": {
+        "capability": {
+          "type": "string"
+        },
         "rights": {
           "ref": "#Rights",
           "type": "ref"

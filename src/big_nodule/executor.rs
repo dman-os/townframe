@@ -45,6 +45,10 @@ pub struct RoutineCapabilities {
     pub docs: Option<CapId>,
     pub drawers: Option<CapId>,
     pub blobs: Option<CapId>,
+    /// The nodule's own actor identity capability, the same for every routine of the revision.
+    /// Unlike the handles above it is not minted per routine: the reconcile never retracts it
+    /// (it is the actor's), and sets it on every routine whose handles were minted.
+    pub actor: Option<CapId>,
 }
 
 /// Everything an executor needs to host one nodule revision's routine components.

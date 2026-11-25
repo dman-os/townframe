@@ -33,7 +33,6 @@ http-body = "1"
 http-body-util = "0.1"
 #
 # identity
-blake3.workspace = true
 http.workspace = true
 
 #

@@ -65,6 +65,28 @@ pub struct NodeSettings {
     /// The blob store's tuning.
     #[serde(default, skip_serializing_if = "BlobSettings::is_default")]
     pub blobs: BlobSettings,
+    /// Where the server listens besides its Unix socket.
+    #[serde(default, skip_serializing_if = "ListenSettings::is_default")]
+    pub listen: ListenSettings,
+}
+
+/// The `listen` section of `node.json`. Keys are snake_case, as the file's other top-level keys
+/// are.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListenSettings {
+    /// An address to serve XRPC on over TCP, such as `127.0.0.1:8080` (port 0 picks one).
+    /// Absent: no TCP listener. TCP has no peer credential, so it admits no anonymous caller:
+    /// every request carries a dispatch capability as its bearer. Only `day node serve` binds
+    /// it; a command's own node lives for one command and listens on its socket alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp: Option<std::net::SocketAddr>,
+}
+
+impl ListenSettings {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// The `blobs` section of `node.json`. Keys are snake_case, as the file's other top-level keys are.
@@ -215,6 +237,7 @@ impl NodeSettings {
             dev: DevSettings::default(),
             net: NetSettings::default(),
             blobs: BlobSettings::default(),
+            listen: ListenSettings::default(),
         };
         let path = root.join(Self::FILE);
         let bytes = serde_json::to_vec_pretty(&settings)?;

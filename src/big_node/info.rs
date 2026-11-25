@@ -61,12 +61,69 @@ impl Method for GetNodeInfo {
 pub struct NodeInfo {
     /// [`crate::node_id`]: lowercase hex.
     pub node_id: String,
-    /// The drawer that holds this node's known-drawers list. A drawer id is a name, not a
-    /// capability: it grants nothing, but it is what a client needs to mint the handle that
-    /// lists the drawers the node knows (`listKnownDrawers`), which is how it finds drawer ids.
-    pub known_drawers_id: DrawerId,
+    /// The drawers the node holds or uses itself. A drawer id is a name, not a capability: it
+    /// grants nothing, but it is what a client needs to mint a handle on the drawer (the
+    /// known-drawers one lists the drawers the node knows, `listKnownDrawers`, which is how a
+    /// client finds the rest).
+    pub drawers: NodeDrawers,
     /// `None` when the node has no peers attachment, so it is neither dialable nor dialing.
     pub peers: Option<PeersInfo>,
+}
+
+/// The node's own drawers, as the drawers service and the boot record them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeDrawers {
+    /// The drawer of every doc this node holds locally.
+    pub present: DrawerId,
+    /// The drawer of every doc this node created.
+    pub originated: DrawerId,
+    /// The drawers the node itself uses, in no meaningful order; each names its role.
+    pub config: Vec<ConfigDrawer>,
+}
+
+impl NodeDrawers {
+    /// The config drawer in `role`. Every role is reported on every node, so it is always there.
+    pub fn config(&self, role: ConfigDrawerRole) -> &DrawerId {
+        &self
+            .config
+            .iter()
+            .find(|drawer| drawer.role == role)
+            .expect("every config role is reported")
+            .drawer_id
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigDrawer {
+    pub role: ConfigDrawerRole,
+    pub drawer_id: DrawerId,
+}
+
+/// What the node uses a config drawer for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConfigDrawerRole {
+    /// The list of drawers the node knows (`listKnownDrawers`).
+    KnownDrawers,
+    /// The nodule service's own config documents.
+    NodeConfig,
+    /// The cartridge registry's cartridges.
+    CartridgeRegistry,
+    /// Each cartridge's config document (ADR 044).
+    CartridgeConfig,
+}
+
+impl ConfigDrawerRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::KnownDrawers => "known drawers",
+            Self::NodeConfig => "node config",
+            Self::CartridgeRegistry => "cartridge registry",
+            Self::CartridgeConfig => "cartridge config",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,7 +138,7 @@ pub struct PeersInfo {
 
 struct NodeInfoProvider {
     node_id: String,
-    known_drawers_id: DrawerId,
+    drawers: NodeDrawers,
     peers: Option<Peers>,
 }
 
@@ -90,7 +147,7 @@ pub(crate) fn register(
     router: &Router,
     provider_id: &str,
     node_id: String,
-    known_drawers_id: DrawerId,
+    drawers: NodeDrawers,
     peers: Option<Peers>,
 ) {
     // The node's facts publish no Lexicon (`GetNodeInfo` is a `Method` only for typed clients), so
@@ -104,7 +161,7 @@ pub(crate) fn register(
             )],
             ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(NodeInfoProvider {
                 node_id,
-                known_drawers_id,
+                drawers,
                 peers,
             }))),
         )
@@ -152,7 +209,7 @@ impl Provider for NodeInfoProvider {
         Ok(Body::Json(
             serde_json::to_value(NodeInfo {
                 node_id: self.node_id.clone(),
-                known_drawers_id: self.known_drawers_id.clone(),
+                drawers: self.drawers.clone(),
                 peers,
             })
             .expect("node info serializes"),

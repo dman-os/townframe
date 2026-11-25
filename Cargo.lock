@@ -1442,6 +1442,7 @@ dependencies = [
  "big_cartridges_core",
  "bytes",
  "futures",
+ "method_core",
  "serde",
  "serde_json",
  "service_client_native_rs",
@@ -1597,6 +1598,7 @@ dependencies = [
  "keyring-core",
  "method_core",
  "method_lexicon",
+ "micros_nodule",
  "rand 0.9.5",
  "rustix",
  "secrets_rs",
@@ -1610,6 +1612,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "utils_rs",
 ]
 
@@ -1629,7 +1632,6 @@ dependencies = [
  "big_dispatch_core",
  "big_nodule_core",
  "big_repo",
- "blake3",
  "bytes",
  "futures",
  "http",
@@ -1662,7 +1664,8 @@ dependencies = [
  "big_cabinet_core",
  "big_cartridges_core",
  "big_dispatch_core",
- "indexmap",
+ "blake3",
+ "indexmap 2.14.2",
  "irpc",
  "macros",
  "method_core",
@@ -1700,6 +1703,7 @@ dependencies = [
  "serde",
  "serde_json",
  "service_client_native_rs",
+ "service_core_rs",
  "service_utils_rs",
  "thiserror 2.0.21",
  "tokio",
@@ -1707,6 +1711,7 @@ dependencies = [
  "tracing",
  "utils_rs",
  "wash-runtime",
+ "wasmtime-wasi",
  "wasmtime-wasi-http",
 ]
 
@@ -8775,6 +8780,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "micros_nodule"
+version = "0.1.0"
+dependencies = [
+ "big_blobs_core",
+ "big_cabinet_core",
+ "big_cartridges_core",
+ "big_dispatch_core",
+ "big_ndk",
+ "big_nodule_core",
+ "futures",
+ "method_core",
+ "serde",
+ "serde_json",
+ "service_core_rs",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -15130,7 +15152,7 @@ dependencies = [
 [[package]]
 name = "wash-runtime"
 version = "2.11.0"
-source = "git+https://github.com/dman-os/wasmCloud?rev=e7648c6e939c50ba1be8d9c138ef6da3305a672e#e7648c6e939c50ba1be8d9c138ef6da3305a672e"
+source = "git+https://github.com/dman-os/wasmCloud?rev=f9c740425488ec045061c065636e4d4b8170d6eb#f9c740425488ec045061c065636e4d4b8170d6eb"
 dependencies = [
  "anyhow",
  "arc-swap",

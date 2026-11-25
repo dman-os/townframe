@@ -4,6 +4,7 @@
 # exposed_external_crates: [http, http_body]
 
 impl Handler < ObserveCartridgeInstalls > for big_nodule::NoduleService
+impl PrivilegedGrants for big_nodule::NoduleService
 pub big_nodule::async fn boot (config : NodulesConfig) -> Result < (Nodules , StopToken) , NodulesError >
 pub big_nodule::async fn ensure_shared_config_drawer (config : SharedConfigDrawerConfig < '_ > ,) -> Result < DrawerId , NodulesError >
 pub big_nodule::egress::async fn call (dispatch : & Client < DispatchProtocol > , caller : Option < & WorkloadCaller > , method : & Method , path : & str , headers : & HeaderMap , body : XrpcBody ,) -> (StatusCode , XrpcBody)
@@ -23,14 +24,16 @@ pub impl big_nodule::executor::Reensure::fn request (& self)
 pub mod big_nodule::egress
 pub mod big_nodule::executor
 pub mod big_nodule::wire
+pub struct big_nodule::CoreCartridge  { id: CartridgeId, version: big_cartridges_core :: Version, actor: OpenedActor, delegators: CoreDelegators, grants: std :: collections :: BTreeMap < big_cartridges_core :: config :: GrantKey , big_cartridges_core :: config :: GrantBody , > }
+pub struct big_nodule::CoreDelegators  { dispatch: CapId, docs: CapId, blobs: CapId }
 pub struct big_nodule::NoduleService  {  }
-pub struct big_nodule::Nodules  { host: Arc < Host < NodulesHandler > >, client: Client < NodulesProtocol > }
-pub struct big_nodule::NodulesConfig  { authority: Client < AuthorityProtocol >, docs: Client < DocsProtocol >, drawers: Client < DrawersProtocol >, config_drawer: DrawerId, registry_drawer: DrawerId, shared_config_drawer: DrawerId, actor: OpenedActor, actor_path: String, namespace: Namespace, dispatch: Arc < big_dispatch :: Router >, dispatch_client: Client < DispatchProtocol >, dispatch_authority: CapId, cartridges: Client < CartridgesProtocol >, cartridges_authorization: Authorization, blobs: Client < big_blobs_core :: BlobsProtocol >, blobs_capability: CapId, executor: Option < Arc < dyn executor :: NoduleExecutor > >, schemas: Arc < SchemaRepo >, allow_slot_takeover: bool, sql: Database }
+pub struct big_nodule::Nodules  { host: Arc < Host < NodulesHandler > >, client: Client < NodulesProtocol >, shared_config_drawer: DrawerId }
+pub struct big_nodule::NodulesConfig  { authority: Client < AuthorityProtocol >, docs: Client < DocsProtocol >, drawers: Client < DrawersProtocol >, config_drawer: DrawerId, registry_drawer: DrawerId, shared_config_drawer: DrawerId, actor: OpenedActor, actor_path: String, namespace: Namespace, dispatch: Arc < big_dispatch :: Router >, dispatch_client: Client < DispatchProtocol >, dispatch_authority: CapId, cartridges: Client < CartridgesProtocol >, cartridges_authorization: Authorization, blobs: Client < big_blobs_core :: BlobsProtocol >, blobs_capability: CapId, executor: Option < Arc < dyn executor :: NoduleExecutor > >, schemas: Arc < SchemaRepo >, allow_slot_takeover: bool, core_cartridge: CoreCartridge, sql: Database, granted: GrantedMethods }
 pub struct big_nodule::SharedConfigDrawerConfig< 'a >  { drawers: & 'a Drawers, actor: & 'a OpenedActor, access: & 'a DrawerAccess, sql: Database }
 pub struct big_nodule::egress::WorkloadCaller  { signer: CapId, missing_authority: Option < MissingAuthorityLookup > }
 pub struct big_nodule::executor::HandlerSpec  { cartridge_id: CartridgeId, revision: Revision, components: BTreeMap < String , ManifestComponent >, routines: BTreeMap < String , RoutineSpec >, config_doc: big_cabinet_core :: dmeta :: DocId, actor: OpenedActor, routine_capabilities: BTreeMap < String , RoutineCapabilities >, reensure: Reensure, missing_authority: MissingAuthorityLookup }
 pub struct big_nodule::executor::Reensure  {  }
-pub struct big_nodule::executor::RoutineCapabilities  { dispatch: Option < CapId >, docs: Option < CapId >, drawers: Option < CapId >, blobs: Option < CapId > }
+pub struct big_nodule::executor::RoutineCapabilities  { dispatch: Option < CapId >, docs: Option < CapId >, drawers: Option < CapId >, blobs: Option < CapId >, actor: Option < CapId > }
 pub struct big_nodule::executor::RoutineSpec  { routine_key: String, component: String, export: String }
 pub trait big_nodule::executor::NoduleExecutor { fn kind (& self) -> & 'static str; async fn ensure (& self , spec : & HandlerSpec) -> Hosted; fn hosts (& self , cartridge_id : & CartridgeId) -> bool; async fn retire (& self , cartridge_id : & CartridgeId) }
 pub type big_nodule::NodulesHandler = Arc < NoduleService >

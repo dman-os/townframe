@@ -247,16 +247,32 @@ async fn watch(
 }
 
 async fn list(node: &BigNode) -> Vec<big_cartridges_core::protocol::CartridgeRecord> {
-    node.cartridges
-        .client
-        .call_with(
-            RequestContext::root(),
-            operator(node).metadata(),
-            ListCartridges {},
-        )
-        .await
-        .unwrap()
-        .cartridges
+    without_core(
+        node,
+        node.cartridges
+            .client
+            .call_with(
+                RequestContext::root(),
+                operator(node).metadata(),
+                ListCartridges {},
+            )
+            .await
+            .unwrap()
+            .cartridges,
+    )
+}
+
+/// `cartridges` without the node's own core cartridge, which every node publishes at boot (ADR
+/// 053): these tests look at what they published themselves.
+fn without_core(
+    node: &BigNode,
+    cartridges: Vec<big_cartridges_core::protocol::CartridgeRecord>,
+) -> Vec<big_cartridges_core::protocol::CartridgeRecord> {
+    let core = crate::core_cartridge::id(&node.cartridges.publisher);
+    cartridges
+        .into_iter()
+        .filter(|record| record.id != core)
+        .collect()
 }
 
 async fn retained(sql: &Database, document: &DocId) -> BTreeSet<String> {
@@ -304,17 +320,19 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
         .await
         .unwrap();
 
-    let list = node
-        .cartridges
-        .client
-        .call_with(
-            RequestContext::root(),
-            operator.metadata(),
-            ListCartridges {},
-        )
-        .await
-        .unwrap()
-        .cartridges;
+    let list = without_core(
+        &node,
+        node.cartridges
+            .client
+            .call_with(
+                RequestContext::root(),
+                operator.metadata(),
+                ListCartridges {},
+            )
+            .await
+            .unwrap()
+            .cartridges,
+    );
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].id, cartridge_id("photos"));
     assert_eq!(
@@ -528,18 +546,7 @@ async fn staging_refuses_components_whose_bytes_are_not_local() {
             artifact: "handler".into(),
         })
     );
-    let listed = node
-        .cartridges
-        .client
-        .call_with(
-            RequestContext::root(),
-            operator(&node).metadata(),
-            ListCartridges {},
-        )
-        .await
-        .unwrap()
-        .cartridges;
-    assert!(listed.is_empty());
+    assert!(list(&node).await.is_empty());
     shutdown(node, stop).await;
 }
 
@@ -762,15 +769,171 @@ async fn the_registry_is_rebuilt_from_its_drawer_after_a_restart() {
     shutdown(node, stop).await;
 }
 
+/// A node publishes and installs its core cartridge at boot (ADR 053 §3): the version its build
+/// carries, under its own publisher DID, with the core nodule enabled and acting as the `micros`
+/// subsystem actor. A reboot finds the install already pinning that version and leaves it as it is.
+// A boot-time `InstallCartridge` was once answered `Denied` under load, unreproduced. To catch it,
+// run with `RUST_LOG_TEST=info,instr=info`: the `instr` lines name the presented authority and
+// signer, what `ResolveAuthority` returned and the scope `scope_of` read, at each refusal.
+#[tokio::test]
+async fn a_node_installs_its_core_cartridge_at_boot_and_a_reboot_keeps_the_install() {
+    let directory = tempfile::tempdir().unwrap();
+    let secrets = secrets().await;
+    let sql_path = directory.path().join("cabinet.sqlite");
+    let boot = async || {
+        let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+        let mut config = config(
+            Arc::clone(&secrets),
+            runtime.database(&sql_path, &[], "_sqlite_rs_migrations"),
+            big_repo::Storage::in_directory(&runtime, &directory.path().join("repo"), None)
+                .unwrap(),
+        );
+        config.blob_storage = big_blobs::Storage::filesystem(directory.path().join("blobs"))
+            .await
+            .unwrap();
+        BigNode::boot(config).await.unwrap()
+    };
+    let core_install = async |node: &BigNode| {
+        node.nodules
+            .client
+            .call_with(
+                RequestContext::root(),
+                operator(node).metadata(),
+                big_cartridges_core::protocol::ListCartridgeInstalls {},
+            )
+            .await
+            .unwrap()
+            .installs
+            .into_iter()
+            .find(|record| {
+                record.cartridge_id == crate::core_cartridge::id(&node.cartridges.publisher)
+            })
+            .expect("the core cartridge is installed")
+            .install
+    };
+
+    let (node, stop) = boot().await;
+    let core = crate::core_cartridge::id(&node.cartridges.publisher);
+    let version: Version = crate::core_cartridge::VERSION.parse().unwrap();
+    let installed = core_install(&node).await;
+    assert_eq!(
+        installed.cartridge.location().reference().key(),
+        &version_key(&version)
+    );
+    assert!(
+        installed
+            .nodule
+            .as_ref()
+            .is_some_and(|nodule| nodule.enabled)
+    );
+    let nodule = node
+        .nodules
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            big_nodule_core::protocol::GetNodule {
+                cartridge_id: core.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    // Opening a path that exists opens the same actor.
+    let micros = node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            big_cabinet_core::authority::OpenActor {
+                parent: node.authority.root,
+                path: "micros".into(),
+                rights: big_cabinet_core::authority::Rights::all(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        nodule.actor.map(|actor| actor.actor_id),
+        Some(micros.actor.actor_id)
+    );
+    get_version(&node, &core.to_string(), crate::core_cartridge::VERSION)
+        .await
+        .unwrap();
+    // Its manifest declares the methods the micros nodule calls, and the node made the grants
+    // for them at boot: held for the boot (in no document), privileged for exactly the reads.
+    // The nodule is ready, which the nodules methods being optional requests keeps true even
+    // though their provider registers after the node is assembled.
+    assert_eq!(nodule.readiness, big_dispatch_core::Readiness::Ready);
+    let grants = node
+        .nodules
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            big_cartridges_core::protocol::ListCartridgeGrants {
+                cartridge_id: Some(core.clone()),
+            },
+        )
+        .await
+        .unwrap()
+        .grants;
+    assert!(grants.iter().all(|grant| grant.this_boot), "{grants:?}");
+    let named = |privileged: bool| -> BTreeSet<String> {
+        grants
+            .iter()
+            .filter(|grant| grant.value.privileged == privileged)
+            .map(|grant| match &grant.grant {
+                big_cartridges_core::config::GrantKey::Method(nsid) => nsid.clone(),
+                other => panic!("the core cartridge holds a method grant, not {other}"),
+            })
+            .collect()
+    };
+    let expected = |nsids: &[&str]| nsids.iter().copied().map(str::to_owned).collect();
+    assert_eq!(
+        named(true),
+        expected(&[
+            "org.example.daybook.cartridges.awaitCartridgeGrants",
+            "org.example.daybook.cartridges.listCartridgeGrants",
+            "org.example.daybook.cartridges.listCartridgeInstalls",
+            "org.example.daybook.cartridges.resolveCartridgePin",
+        ])
+    );
+    assert_eq!(
+        named(false),
+        expected(&[
+            "org.example.daybook.authority.attenuateCapability",
+            "org.example.daybook.authority.openActor",
+            "org.example.daybook.authority.resolveAuthority",
+            "org.example.daybook.authority.retractCapability",
+            "org.example.daybook.blobs.mintCapability",
+            "org.example.daybook.dispatch.mintCapability",
+            "org.example.daybook.docs.mintDocCapability",
+            "org.example.daybook.drawers.mintDrawerCapability",
+        ])
+    );
+    shutdown(node, stop).await;
+
+    let (node, stop) = boot().await;
+    assert_eq!(core_install(&node).await, installed);
+    shutdown(node, stop).await;
+}
+
 #[tokio::test]
 async fn the_watch_observes_publish_and_remove_from_a_cursor() {
     let secrets = secrets().await;
     let (node, stop, _sql) = boot_memory(&secrets).await;
     let operator = operator(&node);
-    // With no cursor the answer is the current state, flagged as a reset; an empty registry says
-    // so at once rather than holding.
+    // With no cursor the answer is the current state, flagged as a reset, at once rather than
+    // holding: here only the node's own core cartridge (ADR 053).
     let start = watch(&node, None, 10_000).await.unwrap();
-    assert!(start.reset && start.caught_up && start.changes.is_empty());
+    let core = crate::core_cartridge::id(&node.cartridges.publisher);
+    assert!(start.reset && start.caught_up);
+    assert!(
+        start
+            .changes
+            .iter()
+            .all(|change| change.cartridge_id == core)
+    );
 
     let info = put(&node, b"watched handler").await;
     // Staging creates the cartridge's document, which the watch reports as a change of its own,
@@ -1660,6 +1823,7 @@ pub(super) async fn import_document(
             RequestContext::root(),
             operator(node).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([doc_id.clone()]),
                     ..DocScope::default()
@@ -1678,6 +1842,7 @@ pub(super) async fn import_document(
             RequestContext::root(),
             operator(node).metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Read)]),
                     create: false,
@@ -1885,6 +2050,49 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
         import_document(&node, reader, &present, &outside).await,
         Err(CartridgesError::Denied)
     );
+    shutdown(node, stop).await;
+}
+
+/// The nodules service registers in dispatch after the nodule service booted and reconciled
+/// (`BigNode::register_late_built_ins`), so the core nodule's optional requests for its reads
+/// were `noProvider` at boot. The nodule service follows the router's claims, so they resolve
+/// once it registers, and a status read after boot sees them so.
+#[tokio::test]
+async fn the_core_nodules_requests_for_nodules_methods_resolve_after_boot() {
+    use big_cartridges_core::protocol::AwaitCartridgeGrants;
+    use big_cartridges_core::protocol::ListCartridgeGrants;
+    use big_cartridges_core::protocol::ListCartridgeInstalls;
+    use method_core::Method;
+
+    let secrets = secrets().await;
+    let (node, stop, _) = boot_memory(&secrets).await;
+    let core = crate::core_cartridge::id(&node.cartridges.publisher);
+    let record = node
+        .nodules
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            big_nodule_core::protocol::GetNodule { cartridge_id: core },
+        )
+        .await
+        .unwrap();
+    for method in [
+        ListCartridgeGrants::XRPC.nsid,
+        AwaitCartridgeGrants::XRPC.nsid,
+        ListCartridgeInstalls::XRPC.nsid,
+    ] {
+        let status = &record.requests[method];
+        assert_eq!(status.unresolved, None, "{method}");
+        assert_eq!(
+            status
+                .locked
+                .as_ref()
+                .map(|locked| locked.provider.as_str()),
+            Some("builtin:nodules"),
+            "{method}"
+        );
+    }
     shutdown(node, stop).await;
 }
 

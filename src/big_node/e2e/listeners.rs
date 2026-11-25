@@ -183,7 +183,7 @@ async fn create_note(
     metadata: HttpMetadata,
 ) -> Result<WriteReceipt, service_utils_rs::ClientError<big_cabinet_core::doc::DocsError>> {
     let placement = format!("drawer {}", node.drawers.local().present_id);
-    let capability = capability(
+    let capability = operator_capability(
         node,
         DocScope {
             create: BTreeSet::from([placement.clone()]),
@@ -512,7 +512,7 @@ async fn a_query_is_served_over_get_and_the_wrong_verb_is_invalid() {
     let client = tcp_client(&node);
     let operator = Authorization::identity(node.authority.root);
     let note = create(&node, "get-query", json!({"$type": NOTE, "value": "x"})).await;
-    let capability = capability(
+    let capability = operator_capability(
         &node,
         DocScope {
             read: DocScope::read_all([note.doc_id.clone()]),

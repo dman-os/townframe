@@ -11,6 +11,7 @@ use service_client_core_rs::xrpc::XrpcResponse;
 use service_core_rs::ClientError;
 use service_core_rs::HttpMetadata;
 use service_core_rs::RequestContext;
+use service_core_rs::xrpc::NODULE_ACTOR_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_BLOBS_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CONFIG_CAPABILITY_HEADER;
@@ -74,6 +75,7 @@ pub struct Cx {
     pub(crate) idempotency_key: Option<String>,
     pub(crate) drawer_capability: Option<String>,
     pub(crate) blobs_capability: Option<String>,
+    pub(crate) actor_capability: Option<String>,
     pub(crate) config_doc: Option<String>,
     pub(crate) config_capability: Option<String>,
     pub(crate) transport: HttpHandle,
@@ -88,6 +90,7 @@ impl std::fmt::Debug for Cx {
             .field("nodule", &self.nodule)
             .field("drawer_capability", &self.drawer_capability)
             .field("blobs_capability", &self.blobs_capability)
+            .field("actor_capability", &self.actor_capability)
             .field("idempotency_key", &self.idempotency_key)
             .finish_non_exhaustive()
     }
@@ -131,6 +134,14 @@ impl Cx {
                 })
             })
             .transpose()?;
+        let actor_capability = headers
+            .get(NODULE_ACTOR_CAPABILITY_HEADER)
+            .map(|value| {
+                value.to_str().map(str::to_owned).map_err(|_| {
+                    format!("{NODULE_ACTOR_CAPABILITY_HEADER} must be valid UTF-8 HTTP text")
+                })
+            })
+            .transpose()?;
         let config_capability = headers
             .get(NODULE_CONFIG_CAPABILITY_HEADER)
             .map(|value| {
@@ -150,6 +161,7 @@ impl Cx {
             nodule,
             drawer_capability,
             blobs_capability,
+            actor_capability,
             idempotency_key: metadata.idempotency_key,
             config_doc,
             config_capability,
@@ -195,6 +207,14 @@ impl Cx {
     /// name (ADR 049 §6.2): what it presents as a blobs call's `capability`.
     pub fn blobs_capability(&self) -> Option<&str> {
         self.blobs_capability.as_deref()
+    }
+
+    /// The nodule's own actor identity capability (`x-nodule-actor-capability`): present it as
+    /// `OpenActor.parent` to open actors under the nodule's own actor, and as the `capability` of
+    /// `AttenuateCapability` to narrow a handle to one of them. The egress signs as that same
+    /// actor, so presenting it passes ADR 037's holder binding.
+    pub fn actor_capability(&self) -> Option<&str> {
+        self.actor_capability.as_deref()
     }
 
     /// Reads the cartridge config document through the capability delivered with this request.

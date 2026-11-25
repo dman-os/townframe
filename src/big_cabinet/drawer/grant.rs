@@ -6,10 +6,11 @@ impl DrawerService {
     async fn grant(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: GrantDrawer,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.capability).await?;
+        let caller = core.invocation(context, metadata, params.capability).await?;
         core.authorize(context, &caller.authority, &params.drawer_id, Access::Admin)
             .await?;
         if !caller.rights.contains(Rights::DELEGATE) {
@@ -32,7 +33,7 @@ impl Handler<GrantDrawer> for DrawerService {
         &self,
         request: Envelope<GrantDrawer>,
     ) -> Result<ResponseEnvelope<()>, DrawersError> {
-        Ok(self.grant(&request.context, request.params).await?.into())
+        Ok(self.grant(&request.context, &request.metadata, request.params).await?.into())
     }
 }
 

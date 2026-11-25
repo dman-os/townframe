@@ -78,13 +78,14 @@ impl DocsService {
     async fn inspected(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         capability: CapId,
         doc_id: &DocId,
         heads: &[ChangeHash],
     ) -> Result<BigDocHandle, DocsError> {
         let caller = self
             .inspection_capabilities
-            .resolve::<DocId>(context, capability)
+            .resolve::<DocId>(context, metadata, capability)
             .await
             .map_err(authority_error)?;
         if !matches!(caller.authority, DomainAuthority::Scoped(ref inspected) if inspected == doc_id)
@@ -130,6 +131,7 @@ impl Handler<UnsafeInspectDatum> for DocsService {
         let document = self
             .inspected(
                 &request.context,
+                &request.metadata,
                 params.capability,
                 &params.doc_id,
                 &params.heads,
@@ -184,6 +186,7 @@ impl Handler<InspectDatumClaims> for DocsService {
         let document = self
             .inspected(
                 &request.context,
+                &request.metadata,
                 params.capability,
                 &params.doc_id,
                 &params.heads,
