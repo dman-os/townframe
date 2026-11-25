@@ -1,7 +1,7 @@
 //! The cartridge registry protocol (ADR 028 §1): the wire contract between the node-side registry
 //! service and whoever publishes to or reads from it.
 //!
-//! Every operation names its caller by the request's `Authorization: Bearer` credential (the
+//! Every method names its caller by the request's `Authorization: Bearer` credential (the
 //! envelope's HTTP metadata, `Authorization::from_metadata`), never by a body field; a request
 //! without one fails with `ContextError::Unauthenticated`. The credential is the operator's root
 //! capability, or a handle the registry minted through [`MintCartridgesCapability`] that carries a

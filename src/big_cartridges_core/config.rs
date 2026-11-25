@@ -10,9 +10,9 @@
 //! identified by [`GrantKey`].
 //!
 //! A cartridge's nodule and its micro ship in one envelope and run the same revision, so there is
-//! one install datum with a member per [`Component`]. Grants are per cartridge, in the person's
-//! nouns (ADR 049 §4.1): one grant feeds both components, and each component's `uses` decides
-//! what of it the component reaches.
+//! one install datum with a member per [`Component`]. Grants are per cartridge, not per
+//! component (ADR 049 §4.1): one grant covers both components, and each component's `uses`
+//! decides what of it the component reaches.
 
 use crate::CartridgeId;
 use big_cabinet_core::DatumKey;
