@@ -1,0 +1,179 @@
+[
+  {
+    "name": "one line, the documented form",
+    "body": "intxt: dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+    ]
+  },
+  {
+    "name": "one per line, in order",
+    "body": "intxt: dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main\nintxt: dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main\n",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+      "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+    ]
+  },
+  {
+    "name": "duplicates are dropped, first mention orders",
+    "body": "dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main\ndtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main\ndtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main\ndtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main",
+    "drawers": [
+      "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+    ]
+  },
+  {
+    "name": "any prefix, or none, before the reference",
+    "body": "Part of the work in dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main, see also dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main!",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+    ]
+  },
+  {
+    "name": "markdown link",
+    "body": "[the intxt](dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main) and more",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+    ]
+  },
+  {
+    "name": "inline code",
+    "body": "`dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main`",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+    ]
+  },
+  {
+    "name": "angle brackets",
+    "body": "<dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main>",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+    ]
+  },
+  {
+    "name": "double and single quotes",
+    "body": "\"dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main\" 'dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main'",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+      "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+    ]
+  },
+  {
+    "name": "trailing period, comma, semicolon, colon",
+    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main. dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main, dtxt:datum:zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP/org.example.intxt/main; dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main:",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+      "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+      "zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP"
+    ]
+  },
+  {
+    "name": "trailing punctuation then a closing parenthesis",
+    "body": "(see dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main.)",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+    ]
+  },
+  {
+    "name": "CRLF line ends",
+    "body": "intxt: dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main\r\nintxt: dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main\r\n",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+      "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+    ]
+  },
+  {
+    "name": "tabs and a non-breaking space end a reference",
+    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main\tdtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main dtxt:datum:zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP/org.example.intxt/main",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+      "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+      "zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP"
+    ]
+  },
+  {
+    "name": "a fragment still names the intxt",
+    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main#L12",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+    ]
+  },
+  {
+    "name": "a percent-encoded slot is decoded",
+    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/ma%69n",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+    ]
+  },
+  {
+    "name": "wrong tag",
+    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt.title/main",
+    "drawers": []
+  },
+  {
+    "name": "wrong slot",
+    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/other",
+    "drawers": []
+  },
+  {
+    "name": "slot with a sub-path",
+    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main/extra",
+    "drawers": []
+  },
+  {
+    "name": "malformed document id",
+    "body": "dtxt:datum:nope/org.example.intxt/main",
+    "drawers": []
+  },
+  {
+    "name": "the self document",
+    "body": "dtxt:datum:self/org.example.intxt/main",
+    "drawers": []
+  },
+  {
+    "name": "a bare id without the prefix",
+    "body": "intxt: z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+    "drawers": []
+  },
+  {
+    "name": "the prefix is lowercase only",
+    "body": "DTXT:DATUM:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main",
+    "drawers": []
+  },
+  {
+    "name": "a reference glued to a longer token is still found",
+    "body": "https://example.org/?u=dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main",
+    "drawers": [
+      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+    ]
+  },
+  {
+    "name": "two references glued together: only the last parses",
+    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/maindtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main",
+    "drawers": [
+      "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+    ]
+  },
+  {
+    "name": "a query that is not a pin makes it malformed",
+    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main?x=1",
+    "drawers": []
+  },
+  {
+    "name": "a trailing question mark or exclamation mark is not trimmed",
+    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main? dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main!",
+    "drawers": []
+  },
+  {
+    "name": "a malformed reference does not hide the next",
+    "body": "dtxt:datum:nope/org.example.intxt/main dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main",
+    "drawers": [
+      "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+    ]
+  },
+  {
+    "name": "no reference",
+    "body": "just words, dtxt: and datum: apart",
+    "drawers": []
+  }
+]

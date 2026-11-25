@@ -487,3 +487,35 @@ fn a_thread_waits_on_whoever_did_not_write_last_and_is_unseen_until_recorded() {
     let anonymous = annotation::Thread::group(vec![posted("0193-c", None, &[], &["h"])]).remove(0);
     assert!(anonymous.waiting_on(&ada));
 }
+
+/// The golden vectors of the PR-description line (`docs/scratch/intxt-commit-membership.md`,
+/// "The grammar of the line"): every case's body names exactly the listed drawers, in order. A
+/// reader in another language is correct when it agrees on every case.
+#[test]
+fn named_in_agrees_with_the_golden_vectors() {
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        body: String,
+        drawers: Vec<String>,
+    }
+    let cases: Vec<Case> = serde_json::from_str(include_str!("testdata/named_in.json")).unwrap();
+    assert!(cases.len() >= 12);
+    for case in cases {
+        let named: Vec<String> = generic::Intxt::named_in(&case.body)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(named, case.drawers, "{}", case.name);
+        // The written reference is one the reader finds.
+        for drawer in &case.drawers {
+            let id: big_cabinet_core::DocId = drawer.parse().unwrap();
+            assert_eq!(
+                generic::Intxt::named_in(&generic::Intxt::reference(&id).to_string()),
+                [id],
+                "{}",
+                case.name
+            );
+        }
+    }
+}
