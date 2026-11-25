@@ -9,7 +9,9 @@
 //! installed by the pin of the version just published, granted what its permbinds name (the
 //! methods, and the drawers the caller passes in), and enabled.
 
+use crate::cartridge::build_of;
 use crate::cartridge::cartridge;
+use crate::cartridge::next_version;
 use crate::cartridge::requested_methods;
 use crate::client::Caller;
 use crate::methods::IntxtError;
@@ -58,12 +60,13 @@ pub struct Installed {
 /// `grant/drawer/<id>`. A drawer intxt makes itself is not among them: the cartridge's grants
 /// name drawers that exist when they are written.
 ///
-/// Idempotent: when the node already has the version this build of `intxt_core` carries installed
+/// Idempotent: when the node already runs this build of the handler and manifest, installed
 /// and enabled, and every one of `drawers` is already granted at its access, it answers that
 /// nodule's record without storing, publishing or granting anything. Drawers it is not yet
 /// granted are granted, so installing again after the node holds new intxts extends the grants.
-/// The version carries the handler's digest ([`crate::cartridge::cartridge`]), so a rebuilt
-/// handler is another version, and installing it upgrades the node.
+/// The version's build metadata names the handler and the manifest ([`crate::cartridge::cartridge`]),
+/// so a rebuilt handler or a changed manifest is another build, and installing it publishes the
+/// next patch after the one the node runs and upgrades the node.
 ///
 /// The envelope is signed as the fixture namespace's owner, the namespace intxt's cartridge sits
 /// under until it has its own (see [`crate::cartridge::cartridge`]).
@@ -72,17 +75,30 @@ pub async fn install<H: HttpTransport>(
     guest_wasm: &[u8],
     drawers: &[(DrawerId, DrawerAccess)],
 ) -> Result<Installed, IntxtError> {
-    let fixture = cartridge(guest_wasm);
-    let (cartridge_id, version) = (fixture.id.clone(), fixture.version.clone());
+    // A probe at patch 0 names the build; the version it is published at is known once the node's
+    // is.
+    let mut fixture = cartridge(guest_wasm, 0);
+    let (cartridge_id, build) = (fixture.id.clone(), build_of(&fixture.version).to_owned());
     let present = caller
         .call(ListNodules {})
         .await?
         .nodules
         .into_iter()
         .find(|record| record.cartridge_id == cartridge_id);
-    let current = present
-        .as_ref()
-        .is_some_and(|record| record.enabled && record.version.as_ref() == Some(&version));
+    let current = present.as_ref().is_some_and(|record| {
+        record.enabled
+            && record
+                .version
+                .as_ref()
+                .is_some_and(|version| build_of(version) == build)
+    });
+    if !current {
+        fixture.version = next_version(
+            present.as_ref().and_then(|record| record.version.as_ref()),
+            &build,
+        );
+    }
+    let version = fixture.version.clone();
     let ungranted: Vec<_> = drawers
         .iter()
         .filter(|(drawer, access)| {

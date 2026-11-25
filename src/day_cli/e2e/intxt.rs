@@ -237,7 +237,7 @@ async fn installing_intxt_twice_changes_nothing() {
         let before = crate::cmds::intxt::call(
             client,
             GetCartridge {
-                id: intxt_core::cartridge::cartridge(&wasm).id.clone(),
+                id: intxt_core::cartridge::cartridge(&wasm, 0).id.clone(),
             },
         )
         .await
@@ -281,8 +281,10 @@ async fn install_revision_without_create_doc(
     use big_cartridges_core::registry::version_pin;
 
     let caller = operator(client);
-    let mut fixture = intxt_core::cartridge::cartridge(wasm);
+    let mut fixture = intxt_core::cartridge::cartridge(wasm, 0);
     assert!(fixture.permbinds.remove("createDoc").is_some());
+    // The build an older `intxt_core` published for these bytes, as its own, at patch 1.
+    fixture.version = "0.1.1+0ldmanifest00000".parse().unwrap();
     let routines = &mut fixture.nodule.as_mut().unwrap().routines;
     for routine in routines.values_mut() {
         routine.uses.remove("createDoc");
@@ -361,7 +363,7 @@ async fn upgrade_to_create_doc(old_wasm: &[u8]) -> big_nodule_core::protocol::No
             crate::cmds::intxt::call(
                 &client,
                 big_nodule_core::protocol::GetNodule {
-                    cartridge_id: intxt_core::cartridge::cartridge(&wasm).id.clone(),
+                    cartridge_id: intxt_core::cartridge::cartridge(&wasm, 0).id.clone(),
                 },
             )
             .await
@@ -378,20 +380,9 @@ async fn upgrade_to_create_doc(old_wasm: &[u8]) -> big_nodule_core::protocol::No
 #[tokio::test(flavor = "multi_thread")]
 async fn installing_a_revision_with_another_handler_grants_a_newly_requested_method() {
     let wasm = std::fs::read(guest_path()).unwrap();
-    // A custom section changes the bytes and so the version. The registry only takes a version
-    // that orders after the newest it has had, and versions that differ in build metadata alone
-    // order by it, so the older build is one whose version sorts lower.
-    let older = (0..=u8::MAX)
-        .map(|salt| {
-            let mut older = wasm.clone();
-            older.extend_from_slice(&[0, 3, 1, b'x', salt]);
-            older
-        })
-        .find(|older| {
-            intxt_core::cartridge::cartridge(older).version
-                < intxt_core::cartridge::cartridge(&wasm).version
-        })
-        .expect("some salt gives a lower version");
+    // A custom section changes the handler's bytes, so the build.
+    let mut older = wasm.clone();
+    older.extend_from_slice(&[0, 3, 1, b'x', 0]);
     let record = upgrade_to_create_doc(&older).await;
     let methods = record.methods.clone().unwrap();
     assert_eq!(record.readiness, big_dispatch_core::Readiness::Ready, "{record:?}");
