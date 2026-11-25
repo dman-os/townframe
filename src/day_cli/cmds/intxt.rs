@@ -336,9 +336,9 @@ pub enum IntxtCommands {
     /// Report how intxt is set up on this machine and in this worktree
     ///
     /// Checks, in order: `day` and `intxt` on the PATH, the node and its server, intxt's
-    /// cartridge on the node, the intxts the node remembers, the Claude Code hooks that record
-    /// sessions, git's `post-rewrite` hook, and the intxt this worktree is on. Each prints one
-    /// line, `ok`, `warn` or `fail`, with the command that fixes anything not ok. It changes
+    /// cartridge on the node, the intxts the node remembers, whether recording is paused (`record
+    /// pause`), the Claude Code hooks that record sessions, git's `post-rewrite` hook, and the
+    /// intxt this worktree is on. Each prints one line, `ok`, `warn` or `fail`, with the command that fixes anything not ok. It changes
     /// nothing and does not start the node: with no server running, the checks that read the
     /// node are skipped (`day node start --bg` runs them). Exits 1 when a check fails.
     #[command(after_long_help = "Examples:\n  intxt doctor\n  intxt doctor --json")]
@@ -399,6 +399,17 @@ pub enum RecordCommands {
     /// `--verbose` is given, and then only to stderr; it never exits with status 2, which
     /// Claude Code feeds back to the model.
     Hook,
+    /// Stop recording: every capture hook (Claude Code's, git's) and `record acp` then does nothing
+    ///
+    /// Writes a marker in capture's state directory (`<node dir>/intxt/paused`). While it is
+    /// there, each hook returns success at once, before it reads its input, reaches the node or
+    /// starts a server, and an ACP session runs unrecorded. Sessions that run while paused are
+    /// not caught up on resume. Pausing twice changes nothing; `intxt doctor` reports the state.
+    Pause,
+    /// Record again: remove the marker `record pause` wrote
+    ///
+    /// Resuming a recording that is on changes nothing.
+    Resume,
     /// Record an ACP session: run the agent command, passing everything through
     ///
     /// An ACP client (an editor) launches this in place of the agent, e.g. `intxt record acp --
@@ -435,6 +446,8 @@ impl RecordCommands {
                 harness: Harness::ClaudeCode { user, dry_run },
             } => hooks::run(user, dry_run),
             Self::Hook => capture::CaptureCommands::run(None, verbose).await,
+            Self::Pause => capture::pause().await,
+            Self::Resume => capture::resume().await,
             Self::Acp { thinking, agent } => record::run(agent, thinking).await,
             Self::GitRewrite { kind } => {
                 capture::CaptureCommands::run(

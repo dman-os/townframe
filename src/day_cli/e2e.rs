@@ -1129,6 +1129,113 @@ mod blackbox {
         );
     }
 
+    /// `record pause` and `record resume` are idempotent and say what changed; doctor reports the
+    /// state with the command that fixes a pause, in the table and in `--json`.
+    #[test]
+    fn pause_and_resume_are_idempotent_and_doctor_reports_them() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        let said = |args: &[&str]| {
+            let output = sandbox.day(&["x", "intxt", "record"]
+                .into_iter()
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>());
+            assert!(output.status.success());
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        let recording = || {
+            let checks: Vec<serde_json::Value> =
+                serde_json::from_slice(&sandbox.doctor(&["--json"]).stdout).unwrap();
+            checks
+                .into_iter()
+                .find(|check| check["check"] == "recording")
+                .unwrap()
+        };
+        let marker = sandbox.node().join("intxt/paused");
+
+        assert_eq!(recording()["status"], "ok");
+        assert!(said(&["resume"]).contains("already on"));
+        assert!(!marker.exists());
+
+        assert!(said(&["pause"]).contains("recording paused"));
+        assert!(marker.exists());
+        assert!(said(&["pause"]).contains("already paused"));
+        let paused = recording();
+        assert_eq!(paused["status"], "warn");
+        assert_eq!(paused["fix"], "intxt record resume");
+        let table = String::from_utf8_lossy(&sandbox.doctor(&[]).stdout).into_owned();
+        assert!(
+            table
+                .lines()
+                .any(|line| line.contains("warn") && line.contains("recording")),
+            "{table}"
+        );
+
+        assert!(said(&["resume"]).contains("recording resumed"));
+        assert!(!marker.exists());
+        assert!(said(&["resume"]).contains("already on"));
+        assert_eq!(recording()["status"], "ok");
+    }
+
+    /// While paused every capture entry point (a Claude Code hook, git's `post-rewrite`, an ACP
+    /// session) succeeds without a word and starts no server; after `resume` the same git hook
+    /// starts one again.
+    #[test]
+    fn paused_hooks_do_nothing_and_resume_restores_capture() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        let worktree = sandbox.node().with_file_name("worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let hook = |args: &[&str]| {
+            Command::new(day_bin())
+                .env("RUST_LOG", "error")
+                .env("NO_COLOR", "1")
+                .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+                .current_dir(&worktree)
+                .arg("--node")
+                .arg(sandbox.node())
+                .args(["x", "intxt"])
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let silent_success = |output: std::process::Output| {
+            assert!(output.status.success(), "{output:?}");
+            assert!(output.stdout.is_empty() && output.stderr.is_empty(), "{output:?}");
+        };
+
+        assert!(hook(&["record", "pause"]).status.success());
+        // The hook's JSON is never read: empty stdin would be a parse error if it were.
+        silent_success(hook(&["record", "hook"]));
+        silent_success(hook(&["capture"]));
+        silent_success(hook(&["record", "git-rewrite", "amend"]));
+        silent_success(hook(&["capture", "git-rewrite", "rebase"]));
+        let acp = hook(&["record", "acp", "--", "sh", "-c", "echo agent; exit 3"]);
+        assert_eq!(acp.status.code(), Some(3), "{acp:?}");
+        assert_eq!(acp.stdout, b"agent\n");
+        assert!(
+            !sandbox.socket().exists(),
+            "a paused hook must not start a server"
+        );
+
+        assert!(hook(&["record", "resume"]).status.success());
+        silent_success(hook(&["record", "git-rewrite", "amend"]));
+        assert!(
+            sandbox.socket().exists(),
+            "a resumed hook starts the server again"
+        );
+        assert!(sandbox.day(&["node", "stop"]).status.success());
+    }
+
     /// A settings file that is not JSON (Claude Code's own tolerates trailing commas, the
     /// install refuses them) fails doctor and is named with the parse error.
     #[test]
@@ -1176,6 +1283,7 @@ mod blackbox {
                 "server",
                 "cartridge",
                 "intxts",
+                "recording",
                 "claude-hooks",
                 "git",
                 "worktree"

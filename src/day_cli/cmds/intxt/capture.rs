@@ -99,6 +99,9 @@ impl CaptureCommands {
     /// The hook's JSON from stdin, captured against the node `--node` names.
     async fn hook(verbose: bool) -> Res<()> {
         let node_dir = lazy::config().await?.node_dir.clone();
+        if Self::paused(&node_dir, verbose)? {
+            return Ok(());
+        }
         let mut input = Vec::new();
         std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)
             .wrap_err("reading the hook's JSON from stdin")?;
@@ -112,6 +115,9 @@ impl CaptureCommands {
     /// in (the current directory).
     async fn rewritten(kind: RewriteKind, verbose: bool) -> Res<()> {
         let node_dir = lazy::config().await?.node_dir.clone();
+        if Self::paused(&node_dir, verbose)? {
+            return Ok(());
+        }
         let mut input = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
             .wrap_err("reading post-rewrite's pairs from stdin")?;
@@ -122,6 +128,17 @@ impl CaptureCommands {
             eprintln!("intxt capture: recorded {recorded} {kind:?} rewrite(s)");
         }
         Ok(())
+    }
+
+    /// Whether recording is paused, checked before a hook reads its input, reaches the node or
+    /// starts a server: a paused hook is a deliberate no-op that succeeds, so it never fails
+    /// the harness or the git command that ran it.
+    fn paused(node_dir: &day_node::NodeDir, verbose: bool) -> Res<bool> {
+        let paused = is_paused(node_dir.root())?;
+        if paused && verbose {
+            eprintln!("intxt capture: recording is paused (`intxt record resume`)");
+        }
+        Ok(paused)
     }
 
     /// `capture install-git-hooks`: installs the hook in the current directory's clone.
@@ -272,6 +289,57 @@ fn idempotency_key(batch: &intxt_core::capture::Batch) -> String {
         ));
     }
     blake3::hash(key.as_bytes()).to_hex()[..32].to_owned()
+}
+
+/// The marker that pauses recording: capture's local state directory (`<node dir>/intxt/`, beside
+/// the session state) holds this file while recording is paused, and its presence is the whole
+/// state. Every reader and writer of the state goes through this function.
+pub(crate) fn pause_marker(node_dir: &Path) -> PathBuf {
+    node_dir.join("intxt/paused")
+}
+
+/// Whether `intxt record pause` is in effect for the node at `node_dir`.
+pub(crate) fn is_paused(node_dir: &Path) -> Res<bool> {
+    let marker = pause_marker(node_dir);
+    marker
+        .try_exists()
+        .wrap_err_with(|| format!("looking for {}", marker.display()))
+}
+
+/// `intxt record pause`: writes the marker. Pausing a paused recording changes nothing.
+pub(super) async fn pause() -> Res<ExitCode> {
+    let node_dir = lazy::config().await?.node_dir.clone();
+    let marker = pause_marker(node_dir.root());
+    std::fs::create_dir_all(marker.parent().expect("the marker is in a directory"))?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(_) => println!(
+            "recording paused: every hook now does nothing (marker {}); `intxt record resume` turns it on",
+            marker.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            println!("recording was already paused (marker {})", marker.display());
+        }
+        Err(error) => return Err(error).wrap_err_with(|| format!("writing {}", marker.display())),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `intxt record resume`: removes the marker. Resuming a recording that is on changes nothing.
+pub(super) async fn resume() -> Res<ExitCode> {
+    let node_dir = lazy::config().await?.node_dir.clone();
+    let marker = pause_marker(node_dir.root());
+    match std::fs::remove_file(&marker) {
+        Ok(()) => println!("recording resumed (removed {})", marker.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("recording was already on (no marker at {})", marker.display());
+        }
+        Err(error) => return Err(error).wrap_err_with(|| format!("removing {}", marker.display())),
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The directory of the host's per-session state files: a hook session's, and an ACP session's

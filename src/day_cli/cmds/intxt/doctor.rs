@@ -3,6 +3,7 @@
 //! and never boots the node in this process: the node-side checks run only against a server that
 //! answers on the socket ([`day_node::NodeDir::probe_socket`]).
 
+use super::capture;
 use super::hooks;
 use super::package::Packaging;
 use super::package::Unreadable;
@@ -110,6 +111,7 @@ pub(super) async fn run(json: bool) -> Res<ExitCode> {
             ));
         }
     }
+    checks.push(recording(dir)?);
     checks.push(claude_hooks(
         identity.as_ref().map_or(&cwd, |found| &found.root),
     ));
@@ -376,6 +378,22 @@ async fn intxts(packaging: &Packaging<'_>) -> Res<(Check, Vec<(String, String)>)
         Check::warn("intxts", detail.trim_end_matches(';'), fix.join("; "))
     };
     Ok((check, titles))
+}
+
+/// Whether recording is on, or paused by `intxt record pause` (every hook is then a no-op).
+fn recording(dir: &day_node::NodeDir) -> Res<Check> {
+    Ok(if capture::is_paused(dir.root())? {
+        Check::warn(
+            "recording",
+            format!(
+                "paused: every capture hook does nothing (marker {})",
+                capture::pause_marker(dir.root()).display()
+            ),
+            "intxt record resume",
+        )
+    } else {
+        Check::ok("recording", "on")
+    })
 }
 
 /// Claude Code hooks that record sessions, in the user's settings (which record every project)

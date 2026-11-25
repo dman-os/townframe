@@ -1669,6 +1669,11 @@ impl<'a> Packaging<'a> {
             Some(drawer) => writeln!(out, "on intxt {drawer}")?,
             None => writeln!(out, "on no intxt (day x intxt use <intxt>)")?,
         }
+        if super::capture::is_paused(&self.node_dir)? {
+            writeln!(out, "recording: paused (day x intxt record resume)")?;
+        } else {
+            writeln!(out, "recording: on")?;
+        }
         writeln!(out, "recorded here: {} op(s)", recorded.ops)?;
         match recorded.git_hooks {
             Some(state) => writeln!(out, "git hooks: {}", state.describe())?,
