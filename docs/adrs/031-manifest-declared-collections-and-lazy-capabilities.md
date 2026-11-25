@@ -1,5 +1,7 @@
 # ADR 031: Manifest-declared collections and lazy capabilities
 
+> **Superseded in part by [ADR 050](050-cartridge-surfaces-and-the-micro-manifest.md):** §3 (collection contracts are `token` defs in a Lexicon, wired by the micro's `collections` map), §5 (publications are `endpoints`, in three kinds: method, callback and view) and §7's vocabulary (`capability-ref` becomes `endpoint-ref`; contribution rows may be declared statically or written by an installer, with no ownership rule yet). Lazy links, registration scopes as bookkeeping, activation and idle shutdown stand.
+
 **Status:** Proposed. The collection and capability waists, manifest admission from a package sidecar, durable registration scopes, lazy activation references and the Clay enablement service are implemented; admission from the `big_cartridges_core` envelope and schema validation of collection rows are not. The validation list below is tracked in `docs/scratch/clay-pr-ledger.md` ("Validation matrix").
 
 **Builds on:** ADR 017's leased projection protocol, ADR 029's capability bank, ADR 030's micro lifecycle, and the plug envelope/catalog work in `big_cartridges_core`.

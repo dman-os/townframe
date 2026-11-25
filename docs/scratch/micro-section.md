@@ -1,5 +1,10 @@
 # Micro surface section (revision 3 of the cartridge manifest)
 
+Status: Decided in direction (operator, D57, D58); normative text is ADR 050, which follows the code and D58 where they differ
+Owner: nodules lane
+Updated: 2026-11-18
+Scope: Revision 3: the micro surface section of the cartridge manifest, with VS Code-derived vocabulary and the operator's sign-off.
+
 Replaces the "Micro section" of `cartridge-surfaces.md` and sections 3-4 of `micro-vocabulary.md`. Nothing built. The shared part (identity, `lexicons`, `components`, `permbinds`, `settings`) and `Reach { uses }` are unchanged; the cartridge carries `surfaces: Vec<Surface>`, a `$type` open union (`#nodule`, `#micro`, unknown carried unread).
 
 ## 1. VS Code, from primary sources
