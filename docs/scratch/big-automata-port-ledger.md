@@ -1089,6 +1089,9 @@ moving any embedder or porting the walkers:
 **Merge point: "done with big automata"** (operator, 2026-11-25). The stack merges once the
 items above are done; big_repo starts after. Until then CI and `check-matrix` may stay red
 (e.g. dead code in `kit/` that the durable outbox and the big_repo port will use).
+Cleanup before the merge point: fold `big_automata_sqlite`'s `002_generation.sql` into `001`
+(no database with 001 alone ever shipped) and drop the upgrade test that guards it; split
+`sync/peer/sim/ops.rs` `Sim::step` (guardrails `ERROR_FN_LENGTH`); the `check-matrix` dead code.
 Deferred to the big_repo phase: the backend migrations, the embedder cutover, deleting
 big_sync, and the delta-walker/frontier family with the other big_sync_core workers.
 
