@@ -135,7 +135,8 @@ Inbound:
   - For the mother's role: Tailscale's home DERP server, Secure Scuttlebutt's pubs and rooms, DIDComm's
     mediator, and the local-first essay's cloud peers.
 - **Anchor** (operator, 2026-11-25) means one specific thing: a member the drawer lists as where it can be
-  expected to be found. A member has the drawer; an anchor has it strongly, and says so.
+  expected to be found, called an anchor node in the UI. A member has the drawer; an anchor has it strongly, and says
+  so.
   - Its familiar precedent is Hyperledger Fabric's anchor peers. Like a drawer's anchors, they are listed in the
     shared object's own configuration (the channel's) so that others can find it. The closest mechanism
     elsewhere is Nostr NIP-65's write relays: where readers fetch an author from.
@@ -174,7 +175,7 @@ Inbound:
 ## Open questions
 
 1. Which two indicators dominate the defaults? The proposal says K2 and K4. Are there target numbers?
-2. Is "sister" retired, or kept for some other relationship?
+2. ~~Is "sister" retired?~~ Retired for now (operator, 2026-11-25), and kept free for a relationship that may need it soon.
 3. The default linger period after a drawer goes inactive, and the global cap on lazy connections to anchors.
 4. Keep-warm: is it set per drawer, or per class of drawer (e.g. every drawer shared by a given person)?
 5. Is "members dial anchors, anchors never dial members" a hard rule? Or may an anchor wake a sleeping
