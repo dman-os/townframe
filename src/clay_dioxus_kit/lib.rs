@@ -43,6 +43,7 @@ pub use headless::nav_button::NavButton;
 pub use headless::nav_button::NavButtonKind;
 pub use headless::nav_rack::NavRack;
 pub use headless::panel_page::PanelPage;
+pub use headless::panel_page::use_pane_rack;
 pub use headless::scrub_strip::ScrubStrip;
 pub use headless::sections::Renderer;
 pub use headless::sections::SectionPane;

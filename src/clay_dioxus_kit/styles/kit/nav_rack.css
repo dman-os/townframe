@@ -1,8 +1,10 @@
 /*
- * ct-nav-rack (headless/nav_rack.rs): a row of nav buttons. It takes no position of its own.
+ * ct-nav-rack (headless/nav_rack.rs): a row of nav buttons. It takes no position of its own, and
+ * keeps the gutter from the edge it sits against, so a place that draws no rack has no gutter.
  */
 .ct-nav-rack {
   display: inline-flex;
   flex: none;
   align-items: center;
+  margin-inline-start: var(--ct-dimension-spacing-2);
 }
