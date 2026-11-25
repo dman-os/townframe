@@ -9,7 +9,7 @@ use crate::driver::Facts;
 use crate::interlude::*;
 use crate::part_store::laws::obj;
 use crate::part_store::laws::part;
-use crate::part_store::laws::set;
+use crate::driver::memory::LwwPayload;
 
 /// Law 6: a lost connection drops every call in flight and leaves every part `Unsynced`; a new
 /// one is a fresh session that asks each part from its persisted cursor, and work already
@@ -35,7 +35,7 @@ async fn law_6_a_new_connection_resumes_from_the_persisted_cursors() {
     rig.fact(1, Fact::Unsynced).await;
     rig.fact(2, Fact::Unsynced).await;
     // the peer moves on while we are away
-    rig.peer.commit(vec![set(&[(1, 11)])]).await;
+    rig.peer.commit(vec![LwwPayload::set(&[(1, 11)])]).await;
     rig.connect();
     rig.synced(1).await;
     rig.synced(2).await;

@@ -13,6 +13,7 @@ use crate::part_store::AccessLevel;
 use crate::part_store::AuthorizedPage;
 use crate::part_store::Generation;
 use crate::part_store::LeafEntry;
+use crate::part_store::LeafPage;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
@@ -398,7 +399,8 @@ impl PartOracle {
         bucks: &[(BuckId, Option<ObjKey>)],
         since: Rev,
         limit: usize,
-    ) -> Option<Vec<Vec<LeafEntry>>> {
+        byte_budget: usize,
+    ) -> Option<Vec<LeafPage>> {
         self.permits(principal, part).then(|| {
             bucks
                 .iter()
@@ -406,7 +408,23 @@ impl PartOracle {
                     if self.bucket_summary(part, *buck).changed_at <= since {
                         return default();
                     }
-                    self.members_of(part, *buck, after.as_ref(), limit)
+                    // Every member, then the prefix by the law's words: take entries one by one
+                    // until the limit or the entry that would take the page past the budget,
+                    // and never fewer than one.
+                    let all = self.members_of(part, *buck, after.as_ref(), usize::MAX);
+                    let mut len = 0;
+                    let mut bytes = 0;
+                    while len < all.len() && len < limit {
+                        bytes += LeafEntry::wire_bytes(all[len].obj.as_bytes().len());
+                        if len > 0 && bytes > byte_budget {
+                            break;
+                        }
+                        len += 1;
+                    }
+                    LeafPage {
+                        more: len < all.len(),
+                        entries: all[..len].to_vec(),
+                    }
                 })
                 .collect()
         })

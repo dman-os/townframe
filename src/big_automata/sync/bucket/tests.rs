@@ -402,7 +402,7 @@ fn identical_stores_compare_only_the_root() -> Res<()> {
         requester: objs,
         readable: vec![true; usize::from(PARTS)],
         leaf_cap: BucketMachine::LEAF_BUCKET_LIMIT_HINT,
-        leaf_bytes: crate::sync::rpc::LEAF_PAGE_BYTE_BUDGET,
+        leaf_bytes: crate::part_store::LEAF_PAGE_BYTE_BUDGET,
     };
     let driver = walk_converges(scenario.clone())?;
     for part in scenario.parts() {
@@ -459,7 +459,7 @@ fn unauthorized_parts_converge_to_nothing() -> Res<()> {
         ],
         readable: vec![true, false, false],
         leaf_cap: 1,
-        leaf_bytes: crate::sync::rpc::LEAF_PAGE_BYTE_BUDGET,
+        leaf_bytes: crate::part_store::LEAF_PAGE_BYTE_BUDGET,
     })
     .map(drop)
 }
@@ -490,7 +490,7 @@ fn a_pending_membership_misses_a_removal_its_payload_overtakes() -> Res<()> {
         }],
         readable: vec![false, true, true],
         leaf_cap: 1,
-        leaf_bytes: crate::sync::rpc::LEAF_PAGE_BYTE_BUDGET,
+        leaf_bytes: crate::part_store::LEAF_PAGE_BYTE_BUDGET,
     })
     .map(drop)
 }

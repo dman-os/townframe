@@ -15,6 +15,7 @@ use proptest::prelude::*;
 use crate::fingerprint::FingerprintSeed;
 use crate::interlude::*;
 use crate::part_store::AccessLevel;
+use crate::part_store::LEAF_PAGE_BYTE_BUDGET;
 use crate::part_store::LeafEntry;
 use crate::part_store::ObjPayload;
 use crate::part_store::ObjState;
@@ -33,8 +34,6 @@ use crate::sync::bucket::calc_working_level;
 use crate::sync::bucket::filter_buckets;
 use crate::sync::bucket::filter_objects;
 use crate::sync::bucket::summaries_agree;
-use crate::sync::rpc::LEAF_PAGE_BYTE_BUDGET;
-use crate::sync::rpc::bucket::BucketObjPageEntry;
 use crate::sync::rpc::bucket::BucketsError;
 use crate::sync::rpc::bucket::GetChangedBucketsRequest;
 use crate::sync::rpc::bucket::LeafBucketsRequest;
@@ -548,9 +547,16 @@ pub struct Divergence {
 /// them; none for a part no object was added to.
 pub async fn leaves<S: Store>(store: &S, part: &PartKey) -> Res<Vec<LeafEntry>> {
     Ok(store
-        .bucket_leaves(&inspector(), part, &[(BuckId::ROOT, None)], 0, usize::MAX)
+        .bucket_leaves(
+            &inspector(),
+            part,
+            &[(BuckId::ROOT, None)],
+            0,
+            usize::MAX,
+            usize::MAX,
+        )
         .await?
-        .map(|mut leaves| leaves.remove(0))
+        .map(|mut leaves| leaves.remove(0).entries)
         .unwrap_or_default())
 }
 
@@ -675,7 +681,7 @@ impl Scenario {
     /// The most entries a leaf page of this scenario's objects holds: the cap, or what the byte
     /// budget lets through (at least one entry, whatever it costs).
     pub fn page_entries(&self) -> usize {
-        let cost = BucketObjPageEntry::wire_bytes(obj(0).as_bytes().len());
+        let cost = LeafEntry::wire_bytes(obj(0).as_bytes().len());
         usize::try_from(self.leaf_cap)
             .expect(ERROR_IMPOSSIBLE)
             .min((self.leaf_bytes / cost).max(1))

@@ -525,24 +525,22 @@ where
         self.inner.latest_rev()
     }
 
-    fn read(
+    async fn read(
         &self,
         selector: &Self::Selector,
         after: Rev,
         until: Rev,
         limits: Limits,
         page: &mut Page<Self::Key, Self::Value>,
-    ) -> impl Future<Output = Res<()>> + Send {
-        async move {
-            let race = surelock::key::lock_scope(|key| {
-                let (mut race, _key) = key.lock(&self.race);
-                race.take()
-            });
-            if let Some(race) = race {
-                race.await?;
-            }
-            self.inner.read(selector, after, until, limits, page).await
+    ) -> Res<()> {
+        let race = surelock::key::lock_scope(|key| {
+            let (mut race, _key) = key.lock(&self.race);
+            race.take()
+        });
+        if let Some(race) = race {
+            race.await?;
         }
+        self.inner.read(selector, after, until, limits, page).await
     }
 
     fn watch(&self) -> RevWatch {

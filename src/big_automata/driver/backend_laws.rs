@@ -23,6 +23,11 @@
 //! 6. **A fetch of content the peer no longer has errors and leaves local state untouched**
 //!    (rigs whose `fetch` downloads, [`BackendRig::DOWNLOADS`]); the job succeeds once the
 //!    peer has the content again.
+//! 7. **Concurrent payloads converge.** Two backends that each wrote a different payload for
+//!    one object and then take each other's payload, both ways at once, end holding equal
+//!    payloads, and taking them again changes nothing on either. The peer's payload is merged
+//!    (commutative and idempotent), never written over: a blind overwrite swaps the two
+//!    payloads on every exchange and the nodes never settle.
 //!
 //! A rig supplies a fresh backend per law and the handful of operations the laws need that the
 //! trait cannot express: what the peer holds, what the backend holds, and how to make its next
@@ -38,7 +43,6 @@ use crate::part_store::ObjPayload;
 use crate::part_store::ObjState;
 use crate::part_store::laws::obj;
 use crate::part_store::laws::part;
-use crate::part_store::laws::payload;
 
 /// What a backend under test is, for [`sync_backend_laws`].
 pub trait BackendRig {
@@ -74,6 +78,15 @@ pub trait BackendRig {
 
     /// The next write of the backend fails after it has done all it can short of committing.
     fn fail_next_write(&self, backend: &Self::Backend);
+
+    /// The payload of `value` the backend can take: a larger value is a later write, so a
+    /// backend that orders its payloads takes the larger over the smaller.
+    fn payload(value: u8) -> ObjPayload;
+
+    /// Two different payloads that two nodes may write for one object at the same time, neither
+    /// derived from the other: whichever way the backend merges (an order of the writes, a
+    /// CRDT), it has to settle both nodes on one result.
+    fn concurrent_payloads(&self) -> (ObjPayload, ObjPayload);
 }
 
 /// What the backend holds for an object: its payload, and the parts it is a member of.
@@ -93,7 +106,7 @@ impl<R: BackendRig> Probe<'_, R> {
     }
 
     async fn peer(&self, index: u8, value: Option<u8>) -> Res<()> {
-        let payload = value.map(payload);
+        let payload = value.map(R::payload);
         self.rig
             .peer_holds(&self.backend, &obj(index), payload.as_ref())
             .await
@@ -106,7 +119,7 @@ impl<R: BackendRig> Probe<'_, R> {
             obj: obj(obj_index),
             add: add.iter().map(|&at| part(at)).collect(),
             remove: remove.iter().map(|&at| part(at)).collect(),
-            payload: (!add.is_empty() || remove.is_empty()).then(|| payload(value)),
+            payload: (!add.is_empty() || remove.is_empty()).then(|| R::payload(value)),
         }
     }
 
@@ -135,10 +148,25 @@ impl<R: BackendRig> Probe<'_, R> {
         Ok(())
     }
 
+    /// The backend takes `payload` from its peer for object `obj_index`, as a job that adds
+    /// part 1 with the payload as its hint: one pass, as the driver applies it.
+    async fn take_from_peer(&self, obj_index: u8, payload: &ObjPayload) -> Res<()> {
+        self.rig
+            .peer_holds(&self.backend, &obj(obj_index), Some(payload))
+            .await?;
+        self.pass(&ObjJob {
+            obj: obj(obj_index),
+            add: vec![part(1)],
+            remove: vec![],
+            payload: Some(payload.clone()),
+        })
+        .await
+    }
+
     /// The backend holds `value` for object `obj_index`, in exactly `parts`.
     async fn expect(&self, obj_index: u8, value: Option<u8>, parts: &[u8], why: &str) -> Res<()> {
         let expected: Held = (
-            value.map(payload),
+            value.map(R::payload),
             parts.iter().map(|&at| part(at)).collect(),
         );
         assert_eq!(self.held(&obj(obj_index)).await?, expected, "{why}");
@@ -292,6 +320,44 @@ pub async fn sync_backend_laws<R: BackendRig>(rig: &R) -> Res<()> {
             "the job succeeds once the peer has the content",
         )
         .await?;
+    }
+
+    // 7: two nodes that wrote different payloads concurrently converge, and then stay quiet
+    concurrent_payloads_converge(rig).await
+}
+
+/// Law 7: two backends that each hold a different payload for one object take each other's,
+/// both ways at once, and agree; taking them again changes nothing.
+async fn concurrent_payloads_converge<R: BackendRig>(rig: &R) -> Res<()> {
+    let probe = || Probe {
+        rig,
+        backend: rig.fresh(),
+    };
+    let (a, b) = (probe(), probe());
+    let (from_a, from_b) = rig.concurrent_payloads();
+    assert_ne!(from_a, from_b, "the rig's concurrent payloads are the same");
+    a.take_from_peer(1, &from_a).await?;
+    b.take_from_peer(1, &from_b).await?;
+    // Both ways at once: each side takes what the other held before the exchange.
+    for round in 0..2 {
+        let (held_a, held_b) = (a.held(&obj(1)).await?.0, b.held(&obj(1)).await?.0);
+        let (stamp_a, stamp_b) = (rig.stamp(&a.backend).await?, rig.stamp(&b.backend).await?);
+        a.take_from_peer(1, &held_b.expect("b holds its payload"))
+            .await?;
+        b.take_from_peer(1, &held_a.expect("a holds its payload"))
+            .await?;
+        assert_eq!(
+            a.held(&obj(1)).await?,
+            b.held(&obj(1)).await?,
+            "the nodes hold different payloads after exchange {round}"
+        );
+        if round == 1 {
+            assert_eq!(
+                (rig.stamp(&a.backend).await?, rig.stamp(&b.backend).await?),
+                (stamp_a, stamp_b),
+                "an exchange between nodes that agree committed something"
+            );
+        }
     }
     Ok(())
 }

@@ -16,7 +16,7 @@ use crate::okv::memory::OkvTable;
 use crate::part_store::AccessLevel;
 use crate::part_store::AuthorizedPage;
 use crate::part_store::Generation;
-use crate::part_store::LeafEntry;
+use crate::part_store::LeafPage;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
@@ -466,13 +466,14 @@ impl PartStoreServe for MemoryPartStore {
         bucks: &[(BuckId, Option<ObjKey>)],
         since: Rev,
         limit: usize,
-    ) -> impl Future<Output = Res<Option<Vec<Vec<LeafEntry>>>>> + Send {
+        byte_budget: usize,
+    ) -> impl Future<Output = Res<Option<Vec<LeafPage>>>> + Send {
         std::future::ready(Ok(self.with_state(|state| {
             state.permits(principal, part).then(|| {
                 bucks
                     .iter()
                     .map(|(buck, after)| {
-                        state.bucket_leaves(part, *buck, after.as_ref(), since, limit)
+                        state.bucket_leaves(part, *buck, after.as_ref(), since, limit, byte_budget)
                     })
                     .collect()
             })

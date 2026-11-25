@@ -137,6 +137,7 @@ impl CursorSyncMachine {
 
     /// Whether the job still waits on `cursor`. A completion can ask this first: a removal
     /// releases an object's earlier syncs on its part while the sync task stays in flight.
+    #[cfg(test)]
     pub(crate) fn owes_obj_job(&self, job: &JobKey, cursor: Rev) -> bool {
         self.jobs.owes(job, &cursor)
     }

@@ -684,7 +684,7 @@ fn law_1_the_difference_of_two_stores_is_emitted_exactly() -> Res<()> {
         ],
         readable: vec![true; usize::from(harness::PARTS)],
         leaf_cap: 2,
-        leaf_bytes: crate::sync::rpc::LEAF_PAGE_BYTE_BUDGET,
+        leaf_bytes: crate::part_store::LEAF_PAGE_BYTE_BUDGET,
     };
     let (emitted, expected) = futures::executor::block_on(run_case(WalkCase {
         scenario,

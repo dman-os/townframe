@@ -23,11 +23,11 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use big_automata::PeerKey;
+use big_automata::driver::memory::LwwPayload;
 use big_automata::part_store::laws::add;
 use big_automata::part_store::laws::grant;
 use big_automata::part_store::laws::part;
 use big_automata::part_store::laws::principal;
-use big_automata::part_store::laws::set;
 use big_automata::part_store::laws::stage;
 use big_automata::part_store::memory::MemoryPartStore;
 use big_automata::part_store::oracle::PartWrite;
@@ -115,12 +115,16 @@ async fn main() {
     commit(&store, vec![grant(&[(1, 0)])]).await;
     for obj in 1..=OBJECTS {
         let part_member = [(obj, 1)];
-        commit(&store, vec![set(&[(obj, obj * 10)]), add(&part_member)]).await;
+        commit(
+            &store,
+            vec![LwwPayload::set(&[(obj, obj * 10)]), add(&part_member)],
+        )
+        .await;
     }
 
-    let principal_of = |_: &RequestContext, _: &TransportContext| -> Result<PeerKey, ContextError> {
-        Ok(principal(0))
-    };
+    let principal_of = |_: &RequestContext,
+                        _: &TransportContext|
+     -> Result<PeerKey, ContextError> { Ok(principal(0)) };
     let (replay, stop) = boot(store, principal_of);
     let mut router = XrpcRouter::new(1 << 20);
     <ReplayBinding<_> as ServerBinding<ReplayProtocol>>::mount(
