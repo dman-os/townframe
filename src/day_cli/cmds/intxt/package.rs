@@ -5,8 +5,10 @@
 //! Packaging is client code (ledger D41, D50): git and jj run here, and the entries are written
 //! with the operator's own authority through [`Caller`], the way the recorder writes, so there
 //! is no nodule method for it. The pack of git objects an entry carries (ADR 040 §4) goes into
-//! the node's blob store and is named by a blob datum in the intxt's own descriptor document
-//! (`org.example.daybook.blob/<digest>`, ledger D45), which the entry references.
+//! the node's blob store and is named by a blob datum in the intxt's commits document
+//! (`org.example.daybook.blob/<digest>`, ledger D45), which the entry references. The descriptor
+//! holds only the small index (marker, title, entries, body order, the `commitsDoc/main`
+//! pointer); content, and so every re-add's blobs, goes in the commits document.
 //!
 //! The verbs write to a `Write` and take the node client and the directories they work in, so
 //! tests drive them without a process around them.
@@ -166,11 +168,15 @@ impl Resolved {
     }
 }
 
-/// What an `add` is about to write: the datums, which of them are entries (in body order), the
-/// documents to share with the intxt, and what to tell the operator.
+/// What an `add` is about to write: the datums for the descriptor, which of them are entries (in
+/// body order), the blob datums for the commits document, the documents to share with the intxt,
+/// and what to tell the operator.
 #[derive(Default)]
 struct Plan {
     set: BTreeMap<DatumKey, Value>,
+    /// The commits document the entries' blobs are in, and the blob datums to write to it. Empty
+    /// unless an entry with a pack is new.
+    blobs: Option<(DocId, BTreeMap<DatumKey, Value>)>,
     written: Vec<DatumKey>,
     shared: BTreeSet<DocId>,
     lines: Vec<String>,
@@ -867,8 +873,7 @@ impl<'a> Packaging<'a> {
         Ok(())
     }
 
-    /// `day x intxt rm`: removes the entries and comments named by their short ids, and the packs
-    /// only the entries referenced. The documents lent to the intxt stay lent: whether another
+    /// `day x intxt rm`: removes the entries and comments named by their short ids. The documents lent to the intxt stay lent: whether another
     /// entry still needs one is not derivable from the entries alone. Removing a thread's first
     /// comment removes its replies and its state with it.
     pub(crate) async fn rm(&self, out: &mut impl Write, intxt: &str, items: &[String]) -> Res<()> {
@@ -886,7 +891,7 @@ impl<'a> Packaging<'a> {
                 removed.insert(found);
             }
         }
-        self.remove_held(&drawer, &view, &removed).await?;
+        self.remove_held(&drawer, &removed).await?;
         let removed_comments = self.remove_comments(&drawer, removed_comments).await?;
         writeln!(
             out,
@@ -900,40 +905,18 @@ impl<'a> Packaging<'a> {
         Ok(())
     }
 
-    /// Removes the entries `removed` from the intxt, and the packs only they referenced. The
-    /// documents lent to the intxt stay lent: whether another entry still needs one is not
-    /// derivable from the entries alone. `view` is the intxt as it was read for `removed`.
+    /// Removes the entries `removed` from the intxt. The documents lent to the intxt stay lent:
+    /// whether another entry still needs one is not derivable from the entries alone.
     pub(super) async fn remove_held(
         &self,
         drawer: &DrawerId,
-        view: &View,
         removed: &BTreeSet<DatumKey>,
     ) -> Res<()> {
-        // An entry's blobs: its pack and, when it has one, its patch.
-        let pack_of = |value: &Value| -> Vec<DatumKey> {
-            ["pack", "patch"]
-                .into_iter()
-                .filter_map(|field| {
-                    let blob: DatumReference = value.get(field)?.as_str()?.parse().ok()?;
-                    Some(blob.key().clone())
-                })
-                .collect()
-        };
-        let kept: BTreeSet<DatumKey> = view
-            .entries
-            .iter()
-            .filter(|(key, _)| !removed.contains(key))
-            .flat_map(|(_, value)| pack_of(value))
-            .collect();
-        let packs: BTreeSet<DatumKey> = view
-            .entries
-            .iter()
-            .filter(|(key, _)| removed.contains(key))
-            .flat_map(|(_, value)| pack_of(value))
-            .filter(|pack| !kept.contains(pack))
-            .collect();
+        // An entry's pack and patch blob datums are in the commits document, which can be shared
+        // with other intxts whose entries may name the same digest, so removing an entry leaves
+        // them there.
         if !removed.is_empty() {
-            self.caller.remove_entries(drawer, removed, &packs).await?;
+            self.caller.remove_entries(drawer, removed).await?;
         }
         Ok(())
     }
@@ -1104,12 +1087,21 @@ impl<'a> Packaging<'a> {
         let kind = if pack.thin { "thin" } else { "full" };
         let size = pack.bytes.len();
         self.ensure_inventory(drawer).await?;
+        // The blob datums live in the commits document and the entry, in the descriptor,
+        // references them there: the descriptor stays a small index however often a rewritten
+        // change is added again.
+        let commits_doc = self.ensure_commits_doc(drawer).await?;
         let (blob_key, blob) = self
             .put_content(pack.bytes, "application/x-git-pack")
             .await?;
-        let pack_ref = DatumReference::new(ReferenceDocId::SelfDoc, blob_key.clone());
-        plan.set.insert(blob_key, blob);
-        let patch_ref = self.plan_patch(plan, resolved, MAX_PATCH_BYTES).await?;
+        let pack_ref = DatumReference::new(
+            ReferenceDocId::Concrete(commits_doc.clone()),
+            blob_key.clone(),
+        );
+        plan.blobs = Some((commits_doc.clone(), [(blob_key, blob)].into()));
+        let patch_ref = self
+            .plan_patch(plan, resolved, &commits_doc, MAX_PATCH_BYTES)
+            .await?;
         plan.set.insert(
             resolved.entry.clone(),
             (resolved.value)(pack_ref, patch_ref, &resolved.tips, &resolved.bases),
@@ -1124,12 +1116,13 @@ impl<'a> Packaging<'a> {
 
     /// The reader-friendly diff of the commits `resolved` names (`text/x-diff`, derived from the
     /// pack's commits; the pack stays the truth): puts it in the blob store, adds its blob datum
-    /// to `plan` and answers its reference. None, with a line saying why, when the diff is over
+    /// (for `commits_doc`) to `plan` and answers its reference. None, with a line saying why, when the diff is over
     /// `max_bytes` or the commits have no single diff.
     async fn plan_patch(
         &self,
         plan: &mut Plan,
         resolved: &Resolved,
+        commits_doc: &DocId,
         max_bytes: u64,
     ) -> Res<Option<DatumReference>> {
         let Some(tip) = resolved.patch_tip.clone() else {
@@ -1153,8 +1146,15 @@ impl<'a> Packaging<'a> {
         };
         let size = diff.len();
         let (blob_key, blob) = self.put_content(diff, "text/x-diff").await?;
-        let patch_ref = DatumReference::new(ReferenceDocId::SelfDoc, blob_key.clone());
-        plan.set.insert(blob_key, blob);
+        let patch_ref = DatumReference::new(
+            ReferenceDocId::Concrete(commits_doc.clone()),
+            blob_key.clone(),
+        );
+        plan.blobs
+            .as_mut()
+            .expect("the pack's blob datum is planned before the patch's")
+            .1
+            .insert(blob_key, blob);
         plan.lines.push(format!("  patch      {size} bytes"));
         Ok(Some(patch_ref))
     }
@@ -1340,6 +1340,16 @@ impl<'a> Packaging<'a> {
         plan.lines.extend(commit_lines);
         let mut written = plan.written.clone();
         if !written.is_empty() {
+            // The blob datums land in the commits document before the descriptor write that adds
+            // the entry naming them, so a reader never sees an entry whose blobs are missing. A
+            // failure between the two writes leaves unreferenced blob datums in the commits
+            // document; adding again is idempotent, since the datums are keyed by digest, and
+            // writes the same ones.
+            if let Some((commits_doc, blobs)) = plan.blobs.take() {
+                self.caller
+                    .write_datums(&commits_doc, blobs, BTreeSet::new())
+                    .await?;
+            }
             self.caller.include(drawer, plan.set, &plan.written).await?;
             for doc in &plan.shared {
                 self.caller.share(drawer, doc, DrawerAccess::Read).await?;

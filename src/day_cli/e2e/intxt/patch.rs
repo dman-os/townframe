@@ -23,12 +23,11 @@ fn expected_diff(repo: &Path, base: &str, tip: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// Reads the bytes of the blob datum `reference` (`dtxt:datum:self/…`) names in the intxt's own
-/// document, from the node's blob store.
+/// Reads the bytes of the blob datum `reference` names in the intxt's commits document, from
+/// the node's blob store.
 async fn read_blob_text(
     client: &NodeClient,
     scratch: &Path,
-    drawer: &big_cabinet_core::DocId,
     reference: &str,
 ) -> (String, String) {
     use crate::client::Raw;
@@ -37,12 +36,11 @@ async fn read_blob_text(
     use big_blobs_core::ReadBlob;
     use big_cabinet_core::authority::Rights;
 
-    let blob_key = reference
-        .strip_prefix("dtxt:datum:self/")
-        .unwrap_or_else(|| panic!("{reference} names the intxt's own document"));
-    let (_, blob) = read_at(client, drawer, &blob_key.parse().unwrap())
-        .await
-        .unwrap();
+    let reference = big_cabinet_core::DatumReference::parse(reference).unwrap();
+    let big_cabinet_core::ReferenceDocId::Concrete(blob_doc) = reference.document() else {
+        panic!("{reference} names a document, not the entry's own");
+    };
+    let (_, blob) = read_at(client, blob_doc, reference.key()).await.unwrap();
     let blob_id: big_blobs_core::BlobId = blob["digest"].as_str().unwrap().parse().unwrap();
     let capability = crate::cmds::intxt::call(
         client,
@@ -129,12 +127,12 @@ async fn add_branch_writes_the_diff_beside_the_pack() {
         git(&repo, &["add", "-A"]);
         git(&repo, &["commit", "-q", "-m", "add b"]);
 
-        let (added, drawer, entry) = add_branch(client, &node_root, &repo).await;
+        let (added, _, entry) = add_branch(client, &node_root, &repo).await;
         assert!(added.contains("  patch      "), "{added}");
         assert!(!added.contains("skipped"), "{added}");
 
         let patch = entry["patch"].as_str().unwrap();
-        let (mime, diff) = read_blob_text(client, tmp.path(), &drawer, patch).await;
+        let (mime, diff) = read_blob_text(client, tmp.path(), patch).await;
         assert_eq!(mime, "text/x-diff");
         assert_eq!(diff, expected_diff(&repo, "main", "feat/x"));
         assert!(diff.contains("@@ -1 +1 @@\n-one\n+two\n"), "{diff}");

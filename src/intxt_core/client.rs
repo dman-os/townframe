@@ -523,14 +523,13 @@ impl<H: HttpTransport> Caller<H> {
         Ok(())
     }
 
-    /// Removes `entries` from the intxt's body and deletes their datums, with `also` (datums only
-    /// they referenced, such as a pack's blob datum), in one write based on the heads the body
-    /// was read at. Documents lent to the intxt stay lent.
+    /// Removes `entries` from the intxt's body and deletes their datums, in one write based on
+    /// the heads the body was read at. Documents lent to the intxt stay lent, and so do the
+    /// blob datums the entries referenced in the commits document.
     pub async fn remove_entries(
         &self,
         intxt: &DrawerId,
         entries: &BTreeSet<DatumKey>,
-        also: &BTreeSet<DatumKey>,
     ) -> Result<(), IntxtError> {
         let body_key = key(generic::Body::ID, "main")?;
         let (body_heads, body_value) = self.read(intxt, &body_key).await?;
@@ -539,7 +538,7 @@ impl<H: HttpTransport> Caller<H> {
         body.order
             .retain(|reference| !entries.contains(reference.key()));
         let set: BTreeMap<DatumKey, Value> = [(body_key, to_value(&body))].into();
-        let remove: BTreeSet<DatumKey> = entries.union(also).cloned().collect();
+        let remove = entries.clone();
         let descriptor = self
             .write_capability(intxt, set.keys().chain(&remove))
             .await?;

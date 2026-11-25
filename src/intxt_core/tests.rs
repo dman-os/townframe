@@ -283,32 +283,32 @@ fn the_adr_examples_are_valid_datums() {
     codec_round_trip::<work::GitCommitEntry>(json!({
         "tip": "org.example.intxt.work.gitCommit/4c1f0a",
         "base": "org.example.intxt.work.gitCommit/9a0e11",
-        "pack": "dtxt:datum:self/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949"
+        "pack": "dtxt:datum:z11111111111111111111111111111111/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949"
     }));
     // A range that reaches the root has no base.
     codec_round_trip::<work::GitCommitEntry>(json!({
         "tip": "org.example.intxt.work.gitCommit/4c1f0a",
-        "pack": "dtxt:datum:self/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949"
+        "pack": "dtxt:datum:z11111111111111111111111111111111/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949"
     }));
     // The patch is optional: an entry written before it existed decodes without one.
     codec_round_trip::<work::GitCommitEntry>(json!({
         "tip": "org.example.intxt.work.gitCommit/4c1f0a",
         "base": "org.example.intxt.work.gitCommit/9a0e11",
-        "pack": "dtxt:datum:self/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949",
-        "patch": "dtxt:datum:self/org.example.daybook.blob/7b0c22d1e0b94f34a2d6e3a1c9f58e10"
+        "pack": "dtxt:datum:z11111111111111111111111111111111/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949",
+        "patch": "dtxt:datum:z11111111111111111111111111111111/org.example.daybook.blob/7b0c22d1e0b94f34a2d6e3a1c9f58e10"
     }));
     let old: work::GitCommitEntry = serde_json::from_value(json!({
         "tip": "org.example.intxt.work.gitCommit/4c1f0a",
-        "pack": "dtxt:datum:self/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949"
+        "pack": "dtxt:datum:z11111111111111111111111111111111/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949"
     }))
     .unwrap();
     assert_eq!(old.patch, None);
     codec_round_trip::<work::JjChangeEntry>(json!({
-        "pack": "dtxt:datum:self/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949",
-        "patch": "dtxt:datum:self/org.example.daybook.blob/7b0c22d1e0b94f34a2d6e3a1c9f58e10"
+        "pack": "dtxt:datum:z11111111111111111111111111111111/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949",
+        "patch": "dtxt:datum:z11111111111111111111111111111111/org.example.daybook.blob/7b0c22d1e0b94f34a2d6e3a1c9f58e10"
     }));
     codec_round_trip::<work::JjChangeEntry>(
-        json!({"pack": "dtxt:datum:self/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949"}),
+        json!({"pack": "dtxt:datum:z11111111111111111111111111111111/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949"}),
     );
     codec_round_trip::<work::CommitsDoc>(json!({
         "doc": "z11111111111111111111111111111111",
