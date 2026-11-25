@@ -721,6 +721,7 @@ impl<'a> Packaging<'a> {
                 .then_with(|| left_drawer.cmp(right_drawer))
         });
 
+        let mut table = super::table(["ID", "TITLE", "COMMITS", "REFS", "SESSIONS"]);
         for (drawer, view) in listed {
             let (mut commits, mut refs, mut sessions) = (0, 0, 0);
             for (entry, _) in view.entries {
@@ -731,20 +732,27 @@ impl<'a> Packaging<'a> {
                     _ => {}
                 }
             }
-            writeln!(
-                out,
-                "{}  \"{}\"  commits: {commits}, refs: {refs}, sessions: {sessions}",
+            table.add_row([
                 shown(&ids, &drawer.to_string()),
                 view.title.title,
-            )?;
+                commits.to_string(),
+                refs.to_string(),
+                sessions.to_string(),
+            ]);
         }
         // Listed, not fatal: one intxt that cannot be read must not hide the others.
-        for Unreadable { drawer, reason } in unreadable {
-            writeln!(
-                out,
-                "{}  (unreadable: {reason})\n  forget it: day x intxt drop {drawer}",
+        for Unreadable { drawer, reason } in &unreadable {
+            table.add_row([
                 shown(&ids, &drawer.to_string()),
-            )?;
+                format!("(unreadable: {reason})"),
+                String::new(),
+                String::new(),
+                String::new(),
+            ]);
+        }
+        writeln!(out, "{table}")?;
+        for Unreadable { drawer, .. } in unreadable {
+            writeln!(out, "forget {}: day x intxt drop {drawer}", shown(&ids, &drawer.to_string()))?;
         }
         Ok(())
     }
@@ -901,7 +909,7 @@ impl<'a> Packaging<'a> {
     /// The intxt's index document read: its title and its entries in body order.
     /// The intxt in `drawer`: its title and entries, read from its index document. The outer
     /// error is a call that failed; the inner one is the intxt's own data that cannot be read
-    /// (no index document, as an intxt made before D70 has; an invalid index pointer; a title,
+    /// (no index document, as a `createIntxt` that did not finish leaves; an invalid index pointer; a title,
     /// body or entry the node does not hold as accepted). A command about one intxt fails on
     /// either (`.await??`); one that walks every intxt reports the unreadable one and goes on.
     pub(super) async fn load(&self, drawer: &DrawerId) -> Res<Result<View, Unreadable>> {
@@ -914,10 +922,7 @@ impl<'a> Packaging<'a> {
         let index = match self.caller.try_index(drawer).await {
             Ok(Some(index)) => index,
             Ok(None) => {
-                return unreadable(
-                    "it has no index document (an intxt made before its index moved to a content document, D70)"
-                        .to_owned(),
-                );
+                return unreadable("it has no index document".to_owned());
             }
             Err(IntxtError::Invalid(reason)) => return unreadable(reason),
             Err(error) => return Err(error.into()),

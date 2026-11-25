@@ -1087,24 +1087,41 @@ mod blackbox {
     fn doctor_without_a_server_skips_the_node_side_checks() {
         let sandbox = Sandbox::new();
         assert!(sandbox.day(&["node", "init"]).status.success());
-        let output = sandbox.doctor(&[]);
-        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let output = sandbox.doctor(&["--json"]);
         assert!(
             output.status.success(),
-            "{text}{}",
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(text.contains("ok    server: none is serving"), "{text}");
-        for check in ["cartridge", "intxts"] {
-            assert!(
-                text.contains(&format!("warn  {check}: skipped")),
-                "{check}: {text}"
-            );
-        }
-        assert!(text.contains("fix: day node start --bg"), "{text}");
+        let checks: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        let check = |name: &str| {
+            checks
+                .iter()
+                .find(|check| check["check"] == name)
+                .unwrap_or_else(|| panic!("no {name} check: {checks:?}"))
+                .clone()
+        };
+        assert_eq!(check("server")["status"], "ok");
         assert!(
-            text.contains("warn  claude-hooks: no intxt recording hook"),
-            "{text}"
+            check("server")["detail"]
+                .as_str()
+                .unwrap()
+                .contains("none is serving")
+        );
+        for name in ["cartridge", "intxts"] {
+            assert_eq!(check(name)["status"], "skip", "{name}");
+            assert_eq!(check(name)["fix"], "day node start --bg", "{name}");
+        }
+        assert_eq!(check("claude-hooks")["status"], "warn");
+        // The same report as a table: a header, and one row per check.
+        let table = String::from_utf8_lossy(&sandbox.doctor(&[]).stdout).into_owned();
+        assert!(table.contains("STATUS") && table.contains("FIX"), "{table}");
+        assert!(
+            table
+                .lines()
+                .any(|line| line.contains("skip") && line.contains("cartridge")),
+            "{table}"
         );
         assert!(
             !sandbox.socket().exists(),
@@ -1123,13 +1140,20 @@ mod blackbox {
         let settings = sandbox.tmp.path().join("home/.claude/settings.json");
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
         std::fs::write(&settings, "{ \"hooks\": {}, }").unwrap();
-        let output = sandbox.doctor(&[]);
-        let text = String::from_utf8_lossy(&output.stdout).into_owned();
-        assert_eq!(output.status.code(), Some(1), "{text}");
+        let output = sandbox.doctor(&["--json"]);
+        assert_eq!(output.status.code(), Some(1));
+        let checks: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        let hooks = checks
+            .iter()
+            .find(|check| check["check"] == "claude-hooks")
+            .unwrap();
+        assert_eq!(hooks["status"], "fail", "{hooks}");
         assert!(
-            text.contains("fail  claude-hooks:")
-                && text.contains(&format!("{} is not valid JSON", settings.display())),
-            "{text}"
+            hooks["detail"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("{} is not valid JSON", settings.display())),
+            "{hooks}"
         );
     }
 
@@ -1158,9 +1182,16 @@ mod blackbox {
             ]
         );
         for check in &checks {
-            assert!(["ok", "warn", "fail"].contains(&check["status"].as_str().unwrap()));
+            let status = check["status"].as_str().unwrap();
+            assert!(["ok", "warn", "fail", "skip"].contains(&status));
             assert!(check["detail"].is_string());
-            assert!(check["fix"].is_null() == (check["status"] == "ok"));
+            // An `ok` has nothing to fix; a `warn` or a `fail` always says how; a `skip` says
+            // what would let it run, when anything would.
+            match status {
+                "ok" => assert!(check["fix"].is_null(), "{check}"),
+                "warn" | "fail" => assert!(check["fix"].is_string(), "{check}"),
+                _ => {}
+            }
         }
     }
 

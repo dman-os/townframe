@@ -760,6 +760,17 @@ async fn with_packaging_exit(
     .await
 }
 
+/// A table for a listing such as `list` or `doctor`: plain columns under `header` with no rules,
+/// wrapped to the terminal's width when stdout is one.
+pub(crate) fn table<const N: usize>(header: [&str; N]) -> comfy_table::Table {
+    let mut table = comfy_table::Table::new();
+    table
+        .load_preset(comfy_table::presets::NOTHING)
+        .set_content_arrangement(comfy_table::ContentArrangement::Dynamic)
+        .set_header(header);
+    table
+}
+
 /// How long a server capture started stays up with nothing to do (ADR 052 §3).
 const CAPTURE_IDLE_EXIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 

@@ -23,6 +23,9 @@ enum Status {
     Ok,
     Warn,
     Fail,
+    /// Not run here: it needs what this machine or directory does not have (a server, a git
+    /// worktree). `fix`, when there is one, is what would let it run.
+    Skip,
 }
 
 /// One line of the report; `--json` prints these as they are.
@@ -51,6 +54,15 @@ impl Check {
             status: Status::Warn,
             detail: detail.into(),
             fix: Some(fix.into()),
+        }
+    }
+
+    fn skip(check: &'static str, detail: impl Into<String>, fix: Option<&str>) -> Self {
+        Self {
+            check,
+            status: Status::Skip,
+            detail: detail.into(),
+            fix: fix.map(str::to_owned),
         }
     }
 
@@ -91,10 +103,10 @@ pub(super) async fn run(json: bool) -> Res<ExitCode> {
         titles = found;
     } else {
         for check in ["cartridge", "intxts"] {
-            checks.push(Check::warn(
+            checks.push(Check::skip(
                 check,
-                "skipped: it needs the node's server",
-                START_SERVER,
+                "it needs the node's server",
+                Some(START_SERVER),
             ));
         }
     }
@@ -108,7 +120,7 @@ pub(super) async fn run(json: bool) -> Res<ExitCode> {
         }
         None => {
             for check in ["git", "worktree"] {
-                checks.push(Check::ok(check, "not in a git worktree, nothing to check"));
+                checks.push(Check::skip(check, "not in a git worktree", None));
             }
         }
     }
@@ -117,17 +129,22 @@ pub(super) async fn run(json: bool) -> Res<ExitCode> {
     if json {
         writeln!(out, "{}", serde_json::to_string_pretty(&checks)?)?;
     } else {
+        let mut table = super::table(["STATUS", "CHECK", "DETAIL", "FIX"]);
         for found in &checks {
             let status = match found.status {
-                Status::Ok => "ok  ",
+                Status::Ok => "ok",
                 Status::Warn => "warn",
                 Status::Fail => "fail",
+                Status::Skip => "skip",
             };
-            writeln!(out, "{status}  {}: {}", found.check, found.detail)?;
-            if let Some(fix) = &found.fix {
-                writeln!(out, "      fix: {fix}")?;
-            }
+            table.add_row([
+                status,
+                found.check,
+                &found.detail,
+                found.fix.as_deref().unwrap_or(""),
+            ]);
         }
+        writeln!(out, "{table}")?;
     }
     Ok(if checks.iter().any(|found| found.status == Status::Fail) {
         ExitCode::FAILURE
@@ -238,10 +255,10 @@ async fn node(dir: &day_node::NodeDir) -> (Check, Option<Res<SocketState>>) {
 fn server(socket: Option<Res<SocketState>>) -> (Check, bool) {
     match socket {
         None => (
-            Check::warn(
+            Check::skip(
                 "server",
-                "skipped: the node cannot be read",
-                "fix the node check above",
+                "the node cannot be read",
+                Some("fix the node check above"),
             ),
             false,
         ),
