@@ -165,6 +165,16 @@ pub enum IntxtCommands {
         /// The intxt: its short id, or its full drawer id
         intxt: String,
     },
+    /// Say which intxts on this node hold a commit
+    ///
+    /// Names the commit by a full sha, a unique prefix or any name git resolves in this worktree.
+    /// Prints one line per intxt that holds it: its short id, its title and its `link:`. Prints
+    /// nothing when no intxt does.
+    #[command(after_long_help = "Examples:\n  day x intxt which 4c1f9a0")]
+    Which {
+        /// The commit, as this worktree's git resolves it
+        commit: String,
+    },
     /// Show what an intxt holds: its commits, jj changes, tracked refs and sessions
     ///
     /// Each entry has a short id, the shortest prefix that is unique among the intxt's entries.
@@ -376,6 +386,10 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
                     .await
             })
             .await
+        }
+        IntxtCommands::Which { commit } => {
+            with_packaging(async |packaging| packaging.which(&mut std::io::stdout(), &commit).await)
+                .await
         }
         IntxtCommands::Show { intxt } => {
             with_packaging(async |packaging| {

@@ -1247,6 +1247,61 @@ mod library {
             assert_eq!(blob["mime"], "application/x-git-pack");
             assert!(blob["lengthOctets"].as_u64().unwrap() > 0, "{blob}");
 
+            // The intxt's commits document holds a `gitCommit/<sha>` for each of the range's
+            // two commits (and nothing for the base, which is not in the range), found by the
+            // membership query anchored on the intxt's drawer.
+            let caller = intxt_core::client::Caller::new(
+                client,
+                service_utils_rs::RequestContext::root(),
+                None,
+                "test-which".to_owned(),
+            );
+            let (first, second) = (rev(&repo, "feat/x~1"), tip.clone());
+            let holders = caller.commit_holders(&drawer, &tip).await.unwrap();
+            let [commits_doc] = holders.iter().cloned().collect::<Vec<_>>().try_into().unwrap();
+            assert_eq!(caller.commit_holders(&drawer, &first).await.unwrap(), holders);
+            assert!(caller.commit_holders(&drawer, &merge_base).await.unwrap().is_empty());
+            let held: Vec<_> = caller
+                .datum_keys(&commits_doc)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|key| key.to_string())
+                .collect();
+            assert_eq!(
+                held,
+                {
+                    let mut expected = [first.clone(), second.clone()]
+                        .map(|sha| format!("org.example.intxt.work.gitCommit/{sha}"));
+                    expected.sort();
+                    expected.to_vec()
+                },
+                "the commits document holds the range's commits and nothing else"
+            );
+            let (_, datum) = caller
+                .read(
+                    &commits_doc,
+                    &format!("org.example.intxt.work.gitCommit/{second}").parse().unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(datum["message"], "add c.txt");
+            assert!(datum.get("raw").is_none(), "{datum}");
+
+            let which = async |name: &str| {
+                let mut out = Vec::new();
+                packaging.which(&mut out, name).await.unwrap();
+                String::from_utf8(out).unwrap()
+            };
+            let held_line = format!(
+                "{short}  \"Two files\"  link: dtxt:datum:{drawer}/org.example.intxt/main\n"
+            );
+            assert_eq!(which(&tip).await, held_line);
+            assert_eq!(which("feat/x~1").await, held_line);
+            // A unique prefix names the commit as well.
+            assert_eq!(which(&tip[..10]).await, held_line);
+            assert_eq!(which("main").await, "", "a commit on main only is in no intxt");
+
             let again = add(&short).await;
             assert!(again.starts_with("nothing to add to "), "{again}");
             assert!(again.contains("(already in)"), "{again}");
