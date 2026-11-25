@@ -16,6 +16,7 @@
 //! | after a revocation commits, no authorized read returns any row of the part, at any rev | [`revocation_hides_every_row_of_the_part`], [`revocation_mid_stream_hides_the_unread_rows`] |
 //! | after a grant, an authorized read from the old cursor returns the backlog | [`grant_returns_the_backlog`] |
 //! | an object route follows the object's readable parts and carries only their rows | [`object_routes_follow_the_readable_parts`] |
+//! | a `since` past every row (`Rev::MAX` included) reads as one at the head: nothing changed, never a panic | [`a_since_past_every_row_reads_nothing_changed`], every check |
 //! | an authorized read of the empty window decides every verdict and reads no row | [`an_empty_window_reads_verdicts_only`], every check, [`differential`] |
 //! | an authorized read carries, from its snapshot, one payload per object with a live row in it, and no other | [`authorized_reads_carry_their_payloads`], every check, [`differential`] |
 //! | a store has a generation from its creation, stable across writes and reads, new after a mint, and carried by every summary | [`generations_identify_the_log`], every check, [`differential`] |
@@ -301,7 +302,8 @@ impl<B: Backend> Harness<B> {
             );
         }
         for principal in &principals {
-            for since in [0, latest / 2, latest] {
+            // `Rev::MAX` is the bound the replay admission passes to mean "no dirt wanted".
+            for since in [0, latest / 2, latest, Rev::MAX] {
                 let asked = parts
                     .iter()
                     .map(|part| (part.clone(), since))
@@ -1018,6 +1020,53 @@ pub async fn an_empty_window_reads_verdicts_only<B: Backend>(backend: &B) -> Res
         vec![ReadVerdict::Permitted, ReadVerdict::Denied]
     );
     Ok(())
+}
+
+/// A `since` past every row, `Rev::MAX` as the replay admission passes it to ask only whether a
+/// part is readable, answers what a `since` at the head answers: the verdict and member count,
+/// no dirt, no bucket changed, no leaf. It is a valid read, not a rev that must fit a store's
+/// integer column.
+pub async fn a_since_past_every_row_reads_nothing_changed<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    harness
+        .commit(vec![
+            set(&[(1, 1)]),
+            add(&[(1, 0), (1, 1)]),
+            grant(&[(0, 0)]),
+        ])
+        .await?;
+    let (store, latest) = (&harness.store, harness.oracle.latest_rev());
+    let (reader, part) = (principal(0), part(0));
+    let asked = |since| [(part.clone(), since)];
+    let at_head = store.part_summaries(&reader, &asked(latest)).await?;
+    let past_all = store.part_summaries(&reader, &asked(Rev::MAX)).await?;
+    assert!(past_all[0].is_some(), "the part is readable");
+    assert_eq!(past_all, at_head);
+    let list = |since| {
+        store.bucket_list(
+            &reader,
+            &part,
+            BuckId::ROOT,
+            BuckId::MAX_LEVEL,
+            since,
+            usize::MAX,
+        )
+    };
+    assert_eq!(list(Rev::MAX).await?, Some(vec![]));
+    assert_eq!(list(Rev::MAX).await?, list(latest).await?);
+    let leaves = |since| {
+        store.bucket_leaves(
+            &reader,
+            &part,
+            &[(BuckId::ROOT, None)],
+            since,
+            usize::MAX,
+            usize::MAX,
+        )
+    };
+    assert_eq!(leaves(Rev::MAX).await?, leaves(latest).await?);
+    // and the oracle agrees at that bound, on every part and principal
+    harness.check().await
 }
 
 /// An authorized read carries the payload of each object with a live row in the page, once per
