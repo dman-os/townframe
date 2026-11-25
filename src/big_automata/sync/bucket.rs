@@ -25,6 +25,10 @@
 //! 4. **Done means every delta went out.** `walk_done` holds only once listing is finished,
 //!    every working bucket is exhausted, no leaf request is outstanding and no entry is buffered.
 //!    A delta that was not pulled yet keeps it false.
+//!    A bucket is finished by its page's `next_after` alone: a page may hold fewer entries than
+//!    the request's hint (the responder stops at its entry cap or its byte budget, and a key
+//!    wider than the budget is a page of one), so neither the listing's `len` nor the hint says
+//!    when a bucket ends.
 //! 5. **Memory is bounded.** Buffered entries stay below `buffer_target + leaf_hint` and the
 //!    working set never exceeds its bound, whatever budgets the caller passes, including none.
 //! 6. **Leaf pages are requested on the low watermark.** New leaf requests go out only while the

@@ -25,6 +25,7 @@ use crate::rev::Limits;
 use crate::rev::Rev;
 use crate::rev::RevWatch;
 
+mod budget;
 mod differential;
 
 /// The one principal the laws ask as.
