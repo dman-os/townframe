@@ -27,7 +27,7 @@ use crate::part_store::PartStoreRead;
 use crate::part_store::laws::obj;
 use crate::part_store::laws::part;
 use crate::part_store::laws::principal;
-use crate::part_store::laws::set;
+use crate::driver::memory::LwwPayload;
 use crate::part_store::laws::stage;
 use crate::part_store::memory::MemoryPartStore;
 use crate::part_store::oracle::PartWrite;
@@ -149,7 +149,7 @@ impl ScriptedPeer {
         self.commit(vec![grant(&[(index, 0)])]).await;
         let sets: Vec<_> = objs.iter().map(|obj| (*obj, value)).collect();
         let adds: Vec<_> = objs.iter().map(|obj| (*obj, index)).collect();
-        self.commit(vec![set(&sets), add(&adds)]).await;
+        self.commit(vec![LwwPayload::set(&sets), add(&adds)]).await;
     }
 
     pub(super) fn set_down(&self, down: bool) {

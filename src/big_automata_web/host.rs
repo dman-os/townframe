@@ -130,7 +130,7 @@ async fn run_accept() {
     show("node_id", &endpoint.id().to_string());
     let counters = std::rc::Rc::new(std::cell::Cell::new((0u32, 0u32)));
     while let Some(incoming) = endpoint.accept().await {
-        let counters = counters.clone();
+        let counters = std::rc::Rc::clone(&counters);
         // One task per connection: the loop must keep accepting while a dialer lingers.
         wasm_bindgen_futures::spawn_local(async move {
             let connection = incoming
@@ -138,9 +138,11 @@ async fn run_accept() {
                 .expect("accepting an incoming connection")
                 .await
                 .expect("completing the handshake");
-            let (mut send, mut recv) =
-                connection.accept_bi().await.expect("the dialer's stream");
-            let request = recv.read_to_end(1 << 16).await.expect("reading the request");
+            let (mut send, mut recv) = connection.accept_bi().await.expect("the dialer's stream");
+            let request = recv
+                .read_to_end(1 << 16)
+                .await
+                .expect("reading the request");
             send.write_all(&request).await.expect("echoing");
             send.finish().expect("finishing the echo");
             let (echoed, closed) = counters.get();

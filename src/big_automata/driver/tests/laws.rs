@@ -16,7 +16,7 @@ use crate::interlude::*;
 use crate::part_store::laws::obj;
 use crate::part_store::laws::part;
 use crate::part_store::laws::principal;
-use crate::part_store::laws::set;
+use crate::driver::memory::LwwPayload;
 use crate::part_store::memory::MemoryPartStore;
 use crate::sync::PeerCursor;
 
@@ -228,7 +228,7 @@ async fn law_5_cursor_writes_land_in_order_and_never_go_back() {
     // 7s, and so on), so writes that were not awaited in turn would overlap and be overtaken.
     for value in 2..=6u8 {
         head = peer
-            .commit(vec![set(&[(1, value)])])
+            .commit(vec![LwwPayload::set(&[(1, value)])])
             .await
             .expect("a change");
         n0_future::time::sleep(Duration::from_millis(500)).await;

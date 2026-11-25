@@ -78,6 +78,10 @@ impl BackendRig for Download {
         backend.fail_next_write();
     }
 
+    fn payload(value: u8) -> ObjPayload {
+        LwwPayload::at(value)
+    }
+
     fn concurrent_payloads(&self) -> (ObjPayload, ObjPayload) {
         concurrent_payloads()
     }
@@ -109,6 +113,10 @@ impl BackendRig for Hinted {
 
     fn fail_next_write(&self, backend: &MemoryBackend) {
         backend.fail_next_write();
+    }
+
+    fn payload(value: u8) -> ObjPayload {
+        LwwPayload::at(value)
     }
 
     fn concurrent_payloads(&self) -> (ObjPayload, ObjPayload) {

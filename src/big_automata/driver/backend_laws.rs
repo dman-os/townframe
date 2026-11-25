@@ -43,7 +43,6 @@ use crate::part_store::ObjPayload;
 use crate::part_store::ObjState;
 use crate::part_store::laws::obj;
 use crate::part_store::laws::part;
-use crate::part_store::laws::payload;
 
 /// What a backend under test is, for [`sync_backend_laws`].
 pub trait BackendRig {
@@ -80,6 +79,10 @@ pub trait BackendRig {
     /// The next write of the backend fails after it has done all it can short of committing.
     fn fail_next_write(&self, backend: &Self::Backend);
 
+    /// The payload of `value` the backend can take: a larger value is a later write, so a
+    /// backend that orders its payloads takes the larger over the smaller.
+    fn payload(value: u8) -> ObjPayload;
+
     /// Two different payloads that two nodes may write for one object at the same time, neither
     /// derived from the other: whichever way the backend merges (an order of the writes, a
     /// CRDT), it has to settle both nodes on one result.
@@ -103,7 +106,7 @@ impl<R: BackendRig> Probe<'_, R> {
     }
 
     async fn peer(&self, index: u8, value: Option<u8>) -> Res<()> {
-        let payload = value.map(payload);
+        let payload = value.map(R::payload);
         self.rig
             .peer_holds(&self.backend, &obj(index), payload.as_ref())
             .await
@@ -116,7 +119,7 @@ impl<R: BackendRig> Probe<'_, R> {
             obj: obj(obj_index),
             add: add.iter().map(|&at| part(at)).collect(),
             remove: remove.iter().map(|&at| part(at)).collect(),
-            payload: (!add.is_empty() || remove.is_empty()).then(|| payload(value)),
+            payload: (!add.is_empty() || remove.is_empty()).then(|| R::payload(value)),
         }
     }
 
@@ -163,7 +166,7 @@ impl<R: BackendRig> Probe<'_, R> {
     /// The backend holds `value` for object `obj_index`, in exactly `parts`.
     async fn expect(&self, obj_index: u8, value: Option<u8>, parts: &[u8], why: &str) -> Res<()> {
         let expected: Held = (
-            value.map(payload),
+            value.map(R::payload),
             parts.iter().map(|&at| part(at)).collect(),
         );
         assert_eq!(self.held(&obj(obj_index)).await?, expected, "{why}");

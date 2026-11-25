@@ -133,7 +133,11 @@ async fn serve(handlers: usize) -> Served {
     let (replay, stop) = boot(store.clone(), principal_of(allowed));
     commit(
         &store.inner,
-        vec![grant(&[(1, 0), (2, 0)]), set(&[(1, 10)]), add(&[(1, 1)])],
+        vec![
+            grant(&[(1, 0), (2, 0)]),
+            LwwPayload::set(&[(1, 10)]),
+            add(&[(1, 1)]),
+        ],
     )
     .await;
 
@@ -255,7 +259,11 @@ async fn a_held_round_does_not_block_other_requests_on_its_connection() {
     assert!(!held.is_finished(), "a summary waited for the held round");
 
     // a write to the part it holds releases it, with that write
-    let rev = commit(&served.store.inner, vec![set(&[(2, 20)]), add(&[(2, 1)])]).await;
+    let rev = commit(
+        &served.store.inner,
+        vec![LwwPayload::set(&[(2, 20)]), add(&[(2, 1)])],
+    )
+    .await;
     let page = held.await.expect("the task").expect("the round");
     assert_eq!(page.events, [changed(rev, 2, 20)]);
     served.shut_down().await;
@@ -303,7 +311,7 @@ async fn handler_concurrency_is_bounded_by_the_router_and_held_rounds_count() {
     );
 
     // the part of the first round is written: it leaves, and its slot admits the third call
-    commit(&served.store.inner, vec![set(&[(1, 11)])]).await;
+    commit(&served.store.inner, vec![LwwPayload::set(&[(1, 11)])]).await;
     first.await.expect("the task").expect("the round");
     // the third was built at the head before that write, so it has rows and leaves at once
     let page = answer(served.client.call(RequestContext::root(), third).await)

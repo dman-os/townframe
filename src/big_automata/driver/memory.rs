@@ -124,32 +124,53 @@ impl LwwPayload {
         serde_json::to_value(self).expect(ERROR_JSON)
     }
 
+    /// The stamped payload of `value`, written by one fixed writer at time `value`: a larger
+    /// value is a later write, and equal stamps always carry equal values.
+    pub fn at(value: u8) -> ObjPayload {
+        Self {
+            value: serde_json::json!(value),
+            written_at: u64::from(value),
+            writer_id: PeerKey::new(&[0]),
+        }
+        .into_payload()
+    }
+
+    /// A batch setting each `(obj, value)`'s object to [`Self::at`] `value`: what a peer's
+    /// store holds for a [`MemoryBackend`] to take.
+    pub fn set(payloads: &[(u8, u8)]) -> PartWrite {
+        PartWrite::SetPayloads(
+            payloads
+                .iter()
+                .map(|&(obj, value)| (laws::obj(obj), Self::at(value)))
+                .collect(),
+        )
+    }
+
     /// Whether a peer's `incoming` payload replaces the `held` one.
     ///
-    /// Two [`LwwPayload`]s are ordered by `written_at`, then `writer_id`, and `incoming` wins
-    /// only when greater: applying it is idempotent, and applying two payloads in either order
-    /// leaves the greater, so concurrent writes converge. Equal metadata must carry equal
-    /// values (one writer does not stamp two payloads alike), which is asserted. A payload that
-    /// is not an [`LwwPayload`] has no order to merge by: it replaces what is held (an
-    /// overwrite, which does not converge under concurrent writes) unless it is equal to it.
+    /// The two are ordered by `written_at`, then `writer_id`, and `incoming` wins only when
+    /// greater: applying it is idempotent, and applying two payloads in either order leaves
+    /// the greater, so concurrent writes converge. Equal metadata must carry equal values (one
+    /// writer does not stamp two payloads alike), which is asserted. A payload that is not an
+    /// [`LwwPayload`] panics: the memory backend is a test backend that merges only what it
+    /// can order, and an unstamped payload would have to overwrite, which does not converge.
     fn wins(incoming: &ObjPayload, held: &ObjPayload) -> bool {
-        match (Self::deserialize(incoming), Self::deserialize(held)) {
-            (Ok(incoming), Ok(held)) => {
-                match (incoming.written_at, &incoming.writer_id)
-                    .cmp(&(held.written_at, &held.writer_id))
-                {
-                    Ordering::Greater => true,
-                    Ordering::Less => false,
-                    Ordering::Equal => {
-                        assert_eq!(
-                            incoming.value, held.value,
-                            "equal LWW metadata must not diverge in payload value"
-                        );
-                        false
-                    }
-                }
+        let stamped = |payload| {
+            Self::deserialize(payload).unwrap_or_else(|err| {
+                panic!("the memory backend takes only LwwPayloads, got {payload}: {err}")
+            })
+        };
+        let (incoming, held) = (stamped(incoming), stamped(held));
+        match (incoming.written_at, &incoming.writer_id).cmp(&(held.written_at, &held.writer_id)) {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => {
+                assert_eq!(
+                    incoming.value, held.value,
+                    "equal LWW metadata must not diverge in payload value"
+                );
+                false
             }
-            _ => incoming != held,
         }
     }
 }
