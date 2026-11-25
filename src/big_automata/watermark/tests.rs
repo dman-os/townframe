@@ -15,6 +15,16 @@ fn set(sids: &[&'static str]) -> Set<&'static str> {
     sids.iter().copied().collect()
 }
 
+/// A stream never seen, or retired, owes nothing.
+#[test]
+fn an_unknown_or_retired_stream_is_settled() {
+    let mut m = Machine::default();
+    assert!(m.is_settled(&"p"));
+    m.add_job(Job::Sync(1), 5, ["p"]);
+    m.retire_stream(&"p");
+    assert!(m.is_settled(&"p"));
+}
+
 #[test]
 fn add_job_opens_a_slot_per_new_stream() {
     let mut m = Machine::default();
@@ -310,10 +320,7 @@ proptest! {
             for sid in STREAMS {
                 prop_assert_eq!(m.watermark(&sid), oracle.emitted.get(sid).copied());
                 let oracle_settled = !oracle.slots.keys().any(|&(slot_sid, _)| slot_sid == sid);
-                // an unknown stream reads as unsettled
-                if oracle.emitted.contains_key(sid) || !oracle_settled {
-                    prop_assert_eq!(m.is_settled(&sid), oracle_settled);
-                }
+                prop_assert_eq!(m.is_settled(&sid), oracle_settled);
             }
             for key in [Job::Sync(0), Job::Sync(1), Job::Sync(2), Job::RemoveFromPart(0), Job::RemoveFromPart(1), Job::RemoveFromPart(2)] {
                 for cursor in 0..8 {

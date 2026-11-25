@@ -1,5 +1,44 @@
-//! TODO: emit sync stats event for use in full.rs
-//! FIXME: figure out the delete obj story
+//! The cursor machine: per-part applied cursors for one peer's cursor-strategy parts.
+//!
+//! Every event the machine sees names parts (an object route's events never reach it: the
+//! parent hands those to `ObjectJobs` and keeps the object route's resume cursor itself). A
+//! membership touch opens a `JobKey::Sync(obj)` slot at its cursor on each named part; a
+//! removal opens a `JobKey::RemoveFromPart(obj)` slot on its part. `ObjectJobs` reports each
+//! settled `(JobKey, cursor)` back through [`CursorSyncMachine::on_obj_sync_job_evt`], and a
+//! part's cursor passes a slot once the job holding it settled.
+//!
+//! # Laws
+//!
+//! 1. **A part's cursor never passes unsettled work.** `SetPartCursor { part, cursor }` is
+//!    emitted only when every slot the part holds at or below `cursor` has settled (or been
+//!    released by law 3), and `cursor` is the highest such slot.
+//! 2. **Part cursors only go forward.** The cursors emitted for one part strictly increase
+//!    between its creation and its [`remove_part`](CursorSyncMachine::remove_part).
+//! 3. **A removal releases earlier syncs on its part only.** A removal of an object at `c` on
+//!    part `p` frees `p`'s slots of the object's syncs below `c`. The same syncs keep gating
+//!    the object's other parts, other objects' syncs keep gating `p`, and the removal's own
+//!    slot gates `p` until its completion is reported.
+//! 4. **A part admits a cursor once.** A part that already emitted past a cursor, or holds a
+//!    slot at it (a re-delivery), skips it: the `SyncObj` names only the parts that admitted
+//!    it, in event order, and an event every part skipped emits nothing.
+//! 5. **Retiring a part is local.** `remove_part` drops the part's slots and replay cursor
+//!    and reports nothing; completions reported afterwards are silent for it and still settle
+//!    the job's other parts, so no other part stalls on a retired one. A part added again
+//!    starts fresh.
+//! 6. **`is_settled(part)` is true exactly when the part owes nothing**: it holds no slot
+//!    that has not passed. A part the machine has never heard of owes nothing.
+//! 7. **Completions are idempotent.** A completion for a job or cursor with no waiter (stale,
+//!    duplicated, released by law 3, or for a retired part) changes nothing.
+//! 8. **Completions commute.** The cursors a part has reached depend on which slots have
+//!    settled, not on the order the completions arrived in.
+//! 9. **Replay cursors are scheduling state.** `part_replay_cursor` is the larger of the
+//!    applied cursor and the newest scanned one, and `advance_part_replay_cursor` only moves
+//!    it forward.
+//!
+//! Contract with the layer above: every emitted `SyncObj` and `RemoveObjFromParts` comes back
+//! through [`CursorSyncMachine::on_obj_sync_job_evt`], or its part is retired with
+//! [`CursorSyncMachine::remove_part`]. Work cancelled because newer work covers it is still
+//! reported for each cursor it held; a slot nobody reports stalls its part.
 
 use crate::interlude::*;
 
@@ -11,7 +50,8 @@ strike! {
     pub enum CursorEvent {
         ObjChanged(pub struct {
             pub cursor: Rev,
-            // if empty, this came from an object only replay
+            /// Never empty: an event naming no part is an object route event, which does not
+            /// reach this machine.
             pub parts: Vec<PartKey>,
             pub obj_key: ObjKey,
             pub payload: ObjPayload,
@@ -44,9 +84,6 @@ structstruck::strike! {
             part_key: PartKey,
             cursor: Rev,
         },
-        PartIdle {
-            part_key: PartKey,
-        }
     }
 }
 
@@ -56,35 +93,18 @@ structstruck::strike! {
 /// removal is per part: its waiter holds the parts it removes the object from. They are
 /// different jobs, so a removal superseding an object's sync on a part never touches the
 /// removal's own slot, and settling one never settles the other.
-///
-/// Contract with the layer above: every emitted `SyncObj` with parts and every
-/// `RemoveObjFromParts` comes back through [`CursorSyncMachine::on_obj_sync_job_evt`], or its
-/// part is retired with [`CursorSyncMachine::remove_part`]. Work cancelled because newer work
-/// covers it is still reported for each cursor it held; a slot nobody reports stalls its part.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum JobKey {
     Sync(ObjKey),
     RemoveFromPart(ObjKey),
 }
 
-structstruck::strike! {
-    #[derive(Debug, Default)]
-    pub struct CursorSyncMachine {
-        /// What each object-target's replay has reached for this session.
-        object_replays: Map<ObjKey, struct ObjectReplay {
-            #![derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-            /// The newest cursor the backend has acknowledged as applied.
-            acknowledged: Rev,
-            /// The newest cursor the replay responder has scanned for this object route.
-            /// This may be ahead of `acknowledged` while work is pending.
-            replay_cursor: Rev,
-            in_flight: Option<Rev>,
-        }>,
-        /// The newest cursor scanned for each part route. This is a scheduling cursor,
-        /// distinct from the applied watermark owned by `jobs`.
-        part_replay_cursors: Map<PartKey, Rev>,
-        jobs: WatermarkMachine<JobKey, PartKey, Rev>,
-    }
+#[derive(Debug, Default)]
+pub struct CursorSyncMachine {
+    /// The newest cursor scanned for each part route. This is a scheduling cursor,
+    /// distinct from the applied watermark owned by `jobs`.
+    part_replay_cursors: Map<PartKey, Rev>,
+    jobs: WatermarkMachine<JobKey, PartKey, Rev>,
 }
 
 impl CursorSyncMachine {
@@ -94,16 +114,9 @@ impl CursorSyncMachine {
         self.part_replay_cursors.remove(&part_key);
     }
 
-    /// Number of replay work units admitted by this cursor machine but not yet
-    /// settled. This is deliberately independent of the task scheduler's live
-    /// capacity: the outer machine uses it only as a replay receive window.
-    pub(crate) fn pending_replay_work(&self) -> usize {
-        self.jobs.pending_jobs_len()
-            + self
-                .object_replays
-                .values()
-                .filter(|replay| replay.in_flight.is_some())
-                .count()
+    /// Whether the part owes nothing: every slot it holds has passed.
+    pub(crate) fn is_settled(&self, part_key: &PartKey) -> bool {
+        self.jobs.is_settled(part_key)
     }
 
     pub(crate) fn part_replay_cursor(&self, part_key: &PartKey, applied: Rev) -> Rev {
@@ -119,33 +132,6 @@ impl CursorSyncMachine {
         *entry = (*entry).max(cursor);
     }
 
-    pub(crate) fn abandon_obj_sync(&mut self, obj_key: &ObjKey) {
-        // we don't remove the object_replay object to avoid
-        // clearing state incase of new work
-        if let Some(replay) = self.object_replays.get_mut(obj_key) {
-            replay.in_flight = None;
-            replay.replay_cursor = replay.acknowledged;
-        }
-    }
-
-    /// Where an object route's replay must resume.
-    ///
-    /// An object route has no part cursor of its own to advance, so this has to
-    /// travel with the route. A store that is not told it replays the object's
-    /// derived part from the start on every page, which re-reads the first page
-    /// forever and never reaches the second.
-    pub(crate) fn obj_resume_cursor(&self, obj_key: &ObjKey) -> Rev {
-        self.object_replays
-            .get(obj_key)
-            .map(|replay| replay.replay_cursor)
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn advance_obj_replay_cursor(&mut self, obj_key: ObjKey, cursor: Rev) {
-        let replay = self.object_replays.entry(obj_key).or_default();
-        replay.replay_cursor = replay.replay_cursor.max(cursor);
-    }
-
     /// Whether the job still waits on `cursor`. A completion can ask this first: a removal
     /// releases an object's earlier syncs on its part while the sync task stays in flight.
     pub(crate) fn owes_obj_job(&self, job: &JobKey, cursor: Rev) -> bool {
@@ -155,38 +141,10 @@ impl CursorSyncMachine {
     pub fn on_subscription_evt(&mut self, evt: CursorEvent, out: &mut Vec<CursorMachineCommand>) {
         match evt {
             CursorEvent::ObjChanged(evt) => {
-                if evt.parts.is_empty() {
-                    let replay = self.object_replays.entry(evt.obj_key.clone()).or_default();
-                    if evt.cursor <= replay.acknowledged {
-                        tracing::debug!(
-                            ?evt.obj_key,
-                            ?evt.cursor,
-                            acknowledged = ?replay.acknowledged,
-                            "cursor machine dropped an object-only event the backend already acknowledged",
-                        );
-                        return;
-                    }
-                    if replay
-                        .in_flight
-                        .is_some_and(|in_flight| evt.cursor <= in_flight)
-                    {
-                        tracing::debug!(
-                            ?evt.obj_key,
-                            ?evt.cursor,
-                            in_flight = ?replay.in_flight,
-                            "cursor machine collapsed a duplicate object-only event into the replay in flight",
-                        );
-                        return;
-                    }
-                    replay.in_flight = Some(evt.cursor);
-                    out.push(CursorMachineCommand::SyncObj {
-                        obj_key: evt.obj_key,
-                        remote_payload: evt.payload,
-                        cursor: evt.cursor,
-                        parts: Vec::new(),
-                    });
-                    return;
-                }
+                assert!(
+                    !evt.parts.is_empty(),
+                    "an event naming no part is an object route event and belongs to ObjectJobs"
+                );
                 tracing::trace!(
                     ?evt.obj_key,
                     ?evt.cursor,
@@ -250,7 +208,7 @@ impl CursorSyncMachine {
                     &evt.part_key,
                     &evt.cursor,
                 );
-                self.emit_advances([(evt.part_key.clone(), reached)], out);
+                Self::emit_advances([(evt.part_key.clone(), reached)], out);
                 out.push(CursorMachineCommand::RemoveObjFromParts {
                     cursor: evt.cursor,
                     obj_key: evt.obj_key,
@@ -266,52 +224,24 @@ impl CursorSyncMachine {
         cursor: Rev,
         out: &mut Vec<CursorMachineCommand>,
     ) {
-        if let JobKey::Sync(obj_key) = &job {
-            // A sync completion is the backend acknowledging a replay of the object's
-            // content, part scoped or object only alike. A removal completion is not: it
-            // reports a membership mutation and must not suppress a content replay the
-            // backend never saw.
-            // create the object replay even if no object replays were
-            // requested to allow continuing in case it's added
-            // FIXME: this is questionable, cursor machine grows per object forever
-            let replay = self.object_replays.entry(obj_key.clone()).or_default();
-            if cursor > replay.acknowledged {
-                replay.acknowledged = cursor;
-            }
-            replay.replay_cursor = replay.replay_cursor.max(cursor);
-            if replay
-                .in_flight
-                .is_some_and(|in_flight| cursor >= in_flight)
-            {
-                replay.in_flight = None;
-            }
-        }
         let advances = self.jobs.settle_on_cursor(&job, &cursor);
-        self.emit_advances(advances, out);
+        Self::emit_advances(advances, out);
     }
 
-    /// Emit the part-cursor commands for streams that just reached a new
-    /// watermark. `PartIdle` follows `SetPartCursor` only when the part has no
-    /// un-advanced cursors left.
+    /// Emit the part-cursor commands for streams that just reached a new watermark.
     fn emit_advances(
-        &mut self,
         advances: impl IntoIterator<Item = (PartKey, Option<Rev>)>,
         out: &mut Vec<CursorMachineCommand>,
     ) {
         for (part_key, reached) in advances {
-            let Some(cursor) = reached else {
-                continue;
-            };
-            out.push(CursorMachineCommand::SetPartCursor {
-                part_key: part_key.clone(),
-                cursor,
-            });
-            if self.jobs.is_settled(&part_key) {
-                out.push(CursorMachineCommand::PartIdle { part_key });
+            if let Some(cursor) = reached {
+                out.push(CursorMachineCommand::SetPartCursor { part_key, cursor });
             }
         }
     }
 }
 
+#[cfg(test)]
+mod oracle;
 #[cfg(test)]
 mod tests;
