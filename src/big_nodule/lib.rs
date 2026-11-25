@@ -737,7 +737,7 @@ pub struct SharedConfigDrawerConfig<'a> {
 ///
 /// The nodules actor holds the right to create drawers on every boot, not only while it makes this
 /// one: it is the delegator every routine's drawer handle is minted under, so a routine whose
-/// `uses` takes `create` can be minted it only while the actor holds it (permission model §6.1).
+/// `uses` takes `create` can be minted it only while the actor holds it (ADR 049 §6.1).
 /// Least privilege applies to the routines' handles, which are `uses` ∩ grants, not to the actor
 /// that mints them. Granting is idempotent, so a later boot re-asserts it at no cost.
 ///
