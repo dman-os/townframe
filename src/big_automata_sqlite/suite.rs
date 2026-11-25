@@ -20,6 +20,7 @@ mod bench;
 mod crash;
 mod cursors;
 mod invariants;
+mod okv;
 mod plans;
 
 pub(crate) type Store = SqlitePartStore<Database>;

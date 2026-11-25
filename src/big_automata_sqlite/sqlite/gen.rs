@@ -127,6 +127,96 @@ pub async fn meta_rev(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlRes
     set.one()
 }
 
+pub const OKV_CONSUMER_CURSOR_SQL: &str = include_str!("queries/okv_consumer_cursor.sql");
+pub async fn okv_consumer_cursor(db: &impl crate::sqlite_rs_alias::QueryExecutor, namespace_id: i64, consumer: String) -> SqlResult<Option<i64>> {
+    let set = db.query(OKV_CONSUMER_CURSOR_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(namespace_id), crate::sqlite_rs_alias::IntoValue::into_value(consumer)]).await?;
+    set.optional()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OkvConsumersRow {
+    pub consumer: String,
+    pub cursor: i64,
+}
+impl crate::sqlite_rs_alias::FromRow for OkvConsumersRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(2)?;
+        Ok(OkvConsumersRow { consumer: row.get::<String>("consumer")?, cursor: row.get::<i64>("cursor")? })
+    }
+}
+
+pub const OKV_CONSUMERS_SQL: &str = include_str!("queries/okv_consumers.sql");
+pub async fn okv_consumers(db: &impl crate::sqlite_rs_alias::QueryExecutor, namespace_id: i64) -> SqlResult<Vec<OkvConsumersRow>> {
+    let set = db.query(OKV_CONSUMERS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(namespace_id)]).await?;
+    set.all()
+}
+
+pub const OKV_FLOOR_SQL: &str = include_str!("queries/okv_floor.sql");
+pub async fn okv_floor(db: &impl crate::sqlite_rs_alias::QueryExecutor, namespace_id: i64) -> SqlResult<Option<i64>> {
+    let set = db.query(OKV_FLOOR_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(namespace_id)]).await?;
+    set.one()
+}
+
+pub const OKV_GET_SQL: &str = include_str!("queries/okv_get.sql");
+pub async fn okv_get(db: &impl crate::sqlite_rs_alias::QueryExecutor, namespace_id: i64, key: Vec<u8>) -> SqlResult<Option<Option<Vec<u8>>>> {
+    let set = db.query(OKV_GET_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(namespace_id), crate::sqlite_rs_alias::IntoValue::into_value(key)]).await?;
+    set.optional()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OkvNamespaceByNameRow {
+    pub namespace_id: i64,
+    pub rev: i64,
+}
+impl crate::sqlite_rs_alias::FromRow for OkvNamespaceByNameRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(2)?;
+        Ok(OkvNamespaceByNameRow { namespace_id: row.get::<i64>("namespace_id")?, rev: row.get::<i64>("rev")? })
+    }
+}
+
+pub const OKV_NAMESPACE_BY_NAME_SQL: &str = include_str!("queries/okv_namespace_by_name.sql");
+pub async fn okv_namespace_by_name(db: &impl crate::sqlite_rs_alias::QueryExecutor, name: String) -> SqlResult<OkvNamespaceByNameRow> {
+    let set = db.query(OKV_NAMESPACE_BY_NAME_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(name)]).await?;
+    set.one()
+}
+
+pub const OKV_NAMESPACE_OPEN_SQL: &str = include_str!("queries/okv_namespace_open.sql");
+pub async fn okv_namespace_open(db: &impl crate::sqlite_rs_alias::Executor, name: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(OKV_NAMESPACE_OPEN_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(name)]).await
+}
+
+pub const OKV_NAMESPACE_REV_SQL: &str = include_str!("queries/okv_namespace_rev.sql");
+pub async fn okv_namespace_rev(db: &impl crate::sqlite_rs_alias::QueryExecutor, namespace_id: i64) -> SqlResult<i64> {
+    let set = db.query(OKV_NAMESPACE_REV_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(namespace_id)]).await?;
+    set.one()
+}
+
+pub const OKV_PRUNE_SQL: &str = include_str!("queries/okv_prune.sql");
+pub async fn okv_prune(db: &impl crate::sqlite_rs_alias::Executor, namespace_id: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(OKV_PRUNE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(namespace_id)]).await
+}
+
+pub const OKV_REGISTER_CONSUMER_SQL: &str = include_str!("queries/okv_register_consumer.sql");
+pub async fn okv_register_consumer(db: &impl crate::sqlite_rs_alias::Executor, namespace_id: i64, consumer: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(OKV_REGISTER_CONSUMER_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(namespace_id), crate::sqlite_rs_alias::IntoValue::into_value(consumer)]).await
+}
+
+pub const OKV_REPORT_CURSOR_SQL: &str = include_str!("queries/okv_report_cursor.sql");
+pub async fn okv_report_cursor(db: &impl crate::sqlite_rs_alias::Executor, cursor: i64, namespace_id: i64, consumer: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(OKV_REPORT_CURSOR_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cursor), crate::sqlite_rs_alias::IntoValue::into_value(namespace_id), crate::sqlite_rs_alias::IntoValue::into_value(consumer)]).await
+}
+
+pub const OKV_SET_NAMESPACE_REV_SQL: &str = include_str!("queries/okv_set_namespace_rev.sql");
+pub async fn okv_set_namespace_rev(db: &impl crate::sqlite_rs_alias::Executor, rev: i64, namespace_id: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(OKV_SET_NAMESPACE_REV_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(rev), crate::sqlite_rs_alias::IntoValue::into_value(namespace_id)]).await
+}
+
+pub const OKV_UNREGISTER_CONSUMER_SQL: &str = include_str!("queries/okv_unregister_consumer.sql");
+pub async fn okv_unregister_consumer(db: &impl crate::sqlite_rs_alias::Executor, namespace_id: i64, consumer: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(OKV_UNREGISTER_CONSUMER_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(namespace_id), crate::sqlite_rs_alias::IntoValue::into_value(consumer)]).await
+}
+
 pub const PART_LATEST_CURSOR_SQL: &str = include_str!("queries/part_latest_cursor.sql");
 pub async fn part_latest_cursor(db: &impl crate::sqlite_rs_alias::QueryExecutor, part_key: Vec<u8>) -> SqlResult<Option<i64>> {
     let set = db.query(PART_LATEST_CURSOR_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(part_key)]).await?;

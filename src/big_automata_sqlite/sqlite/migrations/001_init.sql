@@ -102,3 +102,39 @@ CREATE TABLE big_automata_peer_cursors (
     , generation BLOB NOT NULL CHECK (length(generation) = 16)
     , PRIMARY KEY (peer, backend, part_key)
 ) STRICT, WITHOUT ROWID;
+
+-- The okv tables (`big_automata::okv`), in the same database as the part store so one write
+-- transaction can stage both. A namespace is one okv table and owns its own rev counter, which
+-- an `apply` bumps in the caller's transaction.
+CREATE TABLE big_automata_okv_namespaces (
+      namespace_id INTEGER PRIMARY KEY
+    , name TEXT NOT NULL UNIQUE
+    , rev INTEGER NOT NULL
+) STRICT;
+
+-- One row per key: the rev of the batch that last wrote it, and its value, NULL for a
+-- tombstone. Keys are raw bytes: SQLite's blob order is the memcmp order of `Vec<u8>`.
+CREATE TABLE big_automata_okv_entries (
+      namespace_id INTEGER NOT NULL
+    , key BLOB NOT NULL
+    , rev INTEGER NOT NULL
+    , value BLOB
+    , PRIMARY KEY (namespace_id, key)
+) STRICT, WITHOUT ROWID;
+
+-- The paged reads: a namespace's rows in `(rev, key)` order.
+CREATE INDEX big_automata_okv_entries_by_rev
+    ON big_automata_okv_entries (namespace_id, rev, key);
+
+-- Pruning: a namespace's tombstones by rev.
+CREATE INDEX big_automata_okv_entries_tombstones
+    ON big_automata_okv_entries (namespace_id, rev)
+ WHERE value IS NULL;
+
+-- The consumers holding tombstones back, and the rev each has gone past.
+CREATE TABLE big_automata_okv_consumers (
+      namespace_id INTEGER NOT NULL
+    , consumer TEXT NOT NULL
+    , cursor INTEGER NOT NULL
+    , PRIMARY KEY (namespace_id, consumer)
+) STRICT, WITHOUT ROWID;

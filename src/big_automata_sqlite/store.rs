@@ -29,6 +29,7 @@ use crate::buckets;
 use crate::db::PartDb;
 use crate::interlude::*;
 use crate::log;
+use crate::okv::Staged;
 use crate::read;
 use crate::serve;
 use crate::sql;
@@ -58,10 +59,13 @@ impl<D: PartDb> Clone for SqlitePartStore<D> {
 /// [`commit`](Self::commit) or [`rollback`](Self::rollback); dropping it rolls it back.
 pub struct SqlitePartTx<D: PartDb> {
     store: SqlitePartStore<D>,
-    tx: D::Write,
+    pub(crate) tx: D::Write,
     /// The rev every row this transaction stamps gets: the log's rev at `begin`, plus one.
     rev: Rev,
     stamped: bool,
+    /// The okv tables this transaction has written, by namespace: their watches move after the
+    /// commit, and never for a rollback (the map is dropped with the transaction).
+    pub(crate) okv: BTreeMap<i64, Staged>,
 }
 
 impl<D: PartDb> SqlitePartStore<D> {
@@ -88,6 +92,7 @@ impl<D: PartDb> SqlitePartStore<D> {
             tx,
             rev,
             stamped: false,
+            okv: BTreeMap::new(),
         })
     }
 
@@ -106,6 +111,7 @@ impl<D: PartDb> SqlitePartTx<D> {
             tx,
             rev,
             stamped,
+            okv,
         } = self;
         if stamped {
             queries::set_meta_rev(&tx, sql::rev_to_sql(rev)).await?;
@@ -114,6 +120,9 @@ impl<D: PartDb> SqlitePartTx<D> {
         // After the commit is visible: a woken reader must find it in place.
         if stamped {
             store.wakeups.send_replace(rev);
+        }
+        for staged in okv.into_values() {
+            staged.publish();
         }
         Ok(stamped.then_some(rev))
     }

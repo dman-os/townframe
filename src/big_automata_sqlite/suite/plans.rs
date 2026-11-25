@@ -5,10 +5,20 @@
 //! A plan line that scans a table or an index (rather than searching one) fails the test,
 //! except scans of the batch's own rows (a `VALUES` list is as big as the batch, not the store).
 
+use std::ops::Bound;
 use std::sync::Mutex;
 
+use big_automata::okv::KeyRange;
+use big_automata::okv::Mutation;
+use big_automata::okv::OkvStore;
+use big_automata::okv::Selector;
+use big_automata::okv::laws::Backend as OkvBackend;
+use big_automata::okv::laws::{self as okv_laws};
 use big_automata::part_store::laws::Backend;
 use big_automata::part_store::laws::{self};
+use big_automata::rev::Page;
+use big_automata::rev::RevSource;
+use big_automata::rev::laws::limits;
 use futures::executor::block_on;
 use sqlite_rs::Database;
 use sqlite_rs::ExecuteResult;
@@ -136,6 +146,47 @@ impl Backend for RecordingBackend {
     }
 }
 
+/// The okv laws over the recording database, so the okv statements are planned too.
+#[derive(Clone)]
+struct RecordingOkvBackend {
+    log: Log,
+    tables: Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[async_trait]
+impl OkvBackend for RecordingOkvBackend {
+    type Db = SqlitePartStore<Recording>;
+    type Store = SqliteOkv<Recording>;
+
+    async fn open(&self) -> Res<Self::Db> {
+        let db = Recording {
+            db: RUNTIME.ephemeral(MIGRATIONS)?,
+            log: Arc::clone(&self.log),
+        };
+        SqlitePartStore::open(db).await
+    }
+
+    async fn table(&self, db: &Self::Db) -> Res<Self::Store> {
+        let table = self
+            .tables
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        SqliteOkv::open(db, &format!("table-{table}")).await
+    }
+
+    async fn begin(&self, db: &Self::Db) -> Res<SqlitePartTx<Recording>> {
+        db.begin().await
+    }
+
+    async fn commit(&self, tx: SqlitePartTx<Recording>) -> Res<()> {
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn rollback(&self, tx: SqlitePartTx<Recording>) -> Res<()> {
+        tx.rollback().await
+    }
+}
+
 /// A scan of the batch's own rows: a `VALUES` list, or the CTE of the part count update.
 fn batch_sized(detail: &str) -> bool {
     detail.contains("CONSTANT ROW") || detail.contains("VALUES CLAUSE") || detail == "SCAN delta"
@@ -163,6 +214,77 @@ fn every_statement_is_served_by_an_index() -> Res<()> {
             "the laws should have run many distinct statements, ran {}",
             statements.len()
         );
+        assert_no_scans(statements).await
+    })
+}
+
+/// Every okv statement, the paged reads (each selector, and the continuation of a revision
+/// that spans statements) and `prune` included, is served by an index.
+#[test]
+fn every_okv_statement_is_served_by_an_index() -> Res<()> {
+    block_on(async {
+        let backend = RecordingOkvBackend {
+            log: default(),
+            tables: default(),
+        };
+        okv_laws::collapse(&backend).await?;
+        okv_laws::tombstones(&backend).await?;
+        okv_laws::soft_limits(&backend).await?;
+        okv_laws::get_reads_your_writes(&backend).await?;
+        okv_laws::consumer_cursors(&backend).await?;
+        okv_laws::prune_by_lowest_cursor(&backend).await?;
+
+        // One revision bigger than a page, so the read continues from the last row it saw, under
+        // each kind of selector.
+        let db = backend.open().await?;
+        let table = backend.table(&db).await?;
+        let mut tx = backend.begin(&db).await?;
+        let batch = (0..8_u8)
+            .map(|key| Mutation::Put {
+                key: vec![key],
+                value: vec![key],
+            })
+            .collect();
+        table.apply(&mut tx, batch).await?;
+        backend.commit(tx).await?;
+        let mut page = Page::default();
+        for selector in [
+            Selector::All,
+            Selector::Keys((0..8_u8).map(|key| vec![key]).collect()),
+            Selector::Range(KeyRange {
+                start: Bound::Included(vec![1]),
+                end: Bound::Excluded(vec![6]),
+            }),
+            Selector::Range(KeyRange {
+                start: Bound::Excluded(vec![1]),
+                end: Bound::Included(vec![6]),
+            }),
+        ] {
+            table
+                .read(&selector, 0, 1, limits(2, None), &mut page)
+                .await?;
+            assert!(!page.entries.is_empty());
+        }
+
+        let statements = backend.log.lock().expect(ERROR_MUTEX).clone();
+        assert!(
+            statements.keys().any(|sql| sql.contains("(rev, key) >")),
+            "the continuation statement was never run"
+        );
+        assert!(
+            statements
+                .keys()
+                .any(|sql| sql.contains("DELETE FROM big_automata_okv_entries")),
+            "prune was never run"
+        );
+        assert_no_scans(statements).await
+    })
+}
+
+/// Fail on any plan line that scans, where `statements` are the recorded SQL with a set of
+/// parameters each.
+async fn assert_no_scans(statements: BTreeMap<String, Vec<SqlValue>>) -> Res<()> {
+    {
         let db = RUNTIME.ephemeral(MIGRATIONS)?;
         let mut scans = Vec::new();
         for (sql, params) in &statements {
@@ -187,7 +309,7 @@ fn every_statement_is_served_by_an_index() -> Res<()> {
             scans.join("\n")
         );
         Ok(())
-    })
+    }
 }
 
 /// The objects that are members of no part are a range of a partial index, not a scan of the
