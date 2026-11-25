@@ -115,7 +115,7 @@ of its paths and lists the original commits in its message. They are topical and
 | 77-clay-nsids | #363 | feat(clay): the Clay half of ADR 050 §2 NSIDs (LexRef, Clay Lexicons, Contract enum) |
 | 78-lab-panes | #358 | feat(micro_theme_lab): navigator, canvas and inspector |
 | 79-colour-adr | #380 | docs(adr): ADR 055, the colour system |
-| 85-micros-handles-client | draft | feat(clay_node): cartridge micros take their handles from the node's micros nodule (carries nodules #381) |
+| 85-micros-handles-client | #397 | feat(clay_node): cartridge micros take their handles from the node's micros nodule (carries nodules #381) |
 
 ## Accounting of operator requests (2026-11-03..24)
 
