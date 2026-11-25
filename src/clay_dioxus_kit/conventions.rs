@@ -2,8 +2,8 @@
 //!
 //! `guardrails.toml` already refuses a dependency on any workspace crate (`allowed_dependencies`
 //! is empty) and compiles the crate for all three targets; what it cannot see is how the sources
-//! are laid out and what they name. These tests read the sources of this crate (and the showcase
-//! that holds the specimens) as text, with comments stripped so a doc comment may still explain
+//! are laid out and what they name. These tests read the sources of this crate (and the specimens
+//! crate that holds the specimens) as text, with comments stripped so a doc comment may still explain
 //! a forbidden thing, and fail with the file and line that broke the rule. Adding a component
 //! needs no edit here: the component list is derived from `headless/`.
 use std::path::Path;
@@ -399,7 +399,7 @@ fn tests_neither_sleep_nor_wait() {
     assert_no_violations(violations);
 }
 
-/// `KIT-204`: every component has a specimen page, `claytxt_showcase/specimens/<name>.rs`, that
+/// `KIT-204`: every component has a specimen page, `clay_dioxus_specimens/specimens/<name>.rs`, that
 /// mounts it. A component that is laid out against its host's width (the ones that take a
 /// `WidthClass` or a split extent) shows a compact and an expanded frame, because the kit never
 /// measures and a frame is the host that hands the component its class.
@@ -409,13 +409,13 @@ fn every_component_has_a_specimen() {
     let mut violations = Vec::new();
     for (snake, pascal) in components() {
         let page = crate_root()
-            .join("../claytxt_showcase/specimens")
+            .join("../clay_dioxus_specimens/specimens")
             .join(format!("{snake}.rs"));
         let text = match std::fs::read_to_string(&page) {
             Ok(text) => text,
             Err(_) => {
                 violations.push(format!(
-                    "KIT-204: the showcase has no specimen page `specimens/{snake}.rs`"
+                    "KIT-204: the specimens crate has no specimen page `specimens/{snake}.rs`"
                 ));
                 continue;
             }
