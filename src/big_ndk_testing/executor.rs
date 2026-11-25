@@ -12,6 +12,7 @@
 //! answer through a oneshot.
 
 use async_trait::async_trait;
+use big_cabinet_core::authority::CapId;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Digest;
 use big_cartridges_core::Revision;
@@ -251,6 +252,7 @@ impl Provider for NativeProvider {
 
 struct Running {
     revision: Revision,
+    actor: CapId,
     components: BTreeMap<String, Digest>,
     provider: Arc<NativeProvider>,
     stop: oneshot::Sender<()>,
@@ -277,7 +279,32 @@ pub(crate) struct NativeExecutor {
     hosted: Mutex<BTreeMap<CartridgeId, Running>>,
 }
 
+/// What the node minted for a cartridge's hosted nodule: the durable actor its calls are signed
+/// with, and each routine's service handles by routine key (the same ones a wasm routine is
+/// delivered).
+#[derive(Clone)]
+pub struct CartridgeHandles {
+    pub actor: CapId,
+    pub routines: BTreeMap<String, RoutineCapabilities>,
+}
+
 impl NativeExecutor {
+    /// The handles of the nodule hosted for `cartridge_id`, as of its last `ensure`; `None` while
+    /// it is not hosted (not enabled yet, or retired).
+    pub(crate) fn handles(&self, cartridge_id: &CartridgeId) -> Option<CartridgeHandles> {
+        let hosted = self.hosted.lock().expect("hosted lock");
+        let running = hosted.get(cartridge_id)?;
+        Some(CartridgeHandles {
+            actor: running.actor,
+            routines: running
+                .provider
+                .routine_capabilities
+                .lock()
+                .expect("routine capabilities lock")
+                .clone(),
+        })
+    }
+
     pub(crate) fn new(
         nodules: BTreeMap<CartridgeId, Box<dyn Registered>>,
         dispatch: Client<DispatchProtocol>,
@@ -372,6 +399,7 @@ impl NoduleExecutor for NativeExecutor {
             spec.cartridge_id.clone(),
             Running {
                 revision: spec.revision,
+                actor: spec.actor.capability,
                 components: components.clone(),
                 provider: Arc::clone(&provider),
                 stop: started.stop,

@@ -1659,6 +1659,7 @@ name = "big_ndk_testing"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "big_blobs",
  "big_cabinet",
  "big_cabinet_core",
@@ -1683,6 +1684,7 @@ dependencies = [
  "sqlite_rs",
  "test_nodule_handlers",
  "tokio",
+ "tower",
  "utils_rs",
 ]
 
@@ -1724,6 +1726,7 @@ dependencies = [
  "sqlite_rs",
  "subduction_iroh",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "utils_rs",
@@ -1808,12 +1811,16 @@ dependencies = [
  "http-body",
  "http-body-util",
  "hyper",
+ "hyper-rustls",
+ "hyper-util",
  "method_core",
  "serde",
  "serde_json",
  "service_client_native_rs",
  "service_utils_rs",
+ "thiserror 2.0.21",
  "tokio",
+ "tower",
  "tracing",
  "utils_rs",
  "wash-runtime",
