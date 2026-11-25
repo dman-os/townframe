@@ -53,6 +53,7 @@ use big_cartridges_core::config::Component;
 use big_cartridges_core::config::ComponentInstall;
 use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::config::NetTarget;
 use big_cartridges_core::config::config_identity_key;
 use big_cartridges_core::config::install_key;
 use big_cartridges_core::protocol::CartridgeInstallRecord;
@@ -263,6 +264,7 @@ pub enum NoduleResolution {
         installed: InstalledNodule,
         desired_grants: BTreeMap<DrawerId, DrawerAccess>,
         desired_operations: DispatchScope,
+        desired_nets: BTreeSet<NetTarget>,
     },
     Refused {
         cartridge_id: CartridgeId,
@@ -663,7 +665,7 @@ impl CartridgeConfig {
         if !grant.accepts(&body) {
             return Err(InventoryError::InvalidGrant {
                 grant: grant.to_string(),
-                reason: "a drawer or cartridge grant states its access, and an origin, method \
+                reason: "a drawer or cartridge grant states its access, and a net, method \
                          or authority grant states none"
                     .to_owned(),
             });
@@ -736,9 +738,9 @@ pub struct ResolvedGrants {
     pub drawers: BTreeMap<DrawerId, DrawerAccess>,
     /// Data of other cartridges the cartridge may use, at an access. Nothing enforces these yet.
     pub cartridges: BTreeMap<CartridgeId, DrawerAccess>,
-    /// Origins the cartridge may talk to. Nothing enforces these yet: there is no `#origin`
-    /// permbind.
-    pub origins: BTreeSet<String>,
+    /// Hosts the cartridge may use the network to reach: what a routine's `#net` permbind is
+    /// checked against at egress (ADR 049 §2).
+    pub nets: BTreeSet<NetTarget>,
     /// The operations and authorities the cartridge may invoke through dispatch.
     pub operations: DispatchScope,
 }
@@ -773,8 +775,8 @@ impl ResolvedGrants {
                     .or_insert(access);
                 *held = (*held).max(access);
             }
-            GrantKey::Origin(origin) => {
-                self.origins.insert(origin.clone());
+            GrantKey::Net(net) => {
+                self.nets.insert(net.clone());
             }
             GrantKey::Method(nsid) => {
                 self.operations.operations.insert(nsid.clone());
@@ -1671,6 +1673,7 @@ fn resolve_entry(
     let ResolvedGrants {
         drawers: desired_grants,
         operations: mut desired_operations,
+        nets: desired_nets,
         ..
     } = match docs {
         None => Default::default(),
@@ -1706,5 +1709,6 @@ fn resolve_entry(
         installed,
         desired_grants,
         desired_operations,
+        desired_nets,
     })
 }

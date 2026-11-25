@@ -845,6 +845,7 @@ async fn a_routine_reaches_granted_drawers_only_for_its_datum_kinds() {
 mod grant_requests {
     use super::*;
     use big_cabinet_core::drawer::protocol::DrawerId;
+    use big_cartridges_core::config::GrantBody;
     use big_cartridges_core::config::GrantKey;
     use big_cartridges_core::protocol::AWAIT_MAX_HOLD_MS;
     use big_cartridges_core::protocol::AnswerCartridgeGrantRequest;
@@ -1574,6 +1575,253 @@ mod grant_requests {
             }
         );
         assert!(node.pending().await.is_empty());
+        node.shutdown().await;
+    }
+
+    /// Alpha's `ping` routine takes two `#net` permbinds: GET and HEAD to `api.example.org:8443`,
+    /// and any verb to `www.example.org` (port 443, the default of a permbind without one).
+    fn networked() -> FixtureCartridge {
+        let mut cartridge = requesting();
+        for (binding, host, port, methods) in [
+            (
+                "api",
+                "api.example.org",
+                Some(8443),
+                Some(["GET", "HEAD"].map(str::to_owned).into()),
+            ),
+            ("www", "www.example.org", None, None),
+        ] {
+            cartridge.permbinds.insert(
+                binding.into(),
+                Permbind::Net(big_cartridges_core::PermbindNet {
+                    host: host.into(),
+                    port,
+                    methods,
+                    description: format!("{binding} description"),
+                    extra: Default::default(),
+                }),
+            );
+            uses(&mut cartridge, PING, binding, RoutineUse::default());
+        }
+        cartridge
+    }
+
+    impl Node {
+        /// What the egress answers alpha's `ping` routine for a `method` request to `url`:
+        /// `Ok` when it may go out, else the refusal its guest is served.
+        async fn ping_fetches(
+            &self,
+            executor: &FakeExecutor,
+            method: http::Method,
+            url: &str,
+        ) -> Result<(), (http::StatusCode, serde_json::Value)> {
+            let caller = crate::egress::WorkloadCaller {
+                signer: self.actor_at(&id(ALPHA)).await.capability,
+                missing_authority: executor.missing_authority(),
+            };
+            let mut headers = http::HeaderMap::new();
+            headers.insert(
+                service_core_rs::xrpc::NODULE_CAPABILITY_HEADER,
+                Authorization::id_text(dispatch_of(executor, PING))
+                    .parse()
+                    .unwrap(),
+            );
+            crate::egress::authorize_net(Some(&caller), &method, &url.parse().unwrap(), &headers)
+                .map_err(|(status, body)| {
+                    let crate::XrpcBody::Json(body) = body else {
+                        panic!("an XRPC error is JSON")
+                    };
+                    (status, serde_json::from_slice(&body).unwrap())
+                })
+        }
+    }
+
+    const API: &str = "https://api.example.org:8443/v1/things";
+
+    /// Declared but ungranted is the cartridge's missing authority (naming the request once one
+    /// is filed), and granting it through a runtime request lets the same request out at once,
+    /// with no restart.
+    #[tokio::test]
+    async fn a_declared_net_request_waits_for_its_grant_and_a_runtime_request_gives_it() {
+        let (node, executor, _) = hosted(networked(), &[]).await;
+        let alpha_id = id(ALPHA).to_string();
+
+        let (status, body) = node
+            .ping_fetches(&executor, http::Method::GET, API)
+            .await
+            .unwrap_err();
+        assert_eq!(status, http::StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "MissingAuthority");
+        assert_eq!(
+            body["operationError"],
+            missing_authority(&alpha_id, "api", None)
+        );
+
+        // The routine asks, and the refusal now names its request.
+        let ping = node.as_ping(&executor).await;
+        let filed = node.file(ping, "api", None).await.unwrap();
+        let request = filed.request.unwrap();
+        let (_, body) = node
+            .ping_fetches(&executor, http::Method::GET, API)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            body["operationError"],
+            missing_authority(&alpha_id, "api", Some(request.to_string()))
+        );
+        assert_eq!(
+            node.pending().await[0].access,
+            RequestedAccess::Net {
+                host: "api.example.org".into(),
+                port: Some(8443),
+            }
+        );
+
+        // Allow writes `grant/net/api.example.org:8443`, and the very next request goes out. The
+        // verb the permbind lists goes too, with the host in any case.
+        node.answer(request, GrantAnswer::Allow, None)
+            .await
+            .unwrap();
+        assert!(
+            node.grant_datum_present(GrantKey::Net("api.example.org:8443".parse().unwrap()))
+                .await
+        );
+        for (method, url) in [
+            (http::Method::GET, API),
+            (http::Method::HEAD, API),
+            (http::Method::GET, "https://API.Example.ORG:8443/"),
+        ] {
+            node.ping_fetches(&executor, method, url).await.unwrap();
+        }
+
+        // What is granted is the grant's alone: the other permbind still waits.
+        let (_, body) = node
+            .ping_fetches(&executor, http::Method::GET, "https://www.example.org/")
+            .await
+            .unwrap_err();
+        assert_eq!(body["error"], "MissingAuthority");
+        node.shutdown().await;
+    }
+
+    /// With everything granted, a request that is not exactly what a permbind declares is
+    /// refused as undeclared: a different host, port, scheme (through its default port) or
+    /// verb, and a URL that is not a network one.
+    #[tokio::test]
+    async fn a_net_request_is_allowed_only_exactly_as_declared() {
+        let (node, executor, _) = hosted(networked(), &[]).await;
+        for host in ["api.example.org:8443", "www.example.org"] {
+            node.set_grant(
+                node.operator(),
+                ALPHA,
+                GrantKey::Net(host.parse().unwrap()),
+                Some(GrantBody::present()),
+            )
+            .await
+            .unwrap();
+        }
+        for (method, url) in [
+            (http::Method::GET, API),
+            (http::Method::GET, "https://www.example.org/anything"),
+            (http::Method::POST, "https://www.example.org/anything"),
+        ] {
+            node.ping_fetches(&executor, method, url).await.unwrap();
+        }
+        for (method, url, why) in [
+            (
+                http::Method::GET,
+                "https://other.example.org:8443/",
+                "another host",
+            ),
+            (
+                http::Method::GET,
+                "https://api.example.org/",
+                "the default port, not the declared one",
+            ),
+            (
+                http::Method::GET,
+                "https://api.example.org:9443/",
+                "another port",
+            ),
+            (http::Method::POST, API, "a verb the permbind does not list"),
+            (
+                http::Method::GET,
+                "http://www.example.org/",
+                "plain http reaches port 80, not 443",
+            ),
+            (
+                http::Method::GET,
+                "https://www.example.org:8443/",
+                "a port the permbind does not name",
+            ),
+            (
+                http::Method::GET,
+                "https://sub.www.example.org/",
+                "a subdomain, since there are no wildcards",
+            ),
+        ] {
+            let (status, body) = node
+                .ping_fetches(&executor, method.clone(), url)
+                .await
+                .expect_err(why);
+            assert_eq!(
+                (status, &body["error"]),
+                (http::StatusCode::FORBIDDEN, &json!("Denied")),
+                "{method} {url}: {why}"
+            );
+        }
+        let (status, _) = node
+            .ping_fetches(&executor, http::Method::GET, "ftp://www.example.org/")
+            .await
+            .unwrap_err();
+        assert_eq!(status, http::StatusCode::BAD_REQUEST);
+        node.shutdown().await;
+    }
+
+    /// A routine that does not take a `#net` permbind reaches no host, whatever the cartridge was
+    /// granted, and a request that presents no routine's capability is refused the same way.
+    #[tokio::test]
+    async fn a_routine_without_a_net_use_reaches_nothing() {
+        let mut cartridge = networked();
+        nodule_mut(&mut cartridge)
+            .routines
+            .get_mut(PING)
+            .unwrap()
+            .uses
+            .remove("api");
+        let (node, executor, _) = hosted(cartridge, &[]).await;
+        node.set_grant(
+            node.operator(),
+            ALPHA,
+            GrantKey::Net("api.example.org:8443".parse().unwrap()),
+            Some(GrantBody::present()),
+        )
+        .await
+        .unwrap();
+        let (_, body) = node
+            .ping_fetches(&executor, http::Method::GET, API)
+            .await
+            .unwrap_err();
+        assert_eq!(body["error"], "Denied");
+
+        let caller = crate::egress::WorkloadCaller {
+            signer: node.actor_at(&id(ALPHA)).await.capability,
+            missing_authority: executor.missing_authority(),
+        };
+        let (status, body) = crate::egress::authorize_net(
+            Some(&caller),
+            &http::Method::GET,
+            &API.parse().unwrap(),
+            &http::HeaderMap::new(),
+        )
+        .unwrap_err();
+        let crate::XrpcBody::Json(body) = body else {
+            panic!("an XRPC error is JSON")
+        };
+        assert_eq!(status, http::StatusCode::FORBIDDEN);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"],
+            "Denied"
+        );
         node.shutdown().await;
     }
 }
