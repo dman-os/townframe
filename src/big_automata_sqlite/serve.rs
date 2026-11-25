@@ -5,6 +5,7 @@ use big_automata::BuckLevel;
 use big_automata::part_store::AuthorizedPage;
 use big_automata::part_store::LeafEntry;
 use big_automata::part_store::LeafPage;
+use big_automata::part_store::LeafPageFill;
 use big_automata::part_store::LogRoutes;
 use big_automata::part_store::ObjPayload;
 use big_automata::part_store::PartDirtyCount;
@@ -301,8 +302,8 @@ pub async fn bucket_leaves(
         };
         // One more row than the page can hold is all it can need (the one that sets `more`).
         let chunk = LEAF_CHUNK.min(limit.saturating_add(1));
-        let mut taken = Vec::new();
-        let page = loop {
+        let mut fill = LeafPageFill::new(limit, byte_budget);
+        'chunks: loop {
             let rows = queries::bucket_leaves(
                 x,
                 part.blob(),
@@ -318,25 +319,28 @@ pub async fn bucket_leaves(
                 after_buck = last.buck;
                 after_key = last.obj_key.clone();
             }
-            taken.extend(rows.into_iter().map(|row| LeafEntry {
-                obj: ObjKey::from_blob(&row.obj_key),
-                live: (row.live == 1).then(|| {
-                    PayloadDigest(
-                        row.digest
-                            .expect("a live member has a payload")
-                            .try_into()
-                            .expect("a stored digest is 32 bytes"),
-                    )
-                }),
-            }));
-            // The same prefix rule as the law; `more` set means the entry that ended the page
-            // was read, so no further chunk is needed.
-            let page = LeafPage::collect(taken, limit, byte_budget);
-            if page.more || exhausted {
-                break page;
+            for row in rows {
+                // `more` set means the entry that ended the page was read: no further row or
+                // chunk is needed.
+                if !fill.push(LeafEntry {
+                    obj: ObjKey::from_blob(&row.obj_key),
+                    live: (row.live == 1).then(|| {
+                        PayloadDigest(
+                            row.digest
+                                .expect("a live member has a payload")
+                                .try_into()
+                                .expect("a stored digest is 32 bytes"),
+                        )
+                    }),
+                }) {
+                    break 'chunks;
+                }
             }
-            taken = page.entries;
-        };
+            if exhausted {
+                break;
+            }
+        }
+        let page = fill.finish();
         leaves.push(page);
     }
     Ok(Some(leaves))

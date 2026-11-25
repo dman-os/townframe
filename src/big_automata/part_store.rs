@@ -402,18 +402,59 @@ impl LeafPage {
         limit: usize,
         byte_budget: usize,
     ) -> Self {
-        assert!(limit >= 1, "a leaf page limit is at least 1");
-        let mut page = Self::default();
-        let mut bytes = 0usize;
+        let mut fill = LeafPageFill::new(limit, byte_budget);
         for entry in entries {
-            bytes += LeafEntry::wire_bytes(entry.obj.as_bytes().len());
-            if !page.entries.is_empty() && (page.entries.len() == limit || bytes > byte_budget) {
-                page.more = true;
+            if !fill.push(entry) {
                 break;
             }
-            page.entries.push(entry);
         }
-        page
+        fill.finish()
+    }
+}
+
+/// A [`LeafPage`] being filled one entry at a time: the one place the prefix rule of
+/// [`PartStoreServe::bucket_leaves`] is written. [`LeafPage::collect`] runs it over an
+/// iterator; a store that reads in chunks across `await`s keeps one and pushes rows as they
+/// arrive, so the page's entry count and byte sum are carried, never recomputed.
+#[derive(Debug)]
+pub struct LeafPageFill {
+    page: LeafPage,
+    bytes: usize,
+    limit: usize,
+    byte_budget: usize,
+}
+
+impl LeafPageFill {
+    pub fn new(limit: usize, byte_budget: usize) -> Self {
+        assert!(limit >= 1, "a leaf page limit is at least 1");
+        Self {
+            page: LeafPage::default(),
+            bytes: 0,
+            limit,
+            byte_budget,
+        }
+    }
+
+    /// Offer the next entry of the bucket. `true` if it joined the page and the next may be
+    /// offered; `false` if it ended the page (it is dropped and `more` is set): read no
+    /// further. The first entry always joins, however wide.
+    pub fn push(&mut self, entry: LeafEntry) -> bool {
+        assert!(!self.page.more, "an entry was offered to a finished page");
+        let bytes = self.bytes + LeafEntry::wire_bytes(entry.obj.as_bytes().len());
+        if !self.page.entries.is_empty()
+            && (self.page.entries.len() == self.limit || bytes > self.byte_budget)
+        {
+            self.page.more = true;
+            return false;
+        }
+        self.bytes = bytes;
+        self.page.entries.push(entry);
+        true
+    }
+
+    /// The page: complete if an entry ended it or the bucket ran out.
+    pub fn finish(self) -> LeafPage {
+        self.page
     }
 }
 

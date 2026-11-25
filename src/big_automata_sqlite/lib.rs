@@ -48,13 +48,6 @@ mod interlude {
 use sqlite_rs as sqlite_rs_alias;
 
 mod sqlite {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "generated: the SQL text constants are for the plan tests"
-        )
-    )]
     pub mod queries {
         include!("sqlite/gen.rs");
     }
