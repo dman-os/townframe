@@ -100,6 +100,7 @@ static NEXT_COMMAND: AtomicU64 = AtomicU64::new(0);
 async fn boot() -> TestNode {
     let cartridge = intxt_core::cartridge::cartridge(
         b"placeholder: the native test harness never reads the handler bytes",
+        0,
     );
     let id = cartridge.id.clone();
     let methods = DispatchScope {

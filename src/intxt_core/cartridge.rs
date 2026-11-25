@@ -38,6 +38,7 @@ use big_cartridges_core::PermbindMethod;
 use big_cartridges_core::Routine;
 use big_cartridges_core::RoutineImpl;
 use big_cartridges_core::RoutineUse;
+use big_cartridges_core::Version;
 use big_cartridges_core::test_support::FixtureCartridge;
 use indexmap::IndexMap;
 use method_core::Method;
@@ -162,13 +163,17 @@ const DATUMS: [(&str, &str, bool, bool, bool, bool); 13] = [
 /// permbinds are the whole of what it reaches, and an operator grants the cartridge the methods
 /// and drawers they name (`intxt_core::install`).
 ///
-/// The version is the release plus the handler's build: `0.1.0+<first 16 hex of its BLAKE3>`.
-/// A published version never changes content, and `install` skips a version the node already
-/// runs, so a rebuilt handler under an unchanged version would never reach a node: nodes kept a
-/// handler from before D70 for days that way. Build metadata names this build, and a node that
-/// runs another one installs this one.
+/// The version is `0.1.<patch>+<build>`. The build metadata names everything published: the
+/// first 16 hex of the BLAKE3 over the handler's bytes and the envelope, Lexicons and sidecars
+/// ([`build_digest`]), so a change to the handler or to the manifest alone is another build. A
+/// published version never changes content, and `install` skips the build the node already
+/// runs, so a build whose identity left out the manifest would never reach a node that holds one
+/// with the same handler (that is how `createDoc` went ungranted). The registry orders versions
+/// by precedence and must not see two builds that differ in metadata alone, so the order is
+/// `patch`, which the caller takes from what the node runs ([`next_version`]). A probe at patch 0
+/// names the same build.
 ///
-pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
+pub fn cartridge(wasm: &[u8], patch: u64) -> FixtureCartridge {
     let bundle = Bundle::new(&crate::UNIVERSE, Vec::new());
     let mut cartridge = FixtureCartridge::new(Cartridge::new(
         // intxt has no namespace of its own yet, so its id sits under the fixture namespace
@@ -176,9 +181,8 @@ pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
         big_cartridges_core::example_cartridge!("intxt")
             .parse()
             .expect("intxt's cartridge id is valid"),
-        format!("0.1.0+{}", &blake3::hash(wasm).to_hex()[..16])
-            .parse()
-            .expect("intxt's version is valid"),
+        // The build metadata is known once everything it names is in.
+        version(patch, "0"),
     ));
     cartridge.authority = Some(AUTHORITY.to_owned());
     cartridge.name = Some("intxt".to_owned());
@@ -213,7 +217,56 @@ pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
         .with_wasm(HANDLER_COMPONENT, wasm);
 
     manifest(&mut cartridge);
+    cartridge.version = version(patch, &build_digest(wasm, &cartridge));
     cartridge
+}
+
+/// `0.1.<patch>+<build>`.
+fn version(patch: u64, build: &str) -> Version {
+    format!("0.1.{patch}+{build}")
+        .parse()
+        .expect("intxt's version is valid")
+}
+
+/// The build metadata of `fixture` built from `wasm`: everything the version publishes. The
+/// version itself is not in it, so the patch does not change the build.
+fn build_digest(wasm: &[u8], fixture: &FixtureCartridge) -> String {
+    let mut envelope = fixture.resolved.cartridge.clone();
+    envelope.version = version(0, "0");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&(wasm.len() as u64).to_le_bytes());
+    hasher.update(wasm);
+    hasher.update(
+        &serde_json::to_vec(&(
+            &envelope,
+            &fixture.resolved.lexicons,
+            &fixture.resolved.sidecars,
+        ))
+        .expect("a cartridge serializes"),
+    );
+    hasher.finalize().to_hex()[..16].to_owned()
+}
+
+/// The build metadata of a version `cartridge` made: what names the build.
+pub fn build_of(version: &Version) -> &str {
+    version.0.build.as_str()
+}
+
+/// The version to publish `build` at, given the `known` versions: the one the node runs and the
+/// ones the registry has held (it refuses a version that does not order after the newest it has
+/// had, even one since removed from the node). One patch after the highest, which the registry
+/// orders after all of them. A legacy version without a patch counter (`0.1.0`,
+/// `0.1.0+<hash>`) counts as patch 0, so with no other it becomes `0.1.1+<build>`.
+pub fn next_version<'a>(known: impl IntoIterator<Item = &'a Version>, build: &str) -> Version {
+    version(
+        known
+            .into_iter()
+            .map(|known| known.0.patch)
+            .max()
+            .unwrap_or(0)
+            + 1,
+        build,
+    )
 }
 
 /// Writes the cartridge's permbinds and its nodule's routines, as the ADR 047 datums themselves.
@@ -430,23 +483,59 @@ mod tests {
     use super::*;
     use crate::generic;
 
-    /// The version names the handler's build: the same bytes give the same version (installing
-    /// again is a no-op), other bytes another one (installing them upgrades the node), and both
-    /// are release 0.1.0.
+    /// The build metadata names everything published: the same inputs give the same build (and
+    /// the patch does not change it), other handler bytes or another manifest give another one.
     #[test]
-    fn the_version_names_the_handler_build() {
+    fn the_build_names_the_handler_and_the_manifest() {
+        let build = |fixture: &FixtureCartridge| build_of(&fixture.version).to_owned();
         let (one, again, other) = (
-            cartridge(b"handler one").version.clone(),
-            cartridge(b"handler one").version.clone(),
-            cartridge(b"handler two").version.clone(),
+            cartridge(b"handler one", 0),
+            cartridge(b"handler one", 0),
+            cartridge(b"handler two", 0),
         );
-        assert_eq!(one, again);
-        assert_ne!(one, other);
-        for version in [&one, &other] {
-            assert_eq!((version.0.major, version.0.minor, version.0.patch), (0, 1, 0));
-            assert_eq!(version.0.build.as_str().len(), 16, "{}", version.0);
-        }
+        assert_eq!(build(&one), build(&again));
+        assert_ne!(build(&one), build(&other));
+        assert_eq!(build(&one), build(&cartridge(b"handler one", 7)));
+        assert_eq!(build(&one).len(), 16);
+        assert!(build(&one).bytes().all(|byte| byte.is_ascii_hexdigit()));
+        // The same handler under a manifest without `createDoc`: another build.
+        let mut trimmed = cartridge(b"handler one", 0);
+        assert!(trimmed.permbinds.remove("createDoc").is_some());
+        assert_ne!(build_digest(b"handler one", &trimmed), build(&one));
     }
+
+    /// The patch is the registry's order: a build the node runs is current (its metadata is the
+    /// build's), a new build is one patch after the running one, a legacy version counts as
+    /// patch 0, and consecutive upgrades, even back to an earlier build, order after each other.
+    #[test]
+    fn the_version_to_publish_orders_after_the_running_one() {
+        let parse = |text: &str| text.parse::<Version>().unwrap();
+        assert_eq!(next_version([], "aaaa").to_string(), "0.1.1+aaaa");
+        assert_eq!(
+            next_version([&parse("0.1.0+legacyhandlerhash")], "bbbb").to_string(),
+            "0.1.1+bbbb"
+        );
+        assert_eq!(
+            next_version([&parse("0.1.0")], "bbbb").to_string(),
+            "0.1.1+bbbb"
+        );
+        assert_eq!(
+            next_version([&parse("0.1.4+aaaa")], "bbbb").to_string(),
+            "0.1.5+bbbb"
+        );
+        let first = next_version([], "ffff");
+        let second = next_version([&first], "0000");
+        let third = next_version([&second], "ffff");
+        assert!(first < second && second < third, "{first} {second} {third}");
+        assert_eq!(build_of(&third), "ffff");
+        // The registry has held a newer version than the one the node runs: after the newest.
+        assert_eq!(
+            next_version([&parse("0.1.2+aaaa"), &parse("0.1.5+cccc")], "dddd").to_string(),
+            "0.1.6+dddd"
+        );
+        assert_eq!(build_of(&parse("0.1.3+abcd")), "abcd");
+    }
+
     use big_cabinet_core::datum::DatumMember;
     use big_cartridges_core::test_support::cartridge_id;
     use big_nodule_core::NoduleAdmission;
@@ -456,7 +545,7 @@ mod tests {
     /// serves its operations.
     #[test]
     fn the_cartridge_holds_every_intxt_record() {
-        let fixture = cartridge(b"a handler");
+        let fixture = cartridge(b"a handler", 0);
         assert_eq!(fixture.id, cartridge_id("intxt"));
         let admitted = fixture
             .resolved
@@ -530,7 +619,7 @@ mod tests {
     /// that is not used.
     #[test]
     fn each_routine_uses_only_what_it_needs() {
-        let fixture = cartridge(b"a handler");
+        let fixture = cartridge(b"a handler", 0);
         let nodule = fixture.nodule.as_ref().unwrap();
         // `r`, `w`, `c` are the accesses taken; none is an operation.
         let uses = |routine: &str| -> BTreeMap<&str, String> {

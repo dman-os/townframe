@@ -300,7 +300,7 @@ async fn cartridge(client: &crate::client::NodeClient) -> Res<Check> {
         None,
         "intxt-doctor".to_owned(),
     );
-    let ours = intxt_core::cartridge::cartridge(&[]);
+    let ours = intxt_core::cartridge::cartridge(&[], 0);
     let nodules = caller.call(ListNodules {}).await?.nodules;
     let Some(record) = nodules
         .into_iter()
@@ -331,12 +331,19 @@ async fn cartridge(client: &crate::client::NodeClient) -> Res<Check> {
             ),
             INSTALL,
         )
-    } else if record.version.as_ref() != Some(&ours.version) {
+    } else if let Some(legacy) = record
+        .version
+        .as_ref()
+        .filter(|version| version.0.patch == 0)
+    {
+        // This binary does not carry the handler (`install` is given its path), so it cannot say
+        // which build it would install; only a version from before builds were numbered
+        // (`0.1.0+<handler hash>`) is known to be old.
         Check::warn(
             "cartridge",
             format!(
-                "intxt {version} is installed; this binary carries {}",
-                ours.version
+                "intxt {version} predates numbered builds (build {}); its manifest may lack what the handler calls",
+                intxt_core::cartridge::build_of(legacy)
             ),
             INSTALL,
         )
