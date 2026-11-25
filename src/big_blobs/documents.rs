@@ -195,6 +195,11 @@ pub enum DeferralReason {
     },
     UnsupportedReference,
     UnsupportedKey,
+    /// The cipherBlob does not describe the `Blob` it sits beside: its key,
+    /// the Blob's plaintext and its framing do not produce the digest it
+    /// claims, or this node already holds that digest bound to another
+    /// plaintext. The Blob is the authority; the cipherBlob is derived from it.
+    RepresentationMismatch,
 }
 
 type Attempt<T> = Res<Result<T, DeferralReason>>;
@@ -312,7 +317,7 @@ impl DocumentBlobs {
             } else {
                 let mut stale = false;
                 for cipher_key in cipher_keys {
-                    let result = self
+                    let mut result = self
                         .reuse(
                             context,
                             doc_id,
@@ -324,6 +329,33 @@ impl DocumentBlobs {
                             &cipher_key,
                         )
                         .await?;
+                    // The naming-convention slot is named by the Blob's slot, not by
+                    // its plaintext, so re-pinning the Blob to new bytes (a cartridge
+                    // upgrade rewrites the same artifact slot) leaves its cipherBlob
+                    // describing the old bytes. The cipherBlob is derived from the
+                    // Blob, so it is replaced: `create` reuses the slot's JWK (a key
+                    // may encrypt many plaintexts, the salt is derived from the
+                    // plaintext) and, being deterministic in (key, plaintext,
+                    // framing), converges if two peers repair it concurrently. A
+                    // legacy slot names its plaintext, so a mismatch there is a bad
+                    // claim, not a stale slot, and stays a deferral.
+                    if cipher_key == default_cipher_key
+                        && matches!(result, Err(DeferralReason::RepresentationMismatch))
+                    {
+                        result = self
+                            .create(
+                                context,
+                                doc_id,
+                                &read,
+                                &mut heads,
+                                blob_key,
+                                &blob,
+                                &plaintext,
+                                &jwk_key,
+                                &default_cipher_key,
+                            )
+                            .await?;
+                    }
                     if !record_result(&mut report, doc_id, &cipher_key, result)? {
                         stale = true;
                         break;
@@ -687,10 +719,13 @@ impl DocumentBlobs {
             && cipher_present
             && self.store.sync_reader(c_hash).await?.is_some()
         {
-            plaintext_tag = Some(
-                self.decrypt(&key, c_hash, blob.length_octets, p_hash)
-                    .await?,
-            );
+            match self
+                .decrypt(&key, c_hash, blob.length_octets, p_hash)
+                .await?
+            {
+                Ok(tag) => plaintext_tag = Some(tag),
+                Err(reason) => return Ok(Err(reason)),
+            }
         }
         if plaintext_tag.is_none() {
             return Ok(Err(DeferralReason::BytesUnavailable {
@@ -698,7 +733,8 @@ impl DocumentBlobs {
                 ciphertext: Some(ciphertext),
             }));
         }
-        self.provider
+        let registered = self
+            .provider
             .register_local_pair(
                 &self.store,
                 &self.roots,
@@ -720,6 +756,9 @@ impl DocumentBlobs {
                 },
             )
             .await?;
+        if registered.is_err() {
+            return Ok(Err(DeferralReason::RepresentationMismatch));
+        }
         eyre::ensure!(
             self.ciphertext_length(c_hash).await? == cipher.representation.length_octets,
             "reconstructed ciphertext length differs from CipherBlob metadata"
@@ -740,7 +779,7 @@ impl DocumentBlobs {
         ciphertext: Hash,
         length: u64,
         expected: Hash,
-    ) -> Res<TempTag> {
+    ) -> Attempt<TempTag> {
         let keys = MapKeySource([(ciphertext, key.clone())].into());
         let (tag, actual) = if length == 0 {
             let size = self.ciphertext_length(ciphertext).await?;
@@ -749,10 +788,12 @@ impl DocumentBlobs {
                 "empty plaintext has more than one bounded ciphertext record"
             );
             let bytes = get_decrypted(&self.store, &keys, ciphertext).await?;
-            eyre::ensure!(
-                bytes.is_empty(),
-                "ciphertext contradicts empty plaintext metadata"
-            );
+            // The key authenticated these bytes, so they are a real plaintext
+            // that is not the empty one the Blob names: the cipherBlob
+            // describes some other content.
+            if !bytes.is_empty() {
+                return Ok(Err(DeferralReason::RepresentationMismatch));
+            }
             ensure_stored(&self.store, futures::stream::iter([Ok(Bytes::from(bytes))])).await?
         } else {
             let reader = CipherReader::open(&self.store, &keys, ciphertext, length).await?;
@@ -773,11 +814,12 @@ impl DocumentBlobs {
                 });
             ensure_stored(&self.store, stream).await?
         };
-        eyre::ensure!(
-            actual == expected,
-            "decrypted plaintext differs from the accepted Blob digest"
-        );
-        Ok(tag)
+        // Authenticated under the claimed key but not the plaintext the Blob
+        // names: the cipherBlob describes other content (a re-pinned slot).
+        if actual != expected {
+            return Ok(Err(DeferralReason::RepresentationMismatch));
+        }
+        Ok(Ok(tag))
     }
 }
 
