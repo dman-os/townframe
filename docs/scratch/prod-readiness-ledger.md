@@ -1172,3 +1172,7 @@ inside the transaction. This ties together:
 - **Checkpoints without hydration (an obvious optimization).** A checkpoint concerns keys and
   heads, not content. Settle whether its parents must be automerge heads or can be sedimentree
   heads; the study lane covers upstream.
+- **Queued: upgrade surelock and survey its new release** (operator, 2026-11-26). It now ships
+  async mutexes. **Not authorized for use** until we know whether they have the futurelock
+  problem (a guard held by a future parked in `select!`/`FuturesUnordered` blocks every other
+  waiter). Survey the other additions as well.
