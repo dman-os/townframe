@@ -4,7 +4,6 @@ pub mod datum_set;
 pub use datum_ref::DatumRefEdge;
 pub use datum_ref::DatumRefQuery;
 pub use datum_ref::DatumRefStore;
-pub use datum_ref::DatumRefTarget;
 pub use datum_set::DatumMembership;
 pub use datum_set::DatumRecord;
 pub use datum_set::DatumRoute;
