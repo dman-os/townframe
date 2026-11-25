@@ -93,10 +93,13 @@ lto = "thin"
 debug = "line-tables-only"
 
 # The nodule component is put in the blob service, which takes at most 8 MiB per put
-# (`big_blobs_core::MAX_PUT_BYTES`), and the line tables of every linked crate made it 8.27 MiB:
-# stripping the final link of this one guest leaves 1.82 MiB. Other guests keep their debug info.
+# (`big_blobs_core::MAX_PUT_BYTES`), and the line tables of every linked crate made it 8.27 MiB.
+# `debuginfo` drops the DWARF from the final link and keeps the `name` section, so a trap's frames
+# still name their functions (`symbols` dropped the names too). A cartridge's debug side file
+# (docs/scratch/guest-faults-and-logs.md §3) waits on every consumer reading a packaged guest
+# instead of this raw output. Other guests keep their debug info.
 [profile.release.package.intxt_nodule_guest]
-strip = "symbols"
+strip = "debuginfo"
 
 [profile.wasm-release]
 inherits = "release"

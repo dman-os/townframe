@@ -227,11 +227,16 @@
         // {
           cargoArtifacts = craneLib.buildDepsOnly microsArgs;
           doInstallCargoArtifacts = false;
+          # Ship without DWARF, keeping the `name` section, as x/daytxt-packages.ts does
+          # (docs/scratch/guest-faults-and-logs.md §3): the DWARF is ~94% of a micro, and
+          # the APK and the web site carry these files. Debug side files stay with the dev
+          # loop's build for now; this package keeps none.
+          nativeBuildInputs = guestNativeBuildInputs ++ [ pkgs.wasm-tools ];
           installPhaseCommand = ''
             mkdir -p $out
             ${lib.concatMapStringsSep "\n" (
               name:
-              "cp target/wasm32-wasip3/wasm-release/micro_${name}.wasm $out/${microFile name}.component.wasm"
+              "wasm-tools strip target/wasm32-wasip3/wasm-release/micro_${name}.wasm -o $out/${microFile name}.component.wasm"
             ) microNames}
           '';
         }
