@@ -1198,16 +1198,33 @@ async fn resume_with_final_record_already_spilled() -> Res<()> {
 
 /// A plaintext stream that fails part way must fail the import, not leave it
 /// waiting: the blob worker's decrypt pass feeds `ensure_stored` a stream that
-/// errors when the ciphertext contradicts the claimed length.
+/// errors when the ciphertext contradicts the claimed length. Checked on both
+/// stores, since production runs the filesystem one.
 #[tokio::test(flavor = "multi_thread")]
 async fn ensure_stored_fails_when_its_stream_fails() -> Res<()> {
-    let (store, _virtuals) =
+    let failing = || {
+        futures::stream::iter([
+            Ok(bytes::Bytes::from_static(b"first chunk")),
+            Err(std::io::Error::other("decode failed")),
+        ])
+    };
+    let dir = tempfile::tempdir()?;
+    let (filesystem, _fs_virtuals) = iroh_blobs::store::fs::FsStore::load_with_virtuals(
+        dir.path().join("blobs.db"),
+        iroh_blobs::store::fs::options::Options::new(dir.path()),
+    )
+    .await?;
+    let filesystem = Store::from(filesystem);
+    let fs = tokio::time::timeout(std::time::Duration::from_secs(20), ensure_stored(&filesystem, failing())).await;
+    let (memory, _mem_virtuals) =
         iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
-    let store = Store::from(store);
-    let stream = futures::stream::iter([
-        Ok(bytes::Bytes::from_static(b"first chunk")),
-        Err(std::io::Error::other("decode failed")),
-    ]);
-    assert!(ensure_stored(&store, stream).await.is_err());
+    let memory = Store::from(memory);
+    let mem = tokio::time::timeout(std::time::Duration::from_secs(20), ensure_stored(&memory, failing())).await;
+    assert!(
+        matches!(fs, Ok(Err(_))) && matches!(mem, Ok(Err(_))),
+        "fs store: {}, mem store: {}",
+        if fs.is_err() { "hangs" } else if matches!(fs, Ok(Ok(_))) { "succeeds" } else { "fails" },
+        if mem.is_err() { "hangs" } else if matches!(mem, Ok(Ok(_))) { "succeeds" } else { "fails" },
+    );
     Ok(())
 }
