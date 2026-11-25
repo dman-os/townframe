@@ -162,6 +162,12 @@ const DATUMS: [(&str, &str, bool, bool, bool, bool); 13] = [
 /// permbinds are the whole of what it reaches, and an operator grants the cartridge the methods
 /// and drawers they name (`intxt_core::install`).
 ///
+/// The version is the release plus the handler's build: `0.1.0+<first 16 hex of its BLAKE3>`.
+/// A published version never changes content, and `install` skips a version the node already
+/// runs, so a rebuilt handler under an unchanged version would never reach a node: nodes kept a
+/// handler from before D70 for days that way. Build metadata names this build, and a node that
+/// runs another one installs this one.
+///
 pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
     let bundle = Bundle::new(&crate::UNIVERSE, Vec::new());
     let mut cartridge = FixtureCartridge::new(Cartridge::new(
@@ -170,7 +176,9 @@ pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
         big_cartridges_core::example_cartridge!("intxt")
             .parse()
             .expect("intxt's cartridge id is valid"),
-        "0.1.0".parse().expect("intxt's version is valid"),
+        format!("0.1.0+{}", &blake3::hash(wasm).to_hex()[..16])
+            .parse()
+            .expect("intxt's version is valid"),
     ));
     cartridge.authority = Some(AUTHORITY.to_owned());
     cartridge.name = Some("intxt".to_owned());
@@ -421,6 +429,24 @@ fn as_map(value: Value) -> IndexMap<String, Value> {
 mod tests {
     use super::*;
     use crate::generic;
+
+    /// The version names the handler's build: the same bytes give the same version (installing
+    /// again is a no-op), other bytes another one (installing them upgrades the node), and both
+    /// are release 0.1.0.
+    #[test]
+    fn the_version_names_the_handler_build() {
+        let (one, again, other) = (
+            cartridge(b"handler one").version.clone(),
+            cartridge(b"handler one").version.clone(),
+            cartridge(b"handler two").version.clone(),
+        );
+        assert_eq!(one, again);
+        assert_ne!(one, other);
+        for version in [&one, &other] {
+            assert_eq!((version.0.major, version.0.minor, version.0.patch), (0, 1, 0));
+            assert_eq!(version.0.build.as_str().len(), 16, "{}", version.0);
+        }
+    }
     use big_cabinet_core::datum::DatumMember;
     use big_cartridges_core::test_support::cartridge_id;
     use big_nodule_core::NoduleAdmission;
