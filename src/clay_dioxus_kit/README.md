@@ -161,7 +161,7 @@ enforces them. They apply to every component.
 
 Rules `KIT-100` to `KIT-109` close the design-language gaps found while building the first
 components. The values live in the foundation tokens (`semantic.tokens.json`: `layer.*`,
-`motion.*`, the `scrim`, `selected` and `on-selected` colours) and the Tailwind spacing scale; the
+`motion.*`; the colour roles, including the `scrim`, derive from the palette) and the Tailwind spacing scale; the
 kit names them and never restates a number. Each rule is checked by a harness test in the module
 named after it.
 

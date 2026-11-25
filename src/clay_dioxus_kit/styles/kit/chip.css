@@ -57,8 +57,8 @@ button.ct-chip {
 
 .ct-chip[data-state="on"] {
   --ct-chip-tone: var(--ct-color-primary);
-  background: var(--ct-color-selected);
-  color: var(--ct-color-on-selected);
+  background: var(--ct-color-accent-container);
+  color: var(--ct-color-on-accent-container);
 }
 
 .ct-chip:focus-visible,

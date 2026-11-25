@@ -88,8 +88,8 @@
    variant. */
 .ct-button[data-state="on"],
 .ct-button[data-current] {
-  --ct-button-bg: var(--ct-color-selected);
-  --ct-button-fg: var(--ct-color-on-selected);
+  --ct-button-bg: var(--ct-color-accent-container);
+  --ct-button-fg: var(--ct-color-on-accent-container);
   --ct-button-border: var(--ct-color-primary);
 }
 
