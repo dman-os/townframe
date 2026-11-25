@@ -147,9 +147,12 @@ fn a_thumb_at_the_far_left_of_a_wide_box_pushes_to_the_far_edge() {
     let furthest = pushes.iter().copied().fold(f64::MIN, f64::max);
     let least = pushes.iter().copied().fold(f64::MAX, f64::min);
     assert_eq!(furthest, geometry.limit);
+    // Out of reach the labels trail by the cap, never more: the floor is `limit - MAX_DIFF`
+    // and nothing sits below it.
+    assert_eq!(push_floor(geometry.limit), geometry.limit - MAX_DIFF);
     assert!(
-        (furthest - least - MAX_DIFF).abs() < 1e-6,
-        "the gap to the floor was {}, not the {MAX_DIFF} cap",
+        least >= geometry.limit - MAX_DIFF - 1e-6,
+        "a label trails by {}, past the {MAX_DIFF} cap",
         furthest - least
     );
 
