@@ -105,7 +105,7 @@ enforces them. They apply to every component.
 - **KIT-206** The kit is structure and a quiet default; the app's look is a sheet (ADR 057). A
   skin carries layout, states, focus and legibility, and reads everything two reasonable themes
   would choose differently (a radius, a border, a shadow, a fill) from a component token,
-  `--ct-<component>-radius|border|shadow|fill`, never from a literal. `styles/tokens.css` is the
+  `--ct-<component>-radius|border|divider|shadow|fill`, never from a literal. `styles/tokens.css` is the
   token list with its defaults; `styles/identity/daytxt.css`, imported with `layer(identity)`
   between `kit` and `user`, sets them. Checked:
   `conventions::component_tokens_are_listed_and_the_identity_layer_sits_between_kit_and_user`.

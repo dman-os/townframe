@@ -537,7 +537,7 @@ fn component_tokens_are_listed_and_the_identity_layer_sits_between_kit_and_user(
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
                 .collect();
             let kind = name.rsplit('-').next().unwrap_or_default();
-            let is_component_token = ["radius", "border", "shadow", "fill"].contains(&kind)
+            let is_component_token = ["radius", "border", "divider", "shadow", "fill"].contains(&kind)
                 && !name.starts_with("--ct-dimension-")
                 && !name.starts_with("--ct-color-")
                 && !name.starts_with("--ct-elevation-");

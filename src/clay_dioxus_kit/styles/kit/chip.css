@@ -5,7 +5,6 @@
  * its definition, so it is not the token's.
  */
 .ct-chip {
-  --ct-chip-tone: var(--ct-color-border);
   box-sizing: border-box;
   display: inline-flex;
   align-items: center;
@@ -23,34 +22,65 @@
   white-space: nowrap;
 }
 
+/* A status is the status's container fill with its on-container text, no border; the glyph before
+   the label carries the status for readers who do not see the colour. */
+.ct-chip[data-status] {
+  --ct-chip-glyph: "i";
+  background: var(--ct-chip-container);
+  color: var(--ct-chip-on-container);
+}
+
+.ct-chip[data-status]::before {
+  content: var(--ct-chip-glyph);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  border-radius: var(--ct-dimension-radius-pill);
+  background: var(--ct-chip-tone);
+  color: var(--ct-chip-on-tone);
+  font-size: 0.75rem;
+  font-weight: var(--ct-font-weight-bold);
+  line-height: 1;
+}
+
 .ct-chip[data-status="info"] {
   --ct-chip-tone: var(--ct-color-info);
+  --ct-chip-on-tone: var(--ct-color-on-info);
+  --ct-chip-container: var(--ct-color-info-container);
+  --ct-chip-on-container: var(--ct-color-on-info-container);
 }
 
 .ct-chip[data-status="success"] {
+  --ct-chip-glyph: "\2713";
   --ct-chip-tone: var(--ct-color-success);
+  --ct-chip-on-tone: var(--ct-color-on-success);
+  --ct-chip-container: var(--ct-color-success-container);
+  --ct-chip-on-container: var(--ct-color-on-success-container);
 }
 
 .ct-chip[data-status="warning"] {
+  --ct-chip-glyph: "!";
   --ct-chip-tone: var(--ct-color-warning);
+  --ct-chip-on-tone: var(--ct-color-on-warning);
+  --ct-chip-container: var(--ct-color-warning-container);
+  --ct-chip-on-container: var(--ct-color-on-warning-container);
 }
 
 .ct-chip[data-status="danger"] {
+  --ct-chip-glyph: "!";
   --ct-chip-tone: var(--ct-color-danger);
-}
-
-.ct-chip[data-status] {
-  background: color-mix(
-    in srgb,
-    var(--ct-chip-tone) 18%,
-    var(--ct-color-surface)
-  );
+  --ct-chip-on-tone: var(--ct-color-on-danger);
+  --ct-chip-container: var(--ct-color-danger-container);
+  --ct-chip-on-container: var(--ct-color-on-danger-container);
 }
 
 .ct-chip[data-variant="outline"],
 .ct-chip[data-variant="outline"][data-status] {
   border: var(--ct-dimension-border-width-hairline) solid var(--ct-color-border);
   background: transparent;
+  color: var(--ct-color-text);
 }
 
 button.ct-chip {
@@ -58,7 +88,6 @@ button.ct-chip {
 }
 
 .ct-chip[data-state="on"] {
-  --ct-chip-tone: var(--ct-color-primary);
   background: var(--ct-color-accent-container);
   color: var(--ct-color-on-accent-container);
 }

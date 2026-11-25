@@ -1,8 +1,9 @@
 /*
  * ct-card (headless/card.rs). Parts: header, content, footer. Axis: data-variant
- * (outline|raised|plain) and data-status (info|success|warning|danger; absent is neutral). The
- * status tints the card with its colour role, so a theme that recolours --ct-color-<status>
- * recolours every status-carrying component. Tokens: --ct-card-radius|border|fill (ADR 057).
+ * (tonal|sunken|plain|outlined) and data-status (info|success|warning|danger; absent is neutral).
+ * The status fills the card with its container role, so a theme that recolours the status
+ * recolours every status-carrying component. Tokens: --ct-card-radius|border|divider|fill (ADR 057); the
+ * fill token is the tonal variant's.
  */
 .ct-card {
   box-sizing: border-box;
@@ -16,38 +17,88 @@
   font-family: var(--ct-font-family);
 }
 
-.ct-card[data-variant="outline"] {
-  border: var(--ct-dimension-border-width-hairline) solid var(--ct-color-border);
-}
-
-.ct-card[data-variant="raised"] {
+/* The default is tonal: the card separates itself by fill, one step up the surface ladder, not by an
+   edge or a shadow (ADR 057 section 3). A tonal card inside a tonal card takes the next step, and a
+   third level is plain; none of them adds an edge. */
+.ct-card[data-variant="tonal"]:not([data-status]) .ct-card[data-variant="tonal"]:not([data-status]) {
   background: var(--ct-color-surface-raised);
-  box-shadow: var(--ct-elevation-md);
 }
 
+.ct-card[data-variant="tonal"]:not([data-status])
+  .ct-card[data-variant="tonal"]:not([data-status])
+  .ct-card[data-variant="tonal"]:not([data-status]) {
+  background: transparent;
+}
+
+/* A well that holds other content. */
+.ct-card[data-variant="sunken"] {
+  background: var(--ct-color-surface-sunken);
+}
+
+/* Only groups and pads. */
 .ct-card[data-variant="plain"] {
   background: transparent;
 }
 
+/* Opt-in edge for a container on a busy background where fill alone is not enough. */
+.ct-card[data-variant="outlined"] {
+  border: var(--ct-dimension-border-width-hairline) solid var(--ct-color-border);
+}
+
+/* A status is the status's container fill with its on-container text: no border, no stripe. The
+   icon in the header carries the status for readers who do not see the colour. */
 .ct-card[data-status] {
   --ct-card-tone: var(--ct-color-info);
-  background: color-mix(
-    in srgb,
-    var(--ct-card-tone) 14%,
-    var(--ct-color-surface)
-  );
+  --ct-card-on-tone: var(--ct-color-on-info);
+  background: var(--ct-color-info-container);
+  color: var(--ct-color-on-info-container);
 }
 
 .ct-card[data-status="success"] {
   --ct-card-tone: var(--ct-color-success);
+  --ct-card-on-tone: var(--ct-color-on-success);
+  background: var(--ct-color-success-container);
+  color: var(--ct-color-on-success-container);
 }
 
 .ct-card[data-status="warning"] {
   --ct-card-tone: var(--ct-color-warning);
+  --ct-card-on-tone: var(--ct-color-on-warning);
+  background: var(--ct-color-warning-container);
+  color: var(--ct-color-on-warning-container);
 }
 
 .ct-card[data-status="danger"] {
   --ct-card-tone: var(--ct-color-danger);
+  --ct-card-on-tone: var(--ct-color-on-danger);
+  background: var(--ct-color-danger-container);
+  color: var(--ct-color-on-danger-container);
+}
+
+.ct-card[data-status] [data-part="header"]::before {
+  content: "i";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-right: var(--ct-dimension-spacing-2);
+  border-radius: var(--ct-dimension-radius-pill);
+  background: var(--ct-card-tone);
+  color: var(--ct-card-on-tone);
+  font-size: var(--ct-dimension-font-size-sm);
+  font-weight: var(--ct-font-weight-bold);
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.ct-card[data-status="success"] [data-part="header"]::before {
+  content: "\2713";
+}
+
+.ct-card[data-status="warning"] [data-part="header"]::before,
+.ct-card[data-status="danger"] [data-part="header"]::before {
+  content: "!";
 }
 
 .ct-card [data-part="header"] {
@@ -66,6 +117,5 @@
   align-items: center;
   gap: var(--ct-dimension-spacing-2);
   padding: var(--ct-dimension-spacing-3) calc(var(--ct-spacing) * 5);
-  border-top: var(--ct-dimension-border-width-hairline) solid
-    var(--ct-color-border);
+  border-top: var(--ct-card-divider);
 }

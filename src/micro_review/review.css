@@ -143,11 +143,6 @@
   color: var(--ct-color-danger);
 }
 
-/* An unreadable thing is a failure for the reader, so its card takes the danger border. */
-.micro-review [data-part="unreadable"] > .ct-card {
-  border-color: var(--ct-color-danger);
-}
-
 .micro-review [data-part="unlisted"] {
   color: var(--ct-color-text-muted);
 }

@@ -1,12 +1,15 @@
 /*
  * ct-alert (headless/alert.rs). Parts: icon, content, title, body, dismiss. Axis: data-status
- * (info|success|warning|danger). The tint is the status colour mixed into the surface, so a theme
- * that recolours --ct-color-<status> recolours every alert and chip. Tokens:
+ * (info|success|warning|danger). The fill is the status's container role with its on-container text
+ * and no border or stripe; the icon carries the status for readers who do not see the colour. A
+ * theme that recolours --ct-color-<status> recolours every alert and chip. Tokens:
  * --ct-alert-radius|border|fill (ADR 057).
  */
 .ct-alert {
   --ct-alert-tone: var(--ct-color-info);
   --ct-alert-on-tone: var(--ct-color-on-info);
+  --ct-alert-container: var(--ct-color-info-container);
+  --ct-alert-on-container: var(--ct-color-on-info-container);
   box-sizing: border-box;
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -15,11 +18,8 @@
   padding: var(--ct-dimension-spacing-3) var(--ct-dimension-spacing-4);
   border: var(--ct-alert-border);
   border-radius: var(--ct-alert-radius);
-  background: var(
-    --ct-alert-fill,
-    color-mix(in srgb, var(--ct-alert-tone) 14%, var(--ct-color-surface))
-  );
-  color: var(--ct-color-text);
+  background: var(--ct-alert-fill, var(--ct-alert-container));
+  color: var(--ct-alert-on-container);
   font-family: var(--ct-font-family);
   font-size: var(--ct-dimension-font-size-md);
   line-height: 1.4;
@@ -28,16 +28,22 @@
 .ct-alert[data-status="success"] {
   --ct-alert-tone: var(--ct-color-success);
   --ct-alert-on-tone: var(--ct-color-on-success);
+  --ct-alert-container: var(--ct-color-success-container);
+  --ct-alert-on-container: var(--ct-color-on-success-container);
 }
 
 .ct-alert[data-status="warning"] {
   --ct-alert-tone: var(--ct-color-warning);
   --ct-alert-on-tone: var(--ct-color-on-warning);
+  --ct-alert-container: var(--ct-color-warning-container);
+  --ct-alert-on-container: var(--ct-color-on-warning-container);
 }
 
 .ct-alert[data-status="danger"] {
   --ct-alert-tone: var(--ct-color-danger);
   --ct-alert-on-tone: var(--ct-color-on-danger);
+  --ct-alert-container: var(--ct-color-danger-container);
+  --ct-alert-on-container: var(--ct-color-on-danger-container);
 }
 
 .ct-alert [data-part="icon"] {
@@ -78,7 +84,7 @@
 }
 
 .ct-alert [data-part="body"] {
-  color: var(--ct-color-text);
+  color: inherit;
 }
 
 .ct-alert [data-part="dismiss"] {
@@ -91,7 +97,7 @@
   border: 0;
   border-radius: var(--ct-dimension-radius-sm);
   background: transparent;
-  color: var(--ct-color-text-muted);
+  color: inherit;
   font-size: var(--ct-dimension-font-size-lg);
   cursor: pointer;
 }
@@ -101,8 +107,7 @@
 }
 
 .ct-alert [data-part="dismiss"]:hover {
-  background: var(--ct-color-surface-sunken);
-  color: var(--ct-color-text);
+  background: color-mix(in srgb, currentColor 14%, transparent);
 }
 
 .ct-alert [data-part="dismiss"]:focus-visible {
