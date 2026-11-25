@@ -53,11 +53,13 @@ pub struct UninstallCartridge {
     pub cartridge_id: CartridgeId,
 }
 
-/// Sets, or with `value` absent revokes, one grant of the cartridge: the datum `grant` names in
-/// its config document. Grants are per cartridge, in the person's nouns, and feed the nodule and
-/// the micro alike (ADR 049 §4.1). A drawer or cartridge grant's value states its access; an
-/// origin, method or authority grant states none (see [`GrantKey::accepts`]). Only this method
-/// writes grant datums, never the cartridge.
+/// Sets one grant of the cartridge, or with `value` absent removes it. `grant` says what is being
+/// granted: a drawer, another cartridge's data, a network host, one method, or every method
+/// under an authority prefix. The grant is stored as one datum in the cartridge's config document,
+/// so it follows the cartridge to a sister node. It belongs to the cartridge as a whole, so its
+/// nodule and its micro are both held to it (ADR 049 §4.1). A drawer or cartridge grant's value
+/// states an access level; a net, method or authority grant states none (see
+/// [`GrantKey::accepts`]). Only this method writes grant datums, never the cartridge.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
