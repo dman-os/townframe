@@ -31,15 +31,13 @@ use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
-use big_cabinet_core::reference::ReferenceDocId;
-use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::ResolvedCartridge;
 use big_cartridges_core::config::CartridgeConfigIdentity;
 use big_cartridges_core::config::config_identity_key;
 use big_cartridges_core::protocol::CartridgesError;
 use big_cartridges_core::protocol::CartridgesProtocol;
-use big_cartridges_core::protocol::ResolveCartridgeVersion;
+use big_cartridges_core::protocol::ResolveCartridgePin;
 use big_nodule_core::config::Admission;
 use big_nodule_core::config::AdmissionCache;
 use big_nodule_core::config::CartridgeConfig;
@@ -125,128 +123,38 @@ impl CartridgeDocs {
         })
     }
 
-    /// Reads the version datum `pin` names out of its registry document at the pin's heads, and
-    /// checks what the registry checks before it serves a version: the envelope is well formed,
-    /// signed by its namespace, and sits at the slot of its own version. The registry document
-    /// may have synced in from a peer, so none of it is trusted unread.
-    async fn read_envelope(&self, pin: &DatumPin) -> Result<Cartridge, PinError> {
-        let reference = pin.location().reference();
-        let ReferenceDocId::Concrete(doc_id) = reference.document() else {
-            return Err(PinError::Invalid(
-                "an install pins a registry document by id, not `self`".to_owned(),
-            ));
-        };
-        let heads = reference.heads();
-        if heads.is_empty() {
-            return Err(PinError::Invalid(
-                "an install pin states the document heads it selects".to_owned(),
-            ));
-        }
-        let key = reference.key();
-        if key.tag().as_str() != Cartridge::ID {
-            return Err(PinError::Invalid(format!(
-                "an install pins a `{}` datum, not `{}`",
-                Cartridge::ID,
-                key.tag()
-            )));
-        }
-        let read = self
-            .docs
-            .call(
-                RequestContext::root(),
-                ReadDatums {
-                    capability: self.capability,
-                    doc_id: doc_id.clone(),
-                    at: At::Heads(heads.to_vec()),
-                    datums: Some(BTreeSet::from([key.clone()])),
-                    optimistic: false,
-                },
-            )
-            .await;
-        let mut read = match read {
-            Ok(read) => read,
-            Err(ClientError::Method(
-                error @ (DocsError::DocNotFound
-                | DocsError::UnknownHeads { .. }
-                | DocsError::Pending { .. }),
-            )) => return Err(PinError::Unavailable(error.to_string())),
-            Err(ClientError::Method(error @ DocsError::Denied)) => {
-                return Err(PinError::Invalid(format!(
-                    "the registry document cannot be read: {error}"
-                )));
-            }
-            Err(error) => return Err(PinError::Fatal(crate::docs_error(error))),
-        };
-        let value = match read.datums.remove(key) {
-            Some(DatumRead::Accepted { value, .. }) => value,
-            Some(DatumRead::Pending { reason, .. }) => return Err(PinError::Unavailable(reason)),
-            Some(DatumRead::Absent { .. }) | None => {
-                return Err(PinError::Invalid(
-                    "the version is not in the registry document at the pinned heads".to_owned(),
-                ));
-            }
-            Some(DatumRead::Rejected { reason } | DatumRead::Undecodable { reason, .. }) => {
-                return Err(PinError::Invalid(format!(
-                    "the pinned version datum is unusable: {reason}"
-                )));
-            }
-        };
-        let cartridge: Cartridge = serde_json::from_value(value)
-            .map_err(|error| PinError::Invalid(format!("invalid cartridge envelope: {error}")))?;
-        cartridge
-            .validate()
-            .map_err(|error| PinError::Invalid(error.to_string()))?;
-        cartridge
-            .verify_signature()
-            .map_err(|error| PinError::Invalid(error.to_string()))?;
-        if key.slot_bytes() != cartridge.version.to_string().as_bytes() {
-            return Err(PinError::Invalid(format!(
-                "the pinned datum sits at a slot other than its own version {}",
-                cartridge.version
-            )));
-        }
-        Ok(cartridge)
-    }
-
     /// The version `pin` names, with the payloads its envelope pins, as the cartridges service
-    /// resolves them. The envelope is read and verified at the pin first: the pin selects an exact
-    /// revision, which the service's own view of the version must agree with. The service does not
-    /// run nodule admission; the caller does, on this result.
+    /// resolves them. The service reads the envelope at the pin's heads and serves the version
+    /// only if it is that exact revision: the registry document may have synced in from a peer,
+    /// so none of it is trusted unread, and the check is the registry's, the one a micro host gets
+    /// from the same call. The service does not run nodule admission; the caller does, on this
+    /// result.
     pub(crate) async fn read_pin(&self, pin: &DatumPin) -> Result<ResolvedCartridge, PinError> {
-        let cartridge = self.read_envelope(pin).await?;
-        let resolved = self
-            .cartridges
+        self.cartridges
             .call_with(
                 RequestContext::root(),
                 self.cartridges_authorization.metadata(),
-                ResolveCartridgeVersion {
-                    id: cartridge.id.clone(),
-                    version: cartridge.version.clone(),
-                },
+                ResolveCartridgePin { pin: pin.clone() },
             )
             .await
             .map_err(|error| match error {
-                // The registry has not projected the version yet, or the payloads its pins name
-                // have not reached this node: both clear once sync catches up.
+                // The registry has not projected the version yet, or the envelope or the payloads
+                // its pins name have not reached this node: all clear once sync catches up.
                 ClientError::Method(
                     error @ (CartridgesError::UnknownCartridge(_)
                     | CartridgesError::UnknownVersion { .. }
+                    | CartridgesError::PinnedEnvelopeUnreadable { .. }
                     | CartridgesError::PinnedDatumUnreadable { .. }),
                 ) => PinError::Unavailable(error.to_string()),
                 ClientError::Method(
                     error @ (CartridgesError::Rejected(_)
+                    | CartridgesError::Signature(_)
                     | CartridgesError::PinnedDatumInvalid { .. }
-                    | CartridgesError::PinnedDocumentMismatch { .. }),
+                    | CartridgesError::PinnedDocumentMismatch { .. }
+                    | CartridgesError::PinnedRevisionMismatch { .. }),
                 ) => PinError::Invalid(error.to_string()),
                 error => PinError::Fatal(crate::cartridges_error(error)),
-            })?;
-        if resolved.cartridge.revision() != cartridge.revision() {
-            return Err(PinError::Invalid(format!(
-                "the registry resolves version {} of `{}` to another revision than the pinned one",
-                cartridge.version, cartridge.id
-            )));
-        }
-        Ok(resolved)
+            })
     }
 
     /// The config document an earlier install of `cartridge_id` left: the one this node made or
