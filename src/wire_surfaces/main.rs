@@ -34,6 +34,9 @@ fn main() -> Res<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Bless if problems.evolution.is_empty() => {
+            for line in snapshot.stabilized(&dir)? {
+                println!("{line}");
+            }
             snapshot.bless(&dir)?;
             println!("wire: wrote {dir:?} ({})", snapshot.summary());
             Ok(ExitCode::SUCCESS)
