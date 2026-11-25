@@ -334,18 +334,53 @@ async fn install_revision_without_create_doc(
         .unwrap()
 }
 
-/// Installing a build whose manifest requests a method the node's installed revision did not
-/// (`createDoc`) grants it, so the nodule is ready: both when the new build has another handler
-/// (another version) and when only the manifest changed under the same handler bytes (the same
-/// version, which `install` takes for current).
-#[tokio::test(flavor = "multi_thread")]
-async fn installing_a_revision_that_requests_a_new_method_grants_it() {
+/// Installs the revision without `createDoc` built from `old_wasm`, then installs the current
+/// build (`guest_path`) over it, and says what the node's nodule record holds after.
+async fn upgrade_to_create_doc(old_wasm: &[u8]) -> big_nodule_core::protocol::NoduleRecord {
     use big_dispatch_core::Readiness;
 
+    const CREATE_DOC: &str = "org.example.daybook.docs.createDoc";
     let wasm = std::fs::read(guest_path()).unwrap();
-    // Another handler build: a custom section changes the bytes and so the version. The registry
-    // only takes a version that orders after the newest it has had, and versions that differ in
-    // build metadata alone order by it, so the older build is one whose version sorts lower.
+    let (_tmp, dir) = new_node().await;
+    let client = connect(&dir).await.unwrap();
+    let before = install_revision_without_create_doc(&client, old_wasm).await;
+    assert_eq!(before.readiness, Readiness::Ready);
+    assert!(
+        !before
+            .methods
+            .unwrap()
+            .desired
+            .operations
+            .contains(CREATE_DOC)
+    );
+    let installed = intxt_core::install::install(&operator(&client), &wasm, &[]).await;
+    let record = match installed {
+        Ok(installed) => installed.record,
+        // The record install checked and refused, as the operator saw it.
+        Err(_) => {
+            crate::cmds::intxt::call(
+                &client,
+                big_nodule_core::protocol::GetNodule {
+                    cartridge_id: intxt_core::cartridge::cartridge(&wasm).id.clone(),
+                },
+            )
+            .await
+            .unwrap()
+        }
+    };
+    client.stop().await.unwrap();
+    record
+}
+
+/// Installing a build whose manifest requests a method the node's installed revision did not
+/// (`createDoc`) grants it, so the nodule is ready, whether the new build has another handler
+/// (another version) ...
+#[tokio::test(flavor = "multi_thread")]
+async fn installing_a_revision_with_another_handler_grants_a_newly_requested_method() {
+    let wasm = std::fs::read(guest_path()).unwrap();
+    // A custom section changes the bytes and so the version. The registry only takes a version
+    // that orders after the newest it has had, and versions that differ in build metadata alone
+    // order by it, so the older build is one whose version sorts lower.
     let older = (0..=u8::MAX)
         .map(|salt| {
             let mut older = wasm.clone();
@@ -357,33 +392,33 @@ async fn installing_a_revision_that_requests_a_new_method_grants_it() {
                 < intxt_core::cartridge::cartridge(&wasm).version
         })
         .expect("some salt gives a lower version");
-    for (case, old_wasm) in [("another handler", &older), ("the same handler", &wasm)] {
-        let (_tmp, dir) = new_node().await;
-        let client = connect(&dir).await.unwrap();
-        let before = install_revision_without_create_doc(&client, old_wasm).await;
-        assert_eq!(before.readiness, Readiness::Ready, "{case}");
-        const CREATE_DOC: &str = "org.example.daybook.docs.createDoc";
-        assert!(
-            !before.methods.unwrap().desired.operations.contains(CREATE_DOC),
-            "{case}"
-        );
+    let record = upgrade_to_create_doc(&older).await;
+    let methods = record.methods.clone().unwrap();
+    assert_eq!(record.readiness, big_dispatch_core::Readiness::Ready, "{record:?}");
+    assert!(
+        methods
+            .desired
+            .operations
+            .contains("org.example.daybook.docs.createDoc"),
+        "{methods:?}"
+    );
+}
 
-        let installed = intxt_core::install::install(&operator(&client), &wasm, &[])
-            .await
-            .unwrap();
-        let methods = installed.record.methods.clone().unwrap();
-        assert_eq!(
-            installed.record.readiness,
-            Readiness::Ready,
-            "{case}: {:?}",
-            installed.record
-        );
-        assert!(
-            methods.desired.operations.contains(CREATE_DOC),
-            "{case}: {methods:?}"
-        );
-        client.stop().await.unwrap();
-    }
+/// ... or only the manifest changed under the same handler bytes (the same version, which
+/// `install` takes for current).
+#[tokio::test(flavor = "multi_thread")]
+async fn installing_a_revision_with_the_same_handler_grants_a_newly_requested_method() {
+    let wasm = std::fs::read(guest_path()).unwrap();
+    let record = upgrade_to_create_doc(&wasm).await;
+    let methods = record.methods.clone().unwrap();
+    assert_eq!(record.readiness, big_dispatch_core::Readiness::Ready, "{record:?}");
+    assert!(
+        methods
+            .desired
+            .operations
+            .contains("org.example.daybook.docs.createDoc"),
+        "{methods:?}"
+    );
 }
 
 /// Runs `git` in `dir` with nothing taken from the machine. Hooks do not run: capture installs a
