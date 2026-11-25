@@ -264,8 +264,8 @@ fn test_schemas() -> Arc<SchemaRepo> {
     )
 }
 
-/// The operator introduces the nodule service to dispatch over every authority, privileged
-/// methods excepted, as `big_node` boots it: a handle
+/// The operator introduces the nodule service to dispatch over every authority, privilege
+/// included (only a grant the node itself makes carries it on), as `big_node` boots it: a handle
 /// bound to `nodules_actor`, with `DELEGATE` so the service can bind each nodule's own handle
 /// to that nodule.
 async fn grant_nodule_dispatch(
@@ -281,6 +281,7 @@ async fn grant_nodule_dispatch(
             MintDispatchCapability {
                 scope: DispatchScope {
                     authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
+                    privileged: true,
                     ..Default::default()
                 },
                 rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
@@ -328,11 +329,15 @@ struct Node {
     dispatch: Dispatch,
     dispatch_stop: StopToken,
     /// What the nodule service mints every nodule's dispatch handle from: the operator's grant of
-    /// every method that is not privileged.
+    /// every method, privileged ones included.
     dispatch_authority: CapId,
     nodules: Nodules,
     executor: Option<Arc<dyn NoduleExecutor>>,
     allow_slot_takeover: bool,
+    /// The grants the node makes its core cartridge at each boot (see
+    /// [`crate::CoreCartridge::grants`]): [`installs::core_grants`] unless a test sets others
+    /// before it restarts the service.
+    core_grants: BTreeMap<GrantKey, GrantBody>,
     stop: Option<StopToken>,
 }
 
@@ -471,6 +476,7 @@ async fn node_with_takeover(
         &schemas,
         executor.clone(),
         allow_slot_takeover,
+        installs::core_grants(),
     )
     .await
     .expect("nodule service boot");
@@ -503,6 +509,7 @@ async fn node_with_takeover(
         nodules,
         executor,
         allow_slot_takeover,
+        core_grants: installs::core_grants(),
         stop: Some(stop),
     }
 }
@@ -614,6 +621,7 @@ async fn boot_nodules(
     schemas: &Arc<SchemaRepo>,
     executor: Option<Arc<dyn NoduleExecutor>>,
     allow_slot_takeover: bool,
+    core_grants: BTreeMap<GrantKey, GrantBody>,
 ) -> Result<(Nodules, StopToken), NodulesError> {
     // As `big_node` does: the operator introduces the service's delegator blobs handle.
     let blobs_capability = blobs
@@ -638,6 +646,62 @@ async fn boot_nodules(
         .open_namespace(nodules_actor.actor.actor_id)
         .await
         .expect("nodules namespace");
+    // The micros subsystem actor the core nodule acts as, and the delegators the operator
+    // introduces to it, opened and minted as `big_node` does: the nodule service's own are bound
+    // to `nodules`, of which `micros` is no descendant.
+    let micros = authority
+        .client
+        .call(
+            RequestContext::root(),
+            OpenActor {
+                parent: authority.root,
+                path: "micros".into(),
+                rights: Rights::all(),
+            },
+        )
+        .await
+        .expect("micros actor");
+    let micros_subject = micros.actor.actor_id;
+    let delegators = crate::CoreDelegators {
+        dispatch: grant_nodule_dispatch(authority, dispatch, micros_subject).await,
+        docs: docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(authority.root).metadata(),
+                MintDocCapability {
+                    scope: DocScope {
+                        drawers: BTreeMap::from([(
+                            shared_config_drawer.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(DrawerAccess::Write),
+                        )]),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                    subject: Some(micros_subject),
+                },
+            )
+            .await
+            .expect("the operator mints the micros docs delegator")
+            .capability_id,
+        blobs: blobs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(authority.root).metadata(),
+                MintBlobsCapability {
+                    scope: BlobsScope {
+                        put: true,
+                        ..Default::default()
+                    },
+                    rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                    subject: Some(micros_subject),
+                },
+            )
+            .await
+            .expect("the operator mints the micros blobs delegator")
+            .capability_id,
+    };
     boot(NodulesConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
@@ -658,22 +722,12 @@ async fn boot_nodules(
         executor,
         schemas: Arc::clone(schemas),
         allow_slot_takeover,
-        // The micros subsystem actor the core nodule acts as, opened as `big_node` does.
         core_cartridge: crate::CoreCartridge {
             id: installs::core_cartridge_id(),
             version: installs::CORE_VERSION.parse().unwrap(),
-            actor: authority
-                .client
-                .call(
-                    RequestContext::root(),
-                    OpenActor {
-                        parent: authority.root,
-                        path: "micros".into(),
-                        rights: Rights::all(),
-                    },
-                )
-                .await
-                .expect("micros actor"),
+            actor: micros,
+            delegators,
+            grants: core_grants,
         },
         sql: (**sql).clone(),
     })
@@ -942,6 +996,7 @@ impl Node {
             &self.schemas,
             self.executor.clone(),
             self.allow_slot_takeover,
+            self.core_grants.clone(),
         )
         .await?;
         self.nodules = nodules;

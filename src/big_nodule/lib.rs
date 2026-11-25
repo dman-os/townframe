@@ -69,6 +69,7 @@ use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::config::GrantKey;
 use big_cartridges_core::protocol::AWAIT_MAX_HOLD_MS;
 use big_cartridges_core::protocol::AnswerCartridgeGrantRequest;
 use big_cartridges_core::protocol::AwaitCartridgeGrantRequest;
@@ -109,6 +110,7 @@ use big_nodule_core::protocol::NodulesProtocol;
 use big_nodule_core::protocol::SetMethodRoute;
 use big_nodule_core::protocol::SetNoduleDevTakeover;
 use method_core::EventStream;
+use method_core::Method;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
@@ -150,7 +152,8 @@ pub fn schema_group() -> SchemaRegistrationGroup<'static> {
 /// namespace it mints management handles in,
 /// the dispatch router it registers each admitted nodule's implemented operations in, the dispatch
 /// client and dispatch handle it mints every nodule's own handle from (a
-/// handle covering every authority but no privileged method), the optional executor that hosts their
+/// handle covering every authority, whose privilege bit only the node's own grants to its core
+/// cartridge turn on), the optional executor that hosts their
 /// handlers, the node's schema repo it registers each enabled nodule's datum Lexicons in, and its
 /// database. Without an executor a handler is never
 /// ready: its operations are registered not ready with the nodule's own readiness.
@@ -192,13 +195,34 @@ pub struct NodulesConfig {
     pub sql: Database,
 }
 
-/// The id of the node's core cartridge, the version the node's build carries (ADR 053), and the
-/// actor its nodule acts as: the `micros` subsystem actor, with the rights to open children.
+/// The id of the node's core cartridge, the version the node's build carries (ADR 053), the
+/// actor its nodule acts as (the `micros` subsystem actor, with the rights to open children), the
+/// handles its routines' handles are minted from, and the grants the node itself makes it. The grants are held for the boot, never written to its
+/// config document, which is what lets one of them be `privileged`
+/// ([`big_cartridges_core::config::GrantBody::privileged`]): a person cannot grant that.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreCartridge {
     pub id: CartridgeId,
     pub version: big_cartridges_core::Version,
     pub actor: OpenedActor,
+    pub delegators: CoreDelegators,
+    pub grants: std::collections::BTreeMap<
+        big_cartridges_core::config::GrantKey,
+        big_cartridges_core::config::GrantBody,
+    >,
+}
+
+/// The handles the core cartridge's routines' handles are minted from, which the operator
+/// introduces to the `micros` actor. The nodule service mints every other nodule's handles from
+/// ones bound to its own actor (`nodules`), but an introduction may only name a descendant of the
+/// delegator's subject, and `micros` is a sibling of `nodules`, not a descendant: a `nodules`-bound
+/// delegator cannot mint a handle for it. Each has the scope rules of the service's own, `privileged`
+/// included for dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoreDelegators {
+    pub dispatch: CapId,
+    pub docs: CapId,
+    pub blobs: CapId,
 }
 
 /// The hosted surface: it settles who the caller is and what they may touch, then hands the
@@ -466,8 +490,11 @@ impl NoduleService {
         authorization: Authorization,
         params: ListCartridgeGrants,
     ) -> Res<CartridgeGrants> {
-        let caller = self.caller(context, authorization).await?;
-        if self.scope_of(&caller)?.is_some() {
+        if self
+            .read_scope(context, authorization, ListCartridgeGrants::XRPC.nsid)
+            .await?
+            .is_some()
+        {
             return Err(NodulesError::Denied);
         }
         let grants = self
@@ -487,8 +514,11 @@ impl NoduleService {
         authorization: Authorization,
         params: AwaitCartridgeGrants,
     ) -> Res<CartridgeGrantsAt> {
-        let caller = self.caller(context, authorization).await?;
-        if self.scope_of(&caller)?.is_some() {
+        if self
+            .read_scope(context, authorization, AwaitCartridgeGrants::XRPC.nsid)
+            .await?
+            .is_some()
+        {
             return Err(NodulesError::Denied);
         }
         let deadline = Instant::now()
@@ -529,6 +559,49 @@ impl NoduleService {
             DomainAuthority::Operator => Ok(None),
             DomainAuthority::Identity(_) => Err(NodulesError::Denied),
             DomainAuthority::Scoped(scope) => Ok(Some(scope)),
+        }
+    }
+
+    /// What a read of every cartridge's installs or grants may see for `method`: `None` for all
+    /// of it, `Some` for a management handle's scope.
+    ///
+    /// The operator and the handles this domain minted are settled by [`Self::scope_of`]. A
+    /// handle this domain did not mint is a nodule's dispatch handle (dispatch admitted the call
+    /// before it got here), which is read as everything only when the presenting nodule's
+    /// cartridge holds a privileged grant of exactly `method`. A privileged method trusts a
+    /// privileged grant for that method and for no other, whichever cartridge holds it: the node
+    /// makes that grant to its core cartridge alone ([`CoreCartridge::grants`]), and nothing in
+    /// this rule names the core cartridge or the `micros` actor.
+    async fn read_scope(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        method: &str,
+    ) -> Res<Option<NoduleScope>> {
+        match self.caller(context, authorization).await {
+            Ok(caller) => return Ok(self.scope_of(&caller)?.cloned()),
+            // Not one of this domain's handles. A dead or foreign handle is refused below too,
+            // by `presenter`.
+            Err(NodulesError::Denied) => {}
+            Err(error) => return Err(error),
+        }
+        let Presenter::Actor(actor_id) = self.presenter(context, authorization).await? else {
+            return Err(NodulesError::Denied);
+        };
+        let cartridge_id = self.cartridge_of(actor_id).await?;
+        let grant = GrantKey::Method(method.to_owned());
+        // Only a boot grant counts: the runtime reads no privilege out of a config document.
+        let privileged = self
+            .state
+            .grants
+            .borrow()
+            .grants(&cartridge_id)
+            .iter()
+            .any(|record| record.this_boot && record.grant == grant && record.value.privileged);
+        if privileged {
+            Ok(None)
+        } else {
+            Err(NodulesError::Denied)
         }
     }
 
@@ -685,8 +758,9 @@ impl NoduleService {
         authorization: Authorization,
         _: ListCartridgeInstalls,
     ) -> Res<CartridgeInstalls> {
-        let caller = self.caller(context, authorization).await?;
-        let scope = self.scope_of(&caller)?.cloned();
+        let scope = self
+            .read_scope(context, authorization, ListCartridgeInstalls::XRPC.nsid)
+            .await?;
         let context = context.clone();
         let installs = self
             .state

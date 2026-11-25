@@ -14,6 +14,7 @@ use serde_json::json;
 use service_client_core_rs::xrpc::write_context_headers;
 use service_core_rs::xrpc::DOMAIN_ERROR_FIELD;
 use service_core_rs::xrpc::DOMAIN_ERROR_STATUS;
+use service_core_rs::xrpc::NODULE_ACTOR_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_BLOBS_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CONFIG_CAPABILITY_HEADER;
@@ -43,7 +44,8 @@ pub fn descriptor_body_refused() -> ProviderError {
 /// The headers of a delivery to a handler: the request id and trace of the next hop, the
 /// remaining budget as a relative `x-timeout-ms`, the idempotency key, and the caller's
 /// capability as a bare `Bearer` token (the caller's signer never enters a handler), plus
-/// `x-nodule-capability`, the nodule's own dispatch capability, when it was granted one.
+/// `x-nodule-capability`, the nodule's own dispatch capability, when it was granted one, and
+/// `x-nodule-actor-capability`, the nodule's own actor identity capability.
 pub fn delivery_headers(
     caller: &Caller,
     request: &RequestContext,
@@ -68,6 +70,14 @@ pub fn delivery_headers(
     if let Some(capability) = capabilities.dispatch {
         headers.insert(
             NODULE_CAPABILITY_HEADER,
+            Authorization::id_text(capability)
+                .parse()
+                .expect("a capability id is a valid header value"),
+        );
+    }
+    if let Some(capability) = capabilities.actor {
+        headers.insert(
+            NODULE_ACTOR_CAPABILITY_HEADER,
             Authorization::id_text(capability)
                 .parse()
                 .expect("a capability id is a valid header value"),

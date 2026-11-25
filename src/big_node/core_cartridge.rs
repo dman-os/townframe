@@ -22,8 +22,11 @@ use crate::Res;
 use big_blobs_core::BlobsScope;
 use big_blobs_core::MintBlobsCapability;
 use big_cabinet_core::DatumPin;
+use big_cabinet_core::authority::AttenuateCapability;
 use big_cabinet_core::authority::Authorization;
+use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::OpenedActor;
+use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::DocScope;
@@ -33,35 +36,92 @@ use big_cabinet_core::reference::defs_lexicon;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Digest;
+use big_cartridges_core::Necessity;
+use big_cartridges_core::Permbind;
+use big_cartridges_core::PermbindMethod;
 use big_cartridges_core::ResolvedCartridge;
 use big_cartridges_core::Version;
+use big_cartridges_core::config::GrantBody;
+use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::protocol::AwaitCartridgeGrants;
 use big_cartridges_core::protocol::GetCartridge;
 use big_cartridges_core::protocol::GetCartridgeVersion;
+use big_cartridges_core::protocol::ListCartridgeGrants;
 use big_cartridges_core::protocol::ListCartridgeInstalls;
 use big_cartridges_core::protocol::PublishCartridgeVersion;
 use big_cartridges_core::protocol::StageCartridgeVersion;
 use big_cartridges_core::registry::version_key;
 use big_cartridges_core::registry::version_pin;
 use method_core::ByteBody;
+use method_core::Method;
+use method_core::XrpcMethod;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 /// The core cartridge version this build carries.
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = "0.2.0";
 
 /// `<publisher>/core`, where `publisher` is the node's publisher DID.
 pub fn id(publisher: &str) -> CartridgeId {
     CartridgeId::new(publisher, "core").expect("a publisher DID and `core` form a cartridge id")
 }
 
-/// The id and version the nodule service refuses changes to, and `micros`, the subsystem actor
-/// the core nodule acts as.
-pub(crate) fn pin(publisher: &str, micros: OpenedActor) -> big_nodule::CoreCartridge {
+/// The methods the core nodule calls through dispatch (ADR 052 §2.2): the unprivileged authority
+/// methods it opens each micro's actor and narrows handles onto it with, and the read-only
+/// privileged methods it learns what to mint from. Nothing here writes a grant.
+///
+/// Each is declared with its necessity and whether its grant is privileged.
+///
+/// The authority methods are required: their provider is registered before the nodule service
+/// reconciles. The nodules methods are optional because theirs is registered after the node is
+/// assembled (`BigNode::register_late_built_ins`), so a required request for one would hold the
+/// nodule at `ProviderMissing` through boot. Either way the grant below is what admits a call.
+///
+/// The grants of the three reads are privileged, because the service answers a nodule an
+/// unscoped read of every cartridge only on a privileged grant of that very method
+/// (`NoduleService::read_scope`). `listCartridgeInstalls` is not a privileged method for dispatch
+/// (a scoped management handle may list the installs it manages), but a nodule's unscoped answer
+/// is the same node bookkeeping the other two read, so it is held to the same rule.
+fn methods() -> [(XrpcMethod, Necessity, bool); 6] {
+    [
+        (OpenActor::XRPC, Necessity::Required, false),
+        (AttenuateCapability::XRPC, Necessity::Required, false),
+        (RetractCapability::XRPC, Necessity::Required, false),
+        (ListCartridgeGrants::XRPC, Necessity::Optional, true),
+        (AwaitCartridgeGrants::XRPC, Necessity::Optional, true),
+        (ListCartridgeInstalls::XRPC, Necessity::Optional, true),
+    ]
+}
+
+/// The id and version the nodule service refuses changes to, `micros`, the subsystem actor the
+/// core nodule acts as and the handles its routines' handles are minted from, and the grants the node makes it: one for each method [`package`]
+/// declares a permbind on, `privileged` for the reads, which the service holds for the boot and
+/// never writes to the cartridge's config document (a person could not have granted them, and
+/// `setCartridgeGrant` refuses the core cartridge).
+pub(crate) fn pin(
+    publisher: &str,
+    micros: OpenedActor,
+    delegators: big_nodule::CoreDelegators,
+) -> big_nodule::CoreCartridge {
     big_nodule::CoreCartridge {
         id: id(publisher),
         version: version(),
         actor: micros,
+        delegators,
+        grants: methods()
+            .into_iter()
+            .map(|(method, _, privileged)| {
+                (
+                    GrantKey::Method(method.nsid.to_owned()),
+                    if privileged {
+                        GrantBody::privileged()
+                    } else {
+                        GrantBody::present()
+                    },
+                )
+            })
+            .collect(),
     }
 }
 
@@ -76,6 +136,8 @@ fn version() -> Version {
 /// and the core nodule. The nodule has no routines yet; the micros routines of ADR 052 are its
 /// first. It is declared now because an install is of a cartridge's nodule or micro (a
 /// cartridge contributing neither is refused), so it is what makes the core cartridge installed.
+/// Its manifest declares a method permbind for each of [`methods`], the runtime permbind of ADR
+/// 052 §2.2 item 2, which [`pin`] grants.
 fn package(publisher: &str) -> ResolvedCartridge {
     let defs = defs_lexicon();
     let nsid = defs["id"]
@@ -89,6 +151,24 @@ fn package(publisher: &str) -> ResolvedCartridge {
     cartridge.description =
         Some("The node's own vocabulary: the type libraries every cartridge may refer to.".into());
     cartridge.nodule = Some(Default::default());
+    cartridge.permbinds = methods()
+        .into_iter()
+        .map(|(method, necessity, _)| {
+            (
+                method.nsid.to_owned(),
+                Permbind::Method(PermbindMethod {
+                    nsid: method
+                        .nsid
+                        .parse()
+                        .expect("a built-in method id is an NSID"),
+                    description: format!("The core nodule calls {} through dispatch.", method.nsid),
+                    necessity,
+                    min_revision: None,
+                    extra: Default::default(),
+                }),
+            )
+        })
+        .collect();
     ResolvedCartridge::new(
         cartridge,
         BTreeMap::from([(nsid, file)]),
@@ -283,19 +363,24 @@ mod tests {
     /// has the old one. Changing the package changes this digest; bump the version with it.
     #[test]
     fn the_core_cartridge_content_changes_only_with_its_version() {
-        // The content excludes the id, so any publisher stands in.
+        // The envelope is part of the content (its permbinds are what the node grants), and a
+        // fixed publisher makes its id one value.
         let package = super::package("did:web:example.org");
-        let content =
-            serde_json::to_vec(&(&package.lexicons, &package.sidecars, &package.components))
-                .expect("a package serializes");
+        let content = serde_json::to_vec(&(
+            &package.cartridge,
+            &package.lexicons,
+            &package.sidecars,
+            &package.components,
+        ))
+        .expect("a package serializes");
         assert_eq!(
             (
                 super::VERSION,
                 big_cartridges_core::Digest::of(&content).to_string()
             ),
             (
-                "0.1.0",
-                "zB6VD5X4CwwYW7Uj9vgv4GMhPtiTcfniFpt9L8EURaDdn".to_owned()
+                "0.2.0",
+                "zAY9PkRdrcWxNCzNJ3sMTy2mrh6NVCPWEpmcbVMns7Pm1".to_owned()
             ),
         );
     }

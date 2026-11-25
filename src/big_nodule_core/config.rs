@@ -662,6 +662,14 @@ impl CartridgeConfig {
             self.grants.remove(&grant);
             return Ok(());
         };
+        if body.privileged {
+            return Err(InventoryError::InvalidGrant {
+                grant: grant.to_string(),
+                reason: "privilege is the node's own: it holds it for its core cartridge for \
+                         the boot and never writes it to a config document"
+                    .to_owned(),
+            });
+        }
         if !grant.accepts(&body) {
             return Err(InventoryError::InvalidGrant {
                 grant: grant.to_string(),
@@ -721,7 +729,13 @@ impl CartridgeConfig {
                 }
                 DatumSlot::Accepted { value, .. } => value,
             };
-            resolved.apply(grant, body)?;
+            // A datum may state `privileged` (a sister's write, a hand edit), but privilege is
+            // never read from a document: it is the node's own, held below as a boot grant.
+            let unprivileged = GrantBody {
+                privileged: false,
+                ..body.clone()
+            };
+            resolved.apply(grant, &unprivileged)?;
         }
         // A boot grant is one this node built, so it states a value its kind takes; one that
         // gives more than the datum grant of the same thing widens it, never narrows it.
@@ -780,6 +794,9 @@ impl ResolvedGrants {
             }
             GrantKey::Method(nsid) => {
                 self.operations.operations.insert(nsid.clone());
+                // The scope's one privilege bit lets the handle reach the privileged methods it
+                // names; the names stay what bounds it.
+                self.operations.privileged |= body.privileged;
             }
             GrantKey::Authority(prefix) => {
                 self.operations.authorities.insert(prefix.clone());

@@ -856,6 +856,52 @@ async fn a_node_installs_its_core_cartridge_at_boot_and_a_reboot_keeps_the_insta
     get_version(&node, &core.to_string(), crate::core_cartridge::VERSION)
         .await
         .unwrap();
+    // Its manifest declares the methods the micros nodule calls, and the node made the grants
+    // for them at boot: held for the boot (in no document), privileged for exactly the reads.
+    // The nodule is ready, which the nodules methods being optional requests keeps true even
+    // though their provider registers after the node is assembled.
+    assert_eq!(nodule.readiness, big_dispatch_core::Readiness::Ready);
+    let grants = node
+        .nodules
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            big_cartridges_core::protocol::ListCartridgeGrants {
+                cartridge_id: Some(core.clone()),
+            },
+        )
+        .await
+        .unwrap()
+        .grants;
+    assert!(grants.iter().all(|grant| grant.this_boot), "{grants:?}");
+    let named = |privileged: bool| -> BTreeSet<String> {
+        grants
+            .iter()
+            .filter(|grant| grant.value.privileged == privileged)
+            .map(|grant| match &grant.grant {
+                big_cartridges_core::config::GrantKey::Method(nsid) => nsid.clone(),
+                other => panic!("the core cartridge holds a method grant, not {other}"),
+            })
+            .collect()
+    };
+    let expected = |nsids: [&str; 3]| nsids.map(str::to_owned).into_iter().collect();
+    assert_eq!(
+        named(true),
+        expected([
+            "org.example.daybook.cartridges.awaitCartridgeGrants",
+            "org.example.daybook.cartridges.listCartridgeGrants",
+            "org.example.daybook.cartridges.listCartridgeInstalls",
+        ])
+    );
+    assert_eq!(
+        named(false),
+        expected([
+            "org.example.daybook.authority.attenuateCapability",
+            "org.example.daybook.authority.openActor",
+            "org.example.daybook.authority.retractCapability",
+        ])
+    );
     shutdown(node, stop).await;
 
     let (node, stop) = boot().await;

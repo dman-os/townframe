@@ -38,7 +38,7 @@ The XRPC server reads them with `service_core_rs::xrpc::request_context`; client
 
 ## Nodule delivery headers (defined in `service_core_rs/xrpc.rs`)
 
-All five are set by the host in `big_nodule::wire::delivery_headers` and read by
+All six are set by the host in `big_nodule::wire::delivery_headers` and read by
 `big_ndk::cx::from_headers`. `NODULE_CAPABILITY_HEADER` is also set by `big_ndk` on a guest's
 outgoing calls (`big_ndk/cx.rs:343`) and read back by `big_nodule/egress.rs`, which is how the
 host knows which nodule is calling out. `big_nodule/e2e/executor/routines.rs` asserts it.
@@ -51,6 +51,7 @@ Guest boundary only; no other protocol carries them.
 | `x-nodule-config-capability` (`NODULE_CONFIG_CAPABILITY_HEADER`) | `:20` | Capability to read the config document and write declared settings datums |
 | `x-nodule-drawer-capability` (`NODULE_DRAWER_CAPABILITY_HEADER`) | `:22` | The drawer capability for the routine's granted drawer set, when present |
 | `x-nodule-blobs-capability` (`NODULE_BLOBS_CAPABILITY_HEADER`) | `:24` | The blobs capability the routine's methods need (ADR 049 §6.2), when present |
+| `x-nodule-actor-capability` (`NODULE_ACTOR_CAPABILITY_HEADER`) | `service_core_rs/xrpc.rs` | The nodule's own actor identity capability (`OpenedActor.capability`), for `OpenActor.parent` and `AttenuateCapability`; set on every delivery whose handles were minted |
 
 ## Response metadata (`ResponseMetadata::write_headers` / `read_headers`, `service_core_rs/xrpc.rs:131-185`)
 

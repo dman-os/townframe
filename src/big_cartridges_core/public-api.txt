@@ -69,6 +69,7 @@ pub impl big_cartridges_core::config::CartridgeInstall::fn component_mut (& mut 
 pub impl big_cartridges_core::config::ComponentInstall::fn new (enabled : bool) -> Self
 pub impl big_cartridges_core::config::GrantBody::fn access (access : EntryAccess) -> Self
 pub impl big_cartridges_core::config::GrantBody::fn present () -> Self
+pub impl big_cartridges_core::config::GrantBody::fn privileged () -> Self
 pub impl big_cartridges_core::config::GrantKey::const fn tag (& self) -> & 'static str
 pub impl big_cartridges_core::config::GrantKey::fn accepts (& self , body : & GrantBody) -> bool
 pub impl big_cartridges_core::config::GrantKey::fn datum_key (& self) -> DatumKey
@@ -116,7 +117,7 @@ pub struct big_cartridges_core::config::CartridgeGrant  { access: EntryAccess, e
 pub struct big_cartridges_core::config::CartridgeInstall  { cartridge: DatumPin, config_doc: DocId, nodule: Option < ComponentInstall >, micro: Option < ComponentInstall >, extra: Extra }
 pub struct big_cartridges_core::config::ComponentInstall  { enabled: bool, extra: Extra }
 pub struct big_cartridges_core::config::DrawerGrant  { access: EntryAccess, extra: Extra }
-pub struct big_cartridges_core::config::GrantBody  { access: Option < EntryAccess > }
+pub struct big_cartridges_core::config::GrantBody  { access: Option < EntryAccess >, privileged: bool }
 pub struct big_cartridges_core::config::InvalidGrantKey  { 0: String }
 pub struct big_cartridges_core::config::InvalidNetTarget  { 0: String }
 pub struct big_cartridges_core::config::MethodGrant  { empty: Option < bool >, extra: Extra }

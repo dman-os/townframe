@@ -248,6 +248,7 @@ fn cx_with(transport: &Recording, nodule: Option<&str>, budget: Option<Duration>
         nodule: nodule.map(str::to_owned),
         drawer_capability: None,
         blobs_capability: None,
+        actor_capability: None,
         idempotency_key: Some("outer-key".to_owned()),
         config_doc: None,
         config_capability: None,

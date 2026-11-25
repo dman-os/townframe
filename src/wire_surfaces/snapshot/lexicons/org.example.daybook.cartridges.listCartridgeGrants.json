@@ -51,6 +51,9 @@
             "Admin"
           ],
           "type": "string"
+        },
+        "privileged": {
+          "type": "boolean"
         }
       },
       "type": "object"
