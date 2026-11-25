@@ -541,7 +541,7 @@ impl<H: HttpTransport> Caller<H> {
         Ok(())
     }
 
-    /// Includes a part (a worktree, a git repository or an agent session datum, named by its
+    /// Includes a part (a worktree, a git repository, an agent session or a GitHub pull request datum, named by its
     /// document id, not `self`) in an intxt: writes the entry for it, appends the entry to the
     /// body, and shares the part's document. The entry's slot is the part's own identity (the
     /// worktree's UUID, the repository document, the harness's session id), so two writers
@@ -590,9 +590,22 @@ impl<H: HttpTransport> Caller<H> {
                     extra: Default::default(),
                 }),
             )
+        } else if tag == work::GithubPull::ID {
+            (
+                // The same pull request has one entry whoever adds it: its slot is the pull
+                // request's own, `<owner>/<repo>/<number>`.
+                key(
+                    work::GithubPullEntry::ID,
+                    &String::from_utf8_lossy(part.key().slot_bytes()),
+                )?,
+                to_value(&work::GithubPullEntry {
+                    pull: part.clone(),
+                    extra: Default::default(),
+                }),
+            )
         } else {
             return Err(IntxtError::Invalid(format!(
-                "`{tag}` is not a part an intxt includes: name a worktree, gitRepo or agentSession datum"
+                "`{tag}` is not a part an intxt includes: name a worktree, gitRepo, agentSession or githubPull datum"
             )));
         };
         let [included] = self

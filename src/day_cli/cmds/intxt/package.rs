@@ -1132,6 +1132,7 @@ impl<'a> Packaging<'a> {
         let mut changes = Vec::new();
         let mut refs = Vec::new();
         let mut sessions = Vec::new();
+        let mut pulls = Vec::new();
         let mut others = Vec::new();
         for (entry, value) in &view.entries {
             let id = shown(&ids, &entry.to_string());
@@ -1182,6 +1183,22 @@ impl<'a> Packaging<'a> {
                     None => "(document not synced)".to_owned(),
                 };
                 sessions.push(format!("  {id}  {slot}  {described}"));
+            } else if tag == work::GithubPullEntry::ID {
+                let included: work::GithubPullEntry = serde_json::from_value(value.clone())?;
+                let pull = match included.pull.document() {
+                    ReferenceDocId::Concrete(doc) => {
+                        self.caller.try_read(doc, included.pull.key()).await?.1
+                    }
+                    ReferenceDocId::SelfDoc => None,
+                };
+                let described = match pull {
+                    Some(pull) => {
+                        let pull: work::GithubPull = serde_json::from_value(pull)?;
+                        format!("{:?}  {}", pull.state, pull.title)
+                    }
+                    None => "(document not synced)".to_owned(),
+                };
+                pulls.push(format!("  {id}  {slot}  {described}"));
             } else {
                 others.push(format!("  {id}  {entry}"));
             }
@@ -1195,6 +1212,7 @@ impl<'a> Packaging<'a> {
             ("jj changes", changes),
             ("tracked refs", refs),
             ("sessions", sessions),
+            ("pull requests", pulls),
             ("other", others),
         ] {
             if lines.is_empty() {

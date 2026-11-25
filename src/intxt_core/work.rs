@@ -296,6 +296,44 @@ pub struct RewrittenFrom {
     pub extra: Extra,
 }
 
+/// Whether a pull request is open, closed unmerged, or merged.
+#[macros::datum(open_string)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PullState {
+    #[serde(rename = "open")]
+    Open,
+    #[serde(rename = "closed")]
+    Closed,
+    #[serde(rename = "merged")]
+    Merged,
+    #[datum(other)]
+    Unknown(String),
+}
+
+/// A GitHub pull request as `day x intxt github pull` imported it
+/// (`githubPull/<owner>/<repo>/<number>`), in the repository's GitHub document. A snapshot: the
+/// importer overwrites it when `updatedAt` moves.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubPull {
+    pub title: String,
+    /// Markdown, as written; empty when the PR has no description.
+    pub body: String,
+    pub state: PullState,
+    /// The head branch's name, and the base branch's.
+    pub head: String,
+    pub base: String,
+    pub head_sha: String,
+    pub base_sha: String,
+    /// GitHub's `updated_at`.
+    pub updated_at: Timestamp,
+    /// The PR's page.
+    pub url: String,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
 /// A ref of one clone (`gitRef/<clone uuid>/<ref name>`). One writer: the clone's recorder.
 #[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -579,6 +617,18 @@ pub struct RepoEntry {
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeEntry {
     pub worktree: DatumReference,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// An intxt includes a GitHub pull request (`githubPullEntry/<owner>/<repo>/<number>`): the
+/// reference is the `githubPull` datum in the pull request's own document, which the intxt's
+/// drawer shares so everyone the intxt is shared with reads it.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubPullEntry {
+    pub pull: DatumReference,
     #[serde(flatten)]
     pub extra: Extra,
 }

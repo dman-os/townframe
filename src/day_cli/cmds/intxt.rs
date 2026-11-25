@@ -44,6 +44,7 @@
 //! of each.
 
 pub(crate) mod capture;
+mod github;
 pub(crate) mod package;
 mod record;
 pub(crate) mod review;
@@ -277,6 +278,11 @@ pub enum IntxtCommands {
         #[arg(long)]
         verbose: bool,
     },
+    /// Work with GitHub pull requests
+    Github {
+        #[command(subcommand)]
+        command: GithubCommands,
+    },
     /// Record an ACP session: run the agent command, passing everything through
     ///
     /// An ACP client (an editor) launches this in place of the agent, e.g. `day x intxt record --
@@ -295,9 +301,39 @@ pub enum IntxtCommands {
     },
 }
 
+/// What `day x intxt github` does.
+#[derive(Debug, clap::Subcommand)]
+pub enum GithubCommands {
+    /// Import a pull request onto the node, with your `gh` credentials
+    ///
+    /// Fetches the pull request with `gh api` (so `gh` must be installed and logged in) and
+    /// writes its title, description, state, branches, shas and update time into the node's
+    /// GitHub document for the repository, which a micro can read. Pulling again overwrites it
+    /// only when GitHub says the pull request changed. Prints the title and the intxts the
+    /// description names (a line `intxt: dtxt:datum:…` per intxt, as `day x intxt show` prints
+    /// under `link:`).
+    #[command(
+        after_long_help = "Examples:\n  day x intxt github pull dman-os/townframe#140\n  day x intxt github pull https://github.com/dman-os/townframe/pull/140"
+    )]
+    Pull {
+        /// `<owner>/<repo>#<number>`, or the pull request's URL
+        target: String,
+    },
+}
+
 pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
     match command {
         IntxtCommands::Record { thinking, agent } => record::run(agent, thinking).await,
+        IntxtCommands::Github {
+            command: GithubCommands::Pull { target },
+        } => {
+            with_packaging(async |packaging| {
+                packaging
+                    .github_pull(&mut std::io::stdout(), &target, github::fetch_with_gh)
+                    .await
+            })
+            .await
+        }
         IntxtCommands::Add {
             intxt,
             commits,

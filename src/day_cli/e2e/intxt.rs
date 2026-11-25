@@ -1300,3 +1300,137 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
     })
     .await;
 }
+
+/// `day x intxt github pull` with the fetch injected: the pull request lands in its own
+/// document in the node's github drawer (remembered in `<node dir>/intxt/github.json`),
+/// the printout names the intxts the description links, and pulling again overwrites the datum
+/// only when `updated_at` moved.
+#[tokio::test(flavor = "multi_thread")]
+async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
+    use crate::cmds::intxt::package::Packaging;
+    use big_cabinet_core::DocId;
+    use big_cabinet_core::datum::DatumMember;
+    use intxt_core::client::Caller;
+    use intxt_core::generic;
+    use intxt_core::work;
+    use serde_json::Value;
+    use service_utils_rs::RequestContext;
+
+    with_intxt_node(async |tmp, client| {
+        let node_root = tmp.path().join("node");
+        let packaging = Packaging::new(client, tmp.path(), &node_root);
+        let mut out = Vec::new();
+        let drawer = packaging
+            .create(&mut out, "Port the sync", None)
+            .await
+            .unwrap();
+        let link = generic::Intxt::reference(&drawer).to_string();
+        let answer = |title: &str, updated_at: &str| {
+            json!({
+                "title": title, "state": "open", "merged_at": null,
+                "body": format!("Part of the port.\n\nintxt: {link}\n"),
+                "head": {"ref": "feat/x", "sha": "4c1f0a"},
+                "base": {"ref": "main", "sha": "9a0e11"},
+                "updated_at": updated_at,
+                "html_url": "https://github.com/o/r/pull/12"
+            })
+        };
+        let pull = async |title: &str, updated_at: &str, target: &str| {
+            let mut out = Vec::new();
+            let canned = answer(title, updated_at);
+            packaging
+                .github_pull(&mut out, target, async |pull| {
+                    assert_eq!(
+                        (pull.owner.as_str(), pull.repo.as_str(), pull.number),
+                        ("o", "r", 12)
+                    );
+                    Ok(canned)
+                })
+                .await
+                .unwrap();
+            String::from_utf8(out).unwrap()
+        };
+
+        let first = pull("First title", "2026-11-17T10:00:00Z", "o/r#12").await;
+        assert!(
+            first.contains("o/r#12 \"First title\"") && first.contains("imported"),
+            "{first}"
+        );
+        assert!(first.contains("\"Port the sync\""), "{first}");
+        assert!(first.contains(&format!("link: {link}")), "{first}");
+
+        // The drawer and the pull request's own document are remembered, and hold the datum.
+        let state: Value =
+            serde_json::from_slice(&std::fs::read(node_root.join("intxt/github.json")).unwrap())
+                .unwrap();
+        let doc: DocId = state["pulls"]["o/r#12"].as_str().unwrap().parse().unwrap();
+        let caller = Caller::new(
+            client,
+            RequestContext::root(),
+            None,
+            "test-github".to_owned(),
+        );
+        let slot: big_cabinet_core::DatumKey =
+            format!("{}/o/r/12", work::GithubPull::ID).parse().unwrap();
+        let held = async || caller.read(&doc, &slot).await.unwrap().1;
+        let datum = held().await;
+        assert_eq!(datum["title"], "First title");
+        assert_eq!(datum["state"], "open");
+        assert_eq!(datum["headSha"], "4c1f0a");
+
+        // The intxt the description names includes it: an entry that references the pull
+        // request's document, which the intxt's drawer now lists.
+        assert!(first.contains("pull request added to it"), "{first}");
+        let entry_key: big_cabinet_core::DatumKey = format!("{}/o/r/12", work::GithubPullEntry::ID)
+            .parse()
+            .unwrap();
+        let entry = caller.read(&drawer, &entry_key).await.unwrap().1;
+        assert_eq!(
+            entry["pull"],
+            format!("dtxt:datum:{doc}/{}/o/r/12", work::GithubPull::ID)
+        );
+        let drawers = caller
+            .call(big_cabinet_core::drawer::protocol::ListDocDrawers {
+                doc_id: doc.clone(),
+            })
+            .await
+            .unwrap()
+            .drawers;
+        assert!(
+            drawers.iter().any(|listed| listed.drawer_id == drawer),
+            "{drawers:?}"
+        );
+
+        // The same `updated_at`: nothing is written, whatever else the answer says. A URL names
+        // the same pull request.
+        let again = pull(
+            "Edited title",
+            "2026-11-17T10:00:00Z",
+            "https://github.com/o/r/pull/12",
+        )
+        .await;
+        assert!(again.contains("unchanged"), "{again}");
+        assert_eq!(held().await["title"], "First title");
+        // A newer `updated_at` overwrites it, in the same document.
+        let newer = pull("Edited title", "2026-11-17T12:00:00Z", "o/r#12").await;
+        assert!(newer.contains("imported"), "{newer}");
+        assert!(newer.contains("pull request already in it"), "{newer}");
+        assert_eq!(held().await["title"], "Edited title");
+        let state: Value =
+            serde_json::from_slice(&std::fs::read(node_root.join("intxt/github.json")).unwrap())
+                .unwrap();
+        assert_eq!(state["pulls"]["o/r#12"], doc.to_string());
+
+        // A run that lost `github.json` creates the document under the same command and gets
+        // the first one back.
+        std::fs::remove_file(node_root.join("intxt/github.json")).unwrap();
+        let recovered = pull("Edited again", "2026-11-17T13:00:00Z", "o/r#12").await;
+        assert!(recovered.contains("imported"), "{recovered}");
+        let state: Value =
+            serde_json::from_slice(&std::fs::read(node_root.join("intxt/github.json")).unwrap())
+                .unwrap();
+        assert_eq!(state["pulls"]["o/r#12"], doc.to_string());
+        assert_eq!(held().await["title"], "Edited again");
+    })
+    .await;
+}
