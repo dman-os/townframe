@@ -17,6 +17,9 @@ pub fn NavButtonSpecimens() -> Element {
                 NavButton { kind: NavButtonKind::Sidebar, onclick: move |()| presses += 1 }
                 NavButton { kind: NavButtonKind::HideSidebar, onclick: move |()| presses += 1 }
             }
+            Row { label: "hide, with the app mark (bars on hover)".to_string(),
+                NavButton { kind: NavButtonKind::HideSidebar, mark: "M", onclick: move |()| presses += 1 }
+            }
             Row { label: "back".to_string(),
                 NavButton { kind: NavButtonKind::Back, onclick: move |()| presses += 1 }
             }

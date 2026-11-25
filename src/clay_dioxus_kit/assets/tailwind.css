@@ -1926,8 +1926,30 @@
     rotate: -135deg;
   }
   .ct-nav-button[data-kind="sidebar"] [data-part="icon"] {
+    display: grid;
+    place-items: center;
+  }
+  .ct-nav-button[data-kind="sidebar"] [data-part="icon"] > * {
+    grid-area: 1 / 1;
+  }
+  .ct-nav-button[data-kind="sidebar"] [data-part="bars"] {
+    display: flex;
     flex-direction: column;
     gap: var(--ct-dimension-spacing-1);
+  }
+  .ct-nav-button[data-mark] [data-part="mark"], .ct-nav-button[data-mark] [data-part="bars"] {
+    transition: opacity var(--ct-motion-duration-fade);
+  }
+  .ct-nav-button[data-mark] [data-part="bars"], .ct-nav-button[data-mark]:is(:hover, :focus-visible) [data-part="mark"] {
+    opacity: 0;
+  }
+  .ct-nav-button[data-mark]:is(:hover, :focus-visible) [data-part="bars"] {
+    opacity: 1;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ct-nav-button[data-mark] [data-part="mark"], .ct-nav-button[data-mark] [data-part="bars"] {
+      transition: none;
+    }
   }
   .ct-nav-button[data-kind="sidebar"] [data-part="bar"] {
     width: 1.25rem;

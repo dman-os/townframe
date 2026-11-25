@@ -2,9 +2,10 @@
 //! button that changes meaning; [`NavRack`](crate::NavRack) groups the ones a host places
 //! together.
 //!
-//! Parts: `icon` (decorative, `aria-hidden`), which holds the `glyph` of back and
-//! forward or the three `bar`s of the sidebar toggle. State: `data-kind` (`sidebar`|`back`|
-//! `forward`) and `data-disabled`. The glyphs are drawn by the stylesheet from boxes in
+//! Parts: `icon` (decorative, `aria-hidden`), which holds the `glyph` of back and forward, or the
+//! sidebar toggle's `bars` (three `bar`s) preceded by its `mark` when it is given one: the mark
+//! shows at rest and the bars on hover and keyboard focus, crossfaded by the stylesheet. State:
+//! `data-kind` (`sidebar`|`back`|`forward`), `data-mark` and `data-disabled`. The glyphs are drawn by the stylesheet from boxes in
 //! `currentColor`; the accessible name is the kind's label, so the icon adds none.
 //!
 //! # Renderer limits
@@ -56,6 +57,7 @@ impl NavButtonKind {
 pub fn NavButton(
     kind: NavButtonKind,
     #[props(default)] disabled: bool,
+    #[props(into, default)] mark: Option<String>,
     onclick: EventHandler<()>,
 ) -> Element {
     rsx! {
@@ -65,6 +67,7 @@ pub fn NavButton(
             "aria-label": kind.label(),
             "data-kind": kind.data_kind(),
             "data-disabled": if disabled { Some("") } else { None },
+            "data-mark": if mark.is_some() { Some("") } else { None },
             disabled,
             onclick: move |_| {
                 if !disabled {
@@ -74,8 +77,13 @@ pub fn NavButton(
             span { "data-part": "icon", "aria-hidden": "true",
                 match kind {
                     NavButtonKind::Sidebar | NavButtonKind::HideSidebar => rsx! {
-                        for index in 0..3 {
-                            span { key: "{index}", "data-part": "bar" }
+                        if let Some(mark) = mark.as_ref() {
+                            span { "data-part": "mark", "{mark}" }
+                        }
+                        span { "data-part": "bars",
+                            for index in 0..3 {
+                                span { key: "{index}", "data-part": "bar" }
+                            }
                         }
                     },
                     NavButtonKind::Back | NavButtonKind::Forward => rsx! {
@@ -141,12 +149,8 @@ mod tests {
     #[test]
     fn the_button_names_its_vocabulary_and_draws_its_glyph_from_parts() {
         for (kind, data_kind, glyph) in [
-            (NavButtonKind::Sidebar, "sidebar", vec!["bar", "bar", "bar"]),
-            (
-                NavButtonKind::HideSidebar,
-                "sidebar",
-                vec!["bar", "bar", "bar"],
-            ),
+            (NavButtonKind::Sidebar, "sidebar", vec!["bars"]),
+            (NavButtonKind::HideSidebar, "sidebar", vec!["bars"]),
             (NavButtonKind::Back, "back", vec!["glyph"]),
             (NavButtonKind::Forward, "forward", vec!["glyph"]),
         ] {
@@ -162,6 +166,20 @@ mod tests {
             // The glyph adds no accessible name of its own.
             assert_eq!(page.text(button), "");
         }
+    }
+
+    #[test]
+    fn a_mark_rides_in_the_icon_before_the_bars_and_adds_no_name() {
+        fn app(_: ()) -> Element {
+            rsx! {
+                NavButton { kind: NavButtonKind::HideSidebar, mark: "M", onclick: |()| {} }
+            }
+        }
+        let page = Page::with_props(app, ());
+        let button = page.by_role("button", "Hide sidebar");
+        assert_eq!(page.attr(button, "data-mark").as_deref(), Some(""));
+        let icon = page.children(button)[0];
+        assert_eq!(page.parts(icon), ["mark", "bars"]);
     }
 
     #[test]
