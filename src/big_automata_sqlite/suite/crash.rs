@@ -1,6 +1,5 @@
 //! What SQLite adds to the laws: interrupted writes, reopening a file, migrations.
 
-use big_automata::driver::PeerCursors;
 use big_automata::part_store::Generation;
 use big_automata::part_store::LogSelector;
 use big_automata::part_store::PartStoreRead;
@@ -226,42 +225,6 @@ fn the_generation_and_its_mints_survive_reopening() -> Res<()> {
         let store = Store::open(open_file(&path)).await?;
         assert_eq!(store.generation().await?, minted, "a mint is durable");
         assert_eq!(summarized(&store).await?, minted);
-        Ok(())
-    })
-}
-
-/// A file made before generations (001 alone, with a log and an old-shape cursor row) is
-/// upgraded in place: the log is kept, the store is given a generation that then survives
-/// reopening, and the cursor rows without a generation are dropped.
-#[test]
-fn a_file_from_before_generations_is_upgraded_in_place() -> Res<()> {
-    block_on(async {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("parts.sqlite");
-        let old = RUNTIME.database(&path, &MIGRATIONS[..1], MIGRATION_TABLE);
-        old.migrate().await?;
-        let tx = old.begin_write().await?;
-        tx.execute_batch(
-            "UPDATE big_automata_meta SET rev = 7;
-             INSERT INTO big_automata_peer_cursors (peer, backend, part_key, cursor)
-             VALUES (x'01', 'main', x'02', 5);",
-        )
-        .await?;
-        tx.commit().await?;
-        drop(old);
-
-        let store = Store::open(open_file(&path)).await?;
-        assert_eq!(RevSource::latest_rev(&store).await?, 7, "the log is kept");
-        let upgraded = store.generation().await?;
-        assert_ne!(upgraded, Generation::default());
-        drop(store);
-        let store = Store::open(open_file(&path)).await?;
-        assert_eq!(store.generation().await?, upgraded);
-        let cursors = SqlitePeerCursors::new(open_file(&path));
-        let read = cursors
-            .read(&PeerKey::new(&[1]), "main", &[PartKey::new(&[2])])
-            .await?;
-        assert_eq!(read, vec![None], "an old cursor row is dropped");
         Ok(())
     })
 }

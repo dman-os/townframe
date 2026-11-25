@@ -1,13 +1,19 @@
 -- The part store. Keys (objects, parts, principals) are stored as order-preserving blobs: see
 -- `keys.rs`. Every table is keyed so that the reads of `PartStoreServe` are index ranges.
 
--- One row: the rev of the last committed transaction that stamped anything.
+-- One row: the rev of the last committed transaction that stamped anything, and the store's
+-- generation (see `big_automata::part_store::Generation`): the identity of this log, the 16
+-- bytes of a UUID. It is minted here, by the migration, so a database has a generation from
+-- the moment it has a log and no open ever has to decide whether to mint. `mint_generation`
+-- replaces it. A copy of the file carries it along, which is why a restore needs the
+-- operator's mint.
 CREATE TABLE big_automata_meta (
       id INTEGER PRIMARY KEY CHECK (id = 1)
     , rev INTEGER NOT NULL
+    , generation BLOB NOT NULL CHECK (length(generation) = 16)
 ) STRICT;
 
-INSERT INTO big_automata_meta (id, rev) VALUES (1, 0);
+INSERT INTO big_automata_meta (id, rev, generation) VALUES (1, 0, randomblob(16));
 
 CREATE TABLE big_automata_parts (
       part_key BLOB PRIMARY KEY
@@ -85,13 +91,14 @@ CREATE TABLE big_automata_buckets (
     , PRIMARY KEY (part_key, buck_id)
 ) STRICT, WITHOUT ROWID;
 
--- The driver's `PeerCursors`. `generation` is room for the per-store generation id that will
--- be stored beside each cursor; nothing reads or writes it yet.
+-- The driver's `PeerCursors`, which stores a `PeerCursor`: the rev and the generation of the
+-- peer's log it is a position in, together and both required. Last-write-wins: a write
+-- replaces the row whatever its rev or generation.
 CREATE TABLE big_automata_peer_cursors (
       peer BLOB NOT NULL
     , backend TEXT NOT NULL
     , part_key BLOB NOT NULL
     , cursor INTEGER NOT NULL
-    , generation BLOB
+    , generation BLOB NOT NULL CHECK (length(generation) = 16)
     , PRIMARY KEY (peer, backend, part_key)
 ) STRICT, WITHOUT ROWID;

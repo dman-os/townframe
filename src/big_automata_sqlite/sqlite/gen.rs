@@ -6,7 +6,6 @@ pub const MIGRATION_TABLE: &str = "_big_automata_sqlite_migrations";
 
 pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_init.sql", sql: include_str!("migrations/001_init.sql") },
-    Migration { version: 2, name: "002_generation.sql", sql: include_str!("migrations/002_generation.sql") },
 ];
 
 pub const ACCESS_PERMITS_SQL: &str = include_str!("queries/access_permits.sql");
