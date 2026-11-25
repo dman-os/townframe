@@ -4,6 +4,10 @@ Status: direction from the operator, not yet designed. Source research:
 the outbox research report (big_automata lane scratchpad), section 4, reading PR #117
 (`feat/native-wflow`) and the wflow crates on that branch.
 
+Owner: the big_automata lane
+Scope: `src/big_automata` walkers (`durable_outbox`) and the wflow runner they would launch jobs on
+Updated: 2026-11-25
+
 ## The direction
 
 Walkers (the durable outbox, and later the big_repo/daybook workers built on okv) keep owning

@@ -14,17 +14,6 @@ features = ["automerge"]
 required_features = []
 default_features = true
 
-# Baseline debt present when the crate first got a guardrail contract (2026-11-18). The
-# function-length item sits in `cfg(any())`-disabled port code.
-[[exemptions]]
-code = "ERROR_FN_LENGTH"
-path = "src/big_automata/sync/tasks/decide_peer_strat.rs"
-symbol = "module::DecidePeerStrategyTask::run_run"
-ceiling = 181
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: copied from big_sync_core with the port, disabled until it compiles"
-reference = "docs/scratch/big-automata-port-ledger.md"
-
 [[exemptions]]
 code = "ERROR_GLOB_EXPORT"
 path = "src/big_automata/lib.rs"
