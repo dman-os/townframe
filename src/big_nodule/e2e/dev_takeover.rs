@@ -13,7 +13,9 @@ use super::init::with_requests;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::Digest;
+use big_cartridges_core::config::Component;
 use big_cartridges_core::example_cartridge;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
 use big_cartridges_core::request::Necessity;
 use big_dispatch::Operation;
 use big_dispatch::Provider;
@@ -25,8 +27,6 @@ use big_nodule_core::inventory::FilledBy;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesError;
 use big_nodule_core::protocol::SetNoduleDevTakeover;
-use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleMethodGrants;
 use big_nodule_core::providers::LockedProvider;
 use big_nodule_core::providers::RequestStatus;
 use std::sync::Arc;
@@ -199,19 +199,15 @@ async fn an_identical_request_keeps_its_grant_and_a_new_one_is_ungranted_until_c
     assert_eq!(record.readiness, Readiness::NeedsConfiguration);
     // Naming the added operation is the consent, and makes the slot ready.
     let record = node
-        .call(
-            node.operator(),
-            SetNoduleMethodGrants {
-                cartridge_id: id(BETA),
-                methods: DispatchScope {
-                    operations: [MORE.to_owned()].into(),
-                    authorities: ["org.example.remote".to_owned()].into(),
-                    ..Default::default()
-                },
+        .set_methods(
+            BETA,
+            DispatchScope {
+                operations: [MORE.to_owned()].into(),
+                authorities: ["org.example.remote".to_owned()].into(),
+                ..Default::default()
             },
         )
-        .await
-        .unwrap();
+        .await;
     assert_eq!(record.readiness, Readiness::Ready);
     assert_eq!(
         record.methods.unwrap().desired.operations,
@@ -261,8 +257,9 @@ async fn a_dev_build_enabled_on_its_own_cannot_take_over_a_slot_and_the_reverse(
     let enable = |cartridge_id: &str| {
         node.call(
             operator,
-            SetNoduleEnabled {
+            SetCartridgeEnabled {
                 cartridge_id: id(cartridge_id),
+                component: Component::Nodule,
                 enabled: true,
             },
         )

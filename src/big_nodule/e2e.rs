@@ -19,6 +19,7 @@ use big_cabinet::SchemaRepo;
 use big_cabinet::drawer::access::DrawerWorker;
 use big_cabinet::index::Indexes;
 use big_cabinet_core::DatumKey;
+use big_cabinet_core::DatumPin;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
@@ -29,6 +30,8 @@ use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
+use big_cabinet_core::doc::DatumRead;
+use big_cabinet_core::doc::DatumsRead;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::MintDocCapability;
@@ -37,6 +40,7 @@ use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::doc::WriteReceipt;
 use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::EntryAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
@@ -45,17 +49,29 @@ use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Contribution;
 use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::config::CartridgeInstall;
+use big_cartridges_core::config::Component;
+use big_cartridges_core::config::GrantBody;
+use big_cartridges_core::config::GrantKey;
 use big_cartridges_core::example_cartridge;
+use big_cartridges_core::protocol::CartridgeInstallRecord;
+use big_cartridges_core::protocol::CartridgesError;
+use big_cartridges_core::protocol::ClearCartridgeConfig;
+use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::ListCartridgeInstalls;
+use big_cartridges_core::protocol::ObserveCartridgeInstalls;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
+use big_cartridges_core::protocol::SetCartridgeGrant;
+use big_cartridges_core::protocol::UninstallCartridge;
+use big_cartridges_core::registry::version_key;
+use big_cartridges_core::registry::version_pin;
+use big_cartridges_core::test_support::sign_as_example;
 use big_dispatch::Dispatch;
 use big_dispatch::DispatchConfig;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::MintDispatchCapability;
 use big_dispatch_core::Readiness;
-use big_nodule_core::Config;
 use big_nodule_core::Nodule;
-use big_nodule_core::config::NoduleSettings;
-use big_nodule_core::protocol::AdmitNodule;
-use big_nodule_core::protocol::ConfigureNodule;
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::ListNodules;
 use big_nodule_core::protocol::MintNoduleCapability;
@@ -65,12 +81,10 @@ use big_nodule_core::protocol::NoduleScope;
 use big_nodule_core::protocol::NodulesError;
 use big_nodule_core::protocol::NodulesMessage;
 use big_nodule_core::protocol::NodulesProtocol;
-use big_nodule_core::protocol::SetNoduleDrawerGrants;
-use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::UninstallNodule;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::Storage;
+use futures::StreamExt;
 use indexmap::IndexMap;
 use irpc::Channels;
 use irpc::WithChannels;
@@ -103,8 +117,8 @@ mod schemas;
 const NODULES_PATH: &str = "nodules";
 const NOTE: &str = "org.example.note";
 
-/// A package whose nodule declares one record lexicon and, when `settings` is set, a config
-/// schema with one boolean `thumbnails` setting defaulting to `true`.
+/// A package whose nodule declares one record lexicon and, when `settings` is set, one settings
+/// datum with a boolean `thumbnails` member.
 fn cartridge(id: &str, version: &str, settings: bool) -> Cartridge {
     let nodule_id = format!("org.example.{}", id.rsplit('/').next().unwrap());
     let mut nodule = Nodule::default();
@@ -130,11 +144,7 @@ fn cartridge(id: &str, version: &str, settings: bool) -> Cartridge {
                 }
             }
         })));
-        nodule.config = Some(Config {
-            schema: format!("{nodule_id}.settings"),
-            defaults: Some(settings_of(true)),
-            extra: Default::default(),
-        });
+        nodule.settings = vec![format!("{nodule_id}.settings")];
     }
     let mut cartridge = Cartridge::new(id.parse().unwrap(), version.parse().unwrap());
     cartridge.authority = Some(nodule_id);
@@ -152,17 +162,12 @@ fn lexicon(value: Value) -> IndexMap<String, Value> {
     serde_json::from_value(value).unwrap()
 }
 
-fn settings_of(thumbnails: bool) -> IndexMap<String, Value> {
-    [("thumbnails".to_owned(), json!(thumbnails))]
-        .into_iter()
-        .collect()
-}
-
 /// The schemas the nodule config document and its test notes need.
 fn test_schemas() -> Arc<SchemaRepo> {
     Arc::new(
         SchemaRepo::open([
             crate::schema_group(),
+            big_cartridges::schema_group(),
             blob_schemas(),
             SchemaRegistrationGroup::new(
                 None,
@@ -229,6 +234,10 @@ struct Node {
     drawers_stop: StopToken,
     drawers_actor: OpenedActor,
     nodules_actor: OpenedActor,
+    /// Where the pinned versions live (a registry drawer, as `big_node` creates it) and where
+    /// the cartridge config documents live (the shared config drawer the service creates).
+    registry_drawer: DrawerId,
+    shared_config_drawer: DrawerId,
     docs: DocsRepo,
     drawers: Drawers,
     sql: TestDb,
@@ -364,11 +373,12 @@ async fn node_with_takeover(
     let (drawers, drawers_stop) = big_cabinet::boot_drawers(DrawerConfig { worker: &worker })
         .await
         .expect("drawers boot");
-    grant_drawer_admin(
+    let (registry_drawer, shared_config_drawer) = boot_config_drawers(
         &drawers,
         &drawers_actor,
-        &drawers.local().config_id,
-        nodules_actor.actor.actor_id,
+        &drawer_access,
+        &nodules_actor,
+        &sql,
     )
     .await;
     let dispatch_authority =
@@ -378,6 +388,8 @@ async fn node_with_takeover(
         &docs,
         &drawers,
         &nodules_actor,
+        &registry_drawer,
+        &shared_config_drawer,
         &dispatch,
         dispatch_authority,
         &sql,
@@ -399,6 +411,8 @@ async fn node_with_takeover(
         drawers_stop,
         drawers_actor,
         nodules_actor,
+        registry_drawer,
+        shared_config_drawer,
         docs,
         drawers,
         sql,
@@ -413,11 +427,60 @@ async fn node_with_takeover(
     }
 }
 
-async fn grant_drawer_admin(
+/// The drawers the nodule service works in, as `big_node` boots them: the node's config drawer
+/// (Admin to the service), the registry drawer whose versions installs pin (Read), and the shared
+/// config drawer the service creates for the cartridge config documents. Returns the last two.
+async fn boot_config_drawers(
+    drawers: &Drawers,
+    drawers_actor: &OpenedActor,
+    drawer_access: &PolicyAccess,
+    nodules_actor: &OpenedActor,
+    sql: &TestDb,
+) -> (DrawerId, DrawerId) {
+    grant_drawer(
+        drawers,
+        drawers_actor,
+        &drawers.local().config_id,
+        nodules_actor.actor.actor_id,
+        DrawerAccess::Admin,
+    )
+    .await;
+    let registry_drawer =
+        big_cartridges::ensure_registry_drawer(big_cartridges::RegistryDrawerConfig {
+            drawers,
+            actor: drawers_actor,
+            access: drawer_access,
+            sql: (**sql).clone(),
+        })
+        .await
+        .expect("registry drawer");
+    grant_drawer(
+        drawers,
+        drawers_actor,
+        &registry_drawer,
+        nodules_actor.actor.actor_id,
+        DrawerAccess::Read,
+    )
+    .await;
+    let shared_config_drawer =
+        crate::ensure_shared_config_drawer(crate::SharedConfigDrawerConfig {
+            drawers,
+            actor: nodules_actor,
+            access: drawer_access,
+            sql: (**sql).clone(),
+        })
+        .await
+        .expect("shared config drawer");
+    (registry_drawer, shared_config_drawer)
+}
+
+/// The drawers actor, as the drawer's owner, grants `access` on `drawer_id` to `subject_id`.
+async fn grant_drawer(
     drawers: &Drawers,
     grantor: &OpenedActor,
     drawer_id: &DrawerId,
     subject_id: big_cabinet_core::dmeta::Uuid7,
+    access: DrawerAccess,
 ) {
     let cap = drawers
         .client
@@ -443,7 +506,7 @@ async fn grant_drawer_admin(
                 capability: cap.capability_id,
                 drawer_id: drawer_id.clone(),
                 subject_id,
-                access: DrawerAccess::Admin,
+                access,
             },
         )
         .await
@@ -459,6 +522,8 @@ async fn boot_nodules(
     docs: &DocsRepo,
     drawers: &Drawers,
     nodules_actor: &OpenedActor,
+    registry_drawer: &DrawerId,
+    shared_config_drawer: &DrawerId,
     dispatch: &Dispatch,
     dispatch_authority: CapId,
     sql: &TestDb,
@@ -476,6 +541,8 @@ async fn boot_nodules(
         docs: docs.client.clone(),
         drawers: drawers.client.clone(),
         config_drawer: drawers.local().config_id.clone(),
+        registry_drawer: registry_drawer.clone(),
+        shared_config_drawer: shared_config_drawer.clone(),
         actor: nodules_actor.clone(),
         actor_path: NODULES_PATH.into(),
         namespace,
@@ -530,11 +597,54 @@ impl Node {
             .unwrap()
     }
 
-    /// Waits for the nodule service to reconcile the document at `receipt`'s heads.
+    /// Writes `set` straight into the cartridge's config document, past the nodule service.
+    async fn write_cartridge_datums(
+        &self,
+        cartridge_id: &str,
+        set: BTreeMap<DatumKey, Value>,
+    ) -> WriteReceipt {
+        let doc_id = self.install_of(cartridge_id).await.config_doc;
+        let capability = self
+            .docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                self.operator().metadata(),
+                MintDocCapability {
+                    scope: DocScope {
+                        write: BTreeSet::from([doc_id.clone()]),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+            .unwrap()
+            .capability_id;
+        self.docs
+            .client
+            .call(
+                RequestContext::root(),
+                WriteDatums {
+                    capability,
+                    command: None,
+                    doc_id,
+                    mode: WriteMode::AtCurrent,
+                    set,
+                    remove: BTreeSet::new(),
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Waits for the nodule service to reconcile the node's config document at `receipt`'s heads.
+    /// The heads a record observes are the node document's, then each cartridge document's.
     async fn reconciled_at(&self, receipt: &WriteReceipt, cartridge_id: &str) -> NoduleRecord {
         loop {
             let record = self.get(self.operator(), cartridge_id).await.unwrap();
-            if record.observed_heads == receipt.heads {
+            if record.observed_heads.starts_with(&receipt.heads) {
                 break record;
             }
             tokio::task::yield_now().await;
@@ -555,6 +665,8 @@ impl Node {
             &self.docs,
             &self.drawers,
             &self.nodules_actor,
+            &self.registry_drawer,
+            &self.shared_config_drawer,
             &self.dispatch,
             self.dispatch_authority,
             &self.sql,
@@ -587,13 +699,9 @@ impl Node {
         Authorization::identity(self.authority.root)
     }
 
-    async fn call<P>(
-        &self,
-        authorization: Authorization,
-        params: P,
-    ) -> Result<P::Output, NodulesError>
+    async fn call<P>(&self, authorization: Authorization, params: P) -> Result<P::Output, P::Error>
     where
-        P: Method<Output: method_core::Wire, Error = NodulesError>,
+        P: Method<Output: method_core::Wire>,
         NodulesProtocol: From<Envelope<P>>,
         NodulesMessage: From<WithChannels<Envelope<P>, NodulesProtocol>>,
         Envelope<P>: Channels<NodulesProtocol, Tx = Reply<P>, Rx = NoReceiver>,
@@ -608,19 +716,232 @@ impl Node {
             })
     }
 
+    /// Writes `cartridge` (signed as the example namespace when unsigned) as the version datum
+    /// of a new document in the registry drawer, past the registry service, and returns the pin
+    /// of it at the heads it was written at.
+    async fn publish(&self, cartridge: Cartridge) -> DatumPin {
+        let cartridge = if cartridge.signature.is_some() {
+            cartridge
+        } else {
+            sign_as_example(cartridge)
+        };
+        let placement = format!("drawer {}", self.registry_drawer);
+        let capability = self
+            .docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                self.operator().metadata(),
+                MintDocCapability {
+                    scope: DocScope {
+                        create: BTreeSet::from([placement.clone()]),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+            .expect("a capability to create registry documents")
+            .capability_id;
+        let receipt = self
+            .docs
+            .client
+            .call(
+                RequestContext::root(),
+                CreateDoc {
+                    capability,
+                    command: CommandId::try_from(format!(
+                        "version {}",
+                        big_cabinet_core::dmeta::Uuid7::new()
+                    ))
+                    .unwrap(),
+                    placement,
+                    datums: BTreeMap::from([(
+                        version_key(&cartridge.version),
+                        serde_json::to_value(&cartridge).unwrap(),
+                    )]),
+                },
+            )
+            .await
+            .expect("a registry document for the version");
+        version_pin(receipt.doc_id, &cartridge.version, receipt.heads)
+    }
+
+    /// Installs `cartridge` as `authorization`.
+    async fn install_cartridge(
+        &self,
+        authorization: Authorization,
+        cartridge: Cartridge,
+    ) -> Result<CartridgeInstallRecord, CartridgesError> {
+        let pin = self.publish(cartridge).await;
+        self.call(authorization, InstallCartridge { cartridge: pin })
+            .await
+    }
+
+    /// Installs `cartridge` as `authorization` and reports its nodule as it stands.
     async fn admit(
         &self,
         authorization: Authorization,
         cartridge: Cartridge,
-    ) -> Result<NoduleRecord, NodulesError> {
+    ) -> Result<NoduleRecord, CartridgesError> {
+        let installed = self.install_cartridge(authorization, cartridge).await?;
+        // The caller may not read the nodule it just installed (a handle minted with `admit` only).
+        Ok(self
+            .get(self.operator(), &installed.cartridge_id.to_string())
+            .await
+            .expect("an installed cartridge's nodule"))
+    }
+
+    /// The install row of `cartridge_id`.
+    async fn install_of(&self, cartridge_id: &str) -> CartridgeInstall {
+        self.call(self.operator(), ListCartridgeInstalls {})
+            .await
+            .unwrap()
+            .installs
+            .into_iter()
+            .find(|record| record.cartridge_id == id(cartridge_id))
+            .expect("an installed cartridge")
+            .install
+    }
+
+    /// Everything the cartridge's config document holds, read as the operator.
+    async fn cartridge_doc(&self, cartridge_id: &str) -> DatumsRead {
+        self.read_doc(self.install_of(cartridge_id).await.config_doc)
+            .await
+    }
+
+    /// Everything the document holds, read as the operator.
+    async fn read_doc(&self, doc_id: DocId) -> DatumsRead {
+        let capability = self
+            .docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                self.operator().metadata(),
+                MintDocCapability {
+                    scope: DocScope {
+                        read: BTreeSet::from([doc_id.clone()]),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+            .unwrap()
+            .capability_id;
+        self.docs
+            .client
+            .call(
+                RequestContext::root(),
+                ReadDatums {
+                    capability,
+                    doc_id,
+                    at: At::Current,
+                    datums: None,
+                    optimistic: false,
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn set_grant(
+        &self,
+        authorization: Authorization,
+        cartridge_id: &str,
+        grant: GrantKey,
+        value: Option<GrantBody>,
+    ) -> Result<(), CartridgesError> {
         self.call(
             authorization,
-            AdmitNodule {
-                cartridge,
-                drawers: None,
+            SetCartridgeGrant {
+                cartridge_id: id(cartridge_id),
+                component: Component::Nodule,
+                grant,
+                value,
             },
         )
         .await
+    }
+
+    /// Sets the nodule's drawer grants to exactly `drawers`: the other drawer grants it holds are
+    /// revoked and each of these is granted as a datum of its own.
+    async fn set_drawers(
+        &self,
+        cartridge_id: &str,
+        drawers: BTreeMap<DrawerId, DrawerAccess>,
+    ) -> NoduleRecord {
+        let held: Vec<GrantKey> = self
+            .cartridge_doc(cartridge_id)
+            .await
+            .datums
+            .keys()
+            .filter(|key| key.tag().as_str() == big_cartridges_core::config::NoduleGrant::ID)
+            .filter_map(|key| GrantKey::from_slot(key.slot_bytes()))
+            .filter(|grant| matches!(grant, GrantKey::Drawer(_)))
+            .collect();
+        for grant in held {
+            let GrantKey::Drawer(drawer) = &grant else {
+                unreachable!("filtered to drawer grants");
+            };
+            if !drawers.contains_key(drawer) {
+                self.set_grant(self.operator(), cartridge_id, grant, None)
+                    .await
+                    .unwrap();
+            }
+        }
+        for (drawer, access) in drawers {
+            self.set_grant(
+                self.operator(),
+                cartridge_id,
+                GrantKey::Drawer(drawer),
+                Some(GrantBody::drawer(access.into())),
+            )
+            .await
+            .unwrap();
+        }
+        self.get(self.operator(), cartridge_id).await.unwrap()
+    }
+
+    /// Sets the methods the nodule may invoke to exactly `methods`: the other method and
+    /// authority grants it holds are revoked and each of these is granted as a datum of its own.
+    async fn set_methods(&self, cartridge_id: &str, methods: DispatchScope) -> NoduleRecord {
+        let held: Vec<GrantKey> = self
+            .cartridge_doc(cartridge_id)
+            .await
+            .datums
+            .keys()
+            .filter(|key| key.tag().as_str() == big_cartridges_core::config::NoduleGrant::ID)
+            .filter_map(|key| GrantKey::from_slot(key.slot_bytes()))
+            .filter(|grant| !matches!(grant, GrantKey::Drawer(_)))
+            .collect();
+        let wanted: BTreeSet<GrantKey> = methods
+            .operations
+            .iter()
+            .cloned()
+            .map(GrantKey::Method)
+            .chain(methods.authorities.iter().cloned().map(GrantKey::Authority))
+            .collect();
+        for grant in held {
+            if !wanted.contains(&grant) {
+                self.set_grant(self.operator(), cartridge_id, grant, None)
+                    .await
+                    .unwrap();
+            }
+        }
+        for grant in wanted {
+            self.set_grant(
+                self.operator(),
+                cartridge_id,
+                grant,
+                Some(GrantBody::method(methods.privileged)),
+            )
+            .await
+            .unwrap();
+        }
+        self.get(self.operator(), cartridge_id).await.unwrap()
     }
 
     async fn get(
@@ -724,7 +1045,6 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
     assert_eq!(record.cartridge_id, id(example_cartridge!("photos")));
     assert!(!record.enabled);
     assert_eq!(record.readiness, Readiness::Disabled);
-    assert_eq!(record.config, Some(settings_of(true)));
     assert_eq!(record.error, None);
     assert!(!record.observed_heads.is_empty());
     assert_eq!(record.applied_heads.as_ref(), Some(&record.observed_heads));
@@ -740,38 +1060,22 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
     let enabled = node
         .call(
             operator,
-            SetNoduleEnabled {
+            SetCartridgeEnabled {
                 cartridge_id: id(example_cartridge!("photos")),
+                component: Component::Nodule,
                 enabled: true,
             },
         )
         .await
         .unwrap();
-    assert_eq!(enabled.readiness, Readiness::Ready);
-    let configured = node
-        .call(
-            operator,
-            ConfigureNodule {
-                cartridge_id: id(example_cartridge!("photos")),
-                settings: settings_of(false),
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(configured.config, Some(settings_of(false)));
-    assert!(matches!(
-        node.call(
-            operator,
-            ConfigureNodule {
-                cartridge_id: id(example_cartridge!("photos")),
-                settings: [("thumbnails".to_owned(), json!("no"))]
-                    .into_iter()
-                    .collect(),
-            }
-        )
-        .await,
-        Err(NodulesError::Rejected(_))
-    ));
+    assert!(enabled.install.nodule.is_some_and(|nodule| nodule.enabled));
+    assert_eq!(
+        node.get(operator, example_cartridge!("photos"))
+            .await
+            .unwrap()
+            .readiness,
+        Readiness::Ready
+    );
     node.admit(
         operator,
         cartridge(example_cartridge!("schema"), "0.1.0", false),
@@ -779,22 +1083,11 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
     .await
     .unwrap();
     assert!(matches!(
-        node.call(
-            operator,
-            ConfigureNodule {
-                cartridge_id: id(example_cartridge!("schema")),
-                settings: IndexMap::new(),
-            }
-        )
-        .await,
-        Err(NodulesError::NoConfigSchema(_))
-    ));
-    assert!(matches!(
         node.get(operator, example_cartridge!("missing")).await,
         Err(NodulesError::UnknownCartridge(_))
     ));
 
-    // An upgrade keeps the nodule's actor and the operator's settings.
+    // An upgrade keeps the nodule's actor and its enablement.
     let upgraded = node
         .admit(
             operator,
@@ -808,7 +1101,6 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
         actor.actor.actor_id
     );
     assert!(upgraded.enabled);
-    assert_eq!(upgraded.config, Some(settings_of(false)));
 
     node.restart_nodules().await.unwrap();
     let recovered = node
@@ -828,7 +1120,6 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
         .await
         .unwrap();
     assert!(!schema.enabled);
-    assert_eq!(schema.config, None);
     node.shutdown().await;
 }
 
@@ -870,8 +1161,9 @@ async fn an_enabled_cartridge_holds_its_authority_against_equal_and_nested_prefi
         let refused = node
             .call(
                 operator,
-                SetNoduleEnabled {
+                SetCartridgeEnabled {
                     cartridge_id: rival_id,
+                    component: Component::Nodule,
                     enabled: true,
                 },
             )
@@ -918,7 +1210,7 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
             cartridge(example_cartridge!("intruder"), "1.0.0", false)
         )
         .await,
-        Err(NodulesError::Denied)
+        Err(CartridgesError::Denied)
     );
     assert_eq!(node.list(bystander).await, Err(NodulesError::Denied));
     assert_eq!(
@@ -974,13 +1266,14 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
             cartridge(example_cartridge!("photos"), "1.1.0", true)
         )
         .await,
-        Err(NodulesError::Denied)
+        Err(CartridgesError::Denied)
     );
     assert!(
         node.call(
             photos_only,
-            SetNoduleEnabled {
+            SetCartridgeEnabled {
                 cartridge_id: id(example_cartridge!("photos")),
+                component: Component::Nodule,
                 enabled: true,
             }
         )
@@ -1027,25 +1320,46 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
         Err(NodulesError::Authority(_))
     ));
     assert_eq!(
-        node.call(
+        node.set_grant(
             photos_only,
-            SetNoduleDrawerGrants {
-                cartridge_id: id(example_cartridge!("schema")),
-                drawers: BTreeMap::new(),
-            }
+            example_cartridge!("schema"),
+            GrantKey::Drawer(node.drawers.local().present_id.clone()),
+            None
         )
         .await,
-        Err(NodulesError::Denied)
+        Err(CartridgesError::Denied)
     );
     assert_eq!(
         node.call(
             photos_only,
-            UninstallNodule {
+            UninstallCartridge {
                 cartridge_id: id(example_cartridge!("schema")),
             }
         )
         .await,
-        Err(NodulesError::Denied)
+        Err(CartridgesError::Denied)
+    );
+    assert_eq!(
+        node.call(
+            photos_only,
+            ClearCartridgeConfig {
+                cartridge_id: id(example_cartridge!("schema")),
+            }
+        )
+        .await,
+        Err(CartridgesError::Denied)
+    );
+    // The install rows a handle reads are its own cartridges'.
+    let rows = node
+        .call(photos_only, ListCartridgeInstalls {})
+        .await
+        .unwrap()
+        .installs;
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.cartridge_id.clone())
+            .collect::<Vec<_>>(),
+        vec![id(example_cartridge!("photos"))]
     );
     node.shutdown().await;
 }
@@ -1082,7 +1396,7 @@ async fn an_admit_scoped_handle_admits_only_its_own_cartridges() {
             cartridge(example_cartridge!("schema"), "0.1.0", false)
         )
         .await,
-        Err(NodulesError::Denied)
+        Err(CartridgesError::Denied)
     );
     node.admit(
         operator,
@@ -1096,7 +1410,7 @@ async fn an_admit_scoped_handle_admits_only_its_own_cartridges() {
             cartridge(example_cartridge!("schema"), "0.2.0", false)
         )
         .await,
-        Err(NodulesError::Denied)
+        Err(CartridgesError::Denied)
     );
     assert_eq!(
         node.get(operator, example_cartridge!("schema"))
@@ -1108,89 +1422,75 @@ async fn an_admit_scoped_handle_admits_only_its_own_cartridges() {
     node.shutdown().await;
 }
 
-/// `cartridge(.., true)` whose settings schema also requires a string `endpoint`, so settings written
-/// against the plain revision no longer conform to it.
-fn cartridge_requiring_endpoint(id: &str, version: &str) -> Cartridge {
+/// A package whose nodule lists a settings NSID its Lexicons do not declare, which admission
+/// refuses.
+fn cartridge_with_undeclared_settings(id: &str, version: &str) -> Cartridge {
     let mut cartridge = cartridge(id, version, true);
     let Some(Contribution::Nodule(contribution)) = cartridge.contributions.first_mut() else {
         panic!("test cartridges carry a nodule contribution");
     };
-    let settings = &mut contribution.description["lexicons"][1]["defs"]["main"];
-    settings["required"] = json!(["endpoint"]);
-    settings["properties"]["endpoint"] = json!({ "type": "string" });
-    contribution.description["config"]["defaults"]["endpoint"] = json!("https://example.org");
+    contribution.description["settings"] = json!(["org.example.photos.missing"]);
     cartridge
 }
 
 #[tokio::test]
-async fn an_upgrade_that_invalidates_settings_is_refused_and_repaired_without_losing_actor_or_grants()
- {
+async fn an_upgrade_that_fails_admission_is_rejected_and_a_good_one_keeps_actor_and_grants() {
     let node = node().await;
     let operator = node.operator();
     let present = node.drawers.local().present_id.clone();
-    grant_drawer_admin(
+    grant_drawer(
         &node.drawers,
         &node.drawers_actor,
         &present,
         node.nodules_actor.actor.actor_id,
+        DrawerAccess::Admin,
     )
     .await;
-    let v1 = node
-        .call(
-            operator,
-            AdmitNodule {
-                cartridge: cartridge(example_cartridge!("photos"), "1.0.0", true),
-                drawers: Some(BTreeMap::from([(present.clone(), DrawerAccess::Write)])),
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(v1.error, None);
-    assert!(v1.drawers[&present].granted);
-    node.call(
-        operator,
-        ConfigureNodule {
-            cartridge_id: id(example_cartridge!("photos")),
-            settings: settings_of(false),
-        },
-    )
-    .await
-    .unwrap();
-
-    // The upgrade is admitted; the nodule is refused because the saved settings lack `endpoint`.
-    let refused = node
+    let installed = node
         .admit(
             operator,
-            cartridge_requiring_endpoint(example_cartridge!("photos"), "2.0.0"),
+            cartridge(example_cartridge!("photos"), "1.0.0", true),
         )
         .await
         .unwrap();
-    assert_eq!(refused.version, Some("2.0.0".parse().unwrap()));
-    assert_eq!(refused.readiness, Readiness::Refused);
-    assert!(refused.error.as_deref().unwrap().contains("endpoint"));
-    assert_eq!(refused.config, Some(settings_of(false)));
-    assert_eq!(refused.actor, v1.actor, "the durable actor is kept");
-    // Existing reconcile semantics: a refused nodule is not Admitted, so its applied grants are
-    // retracted. The desired grants stay in config and return on repair.
-    assert!(refused.drawers.is_empty());
+    let v1 = node
+        .set_drawers(
+            example_cartridge!("photos"),
+            BTreeMap::from([(present.clone(), DrawerAccess::Write)]),
+        )
+        .await;
+    assert_eq!(v1.error, None);
+    assert!(v1.drawers[&present].granted);
+    assert_eq!(v1.actor, installed.actor);
 
-    let mut repaired = settings_of(false);
-    repaired.insert("endpoint".into(), json!("https://example.org"));
-    let record = node
-        .call(
+    // A version admission refuses is never pinned: the install keeps running 1.0.0.
+    assert!(matches!(
+        node.admit(
             operator,
-            ConfigureNodule {
-                cartridge_id: id(example_cartridge!("photos")),
-                settings: repaired.clone(),
-            },
+            cartridge_with_undeclared_settings(example_cartridge!("photos"), "2.0.0"),
+        )
+        .await,
+        Err(CartridgesError::Rejected(reason)) if reason.contains("org.example.photos.missing")
+    ));
+    assert_eq!(
+        node.get(operator, example_cartridge!("photos"))
+            .await
+            .unwrap(),
+        v1
+    );
+
+    // A good upgrade keeps the durable actor and the grants, which live in the config document.
+    let upgraded = node
+        .admit(
+            operator,
+            cartridge(example_cartridge!("photos"), "2.0.0", true),
         )
         .await
         .unwrap();
-    assert_eq!(record.error, None);
-    assert_eq!(record.readiness, Readiness::Disabled);
-    assert_eq!(record.config, Some(repaired));
-    assert_eq!(record.actor, v1.actor);
-    assert!(record.drawers[&present].granted);
+    assert_eq!(upgraded.version, Some("2.0.0".parse().unwrap()));
+    assert_eq!(upgraded.actor, v1.actor, "the durable actor is kept");
+    assert_eq!(upgraded.error, None);
+    assert!(upgraded.drawers[&present].granted);
     node.shutdown().await;
 }
 
@@ -1202,19 +1502,24 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
     let placement = format!("drawer {present}");
     let note_key: DatumKey = format!("{NOTE}/main").parse().unwrap();
 
-    // Admit with a desired grant on `present` before `nodules_actor` has Admin on `present`:
-    // the desired grant is persisted in config, but the binding is reported as blocked.
+    // Grant on `present` before `nodules_actor` has Admin on `present`: the desired grant is
+    // persisted in the cartridge's config document, but the binding is reported as blocked.
+    node.admit(
+        operator,
+        cartridge(example_cartridge!("photos"), "1.0.0", true),
+    )
+    .await
+    .unwrap();
     let blocked = node
-        .call(
-            operator,
-            AdmitNodule {
-                cartridge: cartridge(example_cartridge!("photos"), "1.0.0", true),
-                drawers: Some(BTreeMap::from([(present.clone(), DrawerAccess::Write)])),
-            },
+        .set_drawers(
+            example_cartridge!("photos"),
+            BTreeMap::from([(present.clone(), DrawerAccess::Write)]),
         )
-        .await
-        .unwrap();
-    assert_eq!(blocked.applied_heads, None);
+        .await;
+    assert_ne!(
+        blocked.applied_heads.as_ref(),
+        Some(&blocked.observed_heads)
+    );
     assert!(blocked.error.is_some());
     assert_eq!(
         blocked.drawers.get(&present),
@@ -1248,11 +1553,12 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
 
     // Once the operator grants `nodules_actor` Admin on `present`, reconciliation applies the
     // desired grant and the nodule actor can mint doc capabilities on `present`.
-    grant_drawer_admin(
+    grant_drawer(
         &node.drawers,
         &node.drawers_actor,
         &present,
         node.nodules_actor.actor.actor_id,
+        DrawerAccess::Admin,
     )
     .await;
     let applied = node
@@ -1311,15 +1617,11 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
     // Downgrading to Read retracts the Edit source capability (invalidating `create_cap`) and
     // leaves only Read access.
     let downgraded = node
-        .call(
-            operator,
-            SetNoduleDrawerGrants {
-                cartridge_id: id(example_cartridge!("photos")),
-                drawers: BTreeMap::from([(present.clone(), DrawerAccess::Read)]),
-            },
+        .set_drawers(
+            example_cartridge!("photos"),
+            BTreeMap::from([(present.clone(), DrawerAccess::Read)]),
         )
-        .await
-        .unwrap();
+        .await;
     assert_eq!(
         downgraded.drawers.get(&present),
         Some(&NoduleGrantStatus {
@@ -1386,11 +1688,12 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
         .unwrap();
     assert_eq!(after_restart, downgraded);
 
-    // Uninstalling removes the config datums and retracts the Read grant capability, while
-    // re-admitting the same cartridge reopens the same durable actor.
+    // Uninstalling removes the install datums and retracts the Read grant capability, while
+    // re-installing the same cartridge reopens the same durable actor and finds the grant
+    // the cartridge's config document kept.
     node.call(
         operator,
-        UninstallNodule {
+        UninstallCartridge {
             cartridge_id: id(example_cartridge!("photos")),
         },
     )
@@ -1432,11 +1735,19 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
             .actor_id,
         actor.actor.actor_id
     );
+    assert_eq!(
+        readmitted.drawers.get(&present),
+        Some(&NoduleGrantStatus {
+            desired: DrawerAccess::Read,
+            granted: true,
+            error: None,
+        })
+    );
     node.shutdown().await;
 }
 
 #[tokio::test]
-async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
+async fn invalid_imported_grants_are_refused_per_nodule_and_repairable() {
     let node = node().await;
     let operator = node.operator();
     node.admit(
@@ -1452,19 +1763,18 @@ async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
     .await
     .unwrap();
 
-    // Simulate an invalid imported settings datum written directly to the config drawer doc.
-    let bad_settings_key: DatumKey =
-        format!("{}/{}", NoduleSettings::ID, example_cartridge!("photos"))
-            .parse()
-            .unwrap();
+    // Simulate a grant datum that states a value its kind of grant does not take (an access level
+    // on a method grant), written straight into the cartridge's config document as a synced edit
+    // would land.
+    let bad_grant = GrantKey::Method("org.example.remote.ping".to_owned());
     let bad_receipt = node
-        .write_config_datums(BTreeMap::from([(
-            bad_settings_key,
-            json!({
-                "$type": NoduleSettings::ID,
-                "values": { "thumbnails": "not-a-bool" }
-            }),
-        )]))
+        .write_cartridge_datums(
+            example_cartridge!("photos"),
+            BTreeMap::from([(
+                bad_grant.datum_key(Component::Nodule),
+                json!({ "$type": big_cartridges_core::config::NoduleGrant::ID, "access": "Read" }),
+            )]),
+        )
         .await;
 
     let refused = loop {
@@ -1472,13 +1782,23 @@ async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
             .get(operator, example_cartridge!("photos"))
             .await
             .unwrap();
-        if record.observed_heads == bad_receipt.heads {
+        if bad_receipt
+            .heads
+            .iter()
+            .all(|head| record.observed_heads.contains(head))
+        {
             break record;
         }
         tokio::task::yield_now().await;
     };
     assert_eq!(refused.readiness, Readiness::Refused);
-    assert!(refused.error.is_some());
+    assert!(
+        refused
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("org.example.remote.ping")
+    );
     let healthy = node
         .get(operator, example_cartridge!("schema"))
         .await
@@ -1486,19 +1806,462 @@ async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
     assert_eq!(healthy.readiness, Readiness::Disabled);
     assert_eq!(healthy.error, None);
 
-    // Repairing the settings via ConfigureNodule restores the nodule to Admitted.
+    // Setting the grant again replaces the damaged datum and restores the nodule.
+    node.set_grant(
+        operator,
+        example_cartridge!("photos"),
+        bad_grant,
+        Some(GrantBody::method(false)),
+    )
+    .await
+    .unwrap();
     let repaired = node
+        .get(operator, example_cartridge!("photos"))
+        .await
+        .unwrap();
+    assert_eq!(repaired.readiness, Readiness::Disabled);
+    assert_eq!(repaired.error, None);
+    node.shutdown().await;
+}
+
+/// `cartridge(.., true)` that also contributes a micro (its component is a second artifact), so
+/// the install has a member for each component, under one pin.
+fn cartridge_with_micro(id: &str, version: &str) -> Cartridge {
+    let mut cartridge = cartridge(id, version, true);
+    cartridge.artifacts.push(big_cartridges_core::Artifact {
+        key: "micro".into(),
+        digest: big_cartridges_core::Digest::of(b"micro component"),
+        size: Some(15),
+        media_type: Some("application/wasm".into()),
+        extra: Default::default(),
+    });
+    cartridge.contributions.push(Contribution::Micro(
+        big_cartridges_core::MicroContribution {
+            component: "micro".into(),
+            schema: "org.example.clay.micro".into(),
+            description: Default::default(),
+            extra: Default::default(),
+        },
+    ));
+    cartridge
+}
+
+/// The datum the photos nodule declares as its settings, under its own NSID.
+fn photos_settings_key() -> DatumKey {
+    DatumKey::from_text("org.example.photos.settings", "main").unwrap()
+}
+
+fn photos_settings(thumbnails: bool) -> Value {
+    json!({ "$type": "org.example.photos.settings", "thumbnails": thumbnails })
+}
+
+#[tokio::test]
+async fn install_creates_the_cartridge_config_document_and_reinstall_reuses_it_with_its_settings() {
+    let mut node = node().await;
+    let operator = node.operator();
+    let photos = example_cartridge!("photos");
+    node.admit(operator, cartridge(photos, "1.0.0", true))
+        .await
+        .unwrap();
+    node.admit(
+        operator,
+        cartridge(example_cartridge!("schema"), "0.1.0", false),
+    )
+    .await
+    .unwrap();
+
+    // The install names a document in the shared config drawer that is the cartridge's own: it
+    // says whose it is, and another cartridge has another.
+    let installed = node.install_of(photos).await;
+    let schema_doc = node
+        .install_of(example_cartridge!("schema"))
+        .await
+        .config_doc;
+    assert_ne!(installed.config_doc, schema_doc);
+    let doc = node.cartridge_doc(photos).await;
+    let DatumRead::Accepted { value, .. } =
+        &doc.datums[&big_cartridges_core::config::config_identity_key()]
+    else {
+        panic!("the document names its cartridge");
+    };
+    assert_eq!(value["cartridge"], json!(photos));
+    assert!(
+        installed.nodule.is_some() && installed.micro.is_none(),
+        "{installed:?}"
+    );
+
+    // Settings are ordinary datums in the document, written once the nodule's Lexicon is
+    // registered (when it is enabled), and a grant is a datum of its own beside them.
+    node.call(
+        operator,
+        SetCartridgeEnabled {
+            cartridge_id: id(photos),
+            component: Component::Nodule,
+            enabled: true,
+        },
+    )
+    .await
+    .unwrap();
+    node.write_cartridge_datums(
+        photos,
+        BTreeMap::from([(photos_settings_key(), photos_settings(false))]),
+    )
+    .await;
+    let grant = GrantKey::Method("org.example.remote.ping".to_owned());
+    node.set_grant(
+        operator,
+        photos,
+        grant.clone(),
+        Some(GrantBody::method(false)),
+    )
+    .await
+    .unwrap();
+
+    // Uninstalling keeps the document, so a reinstall (this node's, or a sister's) finds the
+    // settings and the grant where they were left, in the same document.
+    node.call(
+        operator,
+        UninstallCartridge {
+            cartridge_id: id(photos),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        node.list(operator)
+            .await
+            .unwrap()
+            .contains(&id(example_cartridge!("schema")))
+    );
+    let left = node.read_doc(installed.config_doc.clone()).await;
+    assert!(left.datums.contains_key(&photos_settings_key()));
+    assert!(
+        left.datums
+            .contains_key(&grant.datum_key(Component::Nodule))
+    );
+
+    node.restart_nodules().await.unwrap();
+    node.admit(operator, cartridge(photos, "1.0.0", true))
+        .await
+        .unwrap();
+    let reinstalled = node.install_of(photos).await;
+    assert_eq!(
+        reinstalled.config_doc, installed.config_doc,
+        "the document is reused"
+    );
+    let doc = node.cartridge_doc(photos).await;
+    let DatumRead::Accepted { value, .. } = &doc.datums[&photos_settings_key()] else {
+        panic!("the settings survived the uninstall");
+    };
+    assert_eq!(value["thumbnails"], json!(false));
+    assert!(doc.datums.contains_key(&grant.datum_key(Component::Nodule)));
+    // The reinstall starts disabled, as any install does: enablement is per node and per install.
+    assert!(!node.get(operator, photos).await.unwrap().enabled);
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn clearing_the_config_deletes_settings_and_grants_of_both_components_and_keeps_the_install()
+{
+    let node = node().await;
+    let operator = node.operator();
+    let photos = example_cartridge!("photos");
+    node.admit(operator, cartridge_with_micro(photos, "1.0.0"))
+        .await
+        .unwrap();
+    node.call(
+        operator,
+        SetCartridgeEnabled {
+            cartridge_id: id(photos),
+            component: Component::Nodule,
+            enabled: true,
+        },
+    )
+    .await
+    .unwrap();
+    node.write_cartridge_datums(
+        photos,
+        BTreeMap::from([(photos_settings_key(), photos_settings(true))]),
+    )
+    .await;
+    let nodule_grant = GrantKey::Method("org.example.remote.ping".to_owned());
+    let micro_grant = GrantKey::Authority("org.example.remote".to_owned());
+    node.set_grant(
+        operator,
+        photos,
+        nodule_grant.clone(),
+        Some(GrantBody::method(false)),
+    )
+    .await
+    .unwrap();
+    node.call(
+        operator,
+        SetCartridgeGrant {
+            cartridge_id: id(photos),
+            component: Component::Micro,
+            grant: micro_grant.clone(),
+            value: Some(GrantBody::method(false)),
+        },
+    )
+    .await
+    .unwrap();
+    let before = node.cartridge_doc(photos).await;
+    for key in [
+        photos_settings_key(),
+        nodule_grant.datum_key(Component::Nodule),
+        micro_grant.datum_key(Component::Micro),
+    ] {
+        assert!(before.datums.contains_key(&key), "{key}");
+    }
+
+    node.call(
+        operator,
+        ClearCartridgeConfig {
+            cartridge_id: id(photos),
+        },
+    )
+    .await
+    .unwrap();
+    let after = node.cartridge_doc(photos).await;
+    assert_eq!(
+        after.datums.keys().cloned().collect::<Vec<_>>(),
+        vec![big_cartridges_core::config::config_identity_key()],
+        "only the identity that names the document is left"
+    );
+    let record = node.get(operator, photos).await.unwrap();
+    assert!(record.enabled, "the install is untouched");
+    assert_eq!(record.methods, None);
+
+    // A cartridge that is not installed has a document too, and clearing it works the same.
+    let schema = example_cartridge!("schema");
+    node.admit(operator, cartridge(schema, "0.1.0", true))
+        .await
+        .unwrap();
+    node.set_grant(
+        operator,
+        schema,
+        GrantKey::Method("org.example.remote.ping".to_owned()),
+        Some(GrantBody::method(false)),
+    )
+    .await
+    .unwrap();
+    let doc_id = node.install_of(schema).await.config_doc;
+    node.call(
+        operator,
+        UninstallCartridge {
+            cartridge_id: id(schema),
+        },
+    )
+    .await
+    .unwrap();
+    node.call(
+        operator,
+        ClearCartridgeConfig {
+            cartridge_id: id(schema),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(node.read_doc(doc_id).await.datums.len(), 1);
+    assert!(matches!(
+        node.call(
+            operator,
+            ClearCartridgeConfig {
+                cartridge_id: id(example_cartridge!("never")),
+            },
+        )
+        .await,
+        Err(CartridgesError::UnknownCartridge(_))
+    ));
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn grants_are_separate_datums_so_two_made_separately_both_apply() {
+    let node = node().await;
+    let operator = node.operator();
+    let photos = example_cartridge!("photos");
+    let present = node.drawers.local().present_id.clone();
+    let originated = node.drawers.local().originated_id.clone();
+    for drawer in [&present, &originated] {
+        grant_drawer(
+            &node.drawers,
+            &node.drawers_actor,
+            drawer,
+            node.nodules_actor.actor.actor_id,
+            DrawerAccess::Admin,
+        )
+        .await;
+    }
+    node.admit(operator, cartridge(photos, "1.0.0", true))
+        .await
+        .unwrap();
+
+    // Each grant is written alone, and the second does not disturb the first: they are two
+    // datums, so the document never has to be rewritten as a whole.
+    node.set_grant(
+        operator,
+        photos,
+        GrantKey::Drawer(present.clone()),
+        Some(GrantBody::drawer(EntryAccess::Read)),
+    )
+    .await
+    .unwrap();
+    let one = node.cartridge_doc(photos).await;
+    node.set_grant(
+        operator,
+        photos,
+        GrantKey::Drawer(originated.clone()),
+        Some(GrantBody::drawer(EntryAccess::Write)),
+    )
+    .await
+    .unwrap();
+    let both = node.cartridge_doc(photos).await;
+    let key = |drawer: &DrawerId| GrantKey::Drawer(drawer.clone()).datum_key(Component::Nodule);
+    assert_eq!(both.datums[&key(&present)], one.datums[&key(&present)]);
+    assert!(both.datums.contains_key(&key(&originated)));
+
+    let record = node.get(operator, photos).await.unwrap();
+    assert_eq!(record.error, None);
+    assert_eq!(
+        record.drawers.get(&present),
+        Some(&NoduleGrantStatus {
+            desired: DrawerAccess::Read,
+            granted: true,
+            error: None,
+        })
+    );
+    assert_eq!(
+        record.drawers.get(&originated),
+        Some(&NoduleGrantStatus {
+            desired: DrawerAccess::Write,
+            granted: true,
+            error: None,
+        })
+    );
+
+    // A grant states what its kind takes, and a component the cartridge does not contribute has
+    // no grants.
+    assert!(matches!(
+        node.set_grant(
+            operator,
+            photos,
+            GrantKey::Method("org.example.remote.ping".to_owned()),
+            Some(GrantBody::drawer(EntryAccess::Read)),
+        )
+        .await,
+        Err(CartridgesError::Rejected(_))
+    ));
+    assert!(matches!(
+        node.call(
+            operator,
+            SetCartridgeGrant {
+                cartridge_id: id(photos),
+                component: Component::Micro,
+                grant: GrantKey::Method("org.example.remote.ping".to_owned()),
+                value: Some(GrantBody::method(false)),
+            },
+        )
+        .await,
+        Err(CartridgesError::Rejected(_))
+    ));
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_nodule_and_its_micro_share_one_pin_and_are_enabled_independently() {
+    let node = node().await;
+    let operator = node.operator();
+    let photos = example_cartridge!("photos");
+    node.admit(operator, cartridge_with_micro(photos, "1.0.0"))
+        .await
+        .unwrap();
+    let install = node.install_of(photos).await;
+    assert_eq!(
+        install.nodule.as_ref().map(|member| member.enabled),
+        Some(false)
+    );
+    assert_eq!(
+        install.micro.as_ref().map(|member| member.enabled),
+        Some(false)
+    );
+
+    // The live feed shows the rows now and after each change.
+    let mut feed = node
+        .nodules
+        .client
+        .subscribe_with_metadata(Envelope::with_metadata(
+            RequestContext::root(),
+            operator.metadata(),
+            ObserveCartridgeInstalls {},
+        ))
+        .await
+        .unwrap()
+        .output;
+    let first = feed.next().await.unwrap().unwrap();
+    assert_eq!(first.installs.len(), 1);
+    assert_eq!(first.installs[0].install, install);
+
+    let micro_on = node
         .call(
             operator,
-            ConfigureNodule {
-                cartridge_id: id(example_cartridge!("photos")),
-                settings: settings_of(false),
+            SetCartridgeEnabled {
+                cartridge_id: id(photos),
+                component: Component::Micro,
+                enabled: true,
             },
         )
         .await
         .unwrap();
-    assert_eq!(repaired.readiness, Readiness::Disabled);
-    assert_eq!(repaired.config, Some(settings_of(false)));
-    assert_eq!(repaired.error, None);
+    assert_eq!(micro_on.install.cartridge, install.cartridge, "one pin");
+    assert_eq!(
+        micro_on
+            .install
+            .nodule
+            .as_ref()
+            .map(|member| member.enabled),
+        Some(false)
+    );
+    assert_eq!(
+        micro_on.install.micro.as_ref().map(|member| member.enabled),
+        Some(true)
+    );
+    let next = feed.next().await.unwrap().unwrap();
+    assert_eq!(next.installs[0].install, micro_on.install);
+    assert_eq!(
+        node.get(operator, photos).await.unwrap().readiness,
+        Readiness::Disabled,
+        "the nodule stays disabled while its micro runs"
+    );
+
+    node.call(
+        operator,
+        SetCartridgeEnabled {
+            cartridge_id: id(photos),
+            component: Component::Nodule,
+            enabled: true,
+        },
+    )
+    .await
+    .unwrap();
+    let next = feed.next().await.unwrap().unwrap();
+    let row = &next.installs[0].install;
+    assert!(row.nodule.as_ref().unwrap().enabled && row.micro.as_ref().unwrap().enabled);
+    assert_eq!(row.cartridge, install.cartridge);
+
+    // A micro-only cartridge installs and is no nodule at all.
+    let mut micro_only = Cartridge::new(
+        example_cartridge!("panel").parse().unwrap(),
+        "1.0.0".parse().unwrap(),
+    );
+    let with_micro = cartridge_with_micro(photos, "1.0.0");
+    micro_only.artifacts = with_micro.artifacts.clone();
+    micro_only.contributions = with_micro.contributions[1..].to_vec();
+    node.install_cartridge(operator, micro_only).await.unwrap();
+    assert_eq!(
+        node.install_of(example_cartridge!("panel")).await.nodule,
+        None
+    );
+    assert_eq!(node.list(operator).await.unwrap(), vec![id(photos)]);
     node.shutdown().await;
 }

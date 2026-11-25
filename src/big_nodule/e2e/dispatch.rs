@@ -14,7 +14,10 @@ use big_cartridges_core::Cartridge;
 use big_cartridges_core::Contribution;
 use big_cartridges_core::Digest;
 use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::config::Component;
 use big_cartridges_core::example_cartridge;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
+use big_cartridges_core::protocol::UninstallCartridge;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
@@ -26,8 +29,6 @@ use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
 use big_nodule_core::Handler;
 use big_nodule_core::Nodule;
-use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::UninstallNodule;
 use method_core::ByteBody;
 use serde_json::Value;
 use serde_json::json;
@@ -175,8 +176,9 @@ impl Node {
     pub(super) async fn set_enabled(&self, cartridge_id: &str, enabled: bool) {
         self.call(
             self.operator(),
-            SetNoduleEnabled {
+            SetCartridgeEnabled {
                 cartridge_id: id(cartridge_id),
+                component: Component::Nodule,
                 enabled,
             },
         )
@@ -241,7 +243,7 @@ async fn an_admitted_nodules_operations_follow_its_lifecycle() {
     node.set_enabled(example_cartridge!("photos"), true).await;
     node.call(
         operator,
-        UninstallNodule {
+        UninstallCartridge {
             cartridge_id: id(example_cartridge!("photos")),
         },
     )

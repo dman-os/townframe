@@ -11,6 +11,8 @@ pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 4, name: "004_actor_path_derived.sql", sql: include_str!("migrations/004_actor_path_derived.sql") },
     Migration { version: 5, name: "005_resolution_locks.sql", sql: include_str!("migrations/005_resolution_locks.sql") },
     Migration { version: 6, name: "006_cartridge_rename.sql", sql: include_str!("migrations/006_cartridge_rename.sql") },
+    Migration { version: 7, name: "007_shared_config_drawer.sql", sql: include_str!("migrations/007_shared_config_drawer.sql") },
+    Migration { version: 8, name: "008_config_docs.sql", sql: include_str!("migrations/008_config_docs.sql") },
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +69,24 @@ impl crate::sqlite_rs_alias::FromRow for AppliedOperationsRow {
 pub const APPLIED_OPERATIONS_SQL: &str = include_str!("queries/applied_operations.sql");
 pub async fn applied_operations(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<AppliedOperationsRow>> {
     let set = db.query(APPLIED_OPERATIONS_SQL, &[]).await?;
+    set.all()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfigDocsRow {
+    pub cartridge_id: String,
+    pub doc_id: String,
+}
+impl crate::sqlite_rs_alias::FromRow for ConfigDocsRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(2)?;
+        Ok(ConfigDocsRow { cartridge_id: row.get::<String>("cartridge_id")?, doc_id: row.get::<String>("doc_id")? })
+    }
+}
+
+pub const CONFIG_DOCS_SQL: &str = include_str!("queries/config_docs.sql");
+pub async fn config_docs(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<ConfigDocsRow>> {
+    let set = db.query(CONFIG_DOCS_SQL, &[]).await?;
     set.all()
 }
 
@@ -131,6 +151,17 @@ pub async fn resolution_locks(db: &impl crate::sqlite_rs_alias::QueryExecutor) -
     set.all()
 }
 
+pub const SET_SHARED_CONFIG_DRAWER_SQL: &str = include_str!("queries/set_shared_config_drawer.sql");
+pub async fn set_shared_config_drawer(db: &impl crate::sqlite_rs_alias::Executor, drawer_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(SET_SHARED_CONFIG_DRAWER_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id)]).await
+}
+
+pub const SHARED_CONFIG_DRAWER_SQL: &str = include_str!("queries/shared_config_drawer.sql");
+pub async fn shared_config_drawer(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Option<String>> {
+    let set = db.query(SHARED_CONFIG_DRAWER_SQL, &[]).await?;
+    set.optional()
+}
+
 pub const UPSERT_ACTOR_SQL: &str = include_str!("queries/upsert_actor.sql");
 pub async fn upsert_actor(db: &impl crate::sqlite_rs_alias::Executor, cartridge_id: String, actor_uuid: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(UPSERT_ACTOR_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id), crate::sqlite_rs_alias::IntoValue::into_value(actor_uuid)]).await
@@ -144,6 +175,11 @@ pub async fn upsert_applied_grant(db: &impl crate::sqlite_rs_alias::Executor, ca
 pub const UPSERT_APPLIED_OPERATIONS_SQL: &str = include_str!("queries/upsert_applied_operations.sql");
 pub async fn upsert_applied_operations(db: &impl crate::sqlite_rs_alias::Executor, cartridge_id: String, scope: String, capability_id: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(UPSERT_APPLIED_OPERATIONS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id), crate::sqlite_rs_alias::IntoValue::into_value(scope), crate::sqlite_rs_alias::IntoValue::into_value(capability_id)]).await
+}
+
+pub const UPSERT_CONFIG_DOC_SQL: &str = include_str!("queries/upsert_config_doc.sql");
+pub async fn upsert_config_doc(db: &impl crate::sqlite_rs_alias::Executor, cartridge_id: String, doc_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(UPSERT_CONFIG_DOC_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id), crate::sqlite_rs_alias::IntoValue::into_value(doc_id)]).await
 }
 
 pub const UPSERT_INIT_DONE_SQL: &str = include_str!("queries/upsert_init_done.sql");

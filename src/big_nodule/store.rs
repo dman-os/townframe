@@ -1,8 +1,9 @@
 //! Host-local SQLite state for [`crate::NoduleService`]: durable actor bindings and applied
 //! service-owned drawer grant bookkeeping.
 //!
-//! Portable desired configuration (`NoduleInstall`, `NoduleSettings`, `NoduleGrants`) lives in the
-//! node's config drawer document; SQLite stores only the host's `(cartridge_id, actor_uuid)`
+//! Portable desired configuration (the `CartridgeInstall` pins in the node's config drawer
+//! document, and the settings and grants in each cartridge's config document) lives in the
+//! documents; SQLite stores only the id of the shared config drawer this node created, the host's `(cartridge_id, actor_uuid)`
 //! identity binding, the `(cartridge_id, drawer_id) -> access` grants this service has applied, and the
 //! `cartridge_id -> (scope, capability)` dispatch capability minted from each nodule's operation grants,
 //! the `(cartridge_id, init key) -> revision` a [`Once`](big_nodule_core::RunMode::Once)
@@ -14,6 +15,7 @@
 
 use crate::sqlite;
 use big_cabinet_core::authority::CapId;
+use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
@@ -383,5 +385,70 @@ pub(crate) async fn replace_resolution_locks(
         .await
         .map_err(storage)?;
     }
+    transaction.commit().await.map_err(storage)
+}
+
+pub(crate) async fn shared_config_drawer(
+    database: &Database,
+) -> Result<Option<DrawerId>, NodulesError> {
+    let transaction = database.begin_read().await.map_err(storage)?;
+    let drawer = sqlite::shared_config_drawer(&transaction)
+        .await
+        .map_err(storage)?;
+    Ok(drawer.map(|drawer| {
+        drawer
+            .parse()
+            .expect("the shared config drawer id this node stored is a doc id")
+    }))
+}
+
+pub(crate) async fn set_shared_config_drawer(
+    database: &Database,
+    drawer: &DrawerId,
+) -> Result<(), NodulesError> {
+    let transaction = database.begin_write().await.map_err(storage)?;
+    sqlite::set_shared_config_drawer(&transaction, drawer.to_string())
+        .await
+        .map_err(storage)?;
+    transaction.commit().await.map_err(storage)
+}
+
+/// The config document this node created or found for each cartridge. A document is findable in
+/// the shared config drawer by its identity datum, but that scan reads an index that trails the
+/// documents, so the node keeps what it has already made or found: a reinstall never misses a
+/// document of its own, and never makes a second.
+pub(crate) async fn config_docs(
+    database: &Database,
+) -> Result<BTreeMap<CartridgeId, DocId>, NodulesError> {
+    let transaction = database.begin_read().await.map_err(storage)?;
+    let rows = sqlite::config_docs(&transaction).await.map_err(storage)?;
+    rows.into_iter()
+        .map(|row| {
+            let cartridge_id: CartridgeId = row.cartridge_id.parse().map_err(|error| {
+                storage(format!(
+                    "config doc cartridge_id `{}` is invalid: {error}",
+                    row.cartridge_id
+                ))
+            })?;
+            let doc_id: DocId = row.doc_id.parse().map_err(|error| {
+                storage(format!(
+                    "config doc id `{}` of `{}` is invalid: {error}",
+                    row.doc_id, row.cartridge_id
+                ))
+            })?;
+            Ok((cartridge_id, doc_id))
+        })
+        .collect()
+}
+
+pub(crate) async fn upsert_config_doc(
+    database: &Database,
+    cartridge_id: &CartridgeId,
+    doc_id: &DocId,
+) -> Result<(), NodulesError> {
+    let transaction = database.begin_write().await.map_err(storage)?;
+    sqlite::upsert_config_doc(&transaction, cartridge_id.to_string(), doc_id.to_string())
+        .await
+        .map_err(storage)?;
     transaction.commit().await.map_err(storage)
 }
