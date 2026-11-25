@@ -390,7 +390,7 @@ async fn filesystem_provenance_restart_case(
         .claim("document:plaintext", &[plain_id])
         .await?;
     let (blobs, stop, sql) = if interrupted_install {
-        blobs.service.roots.record_virtual(&pair).await?;
+        assert!(blobs.service.roots.record_virtual(&pair).await?);
         assert!(!blobs.service.store.blobs().has(cipher).await?);
         assert!(blobs.service.provider.reader_for(&cipher).is_none());
         assert!(!has_pair_tags(&blobs.service.store, cipher).await?);

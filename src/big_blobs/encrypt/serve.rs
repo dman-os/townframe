@@ -64,6 +64,36 @@ use super::store::set_pair_tags;
 /// requirement.
 ///
 /// [`register_pair`]: CipherBlobProvider::register_pair
+/// Why a document's claim about a pair was refused.
+///
+/// A claim names a ciphertext digest, a key, a plaintext and a framing, and
+/// nothing in a document guarantees the four agree: the same `Blob` slot can be
+/// re-pinned to new bytes while its cipherBlob still names the old
+/// representation, and a peer can write any claim. Neither is an invariant
+/// break on this node, so the caller decides what the refusal means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PairRefusal {
+    /// `(key, plaintext, framing)` does not encrypt to the claimed digest.
+    DigestMismatch,
+    /// This node already holds the claimed digest bound to a different
+    /// `(key, plaintext, framing)`.
+    BindingConflict,
+}
+
+impl PairRefusal {
+    /// For callers that derived the pair themselves: their own encrypt pass
+    /// cannot disagree with its own digest, so a refusal there is a hash
+    /// collision or a corrupt local record and surfaces as that call's error.
+    fn into_error(self) -> eyre::Report {
+        match self {
+            Self::DigestMismatch => {
+                eyre::eyre!("reconstructed ciphertext differs from accepted digest")
+            }
+            Self::BindingConflict => eyre::eyre!("virtual ciphertext binding changed"),
+        }
+    }
+}
+
 pub struct CipherBlobProvider {
     pairs: RwLock<HashMap<Hash, Arc<PlainPair>>>,
 }
@@ -256,7 +286,8 @@ impl CipherBlobProvider {
                 claimed_by: None,
             },
         )
-        .await
+        .await?
+        .map_err(PairRefusal::into_error)
     }
 
     /// Register a pair with the document whose cipherBlob facet is expected to
@@ -294,15 +325,20 @@ impl CipherBlobProvider {
                 claimed_by: Some((doc_id.to_owned(), branch_path.to_owned())),
             },
         )
-        .await
+        .await?
+        .map_err(PairRefusal::into_error)
     }
 
+    /// Register a pair whose binding comes from a document claim rather than
+    /// from this node's own encrypt pass, so the claim may not describe the
+    /// pair it names. Such a claim is refused, not an error: the document was
+    /// edited (or written by a peer) independently of what this node holds.
     pub(crate) async fn register_local_pair(
         &self,
         store: &Store,
         roots: &PairRoots,
         pair: VirtualPair,
-    ) -> Res<()> {
+    ) -> Res<Result<(), PairRefusal>> {
         let prepared = if store.blobs().has(pair.cipher).await? {
             None
         } else {
@@ -318,12 +354,11 @@ impl CipherBlobProvider {
         roots: &PairRoots,
         pair: VirtualPair,
         prepared: Option<PreparedCiphertext>,
-    ) -> Res<()> {
-        if let Some(prepared) = &prepared {
-            eyre::ensure!(
-                prepared.hash == pair.cipher,
-                "reconstructed ciphertext differs from accepted digest"
-            );
+    ) -> Res<Result<(), PairRefusal>> {
+        if let Some(prepared) = &prepared
+            && prepared.hash != pair.cipher
+        {
+            return Ok(Err(PairRefusal::DigestMismatch));
         }
         let Some(reader) = store.sync_reader(pair.plaintext).await? else {
             eyre::bail!(
@@ -332,11 +367,14 @@ impl CipherBlobProvider {
                 pair.plaintext
             );
         };
-        roots.record_virtual(&pair).await?;
+        if !roots.record_virtual(&pair).await? {
+            return Ok(Err(PairRefusal::BindingConflict));
+        }
         if let Some(prepared) = prepared {
             prepared.install(store).await?;
         }
-        self.register_pair_recorded(store, &pair, reader).await
+        self.register_pair_recorded(store, &pair, reader).await?;
+        Ok(Ok(()))
     }
 
     pub(crate) async fn restore(&self, store: &Store, roots: &PairRoots) -> Res<()> {
@@ -428,7 +466,8 @@ impl CipherBlobProvider {
             },
             Some(prepared),
         )
-        .await?;
+        .await?
+        .map_err(PairRefusal::into_error)?;
         Ok(c_hash)
     }
 
@@ -467,7 +506,8 @@ impl CipherBlobProvider {
             },
             Some(prepared),
         )
-        .await?;
+        .await?
+        .map_err(PairRefusal::into_error)?;
         Ok(c_hash)
     }
 

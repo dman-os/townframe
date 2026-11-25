@@ -412,7 +412,12 @@ async fn legacy_slot_claim_that_does_not_describe_its_plaintext_defers() -> Res<
     let _tag = harness.put(plain).await?;
     let key = MasterKey::random();
     let encoding = EncodingParams::DEFAULT;
-    let other = encrypt_with_rs(&key, b"another plaintext", encoding.record_size, encoding.padding);
+    let other = encrypt_with_rs(
+        &key,
+        b"another plaintext",
+        encoding.record_size,
+        encoding.padding,
+    );
     let plaintext = BlobId::new(*Hash::new(plain).as_bytes());
     let (jwk_key, cipher_key) =
         legacy_representation_keys(&harness.docs.doc_id, &blob_key(), &plaintext)?;
@@ -1020,8 +1025,18 @@ async fn ciphertext_first_decrypts_in_bounded_windows_and_checks_plaintext_ident
     let mut wrong = blob_value(&plain);
     wrong["digest"] = BlobId::new([11; 32]).digest_str().into();
     harness.replace(blob_key(), accepted(wrong));
-    let error = harness.reconcile().await.unwrap_err();
-    assert!(error.to_string().contains("decrypted plaintext differs"));
+    // The cipherBlob authenticates under its key but decrypts to other
+    // content than the re-pinned Blob names: it is replaced, which waits for
+    // the new bytes instead of failing the worker.
+    let report = harness.reconcile().await?;
+    assert!(report.retained.is_empty());
+    assert!(matches!(
+        report.deferred.as_slice(),
+        [DocumentDeferral {
+            reason: DeferralReason::BytesUnavailable { .. },
+            ..
+        }]
+    ));
     assert!(!harness.store.blobs().has(Hash::from([11; 32])).await?);
     assert_eq!(harness.current().heads, current.heads);
     Ok(())
