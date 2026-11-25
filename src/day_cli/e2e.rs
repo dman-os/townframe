@@ -1219,8 +1219,43 @@ mod blackbox {
         };
 
         assert!(hook(&["record", "pause"]).status.success());
-        // The hook's JSON is never read: empty stdin would be a parse error if it were.
+        // The payload is drained, not parsed: empty stdin would be a parse error if it were.
         silent_success(hook(&["record", "hook"]));
+        // A payload several pipe buffers long: a hook that exited without reading it would give
+        // its writer EPIPE, which Claude Code can report as a hook error.
+        for args in [
+            &["record", "hook"][..],
+            &["capture", "git-rewrite", "amend"][..],
+        ] {
+            let mut child = Command::new(day_bin())
+                .env("RUST_LOG", "error")
+                .env("NO_COLOR", "1")
+                .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+                .current_dir(&worktree)
+                .arg("--node")
+                .arg(sandbox.node())
+                .args(["x", "intxt"])
+                .args(args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            let writer = std::thread::spawn(move || {
+                std::io::Write::write_all(&mut stdin, &vec![b'x'; 1024 * 1024])
+            });
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+            assert!(
+                output.stdout.is_empty() && output.stderr.is_empty(),
+                "{output:?}"
+            );
+            writer
+                .join()
+                .unwrap()
+                .unwrap_or_else(|error| panic!("{args:?}: the writer saw {error}"));
+        }
         silent_success(hook(&["capture"]));
         silent_success(hook(&["record", "git-rewrite", "amend"]));
         silent_success(hook(&["capture", "git-rewrite", "rebase"]));

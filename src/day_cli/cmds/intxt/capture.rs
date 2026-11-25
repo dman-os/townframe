@@ -130,13 +130,19 @@ impl CaptureCommands {
         Ok(())
     }
 
-    /// Whether recording is paused, checked before a hook reads its input, reaches the node or
-    /// starts a server: a paused hook is a deliberate no-op that succeeds, so it never fails
-    /// the harness or the git command that ran it.
+    /// Whether recording is paused, checked before a hook reaches the node or starts a server: a
+    /// paused hook is a deliberate no-op that succeeds, so it never fails the harness or the git
+    /// command that ran it. The payload on stdin is read to its end and dropped first: a writer
+    /// (Claude Code, git) whose reader exits early gets EPIPE, which Claude Code can report as
+    /// a hook error.
     fn paused(node_dir: &day_node::NodeDir, verbose: bool) -> Res<bool> {
         let paused = is_paused(node_dir.root())?;
-        if paused && verbose {
-            eprintln!("intxt capture: recording is paused (`intxt record resume`)");
+        if paused {
+            std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink())
+                .wrap_err("draining the hook's stdin")?;
+            if verbose {
+                eprintln!("intxt capture: recording is paused (`intxt record resume`)");
+            }
         }
         Ok(paused)
     }

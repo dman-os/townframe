@@ -402,8 +402,8 @@ pub enum RecordCommands {
     /// Stop recording: every capture hook (Claude Code's, git's) and `record acp` then does nothing
     ///
     /// Writes a marker in capture's state directory (`<node dir>/intxt/paused`). While it is
-    /// there, each hook returns success at once, before it reads its input, reaches the node or
-    /// starts a server, and an ACP session runs unrecorded. Sessions that run while paused are
+    /// there, each hook reads its input to the end and drops it, returns success, and never reaches the
+    /// node or starts a server, and an ACP session runs unrecorded. Sessions that run while paused are
     /// not caught up on resume. Pausing twice changes nothing; `intxt doctor` reports the state.
     Pause,
     /// Record again: remove the marker `record pause` wrote
