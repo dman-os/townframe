@@ -29,7 +29,7 @@ impl ByteKey {
     pub fn as_bytes(&self) -> &[u8] {
         match &self {
             ByteKey::Inline { len, buf: bytes } => &bytes[0..*len as _],
-            ByteKey::Heap(items) => &items,
+            ByteKey::Heap(items) => items,
         }
     }
 
@@ -88,7 +88,7 @@ impl Serialize for ByteKey {
         if serializer.is_human_readable() {
             utils_rs::hash::encode_base58_multibase(&self.as_bytes()).serialize(serializer)
         } else {
-            serializer.serialize_bytes(&self.as_bytes())
+            serializer.serialize_bytes(self.as_bytes())
         }
     }
 }

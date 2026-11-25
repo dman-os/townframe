@@ -599,6 +599,172 @@ ordered-KV shape. One shared substrate (ordered KV + atomic batch) is noted, not
 - Cross-process wakeups: poll `PRAGMA data_version`, or a daemon?
 - Should `RevisionedStore` and `okv` converge on one read contract?
 
+### Part store spec, memory first (draft 2026-11-18; awaiting operator review)
+
+**Decided with the operator:**
+- **One stamped log is the global cursor.** That matches the old model, where everything is
+  stamped by one counter.
+- **Three traits, one per audience.**
+- **Memory first, SQLite later,** against the same laws.
+
+**What the old SQLite schema really is** (`big_sync/sqlite/migrations/001_init.sql`):
+- **`big_sync_members` *is* the stamped log.**
+  - It is keyed by `(obj_ref, maybe_part_ref)`, where `maybe_part_ref = 0` is the object lane.
+  - Each row holds `event_type` (`Changed`/`Removed`), `txid` (the cursor) and `added_at`.
+  - It is collapsed to one row per key, and indexed by `(part, txid)` and `(obj, txid)`.
+- **`big_sync_syncable`** (part, principal) → `access_level` and `changed_at`: stamped with the
+  same cursor, but stored outside the log.
+- **`big_sync_buckets`** (part, `buck_id`) → `level`, `changed_at` (stamped), live/dead counts
+  and fingerprints.
+- **`big_sync_objs`** obj → `payload_json`, `buck_index`.
+- **`big_sync_parts`** part → `latest_cursor`; the global cursor lives in `big_sync_meta`.
+- **`big_sync_pending_members`:** membership assigned before the payload exists. It has no
+  event and no bucket entry until the payload arrives; then it is promoted to live, gets its
+  bucket transition, and emits `Changed` at the new cursor.
+- **`big_sync_peer_cursors`.**
+- **N+1 in the write paths:** `add_obj_to_parts` loops over parts calling `ensure_part_ref`
+  and `load_member_state` once per part (`part_store/sqlite.rs:1061`).
+
+**New model on `MemoryDb`.** All tables share one db and one transaction.
+- **`log`, an okv table: the stamped log, whose rev *is* the cursor.**
+  - Key: `LogKey { Object(obj), Member { obj, part }, Access { part, principal } }`.
+  - Value: `LogEntry { Object(ObjLane), Member(Membership), Access(Level) }`. Tombstones for
+    removals.
+  - Access is now in the log, so access changes and membership changes share one cursor *by
+    construction*, and `part_dirty_count` becomes a count of log rows in a rev window.
+- **Plain KV tables** (a new non-revisioned table kind in `MemoryDb`: same lock and
+  transaction, no rev, no rev index):
+  - `objs`: obj → `{ payload | Withheld, payload_digest, buck_index }`. An explicit `Withheld`
+    replaces the magic `null`; the digest is stored at write time for the bucket leaf
+    fingerprint.
+  - `parts`: part → `{ latest_cursor }`.
+  - `members_by_part`: (part, obj) → () — a derived index for `member_count`, part listing and
+    bucket ranges. Membership's truth is the log; this index is maintained by the same single
+    write path.
+  - `pending`: (obj, part) → ().
+  - `buckets`: (part, `BuckId`) → `BucketSummaryState`, maintained incrementally with
+    `apply_transition`.
+  - `peer_cursors`: (peer, part) → cursor.
+- **Piece F is dropped** (`part_store_stats`, `partless_objects`, `remove_part_member`,
+  `remove_obj_payload` as a side channel).
+
+**Three traits:**
+1. **`PartStoreWrite` (embedders)**, inside a caller transaction:
+   - set or withhold an object's payload;
+   - add an object to parts or remove it;
+   - set or revoke a principal's access to a part;
+   - ensure a part exists.
+
+   Every method takes batches (`&[…]`), so no N+1.
+2. **`PartStoreRead` (client):**
+   - batch reads `obj_states(objs)` (payload state, digest and membership) and
+     `bucket_summaries(part, ids)`;
+   - `member_count(part)`;
+   - peer cursors: get, and `set_peer_part_cursors(batch)` (the batched, coalesced cursor
+     writes from the tasks review).
+3. **`PartStoreServe` (responder):**
+   - the log as a `RevSource`, with a selector of part routes (each with a lower bound) and
+     object routes;
+   - authorization (`permitted_parts`, `read_denied`) against the log's current `Access` rows;
+   - `part_dirty_count`;
+   - bucket lists and leaves.
+
+   Page assembly, sessions and budgets are out (the responder, later).
+
+**Testing:**
+- **A naive oracle for the whole store:** the full mutation history, with current state
+  computed by fold.
+- **Laws:**
+  - replay reconstructs membership and access;
+  - collapse and tombstones;
+  - pending → live on the payload's arrival, with exactly one event;
+  - authorization filtering of the log equals the oracle's filter, pinned in both
+    grant/revoke orders;
+  - `Withheld` is distinct from deleted;
+  - the incremental bucket summary equals a recompute;
+  - `part_dirty_count` equals a count over the oracle;
+  - cursors only advance;
+  - every write method is one transaction, with no partial visibility.
+- **A differential proptest** over generated write/grant/revoke/read sequences.
+- **The 32 `host_contract` scenarios** are triaged: keep the ones that are still meaningful
+  as named laws or scenarios; drop the rest.
+- **SQLite later:** the same laws, plus query-plan assertions.
+
+**Operator decisions (2026-11-18), superseding the draft above where they differ:**
+- **No part-store tables in `MemoryDb`, and no plain-KV table kind.** `MemoryPartStore` is its
+  own store:
+  - one surelock over its own relational state struct (`BTreeMap` tables in the relational
+    spirit, so the SQLite port matches);
+  - the log embedded in that state using okv's table type (`OkvTable`, made `pub(crate)` with
+    its read and write helpers), so the log is still a `RevSource` that runs the rev laws.
+- **No physical object lane.** The log keys are `Member { obj, part }` (object-first) and
+  `Access { part, principal }`.
+  - A payload change re-stamps the object's member rows at the new rev, so object routes are a
+    key range and part replay reads that part's rows.
+  - The cost is write amplification proportional to the number of parts the object is in.
+- **Pending membership stays.**
+- **The trait names stand:** `PartStoreWrite` / `PartStoreRead` / `PartStoreServe`.
+
+**Previously open:**
+1. **The `members_by_part` index vs ordering the log key part-first.** Part-first (`Member {
+   part, obj }`) makes per-part replay a key range, but `obj_parts` then needs an index. I lean
+   obj-first in the log, plus the part index.
+2. **Does the object lane (`Object(obj)`) stay in the log?** It's what object routes replay,
+   and payload changes stamp it.
+3. **Should `pending` stay a feature?** The wiki calls membership-before-payload "more
+   important"; I assume yes.
+4. **The trait names:** `PartStoreWrite` / `PartStoreRead` / `PartStoreServe`.
+
+### Memory part store delivered (2026-11-18; lane-verified)
+
+**Status:**
+- **Code:** `big_automata/part_store.rs` (the three traits and the types), plus
+  `part_store/{memory, memory/{objects, access, buckets}, oracle, laws, tests}.rs`.
+- **`OkvTable`** is `pub(crate)` with embedding helpers; the stub `store.rs` traits are gone.
+- **`bucket.rs`** uses the batched reads, with no N+1.
+- **Checks:** clippy 0 errors; the lane fixed 3 clippy needless-borrow warnings in
+  `bucket.rs`/`ids.rs` left over from the verbatim port. **122/122 on mothership.**
+- **Mutation check:** a planted bucket bug made the differential fail, so it isn't passing
+  vacuously.
+- **Mothership:** the scratch worktree's index is now reset to `refs/heads/mirror/automata`
+  (pushed from the laptop). The agent's `git add -N` workaround is undone.
+
+**Scenario triage of the old contracts** (full table in the agent's report, 2026-11-18):
+- **Kept as laws:** most scenarios.
+- **Moved to the future responder:** page limits, byte budgets, sessions, per-event filtering
+  and verdicts on pages.
+- **Dropped:** the aggregator, `summarize_parts`, and the `remove_obj_payload` half.
+- **Open:** `tombstone_added_at` (Q7) and `object_lane_carries_no_membership` (Q6).
+
+**Questions before the SQLite port (lane's recommendation in brackets):**
+1. The traits use `async_trait` (`Send`), like `RevSource`, so `bucket.rs` dropped
+   `FutureForm` [accept].
+2. One rev per transaction, not per write method; `commit` returns `Option<Rev>` [accept].
+3. Writes that change nothing stamp nothing [accept].
+4. `PayloadDigest` is a fixed-seed SipHash u64 over `Hash` [**change to blake3 over
+   canonical bytes**: the digest crosses peers through bucket fingerprints, and `Hash`-based
+   SipHash isn't a stable cross-version or cross-platform encoding].
+5. The bucket live fingerprint now hashes the digest (`-v2`), but the leaf fingerprint still
+   hashes the payload because of the wire type, so a locally `Withheld` object counts as
+   changed [**move the leaf fingerprint to `SipHash(seed, digest)`** as decided in the
+   bucket review; a wire-type change in `rpc/bucket.rs`].
+6. With no object lane, object routes also replay membership tombstones; the old contract
+   said they carry no membership [operator call].
+7. ADR 012's `added_at` tombstone rule (skip a removal for an object added and removed after
+   the page cursor) can't be evaluated from an okv tombstone [**membership value
+   `Live { added_at } | Removed { added_at }`** instead of a tombstone].
+8. Part routes exclude `Access` rows; only `All` replays them [keep].
+9. `part_dirty_count` counts revocations; the old store didn't [operator call; arguably more
+   correct, since losing access is relevant to that principal].
+
+**Lower priority:**
+- Q12: `obj_states` clones payloads; split out a digest-only read.
+- Q13: pending memberships are invisible to reads.
+- Q14: `parts.latest_cursor` is maintained but unread.
+- Q17: the `LogStreams` adapter uses filler writes to keep one rev per batch.
+- Q20: the disabled tasks still name the removed traits.
+- Q21: `add_members` and `grant_access` create parts implicitly.
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a
