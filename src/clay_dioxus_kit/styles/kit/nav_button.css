@@ -1,7 +1,9 @@
 /*
  * ct-nav-button (headless/nav_button.rs). Parts: icon, and in it the glyph
- * (back, forward) or three bars (sidebar). State: data-kind (sidebar|back|forward), which decides
- * the glyph, and data-disabled. The glyph is drawn from boxes in currentColor, which are plain
+ * (back, forward) or the bars (sidebar), which a mark may precede. State: data-kind
+ * (sidebar|back|forward), which decides the glyph, data-mark and data-disabled. A marked toggle
+ * shows its mark at rest and its bars on hover and focus-visible (a touch screen has no hover, so
+ * it keeps the mark and a tap still toggles); the two share one cell and crossfade. The glyph is drawn from boxes in currentColor, which are plain
  * elements in every renderer.
  */
 .ct-nav-button {
@@ -58,8 +60,39 @@
 }
 
 .ct-nav-button[data-kind="sidebar"] [data-part="icon"] {
+  display: grid;
+  place-items: center;
+}
+
+.ct-nav-button[data-kind="sidebar"] [data-part="icon"] > * {
+  grid-area: 1 / 1;
+}
+
+.ct-nav-button[data-kind="sidebar"] [data-part="bars"] {
+  display: flex;
   flex-direction: column;
   gap: var(--ct-dimension-spacing-1);
+}
+
+.ct-nav-button[data-mark] [data-part="mark"],
+.ct-nav-button[data-mark] [data-part="bars"] {
+  transition: opacity var(--ct-motion-duration-fade);
+}
+
+.ct-nav-button[data-mark] [data-part="bars"],
+.ct-nav-button[data-mark]:is(:hover, :focus-visible) [data-part="mark"] {
+  opacity: 0;
+}
+
+.ct-nav-button[data-mark]:is(:hover, :focus-visible) [data-part="bars"] {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ct-nav-button[data-mark] [data-part="mark"],
+  .ct-nav-button[data-mark] [data-part="bars"] {
+    transition: none;
+  }
 }
 
 .ct-nav-button[data-kind="sidebar"] [data-part="bar"] {

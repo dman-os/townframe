@@ -536,11 +536,15 @@ fn Frame(shell: Shell) -> Element {
     }
 }
 
+/// The app's mark, shown on the sidebar's hide button until it is hovered or focused.
+const APP_MARK: &str = "🌞";
+
 /// The sidebar's header while it is shown (ADR 058 §2.3): the rack's controls at the window's
-/// top-left, where the floating rack was, then the app's mark. Docked, the rack's three: hide,
-/// back and forward (the last two disabled when there is nowhere to go, as in the floating rack).
-/// As the compact drawer, hide alone: back would pop the same entry, and forward is the footer's.
-/// The mark is a plain image, not a control, and there is no menu behind it yet.
+/// top-left, where the floating rack was. Docked, the rack's three: hide, back and forward (the
+/// last two disabled when there is nowhere to go, as in the floating rack). As the compact drawer,
+/// hide alone: back would pop the same entry, and forward is the footer's. The hide button
+/// carries the app's mark, which it shows at rest and swaps for the toggle glyph on hover and
+/// focus; there is no separate mark and no menu behind it yet.
 #[component]
 fn SidebarHeader(
     wide: bool,
@@ -553,13 +557,12 @@ fn SidebarHeader(
     rsx! {
         header { "data-part": "header",
             NavRack {
-                NavButton { kind: NavButtonKind::HideSidebar, onclick: on_hide }
+                NavButton { kind: NavButtonKind::HideSidebar, mark: APP_MARK, onclick: on_hide }
                 if wide {
                     NavButton { kind: NavButtonKind::Back, disabled: !can_back, onclick: on_back }
                     NavButton { kind: NavButtonKind::Forward, disabled: !can_forward, onclick: on_forward }
                 }
             }
-            span { "data-part": "mark", role: "img", "aria-label": "daytxt", "🌞" }
         }
     }
 }
@@ -1033,8 +1036,8 @@ mod tests {
         dom.rebuild_in_place();
         let html = dioxus_ssr::render(&dom);
         assert!(
-            html.contains("aria-label=\"daytxt\""),
-            "the mark is named: {html}"
+            html.contains("data-part=\"mark\"") && html.contains(APP_MARK),
+            "the hide button carries the mark: {html}"
         );
         html.split("<button")
             .skip(1)
