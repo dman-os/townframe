@@ -194,6 +194,90 @@ fn fixture() -> IntxtView {
     let jj_change: JjChange =
         serde_json::from_value(json!({"commits": ["77b2e0aa11223344", "4c1f0a9b55667788"]}))
             .unwrap();
+    let (session_entry, session, summary) = fixture_session();
+
+    let sibling_drawer: DocId = "z11111111111111111111111111111112"
+        .parse()
+        .expect("fixture drawer id");
+    let mut sibling = PrLink::new(intxt_core::generic::Intxt::reference(&sibling_drawer, []));
+    sibling.title = Some("intxt: commits live with the intxt".into());
+    sibling.refs = vec!["refs/heads/stack/intxt-16".into()];
+    let links = PrLinks {
+        intxts: vec![
+            PrLink::new(intxt_core::generic::Intxt::reference(
+                &drawer,
+                [relay.clone()],
+            )),
+            sibling,
+        ],
+        ..Default::default()
+    };
+    let pull_entry: GithubPullEntry = serde_json::from_value(json!({
+        "pull": datum_ref("work.githubPull", "o/r/12").to_string()
+    }))
+    .unwrap();
+    let pull: GithubPull = serde_json::from_value(json!({
+        "title": "Splits the reference parser",
+        "body": format!("Splits the parser.\n\n{}", links.block(None)),
+        "state": "merged", "head": "feat/refs", "base": "main",
+        "headSha": "4c1f0a", "baseSha": "9a0e11",
+        "updatedAt": "2026-11-17T10:00:00Z", "url": "https://github.com/o/r/pull/12"
+    }))
+    .unwrap();
+
+    let comments = fixture_comments();
+
+    IntxtView::new(
+        &drawer,
+        &[relay],
+        &title,
+        &[
+            EntryDatum::Commits {
+                entry: &commits,
+                commits: &[
+                    CommitDatum {
+                        sha: "aa0fcdcc77a1b2c3".into(),
+                        commit: tip_commit,
+                    },
+                    CommitDatum {
+                        sha: "bb0fcdcc77a1b2c3".into(),
+                        commit: base_commit,
+                    },
+                ],
+                patch: Some(&PatchDatum {
+                    text: FIXTURE_PATCH.into(),
+                    total_octets: FIXTURE_PATCH.len() as u64,
+                }),
+            },
+            EntryDatum::GitRef {
+                entry: &ref_entry,
+                git_ref: &git_ref,
+            },
+            EntryDatum::JjChange {
+                entry: &jj_entry,
+                change: &jj_change,
+                commits: &[],
+                patch: None,
+            },
+            EntryDatum::Session {
+                entry: &session_entry,
+                session: &session,
+                summary: &summary,
+            },
+            EntryDatum::GithubPull {
+                entry: &pull_entry,
+                pull: &pull,
+            },
+        ],
+        &comments
+            .iter()
+            .map(|(id, comment)| CommentDatum { id, comment })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// A session entry, its session and the summary of three turns.
+fn fixture_session() -> (SessionEntry, AgentSession, SessionSummary) {
     let session_entry: SessionEntry = serde_json::from_value(json!({
         "session": datum_ref("work.agentSession", "main").to_string()
     }))
@@ -252,36 +336,11 @@ fn fixture() -> IntxtView {
     for turn in &turns {
         summary.add(turn);
     }
+    (session_entry, session, summary)
+}
 
-    let sibling_drawer: DocId = "z11111111111111111111111111111112"
-        .parse()
-        .expect("fixture drawer id");
-    let mut sibling = PrLink::new(intxt_core::generic::Intxt::reference(&sibling_drawer, []));
-    sibling.title = Some("intxt: commits live with the intxt".into());
-    sibling.refs = vec!["refs/heads/stack/intxt-16".into()];
-    let links = PrLinks {
-        intxts: vec![
-            PrLink::new(intxt_core::generic::Intxt::reference(
-                &drawer,
-                [relay.clone()],
-            )),
-            sibling,
-        ],
-        ..Default::default()
-    };
-    let pull_entry: GithubPullEntry = serde_json::from_value(json!({
-        "pull": datum_ref("work.githubPull", "o/r/12").to_string()
-    }))
-    .unwrap();
-    let pull: GithubPull = serde_json::from_value(json!({
-        "title": "Splits the reference parser",
-        "body": format!("Splits the parser.\n\n{}", links.block(None)),
-        "state": "merged", "head": "feat/refs", "base": "main",
-        "headSha": "4c1f0a", "baseSha": "9a0e11",
-        "updatedAt": "2026-11-17T10:00:00Z", "url": "https://github.com/o/r/pull/12"
-    }))
-    .unwrap();
-
+/// A question with a reply, and a remark on a branch.
+fn fixture_comments() -> [(DatumReference, Comment); 3] {
     let question_id = datum_ref("comment", "0193");
     let question: Comment = serde_json::from_value(json!({
         "targets": [{
@@ -313,62 +372,9 @@ fn fixture() -> IntxtView {
         "creator": {"type": "Person"}
     }))
     .unwrap();
-
-    IntxtView::new(
-        &drawer,
-        &[relay],
-        &title,
-        &[
-            EntryDatum::Commits {
-                entry: &commits,
-                commits: &[
-                    CommitDatum {
-                        sha: "aa0fcdcc77a1b2c3".into(),
-                        commit: tip_commit,
-                    },
-                    CommitDatum {
-                        sha: "bb0fcdcc77a1b2c3".into(),
-                        commit: base_commit,
-                    },
-                ],
-                patch: Some(&PatchDatum {
-                    text: FIXTURE_PATCH.into(),
-                    total_octets: FIXTURE_PATCH.len() as u64,
-                }),
-            },
-            EntryDatum::GitRef {
-                entry: &ref_entry,
-                git_ref: &git_ref,
-            },
-            EntryDatum::JjChange {
-                entry: &jj_entry,
-                change: &jj_change,
-                commits: &[],
-                patch: None,
-            },
-            EntryDatum::Session {
-                entry: &session_entry,
-                session: &session,
-                summary: &summary,
-            },
-            EntryDatum::GithubPull {
-                entry: &pull_entry,
-                pull: &pull,
-            },
-        ],
-        &[
-            CommentDatum {
-                id: &question_id,
-                comment: &question,
-            },
-            CommentDatum {
-                id: &reply_id,
-                comment: &reply,
-            },
-            CommentDatum {
-                id: &remark_id,
-                comment: &remark,
-            },
-        ],
-    )
+    [
+        (question_id, question),
+        (reply_id, reply),
+        (remark_id, remark),
+    ]
 }

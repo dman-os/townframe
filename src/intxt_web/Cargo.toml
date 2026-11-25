@@ -9,20 +9,28 @@ path = "lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
+#
+# internal
+intxt_core.workspace = true
+big_cabinet_core.workspace = true
+big_blobs_core.workspace = true
+method_core.workspace = true
+# The XRPC envelope (`encode_request`, `decode_response`) and the `HttpTransport` the node source
+# is generic over: the same code the CLI and the nodules speak to a node with.
+service_client_core_rs.workspace = true
+service_core_rs.workspace = true
+
+#
+# wasm component
 wit-bindgen = { version = "0.62.0", features = ["async-spawn", "futures-stream", "inter-task-wakeup"] }
 # Only the renderer-agnostic core: rsx! + html elements + hooks. No `launch`, `web`, `fullstack`,
 # `devtools`, `document`, `asset` (those pull tokio/axum/wasm-bindgen/manganis).
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "html", "hooks", "signals"] }
 dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
-intxt_core = { path = "../intxt_core" }
-big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
-big_blobs_core = { path = "../big_blobs_core" }
-method_core = { path = "../method_core", default-features = false }
-# The XRPC envelope (`encode_request`, `decode_response`) and the `HttpTransport` the node source
-# is generic over: the same code the CLI and the nodules speak to a node with.
-service_client_core_rs = { path = "../service_client_core_rs", default-features = false }
-service_core_rs = { path = "../service_core_rs", default-features = false }
+
+#
+# http, markup, errors and encoding
 http = "1"
 # Raw HTML in a description is turned into text before it is written (see `markdown`).
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
@@ -41,6 +49,16 @@ pollster = "0.4"
 
 # Single-crate workspace, like btress_sysadmin: keeps the root lockfile untouched.
 [workspace]
+
+[workspace.dependencies]
+#
+# internal
+intxt_core = { path = "../intxt_core" }
+big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
+big_blobs_core = { path = "../big_blobs_core" }
+method_core = { path = "../method_core", default-features = false }
+service_client_core_rs = { path = "../service_client_core_rs", default-features = false }
+service_core_rs = { path = "../service_core_rs", default-features = false }
 
 [profile.release]
 opt-level = "s"
