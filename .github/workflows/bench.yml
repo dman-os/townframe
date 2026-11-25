@@ -1,0 +1,94 @@
+name: bench
+
+# The performance gate runs on deterministic counts (callgrind instructions, counted
+# allocations, simulated time), never wall time: shared runners are too noisy for timing. See
+# `.agents/skills/benchmarking/SKILL.md`.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "src/big_automata/**"
+      - "src/big_automata_web/**"
+      - "src/utils_rs/**"
+      - "x/bench*.ts"
+      - "src/nix/devshells.nix"
+      - ".github/workflows/bench.yml"
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deno-tests:
+    name: bench tooling tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+      - run: nix develop .#ci-rust --command deno test x/bench-lib.test.ts
+
+  gate:
+    name: instruction and allocation gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the gate checks out the base commit beside the head in one job, on one machine
+          fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      # Whether this runner exposes hardware performance counters. Recorded in the benchmarking
+      # skill; the gate does not depend on it (callgrind counts instructions in software).
+      - name: probe perf_event_open
+        continue-on-error: true
+        run: |
+          echo "perf_event_paranoid: $(cat /proc/sys/kernel/perf_event_paranoid)"
+          python3 - <<'EOF'
+          import ctypes, os, struct
+          libc = ctypes.CDLL(None, use_errno=True)
+          # perf_event_attr: type=HARDWARE(0), size=128, config=INSTRUCTIONS(1), flags: exclude_kernel and exclude_hv
+          attr = struct.pack("IIQQQQQ", 0, 128, 1, 0, 0, 0, 96).ljust(128, b"\0")
+          fd = libc.syscall(298, attr, 0, -1, -1, 0)
+          print("perf_event_open(HW_INSTRUCTIONS) fd:", fd, "errno:", os.strerror(ctypes.get_errno()) if fd < 0 else "-")
+          EOF
+          nproc; grep -m1 "model name" /proc/cpuinfo
+      - name: gate (base vs head, same checkout, same runner)
+        run: |
+          nix develop .#ci-rust --command deno run -A x/bench.ts gate \
+            --base "${{ github.event.pull_request.base.sha }}" big_automata
+      - name: history
+        if: always()
+        run: cat ~/.local/share/townframe-bench/*.jsonl | head -c 20000 || true
+
+  # Real-time numbers for looking at, never compared: wall clock on a shared runner is noise.
+  # The artifact is the record stream, as `x/bench.ts` writes it.
+  wall:
+    name: wall-clock benches (not gated)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - run: nix develop .#ci-rust --command deno run -A x/bench.ts run big_automata:wall --release --out wall.jsonl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-wall-${{ github.sha }}
+          path: wall.jsonl
