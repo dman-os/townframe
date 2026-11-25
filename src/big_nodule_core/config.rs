@@ -1,21 +1,26 @@
-//! Portable nodule configuration datums and the [`DatumStore`] projection over a node's config
-//! document (ADR 027 §4, §6).
+//! Portable nodule configuration datums and the [`DatumStore`] projections over the two kinds of
+//! document that hold them (ADR 027 §4, §6; ADR 044).
 //!
-//! Each installed nodule's desired state is stored across up to three independently addressed
-//! datums keyed by its [`CartridgeId`] slot:
-//! - [`NoduleInstall`][]: `org.example.daybook.nodule.install/<cartridgeId>`
-//! - [`NoduleSettings`][]: `org.example.daybook.nodule.settings/<cartridgeId>`
-//! - [`NoduleGrants`][]: `org.example.daybook.nodule.grants/<cartridgeId>`
-//! - [`NoduleDevTakeover`][]: `org.example.daybook.nodule.dev_takeover/<cartridgeId>`, present only
-//!   while another installed cartridge fills the slot
+//! The node's config document ([`NoduleConfig`], this node only) holds, per installed cartridge:
+//! - [`CartridgeInstall`]: `org.example.daybook.cartridges.install/<cartridgeId>`, a pin of the
+//!   published version and each component's enablement on this node;
+//! - [`NoduleDevTakeover`]: `org.example.daybook.nodule.devTakeover/<cartridgeId>`, present only
+//!   while another installed cartridge fills the slot;
+//! - the handler artifact pins, `org.example.daybook.blob/nodule.artifact/<cartridgeId>/<artifactKey>`
+//!   [`Blob`] datums (see [`artifact_key`]), which is what makes big_blobs retain and fetch the
+//!   bytes;
+//! - the node-local method routes ([`MethodRoute`]).
 //!
-//! Beside them, each installed nodule's handler artifact is referenced by a
-//! `org.example.daybook.blob/nodule.artifact/<cartridgeId>/<artifactKey>` [`Blob`] datum (see
-//! [`artifact_key`]), which is what makes big_blobs retain and fetch the bytes.
+//! The cartridge's own config document ([`CartridgeConfig`], one per cartridge in the shared
+//! config drawer, so it follows the user to sister nodes) holds its settings datums, which are
+//! ordinary datums under the NSIDs its manifest declares and are never interpreted here, and one
+//! grant datum per grant (see [`GrantKey`]).
 //!
-//! [`NoduleConfig`] hydrates these datums from one [`DatumsRead`] frontier, preserves unknown
+//! [`NoduleConfig`] hydrates from the node document and is handed every cartridge document an
+//! install names ([`NoduleConfig::attach_cartridge_docs`]). Both projections preserve unknown
 //! fields, unknown vocabulary values, and undecodable/rejected/pending entries so unrelated edits
-//! never delete them, and resolves each nodule's desired state independently for the reconciler.
+//! never delete them, and [`NoduleConfig::resolve`] evaluates each nodule's desired state
+//! independently for the reconciler.
 
 use crate::Nodule;
 use crate::inventory::FilledBy;
@@ -24,21 +29,33 @@ use crate::inventory::InventoryError;
 use crate::inventory::admit_cartridge_nodule;
 use big_blobs_core::Blob;
 use big_cabinet_core::DatumKey;
+use big_cabinet_core::DatumPin;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::Extra;
+use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::doc::DatumPatch;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DatumStore;
 use big_cabinet_core::doc::DatumsRead;
 use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::drawer::DrawerAccess;
-use big_cabinet_core::drawer::EntryAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeError;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Revision;
 use big_cartridges_core::Version;
+use big_cartridges_core::config::CartridgeConfigIdentity;
+use big_cartridges_core::config::CartridgeInstall;
+use big_cartridges_core::config::Component;
+use big_cartridges_core::config::ComponentInstall;
+use big_cartridges_core::config::GrantBody;
+use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::config::MicroGrant;
+use big_cartridges_core::config::NoduleGrant;
+use big_cartridges_core::config::config_identity_key;
+use big_cartridges_core::config::install_key;
+use big_cartridges_core::protocol::CartridgeInstallRecord;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::Route;
 use indexmap::IndexMap;
@@ -51,145 +68,6 @@ use std::collections::BTreeSet;
 use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::Mutex;
-
-/// `org.example.daybook.nodule.install/<cartridgeId>`: installed package envelope, selected revision,
-/// and desired enablement on this node.
-#[macros::datum(authority = Nodule::ID, name = "install")]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NoduleInstall {
-    pub envelope: IndexMap<String, Value>,
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
-    pub revision: Revision,
-    pub enabled: bool,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-impl NoduleInstall {
-    pub fn from_cartridge(cartridge: &Cartridge, enabled: bool) -> Self {
-        let envelope: IndexMap<String, Value> = serde_json::from_value(
-            serde_json::to_value(cartridge).expect("a cartridge envelope serializes"),
-        )
-        .expect("a cartridge envelope serializes as a JSON object");
-        Self {
-            envelope,
-            revision: cartridge.revision(),
-            enabled,
-            extra: Default::default(),
-        }
-    }
-
-    pub fn decode_cartridge(&self) -> Result<Cartridge, String> {
-        let value = Value::Object(
-            self.envelope
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        );
-        let cartridge: Cartridge = serde_json::from_value(value)
-            .map_err(|err| format!("invalid cartridge envelope: {err}"))?;
-        cartridge.validate().map_err(|err| err.to_string())?;
-        let actual = cartridge.revision();
-        if actual != self.revision {
-            return Err(format!(
-                "cartridge `{}` revision mismatch: install pins {}, envelope hashes to {}",
-                cartridge.id, self.revision, actual
-            ));
-        }
-        Ok(cartridge)
-    }
-}
-
-/// `org.example.daybook.nodule.settings/<cartridgeId>`: explicit operator settings for an installed
-/// nodule. Absence means the nodule uses the admitted envelope's defaults.
-#[macros::datum(authority = Nodule::ID, name = "settings")]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NoduleSettings {
-    pub values: IndexMap<String, Value>,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-impl NoduleSettings {
-    pub fn new(values: IndexMap<String, Value>) -> Self {
-        Self {
-            values,
-            extra: Default::default(),
-        }
-    }
-}
-
-/// `org.example.daybook.nodule.grants/<cartridgeId>`: desired local drawer access bindings for an
-/// installed nodule, keyed by portable [`DrawerId`], and the methods it may invoke through
-/// dispatch.
-#[macros::datum(authority = Nodule::ID, name = "grants")]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NoduleGrants {
-    #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<String, String>"))]
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub drawers: BTreeMap<DrawerId, EntryAccess>,
-    /// The methods the nodule's own actor may invoke through dispatch, as the scope of the
-    /// capability the nodule service mints for it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub methods: Option<MethodGrants>,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-/// The methods a nodule may invoke through dispatch: the wire form of a [`DispatchScope`], as
-/// arrays because datums carry no sets. Authority prefixes match whole NSID segments, exactly as
-/// in any other scope.
-#[macros::datum]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MethodGrants {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub methods: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub authorities: Vec<String>,
-    /// Whether the nodule may invoke privileged methods (`XrpcMethod::privileged`). The nodule
-    /// service holds no privilege, so a grant that sets this is reported as not applied.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub privileged: bool,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-impl From<MethodGrants> for DispatchScope {
-    fn from(grants: MethodGrants) -> Self {
-        Self {
-            operations: grants.methods.into_iter().collect(),
-            authorities: grants.authorities.into_iter().collect(),
-            privileged: grants.privileged,
-        }
-    }
-}
-
-impl From<DispatchScope> for MethodGrants {
-    fn from(scope: DispatchScope) -> Self {
-        Self {
-            methods: scope.operations.into_iter().collect(),
-            authorities: scope.authorities.into_iter().collect(),
-            privileged: scope.privileged,
-            extra: Default::default(),
-        }
-    }
-}
-
-impl NoduleGrants {
-    /// Whether the datum grants nothing and carries nothing: it is then deleted rather than
-    /// stored.
-    fn is_empty(&self) -> bool {
-        self.drawers.is_empty() && self.methods.is_none() && self.extra.is_empty()
-    }
-}
 
 /// `org.example.daybook.nodule.devTakeover/<cartridgeId>`: the dev hook that runs the installed
 /// cartridge `by` *as* this cartridge, to test a dev build against real data (ADR 045 §5). `by`'s
@@ -224,33 +102,18 @@ pub struct MethodRoute {
     pub extra: Extra,
 }
 
-/// The portable nodule configuration datum declarations.
+/// The portable nodule configuration datum declarations: the cartridge-level install and grant
+/// datums, the dev takeover and the route.
 #[cfg(feature = "schemars")]
 pub fn config_universe() -> big_cabinet_core::datum::Universe {
     use big_cabinet_core::datum::Declaration;
     use big_cabinet_core::datum::Universe;
-    Universe::collect([
-        Declaration::of::<NoduleInstall>().expect("NoduleInstall declaration is valid"),
-        Declaration::of::<NoduleSettings>().expect("NoduleSettings declaration is valid"),
-        Declaration::of::<NoduleGrants>().expect("NoduleGrants declaration is valid"),
+    let mut declarations = big_cartridges_core::config::config_declarations();
+    declarations.extend([
         Declaration::of::<NoduleDevTakeover>().expect("NoduleDevTakeover declaration is valid"),
         Declaration::of::<MethodRoute>().expect("MethodRoute declaration is valid"),
-    ])
-}
-
-pub fn install_key(cartridge_id: &CartridgeId) -> DatumKey {
-    DatumKey::from_text(NoduleInstall::ID, cartridge_id.to_string())
-        .expect("a CartridgeId is a valid datum key slot")
-}
-
-pub fn settings_key(cartridge_id: &CartridgeId) -> DatumKey {
-    DatumKey::from_text(NoduleSettings::ID, cartridge_id.to_string())
-        .expect("a CartridgeId is a valid datum key slot")
-}
-
-pub fn grants_key(cartridge_id: &CartridgeId) -> DatumKey {
-    DatumKey::from_text(NoduleGrants::ID, cartridge_id.to_string())
-        .expect("a CartridgeId is a valid datum key slot")
+    ]);
+    Universe::collect(declarations)
 }
 
 pub fn dev_takeover_key(cartridge_id: &CartridgeId) -> DatumKey {
@@ -372,25 +235,20 @@ impl<T: DeserializeOwned> DatumSlot<T> {
     }
 }
 
-/// The configuration datum slots for one [`CartridgeId`]: the three nodule datums and the artifact
-/// [`Blob`] references, by artifact key. An artifact slot present here is always in the document
-/// or about to be; absence from the map is absence from the document.
+/// The configuration datum slots for one [`CartridgeId`] in the node's config document: its
+/// install, its dev takeover, and the artifact [`Blob`] references by artifact key. An artifact
+/// slot present here is always in the document or about to be; absence from the map is absence
+/// from the document.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NoduleEntry {
-    pub install: DatumSlot<NoduleInstall>,
-    pub settings: DatumSlot<NoduleSettings>,
-    pub grants: DatumSlot<NoduleGrants>,
+    pub install: DatumSlot<CartridgeInstall>,
     pub dev_takeover: DatumSlot<NoduleDevTakeover>,
     pub artifacts: BTreeMap<String, DatumSlot<Blob>>,
 }
 
 impl NoduleEntry {
     pub fn is_empty(&self) -> bool {
-        self.install.is_absent()
-            && self.settings.is_absent()
-            && self.grants.is_absent()
-            && self.dev_takeover.is_absent()
-            && self.artifacts.is_empty()
+        self.install.is_absent() && self.dev_takeover.is_absent() && self.artifacts.is_empty()
     }
 }
 
@@ -411,13 +269,12 @@ pub enum NoduleResolution {
         version: Option<Version>,
         revision: Option<Revision>,
         enabled: bool,
-        config: Option<IndexMap<String, Value>>,
         reason: String,
     },
 }
 
-/// What admitting one stored install envelope established, kept so the same envelope is not
-/// decoded and admitted again on every reconcile.
+/// What admitting one pinned cartridge version established, kept so the same version is not
+/// admitted again on every reconcile.
 #[expect(
     clippy::large_enum_variant,
     reason = "always held behind an Arc in the admission cache"
@@ -426,6 +283,7 @@ pub enum NoduleResolution {
 pub enum Admission {
     Admitted {
         version: Version,
+        revision: Revision,
         nodule: Nodule,
         admitted: crate::Admitted,
         artifacts: BTreeMap<
@@ -436,24 +294,66 @@ pub enum Admission {
             ),
         >,
     },
-    /// The envelope cannot be installed; `version` is a best-effort read of the raw envelope for
-    /// the refusal record.
+    /// The version cannot be installed as a nodule, or could not be read; `version` and `revision`
+    /// are what is known of it for the refusal record.
     Refused {
         version: Option<Version>,
+        revision: Option<Revision>,
         reason: String,
     },
 }
 
-struct CachedAdmission {
-    envelope: IndexMap<String, Value>,
-    revision: Revision,
-    admission: Arc<Admission>,
+impl Admission {
+    /// What admitting `cartridge`'s nodule contribution establishes.
+    pub fn of(cartridge: &Cartridge) -> Self {
+        let revision = cartridge.revision();
+        match admit_cartridge_nodule(cartridge) {
+            Ok((nodule, admitted, artifacts)) => Self::Admitted {
+                version: cartridge.version.clone(),
+                revision,
+                nodule,
+                admitted,
+                artifacts,
+            },
+            Err(err) => Self::Refused {
+                version: Some(cartridge.version.clone()),
+                revision: Some(revision),
+                reason: err.to_string(),
+            },
+        }
+    }
+
+    pub fn version(&self) -> Option<&Version> {
+        match self {
+            Self::Admitted { version, .. } => Some(version),
+            Self::Refused { version, .. } => version.as_ref(),
+        }
+    }
+
+    pub fn revision(&self) -> Option<Revision> {
+        match self {
+            Self::Admitted { revision, .. } => Some(*revision),
+            Self::Refused { revision, .. } => *revision,
+        }
+    }
 }
 
-/// Memo of [`Admission`] outcomes per installed cartridge, owned by whoever reconciles (the nodule state
-/// actor). An entry is reused only while the stored install datum carries the same revision and a
-/// byte-equal envelope, so a changed or tampered envelope is always re-admitted. [`NoduleConfig::resolve`]
-/// drops entries for cartridges that are no longer installed. The lock is held only around map access.
+struct CachedAdmission {
+    pin: DatumPin,
+    admission: Arc<Admission>,
+    /// Whether the outcome is final for this pin. A pin whose heads have not reached this node
+    /// yet is unsettled, and is read again on the next reconcile; a version that was read and
+    /// refused is as final as one that was admitted.
+    settled: bool,
+}
+
+/// The cache entry an [`AdmissionCache::insert`] replaced.
+pub struct Displaced(Option<CachedAdmission>);
+
+/// Memo of [`Admission`] outcomes per installed cartridge, owned by whoever reconciles (the nodule
+/// state actor), which reads each pinned version once and fills it in. An entry serves only the
+/// pin it was filled for, so a re-pin is read and admitted again; [`NoduleConfig::resolve`] drops
+/// entries for cartridges that are no longer installed. The lock is held only around map access.
 #[derive(Default)]
 pub struct AdmissionCache {
     entries: Mutex<BTreeMap<CartridgeId, CachedAdmission>>,
@@ -464,26 +364,63 @@ impl AdmissionCache {
         Self::default()
     }
 
-    /// The admission outcome of `install` as stored under `cartridge_id`, computed at most once per
-    /// `(cartridge_id, revision, envelope)`.
-    pub fn admission(&self, cartridge_id: &CartridgeId, install: &NoduleInstall) -> Arc<Admission> {
-        let mut entries = self.entries.lock().expect("admission cache lock");
-        if let Some(cached) = entries.get(cartridge_id)
-            && cached.revision == install.revision
-            && cached.envelope == install.envelope
-        {
-            return Arc::clone(&cached.admission);
-        }
-        let admission = Arc::new(Self::compute(cartridge_id, install));
-        entries.insert(
+    /// Whether `pin` of `cartridge_id` has no settled outcome yet, so its version must be read.
+    pub fn needs_read(&self, cartridge_id: &CartridgeId, pin: &DatumPin) -> bool {
+        self.entries
+            .lock()
+            .expect("admission cache lock")
+            .get(cartridge_id)
+            .is_none_or(|cached| &cached.pin != pin || !cached.settled)
+    }
+
+    /// Records the outcome of reading and admitting `pin` of `cartridge_id`, and returns what it
+    /// displaced.
+    pub fn insert(
+        &self,
+        cartridge_id: &CartridgeId,
+        pin: DatumPin,
+        admission: Admission,
+        settled: bool,
+    ) -> Displaced {
+        Displaced(self.entries.lock().expect("admission cache lock").insert(
             cartridge_id.clone(),
             CachedAdmission {
-                envelope: install.envelope.clone(),
-                revision: install.revision,
-                admission: Arc::clone(&admission),
+                pin,
+                admission: Arc::new(admission),
+                settled,
             },
-        );
-        admission
+        ))
+    }
+
+    /// Puts back what an [`Self::insert`] displaced, for an edit that failed after it.
+    pub fn restore(&self, cartridge_id: &CartridgeId, displaced: Displaced) {
+        let mut entries = self.entries.lock().expect("admission cache lock");
+        match displaced.0 {
+            Some(cached) => entries.insert(cartridge_id.clone(), cached),
+            None => entries.remove(cartridge_id),
+        };
+    }
+
+    /// The admission outcome of `install`'s pinned version, or a refusal while it has not been
+    /// read.
+    pub fn admission(
+        &self,
+        cartridge_id: &CartridgeId,
+        install: &CartridgeInstall,
+    ) -> Arc<Admission> {
+        match self
+            .entries
+            .lock()
+            .expect("admission cache lock")
+            .get(cartridge_id)
+        {
+            Some(cached) if cached.pin == install.cartridge => Arc::clone(&cached.admission),
+            _ => Arc::new(Admission::Refused {
+                version: None,
+                revision: None,
+                reason: "the pinned cartridge version has not been read".to_owned(),
+            }),
+        }
     }
 
     fn retain<'a>(&self, installed: impl Iterator<Item = &'a CartridgeId>) {
@@ -493,52 +430,19 @@ impl AdmissionCache {
             .expect("admission cache lock")
             .retain(|cartridge_id, _| keep.contains(cartridge_id));
     }
-
-    fn compute(cartridge_id: &CartridgeId, install: &NoduleInstall) -> Admission {
-        let cartridge = match install.decode_cartridge() {
-            Ok(cartridge) => cartridge,
-            Err(reason) => {
-                return Admission::Refused {
-                    version: install
-                        .envelope
-                        .get("version")
-                        .and_then(Value::as_str)
-                        .and_then(|v| v.parse::<Version>().ok()),
-                    reason,
-                };
-            }
-        };
-        if &cartridge.id != cartridge_id {
-            return Admission::Refused {
-                version: Some(cartridge.version),
-                reason: format!(
-                    "install datum key `{cartridge_id}` does not match envelope id `{}`",
-                    cartridge.id
-                ),
-            };
-        }
-        match admit_cartridge_nodule(&cartridge) {
-            Ok((nodule, admitted, artifacts)) => Admission::Admitted {
-                version: cartridge.version,
-                nodule,
-                admitted,
-                artifacts,
-            },
-            Err(err) => Admission::Refused {
-                version: Some(cartridge.version),
-                reason: err.to_string(),
-            },
-        }
-    }
 }
 
-/// Typed [`DatumStore`] projection over a node's nodule configuration datums.
+/// Typed [`DatumStore`] projection over a node's nodule configuration datums: the installs, dev
+/// takeovers, artifact pins and routes of its config document. The cartridge config documents the
+/// installs name ride along, attached for resolution, and are neither read from nor written back
+/// to this document.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NoduleConfig {
     entries: BTreeMap<CartridgeId, NoduleEntry>,
     /// The route datums by pattern: node-wide, so they belong to no cartridge's entry.
     routes: BTreeMap<String, DatumSlot<MethodRoute>>,
     carried_keys: BTreeMap<DatumKey, DatumRead>,
+    cartridge_docs: BTreeMap<CartridgeId, CartridgeConfig>,
 }
 
 impl From<InventoryError> for StoreError {
@@ -550,11 +454,7 @@ impl From<InventoryError> for StoreError {
 impl DatumStore for NoduleConfig {
     fn owns(key: &DatumKey) -> bool {
         match key.tag().as_str() {
-            NoduleInstall::ID
-            | NoduleSettings::ID
-            | NoduleGrants::ID
-            | NoduleDevTakeover::ID
-            | MethodRoute::ID => true,
+            CartridgeInstall::ID | NoduleDevTakeover::ID | MethodRoute::ID => true,
             Blob::ID => key
                 .slot_bytes()
                 .starts_with(ARTIFACT_SLOT_PREFIX.as_bytes()),
@@ -603,9 +503,7 @@ impl DatumStore for NoduleConfig {
             };
             let entry = config.entries.entry(cartridge_id).or_default();
             match key.tag().as_str() {
-                NoduleInstall::ID => entry.install = DatumSlot::from_read(datum_read),
-                NoduleSettings::ID => entry.settings = DatumSlot::from_read(datum_read),
-                NoduleGrants::ID => entry.grants = DatumSlot::from_read(datum_read),
+                CartridgeInstall::ID => entry.install = DatumSlot::from_read(datum_read),
                 NoduleDevTakeover::ID => entry.dev_takeover = DatumSlot::from_read(datum_read),
                 _ => unreachable!("checked by NoduleConfig::owns"),
             }
@@ -626,18 +524,6 @@ impl DatumStore for NoduleConfig {
                 install_key(cartridge_id),
                 &prev.install,
                 &next.install,
-                &mut patch,
-            )?;
-            diff_slot(
-                settings_key(cartridge_id),
-                &prev.settings,
-                &next.settings,
-                &mut patch,
-            )?;
-            diff_slot(
-                grants_key(cartridge_id),
-                &prev.grants,
-                &next.grants,
                 &mut patch,
             )?;
             diff_slot(
@@ -677,126 +563,200 @@ impl DatumStore for NoduleConfig {
     }
 }
 
-fn diff_slot<T: PartialEq + Serialize>(
-    key: DatumKey,
-    before: &DatumSlot<T>,
-    after: &DatumSlot<T>,
-    patch: &mut DatumPatch,
-) -> Result<(), StoreError> {
-    if before == after {
-        return Ok(());
+/// Typed [`DatumStore`] projection over a cartridge's config document: its grants, keyed by
+/// component and [`GrantKey`], and the cartridge identity. Everything else the document holds is
+/// the cartridge's settings (ordinary datums under the NSIDs its manifest declares, written by
+/// the nodule, its micro or a generic editor), carried verbatim and never decoded here, so this
+/// projection owns the whole document without interpreting what it does not know.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CartridgeConfig {
+    identity: DatumSlot<CartridgeConfigIdentity>,
+    grants: BTreeMap<(Component, GrantKey), DatumSlot<GrantBody>>,
+    /// The settings datums, and grant-tagged datums whose slot is not a grant key.
+    carried: BTreeMap<DatumKey, DatumRead>,
+}
+
+impl DatumStore for CartridgeConfig {
+    fn owns(_: &DatumKey) -> bool {
+        true
     }
-    match after {
-        DatumSlot::Absent => {
-            if !before.is_absent() {
-                patch.remove.insert(key);
+
+    fn hydrate(read: &DatumsRead) -> Self {
+        let mut config = Self::default();
+        for (key, datum_read) in &read.datums {
+            if matches!(datum_read, DatumRead::Absent { .. }) {
+                continue;
             }
-            Ok(())
-        }
-        DatumSlot::Accepted { value, raw } => {
-            if let DatumSlot::Accepted {
-                value: before_val,
-                raw: before_raw,
-            } = before
-                && before_val == value
-                && (raw.is_none() || before_raw == raw)
-            {
-                return Ok(());
+            if *key == config_identity_key() {
+                config.identity = DatumSlot::from_read(datum_read);
+                continue;
             }
-            let json = match raw {
-                Some(raw) => raw.clone(),
-                None => serde_json::to_value(value)
-                    .map_err(|err| StoreError::InvalidEdit(err.to_string()))?,
+            let component = match key.tag().as_str() {
+                NoduleGrant::ID => Some(Component::Nodule),
+                MicroGrant::ID => Some(Component::Micro),
+                _ => None,
             };
-            patch.set.insert(key, json);
-            Ok(())
+            match component.zip(GrantKey::from_slot(key.slot_bytes())) {
+                Some((component, grant)) => {
+                    config
+                        .grants
+                        .insert((component, grant), DatumSlot::from_read(datum_read));
+                }
+                None => {
+                    config.carried.insert(key.clone(), datum_read.clone());
+                }
+            }
         }
-        DatumSlot::Invalid { reason, .. } => Err(StoreError::InvalidEdit(format!(
-            "cannot write invalid datum `{key}`: {reason}"
-        ))),
+        config
+    }
+
+    fn diff(before: &Self, after: &Self) -> Result<DatumPatch, StoreError> {
+        let mut patch = DatumPatch::default();
+        diff_slot(
+            config_identity_key(),
+            &before.identity,
+            &after.identity,
+            &mut patch,
+        )?;
+        let absent = DatumSlot::Absent;
+        let grants: BTreeSet<&(Component, GrantKey)> =
+            before.grants.keys().chain(after.grants.keys()).collect();
+        for grant in grants {
+            diff_slot(
+                grant.1.datum_key(grant.0),
+                before.grants.get(grant).unwrap_or(&absent),
+                after.grants.get(grant).unwrap_or(&absent),
+                &mut patch,
+            )?;
+        }
+        for key in before.carried.keys() {
+            if !after.carried.contains_key(key) {
+                patch.remove.insert(key.clone());
+            }
+        }
+        Ok(patch)
     }
 }
 
-/// The artifact [`Blob`] slots an install of `artifacts` leaves: exactly one per artifact, and
-/// none for a key the previous revision had and this one lacks, so the diff removes the stale
-/// reference together with the install datum. A slot whose stored blob already says the same is
-/// kept as stored (no write), a changed one keeps its stored unknown fields, and a stored slot
-/// that did not decode is replaced, which is how it is repaired.
-fn artifact_slots(
-    stored: &BTreeMap<String, DatumSlot<Blob>>,
-    artifacts: &BTreeMap<
-        String,
-        (
-            big_cartridges_core::Artifact,
-            crate::inventory::ArtifactState,
-        ),
-    >,
-) -> BTreeMap<String, DatumSlot<Blob>> {
-    artifacts
-        .iter()
-        .map(|(key, (artifact, _))| {
-            let (extra, kept) = match stored.get(key) {
-                Some(DatumSlot::Accepted { value, raw }) => {
-                    (value.extra.clone(), Some((value, raw)))
-                }
-                _ => (Extra::default(), None),
-            };
-            let desired = Blob {
-                mime: artifact
-                    .media_type
-                    .clone()
-                    .unwrap_or_else(|| "application/octet-stream".to_owned()),
-                length_octets: artifact
-                    .size
-                    .expect("admission refuses an artifact without a size"),
-                digest: artifact.digest.to_string(),
-                inline: None,
-                urls: None,
-                extra,
-            };
-            let slot = match kept {
-                Some((value, _)) if *value == desired => stored[key].clone(),
-                _ => {
-                    // The datum wire form omits an unset option rather than writing `null`.
-                    let mut raw = serde_json::to_value(&desired).expect("a blob serializes");
-                    raw.as_object_mut()
-                        .expect("a blob serializes as an object")
-                        .retain(|_, value| !value.is_null());
-                    DatumSlot::Accepted {
-                        value: desired,
-                        raw: Some(raw),
-                    }
-                }
-            };
-            (key.clone(), slot)
-        })
-        .collect()
-}
+impl CartridgeConfig {
+    pub fn identity(&self) -> &DatumSlot<CartridgeConfigIdentity> {
+        &self.identity
+    }
 
-/// Rewrites one part of the grants datum, keeping what `edit` does not touch (the other grant
-/// kind and unknown members). An invalid or absent datum starts from empty, as a rewrite of it
-/// always has.
-fn apply_grants_slot(slot: &mut DatumSlot<NoduleGrants>, edit: impl FnOnce(&mut NoduleGrants)) {
-    let mut grants = match slot {
-        DatumSlot::Accepted { value, .. } => value.clone(),
-        _ => NoduleGrants::default(),
-    };
-    edit(&mut grants);
-    *slot = if grants.is_empty() {
-        DatumSlot::Absent
-    } else {
-        DatumSlot::Accepted {
-            value: grants,
-            raw: None,
+    /// The grants of `component`, by key, with whether each decoded.
+    pub fn grants(
+        &self,
+        component: Component,
+    ) -> impl Iterator<Item = (&GrantKey, &DatumSlot<GrantBody>)> {
+        self.grants
+            .iter()
+            .filter(move |((owner, _), _)| *owner == component)
+            .map(|((_, grant), slot)| (grant, slot))
+    }
+
+    /// Sets, or with `value` absent revokes, one grant of `component`. A rewrite keeps the members
+    /// of the stored datum this build does not know.
+    pub fn set_grant(
+        &mut self,
+        component: Component,
+        grant: GrantKey,
+        value: Option<GrantBody>,
+    ) -> Result<(), InventoryError> {
+        let slot = (component, grant);
+        let Some(body) = value else {
+            self.grants.remove(&slot);
+            return Ok(());
+        };
+        if !slot.1.accepts(&body) {
+            return Err(InventoryError::InvalidGrant {
+                grant: slot.1.to_string(),
+                reason: "a drawer grant states its access and nothing else, and a method or \
+                         authority grant states no access"
+                    .to_owned(),
+            });
         }
-    };
+        // The stored datum's other members survive the rewrite; the two this build writes are
+        // replaced, and one the new value leaves out is dropped.
+        let mut raw = match self.grants.get(&slot) {
+            Some(DatumSlot::Accepted {
+                raw: Some(Value::Object(raw)),
+                ..
+            }) => raw.clone(),
+            _ => serde_json::Map::new(),
+        };
+        raw.remove("access");
+        raw.remove("privileged");
+        let Value::Object(written) = serde_json::to_value(&body).expect("a grant body serializes")
+        else {
+            unreachable!("a grant body serializes as an object");
+        };
+        raw.extend(written);
+        self.grants.insert(
+            slot,
+            DatumSlot::Accepted {
+                value: body,
+                raw: Some(Value::Object(raw)),
+            },
+        );
+        Ok(())
+    }
+
+    /// Drops the settings and every grant, nodule and micro. The identity stays: it is what lets
+    /// the document be found again.
+    pub fn clear(&mut self) {
+        self.grants.clear();
+        self.carried.clear();
+    }
+
+    /// What `component`'s grants ask for: drawer access by drawer, and the scope of the dispatch
+    /// capability minted for it. A grant that does not decode, or states an access level this
+    /// build does not know, refuses the component with the reason, as an invalid datum always has.
+    pub fn resolve_grants(
+        &self,
+        component: Component,
+    ) -> Result<(BTreeMap<DrawerId, DrawerAccess>, DispatchScope), String> {
+        let mut drawers = BTreeMap::new();
+        let mut scope = DispatchScope::default();
+        for (grant, slot) in self.grants(component) {
+            let body = match slot {
+                DatumSlot::Absent => continue,
+                DatumSlot::Invalid { reason, .. } => {
+                    return Err(format!("invalid grant datum `{grant}`: {reason}"));
+                }
+                DatumSlot::Accepted { value, .. } => value,
+            };
+            if !grant.accepts(body) {
+                return Err(format!(
+                    "grant datum `{grant}` states a value that kind of grant does not take"
+                ));
+            }
+            match grant {
+                GrantKey::Drawer(drawer_id) => {
+                    let access = body.access.as_ref().expect("checked by `accepts`");
+                    let Some(known) = access.known() else {
+                        return Err(format!(
+                            "unknown drawer access level `{}` for drawer `{drawer_id}`",
+                            access.as_str()
+                        ));
+                    };
+                    drawers.insert(drawer_id.clone(), known);
+                }
+                GrantKey::Method(nsid) => {
+                    scope.operations.insert(nsid.clone());
+                }
+                GrantKey::Authority(prefix) => {
+                    scope.authorities.insert(prefix.clone());
+                }
+            }
+            scope.privileged |= body.privileged;
+        }
+        Ok((drawers, scope))
+    }
 }
 
-fn drawer_entries(drawers: BTreeMap<DrawerId, DrawerAccess>) -> BTreeMap<DrawerId, EntryAccess> {
-    drawers
-        .into_iter()
-        .map(|(drawer_id, access)| (drawer_id, EntryAccess::from(access)))
-        .collect()
+/// Whether the nodule member of `install` is enabled.
+fn nodule_enabled(install: &CartridgeInstall) -> bool {
+    install.nodule.as_ref().is_some_and(|nodule| nodule.enabled)
 }
 
 impl NoduleConfig {
@@ -820,156 +780,142 @@ impl NoduleConfig {
         self.carried_keys.remove(key).is_some()
     }
 
-    /// Validates `cartridge`, admits its nodule contribution, checks authority conflicts and existing
-    /// settings compatibility, and updates the [`NoduleInstall`] (and optionally [`NoduleGrants`])
-    /// slots for `cartridge.id`.
-    pub fn admit(
+    /// Hands resolution the cartridge config documents the installs name, replacing any attached
+    /// before. A cartridge without one resolves with no grants.
+    pub fn attach_cartridge_docs(&mut self, docs: BTreeMap<CartridgeId, CartridgeConfig>) {
+        self.cartridge_docs = docs;
+    }
+
+    /// The config document each installed cartridge names.
+    pub fn config_docs(&self) -> BTreeMap<CartridgeId, DocId> {
+        self.entries
+            .iter()
+            .filter_map(|(cartridge_id, entry)| {
+                entry
+                    .install
+                    .accepted()
+                    .map(|install| (cartridge_id.clone(), install.config_doc.clone()))
+            })
+            .collect()
+    }
+
+    /// The installs this document holds, for the install surface.
+    pub fn installs(&self) -> Vec<CartridgeInstallRecord> {
+        self.entries
+            .iter()
+            .filter_map(|(cartridge_id, entry)| {
+                entry
+                    .install
+                    .accepted()
+                    .map(|install| CartridgeInstallRecord {
+                        cartridge_id: cartridge_id.clone(),
+                        install: install.clone(),
+                    })
+            })
+            .collect()
+    }
+
+    /// Records the install of `cartridge`, read from `pin`: admits its nodule contribution if it
+    /// has one, checks it does not collide with the version already installed, and updates the
+    /// [`CartridgeInstall`] and the handler artifact references. A component is present exactly
+    /// when the envelope contributes it. An install that exists keeps each component's enablement
+    /// and its unknown members, so this is also the upgrade; a new one starts disabled. The
+    /// admission of `pin` is entered in `cache` here, and put back as it was if the install is
+    /// refused.
+    pub fn install(
         &mut self,
         cache: &AdmissionCache,
         cartridge: &Cartridge,
-        drawers: Option<BTreeMap<DrawerId, DrawerAccess>>,
-    ) -> Result<InstalledNodule, InventoryError> {
-        let (nodule, admitted, artifacts) = admit_cartridge_nodule(cartridge)?;
-        let revision = cartridge.revision();
-        let (enabled, install_extra, config, configured) =
-            if let Some(existing_entry) = self.entries.get(&cartridge.id) {
-                if let Some(existing_install) = existing_entry.install.accepted()
-                    && let Ok(existing_cartridge) = existing_install.decode_cartridge()
-                    && existing_cartridge.version == cartridge.version
-                    && existing_install.revision != revision
-                {
-                    return Err(InventoryError::Cartridge(CartridgeError::Conflict {
-                        id: cartridge.id.clone(),
-                        version: Box::new(cartridge.version.clone()),
-                        existing: existing_install.revision,
-                        incoming: revision,
-                    }));
-                }
-                if drawers.is_none()
-                    && let DatumSlot::Invalid { reason, .. } = &existing_entry.grants
-                {
-                    return Err(InventoryError::InvalidContribution {
-                        id: cartridge.id.clone(),
-                        reason: format!("existing grants datum is invalid: {reason}"),
-                    });
-                }
-                let (config, configured) = match &existing_entry.settings {
-                    DatumSlot::Absent => (
-                        nodule
-                            .config
-                            .as_ref()
-                            .and_then(|config| config.defaults.clone()),
-                        false,
-                    ),
-                    // Explicit settings are carried verbatim even when the incoming revision's
-                    // schema no longer accepts them (or it declares none): the stored datum is
-                    // untouched, `resolve` refuses the nodule with the schema error, and
-                    // `configure` validates against this newly installed revision so rewriting the
-                    // settings repairs it. Rejecting the upgrade here would wedge the operator,
-                    // who could not repair settings against the old revision.
-                    DatumSlot::Accepted { value, .. } => (Some(value.values.clone()), true),
-                    DatumSlot::Invalid { reason, .. } => {
-                        return Err(InventoryError::InvalidContribution {
-                            id: cartridge.id.clone(),
-                            reason: format!("existing settings datum is invalid: {reason}"),
-                        });
-                    }
-                };
-                let (enabled, extra) = match &existing_entry.install {
-                    DatumSlot::Accepted { value, .. } => (value.enabled, value.extra.clone()),
-                    _ => (false, Extra::default()),
-                };
-                (enabled, extra, config, configured)
-            } else {
-                let defaults = nodule
-                    .config
+        pin: DatumPin,
+        config_doc: DocId,
+    ) -> Result<(), InventoryError> {
+        let has_nodule = cartridge.nodule().is_some();
+        let has_micro = cartridge.micro().is_some();
+        if !has_nodule && !has_micro {
+            return Err(InventoryError::NothingToInstall(cartridge.id.clone()));
+        }
+        let nodule = has_nodule
+            .then(|| admit_cartridge_nodule(cartridge))
+            .transpose()?;
+        let existing = self
+            .entries
+            .get(&cartridge.id)
+            .and_then(|entry| entry.install.accepted())
+            .cloned();
+        if let Some(existing) = &existing {
+            let previous = cache.admission(&cartridge.id, existing);
+            let revision = cartridge.revision();
+            if previous.version() == Some(&cartridge.version)
+                && let Some(known) = previous.revision()
+                && known != revision
+            {
+                return Err(InventoryError::Cartridge(CartridgeError::Conflict {
+                    id: cartridge.id.clone(),
+                    version: Box::new(cartridge.version.clone()),
+                    existing: known,
+                    incoming: revision,
+                }));
+            }
+        }
+        let member = |present: bool, kept: Option<&ComponentInstall>| {
+            present.then(|| {
+                kept.cloned()
+                    .unwrap_or_else(|| ComponentInstall::new(false))
+            })
+        };
+        let install = CartridgeInstall {
+            cartridge: pin,
+            config_doc,
+            nodule: member(
+                has_nodule,
+                existing
                     .as_ref()
-                    .and_then(|config| config.defaults.clone());
-                (false, Extra::default(), defaults, false)
-            };
-
-        let mut install = NoduleInstall::from_cartridge(cartridge, enabled);
-        install.extra = install_extra;
+                    .and_then(|install| install.nodule.as_ref()),
+            ),
+            micro: member(
+                has_micro,
+                existing.as_ref().and_then(|install| install.micro.as_ref()),
+            ),
+            extra: existing.map(|install| install.extra).unwrap_or_default(),
+        };
+        let enabled = nodule_enabled(&install);
+        let displaced = cache.insert(
+            &cartridge.id,
+            install.cartridge.clone(),
+            Admission::of(cartridge),
+            true,
+        );
         let entry = self.entries.entry(cartridge.id.clone()).or_default();
         entry.install = DatumSlot::Accepted {
             value: install,
             raw: None,
         };
-        if let Some(drawers) = drawers {
-            apply_grants_slot(&mut entry.grants, |grants| {
-                grants.drawers = drawer_entries(drawers);
-            });
-        }
-        entry.artifacts = artifact_slots(&entry.artifacts, &artifacts);
+        entry.artifacts = match nodule {
+            Some((_, _, artifacts)) => artifact_slots(&entry.artifacts, &artifacts),
+            None => BTreeMap::new(),
+        };
         // A cartridge installed disabled holds nothing yet; an upgrade of an enabled one must not
         // take a prefix another enabled slot holds.
-        if enabled {
-            self.ensure_no_authority_conflict(cache, &cartridge.id)?;
+        if enabled && let Err(error) = self.ensure_no_authority_conflict(cache, &cartridge.id) {
+            cache.restore(&cartridge.id, displaced);
+            return Err(error);
         }
-
-        Ok(InstalledNodule::new(
-            cartridge.id.clone(),
-            cartridge.version.clone(),
-            revision,
-            nodule,
-            admitted,
-            artifacts,
-            enabled,
-            config,
-            configured,
-        ))
+        Ok(())
     }
 
-    pub fn configure(
-        &mut self,
-        cartridge_id: &CartridgeId,
-        settings: IndexMap<String, Value>,
-    ) -> Result<InstalledNodule, InventoryError> {
-        let (cartridge, nodule, admitted, artifacts, enabled) =
-            self.validate_installed_cartridge(cartridge_id)?;
-        if nodule.config.is_none() {
-            return Err(InventoryError::NoConfigSchema(cartridge_id.clone()));
-        }
-        nodule.validate_config(&settings, "config")?;
-        let entry = self
-            .entries
-            .get_mut(cartridge_id)
-            .expect("verified installed");
-        let extra = match &entry.settings {
-            DatumSlot::Accepted { value, .. } => value.extra.clone(),
-            _ => Extra::default(),
-        };
-        entry.settings = DatumSlot::Accepted {
-            value: NoduleSettings {
-                values: settings.clone(),
-                extra,
-            },
-            raw: None,
-        };
-        Ok(InstalledNodule::new(
-            cartridge.id.clone(),
-            cartridge.version.clone(),
-            cartridge.revision(),
-            nodule,
-            admitted,
-            artifacts,
-            enabled,
-            Some(settings),
-            true,
-        ))
-    }
-
-    /// Enabling is where two holders of one prefix are refused (ADR 028 §5), and where a cartridge
-    /// that fills another slot is refused its own: one code lineage per slot.
+    /// Enabling the nodule is where two holders of one prefix are refused (ADR 028 §5), and where
+    /// a cartridge that fills another slot is refused its own: one code lineage per slot.
     pub fn set_enabled(
         &mut self,
         cache: &AdmissionCache,
         cartridge_id: &CartridgeId,
+        component: Component,
         enabled: bool,
-    ) -> Result<InstalledNodule, InventoryError> {
-        let (cartridge, nodule, admitted, artifacts, _, (config, configured)) =
-            self.validate_installed(cartridge_id)?;
-        if enabled && let Some(slot) = self.slot_filled_by(cartridge_id) {
+    ) -> Result<(), InventoryError> {
+        if component == Component::Nodule
+            && enabled
+            && let Some(slot) = self.slot_filled_by(cartridge_id)
+        {
             return Err(InventoryError::InvalidDevTakeover {
                 id: slot,
                 reason: format!(
@@ -980,27 +926,34 @@ impl NoduleConfig {
         let entry = self
             .entries
             .get_mut(cartridge_id)
-            .expect("verified installed");
-        if let DatumSlot::Accepted { value, raw } = &mut entry.install
-            && value.enabled != enabled
-        {
-            value.enabled = enabled;
-            *raw = None;
-        }
-        if enabled {
+            .ok_or_else(|| InventoryError::UnknownCartridge(cartridge_id.clone()))?;
+        let install = match &mut entry.install {
+            DatumSlot::Absent => {
+                return Err(InventoryError::UnknownCartridge(cartridge_id.clone()));
+            }
+            DatumSlot::Invalid { reason, .. } => {
+                return Err(InventoryError::InvalidContribution {
+                    id: cartridge_id.clone(),
+                    reason: format!("install datum is invalid: {reason}"),
+                });
+            }
+            DatumSlot::Accepted { value, raw } => {
+                *raw = None;
+                value
+            }
+        };
+        let Some(member) = install.component_mut(component) else {
+            return Err(InventoryError::NoComponent {
+                id: cartridge_id.clone(),
+                component,
+                action: "enable or disable",
+            });
+        };
+        member.enabled = enabled;
+        if component == Component::Nodule && enabled {
             self.ensure_no_authority_conflict(cache, cartridge_id)?;
         }
-        Ok(InstalledNodule::new(
-            cartridge.id.clone(),
-            cartridge.version.clone(),
-            cartridge.revision(),
-            nodule,
-            admitted,
-            artifacts,
-            enabled,
-            config,
-            configured,
-        ))
+        Ok(())
     }
 
     /// Makes every stored dev takeover refuse its slot when the slot is resolved, as a datum that
@@ -1122,7 +1075,7 @@ impl NoduleConfig {
             id: cartridge_id.clone(),
             reason,
         };
-        self.validate_installed_cartridge(cartridge_id)?;
+        self.installed_nodule(cartridge_id)?;
         let Some(by) = by else {
             self.entries
                 .get_mut(cartridge_id)
@@ -1135,14 +1088,16 @@ impl NoduleConfig {
         }
         // Reuses `resolve`'s checks, so what is refused here is exactly what would be refused
         // when reconciling.
-        let entry = &self.entries[cartridge_id];
-        let install = entry.install.accepted().expect("verified installed");
-        filler(cartridge_id, install, &by, &self.entries, cache).map_err(invalid)?;
-        self.validate_installed_cartridge(&by)?;
-        if self.entries[&by]
+        let install = self.entries[cartridge_id]
             .install
             .accepted()
-            .is_some_and(|install| install.enabled)
+            .expect("verified installed");
+        filler(cartridge_id, install, &by, &self.entries, cache).map_err(invalid)?;
+        if self
+            .installed_nodule(&by)?
+            .nodule
+            .as_ref()
+            .is_some_and(|nodule| nodule.enabled)
         {
             return Err(invalid(format!(
                 "`{by}` is enabled on its own, and one code lineage cannot fill the slot while \
@@ -1166,78 +1121,15 @@ impl NoduleConfig {
         if self.entries[cartridge_id]
             .install
             .accepted()
-            .is_some_and(|install| install.enabled)
+            .is_some_and(nodule_enabled)
         {
             self.ensure_no_authority_conflict(cache, cartridge_id)?;
         }
         Ok(())
     }
 
-    pub fn set_drawer_grants(
-        &mut self,
-        cartridge_id: &CartridgeId,
-        drawers: BTreeMap<DrawerId, DrawerAccess>,
-    ) -> Result<InstalledNodule, InventoryError> {
-        let (cartridge, nodule, admitted, artifacts, enabled, (config, configured)) =
-            self.validate_installed(cartridge_id)?;
-        let entry = self
-            .entries
-            .get_mut(cartridge_id)
-            .expect("verified installed");
-        apply_grants_slot(&mut entry.grants, |grants| {
-            grants.drawers = drawer_entries(drawers);
-        });
-        Ok(InstalledNodule::new(
-            cartridge.id.clone(),
-            cartridge.version.clone(),
-            cartridge.revision(),
-            nodule,
-            admitted,
-            artifacts,
-            enabled,
-            config,
-            configured,
-        ))
-    }
-
-    /// Replaces the methods the nodule may invoke through dispatch, keeping its drawer grants.
-    pub fn set_method_grants(
-        &mut self,
-        cartridge_id: &CartridgeId,
-        methods: DispatchScope,
-    ) -> Result<InstalledNodule, InventoryError> {
-        let (cartridge, nodule, admitted, artifacts, enabled, (config, configured)) =
-            self.validate_installed(cartridge_id)?;
-        let entry = self
-            .entries
-            .get_mut(cartridge_id)
-            .expect("verified installed");
-        apply_grants_slot(&mut entry.grants, |grants| {
-            // An empty scope is stored as no value at all; a rewrite keeps the unknown members of
-            // the previous value while there is one.
-            let extra = grants
-                .methods
-                .take()
-                .map(|previous| previous.extra)
-                .unwrap_or_default();
-            grants.methods = (methods != DispatchScope::default()).then(|| MethodGrants {
-                extra,
-                ..MethodGrants::from(methods)
-            });
-        });
-        Ok(InstalledNodule::new(
-            cartridge.id.clone(),
-            cartridge.version.clone(),
-            cartridge.revision(),
-            nodule,
-            admitted,
-            artifacts,
-            enabled,
-            config,
-            configured,
-        ))
-    }
-
+    /// Removes the install, its artifact references and any dev takeover. The cartridge's config
+    /// document is not this document's: it stays, with the settings and grants in it.
     pub fn uninstall(&mut self, cartridge_id: &CartridgeId) -> Result<(), InventoryError> {
         let Some(entry) = self.entries.remove(cartridge_id) else {
             return Err(InventoryError::UnknownCartridge(cartridge_id.clone()));
@@ -1249,8 +1141,8 @@ impl NoduleConfig {
     }
 
     /// Evaluates every installed nodule entry independently, reporting per-nodule refusals without
-    /// failing unrelated valid nodules. Orphan settings or grants (where `install` is absent) do
-    /// not install a nodule.
+    /// failing unrelated valid nodules. A cartridge whose install has no nodule member is not a
+    /// nodule and is left out.
     pub fn resolve(&self, cache: &AdmissionCache) -> BTreeMap<CartridgeId, NoduleResolution> {
         let mut results = self.resolve_slots(cache);
         // Authority conflicts first: a refused slot holds nothing, so it does not take part in
@@ -1267,7 +1159,6 @@ impl NoduleConfig {
                             version: Some(installed.version),
                             revision: Some(installed.revision),
                             enabled: installed.enabled,
-                            config: installed.config,
                             reason: error.to_string(),
                         },
                     );
@@ -1282,7 +1173,13 @@ impl NoduleConfig {
     fn resolve_slots(&self, cache: &AdmissionCache) -> BTreeMap<CartridgeId, NoduleResolution> {
         let mut results = BTreeMap::new();
         for (cartridge_id, entry) in &self.entries {
-            if let Some(resolution) = resolve_entry(cartridge_id, entry, &self.entries, cache) {
+            if let Some(resolution) = resolve_entry(
+                cartridge_id,
+                entry,
+                &self.entries,
+                self.cartridge_docs.get(cartridge_id),
+                cache,
+            ) {
                 results.insert(cartridge_id.clone(), resolution);
             }
         }
@@ -1302,118 +1199,128 @@ impl NoduleConfig {
         }
     }
 
-    #[expect(
-        clippy::type_complexity,
-        reason = "internal helper returning decoded cartridge components"
-    )]
-    fn validate_installed_cartridge(
+    /// The stored install of a cartridge that has a nodule member.
+    fn installed_nodule(
         &self,
         cartridge_id: &CartridgeId,
-    ) -> Result<
-        (
-            Cartridge,
-            Nodule,
-            crate::Admitted,
-            BTreeMap<
-                String,
-                (
-                    big_cartridges_core::Artifact,
-                    crate::inventory::ArtifactState,
-                ),
-            >,
-            bool,
-        ),
-        InventoryError,
-    > {
-        let Some(entry) = self.entries.get(cartridge_id) else {
-            return Err(InventoryError::UnknownCartridge(cartridge_id.clone()));
-        };
-        let install = match &entry.install {
-            DatumSlot::Absent => {
+    ) -> Result<&CartridgeInstall, InventoryError> {
+        let install = match self.entries.get(cartridge_id).map(|entry| &entry.install) {
+            None | Some(DatumSlot::Absent) => {
                 return Err(InventoryError::UnknownCartridge(cartridge_id.clone()));
             }
-            DatumSlot::Invalid { reason, .. } => {
+            Some(DatumSlot::Invalid { reason, .. }) => {
                 return Err(InventoryError::InvalidContribution {
                     id: cartridge_id.clone(),
                     reason: format!("install datum is invalid: {reason}"),
                 });
             }
-            DatumSlot::Accepted { value, .. } => value,
+            Some(DatumSlot::Accepted { value, .. }) => value,
         };
-        let cartridge =
-            install
-                .decode_cartridge()
-                .map_err(|reason| InventoryError::InvalidContribution {
-                    id: cartridge_id.clone(),
-                    reason,
-                })?;
-        if &cartridge.id != cartridge_id {
-            return Err(InventoryError::InvalidContribution {
+        if install.nodule.is_none() {
+            return Err(InventoryError::NoComponent {
                 id: cartridge_id.clone(),
-                reason: format!(
-                    "install datum key `{cartridge_id}` does not match envelope id `{}`",
-                    cartridge.id
-                ),
+                component: Component::Nodule,
+                action: "run as a slot",
             });
         }
-        let (nodule, admitted, artifacts) = admit_cartridge_nodule(&cartridge)?;
-        Ok((cartridge, nodule, admitted, artifacts, install.enabled))
+        Ok(install)
     }
+}
 
-    #[expect(
-        clippy::type_complexity,
-        reason = "internal helper returning decoded cartridge and settings components"
-    )]
-    fn validate_installed(
-        &self,
-        cartridge_id: &CartridgeId,
-    ) -> Result<
-        (
-            Cartridge,
-            Nodule,
-            crate::Admitted,
-            BTreeMap<
-                String,
-                (
-                    big_cartridges_core::Artifact,
-                    crate::inventory::ArtifactState,
-                ),
-            >,
-            bool,
-            (Option<IndexMap<String, Value>>, bool),
-        ),
-        InventoryError,
-    > {
-        let (cartridge, nodule, admitted, artifacts, enabled) =
-            self.validate_installed_cartridge(cartridge_id)?;
-        let entry = self.entries.get(cartridge_id).expect("verified installed");
-        let config_state = match &entry.settings {
-            DatumSlot::Absent => (
-                nodule
-                    .config
-                    .as_ref()
-                    .and_then(|config| config.defaults.clone()),
-                false,
-            ),
-            // Settings that do not conform to this revision are reported by `resolve` as a
-            // refusal; they must not block enabling or granting, only `configure` repairs them.
-            DatumSlot::Accepted { value, .. } => (Some(value.values.clone()), true),
-            DatumSlot::Invalid { reason, .. } => {
-                return Err(InventoryError::InvalidContribution {
-                    id: cartridge_id.clone(),
-                    reason: format!("settings datum is invalid: {reason}"),
-                });
-            }
-        };
-        Ok((
-            cartridge,
-            nodule,
-            admitted,
-            artifacts,
-            enabled,
-            config_state,
-        ))
+fn diff_slot<T: PartialEq + Serialize>(
+    key: DatumKey,
+    before: &DatumSlot<T>,
+    after: &DatumSlot<T>,
+    patch: &mut DatumPatch,
+) -> Result<(), StoreError> {
+    if before == after {
+        return Ok(());
     }
+    match after {
+        DatumSlot::Absent => {
+            if !before.is_absent() {
+                patch.remove.insert(key);
+            }
+            Ok(())
+        }
+        DatumSlot::Accepted { value, raw } => {
+            if let DatumSlot::Accepted {
+                value: before_val,
+                raw: before_raw,
+            } = before
+                && before_val == value
+                && (raw.is_none() || before_raw == raw)
+            {
+                return Ok(());
+            }
+            let json = match raw {
+                Some(raw) => raw.clone(),
+                None => serde_json::to_value(value)
+                    .map_err(|err| StoreError::InvalidEdit(err.to_string()))?,
+            };
+            patch.set.insert(key, json);
+            Ok(())
+        }
+        DatumSlot::Invalid { reason, .. } => Err(StoreError::InvalidEdit(format!(
+            "cannot write invalid datum `{key}`: {reason}"
+        ))),
+    }
+}
+
+/// The artifact [`Blob`] slots an install of `artifacts` leaves: exactly one per artifact, and
+/// none for a key the previous revision had and this one lacks, so the diff removes the stale
+/// reference together with the install datum. A slot whose stored blob already says the same is
+/// kept as stored (no write), a changed one keeps its stored unknown fields, and a stored slot
+/// that did not decode is replaced, which is how it is repaired.
+fn artifact_slots(
+    stored: &BTreeMap<String, DatumSlot<Blob>>,
+    artifacts: &BTreeMap<
+        String,
+        (
+            big_cartridges_core::Artifact,
+            crate::inventory::ArtifactState,
+        ),
+    >,
+) -> BTreeMap<String, DatumSlot<Blob>> {
+    artifacts
+        .iter()
+        .map(|(key, (artifact, _))| {
+            let (extra, kept) = match stored.get(key) {
+                Some(DatumSlot::Accepted { value, raw }) => {
+                    (value.extra.clone(), Some((value, raw)))
+                }
+                _ => (Extra::default(), None),
+            };
+            let desired = Blob {
+                mime: artifact
+                    .media_type
+                    .clone()
+                    .unwrap_or_else(|| "application/octet-stream".to_owned()),
+                length_octets: artifact
+                    .size
+                    .expect("admission refuses an artifact without a size"),
+                digest: artifact.digest.to_string(),
+                inline: None,
+                urls: None,
+                extra,
+            };
+            let slot = match kept {
+                Some((value, _)) if *value == desired => stored[key].clone(),
+                _ => {
+                    // The datum wire form omits an unset option rather than writing `null`.
+                    let mut raw = serde_json::to_value(&desired).expect("a blob serializes");
+                    raw.as_object_mut()
+                        .expect("a blob serializes as an object")
+                        .retain(|_, value| !value.is_null());
+                    DatumSlot::Accepted {
+                        value: desired,
+                        raw: Some(raw),
+                    }
+                }
+            };
+            (key.clone(), slot)
+        })
+        .collect()
 }
 
 /// The slots whose enabled authority equals or nests with another enabled slot's. The authority
@@ -1561,11 +1468,11 @@ fn lexicon_conflicts(
 /// prefix (ADR 028 §5), and a fork that renamed its prefix is a different slot, not a drop-in.
 fn filler<'a>(
     cartridge_id: &CartridgeId,
-    install: &NoduleInstall,
+    install: &CartridgeInstall,
     by: &CartridgeId,
     entries: &'a BTreeMap<CartridgeId, NoduleEntry>,
     cache: &AdmissionCache,
-) -> Result<(&'a NoduleInstall, Arc<Admission>), String> {
+) -> Result<(&'a CartridgeInstall, Arc<Admission>), String> {
     let Some(filler_install) = entries.get(by).and_then(|entry| entry.install.accepted()) else {
         return Err(format!("dev build `{by}` is not installed"));
     };
@@ -1629,21 +1536,21 @@ fn substituted_grants(own: &Nodule, filler: &Nodule, granted: &DispatchScope) ->
     }
 }
 
-/// The install whose code runs in slot `cartridge_id`, its admission and, under a dev takeover, the
+/// The admission of the code that runs in slot `cartridge_id` and, under a dev takeover, the
 /// cartridge filling it: the slot's own install unless its takeover datum names another.
-fn code_source<'a>(
+fn code_source(
     cartridge_id: &CartridgeId,
-    entry: &'a NoduleEntry,
-    install: &'a NoduleInstall,
-    entries: &'a BTreeMap<CartridgeId, NoduleEntry>,
+    entry: &NoduleEntry,
+    install: &CartridgeInstall,
+    entries: &BTreeMap<CartridgeId, NoduleEntry>,
     cache: &AdmissionCache,
-) -> Result<(&'a NoduleInstall, Arc<Admission>, Option<CartridgeId>), String> {
+) -> Result<(Arc<Admission>, Option<CartridgeId>), String> {
     match &entry.dev_takeover {
-        DatumSlot::Absent => Ok((install, cache.admission(cartridge_id, install), None)),
+        DatumSlot::Absent => Ok((cache.admission(cartridge_id, install), None)),
         DatumSlot::Invalid { reason, .. } => Err(format!("invalid devTakeover datum: {reason}")),
         DatumSlot::Accepted { value, .. } => {
-            let (source, admission) = filler(cartridge_id, install, &value.by, entries, cache)?;
-            Ok((source, admission, Some(value.by.clone())))
+            let (_, admission) = filler(cartridge_id, install, &value.by, entries, cache)?;
+            Ok((admission, Some(value.by.clone())))
         }
     }
 }
@@ -1652,6 +1559,7 @@ fn resolve_entry(
     cartridge_id: &CartridgeId,
     entry: &NoduleEntry,
     entries: &BTreeMap<CartridgeId, NoduleEntry>,
+    docs: Option<&CartridgeConfig>,
     cache: &AdmissionCache,
 ) -> Option<NoduleResolution> {
     let install = match &entry.install {
@@ -1662,128 +1570,61 @@ fn resolve_entry(
                 version: None,
                 revision: None,
                 enabled: false,
-                config: None,
                 reason: format!("invalid install datum: {reason}"),
             });
         }
         DatumSlot::Accepted { value, .. } => value,
     };
+    // A cartridge that contributes only a micro is not a nodule.
+    let enabled = install.nodule.as_ref()?.enabled;
 
-    let refuse_at = |revision: Revision,
-                     version: Option<Version>,
-                     config: Option<IndexMap<String, Value>>,
-                     reason: String| {
+    let refuse = |version: Option<Version>, revision: Option<Revision>, reason: String| {
         NoduleResolution::Refused {
             cartridge_id: cartridge_id.clone(),
             version,
-            revision: Some(revision),
-            enabled: install.enabled,
-            config,
+            revision,
+            enabled,
             reason,
         }
     };
 
     // The code that runs in this slot: its own install, or the filler's under a dev takeover.
     // Everything else about the slot (settings, grants, enablement) is the slot's own.
-    let (source, admission, filled_from) =
-        match code_source(cartridge_id, entry, install, entries, cache) {
-            Ok(source) => source,
-            Err(reason) => {
-                return Some(refuse_at(
-                    install.revision,
-                    None,
-                    entry.settings.accepted().map(|s| s.values.clone()),
-                    reason,
-                ));
-            }
-        };
-    let refuse =
-        |version: Option<Version>, config: Option<IndexMap<String, Value>>, reason: String| {
-            refuse_at(source.revision, version, config, reason)
-        };
-    let (version, nodule, admitted, artifacts) = match &*admission {
-        Admission::Refused { version, reason } => {
-            return Some(refuse(
-                version.clone(),
-                entry.settings.accepted().map(|s| s.values.clone()),
-                reason.clone(),
-            ));
+    let (admission, filled_from) = match code_source(cartridge_id, entry, install, entries, cache) {
+        Ok(source) => source,
+        Err(reason) => {
+            let own = cache.admission(cartridge_id, install);
+            return Some(refuse(None, own.revision(), reason));
         }
+    };
+    let (version, revision, nodule, admitted, artifacts) = match &*admission {
+        Admission::Refused {
+            version,
+            revision,
+            reason,
+        } => return Some(refuse(version.clone(), *revision, reason.clone())),
         Admission::Admitted {
             version,
+            revision,
             nodule,
             admitted,
             artifacts,
         } => (
             version.clone(),
+            *revision,
             nodule.clone(),
             admitted.clone(),
             artifacts.clone(),
         ),
     };
 
-    let (config, configured) = match &entry.settings {
-        DatumSlot::Absent => (
-            nodule
-                .config
-                .as_ref()
-                .and_then(|config| config.defaults.clone()),
-            false,
-        ),
-        DatumSlot::Invalid { reason, .. } => {
-            return Some(refuse(
-                Some(version.clone()),
-                None,
-                format!("invalid settings datum: {reason}"),
-            ));
-        }
-        DatumSlot::Accepted { value, .. } => {
-            if nodule.config.is_none() {
-                return Some(refuse(
-                    Some(version.clone()),
-                    Some(value.values.clone()),
-                    InventoryError::NoConfigSchema(cartridge_id.clone()).to_string(),
-                ));
-            }
-            if let Err(err) = nodule.validate_config(&value.values, "config") {
-                return Some(refuse(
-                    Some(version.clone()),
-                    Some(value.values.clone()),
-                    err.to_string(),
-                ));
-            }
-            (Some(value.values.clone()), true)
-        }
+    let (desired_grants, mut desired_operations) = match docs {
+        None => Default::default(),
+        Some(docs) => match docs.resolve_grants(Component::Nodule) {
+            Ok(grants) => grants,
+            Err(reason) => return Some(refuse(Some(version), Some(revision), reason)),
+        },
     };
-
-    let mut desired_grants = BTreeMap::new();
-    let mut desired_operations = DispatchScope::default();
-    match &entry.grants {
-        DatumSlot::Absent => {}
-        DatumSlot::Invalid { reason, .. } => {
-            return Some(refuse(
-                Some(version.clone()),
-                config,
-                format!("invalid grants datum: {reason}"),
-            ));
-        }
-        DatumSlot::Accepted { value, .. } => {
-            for (drawer_id, access) in &value.drawers {
-                let Some(known) = access.known() else {
-                    return Some(refuse(
-                        Some(version.clone()),
-                        config,
-                        format!(
-                            "unknown drawer access level `{}` for drawer `{drawer_id}`",
-                            access.as_str()
-                        ),
-                    ));
-                };
-                desired_grants.insert(drawer_id.clone(), known);
-            }
-            desired_operations = value.methods.clone().map(Into::into).unwrap_or_default();
-        }
-    }
     if filled_from.is_some() {
         let Admission::Admitted { nodule: own, .. } = &*cache.admission(cartridge_id, install)
         else {
@@ -1795,13 +1636,11 @@ fn resolve_entry(
     let mut installed = InstalledNodule::new(
         cartridge_id.clone(),
         version.clone(),
-        source.revision,
+        revision,
         nodule,
         admitted,
         artifacts,
-        install.enabled,
-        config,
-        configured,
+        enabled,
     );
     installed.filled_by = filled_from.map(|filler| FilledBy {
         cartridge_id: filler,

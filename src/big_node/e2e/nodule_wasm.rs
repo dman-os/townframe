@@ -13,9 +13,19 @@ use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Contribution;
 use big_cartridges_core::Digest;
 use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::config::Component;
+use big_cartridges_core::config::GrantBody;
+use big_cartridges_core::config::GrantKey;
 use big_cartridges_core::example_cartridge;
+use big_cartridges_core::protocol::ClearCartridgeConfig;
+use big_cartridges_core::protocol::GetCartridge;
+use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
+use big_cartridges_core::protocol::SetCartridgeGrant;
+use big_cartridges_core::registry::version_pin;
 use big_cartridges_core::request::Necessity;
 use big_cartridges_core::request::Request;
+use big_cartridges_core::test_support::sign_as_example;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
@@ -24,11 +34,8 @@ use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
 use big_nodule_core::Handler;
 use big_nodule_core::Nodule;
-use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
-use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleMethodGrants;
 use method_core::ByteBody;
 use method_core::Method;
 use service_utils_rs::ClientError;
@@ -171,19 +178,105 @@ pub(super) async fn put(node: &BigNode, bytes: &[u8]) {
         .unwrap();
 }
 
+/// Publishes `cartridge` through the registry (signed as the example namespace when it is
+/// unsigned; the handler bytes must be in the blob store already) and installs the pin of the
+/// version just published.
 pub(super) async fn admit(node: &BigNode, cartridge: Cartridge) -> NoduleRecord {
+    let cartridge = if cartridge.signature.is_some() {
+        cartridge
+    } else {
+        sign_as_example(cartridge)
+    };
+    let (id, version) = (cartridge.id.clone(), cartridge.version.clone());
+    let operator = super::cartridges::operator(node);
+    super::cartridges::publish(node, operator, cartridge)
+        .await
+        .unwrap();
+    let doc_id = node
+        .cartridges
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator.metadata(),
+            GetCartridge { id: id.clone() },
+        )
+        .await
+        .unwrap()
+        .doc_id;
+    let heads = blobs::all_datums(node, &doc_id).await.heads;
     node.nodules
         .client
         .call_with(
             RequestContext::root(),
-            Authorization::identity(node.authority.root).metadata(),
-            AdmitNodule {
-                cartridge,
-                drawers: None,
+            operator.metadata(),
+            InstallCartridge {
+                cartridge: version_pin(doc_id, &version, heads),
+            },
+        )
+        .await
+        .unwrap();
+    record_of(node, &id).await
+}
+
+/// Installs `cartridge` whose handler bytes are not in the blob store yet. The registry service
+/// refuses a version whose artifacts it cannot find, so this writes the version datum of a registry
+/// document itself, as the operator, and installs the pin of it: the nodule then waits for its
+/// bytes (`ArtifactsUnavailable`) instead of being refused.
+pub(super) async fn admit_before_its_bytes(node: &BigNode, cartridge: Cartridge) -> NoduleRecord {
+    use big_cabinet_core::authority::Rights;
+    use big_cabinet_core::doc::CommandId;
+    use big_cabinet_core::doc::DocScope;
+    use big_cartridges_core::registry::version_key;
+    let cartridge = sign_as_example(cartridge);
+    let operator = Authorization::identity(node.authority.root);
+    let placement = format!("drawer {}", node.registry_drawer);
+    let capability = node
+        .docs
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator.metadata(),
+            big_cabinet_core::doc::MintDocCapability {
+                scope: DocScope {
+                    create: [placement.clone()].into(),
+                    ..DocScope::default()
+                },
+                rights: Rights::USE,
+                subject: None,
             },
         )
         .await
         .unwrap()
+        .capability_id;
+    let receipt = node
+        .docs
+        .client
+        .call(
+            RequestContext::root(),
+            CreateDoc {
+                capability,
+                command: CommandId::try_from("version before its bytes".to_owned()).unwrap(),
+                placement,
+                datums: BTreeMap::from([(
+                    version_key(&cartridge.version),
+                    serde_json::to_value(&cartridge).unwrap(),
+                )]),
+            },
+        )
+        .await
+        .unwrap();
+    node.nodules
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator.metadata(),
+            InstallCartridge {
+                cartridge: version_pin(receipt.doc_id, &cartridge.version, receipt.heads),
+            },
+        )
+        .await
+        .unwrap();
+    record_of(node, &cartridge.id).await
 }
 
 pub(super) async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> NoduleRecord {
@@ -192,42 +285,73 @@ pub(super) async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> N
         .call_with(
             RequestContext::root(),
             Authorization::identity(node.authority.root).metadata(),
-            SetNoduleEnabled {
+            SetCartridgeEnabled {
                 cartridge_id: spec.cartridge.clone(),
+                component: Component::Nodule,
                 enabled,
             },
         )
         .await
-        .unwrap()
+        .unwrap();
+    record(node, spec).await
 }
 
+/// Makes `methods` the whole of the nodule's method grants: the cartridge's config is cleared
+/// (these nodules have no settings), then each operation and authority is granted as a datum of
+/// its own.
 pub(super) async fn set_operations(
     node: &BigNode,
     spec: &Spec,
     methods: DispatchScope,
 ) -> NoduleRecord {
+    let operator = Authorization::identity(node.authority.root);
     node.nodules
         .client
         .call_with(
             RequestContext::root(),
-            Authorization::identity(node.authority.root).metadata(),
-            SetNoduleMethodGrants {
+            operator.metadata(),
+            ClearCartridgeConfig {
                 cartridge_id: spec.cartridge.clone(),
-                methods,
             },
         )
         .await
-        .unwrap()
+        .unwrap();
+    let grants = methods
+        .operations
+        .into_iter()
+        .map(GrantKey::Method)
+        .chain(methods.authorities.into_iter().map(GrantKey::Authority));
+    for grant in grants {
+        node.nodules
+            .client
+            .call_with(
+                RequestContext::root(),
+                operator.metadata(),
+                SetCartridgeGrant {
+                    cartridge_id: spec.cartridge.clone(),
+                    component: Component::Nodule,
+                    grant,
+                    value: Some(GrantBody::method(methods.privileged)),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    record(node, spec).await
 }
 
 async fn record(node: &BigNode, spec: &Spec) -> NoduleRecord {
+    record_of(node, &spec.cartridge).await
+}
+
+async fn record_of(node: &BigNode, cartridge_id: &CartridgeId) -> NoduleRecord {
     node.nodules
         .client
         .call_with(
             RequestContext::root(),
             Authorization::identity(node.authority.root).metadata(),
             GetNodule {
-                cartridge_id: spec.cartridge.clone(),
+                cartridge_id: cartridge_id.clone(),
             },
         )
         .await
@@ -556,7 +680,7 @@ async fn a_handler_whose_bytes_arrive_late_becomes_ready_when_they_do() {
     let (node, stop) = boot_node(&secrets).await;
     let spec = caller();
     let echo = spec.echo();
-    admit(&node, cartridge(&spec, &bytes, &[])).await;
+    admit_before_its_bytes(&node, cartridge(&spec, &bytes, &[])).await;
     let waiting = set_enabled(&node, &spec, true).await;
     assert_eq!(waiting.readiness, Readiness::ArtifactsUnavailable);
     assert!(!node.executor.hosts(&spec.cartridge));

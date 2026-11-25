@@ -17,8 +17,14 @@ use crate::CartridgeId;
 use crate::Version;
 use big_blobs_core::Blob;
 use big_cabinet_core::DatumKey;
+use big_cabinet_core::DatumPin;
+use big_cabinet_core::DatumReference;
+use big_cabinet_core::Location;
+use big_cabinet_core::ReferenceDocId;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::Extra;
+use big_cabinet_core::dmeta::DocId;
+use big_cabinet_core::doc::ChangeHash;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -52,6 +58,19 @@ pub const ARTIFACT_SLOT_PREFIX: &str = "cartridge.artifact/";
 pub fn version_key(version: &Version) -> DatumKey {
     DatumKey::from_text(Cartridge::ID, version.to_string())
         .expect("a semver label is a valid datum key slot")
+}
+
+/// The pin of `version`'s envelope in the registry document `doc_id`, at the document `heads` it
+/// was read at: what an install takes (ADR 044 §2). Its heads select the revision, and holding
+/// the pin is what keeps that version.
+pub fn version_pin(
+    doc_id: DocId,
+    version: &Version,
+    heads: impl IntoIterator<Item = ChangeHash>,
+) -> DatumPin {
+    let reference =
+        DatumReference::new(ReferenceDocId::Concrete(doc_id), version_key(version)).pinned(heads);
+    DatumPin::new(Location::new(reference, None).expect("a location without a fragment is valid"))
 }
 
 /// `org.example.daybook.blob/cartridge.artifact/<version>/<artifactKey>`: the [`Blob`] reference that

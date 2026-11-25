@@ -30,6 +30,8 @@ use big_cabinet_core::doc::WriteMode;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Digest;
 use big_cartridges_core::example_cartridge;
+use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::UninstallCartridge;
 use big_dispatch::Provider;
 use big_dispatch::ProviderKind;
 use big_dispatch::ProviderState;
@@ -38,7 +40,6 @@ use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
 use big_nodule_core::config::artifact_key;
 use big_nodule_core::inventory::ArtifactState;
-use big_nodule_core::protocol::UninstallNodule;
 use serde_json::json;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
@@ -244,7 +245,7 @@ async fn a_hosted_handler_is_registered_not_ready_until_the_executor_signals_and
 
     node.call(
         operator,
-        UninstallNodule {
+        UninstallCartridge {
             cartridge_id: photos,
         },
     )
@@ -299,9 +300,14 @@ async fn an_operation_stays_registered_not_ready_while_an_upgrade_starts_the_new
     node.set_enabled(PHOTOS, true).await;
     assert!(node.invoke(operator, OWN, json!({})).await.is_ok());
 
+    // The version is in the registry before the upgrade starts, so the window under test is the
+    // new revision's start alone.
+    let pin = node
+        .publish(serving_cartridge_of(PHOTOS, "1.1.0", OWN, "two"))
+        .await;
     executor.slow_ensure(Duration::from_millis(100));
     let (upgraded, during) = tokio::join!(
-        node.admit(operator, serving_cartridge_of(PHOTOS, "1.1.0", OWN, "two")),
+        node.call(operator, InstallCartridge { cartridge: pin }),
         async {
             let mut answers = Vec::new();
             for _ in 0..20 {
@@ -311,7 +317,11 @@ async fn an_operation_stays_registered_not_ready_while_an_upgrade_starts_the_new
             answers
         }
     );
-    assert_eq!(upgraded.unwrap().readiness, Readiness::Ready);
+    upgraded.unwrap();
+    assert_eq!(
+        node.get(operator, PHOTOS).await.unwrap().readiness,
+        Readiness::Ready
+    );
     let not_ready = Err(not_ready(NotReadyReason::Provider(Readiness::Initializing)));
     assert!(
         during.contains(&not_ready),
@@ -544,7 +554,7 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
     // Uninstalling removes the reference and nothing else.
     node.call(
         operator,
-        UninstallNodule {
+        UninstallCartridge {
             cartridge_id: id(PHOTOS),
         },
     )

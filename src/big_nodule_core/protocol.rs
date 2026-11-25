@@ -22,23 +22,28 @@ use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
-use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Revision;
 use big_cartridges_core::Version;
+use big_cartridges_core::protocol::CartridgesError;
+use big_cartridges_core::protocol::ClearCartridgeConfig;
+use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::ListCartridgeInstalls;
+use big_cartridges_core::protocol::ObserveCartridgeInstalls;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
+use big_cartridges_core::protocol::SetCartridgeGrant;
+use big_cartridges_core::protocol::UninstallCartridge;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::Readiness;
-use indexmap::IndexMap;
 use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
 use service_core_rs::declare_service_protocol;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 /// What a minted management handle may do. `cartridges` names the packages the holder may read, and
-/// whose enablement and settings it may change. `admit` additionally lets it install or upgrade
+/// whose enablement and grants it may change. `admit` additionally lets it install or upgrade
 /// those same packages and no others, so a handle can never introduce a cartridge id it was not minted
 /// for. The operator's identity is unrestricted without a scope.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -63,50 +68,6 @@ impl NoduleScope {
 pub struct MintNoduleCapability {
     pub scope: NoduleScope,
     pub rights: Rights,
-}
-
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdmitNodule {
-    pub cartridge: Cartridge,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drawers: Option<BTreeMap<DrawerId, DrawerAccess>>,
-}
-
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfigureNodule {
-    pub cartridge_id: CartridgeId,
-    pub settings: IndexMap<String, Value>,
-}
-
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetNoduleEnabled {
-    pub cartridge_id: CartridgeId,
-    pub enabled: bool,
-}
-
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetNoduleDrawerGrants {
-    pub cartridge_id: CartridgeId,
-    pub drawers: BTreeMap<DrawerId, DrawerAccess>,
-}
-
-/// Replaces the methods the nodule's actor may invoke through dispatch. The service mints one
-/// dispatch capability for the actor from it (see [`NoduleMethodGrantStatus`]); an empty scope
-/// revokes it.
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetNoduleMethodGrants {
-    pub cartridge_id: CartridgeId,
-    pub methods: DispatchScope,
 }
 
 /// Confirms that the nodule's request `binding` is to be served by the cartridge that now provides its
@@ -147,13 +108,6 @@ pub struct SetMethodRoute {
     pub pattern: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-}
-
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UninstallNodule {
-    pub cartridge_id: CartridgeId,
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -252,8 +206,6 @@ pub struct NoduleRecord {
     pub filled_by: Option<FilledBy>,
     pub enabled: bool,
     pub readiness: Readiness,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<IndexMap<String, Value>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub artifacts: BTreeMap<String, ArtifactState>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -296,58 +248,68 @@ pub enum NodulesError {
     Rejected(String),
     #[error("nodule for cartridge `{0}` is not installed")]
     UnknownCartridge(CartridgeId),
-    #[error("nodule for cartridge `{0}` declares no config schema")]
-    NoConfigSchema(CartridgeId),
 }
 
 /// Inventory refusals cross the wire as text: the caller gets the reason, not the
-/// inventory's error tree, except the two it can act on by naming a different cartridge.
+/// inventory's error tree, except the one it can act on by naming a different cartridge.
 impl From<InventoryError> for NodulesError {
     fn from(error: InventoryError) -> Self {
         match error {
             InventoryError::UnknownCartridge(id) => NodulesError::UnknownCartridge(id),
-            InventoryError::NoConfigSchema(id) => NodulesError::NoConfigSchema(id),
             other => NodulesError::Rejected(other.to_string()),
         }
     }
 }
 
-// Every method that changes nodules (install, enable, grants, routes, dev takeover) is privileged: a
-// nodule's dispatch scope never reaches them, which is what keeps a nodule from widening its own
-// grants. The reads (`getNodule`, `listNodules`) confer nothing, so a scope naming them reaches
-// them, and minting a nodule handle only narrows the presented one (`scope.covers`).
+// Every method that changes nodules (dev takeover, routes) is privileged, as are the cartridge-level
+// methods that install, enable and grant (see `big_cartridges_core::protocol`): a nodule's dispatch
+// scope never reaches them, which is what keeps a nodule from widening its own grants. The reads
+// (`getNodule`, `listNodules`) confer nothing, so a scope naming them reaches them, and minting a
+// nodule handle only narrows the presented one (`scope.covers`).
 method_core::methods! {
     error = NodulesError, nsid_prefix = "org.example.daybook.nodules.";
     MintNoduleCapability => Capability, procedure, "mintNoduleCapability";
-    AdmitNodule => NoduleRecord, procedure, "admitNodule", privileged;
-    ConfigureNodule => NoduleRecord, procedure, "configureNodule", privileged;
-    SetNoduleEnabled => NoduleRecord, procedure, "setNoduleEnabled", privileged;
-    SetNoduleDrawerGrants => NoduleRecord, procedure, "setNoduleDrawerGrants", privileged;
-    SetNoduleMethodGrants => NoduleRecord, procedure, "setNoduleMethodGrants", privileged;
     ConfirmNoduleResolution => NoduleRecord, procedure, "confirmNoduleResolution", privileged;
     SetNoduleDevTakeover => NoduleRecord, procedure, "setNoduleDevTakeover", privileged;
     SetMethodRoute => (), procedure, "setMethodRoute", privileged;
-    UninstallNodule => (), procedure, "uninstallNodule", privileged;
     GetNodule => NoduleRecord, query, "getNodule";
     ListNodules => NoduleList, query, "listNodules";
+}
+
+/// The cartridge-level methods fail with the cartridges service's error, which the nodule service
+/// translates its own into.
+impl From<NodulesError> for CartridgesError {
+    fn from(error: NodulesError) -> Self {
+        match error {
+            NodulesError::Context(error) => Self::Context(error),
+            NodulesError::Denied => Self::Denied,
+            NodulesError::Authority(error) => Self::Authority(error),
+            NodulesError::AuthorityUnavailable(message) => Self::AuthorityUnavailable(message),
+            NodulesError::Storage(message) => Self::Storage(message),
+            NodulesError::Rejected(reason) => Self::Rejected(reason),
+            NodulesError::UnknownCartridge(id) => Self::UnknownCartridge(id),
+        }
+    }
 }
 
 declare_service_protocol! {
     pub enum NodulesProtocol => NodulesMessage {
         unary {
             MintNoduleCapability(MintNoduleCapability),
-            AdmitNodule(AdmitNodule),
-            ConfigureNodule(ConfigureNodule),
-            SetNoduleEnabled(SetNoduleEnabled),
-            SetNoduleDrawerGrants(SetNoduleDrawerGrants),
-            SetNoduleMethodGrants(SetNoduleMethodGrants),
+            InstallCartridge(InstallCartridge),
+            SetCartridgeEnabled(SetCartridgeEnabled),
+            UninstallCartridge(UninstallCartridge),
+            SetCartridgeGrant(SetCartridgeGrant),
+            ClearCartridgeConfig(ClearCartridgeConfig),
+            ListCartridgeInstalls(ListCartridgeInstalls),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
             SetNoduleDevTakeover(SetNoduleDevTakeover),
             SetMethodRoute(SetMethodRoute),
-            UninstallNodule(UninstallNodule),
             GetNodule(GetNodule),
             ListNodules(ListNodules)
         }
-        stream {}
+        stream {
+            ObserveCartridgeInstalls(ObserveCartridgeInstalls)
+        }
     }
 }
