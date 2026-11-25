@@ -296,12 +296,7 @@ impl Default for RuntimeConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Migration<'sql> {
-    pub version: i64,
-    pub name: &'sql str,
-    pub sql: &'sql str,
-}
+pub use crate::portable::Migration;
 
 // ---------------------------------------------------------------------------
 // Worker pool

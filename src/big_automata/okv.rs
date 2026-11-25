@@ -157,7 +157,7 @@ pub trait OkvStore: RevSource<Selector = Selector<<Self as RevSource>::Key>> {
     fn prune(&self) -> impl Future<Output = Res<Pruned>> + Send;
 }
 
-/// What a row costs against a byte budget; see the module docs.
-pub(crate) fn row_bytes<K: AsRef<[u8]>, V: AsRef<[u8]>>(key: &K, value: Option<&V>) -> usize {
+/// What a row costs against a byte budget (its key bytes plus its value bytes); see the module docs.
+pub fn row_bytes<K: AsRef<[u8]>, V: AsRef<[u8]>>(key: &K, value: Option<&V>) -> usize {
     key.as_ref().len() + value.map_or(0, |value| value.as_ref().len())
 }

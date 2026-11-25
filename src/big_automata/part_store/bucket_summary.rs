@@ -57,7 +57,40 @@ pub struct BucketSummaryState {
     dead_fp: BucketFingerprint,
 }
 
+/// A bucket's counters as plain integers, for stores that persist [`BucketSummaryState`]: the
+/// fingerprints are the wrapping sums the state keeps, so a store restores exactly what it saved.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BucketSummaryRaw {
+    pub changed_at: Rev,
+    pub live_count: u32,
+    pub dead_count: u32,
+    pub live_fp: u64,
+    pub dead_fp: u64,
+}
+
+impl From<BucketSummaryRaw> for BucketSummaryState {
+    fn from(raw: BucketSummaryRaw) -> Self {
+        Self {
+            changed_at: raw.changed_at,
+            live_count: raw.live_count,
+            dead_count: raw.dead_count,
+            live_fp: BucketFingerprint(raw.live_fp),
+            dead_fp: BucketFingerprint(raw.dead_fp),
+        }
+    }
+}
+
 impl BucketSummaryState {
+    pub fn raw(&self) -> BucketSummaryRaw {
+        BucketSummaryRaw {
+            changed_at: self.changed_at,
+            live_count: self.live_count,
+            dead_count: self.dead_count,
+            live_fp: self.live_fp.as_u64(),
+            dead_fp: self.dead_fp.as_u64(),
+        }
+    }
+
     pub fn apply_transition(
         &mut self,
         buck_id: BuckId,

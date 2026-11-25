@@ -11,7 +11,10 @@
 //!    higher rev would store the old cursor again and resume from it after the next
 //!    reconnect, skipping what the peer's new log stamped below it.
 //! 4. The entries of one write apply in order, so the last entry for a part is the one stored.
-//! 5. Keys are (peer, backend, part): another peer's or backend's cursors do not meet.
+//! 5. Keys are (peer, backend, part): another peer's, backend's or part's cursors do not meet,
+//!    in either direction (a write elsewhere neither shows here nor disturbs what is here).
+//! 6. A read answers in the order asked, for parts unknown and repeated included.
+//! 7. Empty reads and writes are fine and change nothing.
 
 use super::PeerCursors;
 use crate::interlude::*;
@@ -72,5 +75,37 @@ pub async fn peer_cursor_table_laws<K: PeerCursors>(table: &K) -> Res<()> {
     // 5
     assert_eq!(read(&other_peer, "b").await?, vec![None, None, None]);
     assert_eq!(read(&peer, "c").await?, vec![None, None, None]);
+    let stored = read(&peer, "b").await?;
+    table
+        .write(&other_peer, "b", &[(parts[0].clone(), at(new, 1))])
+        .await?;
+    table
+        .write(&peer, "c", &[(parts[0].clone(), at(old, 99))])
+        .await?;
+    assert_eq!(read(&peer, "b").await?, stored, "writes elsewhere");
+    assert_eq!(
+        read(&other_peer, "b").await?,
+        vec![Some(at(new, 1)), None, None]
+    );
+    assert_eq!(read(&peer, "c").await?, vec![Some(at(old, 99)), None, None]);
+    // 6
+    let asked = [
+        parts[2].clone(),
+        parts[0].clone(),
+        PartKey::new(&[9]),
+        parts[1].clone(),
+        parts[0].clone(),
+    ];
+    assert_eq!(
+        table.read(&peer, "b", &asked).await?,
+        vec![stored[2], stored[0], None, stored[1], stored[0]]
+    );
+    // 7
+    table.write(&peer, "b", &[]).await?;
+    assert_eq!(
+        table.read(&peer, "b", &[]).await?,
+        Vec::<Option<PeerCursor>>::new()
+    );
+    assert_eq!(read(&peer, "b").await?, stored, "an empty write");
     Ok(())
 }

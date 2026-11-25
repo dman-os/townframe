@@ -85,6 +85,7 @@ mod edges;
 pub use edges::a_listing_ends_at_the_last_bucket_of_a_level;
 mod generators;
 pub use generators::part_ops;
+pub use generators::part_writes;
 use generators::*;
 
 mod payloads;

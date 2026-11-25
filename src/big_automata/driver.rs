@@ -111,7 +111,6 @@ pub use run::DriverConfig;
 pub use run::PeerDriver;
 pub use run::RouteUpdate;
 
-use crate::rev::Rev;
 use crate::sync::PeerCursor;
 
 /// The backend the driver syncs into: the cut of the backend contract in
