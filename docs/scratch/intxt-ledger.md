@@ -281,7 +281,8 @@ Round 1 as given (2026-11-19, CLI dogfood; proposals mine where marked):
   - **nodules builds** `Sync`, `Blob`, `Upkeep` and `Guest` holds after their micros layers. Until then, idle means no connected clients, so an idle exit can cut off a sync.
 - **D90 (2026-11-24, operator) Recording is on for every Claude Code session on the operator's machine.** The hooks are user-wide in `~/.claude/settings.json` (`intxt record hook`), so other lanes' and other projects' sessions record too, onto the default node. `intxt` is a symlink to `day` in `~/.cargo/bin` (D84's interim). A hook starts the node's server when none serves (layer 42), and that server stops after 10 idle minutes (46). No per-worktree setup is needed: the `post-rewrite` hook sits in the repo's shared git directory and is installed on the first recording. Socket activation stays an option, with the units shipped by the package (`day` would only accept `LISTEN_FDS`), never written by `day`.
 - **D91 (2026-11-25, operator) No backwards compatibility for code that has not landed on main.** Data a format that never landed produced is removed, not explained or special-cased. The pre-D70 wording came out of `list`, `status` and `doctor` (layer 51), and the operator's stale intxts were dropped.
-- **D92 (2026-11-25, operator) Import whole session logs, not only record incrementally.** Hooks record a session as it runs; intxt should also import a session's log wholesale (a Claude Code transcript, and other harnesses' logs), for sessions that ran before the hooks were installed, on another machine, or with recording off. Today capture reads a transcript only to resolve the turns of calls it already saw. Design open: the command (`intxt record import <log>`?), and whether an imported session's ops can be attributed to worktree changes after the fact. Proposal (2026-11-25): [intxt-session-import.md](intxt-session-import.md), `intxt record import <transcript>...` sharing the hooks' session state, so it is idempotent with live recording; it records the conversation with no ops; after-the-fact attribution and a provenance field are open questions.
+- **D92 (2026-11-25, operator) Import whole session logs, not only record incrementally.** Hooks record a session as it runs; intxt should also import a session's log wholesale (a Claude Code transcript, and other harnesses' logs), for sessions that ran before the hooks were installed, on another machine, or with recording off. Today capture reads a transcript only to resolve the turns of calls it already saw. Design open: the command (`intxt record import <log>`?), and whether an imported session's ops can be attributed to worktree changes after the fact. Proposal (2026-11-25): [intxt-session-import.md](intxt-session-import.md), `intxt record import <transcript>...` sharing the hooks' session state, so it is idempotent with live recording; it records the conversation with no ops; after-the-fact attribution and a provenance field are open questions. Deferred 2026-11-25 (D93).
+- **D93 (2026-11-25, operator) Session import is deferred.** Answers on its open questions: an import never guesses which commits its tool-call diffs belong to; imports and incremental (hook) recordings must be distinguishable, and how is the lane's call when the feature resumes; transcripts from another machine keep that machine's paths as recorded.
 
 ## For the ADRs
 
@@ -492,55 +493,14 @@ Round 1 as given (2026-11-19, CLI dogfood; proposals mine where marked):
 - **F39 (2026-11-25, nodules node-101) Re-installing a handler crashed the node:** "virtual ciphertext binding changed" (`big_blobs/pair_roots.rs:105`), unwrapped in the blob worker (`workers.rs:457`), when a crashed install's blob was put again. nodules is fixing it so a per-blob condition never takes the node down. Until then nobody retries `intxt install` on the operator's node. Its cartridge is `0.1.0+dd0d3244860e7e78`, "enabled but not ready: NeedsConfiguration", so intxt cannot create intxts there for now. Boot is fine.
 - **F40 (2026-11-25) The panic that crashed it was lost.** The panic hook printed the report to stdout, which for a background server is the readiness pipe its starter had left, so it panicked inside the hook and aborted. Fixed in layer 54: the report goes out only as the error event (stderr and the log file), and a test panics with a closed stdout.
 - **F41 (2026-11-25) mbx prunes the guest workspace's target while builds still need it.** `intxt_nodule_guest.wasm` vanished minutes after it was built, three times, so e2e tests and installs failed on a missing file. Copy a built guest out of the managed target before installing it.
+- **F42 (2026-11-25) capture's git hooks start a server even with the Claude Code hooks paused.** Rebasing layers 53 and 54 in the desktop worktree fired capture's `post-rewrite` hook, whose `ensure_server` started `day … node start --idle-exit=600s` on the operator's node while that node still crashed on re-install (F39) and the Claude hooks were removed from `settings.json`. Pausing recording means pausing the git hooks too; today there is no switch for both. Open: a single recording on/off switch that both hook families honour.
 
 ## In flight
 
 Keep this section short: what's moving now and what's next. Move finished entries to `intxt-ledger-history.md`.
 
-- **The stack (2026-11-24, later):** GitHub stack #221, 36 draft PRs (#123 … #321), restacked onto nodules' node-76 (#252). Layers above the 11-19 tip:
-  - 34 `PrLinks::split` (#290);
-  - 35 the `intxt` multicall, `day` PATH plugins and `record install claude-code` (#312);
-  - 36 docs (#320);
-  - 37 the node-76 fixups (#321).
-  
-  Verified on the laptop: clippy clean; intxt crates 138/138; day_cli 75/75 on a clean run; `guardrails lint` 0. Nothing merged. All refs from the laptop and mothership are on origin (`wip/intxt/*`).
-  - **F (11-24) An intermittent day_cli e2e failure under heavy load.** `intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_op` failed once after 28 s, and several e2e tests timed out at 120 s, while the desktop and other builds were compiling on the laptop. It wasn't reproduced in 45 stressed runs (-j6) or a clean -j4 run. The message wasn't captured; next time run with `--failure-output immediate`.
-- **The web viewer (#310, `feat/intxt-web`, on intxt-37), 11-24:** it reads a real intxt from a node over TCP XRPC (`NodeSource`) and renders:
-  - the title and a Markdown description (raw HTML escaped);
-  - commits from the commits documents;
-  - the range's patch as escaped HTML, capped at 256 KiB;
-  - PR descriptions with the block stripped.
-  
-  25 tests pass; it was checked end to end against a real node. The component is 8.9 MB, unstripped. It carries `big_blobs_core` with `irpc` default features off, so it builds for wasm. Shortcuts are C15–C18. Open for the operator:
-  - Should `via` choose the node per request, or should a viewer node sync drawers first?
-  - Should `add` record per-commit patches, or is the range patch enough?
-  - Should one unreadable datum render a partial page, rather than a 502?
-- **The review micro on the desktop (2026-11-24): works end to end, looks poor (D88).** Rehearsed on a fresh node (`/tmp/intxt-dog`): `github pull` of #322, intxt `k`, `review.json`; Layout → Review → the PR → the intxt → "Show changes" renders the patch in CodeView. Layers, all pushed to origin and mirrored to mothership, now on claytxt-69 (fd9153fa): 39 (04165df3) the D70 fix, 40 (21db9602) the strip, 41 (e937f8e4) the log file, 42 (169cbdfc) capture starts the server, 43 (612bf1b9) ADR 052, 44 (1990cb99) the activity registry, 45 (edf1a0a1) Client holds, 46 (ebe73e35) the idle exit, 47 (34ac5199) unreadable intxts, 48 (4f113fe8) capture's Stop-hook command id and rewrite panic, 49 (f1a7ac90) Call holds, 50 (72e7f132) `intxt doctor`, 51 (492debb5) tables, `skip`, no pre-D70 wording. Draft PRs #365–#377 for 39–51 sit in the lane's GitHub stack #221 on #322; #365 names its dependency on claytxt up to #344. Local, not pushed yet: 52 capture's retry when a server idles out mid-connect (subagent), 53 (fc8ceeee) the cartridge version names its build, 54 (5b8f6643) the panic hook never prints to stdout. The first rehearsal's layers on claytxt-67 were:
-  - 39 b97763ff the D70 fix (F30);
-  - 40 dc057a97 guests ship without DWARF (D87);
-  - 41 eea77792 the log file (D87);
-  - A micro_review surface test was dropped: `SurfaceTree`'s `WriteMutations` path does not validate (only `apply` on wire batches does), and a first render has no rows. claytxt-69 (fd9153fa, #344) admits every batch the CodeView rig records through `SurfaceTree::apply`, which covers every CodeView consumer. It also found that a five-file first window is one ~266 KB batch, over the old 256 KiB limit, so any multi-file PR would have faulted; per-batch limits are now 16k mutations, 1 MiB and 512K work.
-  
-  Enabling Layout and then Review in Settings is a step the operator's "what to try" script needs.
-- **Recording Claude Code today, and what it lacks** (2026-11-24, from the code):
-  - `day x intxt capture` handles every hook (SessionStart, Pre/PostToolUse, UserPromptSubmit, Stop, SubagentStop, SessionEnd) and imports transcripts with subagents.
-  - It is not installed anywhere: hooks are added to `settings.json` by hand, and FDR 008's `record install` is unbuilt.
-  - The task fence reads only `TodoWrite`. It doesn't see Claude Code's newer task tools, which needs checking against the installed version.
-  - Capture never writes stdout, so there is no turn-id injection yet (D73).
-  - None of FDR 010's datums exist, and no fences or inline tags (D75).
-  - The operator and an agent are one actor (C7).
-  - The operator's `day` lacks layers 28/29/31.
-- **Restack onto node-76 (2026-11-24): needed now.** The intxt stack and claytxt's both sit on node-55. node-56..76 bring `BlobsScope.drawers` (#244, closes C13), so "Show changes" can read patches, along with the typed `day` client below. claytxt rebases after intxt. The to-do list from 11-19 still applies:
-- **To do when restacking onto nodules' node-67** (`stack/node-67-day-typed`, 2026-11-19):
-  - Move `day x intxt` onto the typed `NodeClient::call<M: Unary>`. `call_untyped`/`call_untyped_bytes` remain only for `day exec`, byte bodies and wire tests.
-  - The server verbs change: `day node start` runs in the foreground and `--bg` backgrounds it; `node run` is gone; user text says "server", not "daemon"; the log is `serve.log`.
-  - `getNodeInfo` is the typed `GetNodeInfo`.
-  - The dogfood walkthrough and capture's "needs the daemon" messages follow these changes.
-  - Datum inspection becomes `day dump doc <id> [<key>]` / `day dump drawer <id>` (node-69).
-- **Next:**
-  - the forge-identity discussion with the operator (`intxt-forge-identity.md`, D80);
-  - the web app's skeleton (D79): one intxt rendered by SSR from a doc id and a node;
-  - `record install`;
-  - raising C4, C5 and C8 with nodules, and C1 and C2 with claytxt (citizenship).
-  
-  FDR 010's work is deferred (D78).
+- **The stack (2026-11-25):** GitHub stack #221, 53 draft PRs, tip #388. Layers 39–51 are #365–#377; 52 capture's retry when a server idled out (#389, bf76828b); 53 the cartridge version names its handler build (#387, 3a377690); 54 the panic hook never prints to stdout (#388, b2c941a1). Nothing merged. 52–54 verified on mothership-alpha: clippy, the `day` and guest builds, `intxt_core` 25/25, 40 selected `day_cli` e2e 40/40, `guardrails lint` and `api --check`; the layer-52 attach test was fixed (bf76828b) to create its own socket directory and not rerun on alpha after the fix.
+- **Dogfood install (2026-11-25):** `wip/intxt/dogfood` on origin is layer 54 plus the four commits of nodules' #382 (node-101, F39) cherry-picked; a merge of node-101 itself conflicts in 7 files because it sits on node-77…94. `day` and the handler are rebuilt from it on mothership-alpha and reinstalled on the operator's node, and the intxt hooks restored (in progress at time of writing).
+- **The web viewer (#310, `feat/intxt-web`, tip 630b9f0b):** reads a real intxt from a node over TCP XRPC with a dispatch bearer; commits, the range patch, Markdown descriptions; phone-first layout with its own stylesheet (4c767da9); `intxt show` and the PR block link to it (630b9f0b). Shortcuts C15–C18. Open for the operator: whether `via` chooses the node per request or a viewer node syncs drawers first; per-commit patches vs the range patch; partial page vs 502 when one datum can't be read.
+- **The review micro on the desktop:** works end to end, looks poor; visuals wait for a design session with claytxt (D88).
+- **Next:** hosting the relay and viewer on the x86 box (operator); the viewer's comment threads and session summaries (Direction item 6); raising C15, C16, C17, C18 (and C4, C5, C8) with nodules and C1, C2 with claytxt; a recording on/off switch covering both hook families (F42). Session import is deferred (D93); FDR 010 stays deferred (D78).

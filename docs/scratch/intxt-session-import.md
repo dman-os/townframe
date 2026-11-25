@@ -1,5 +1,7 @@
 # Importing whole session logs (D92)
 
+**Status (2026-11-25): deferred (ledger D93).** The operator answered the open questions below: no guessing, imports must be distinguishable from incremental recordings (the lane decides how), foreign paths are kept.
+
 Status: Proposed, 2026-11-25. Not built.
 
 ## The need
