@@ -1,8 +1,8 @@
 # ADR 053: The core cartridge: the node's built-in surfaces ship as a cartridge
 
-**Status:** Draft (2026-11-24). Proposed by the nodules lane from the operator's decision of 2026-11-24 ("let us indeed try
-to make the micros layer itself a cartridge", ADR 052). Nothing here is built. Decisions marked **To confirm** need the
-operator.
+**Status:** Accepted (2026-11-24). Proposed by the nodules lane from the operator's decision of 2026-11-24 ("let us indeed try
+to make the micros layer itself a cartridge", ADR 052); the operator accepted it as described. §9 records which items the
+operator settled. Decisions still marked **To confirm** in the body and not settled in §9 remain open.
 
 **Amends:** nothing yet; it is the home ADR 052 §2 and the ledger's "core cartridge" to-do point at.
 
@@ -35,8 +35,10 @@ The node's own vocabulary is a list in the binary, not a cartridge.
 
 ## 2. Decision: one preinstalled cartridge
 
-The node's built-in surfaces that *can* be a cartridge ship as one: the **core cartridge**, id `<node-build DID>/core`
-(the id's authority is the project's, ADR 028). It carries a manifest like any other (ADR 047 and ADR 050): shared
+The node's built-in surfaces that *can* be a cartridge ship as one: the **core cartridge**, id `<the node's publisher DID>/core`
+(the id's authority is the node's own, ADR 028). The id differs per node. Nothing references the core cartridge by id: other
+cartridges reference its Lexicons by NSID, so the difference is harmless. There is no build-time signing key; the node
+publishes its core cartridge like any publisher (§3 step 3). It carries a manifest like any other (ADR 047 and ADR 050): shared
 infrastructure (Lexicons, components, permbinds, settings, grants) and a list of surfaces, which today is one nodule, the
 `micros` nodule of ADR 052. Its Lexicons are the source `node_type_libraries()` reads. The rest of this ADR says how that
 works without a loop, and which special cases move.
@@ -63,8 +65,10 @@ store; it reads the copy compiled into the binary.**
    embedded revision, publishes the revision to the registry from the embedded package (the same envelope and artifact
    blobs a person's `installCartridge` would write), and writes the grants the manifest declares. This is the one install
    the node performs with no operator present: it is signed by the node's own identity (the seed keyring), the way the
-   service actors' durable grants are made at boot. Which identity signs is **To confirm**: the node identity, or the
-   operator root capability when `day node init` has one.
+   service actors' durable grants are made at boot. Finding from implementation: the id's namespace is the node's publisher
+   DID, so no node-build DID or build-time key exists. The node already signs unsigned envelopes in its own namespace with
+   its own key (`src/big_cartridges/lib.rs`, the `publish` handler calls `envelope.sign_with(...)` when
+   `envelope.id.namespace == self.publisher`), so publishing the core cartridge is an ordinary publish by that publisher.
 4. **Admission of the core cartridge's own Lexicons** is the bootstrap case, and it is the only one: `SchemaRepo` is seeded
    from the embedded package before the cabinet or the registry exists, as `big_node::schema_groups()` seeds the built-in
    datums today. The registry then admits the core cartridge's *published* Lexicons (step 3) against the same embedded
@@ -91,7 +95,9 @@ A new node build embeds a new core cartridge revision. At boot, before any other
   state (the micros nodule's handle revision) is rebuilt lazily by the next `micros.awaitHandles`.
 - **The embedded revision equals the pin**: nothing.
 - **The embedded revision is older than the pin** (a downgrade of the binary): the node refuses to boot with a typed error
-  naming both revisions. A downgrade cannot un-admit Lexicons other cartridges already depend on (ADR 028: a breaking
+  naming both revisions. The refusal falls out of the registry's existing `Downgrade` rule at publish
+  (`CartridgesError::Downgrade` in `src/big_cartridges_core/protocol.rs`), so no separate check is written. The content of
+  a version is pinned by a unit test, so a change to the embedded content forces a version bump. A downgrade cannot un-admit Lexicons other cartridges already depend on (ADR 028: a breaking
   change is a new NSID), and the Lexicon evolution rules (ADR 021) only run forward.
 - **Existing nodes, the first time**: a node created before this ADR has no core install. It takes the "no pin" path of
   §3 step 3 at its next boot. There is no migration of data, because the core cartridge's Lexicons are the defs the
@@ -105,9 +111,10 @@ ADR 052 §2's `micros` nodule is the core cartridge's one nodule surface. It get
 manifest to declare its permbinds in (§2.2's runtime permbind among them), and a version the node's build pins. The
 nodule's wasm component is built by the same pipeline as other nodules (`cargo x plug build-oci`) and embedded.
 Building it as a prerequisite of building the node, rather than as a test fixture, is a build-order change the guardrails
-and CI have to learn (the wasm guests live in the `src/wasm_utils_rs` workspace). **To confirm**: embed the built
-component in the node binary (hermetic, a bootstrap dependency in the build), or fetch it from a pinned OCI digest at
-first boot (no build dependency, a network dependency at node creation). The proposal is to embed.
+and CI have to learn (the wasm guests live in the `src/wasm_utils_rs` workspace). Settled by the operator: the
+component is **embedded** in the node binary, because the GUI must work standalone with no network at startup. Fetching it
+from a pinned OCI digest at first boot is rejected for that reason: it avoids a build dependency but makes node creation
+depend on the network.
 
 ## 6. What else could move in: the catalogue
 
@@ -164,9 +171,12 @@ Each layer is one small PR. Nodules lane.
 
 1. **Bootstrap rule** (§3): admission reads the binary's embedded copy, never the store; the store's record is for audit
    and is rewritten when it differs.
-2. **Who signs the preinstall** (§3 step 3): the node's own identity, or the operator root capability.
-3. **Downgrade refusal** (§4): a binary older than the installed core revision refuses to boot.
-4. **Embed the micros component, or fetch a pinned digest** (§5).
+2. **Who signs the preinstall** (§3 step 3): settled, the node's own identity. The core cartridge's id is
+   `<the node's publisher DID>/core` and the node signs it like any publisher.
+3. **Downgrade refusal** (§4): a binary older than the installed core revision refuses to boot, by the registry's existing
+   `Downgrade` rule at publish.
+4. **Embed the micros component, or fetch a pinned digest** (§5): settled by the operator, embed (the GUI must work
+   standalone with no network at startup).
 5. **Cabinet and registry datums are published in the core cartridge but admitted from the binary** (§6).
 6. **The host-internal tags**: real Lexicons for the ones other tools author (the install and grant records), a separate id
    type for the ones with no second author (§6, `nsid-audit.md` item 6).
