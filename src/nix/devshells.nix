@@ -289,7 +289,10 @@ _: {
         ++ kotliLintTools
         ++ devOnlyInputs
         ++ desktopRuntimeLibPackages
-        ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.linuxHeaders ]
+        ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+          pkgs.linuxHeaders
+          pkgs.valgrind
+        ]
         ++ [ rustFull ];
 
       ciRustShell = pkgs.mkShell (
@@ -304,7 +307,11 @@ _: {
               pkgs.llvmPackages.libclang
               pkgs.stdenv.cc.cc.lib
             ]
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.linuxHeaders ];
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              pkgs.linuxHeaders
+              # callgrind, for the instruction-count benches (x/bench.ts, Gungraun)
+              pkgs.valgrind
+            ];
           shellHook = ''
             export LIBCLANG_PATH="${pkgs.lib.getLib pkgs.llvmPackages.libclang}/lib"
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''

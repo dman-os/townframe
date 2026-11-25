@@ -514,6 +514,7 @@ where
             .remove(&call)
             .expect("a call's outcome is reported once");
         let sync = &mut conn.sync;
+        tracing::debug!(target: "instr", call = ?call, "done");
         match done {
             Done::Summary(reply) => sync.summary_replied(call, reply),
             Done::Session(reply) => sync.update_replied(call, reply),
@@ -535,7 +536,15 @@ where
         conn.sync.flush((self.clock)(), &mut cmds);
         let mut persists = vec![];
         let mut issued = vec![];
+        tracing::debug!(
+            target: "instr",
+            cmds = cmds.len(),
+            in_flight = conn.aborts.len(),
+            next_due = ?conn.sync.next_due(),
+            "flush"
+        );
         for cmd in cmds {
+            tracing::debug!(target: "instr", ?cmd, "issue");
             match cmd {
                 PeerCommand::Cancel { call } => conn.aborts[&call].abort(),
                 PeerCommand::PersistCursor { part, cursor } => persists.push((part, cursor)),

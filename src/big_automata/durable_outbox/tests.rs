@@ -7,6 +7,7 @@ use std::sync::LazyLock;
 use super::*;
 use crate::kit::scheduler::Instant;
 
+mod bench;
 mod differential;
 mod driver;
 mod laws;

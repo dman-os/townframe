@@ -971,9 +971,12 @@ impl PeerSync {
             Reply::Answer(mut pages) => {
                 self.walk_pacer.succeed();
                 // A page that does not move its bucket forward makes no progress: the peer
-                // could page one bucket for ever. The call failed (law 3).
+                // could page one bucket for ever. The call failed (law 3). Forward is in the
+                // order leaves are paged in, which is not the order of the keys: a page's
+                // `next_after` is often below its `after` by key.
                 let stuck = pages.values().any(|page| {
-                    matches!((&page.after, &page.next_after), (Some(after), Some(next)) if next <= after)
+                    matches!((&page.after, &page.next_after), (Some(after), Some(next))
+                        if BuckId::leaf_cmp(next, after).is_le())
                 });
                 if stuck {
                     return self.walk_failed(part, WalkRequest::Leaf { since, buckets });

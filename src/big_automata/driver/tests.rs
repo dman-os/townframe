@@ -6,6 +6,7 @@
 //! driver that stalls fails the test.
 
 mod backend;
+mod bench;
 mod crashes;
 mod full_sync;
 mod laws;
