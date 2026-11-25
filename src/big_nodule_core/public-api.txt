@@ -60,6 +60,7 @@ pub impl big_nodule_core::config::NoduleConfig::fn uninstall (& mut self , cartr
 pub impl big_nodule_core::config::NoduleEntry::fn is_empty (& self) -> bool
 pub impl big_nodule_core::inventory::InstalledNodule::fn artifact_states (& self) -> BTreeMap < String , ArtifactState >
 pub impl big_nodule_core::inventory::InstalledNodule::fn readiness (& self) -> Readiness
+pub impl big_nodule_core::inventory::InstalledNodule::fn routine_scopes (& self , desired_grants : & BTreeMap < DrawerId , DrawerAccess > , effective_operations : & DispatchScope , builtin_handle_need : impl Fn (& str) -> Option < HandleNeed > ,) -> BTreeMap < String , RoutineScopes >
 pub impl big_nodule_core::protocol::NoduleScope::fn covers (& self , other : & Self) -> bool
 pub impl big_nodule_core::providers::ProviderIndex::fn is_routed (& self , nsid : & str) -> bool
 pub impl big_nodule_core::providers::ProviderIndex::fn new (resolved : & BTreeMap < CartridgeId , NoduleResolution > , routes : BTreeMap < String , Route > ,) -> Self
@@ -84,6 +85,7 @@ pub struct big_nodule_core::config::ResolvedGrants  { drawers: BTreeMap < Drawer
 pub struct big_nodule_core::inventory::Artifact  { digest: big_cartridges_core :: Digest, size: Option < u64 >, media_type: Option < String > }
 pub struct big_nodule_core::inventory::FilledBy  { cartridge_id: CartridgeId, version: Version }
 pub struct big_nodule_core::inventory::InstalledNodule  { cartridge_id: CartridgeId, config_doc: DocId, version: Version, revision: Revision, resolved: ResolvedCartridge, nodule: Nodule, admitted: Admitted, artifacts: BTreeMap < String , (Artifact , ArtifactState) >, enabled: bool, filled_by: Option < FilledBy > }
+pub struct big_nodule_core::inventory::RoutineScopes  { dispatch: Option < DispatchScope >, docs: Option < DocScope >, drawers: Option < DrawerScope >, blobs: Option < big_blobs_core :: protocol :: BlobsScope > }
 pub struct big_nodule_core::protocol::ConfirmNoduleResolution  { cartridge_id: CartridgeId, binding: String }
 pub struct big_nodule_core::protocol::GetNodule  { cartridge_id: CartridgeId }
 pub struct big_nodule_core::protocol::ListNodules  {  }
