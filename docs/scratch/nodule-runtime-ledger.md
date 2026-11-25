@@ -2,7 +2,7 @@
 
 Status: Active
 Owner: Townframe maintainers
-Updated: 2026-11-17
+Updated: 2026-11-18
 Scope: Working ledger for the `feat/nodules` PR: decisions made with the operator, work in flight, to-dos, and questions awaiting review. Read this first after any context compaction, together with AGENTS.md and ADR 027.
 
 ## How to use this ledger
@@ -764,6 +764,28 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   - **`resolveCartridgePin { pin }`** replaces the asked-for pure `verify_pinned(pin, resolved)`. A `DatumPin` holds only a location and heads, and an install pin's heads can be any frontier at or after publish, so no pure check can tell that a resolve is what the pin selects without the envelope at those heads. The registry reads the envelope at the pin's heads, checks it as a publish does (well formed, signed, at its own version's slot) and serves the label's resolution only if it is that revision (`PinnedRevisionMismatch`, recoverable `PinnedEnvelopeUnreadable`). The nodule runtime's `read_pin` is now this one call too, so micros and nodules share one pin path.
   - **`awaitCartridgeGrants { cartridgeId, since?, holdMs }` returns `{ grants, revision }`**, a long poll answering with the same `CartridgeGrantRecord`s `listCartridgeGrants` lists, never a `ResolvedGrants` (the micro host applies `ResolvedGrants::from_grants`). It is operator-only, as the list is. The revision is `<boot uuid>.<feed seq>`, so one from before a restart never matches. It is published at the end of every reconcile, which every grant change runs.
 - **D55. A drawer reach reads the drawer's own document** (2026-11-18, raised by intxt): `DocScope.drawers` reached only member documents (`reach_drawers` → `scoped_docs`). The drawer document is not a member of its own drawer, so a handle could read nothing of a drawer's descriptor, although ADR 019 makes that document the public root its Read participants receive. A reach with `access >= Read` now reads it at the reach's readable kinds (`big_cabinet/doc.rs` `reach`), and `grant/drawer/<X>`-derived handles inherit this. Writing it through the reach stays refused pending the operator (see the open question).
+- **D56. Grants, `#net` and ownership** (operator, 2026-11-18, day session):
+  - **This lane owns the host boundary:** how plugins are programmed, for nodules and micros alike. Anything the two share (permbinds, grants, handles, the guest SDK, manifests) is ours, including what claytxt built; tell claytxt when something they use changes. Next to the implementation work, review the boundary from scratch as a plugin author would, with end-user programmability in mind, and list the sharp edges.
+  - **A runtime grants itself first, then its children.** There's no rule that a child's grant lets the parent act; every grant a child holds sits on an explicit grant to its parent.
+    - *Creation (supersedes the A2 proposal that the create permission is the consent):* the runtime proxies a cartridge's create call, so the drawer is created as the `nodules` service actor. That actor owns it and grants the cartridge actor access.
+    - *A granted existing drawer (the "who delegates" question):* the grant call (`SetCartridgeGrant`, Allow) grants the drawer to the service actor while the granter's authority is present. The runtime then grants it down to the cartridge actor, as `apply_grant` does now. The same holds for `micros`.
+    - Why it's cheap: a drawer grant to an actor is one row in the node-local authority ledger (`GrantDrawer`, `big_cabinet/drawer/grant.rs`), not a keyhive delegation, and nothing about it syncs.
+    - Still true, and documented in ADR 037 question 2: a channel may act as its actor's descendants, so the service actor can act as any cartridge actor. The explicit grants make access work without leaning on that.
+    - Open, for the sister-node work (ADR 038): a grant datum lives in the cartridge config document in the shared config drawer (ADR 044), so it will sync to sisters, but the local grants it needs do not. On a sister, who grants the drawer to that node's service actor?
+  - **By default, a nodule may create its own drawers,** without declaring a permbind: like an XDG data directory. This depends on the drawer rework automata is doing this week, so check with them before building it.
+  - **A1 (writing the drawer document) is withdrawn as a node-side change.** intxt's broad identity and description datums may stay in the drawer's metadata root. Its churny records (`repoEntry`, `commitsDoc`, body entries, diff blobs) belong in content documents. The operator is settling this with intxt directly; intxt may already have moved on a ref this lane hasn't seen.
+  - **`#net` follows wasmCloud and Deno:**
+    - Build on our wash fork's two layers: the host allowlist (`allowed_hosts`), then a re-check of every address DNS returns (`host/egress_policy.rs`).
+    - Loopback, link-local, the cloud metadata address and **private ranges are all denied by default.** That's stricter than wash, which allows private ranges because it targets clusters; on an end-user device the LAN is as sensitive as localhost.
+    - A guest's `127.0.0.1` is its own virtual network. The machine's loopback is reachable only through a sentinel host we control (wash's `host.wasmcloud.internal`), gated by both a per-cartridge port allowlist and a node switch.
+    - The syntax is Deno's `--allow-net`: `host` allows any port, `host:port` one port, no scheme, and IPv6 is written `[::1]:8000`. Being familiar to users and agents beats our earlier "no port means 443".
+    - Redirects stay as they are: each hop is checked as a fresh request.
+    - `Cx::fetch` streams over WASIp3 `wasi:http` instead of buffering whole bodies.
+  - **5a:** the operator has the explanation and has no objection; the review is still theirs.
+  - **The identity seed belongs in the keyring.** `secrets_rs` was designed for this and already holds the wrapping key and keyhive's data-encryption keys; the node's private key was missed. `node.json` keeps only the public node id, which names the keyring entries.
+  - **Mothership:** our user has sudo, so system changes there (lingering, services) are approved.
+  - **Documentation:** the permission decisions here, in D52–D55 and in ADR 037's actor-tree rule must be stated in ADRs a future reader will find (ADR 049 amendments or a new ADR), not only in this ledger.
+  - **Ledger hygiene (operator):** don't re-ask settled questions. The open questions below on `#keyRef` (removed 2026-11-17) and `nodule_operations` (gone with the ceiling, 2026-11-11) were stale.
 - [todo] Least privilege after D54: the nodule service's docs handle still reads the registry drawer (`big_nodule/lib.rs` boot, `registry_drawer` in `NodulesConfig`), which only the removed envelope read used. Drop the reach and the config field.
 - [todo] An "any" datum: an untyped, opaque JSON key/value datum for prototyping, frozen into schemas once a shape settles. Separate from the sidecar tag.
 - [done 2026-11-18] `big_ndk`'s `export_nodule!` boxes each arm's handler future (node-51), the frame shape #143 removed from the route macros.
@@ -949,25 +971,17 @@ Big_cabinet read/write options discussed with the operator 2026-11-06, deferred 
 
 ## Open questions for the operator
 
-- **A drawer a cartridge creates is unreachable by its handles** (intxt, 2026-11-18). A `#drawers` create use sets only the create flag. Reaches come from the `grant/drawer` set, and creating a drawer writes no grant, so `createIntxt` cannot write the new drawer's descriptor through a handle. Proposal: a drawer created through a cartridge's handle gets `grant/drawer/<new>` at the access its permbind declares, written by the runtime, and the reconcile re-mints. The create permission is the consent: it reaches only what the cartridge made. Needs the operator's call since no person answers that grant.
-- **Who delegates a granted drawer to the service actor** (intxt, 2026-11-18). `apply_grant` mints from the `nodules` service actor's own identity, so that actor must already hold the drawer (049 §6.1, delegator), and §6.1 does not say who gives it. The tests add it first. Options: (a) the installer or operator adds the service actor as a member before granting, using today's calls; (b) `SetCartridgeGrant` and Allow carry the granter's drawer authority and delegate in the same call. Hard case: a grant datum that syncs from another device, since the service actor is per node. The same applies to the `micros` actor.
-- **Writing the drawer document through a drawer reach** (D55 follow-up, intxt's use case). intxt keeps every intxt's records in its drawer document: `createIntxt` writes the marker, title and body, `addToIntxt` appends body entries and `*Entry` datums, and `day x intxt edit` changes the title, description and entries. Under ADR 049 its `intxts` #drawers (write) plus `intxtRecords` #datum (write) grant should let a routine write those kinds there. Proposal: a reach with `access >= Write` also writes the drawer document, limited to the reach's write kinds. System datums (dmeta, roster, branch) stay with the drawers service and drawer Admin. Until decided, intxt lists the drawer document in `DocScope.read`/`write` explicitly.
-
-- **`#net` (node-54), questions the lane reported and did not decide** (2026-11-18):
-  1. **Loopback and private ranges (security).** A granted hostname can resolve to 127.0.0.1, a private range or the node's own listeners (DNS rebinding included). Nothing blocks it. The proposal is to refuse loopback, link-local and private destinations unless the grant names an IP literal or `localhost` explicitly, checked at connect time against the resolved address.
-  2. **Scheme.** The check compares only the port, and a permbind with no port means 443. So `host` does not allow `http://host` (port 80), `host:80` does, and `http://h:8443` and `https://h:8443` are the same to it. Should the permbind carry the scheme?
-  3. **IPv6 literals** are not accepted in a grant (`host[:port]`).
-  4. **Redirects** are not followed by the host. A guest that follows one is checked again as a fresh request (fine as is, noted).
-  5. **`Cx::fetch` buffers whole bodies** in the guest SDK. The host side streams.
+- Settled 2026-11-18 (D56): the three intxt ADR 049 gaps (a created drawer unreachable by its handles; who delegates a granted drawer to the service actor; writing the drawer document through a reach) and the five `#net` questions. What remains open from them is the sister-node case in D56.
+- **Sisters and grants** (D56): a grant datum syncs through the shared config drawer, but the node-local grant to each node's service actor does not. Who grants it on a sister? For ADR 038.
 
 - **Not offering node-local methods to other nodes (operator, 2026-11-11; not this week).** ADR 042 §3 *refuses* a local-only method (for example `blobs.importFile`, which takes file descriptors) unless the call's origin is local. The open question is the step before that: such methods should not be *offered* at all to callers outside the node. That means they're left out of whatever a remote peer or the network's `/xrpc` surface can discover or route to, not just refused at call time. Candidates: mount local-only methods only on the local transports' routers (precedent: Docker's Unix socket vs TCP, D-Bus services on the session bus only), versus one router that filters by origin when listing and routing. It ties in with the missing "list providers/methods" operation and with network/XRPC exposure (Deferred).
 - **`day` CLI (landed `39888307`), questions from the port:**
   1. **Wrapping key scope.** Resolved (operator): the wrapping key is the keyring entry `big_cabinet.authority` / `wrapping.<node id>`; `big_node::delete_secrets` lists every entry a node keeps. The `day` blackbox tests delete their node's entries when each case ends. An old unscoped `wrapping` entry is never read again: a node directory booted before this change would find no key and refuse to boot (`StateCorrupt`) instead of silently re-keying. No release has shipped, so nothing migrates.
   2. **Socket location.** Resolved (operator): `$XDG_RUNTIME_DIR/day/<node id>.sock`, falling back to `/tmp/day-<euid>/<node id>.sock`; one function (`default_socket_dir` in `day_cli/context.rs`), not configurable yet.
   3. **`day init` on an existing node.** Resolved (operator): idempotent, prints `node <id> already initialized at <path>` and exits 0; a `node.json` that is not a valid node is an error (exit 1) and is left alone.
-  4. **`nodule_operations` default** in `node.json` is empty (nodules can invoke nothing); the big_node tests use `{authorities: ["org.example"]}`.
+  4. Moot: `nodule_operations` went with the nodule ceiling (2026-11-11, `4f0848ea`..`fe26b54e`); methods declare `privileged` instead.
   5. **Peers.** Resolved (operator): `node.json` has an optional `peers` section (`bootstrap` endpoint tickets, `loopbackOnly`); the daemon attaches the peers service when it is present and dials the list. `org.example.daybook.node.getNodeInfo` (built-in provider `builtin:node`) reports the node id, its own ticket and the connected peers; `day status` and `day peers ls` read it. `day peers add <ticket>` edits `node.json` and takes effect at the next daemon start.
-  6. **Identity seed at rest.** `node.json` holds the seed in a 0600 file, not the keyring; ADR 033 says data is encrypted at rest.
+  6. Decided (operator, 2026-11-18, D56): the identity seed moves into the keyring through `secrets_rs`; `node.json` keeps the public node id. To do.
   - Gaps big_node exposes: no operation lists providers/operations, reports the node id, peers, readiness or version, or stops the node (the CLI uses SIGTERM plus the pid in its lock file).
 
 - Lifecycle review questions 1–7: resolved 2026-11-04. See ADR 027 §10 and ADR 028.
@@ -976,7 +990,7 @@ Big_cabinet read/write options discussed with the operator 2026-11-06, deferred 
 - Resolved: ADR 027 was revised in place with D1–D6 (`01ea305b`).
 - Resolved (D31): integer widths lean on spec compatibility.
 
-- **2026-11-17 (pending operator answers).** Not decided; do not treat as settled.
-  1. **`#keyRef`:** keep it, or the narrower shape (content-addressed key type plus a field-level marker; keep the query and read-by-key), or drop both from stack PR node-10. intxt no longer uses either (its commits live per intxt and membership is `Predicate::HasKey`), so nothing does. Manager's lean: drop, and bring back the narrower shape when a real content-addressed user appears.
-  2. **The atmosphere border:** run the spaces experiment (alpha spaces PDS plus bulletin, managed-policy `checkAccess` backed by keyhive), and review draft ADR 048 (three tiers, inward direction).
-  3. **Mothership:** enable lingering (root) plus the secret store, so the relay survives a reboot.
+- **2026-11-17 questions.**
+  1. Settled: `#keyRef` was dropped (operator, 2026-11-17; ADR 035 §2.9). The `keyRef` left in `big_blobs_core` is `CipherBlob.keyRef`, ADR 026's link to the key datum, which is unrelated.
+  2. **The atmosphere border (to discuss with the operator; shelved to next week, D50):** run the spaces experiment (alpha spaces PDS plus bulletin, managed-policy `checkAccess` backed by keyhive), and review draft ADR 048 (three tiers, inward direction).
+  3. **Mothership:** enable lingering (root) plus the secret store, so the relay survives a reboot. Approved (D56, our user has sudo); this lane does it.
