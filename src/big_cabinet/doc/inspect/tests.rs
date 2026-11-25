@@ -643,6 +643,7 @@ async fn capability_checks_precede_any_repository_lookup() {
             AttenuateCapability {
                 capability: fixture.issuer.capability,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -835,6 +836,7 @@ async fn boot_requires_exact_actor_association_and_shutdown_closes_inspection_an
             AttenuateCapability {
                 capability: fixture.issuer.capability,
                 rights: Rights::all(),
+                subject: None,
             },
         )
         .await

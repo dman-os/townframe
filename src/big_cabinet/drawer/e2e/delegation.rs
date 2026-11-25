@@ -636,6 +636,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
             AttenuateCapability {
                 capability: bound.capability_id,
                 rights: Rights::USE | Rights::DELEGATE,
+                subject: None,
             },
         )
         .await
@@ -881,6 +882,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
             AttenuateCapability {
                 capability: admin,
                 rights: Rights::USE | Rights::NARROW,
+                subject: None,
             },
         )
         .await
@@ -1117,6 +1119,7 @@ async fn a_durable_drawer_grant_outlives_its_capability_and_a_restart_until_revo
             AttenuateCapability {
                 capability: admin,
                 rights: Rights::USE | Rights::NARROW,
+                subject: None,
             },
         )
         .await

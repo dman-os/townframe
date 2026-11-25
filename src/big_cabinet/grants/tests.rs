@@ -165,6 +165,7 @@ async fn withdrawal_invalidates_old_proofs_and_transitive_derivations() {
             AttenuateCapability {
                 capability: minted.capability_id,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await

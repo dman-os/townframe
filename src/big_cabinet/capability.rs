@@ -379,6 +379,7 @@ mod tests {
                 AttenuateCapability {
                     capability: authority.root,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await

@@ -100,6 +100,7 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
             AttenuateCapability {
                 capability: bound.capability_id,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -705,6 +706,7 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
             AttenuateCapability {
                 capability: bound.capability_id,
                 rights: Rights::empty(),
+                subject: None,
             },
         )
         .await
@@ -717,6 +719,7 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
             AttenuateCapability {
                 capability: owner.capability,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -1043,6 +1046,7 @@ async fn bound_creation_requests(
             AttenuateCapability {
                 capability: bound.capability_id,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -1888,6 +1892,7 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
             AttenuateCapability {
                 capability: resource.capability_id,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -2226,6 +2231,7 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
                 AttenuateCapability {
                     capability: narrowed.capability_id,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await

@@ -124,7 +124,7 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
         use big_cartridges_core::protocol as cartridge_methods;
         use big_nodule_core::protocol as nodule_methods;
         for (nsid, privileged) in [
-            (authority_methods::OpenActor::XRPC.nsid, true),
+            (authority_methods::OpenActor::XRPC.nsid, false),
             (authority_methods::MintCapability::XRPC.nsid, true),
             (authority_methods::AttenuateCapability::XRPC.nsid, false),
             (authority_methods::RetractCapability::XRPC.nsid, false),

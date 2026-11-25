@@ -28,19 +28,7 @@ impl cap::State {
             .collect();
         let subject = match request.subject {
             Some(named) if inherited != Some(named) => {
-                // An introduction: binding the handle to an actor other than the one it derives
-                // from is the right `Rights::DELEGATE` names, and a channel is trusted for its
-                // own subject's descendants and nothing else (ADR 037 question 2). Naming
-                // anyone else is escalation, not a missing right. The handle then lives only
-                // as long as the named actor does.
-                delegator.require(Rights::DELEGATE)?;
-                let liveness = self.liveness_of(named)?;
-                let own = delegator.cap.subject.ok_or(AuthorityError::Escalation)?;
-                if !self.is_descendant(named, own) {
-                    return Err(AuthorityError::Escalation);
-                }
-                dependencies.push(liveness);
-                Some(named)
+                Some(self.introduce(delegator, named, &mut dependencies)?)
             }
             _ => inherited,
         };

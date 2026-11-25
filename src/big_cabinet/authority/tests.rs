@@ -163,7 +163,12 @@ impl TestAuthority {
         capability: CapId,
         rights: Rights,
     ) -> Result<Capability, AuthorityServiceError> {
-        self.call(AttenuateCapability { capability, rights }).await
+        self.call(AttenuateCapability {
+            capability,
+            rights,
+            subject: None,
+        })
+        .await
     }
 
     async fn retract(&self, via: CapId, capability: CapId) -> Result<(), AuthorityServiceError> {
@@ -1994,6 +1999,7 @@ async fn the_protocol_answers_alike_over_every_transport() {
             AttenuateCapability {
                 capability: actor.capability,
                 rights: Rights::all(),
+                subject: None,
             },
         )
         .await
@@ -2409,6 +2415,223 @@ async fn an_introduction_to_anyone_but_a_descendant_is_an_escalation_even_with_d
         )
         .await,
         AuthorityServiceError::Unauthorized
+    );
+    test.stop.stop().await;
+}
+
+impl TestAuthority {
+    /// Narrow `capability` to `rights`, introducing the result to `subject`.
+    async fn attenuate_to(
+        &self,
+        capability: CapId,
+        rights: Rights,
+        subject: Uuid7,
+    ) -> Result<Capability, AuthorityServiceError> {
+        self.call(AttenuateCapability {
+            capability,
+            rights,
+            subject: Some(subject),
+        })
+        .await
+    }
+}
+
+/// What a micros nodule does under its own cartridge actor, with nothing but handles it was
+/// given and no privileged method: open an actor for a micro, and narrow a handle it holds to
+/// that actor. `openActor` and `attenuateCapability` are the two unprivileged methods, so this
+/// test calls them as a nodule's dispatch scope would reach them.
+#[tokio::test]
+async fn a_nodule_opens_a_child_and_introduces_a_narrowed_handle_to_it() {
+    let test = boot_authority().await;
+    let nodule_rights = Rights::USE | Rights::NARROW | Rights::MINT_CHILD | Rights::DELEGATE;
+    let nodule = test
+        .open(test.root(), "nodule", nodule_rights)
+        .await
+        .unwrap();
+    // The operator's side: a docs-shaped handle over some object, bound to the nodule's actor.
+    let namespace = test.namespace(Uuid7::new()).await;
+    let held = test
+        .mint_from(
+            &namespace,
+            test.root(),
+            Rights::USE | Rights::NARROW | Rights::DELEGATE,
+            Some(nodule.actor.actor_id),
+        )
+        .await
+        .unwrap();
+
+    let micro = test
+        .open(
+            nodule.capability,
+            "nodule/micro",
+            Rights::USE | Rights::MINT_CHILD,
+        )
+        .await
+        .unwrap();
+    assert_eq!(micro.actor.parent_actor_id, Some(nodule.actor.actor_id));
+    // Reopening the same path reuses the actor.
+    let again = test
+        .open(
+            nodule.capability,
+            "nodule/micro",
+            Rights::USE | Rights::MINT_CHILD,
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.actor.actor_id, micro.actor.actor_id);
+
+    let narrowed = test
+        .attenuate_to(held.capability_id, Rights::USE, micro.actor.actor_id)
+        .await
+        .unwrap();
+    assert_eq!(narrowed.subject, Some(micro.actor.actor_id));
+    assert_eq!(narrowed.rights, Rights::USE);
+    // It is the held handle's own object and namespace: nothing foreign was named.
+    assert_eq!(narrowed.object, held.object);
+    assert_eq!(narrowed.issuer_id, held.issuer_id);
+
+    // The handle lives only as long as the micro's actor does.
+    test.retract(nodule.capability, micro.capability)
+        .await
+        .unwrap();
+    assert_refused!(
+        test.call(InspectCapability {
+            capability: narrowed.capability_id
+        })
+        .await,
+        AuthorityServiceError::InvalidCapability
+    );
+    test.stop.stop().await;
+}
+
+#[tokio::test]
+async fn a_nodule_cannot_open_outside_its_own_children_or_widen_rights() {
+    let test = boot_authority().await;
+    let nodule_rights = Rights::USE | Rights::NARROW | Rights::MINT_CHILD | Rights::DELEGATE;
+    let nodule = test
+        .open(test.root(), "nodule", nodule_rights)
+        .await
+        .unwrap();
+    let sibling = test.subsystem("sibling").await;
+    let child = test
+        .open(
+            nodule.capability,
+            "nodule/child",
+            Rights::USE | Rights::MINT_CHILD,
+        )
+        .await
+        .unwrap();
+
+    // A path names its parent, so only the presented actor's own children are reachable: a
+    // sibling, the actor itself, an ancestor, an unrelated actor's child, a grandchild that
+    // skips a level.
+    for path in [
+        "sibling",
+        "nodule",
+        "",
+        "sibling/child",
+        "nodule/child/grandchild",
+        "nodule/a/b",
+    ] {
+        assert_refused!(
+            test.open(nodule.capability, path, Rights::USE).await,
+            AuthorityServiceError::InvalidActorPath
+        );
+    }
+    // The child may open its own children, not its parent's.
+    assert!(
+        test.open(child.capability, "nodule/child/grandchild", Rights::USE)
+            .await
+            .is_ok()
+    );
+    assert_refused!(
+        test.open(child.capability, "nodule/other", Rights::USE)
+            .await,
+        AuthorityServiceError::InvalidActorPath
+    );
+    // A handle that is not an identity capability opens nothing, and one without MINT_CHILD
+    // opens nothing either.
+    let namespace = test.namespace(Uuid7::new()).await;
+    let plain = test
+        .mint_from(&namespace, test.root(), Rights::all(), None)
+        .await
+        .unwrap();
+    assert_refused!(
+        test.open(plain.capability_id, "nodule/x", Rights::USE)
+            .await,
+        AuthorityServiceError::UnrecognizedActor
+    );
+    let no_mint_child = test.open(test.root(), "weak", Rights::USE).await.unwrap();
+    assert_refused!(
+        test.open(no_mint_child.capability, "weak/y", Rights::USE)
+            .await,
+        AuthorityServiceError::Unauthorized
+    );
+    // Rights never exceed the parent's.
+    assert_refused!(
+        test.open(
+            child.capability,
+            "nodule/child/wide",
+            Rights::USE | Rights::NARROW
+        )
+        .await,
+        AuthorityServiceError::Escalation
+    );
+    let narrowed = test
+        .attenuate(nodule.capability, Rights::USE | Rights::NARROW)
+        .await
+        .unwrap();
+    assert_refused!(
+        test.attenuate(narrowed.capability_id, Rights::USE | Rights::MINT_CHILD)
+            .await,
+        AuthorityServiceError::Escalation
+    );
+    let namespace_held = test
+        .mint_from(
+            &namespace,
+            test.root(),
+            Rights::USE | Rights::NARROW | Rights::DELEGATE,
+            Some(nodule.actor.actor_id),
+        )
+        .await
+        .unwrap();
+    assert_refused!(
+        test.attenuate_to(
+            namespace_held.capability_id,
+            Rights::all(),
+            child.actor.actor_id
+        )
+        .await,
+        AuthorityServiceError::Escalation
+    );
+    // An introduction reaches descendants only: a sibling, the nodule's own actor's ancestor,
+    // an unrelated actor.
+    for named in [
+        sibling.actor.actor_id,
+        test.authority.service.operator_uuid(),
+    ] {
+        assert_refused!(
+            test.attenuate_to(namespace_held.capability_id, Rights::USE, named)
+                .await,
+            AuthorityServiceError::Escalation
+        );
+    }
+    // Without DELEGATE it cannot introduce at all.
+    let no_delegate = test
+        .attenuate(namespace_held.capability_id, Rights::USE | Rights::NARROW)
+        .await
+        .unwrap();
+    assert_refused!(
+        test.attenuate_to(no_delegate.capability_id, Rights::USE, child.actor.actor_id)
+            .await,
+        AuthorityServiceError::Unauthorized
+    );
+    // A namespace root is bound to no actor, so an introduction through it reaches nobody and
+    // cannot name another object or namespace either: attenuation has no way to.
+    assert_refused!(
+        test.attenuate_to(namespace.capability, Rights::USE, child.actor.actor_id)
+            .await,
+        AuthorityServiceError::Escalation
     );
     test.stop.stop().await;
 }

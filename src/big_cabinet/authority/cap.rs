@@ -234,6 +234,28 @@ impl State {
             .ok_or(AuthorityError::ActorNotFound)
     }
 
+    /// The introduction rule both `MintCapability` and `AttenuateCapability` apply when a
+    /// request names a `subject` other than the one it inherits: binding a handle to another
+    /// actor is the right `Rights::DELEGATE` names, and a handle is trusted for its own
+    /// subject's descendants and nothing else (ADR 037 question 2), so naming anyone else is
+    /// `Escalation`, not a missing right. The named actor must be live, and the new handle
+    /// depends on its liveness, which is pushed onto `dependencies`.
+    pub(super) fn introduce(
+        &self,
+        delegator: &Chain<'_>,
+        named: Uuid7,
+        dependencies: &mut Vec<CapId>,
+    ) -> Result<Uuid7, AuthorityError> {
+        delegator.require(Rights::DELEGATE)?;
+        let liveness = self.liveness_of(named)?;
+        let own = delegator.cap.subject.ok_or(AuthorityError::Escalation)?;
+        if !self.is_descendant(named, own) {
+            return Err(AuthorityError::Escalation);
+        }
+        dependencies.push(liveness);
+        Ok(named)
+    }
+
     pub(super) fn child(
         &self,
         object: String,
