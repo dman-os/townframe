@@ -835,10 +835,31 @@ impl Page {
     /// asked for (`Some(true)` once focused). Spawned work is polled once, which finishes any task
     /// whose futures are already ready, as the recording backing's are.
     pub(crate) fn mount(&mut self, node: Node) -> Rc<Cell<Option<bool>>> {
-        struct Recorder(Rc<Cell<Option<bool>>>);
+        self.mount_measured(node, dioxus_html::geometry::PixelsRect::default())
+    }
+
+    /// [`Self::mount`] for an element whose `get_client_rect` reads `rect`.
+    pub(crate) fn mount_measured(
+        &mut self,
+        node: Node,
+        rect: dioxus_html::geometry::PixelsRect,
+    ) -> Rc<Cell<Option<bool>>> {
+        struct Recorder(Rc<Cell<Option<bool>>>, dioxus_html::geometry::PixelsRect);
         impl RenderedElementBacking for Recorder {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
+            }
+            fn get_client_rect(
+                &self,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = MountedResult<dioxus_html::geometry::PixelsRect>,
+                        >,
+                >,
+            > {
+                let rect = self.1;
+                Box::pin(async move { Ok(rect) })
             }
             fn set_focus(
                 &self,
@@ -850,7 +871,7 @@ impl Page {
             }
         }
         let focused = Rc::new(Cell::new(None));
-        let data = MountedData::new(Recorder(Rc::clone(&focused)));
+        let data = MountedData::new(Recorder(Rc::clone(&focused), rect));
         let element = self.element_id(node);
         self.vdom.runtime().handle_event_for_target(
             RenderTargetId::ROOT,

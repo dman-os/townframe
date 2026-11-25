@@ -279,7 +279,10 @@ fn components_take_no_class_or_style_pass_through() {
 }
 
 /// `KIT-040`: the breakpoints are defined in `width.rs` and nowhere else, and no component
-/// measures the DOM (Blitz panics on rect reads inside handlers; a guest has no DOM).
+/// measures the DOM (Blitz panics on rect reads inside handlers; a guest has no DOM), except
+/// `ScrubStrip`, whose overlay covers the window and reads its own box (gated on
+/// `Renderer::measures_layout`) because a host-supplied size drifts from the pointer's
+/// coordinates.
 #[test]
 fn breakpoints_live_in_width_rs_and_nothing_measures_the_dom() {
     const MEASURING: [&str; 9] = [
@@ -313,6 +316,10 @@ fn breakpoints_live_in_width_rs_and_nothing_measures_the_dom() {
                 // `headless.rs` holds the roving-focus helper, which keeps element handles to
                 // focus them and never measures through them.
                 .filter(|api| !(source.path == "headless.rs" && **api == "MountedData"))
+                .filter(|api| {
+                    !(source.path == "headless/scrub_strip.rs"
+                        && ["MountedData", "get_client_rect"].contains(api))
+                })
                 .find(|api| line.contains(**api))
                 .map(|api| format!("`{api}` measures the DOM or asks the window"))
         }));

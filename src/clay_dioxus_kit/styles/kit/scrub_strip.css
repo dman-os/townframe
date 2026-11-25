@@ -8,6 +8,10 @@
  * bubble --ct-strip-push and --ct-strip-dy. This sheet turns them into positions, so a theme can
  * restyle the strip without touching where things are.
  *
+ * Releasing is a settle, not a cut: the idle state keeps the overlay catching pointer events for
+ * the length of the marker transition (a discrete `pointer-events` transition with a delay), and
+ * the bubble, always mounted, fades and slides back to the resting column over the same time.
+ *
  * No `transform`: Blitz implements none, and positions as `right`/`top` work in every renderer.
  */
 .ct-scrub-strip {
@@ -25,6 +29,13 @@
 
 .ct-scrub-strip[data-state="engaged"] {
   pointer-events: auto;
+}
+
+/* The overlay lets go of the window only once the settle below has played: `pointer-events`
+   flips from auto to none when this zero-length transition's delay ends. Declared on the
+   idle rule only, so engaging flips it at once. */
+.ct-scrub-strip:not([data-state="engaged"]) {
+  transition: pointer-events 0s var(--ct-motion-duration-enter) allow-discrete;
 }
 
 .ct-scrub-strip [data-part="scrim"] {
@@ -173,6 +184,20 @@
   font-weight: var(--ct-font-weight-semibold);
   white-space: nowrap;
   pointer-events: none;
+  opacity: 0;
+}
+
+.ct-scrub-strip [data-part="bubble"] {
+  transition:
+    right var(--ct-motion-duration-enter) var(--ct-motion-easing-enter),
+    top var(--ct-motion-duration-enter) var(--ct-motion-easing-enter),
+    opacity var(--ct-motion-duration-enter) var(--ct-motion-easing-enter);
+}
+
+/* While pressed the bubble follows the finger exactly, so nothing eases. */
+.ct-scrub-strip[data-state="engaged"] [data-part="bubble"] {
+  opacity: 1;
+  transition: none;
 }
 
 .ct-scrub-strip [data-part="grab-band"] {
@@ -209,6 +234,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .ct-scrub-strip,
   .ct-scrub-strip [data-part] {
     transition: none;
   }

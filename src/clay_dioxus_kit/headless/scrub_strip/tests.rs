@@ -118,6 +118,49 @@ fn the_strip_follows_the_thumb_until_the_window_runs_out() {
     assert!(room > 900.0, "room was only {room}");
 }
 
+/// The regression this strip once had: its geometry took a window width that did not match the
+/// pointer's coordinates, so in a window wider than the number it was given the thumb read as
+/// "on the resting column" and the picked label never travelled past the clearance. Measured
+/// from the box itself, a thumb at the far left of a wide box takes the label to the far edge,
+/// with the labels out of reach trailing it by exactly the cap.
+#[test]
+fn a_thumb_at_the_far_left_of_a_wide_box_pushes_to_the_far_edge() {
+    let (width, height) = (1920.0, HEIGHT);
+    let items = breakpoints();
+    let state = StripState {
+        thumb_x: Some(12.0),
+        ..StripState::default()
+    };
+    let geometry = Geometry::new((width, height), &items, &state);
+    let room = width - REST_INSET - spacing(height, items.len()) * ACTIVE_SPACING_MULTIPLIER / 2.0;
+    assert!(
+        (geometry.limit - room).abs() < 1e-9,
+        "the label stopped short of the far edge: {} of {room}",
+        geometry.limit
+    );
+    assert!(
+        geometry.limit > 1700.0,
+        "pushed only {} of a {width} px box",
+        geometry.limit
+    );
+    let pushes: Vec<f64> = geometry.placed.iter().map(|placed| placed.push).collect();
+    let furthest = pushes.iter().copied().fold(f64::MIN, f64::max);
+    let least = pushes.iter().copied().fold(f64::MAX, f64::min);
+    assert_eq!(furthest, geometry.limit);
+    // Out of reach the labels trail by the cap, never more: the floor is `limit - MAX_DIFF`
+    // and nothing sits below it.
+    assert_eq!(push_floor(geometry.limit), geometry.limit - MAX_DIFF);
+    assert!(
+        least >= geometry.limit - MAX_DIFF - 1e-6,
+        "a label trails by {}, past the {MAX_DIFF} cap",
+        furthest - least
+    );
+
+    // The same thumb in a narrower box reaches a nearer edge: the size comes from the box.
+    let narrow = Geometry::new((720.0, height), &items, &state);
+    assert!(narrow.limit < geometry.limit);
+}
+
 /// The floor is where the breakpoints out of reach sit. It has to stay on
 /// the resting column for a short drag and then come along on a long one,
 /// with the gap to the thumb never widening past the cap.
@@ -581,6 +624,9 @@ mod rendered {
     //! stylesheet keys on.
     use super::*;
     use crate::testing::Page;
+    use dioxus::html::geometry::PixelsRect;
+    use dioxus::html::geometry::euclid::Point2D;
+    use dioxus::html::geometry::euclid::Size2D;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -604,7 +650,6 @@ mod rendered {
                 button { key: "{index}", onclick: move |_| tab.set(index), "tab {index}" }
             }
             ScrubStrip {
-                viewport: (1076.0, 860.0),
                 items: TABS[tab()].to_vec(),
                 renderer: probe.renderer,
                 on_select: move |index| selected.borrow_mut().push(index),
@@ -619,6 +664,18 @@ mod rendered {
             selected: Rc::clone(&selected),
         };
         (Page::with_props(app, probe), selected)
+    }
+
+    /// The overlay's mount, reporting `rect` as its box, as a browser would.
+    fn measure(page: &mut Page, origin: (f64, f64), size: (f64, f64)) {
+        let root = page.by_class("ct-scrub-strip");
+        page.mount_measured(
+            root,
+            PixelsRect::new(
+                Point2D::new(origin.0, origin.1),
+                Size2D::new(size.0, size.1),
+            ),
+        );
     }
 
     fn markers(page: &Page) -> Vec<String> {
@@ -636,7 +693,10 @@ mod rendered {
         let root = page.by_class("ct-scrub-strip");
         assert_eq!(page.attr(root, "data-state").as_deref(), Some("idle"));
         // Every child is a part (`parts` fails on one that is not), in paint order.
-        assert_eq!(page.parts(root), ["scrim", "marker", "grab-band", "status"]);
+        assert_eq!(
+            page.parts(root),
+            ["scrim", "marker", "bubble", "grab-band", "status"]
+        );
         for property in [
             "--ct-strip-cell",
             "--ct-strip-inset",
@@ -754,7 +814,8 @@ mod rendered {
 
     #[test]
     fn pressing_engages_and_releasing_returns_to_rest_with_the_labels_at_the_edge() {
-        let (mut page, selected) = render(Renderer::Blitz);
+        let (mut page, selected) = render(Renderer::Browser);
+        measure(&mut page, (0.0, 0.0), (1076.0, 860.0));
         on_tab(&mut page, 1);
         let root = page.by_class("ct-scrub-strip");
         let band = page.by_role("slider", "Index");
@@ -767,6 +828,7 @@ mod rendered {
             page.custom_property(root, "--ct-strip-limit").as_deref(),
             Some("0px")
         );
+        // The bubble is always mounted; the stylesheet shows it while engaged.
         let parts = page.parts(root);
         assert!(parts.contains(&"bubble".to_string()), "{parts:?}");
         page.pointer_at(root, "pointerup", (1050.0, 430.0));
@@ -775,7 +837,17 @@ mod rendered {
             page.custom_property(root, "--ct-strip-limit").as_deref(),
             Some("0px")
         );
-        assert!(!page.parts(root).contains(&"bubble".to_string()));
+        // The bubble stays for the stylesheet to slide it back to the column; it is pushed no
+        // further.
+        let bubble = page
+            .children(root)
+            .into_iter()
+            .find(|part| page.attr(*part, "data-part").as_deref() == Some("bubble"))
+            .expect("the bubble stays mounted at rest");
+        assert_eq!(
+            page.custom_property(bubble, "--ct-strip-push").as_deref(),
+            Some("0px")
+        );
         for marker in page
             .children(root)
             .into_iter()
@@ -786,6 +858,32 @@ mod rendered {
                 Some("0px")
             );
         }
+    }
+
+    /// The overlay need not start at the client origin (a micro's mount may be offset): the
+    /// pointer is read relative to the measured box, so a thumb 26 px inboard of the box's right
+    /// edge reads the same wherever the box sits.
+    #[test]
+    fn pointers_are_read_relative_to_the_measured_box() {
+        let limit_after_press = |origin_x: f64| {
+            let (mut page, _) = render(Renderer::Browser);
+            measure(&mut page, (origin_x, 0.0), (1076.0, 860.0));
+            let root = page.by_class("ct-scrub-strip");
+            let band = page.by_role("slider", "Index");
+            page.pointer_at(band, "pointerdown", (origin_x + 1050.0, 430.0));
+            page.custom_property(root, "--ct-strip-limit")
+        };
+        assert_eq!(limit_after_press(0.0), limit_after_press(300.0));
+    }
+
+    /// A strip that was never measured (Blitz, which has no layout to read) still engages and
+    /// picks; its labels just have no window to travel into.
+    #[test]
+    fn an_unmeasured_strip_still_picks() {
+        let (mut page, selected) = render(Renderer::Blitz);
+        let band = page.by_role("slider", "Index");
+        page.pointer_at(band, "pointerdown", (1050.0, 430.0));
+        assert!(!selected.borrow().is_empty());
     }
 
     /// A release with no press of the strip's own (a scrollbar drag let go over the grab band)
@@ -844,7 +942,6 @@ mod rendered {
                 button { key: "{index}", onclick: move |_| tab.set(index), "tab {index}" }
             }
             ScrubStrip {
-                viewport: (1076.0, 860.0),
                 items: TABS[tab()].to_vec(),
                 renderer: Renderer::Browser,
                 on_select: move |_| {},

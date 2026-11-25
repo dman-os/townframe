@@ -13,14 +13,13 @@ const LETTERS: [&str; 26] = [
 
 /// `ScrubStrip`: an A to Z list with the strip pinned to the right edge of the window. Press and
 /// drag the edge (or tab onto it and use the arrow keys, Home and End) to jump between letters.
-/// The window's size is the strip's `viewport`.
+/// The strip measures the window itself.
 #[component]
-pub fn ScrubStripSpecimens(viewport: (f64, f64)) -> Element {
+pub fn ScrubStripSpecimens() -> Element {
     let anchors = use_context::<Signal<BTreeMap<String, Rc<MountedData>>>>();
     let renderer = use_context::<Renderer>();
     rsx! {
         ScrubStrip {
-            viewport,
             items: LETTERS.to_vec(),
             renderer,
             label: "Letters".to_string(),

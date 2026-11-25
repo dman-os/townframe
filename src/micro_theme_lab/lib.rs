@@ -325,9 +325,7 @@ impl Component {
             Self::Sections => rsx! { SectionsSpecimens {} },
             Self::Sheet => rsx! { SheetSpecimens {} },
             Self::Drawer => rsx! { DrawerSpecimens {} },
-            // The strip sizes itself to a viewport; the canvas gives it a fixed one, as the
-            // showcase does, since a micro does not know its mount's size yet.
-            Self::ScrubStrip => rsx! { ScrubStripSpecimens { viewport: (720.0, 860.0) } },
+            Self::ScrubStrip => rsx! { ScrubStripSpecimens {} },
         }
     }
 }

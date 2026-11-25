@@ -3,7 +3,7 @@
 //! Neither renderer lets a component ask the DOM how wide it is (Blitz panics when
 //! `get_client_rect` runs inside an event handler or `onmounted`, and a guest has no DOM at all),
 //! so the host, which owns the window, classifies its width and passes the class down as a prop
-//! (`KIT-040`). The breakpoints are defined here and nowhere else.
+//! (`KIT-040`; `ScrubStrip` is the one component that measures, its own full-window overlay). The breakpoints are defined here and nowhere else.
 
 /// How much horizontal room the host has, in the Material window-size-class steps.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

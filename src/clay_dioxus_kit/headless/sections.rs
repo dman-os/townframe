@@ -93,6 +93,12 @@ impl Renderer {
         matches!(self, Self::Browser)
     }
 
+    /// Whether a component may read its element's rect (`MountedData::get_client_rect`); Blitz has
+    /// no layout at mount time and panics on the read.
+    pub fn measures_layout(self) -> bool {
+        matches!(self, Self::Browser)
+    }
+
     /// Whether a pressed pointer keeps delivering events outside the window; Blitz has no pointer capture.
     pub fn captures_pointer(self) -> bool {
         matches!(self, Self::Browser)
