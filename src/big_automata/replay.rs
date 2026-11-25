@@ -103,6 +103,10 @@
 //! 13. *Hold.* A round whose targets have no rows may wait up to its `hold_ms` (capped by the
 //!     server) for one to appear. Cancelling the request ends the wait. Waiting never changes
 //!     what a round may carry.
+//!     The wait is a [long-poll](crate::long_poll) on the routes the round names, so a commit on
+//!     other routes neither wakes it nor costs it a read, and a server may linger a short while
+//!     after the first commit that concerns it (up to a full page) to answer a burst as one
+//!     page.
 //!
 //! **Limits**
 //!

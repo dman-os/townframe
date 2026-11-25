@@ -21,18 +21,18 @@ use crate::driver::PeerDriver;
 use crate::driver::RouteUpdate;
 use crate::driver::Settle;
 use crate::driver::SyncBackend;
+use crate::driver::memory::LwwPayload;
 use crate::driver::memory::MemoryBackend;
 use crate::driver::memory::MemoryPeerCursors;
+use crate::long_poll::RuntimeTimer;
 use crate::part_store::PartStoreRead;
 use crate::part_store::laws::obj;
 use crate::part_store::laws::part;
 use crate::part_store::laws::principal;
-use crate::driver::memory::LwwPayload;
 use crate::part_store::laws::stage;
 use crate::part_store::memory::MemoryPartStore;
 use crate::part_store::oracle::PartWrite;
 use crate::replay::responder::Responder;
-use crate::replay::responder::Timer;
 use crate::replay::server::ReplayServer;
 use crate::replay::wire::CloseSession;
 use crate::replay::wire::PageSession;
@@ -57,14 +57,6 @@ use crate::sync::rpc::summary::PartSummariesResponse;
 /// The principal our driver acts as at every scripted peer.
 fn me() -> PeerKey {
     principal(0)
-}
-
-struct SleepTimer;
-
-impl Timer for SleepTimer {
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + use<> {
-        n0_future::time::sleep(duration)
-    }
 }
 
 pub(super) fn clock() -> Clock {
@@ -198,8 +190,8 @@ impl ScriptedPeer {
         Ok(())
     }
 
-    fn responder(&self) -> Responder<MemoryPartStore, SleepTimer> {
-        Responder::new(self.inner.store.clone(), SleepTimer)
+    fn responder(&self) -> Responder<MemoryPartStore, RuntimeTimer> {
+        Responder::new(self.inner.store.clone(), RuntimeTimer)
     }
 
     fn server(&self) -> std::sync::MutexGuard<'_, ReplayServer> {

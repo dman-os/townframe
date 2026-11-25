@@ -30,6 +30,8 @@ use crate::replay::wire::SessionUpdated;
 use crate::replay::wire::TargetId;
 use crate::replay::wire::Verdict;
 
+mod herd;
+
 /// A timer whose sleeps end only when the test says so.
 #[derive(Clone, Default)]
 struct ManualTimer {
@@ -131,7 +133,9 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let store = MemoryPartStore::default();
+        // A frozen clock: the holds' sleeps are exactly the durations asked.
+        let now = Instant::now();
+        let store = MemoryPartStore::with_clock(Arc::new(move || now));
         let timer = ManualTimer::default();
         Self {
             responder: Responder::new(store.clone(), timer.clone()),
