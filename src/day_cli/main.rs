@@ -176,6 +176,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         StaticCommands::Peers { command } => cmds::peers::run(command).await,
         StaticCommands::Drawers { command } => cmds::drawers::run(command).await,
         StaticCommands::Grants { command } => cmds::grants::run(command).await,
+        StaticCommands::Dump { command } => cmds::dump::run(command).await,
         StaticCommands::Exec {
             nsid,
             input,
@@ -247,6 +248,11 @@ enum StaticCommands {
     Grants {
         #[clap(subcommand)]
         command: cmds::grants::GrantsCommands,
+    },
+    /// Raw debug view of what the node holds, as JSON
+    Dump {
+        #[clap(subcommand)]
+        command: cmds::dump::DumpCommands,
     },
     /// Execute an operation through the node's dispatch router and print the JSON answer
     #[clap(visible_alias = "x")]

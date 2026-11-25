@@ -1,5 +1,6 @@
 pub mod carts;
 pub mod drawers;
+pub mod dump;
 pub mod exec;
 pub mod grants;
 pub mod init;
