@@ -56,7 +56,7 @@ pub struct UninstallCartridge {
 /// Sets one grant of the cartridge, or with `value` absent removes it. `grant` says what is being
 /// granted: a drawer, another cartridge's data, a network host, one method, or every method
 /// under an authority prefix. The grant is stored as one datum in the cartridge's config document,
-/// so it follows the cartridge to a sister node. It belongs to the cartridge as a whole, so its
+/// so it follows the cartridge to a twin node. It belongs to the cartridge as a whole, so its
 /// nodule and its micro are both held to it (ADR 049 §4.1). A drawer or cartridge grant's value
 /// states an access level; a net, method or authority grant states none (see
 /// [`GrantKey::accepts`]). Only this method writes grant datums, never the cartridge.
