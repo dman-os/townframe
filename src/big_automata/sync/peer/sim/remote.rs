@@ -41,6 +41,8 @@ use crate::sync::rpc::bucket::BucketObjPageEntry;
 use crate::sync::rpc::bucket::LeafBucketPage;
 use crate::sync::rpc::bucket::LeafBucketRequest;
 
+use std::sync::atomic::AtomicU64;
+
 use crate::kit::scheduler::Instant;
 
 /// Our principal at the peer.
@@ -69,6 +71,8 @@ pub(super) struct View {
 
 pub(super) struct Remote {
     store: MemoryPartStore,
+    /// The generations every store of this peer mints, in order: a seed replays the same ones.
+    mints: Arc<AtomicU64>,
     oracle: PartOracle,
     responder: Responder<MemoryPartStore, Expired>,
     server: ReplayServer,
@@ -109,8 +113,10 @@ struct Saved {
 
 impl Remote {
     pub(super) fn new(parts: &[PartKey], objs: &[ObjKey], summary_cap: usize) -> Self {
-        let store = MemoryPartStore::default();
+        let mints = Arc::<AtomicU64>::default();
+        let store = MemoryPartStore::deterministic(Arc::clone(&mints));
         Self {
+            mints,
             responder: Responder::new(store.clone(), Expired),
             oracle: PartOracle::with_generation(block_on(store.generation()).unwrap()),
             store,
@@ -162,7 +168,7 @@ impl Remote {
     /// the old log.
     pub(super) fn lose_data(&mut self) {
         self.leave_ghosts();
-        let store = MemoryPartStore::default();
+        let store = MemoryPartStore::deterministic(Arc::clone(&self.mints));
         self.oracle = PartOracle::with_generation(block_on(store.generation()).unwrap());
         self.views = Self::blank_views(&self.parts);
         self.row_rev = default();
