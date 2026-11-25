@@ -374,35 +374,44 @@ fn StateRow(name: &'static str, detail: &'static str, decoration: &'static str) 
     }
 }
 
-/// The semantic colour tokens of `styles/tokens/semantic.tokens.json`, in the order the file
-/// declares them. A token named `on-X` is the content colour drawn over `X`.
-const SEMANTIC_COLORS: [&str; 26] = [
+/// The colour roles, in the order of the `roles` table in `x/design-tokens.ts` that derives them
+/// from the palette. A role named `on-X` is the content colour drawn over `X`.
+const SEMANTIC_COLORS: [&str; 35] = [
     "canvas",
+    "surface-sunken",
     "surface",
     "surface-raised",
-    "surface-sunken",
     "text",
     "text-muted",
     "text-subtle",
     "border",
+    "border-strong",
     "focus",
     "primary",
     "on-primary",
+    "primary-container",
+    "on-primary-container",
     "accent",
     "on-accent",
     "accent-container",
     "on-accent-container",
-    "selected",
-    "on-selected",
-    "scrim",
     "danger",
     "on-danger",
+    "danger-container",
+    "on-danger-container",
     "success",
     "on-success",
+    "success-container",
+    "on-success-container",
     "warning",
     "on-warning",
+    "warning-container",
+    "on-warning-container",
     "info",
     "on-info",
+    "info-container",
+    "on-info-container",
+    "scrim",
 ];
 
 /// One swatch per semantic colour token, painted with the live `var(--ct-color-*)` so a theme

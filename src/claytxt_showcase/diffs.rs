@@ -179,7 +179,7 @@ fn Segmented(
                         role: "radio",
                         "aria-checked": index == selected,
                         "data-state": if index == selected { "active" } else { "inactive" },
-                        class: "min-h-12 cursor-pointer rounded-md border border-border bg-card px-4 font-sans text-foreground-muted hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus data-[state=active]:bg-selected data-[state=active]:text-on-selected",
+                        class: "min-h-12 cursor-pointer rounded-md border border-border bg-card px-4 font-sans text-foreground-muted hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus data-[state=active]:bg-accent-container data-[state=active]:text-on-accent-container",
                         onclick: move |_| on_select.call(index),
                         "{option}"
                     }
@@ -203,7 +203,7 @@ fn Switch(
             disabled,
             "aria-checked": checked,
             "data-state": if checked { "active" } else { "inactive" },
-            class: "min-h-12 cursor-pointer rounded-md border border-border bg-card px-4 font-sans text-foreground-muted disabled:cursor-not-allowed disabled:opacity-50 hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus data-[state=active]:bg-selected data-[state=active]:text-on-selected",
+            class: "min-h-12 cursor-pointer rounded-md border border-border bg-card px-4 font-sans text-foreground-muted disabled:cursor-not-allowed disabled:opacity-50 hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus data-[state=active]:bg-accent-container data-[state=active]:text-on-accent-container",
             onclick: move |_| on_toggle.call(!checked),
             "{label}: " { if checked { "on" } else { "off" } }
         }

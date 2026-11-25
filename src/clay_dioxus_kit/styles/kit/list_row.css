@@ -28,6 +28,6 @@
 }
 
 .ct-list-row[data-state="current"] {
-  background: var(--ct-color-selected);
-  color: var(--ct-color-on-selected);
+  background: var(--ct-color-accent-container);
+  color: var(--ct-color-on-accent-container);
 }

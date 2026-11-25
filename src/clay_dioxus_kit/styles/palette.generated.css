@@ -8,12 +8,12 @@
 @layer tokens {
   :root {
     --ct-palette-neutral-1: light-dark(#fbf8ff, #131318);
-    --ct-palette-neutral-2: light-dark(#f5f2fa, #1b1b21);
-    --ct-palette-neutral-3: light-dark(#efedf4, #1f1f25);
-    --ct-palette-neutral-4: light-dark(#e9e7ef, #29292f);
-    --ct-palette-neutral-5: light-dark(#e4e1e9, #34343a);
+    --ct-palette-neutral-2: light-dark(#f8f5fc, #17171c);
+    --ct-palette-neutral-3: light-dark(#f5f2fa, #1b1b21);
+    --ct-palette-neutral-4: light-dark(#efedf4, #1f1f25);
+    --ct-palette-neutral-5: light-dark(#e9e7ef, #29292f);
     --ct-palette-neutral-6: light-dark(#c7c5d0, #46464f);
-    --ct-palette-neutral-7: light-dark(#817f8a, #767680);
+    --ct-palette-neutral-7: light-dark(#85838d, #6d6d76);
     --ct-palette-neutral-8: light-dark(#767680, #90909a);
     --ct-palette-neutral-9: light-dark(#66666f, #a2a1ac);
     --ct-palette-neutral-10: light-dark(#56565f, #b4b3be);
@@ -133,7 +133,7 @@
     --ct-color-on-info: var(--ct-palette-info-contrast);
     --ct-color-info-container: var(--ct-palette-info-3);
     --ct-color-on-info-container: var(--ct-palette-info-11);
-    --ct-color-scrim: color-mix(in srgb, var(--ct-palette-neutral-12) 32%, transparent);
+    --ct-color-scrim: rgb(0 0 0 / 32%);
   }
 
   /* The more-contrast variant: the host sets data-contrast="more" on the root (ADR 055 §4.2). */

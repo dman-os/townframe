@@ -5,9 +5,9 @@
    the imports below, `kit` by the component skins, `user` by the end user's theme at run time. */
 @layer reset, tokens, kit, user;
 
-@import "./styles/material.css";
 @import "./styles/reset.css";
 @import "./styles/tokens.generated.css";
+@import "./styles/palette.generated.css";
 @import "./styles/tokens.css";
 @import "./styles/kit/button.css" layer(kit);
 @import "./styles/kit/tabs.css" layer(kit);

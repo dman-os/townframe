@@ -447,7 +447,7 @@ fn PrFiles(diff: &'static PrDiff, options: DiffOptions, virtualized: Virtualizat
                                 rsx! {
                                     li { key: "{file_index}",
                                         button {
-                                            class: "flex min-h-12 w-full cursor-pointer items-center justify-between gap-3 rounded-md border border-border bg-card px-3 text-left text-sm text-foreground-muted hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus data-[state=active]:bg-selected data-[state=active]:text-on-selected",
+                                            class: "flex min-h-12 w-full cursor-pointer items-center justify-between gap-3 rounded-md border border-border bg-card px-3 text-left text-sm text-foreground-muted hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus data-[state=active]:bg-accent-container data-[state=active]:text-on-accent-container",
                                             "data-state": if file_index == index { "active" } else { "inactive" },
                                             "aria-current": file_index == index,
                                             onclick: move |_| selected.set(file_index),
