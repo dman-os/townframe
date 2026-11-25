@@ -98,6 +98,27 @@ pub struct NodeSettings {
     /// the node reads this file at boot).
     #[serde(default, skip_serializing_if = "DevSettings::is_default")]
     pub dev: DevSettings,
+    /// What a nodule's `#net` permbinds may reach beyond the public internet.
+    #[serde(default, skip_serializing_if = "NetSettings::is_default")]
+    pub net: NetSettings,
+}
+
+/// The `net` section of `node.json`. Keys are snake_case, as the file's other top-level keys are.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetSettings {
+    /// Lets a nodule that holds a `grant/net` for `host.daybook.internal:<port>` reach that
+    /// port on this machine's own loopback (a local server, a dev tool). Off by default, and
+    /// read at boot, so no nodule or command can turn it on. A guest's own `127.0.0.1` and
+    /// `localhost` never reach the machine either way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_host_loopback: bool,
+}
+
+impl NetSettings {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// The `dev` section of `node.json`. Keys are snake_case, as the file's other top-level keys are.
@@ -298,6 +319,7 @@ impl NodeDir {
             peers: None,
             relay: false,
             dev: DevSettings::default(),
+            net: NetSettings::default(),
         };
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -632,6 +654,7 @@ impl Booted {
             listeners,
             peers,
             allow_slot_takeover: settings.dev.allow_slot_takeover,
+            allow_host_loopback: settings.net.allow_host_loopback,
         };
         let (node, stop) = BigNode::boot(config).await?;
         lock.serving()?;

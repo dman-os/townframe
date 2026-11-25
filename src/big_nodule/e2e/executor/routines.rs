@@ -1579,7 +1579,8 @@ mod grant_requests {
     }
 
     /// Alpha's `ping` routine takes two `#net` permbinds: GET and HEAD to `api.example.org:8443`,
-    /// and any verb to `www.example.org` (port 443, the default of a permbind without one).
+    /// and any verb to `www.example.org` on any port (a permbind without a port, as in Deno's
+    /// `--allow-net`).
     fn networked() -> FixtureCartridge {
         let mut cartridge = requesting();
         for (binding, host, port, methods) in [
@@ -1704,8 +1705,8 @@ mod grant_requests {
     }
 
     /// With everything granted, a request that is not exactly what a permbind declares is
-    /// refused as undeclared: a different host, port, scheme (through its default port) or
-    /// verb, and a URL that is not a network one.
+    /// refused as undeclared: a different host, a port other than the one a permbind names (a
+    /// permbind with no port names every port), or verb, and a URL that is not a network one.
     #[tokio::test]
     async fn a_net_request_is_allowed_only_exactly_as_declared() {
         let (node, executor, _) = hosted(networked(), &[]).await;
@@ -1723,6 +1724,10 @@ mod grant_requests {
             (http::Method::GET, API),
             (http::Method::GET, "https://www.example.org/anything"),
             (http::Method::POST, "https://www.example.org/anything"),
+            // No port is every port, and the scheme only chooses the port a URL leaves out.
+            (http::Method::GET, "http://www.example.org/"),
+            (http::Method::GET, "https://www.example.org:8443/"),
+            (http::Method::GET, "http://www.example.org:8080/"),
         ] {
             node.ping_fetches(&executor, method, url).await.unwrap();
         }
@@ -1743,16 +1748,6 @@ mod grant_requests {
                 "another port",
             ),
             (http::Method::POST, API, "a verb the permbind does not list"),
-            (
-                http::Method::GET,
-                "http://www.example.org/",
-                "plain http reaches port 80, not 443",
-            ),
-            (
-                http::Method::GET,
-                "https://www.example.org:8443/",
-                "a port the permbind does not name",
-            ),
             (
                 http::Method::GET,
                 "https://sub.www.example.org/",
@@ -1822,6 +1817,84 @@ mod grant_requests {
             serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"],
             "Denied"
         );
+        node.shutdown().await;
+    }
+
+    /// A grant states its own port reach, separately from the permbind's: `host` is every port
+    /// and `host:port` that port only. A narrower grant than the permbind leaves the request
+    /// waiting for authority, a wider one covers it, and an IPv6 literal is written in brackets.
+    #[tokio::test]
+    async fn a_grant_covers_a_permbind_by_host_and_port_as_deno_allow_net_does() {
+        let mut cartridge = networked();
+        cartridge.permbinds.insert(
+            "lit".into(),
+            Permbind::Net(big_cartridges_core::PermbindNet {
+                host: "[2001:db8::1]".into(),
+                port: Some(8000),
+                methods: None,
+                description: "lit description".into(),
+                extra: Default::default(),
+            }),
+        );
+        uses(&mut cartridge, PING, "lit", RoutineUse::default());
+        let (node, executor, _) = hosted(cartridge, &[]).await;
+        // Host and port are joined here so no literal reads as a fixed socket address to bind.
+        let v6 = |host: &str, port: u16| format!("[{host}]:{port}");
+        let lit = format!("http://{}/", v6("2001:db8::1", 8000));
+        let lit = lit.as_str();
+
+        // `www.example.org:443` is narrower than the `www.example.org` permbind (every port), so
+        // it does not cover it; `api.example.org` (every port) covers the pinned 8443.
+        for grant in [
+            "www.example.org:443",
+            "api.example.org",
+            &v6("2001:db8::1", 8001),
+        ] {
+            node.set_grant(
+                node.operator(),
+                ALPHA,
+                GrantKey::Net(grant.parse().unwrap()),
+                Some(GrantBody::present()),
+            )
+            .await
+            .unwrap();
+        }
+        node.ping_fetches(&executor, http::Method::GET, API)
+            .await
+            .unwrap();
+        for url in ["https://www.example.org/", lit] {
+            let (_, body) = node
+                .ping_fetches(&executor, http::Method::GET, url)
+                .await
+                .unwrap_err();
+            assert_eq!(body["error"], "MissingAuthority", "{url}");
+        }
+
+        for grant in ["www.example.org", &v6("2001:DB8:0::1", 8000)] {
+            node.set_grant(
+                node.operator(),
+                ALPHA,
+                GrantKey::Net(grant.parse().unwrap()),
+                Some(GrantBody::present()),
+            )
+            .await
+            .unwrap();
+        }
+        for url in ["https://www.example.org/", lit] {
+            node.ping_fetches(&executor, http::Method::GET, url)
+                .await
+                .unwrap();
+        }
+        // The permbind's own port is all the literal may use.
+        let (_, body) = node
+            .ping_fetches(
+                &executor,
+                http::Method::GET,
+                &format!("http://{}/", v6("2001:db8::1", 8001)),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(body["error"], "Denied");
         node.shutdown().await;
     }
 }
