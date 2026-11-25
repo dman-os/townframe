@@ -6,6 +6,8 @@ use super::library::new_node;
 use crate::client::NodeClient;
 use crate::interlude::*;
 
+mod patch;
+
 /// Where the handler component is built (see `intxt install --handler`): CI builds it before
 /// these tests, and `INTXT_GUEST_WASM` names it when it is elsewhere.
 pub(super) fn guest_path() -> PathBuf {

@@ -88,6 +88,10 @@ The same path edited in worktrees on two machines therefore has two op logs that
 
 **An intxt carries objects as a pack.** It holds the objects its commits and ops need, as a thin pack (deltas against a base commit the recipient already has, as `git push`, a bundle with prerequisites and `format-patch` assume) or as a full pack when the recipient has no base. On our lane's work, a thin pack is 53–82 KB for 5–12 commits, against 0.6–0.9 MB full (F27). A commit carried this way rebuilds with its original sha (31 of 31, F25), so `git am` from an intxt alone reproduces it.
 
+A commits entry may also carry a derived unified diff for readers (`patch`, a `text/x-diff` blob beside the pack, holding `git diff -M <base>..<tip>`, against the empty tree when the range reaches the root), so a phone shows each entry's diff without parsing a git pack; the pack is authoritative, the patch is a reading aid, and it is left out when the diff is over 8 MiB.
+
+**Changed 2026-11-17:** §4: a commits entry (and a jj change entry) may carry `patch`, a derived unified diff for readers. The pack stays the truth, and `add` leaves the patch out when the diff is over 8 MiB, as it leaves a large file out of the pack. Secrets: `add` has no excluded-object mechanism yet, so a patch is written for any range it packs.
+
 - **Large files:** a file over 8 MiB is recorded by its blob id and size and not packed (D45).
 - **Secrets:** an object that captured a secret is left out of the pack. Ops still name its id, and a reader shows that content as unavailable.
 
