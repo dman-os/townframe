@@ -406,6 +406,7 @@ impl LabTab {
             LabTab::Button => &[
                 ("button-variants", "Variants"),
                 ("button-states", "States"),
+                ("button-label-styles", "Label styles"),
                 ("button-toggle", "Toggle"),
             ],
             LabTab::Tabs => &[
