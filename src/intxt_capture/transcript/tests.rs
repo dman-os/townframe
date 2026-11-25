@@ -25,6 +25,7 @@ fn merge(into: &mut Imported, next: Imported) {
     into.turns.extend(next.turns);
     into.plan = next.plan.or(into.plan.take());
     into.spawned.extend(next.spawned);
+    into.skipped.extend(next.skipped);
 }
 
 /// Every datum survives its intxt_core type: decoding what the importer produced and encoding it
@@ -238,6 +239,31 @@ fn a_partial_last_line_waits_for_its_newline() {
     assert_eq!(importer.offset(), first_line as u64);
 }
 
+/// Claude Code once wrote a record cut off mid-string and carried on with the next line (seen
+/// around a `/clear`, 2026-11-25). The line is skipped and reported; every other record imports as
+/// if it weren't there.
+#[test]
+fn a_malformed_whole_line_is_skipped_and_reported() {
+    let first_line = MAIN.find('\n').unwrap() + 1;
+    let cut = r#"{"type":"queue-operation","operation":"remove","timestamp":"2026-11-25"#;
+    let damaged = format!("{}{cut}\n{}", &MAIN[..first_line], &MAIN[first_line..]);
+
+    let imported = import_once(None, &damaged);
+    let clean = import_once(None, MAIN);
+    assert_eq!(imported.skipped.len(), 1, "{:?}", imported.skipped);
+    assert_eq!(imported.skipped[0].at, first_line as u64);
+    assert!(
+        imported.skipped[0].reason.contains("EOF while parsing"),
+        "{}",
+        imported.skipped[0].reason
+    );
+    assert_eq!(imported.offset, damaged.len() as u64);
+    assert_eq!(
+        (&imported.session, &imported.turns, &imported.plan, &imported.spawned),
+        (&clean.session, &clean.turns, &clean.plan, &clean.spawned)
+    );
+}
+
 #[test]
 fn import_file_resumes_from_the_stored_offset() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("transcript/fixtures/main.jsonl");
@@ -276,13 +302,10 @@ fn records_before_the_first_prompt_open_a_turn_of_their_own() {
     assert_eq!(imported.turns["u1"].parent_turn.as_deref(), Some("c0"));
 }
 
+/// A line that isn't JSON is skipped (`a_malformed_whole_line_is_skipped_and_reported`); a record
+/// that parses but breaks the transcript's own invariants is still an error.
 #[test]
-fn malformed_input_is_an_error_not_a_skip() {
-    let mut importer = TranscriptImporter::new(None);
-    assert!(matches!(
-        importer.import(b"{\"type\":\n"),
-        Err(ImportError::Line { at: 0, .. })
-    ));
+fn a_record_that_breaks_the_transcript_is_an_error() {
     let orphan_result = r#"{"type":"user","uuid":"r","parentUuid":null,"timestamp":"2026-11-10T10:00:00Z","cwd":"/w","sessionId":"s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"nope","content":"x"}]}}"#;
     assert!(matches!(
         TranscriptImporter::new(None).import(format!("{orphan_result}\n").as_bytes()),

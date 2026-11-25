@@ -324,10 +324,19 @@ fn subagent_transcript(transcript: &Path, agent_id: &str) -> PathBuf {
 }
 
 /// Import whatever `path` has beyond the importer's offset; a transcript not written yet imports
-/// nothing.
+/// nothing. A line the importer skipped is logged: its record is missing from the session.
 fn import(importer: &mut TranscriptImporter, path: &Path) -> Result<Imported, Error> {
     if path.exists() {
-        Ok(importer.import_file(path)?)
+        let imported = importer.import_file(path)?;
+        for line in &imported.skipped {
+            tracing::warn!(
+                transcript = %path.display(),
+                at = line.at,
+                reason = %line.reason,
+                "skipped a transcript line that isn't JSON; its record is missing from the session"
+            );
+        }
+        Ok(imported)
     } else {
         Ok(Imported {
             offset: importer.offset(),
