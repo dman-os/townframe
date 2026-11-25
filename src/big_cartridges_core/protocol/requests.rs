@@ -83,7 +83,7 @@ pub enum RequestedAccess {
         #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
         drawer: Option<DrawerId>,
     },
-    /// Calling one operation through dispatch.
+    /// Calling one method through dispatch.
     #[serde(rename_all = "camelCase")]
     Method { nsid: String },
     /// Using the network to reach `host`, on `port` when the `#net` permbind names one (else on

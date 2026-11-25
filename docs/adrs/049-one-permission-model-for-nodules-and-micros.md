@@ -88,7 +88,7 @@ table, never from the request).
 - **Permbinds are cartridge-level.** A cartridge's nodule and micro draw on one list. Granting
   reasons about that list once; each runtime is granted separately.
 - **Routines declare `uses`.** Today a routine's `uses` lowers into up to three handles
-  (`big_nodule::executor::RoutineCapabilities`): a dispatch handle (the operations it binds), a
+  (`big_nodule::executor::RoutineCapabilities`): a dispatch handle (the methods it binds), a
   docs handle over the cartridge config document (its `#datum` kinds) and a drawers handle (its
   `#drawers` access and the create flag). `big_nodule/state.rs` builds those scopes from `uses`
   and the granted drawers.
@@ -158,8 +158,8 @@ and is the permbind raw `wasi:sockets` will use later.
   checked like any other.
 
 A rich external service (GitHub,
-Google) is not a raw network grant: a platform cartridge provides it as operations, and a cartridge that wants it declares a
-`#method` on those operations. The general-purpose service cartridges are the trusted part; the
+Google) is not a raw network grant: a platform cartridge provides it as methods, and a cartridge that wants it declares a
+`#method` on those methods. The general-purpose service cartridges are the trusted part; the
 cartridges that use them are analysed without network access.
 
 ## 3. Declaration: the micro side [claytxt]
@@ -183,7 +183,7 @@ Asymmetries with the nodule side, stated explicitly:
    mount of that incarnation, and retracted when the incarnation drops (Clay shutdown is RAII). A grant change
    re-mints it under 6.4's order.
 2. **The guest never holds the handle's bytes.** The host attaches the handle to each `dispatch.local` and docs call;
-   the guest names only the operation. This matters more for micros, whose code is user-editable (the TS tier). On the
+   the guest names only the method. This matters more for micros, whose code is user-editable (the TS tier). On the
    web, the page is the host and the micro still runs in wcmp's sandbox, so the same holds.
 3. **UI sinks are reads and sends.** A micro reads not only through `fetch` but by rendering: an `<img>` whose source
    is a blob, a CSS `url()`. The host resolves a sink on the surface and checks it against the micro's handle, as for
@@ -215,9 +215,9 @@ and 7), so a grant records the answer to that question, once:
 - `grant/cartridge/<cartridgeId>` → `{ access }`, "may use data from cartridge Y" (its collections
   and datums included, item 8);
 - `grant/net/<host[:port]>` → `{}`, "may use the network to reach Z";
-- `grant/method/<nsid>` → `{}`, "may use Y's operation", and `grant/authority/<prefix or *>` →
-  `{}`, "may use operations under this namespace". They are two kinds because an NSID-shaped
-  name is both a valid operation and a valid authority prefix, and dev takeover needs the two
+- `grant/method/<nsid>` → `{}`, "may use Y's method", and `grant/authority/<prefix or *>` →
+  `{}`, "may use methods under this namespace". They are two kinds because an NSID-shaped
+  name is both a valid method and a valid authority prefix, and dev takeover needs the two
   apart (ADR 028 §3; operator, 2026-11-18). Most are proposed and accepted at install (ADR 047
   §10).
 
@@ -314,7 +314,7 @@ neither style nor read:
   not (a background incarnation, or a request filed by a routine), it goes to the shell's pending list and the CLI
   queue only, with no interruption. One request is answered once, on whichever surface the person uses.
 
-**Another cartridge's missing authority** (item 2). When X's micro calls Y's operation and gets Y's
+**Another cartridge's missing authority** (item 2). When X's micro calls Y's method and gets Y's
 `MissingAuthority { cartridge: Y, request }`, X may show "Y needs permission for this" and offer the request. The
 prompt is still the shell's and is about Y: X can surface Y's request but never answer it, and answering it changes
 only Y's grants. X never gains anything from it.
@@ -375,21 +375,21 @@ capability, blobs a blobs capability. `RoutineCapabilities` mints only three of 
 config docs, drawers), so a routine that binds `blobs.put` passes dispatch and is refused by
 blobs (§7's second gap).
 
-A domain handle mixes two things. Its operation-level part (`BlobsScope.put`) only repeats what
+A domain handle mixes two things. Its method-level part (`BlobsScope.put`) only repeats what
 dispatch already checked: may this routine call `blobs.put`. Its resource-level part
 (`BlobsScope.read` and `BlobsScope.drawers`, which reaches the blobs pinned in a reached drawer's
 inventories at Read or more; a doc capability's documents) says *which* resources, and dispatch
 cannot.
 
 Proposed:
-- **The operation-level part follows from the `#method` permbind.** A routine that may call an
-  operation gets the service handle part that operation needs, minted by the service actor as in
-  6.1. Which part each operation needs is stated once, beside the method's definition in
+- **The method-level part follows from the `#method` permbind.** A routine that may call a
+  method gets the service handle part that method needs, minted by the service actor as in
+  6.1. Which part each method needs is stated once, beside the method's definition in
   `method_core`, so the lowering is a table the runtime reads, not code per service.
 - **The resource-level part follows from the grants** (drawers, datum kinds, cartridges, §4.1).
-- **Later, operation-level flags leave the service handles** and dispatch alone checks
-  operations. Built-in services and cartridge-provided services then have the same shape: a
-  handle names resources, dispatch names operations (operator review item 10).
+- **Later, method-level flags leave the service handles** and dispatch alone checks
+  methods. Built-in services and cartridge-provided services then have the same shape: a
+  handle names resources, dispatch names methods (operator review item 10).
 
 Alternative considered: a permbind kind per domain (`#blobs { put, read }`). Rejected for now:
 it puts service structure into every manifest, and a cartridge cares that it may call `put`, not
@@ -397,7 +397,7 @@ which capability domain enforces it.
 
 ### 6.3 Enforcement points, unchanged
 
-- Dispatch refuses an operation outside the routine's dispatch handle.
+- Dispatch refuses a method outside the routine's dispatch handle.
 - The docs service refuses a datum kind outside the doc handle (`DocScope.read`/`write` map each
   doc to `DatumKinds`).
 - Each domain service refuses outside its own handle.
@@ -507,7 +507,7 @@ the analysis is static: it reads a cartridge version's manifest, needs no execut
 same answer on every node and in the registry.
 
 - **The graph.** Nodes are the cartridge's routines and micro, and the resources their `uses`
-  name: datum kinds in drawers (read or write), other cartridges' data, operations, network hosts, and
+  name: datum kinds in drawers (read or write), other cartridges' data, methods, network hosts, and
   the cartridge's own local state and revisioned stores. Edges are the declared accesses.
 - **Flows.** Data read by a routine can reach anything that routine can write or send. Across
   routines, data flows through anything one writes and another reads: shared local state, the
@@ -522,13 +522,13 @@ same answer on every node and in the registry.
 - **What it cannot see.** Two routines served by one component instance could exchange data in
   memory (ADR 047 §6 states this limit), so the analysis treats a component's routines as one
   unit for flows, and the per-routine split only sharpens reports within that bound. Platform
-  cartridges (§2's GitHub or Google services) are trusted to do what their operations say; a
-  cartridge using them is analysed as calling those operations, not as holding their network
+  cartridges (§2's GitHub or Google services) are trusted to do what their methods say; a
+  cartridge using them is analysed as calling those methods, not as holding their network
   access.
 
 ## 10. Open questions [both]
 
-Answered by the operator's review: `#datum` narrows inside granted drawers (§2); an operation
+Answered by the operator's review: `#datum` narrows inside granted drawers (§2); a method
 states the handle part it needs beside its definition in `method_core` (§6.2); the authoring surface
 is the existing manifest code behind a builder (§2).
 
@@ -556,7 +556,7 @@ The earlier one-shot-versus-remember question is answered by §4.2 (the boot-sco
 access question by item 8, and the nodule `atRuntime` question by §4.2 (one queue, no `atRuntime`). Still open:
 1. **Where a sink checks its handle** (§3 asymmetry 3): on the host surface, as proposed, or through a docs or blobs
    call the host makes for the micro? This decides how `<img>` of a blob works on Wry and Blitz.
-2. **Embedding as a `#method` reach** (§3 asymmetry 4): is a presentation an operation of Y's, for the permbind and
+2. **Embedding as a `#method` reach** (§3 asymmetry 4): is a presentation a method of Y's, for the permbind and
    the analysis, or does it need its own kind?
 3. **Explicit requests only** (§5): answered, explicit only.
 4. **Prompts for invisible requesters** (§5): answered, a pending panel for human-in-the-loop work plus notifications.
