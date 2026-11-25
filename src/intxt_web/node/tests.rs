@@ -2,6 +2,7 @@
 //! the same envelopes a real node writes.
 
 use super::*;
+use crate::feed::FeedKind;
 use crate::route::render;
 use crate::view::EntryKind;
 use big_cabinet_core::doc::DatumPage;
@@ -484,8 +485,8 @@ fn an_intxt_loads_with_its_commits_patch_comments_and_pull_request() {
     // The range is the tip and what is above the base, newest first; the base itself is out.
     let shas: Vec<&str> = range.commits.iter().map(|c| c.sha.as_str()).collect();
     assert_eq!(shas, [TIP, OLDER]);
-    assert_eq!(range.commits[0].author, "ada <ada@example.org>");
-    assert_eq!(range.commits[0].date, "2026-11-02 10:00");
+    assert_eq!(range.commits[0].author, "ada");
+    assert_eq!(range.commits[0].at.to_string(), "2026-11-02T10:00:00Z");
     assert_eq!(range.commits[0].message, "feat: the tip\n\nbody line");
     let patch = range.patch.as_ref().expect("the patch blob is held");
     assert_eq!(patch.omitted_octets, 0);
@@ -507,7 +508,7 @@ fn an_intxt_loads_with_its_commits_patch_comments_and_pull_request() {
     let prompts: Vec<&str> = summary.prompts().map(|p| p.headline.as_str()).collect();
     assert_eq!(
         prompts.len(),
-        crate::view::SessionSummary::MAX_PROMPTS.min(TURNS)
+        crate::session::SessionSummary::MAX_PROMPTS.min(TURNS)
     );
     assert_eq!(&prompts[..3], ["prompt 0", "prompt 1", "prompt 2"]);
     assert_eq!(
@@ -523,7 +524,7 @@ fn an_intxt_loads_with_its_commits_patch_comments_and_pull_request() {
     assert_eq!(view.threads[0].replies[0].body, "Because.");
 
     // The page escapes the diff and the description's raw HTML.
-    let page = render(crate::route::intxt_page, view);
+    let page = render(crate::route::intxt_page, (view, crate::view::Tab::Files));
     assert!(
         page.contains("+&#60;b&#62;new&#60;/b&#62; &#38; more"),
         "{page}"
@@ -602,6 +603,136 @@ fn an_index_that_is_not_an_intxts_is_unreadable_not_a_crash() {
     let error = load(&node, DRAWER).unwrap_err();
     assert!(matches!(error, LoadError::Unreadable { .. }), "{error}");
     assert_eq!(error.status(), 502);
+}
+
+/// Adds `entries` (datum key, value) to the index document and the end of the body's order.
+fn add_entries(node: &FakeNode, entries: &[(DatumKey, Value)]) {
+    let mut docs = node.docs.borrow_mut();
+    let index = docs.get_mut(&doc(INDEX)).unwrap();
+    let body_key = key("org.example.intxt.body", "main");
+    for (entry_key, value) in entries {
+        let reference = serde_json::to_value(DatumReference::new(
+            ReferenceDocId::SelfDoc,
+            entry_key.clone(),
+        ))
+        .unwrap();
+        index.get_mut(&body_key).unwrap()["order"]
+            .as_array_mut()
+            .unwrap()
+            .push(reference);
+        // An empty object stands for an entry the index does not hold.
+        if !value.as_object().unwrap().is_empty() {
+            index.insert(entry_key.clone(), value.clone());
+        }
+    }
+}
+
+#[test]
+fn an_entry_that_cannot_be_read_is_a_gap_and_the_rest_of_the_page_stands() {
+    let node = Rc::new(FakeNode::with_intxt());
+    add_entries(
+        &node,
+        &[
+            // Named by the body and absent from the index document.
+            (
+                key("org.example.intxt.work.sessionEntry", "gone"),
+                json!({}),
+            ),
+            // Present and not an entry.
+            (
+                key("org.example.intxt.work.githubPullEntry", "bad"),
+                json!({"pull": 7}),
+            ),
+        ],
+    );
+    let view = load(&node, DRAWER).unwrap();
+    assert_eq!(view.entries.len(), 5);
+    let gaps: Vec<_> = view
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::Gap)
+        .collect();
+    assert_eq!(gaps.len(), 2);
+    assert!(
+        gaps[0].label.ends_with("sessionEntry/gone"),
+        "{}",
+        gaps[0].label
+    );
+    assert!(
+        gaps[0].refs[0].value.contains("not readable"),
+        "{:?}",
+        gaps[0].refs
+    );
+    assert_eq!(view.entries[0].kind, EntryKind::Commits);
+    // Said in the feed too, after the dated items.
+    let in_feed = view
+        .feed()
+        .iter()
+        .filter(|item| matches!(item.what, FeedKind::Entry(index) if view.entries[index].kind == EntryKind::Gap))
+        .count();
+    assert_eq!(in_feed, 2);
+}
+
+#[test]
+fn an_entry_of_an_unknown_kind_is_kept_as_a_generic_datum() {
+    let node = Rc::new(FakeNode::with_intxt());
+    add_entries(
+        &node,
+        &[(
+            key("org.example.intxt.checkRun", "ci"),
+            json!({"name": "ci", "status": "passed", "creator": {"name": "ci-bot"},
+                   "at": "2026-11-03T09:00:00Z", "nested": {"x": 1}}),
+        )],
+    );
+    let view = load(&node, DRAWER).unwrap();
+    let generic = view.entries.last().unwrap();
+    assert_eq!(generic.kind, EntryKind::Generic);
+    assert_eq!(generic.label, "org.example.intxt.checkRun");
+    assert_eq!(generic.actor.as_deref(), Some("ci-bot"));
+    assert_eq!(generic.at.unwrap().to_string(), "2026-11-03T09:00:00Z");
+    let fields: Vec<_> = generic
+        .refs
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    assert_eq!(fields, ["at", "name", "status"]);
+}
+
+#[test]
+fn structures_in_the_notes_become_the_guide_and_comment_slots_give_times() {
+    let node = Rc::new(FakeNode::with_intxt());
+    {
+        let mut docs = node.docs.borrow_mut();
+        let notes = docs.get_mut(&doc(NOTES)).unwrap();
+        notes.insert(
+            key(
+                "org.example.intxt.structure",
+                "0193c000-0000-7000-8000-000000000001",
+            ),
+            json!({"kind": "section", "title": "Start here", "order": "1"}),
+        );
+        // A comment slot that is a UUIDv7 carries its time.
+        notes.insert(
+            key(
+                "org.example.intxt.comment",
+                "01935f3a-8c00-7000-8000-000000000009",
+            ),
+            json!({"targets": [], "body": {"mime": "text/markdown", "content": "timed"},
+                   "motivation": "commenting", "creator": {"type": "Person", "name": "ada"}}),
+        );
+    }
+    let view = load(&node, DRAWER).unwrap();
+    assert_eq!(view.guide.len(), 1);
+    assert_eq!(view.guide[0].title, "Start here");
+    assert!(view.guide[0].at.is_some());
+    let timed = view
+        .threads
+        .iter()
+        .find(|thread| thread.root.body == "timed")
+        .unwrap();
+    assert!(timed.root.at.is_some());
+    // The slots the older tests use are not UUIDv7: no time, and not invented.
+    assert!(view.threads.iter().any(|thread| thread.root.at.is_none()));
 }
 
 #[test]
