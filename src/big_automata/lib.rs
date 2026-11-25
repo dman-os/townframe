@@ -24,9 +24,6 @@ pub mod part_store;
 pub mod replay;
 pub mod rev;
 pub mod sync;
-mod utils;
-
-use crate::interlude::*;
 
 #[derive(Default, Debug, Clone, Copy)]
 pub enum AllowedStrat {

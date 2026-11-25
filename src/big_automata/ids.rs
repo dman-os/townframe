@@ -49,7 +49,7 @@ impl std::fmt::Display for ByteKey {
         write!(
             formatter,
             "{}",
-            utils_rs::hash::encode_base58_multibase(&self.as_bytes())
+            utils_rs::hash::encode_base58_multibase(self.as_bytes())
         )
     }
 }
@@ -86,7 +86,7 @@ impl Serialize for ByteKey {
         S: serde::Serializer,
     {
         if serializer.is_human_readable() {
-            utils_rs::hash::encode_base58_multibase(&self.as_bytes()).serialize(serializer)
+            utils_rs::hash::encode_base58_multibase(self.as_bytes()).serialize(serializer)
         } else {
             serializer.serialize_bytes(self.as_bytes())
         }

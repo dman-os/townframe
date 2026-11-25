@@ -320,6 +320,16 @@ pub async fn sync_backend_laws<R: BackendRig>(rig: &R) -> Res<()> {
     }
 
     // 7: two nodes that wrote different payloads concurrently converge, and then stay quiet
+    concurrent_payloads_converge(rig).await
+}
+
+/// Law 7: two backends that each hold a different payload for one object take each other's,
+/// both ways at once, and agree; taking them again changes nothing.
+async fn concurrent_payloads_converge<R: BackendRig>(rig: &R) -> Res<()> {
+    let probe = || Probe {
+        rig,
+        backend: rig.fresh(),
+    };
     let (a, b) = (probe(), probe());
     let (from_a, from_b) = rig.concurrent_payloads();
     assert_ne!(from_a, from_b, "the rig's concurrent payloads are the same");
