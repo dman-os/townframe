@@ -357,6 +357,87 @@ async fn legacy_hashed_representation_still_resolves() -> Res<()> {
     Ok(())
 }
 
+/// A cartridge upgrade re-pins the same `Blob` slot to new bytes while the
+/// slot's JWK and cipherBlob stay behind, so the cipherBlob names a
+/// representation of the previous plaintext. The blob worker used to unwrap
+/// the resulting "virtual ciphertext binding changed" and take the node down.
+#[tokio::test(flavor = "multi_thread")]
+async fn rewritten_blob_slot_replaces_its_stale_cipher_blob() -> Res<()> {
+    let first = b"handler build one";
+    let second = b"handler build two, same slot";
+    let harness = Harness::new(first).await?;
+    let _first_tag = harness.put(first).await?;
+    let report = harness.reconcile().await?;
+    assert!(report.deferred.is_empty(), "{:?}", report.deferred);
+    let (jwk_key, cipher_key) = representation_keys(&blob_key())?;
+    let key = {
+        let current = harness.current();
+        let DatumRead::Accepted { value, .. } = &current.datums[&jwk_key] else {
+            panic!("jwk is not accepted");
+        };
+        master_key(value).unwrap()
+    };
+
+    let _second_tag = harness.put(second).await?;
+    harness.replace(blob_key(), accepted(blob_value(second)));
+    let report = harness.reconcile().await?;
+    assert!(report.deferred.is_empty(), "{:?}", report.deferred);
+    let expected = encrypt_bytes(&key, second);
+    assert_eq!(report.retained.len(), 1);
+    assert_eq!(
+        report.retained[0].ciphertext.to_bytes32(),
+        *Hash::new(&expected).as_bytes()
+    );
+    assert_eq!(
+        harness.cipher(&cipher_key).representation.digest,
+        report.retained[0].ciphertext.digest_str()
+    );
+    let state = harness.docs.state.lock().unwrap();
+    assert_eq!(state.writes.len(), 2);
+    assert_eq!(
+        state.writes[1].set.keys().collect::<Vec<_>>(),
+        vec![&cipher_key],
+        "the slot's JWK is reused, only the cipherBlob is replaced"
+    );
+    Ok(())
+}
+
+/// A cipherBlob that names a digest `(key, plaintext, framing)` does not
+/// produce, in a slot the Blob's plaintext is part of, cannot be a stale slot
+/// to overwrite: it is a bad claim and defers that blob.
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_slot_claim_that_does_not_describe_its_plaintext_defers() -> Res<()> {
+    let plain = b"legacy slot plaintext";
+    let harness = Harness::new(plain).await?;
+    let _tag = harness.put(plain).await?;
+    let key = MasterKey::random();
+    let encoding = EncodingParams::DEFAULT;
+    let other = encrypt_with_rs(&key, b"another plaintext", encoding.record_size, encoding.padding);
+    let plaintext = BlobId::new(*Hash::new(plain).as_bytes());
+    let (jwk_key, cipher_key) =
+        legacy_representation_keys(&harness.docs.doc_id, &blob_key(), &plaintext)?;
+    harness.replace(
+        jwk_key.clone(),
+        accepted(serde_json::to_value(JwkOct::from_master_key(&key))?),
+    );
+    harness.replace(
+        cipher_key,
+        accepted(serde_json::json!({
+            "representation": {"digest": BlobId::new(*Hash::new(&other).as_bytes()).digest_str(), "lengthOctets": other.len()},
+            "contentEncoding": CONTENT_ENCODING_AES128GCM,
+            "encodingParameters": encoding.to_encoding_parameters(),
+            "keyRef": format!("dtxt:datum:self/{jwk_key}"),
+            "keyRefHeads": [ChangeHash([1; 32]).to_string()],
+        })),
+    );
+    let report = harness.reconcile().await?;
+    assert!(report.retained.is_empty());
+    assert_eq!(report.deferred.len(), 1, "{:?}", report.deferred);
+    assert!(harness.docs.state.lock().unwrap().writes.is_empty());
+    assert!(harness.roots.virtual_pairs().await?.is_empty());
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn in_doc_key_resolves_at_cipher_heads_after_jwk_overwrite() -> Res<()> {
     let plain = b"concurrent encryptor key pin";
