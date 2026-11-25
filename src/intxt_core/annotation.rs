@@ -11,6 +11,7 @@ use big_cabinet_core::DatumReference;
 use big_cabinet_core::Location;
 use big_cabinet_core::datum::Extra;
 use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::reference::ReferenceDocId;
 use big_cabinet_core::reference::DatumPin;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -18,7 +19,9 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 /// A comment (`org.example.intxt.comment/<uuidv7>`). Each comment is its own slot, so writers never
-/// share one; authorship is what the cabinet attests, not a field.
+/// share one. What the cabinet attests about it is which actor signed the write; `creator` and
+/// `generator` are the writer's claim about who it is (ADR 041 §2), which is what tells a reviewer
+/// from the agent that shares the reviewer's actor on one node.
 #[macros::datum(authority = "org.example.intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -29,8 +32,87 @@ pub struct Comment {
     /// The parent comment, for replies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<DatumReference>,
+    // Plain comments, not doc comments: a doc comment becomes a `description` beside the `$ref`
+    // to `Participant`, which Lexicon cannot state.
+    // Who wrote it, as claimed: a `Person`, or `Software` naming its session.
+    pub creator: Participant,
+    // The software that produced it, when an agent wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator: Option<Participant>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// W3C Web Annotation's `Agent`, as the `creator` and the `generator` of a comment.
+#[macros::datum]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Participant {
+    #[serde(rename = "type")]
+    pub kind: ParticipantKind,
+    /// A reference to whatever identifies the participant. Today that is the session document
+    /// capture recorded for an agent's session (its `agentSession/main` datum), and absent when
+    /// the session is not recorded. A long-lived identity datum can be named here later without
+    /// a change of shape (ledger D69).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<DatumReference>,
+    /// A generator's name, such as `claude-code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// What kind of agent a [`Participant`] is: W3C's `Person`, `Organization` and `Software`.
+#[macros::datum(open_string)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ParticipantKind {
+    #[serde(rename = "Person")]
+    Person,
+    #[serde(rename = "Organization")]
+    Organization,
+    #[serde(rename = "Software")]
+    Software,
+    #[datum(other)]
+    Unknown(String),
+}
+
+impl Participant {
+    /// The operator: a `Person` with no identifying reference, which is what a comment written
+    /// with no agent detected claims.
+    pub fn person() -> Self {
+        Self {
+            kind: ParticipantKind::Person,
+            id: None,
+            name: None,
+            version: None,
+            extra: Default::default(),
+        }
+    }
+
+    /// Whether `other` is the same participant: the same kind naming the same thing. A
+    /// generator's name and version are not part of it, since one session spans upgrades of the
+    /// harness.
+    pub fn is(&self, other: &Participant) -> bool {
+        self.kind == other.kind && self.id == other.id
+    }
+
+    /// What tells this participant's [`Seen`] slots from another's under one actor: none for the
+    /// `Person`, whose slots are the actor's own, and for any other participant the document its
+    /// `id` names, or its kind's spelling when it names nothing. Alphanumeric only, so it is safe
+    /// in a slot beside the `/` and `.` that [`Seen`] puts around it.
+    pub fn seen_scope(&self) -> Option<String> {
+        if self.kind == ParticipantKind::Person {
+            return None;
+        }
+        let scope = match self.id.as_ref().map(|id| id.document()) {
+            Some(ReferenceDocId::Concrete(doc)) => doc.to_string(),
+            _ => serde_json::to_string(&self.kind).expect("a kind serializes"),
+        };
+        Some(scope.chars().filter(char::is_ascii_alphanumeric).collect())
+    }
 }
 
 /// What a comment or structure is about. `source` is a [`DatumPin`] (ADR 035 §2.8): the datum,
@@ -201,6 +283,11 @@ pub enum Progress {
 
 /// What one reader has seen (`org.example.intxt.seen/<actor uuid>/<range>`). Only that reader writes
 /// it. Split into ranges because one map hits the native read budget at about 5,400 entries.
+///
+/// A reader is a participant, not an actor: on one node an agent and the operator are one actor, and
+/// the agent marking a thread seen must not hide it from the operator. The operator's `Person`
+/// keeps the slot above; any other participant's is `<actor uuid>.<scope>/<range>`, the scope being
+/// [`Participant::seen_scope`]. The dot keeps the operator's `<actor uuid>/` prefix from matching it.
 #[macros::datum(authority = "org.example.intxt")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -226,7 +313,8 @@ pub struct AnnotationsEntry {
 }
 
 /// A comment as read from a notes document: its key, its value, the heads of the version read and
-/// the actors the cabinet attests wrote that version (ADR 041 §2: authorship is not a field).
+/// the actors the cabinet attests wrote that version, which a reader sets against the comment's
+/// claimed `creator` (ADR 041 §2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Posted {
     pub key: DatumKey,
@@ -286,17 +374,19 @@ impl Thread {
         self.comments.last().expect("a thread has a comment")
     }
 
-    /// Whether `reader` wrote nothing last: someone else is waiting for an answer (ADR 041 §5).
-    /// A version no verified author wrote counts as someone else's.
-    pub fn waiting_on(&self, reader: &Uuid7) -> bool {
-        !self.last().authors.contains(reader)
+    /// Whether `reader` did not write last: someone else is waiting for an answer (ADR 041 §5).
+    /// Writers are compared by the `creator` they claim, not by the actor the cabinet attests,
+    /// which is one for the operator and the agents on a node.
+    pub fn waiting_on(&self, reader: &Participant) -> bool {
+        !self.last().comment.creator.is(reader)
     }
 
     /// Whether a comment of the thread that `reader` did not write has a version other than the
     /// one `seen` records for it (`Seen.datums`, ADR 041 §5).
-    pub fn unseen_by(&self, reader: &Uuid7, seen: &BTreeMap<String, Vec<String>>) -> bool {
+    pub fn unseen_by(&self, reader: &Participant, seen: &BTreeMap<String, Vec<String>>) -> bool {
         self.comments.iter().any(|post| {
-            !post.authors.contains(reader) && seen.get(&post.key.to_string()) != Some(&post.heads)
+            !post.comment.creator.is(reader)
+                && seen.get(&post.key.to_string()) != Some(&post.heads)
         })
     }
 }

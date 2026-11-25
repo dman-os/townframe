@@ -140,7 +140,8 @@ fn the_adr_examples_are_valid_datums() {
             "quote": {"exact": "fn parse("}
         }],
         "body": {"mime": "text/markdown", "content": "Why a second parser?"},
-        "motivation": "commenting"
+        "motivation": "commenting",
+        "creator": {"type": "Person"}
     }));
     codec_round_trip::<annotation::Comment>(json!({
         "targets": [{
@@ -152,13 +153,20 @@ fn the_adr_examples_are_valid_datums() {
             "quote": {"exact": "fn parse(", "prefix": "pub ", "suffix": "value: &str)"}
         }],
         "body": {"mime": "text/markdown", "content": "Why not reuse the fragment here?"},
-        "motivation": "commenting"
+        "motivation": "commenting",
+        "creator": {
+            "type": "Software",
+            "id": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.agentSession/main"
+        },
+        "generator": {"type": "Software", "name": "claude-code", "version": "2.1.322"}
     }));
     codec_round_trip::<annotation::Comment>(json!({
         "targets": [{"source": {"ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.comment/0193"}}],
         "body": {"mime": "text/markdown", "content": "Because the slot can contain `/`."},
         "motivation": "replying",
-        "replyTo": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.comment/0193"
+        "replyTo": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.comment/0193",
+        "creator": {"type": "Software"},
+        "generator": {"type": "Software", "name": "claude-code"}
     }));
     codec_round_trip::<annotation::ThreadState>(json!({"resolved": false}));
     codec_round_trip::<annotation::Structure>(json!({
@@ -483,15 +491,21 @@ fn future_fields_and_vocabulary_values_are_carried() {
         "targets": [{"source": {"ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.note/main"}, "selector": {"kind": "svg"}}],
         "body": {"mime": "text/markdown", "content": "Looks right.", "language": "en"},
         "motivation": "approving",
+        "creator": {"type": "Bot", "nickname": "ci", "id": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.agentSession/main"},
         "visibility": "team"
     }));
     let comment: annotation::Comment = serde_json::from_value(json!({
-        "targets": [], "body": {"mime": "text/plain", "content": ""}, "motivation": "approving"
+        "targets": [], "body": {"mime": "text/plain", "content": ""}, "motivation": "approving",
+        "creator": {"type": "Bot"}
     }))
     .unwrap();
     assert_eq!(
         comment.motivation,
         annotation::Motivation::Unknown("approving".into())
+    );
+    assert_eq!(
+        comment.creator.kind,
+        annotation::ParticipantKind::Unknown("Bot".into())
     );
     codec_round_trip::<work::WorktreeOp>(json!({
         "at": "2026-11-10T21:04:11Z",
@@ -549,10 +563,22 @@ fn note_content_is_stored_as_text() {
     );
 }
 
+/// A `Software` participant whose session document is `z111…1<suffix>`.
+fn agent(suffix: &str) -> annotation::Participant {
+    serde_json::from_value(json!({
+        "type": "Software",
+        "id": format!(
+            "dtxt:datum:z{}{suffix}/org.example.intxt.work.agentSession/main",
+            "1".repeat(31)
+        ),
+    }))
+    .unwrap()
+}
+
 fn posted(
     slot: &str,
     reply_to: Option<&str>,
-    authors: &[Uuid7],
+    creator: &annotation::Participant,
     heads: &[&str],
 ) -> annotation::Posted {
     let target = |slot: &str| {
@@ -565,24 +591,26 @@ fn posted(
             "body": {"mime": "text/markdown", "content": slot},
             "motivation": if reply_to.is_some() { "replying" } else { "commenting" },
             "replyTo": reply_to.map(target),
+            "creator": creator,
         }))
         .unwrap(),
         heads: heads.iter().map(|head| (*head).to_owned()).collect(),
-        authors: authors.to_vec(),
+        // Every participant here is one attested actor, as on one node.
+        authors: vec![Uuid7::new()],
     }
 }
 
 #[test]
 fn threads_group_replies_under_their_first_comment_in_time_order() {
-    let (ada, grace) = (Uuid7::new(), Uuid7::new());
+    let (ada, grace) = (annotation::Participant::person(), agent("a"));
     // Comment slots are time-ordered; given in a different order, replies of replies included,
     // and one reply whose parent was removed.
     let threads = annotation::Thread::group(vec![
-        posted("0193-d", Some("0193-c"), &[ada], &["h"]),
-        posted("0193-c", Some("0193-a"), &[grace], &["h"]),
-        posted("0193-b", None, &[grace], &["h"]),
-        posted("0193-a", None, &[ada], &["h"]),
-        posted("0193-e", Some("0193-gone"), &[grace], &["h"]),
+        posted("0193-d", Some("0193-c"), &ada, &["h"]),
+        posted("0193-c", Some("0193-a"), &grace, &["h"]),
+        posted("0193-b", None, &grace, &["h"]),
+        posted("0193-a", None, &ada, &["h"]),
+        posted("0193-e", Some("0193-gone"), &grace, &["h"]),
     ]);
     let slots: Vec<Vec<String>> = threads
         .iter()
@@ -615,10 +643,10 @@ fn threads_group_replies_under_their_first_comment_in_time_order() {
 
 #[test]
 fn a_reply_loop_ends_instead_of_hanging() {
-    let ada = Uuid7::new();
+    let ada = annotation::Participant::person();
     let threads = annotation::Thread::group(vec![
-        posted("0193-a", Some("0193-b"), &[ada], &["h"]),
-        posted("0193-b", Some("0193-a"), &[ada], &["h"]),
+        posted("0193-a", Some("0193-b"), &ada, &["h"]),
+        posted("0193-b", Some("0193-a"), &ada, &["h"]),
     ]);
     assert_eq!(
         threads
@@ -631,10 +659,10 @@ fn a_reply_loop_ends_instead_of_hanging() {
 
 #[test]
 fn a_thread_waits_on_whoever_did_not_write_last_and_is_unseen_until_recorded() {
-    let (ada, grace) = (Uuid7::new(), Uuid7::new());
+    let (ada, grace) = (annotation::Participant::person(), agent("a"));
     let thread = annotation::Thread::group(vec![
-        posted("0193-a", None, &[ada], &["h1"]),
-        posted("0193-b", Some("0193-a"), &[grace], &["h2"]),
+        posted("0193-a", None, &ada, &["h1"]),
+        posted("0193-b", Some("0193-a"), &grace, &["h2"]),
     ])
     .remove(0);
     assert!(thread.waiting_on(&ada));
@@ -660,7 +688,23 @@ fn a_thread_waits_on_whoever_did_not_write_last_and_is_unseen_until_recorded() {
         vec!["old".to_owned()],
     );
     assert!(thread.unseen_by(&ada, &seen));
-    // A version no verified author wrote is someone else's.
-    let anonymous = annotation::Thread::group(vec![posted("0193-c", None, &[], &["h"])]).remove(0);
-    assert!(anonymous.waiting_on(&ada));
+}
+
+/// Two agents with no recorded session are one participant, and an agent with a session is not
+/// the operator: the kinds and ids are what is compared, not the generator's version.
+#[test]
+fn participants_are_compared_by_kind_and_id_and_scope_their_seen_slots() {
+    let person = annotation::Participant::person();
+    assert!(person.is(&person.clone()));
+    assert_eq!(person.seen_scope(), None);
+    let (one, two) = (agent("a"), agent("b"));
+    assert!(!one.is(&two) && !one.is(&person));
+    let mut upgraded = one.clone();
+    upgraded.version = Some("9".to_owned());
+    assert!(one.is(&upgraded));
+    assert_ne!(one.seen_scope(), two.seen_scope());
+    assert_eq!(one.seen_scope().unwrap(), format!("z{}a", "1".repeat(31)));
+    let unrecorded: annotation::Participant =
+        serde_json::from_value(json!({"type": "Software"})).unwrap();
+    assert_eq!(unrecorded.seen_scope().unwrap(), "Software");
 }

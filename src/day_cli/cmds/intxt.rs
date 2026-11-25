@@ -60,6 +60,7 @@ pub(crate) mod capture;
 mod edit;
 mod github;
 pub(crate) mod package;
+pub(crate) mod participant;
 mod record;
 pub(crate) mod review;
 
@@ -665,11 +666,12 @@ async fn with_packaging_exit(
     let client = lazy::node().await?;
     let cwd = std::env::current_dir()?;
     let config = lazy::config().await?;
-    verb(&package::Packaging::new(
-        &client,
-        &cwd,
-        config.node_dir.root(),
-    ))
+    // The environment is read here and nowhere below: verbs are handed who they write as.
+    let participant = participant::Detected::from_process(config.node_dir.root())?;
+    verb(
+        &package::Packaging::new(&client, &cwd, config.node_dir.root())
+            .participating_as(participant),
+    )
     .await
 }
 

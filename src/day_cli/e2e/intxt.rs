@@ -1270,8 +1270,9 @@ async fn intxt_add_copies_the_rewrites_the_hook_reported() {
     .await;
 }
 
-/// Review through `comment`, `reply` and `inbox`, between two actors of one node (the
-/// operator and an `agent` it opens): a comment on a commit's lines, the other side's inbox
+/// Review through `comment`, `reply` and `inbox`, between two participants of one actor (the
+/// operator, and an agent detected from `AI_AGENT` and its session variable, both the node's
+/// operator as far as the cabinet attests, ledger D69): a comment on a commit's lines, the other side's inbox
 /// and reply, a rebase that inserts lines above the target (the comment follows to its new
 /// lines), an edit of the targeted text (outdated), and resolving, after which the thread
 /// leaves the inbox.
@@ -1279,8 +1280,7 @@ async fn intxt_add_copies_the_rewrites_the_hook_reported() {
 async fn intxt_review_comments_follow_a_rebase_and_resolve() {
     use crate::cmds::intxt::package::Packaging;
     use crate::cmds::intxt::review::Side;
-    use big_cabinet_core::authority::OpenActor;
-    use big_cabinet_core::authority::Rights;
+    use crate::cmds::intxt::participant::Detected;
     use intxt_core::annotation::Motivation;
     use intxt_core::edit::Named;
 
@@ -1303,19 +1303,15 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
         let (first, second) = (rev(&repo, "feat/x~1"), rev(&repo, "feat/x"));
 
         let operator = Packaging::new(client, &repo, &node_root);
-        let agent_actor = crate::cmds::intxt::call(
-            client,
-            OpenActor {
-                parent: client.booted_node().authority.root,
-                path: "agent".into(),
-                rights: Rights::USE,
-            },
-        )
-        .await
-        .unwrap()
-        .actor
-        .actor_id;
-        let agent = Packaging::new(client, &repo, &node_root).acting_as(agent_actor);
+        // The environment of a Claude Code session, handed in as the CLI edge would read it.
+        let agent = Packaging::new(client, &repo, &node_root).participating_as(
+            Detected::from_env(&node_root, |name| match name {
+                "AI_AGENT" => Some("claude-code_2-1-322_agent".to_owned()),
+                "CLAUDE_CODE_SESSION_ID" => Some("session-1".to_owned()),
+                _ => None,
+            })
+            .unwrap(),
+        );
 
         let mut created = Vec::new();
         let drawer = operator
@@ -1425,7 +1421,7 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
         );
         assert!(seen_by_agent.contains("waiting on you"), "{seen_by_agent}");
         assert!(
-            seen_by_agent.contains("them: Why edit b8?"),
+            seen_by_agent.contains("someone (claimed): Why edit b8?"),
             "{seen_by_agent}"
         );
         // The author's own inbox has nothing: it wrote last.
@@ -1449,7 +1445,10 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
         assert!(replied.starts_with("reply "), "{replied}");
         assert!(inbox(&agent).await.contains("nothing waiting"));
         let waiting = inbox(&operator).await;
-        assert!(waiting.contains("them: Fixes the off-by-one."), "{waiting}");
+        assert!(
+            waiting.contains("claude-code (claimed): Fixes the off-by-one."),
+            "{waiting}"
+        );
         assert!(waiting.contains("you: Why edit b8?"), "{waiting}");
         // Seen, but still waiting on the author until they answer.
         assert!(inbox(&operator).await.contains("waiting on you"));
