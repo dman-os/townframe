@@ -269,7 +269,7 @@ fs4 = "0.13.1"
 # crypto
 chacha20poly1305 = "0.10"
 aes-gcm = "0.10"
-bao-tree = { version = "0.16", default-features = false, features = ["experimental-mixed", "tokio_fsm", "validate", "serde"] }
+bao-tree = { version = "0.17", default-features = false, features = ["experimental-mixed", "tokio_fsm", "validate", "serde"] }
 hkdf = "0.12"
 sha2 = "0.10"
 

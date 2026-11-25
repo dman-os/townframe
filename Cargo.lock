@@ -1314,25 +1314,6 @@ dependencies = [
 
 [[package]]
 name = "bao-tree"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "149a2a6017771141e2cd5d0c55b3892d8ff1958df5c318b2e496bf3544b426ed"
-dependencies = [
- "blake3",
- "bytes",
- "futures-lite",
- "genawaiter",
- "iroh-io",
- "positioned-io",
- "range-collections",
- "self_cell",
- "serde",
- "smallvec",
- "tokio",
-]
-
-[[package]]
-name = "bao-tree"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50d0e17303b78c9bb240014f3f401ecae5c0460438ace49a171e5f97e3ae57ba"
@@ -1436,7 +1417,7 @@ dependencies = [
  "aes-gcm",
  "async-trait",
  "automerge",
- "bao-tree 0.16.1",
+ "bao-tree",
  "big_blobs_core",
  "big_cabinet",
  "big_cabinet_core",
@@ -8304,7 +8285,7 @@ name = "iroh-blobs"
 version = "0.104.1"
 source = "git+https://github.com/dman-os/iroh-blobs?rev=8e077111e91f818af22cc549b52b7369110e59bb#8e077111e91f818af22cc549b52b7369110e59bb"
 dependencies = [
- "bao-tree 0.17.0",
+ "bao-tree",
  "bytes",
  "cfg_aliases",
  "chrono",
