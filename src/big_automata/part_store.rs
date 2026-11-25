@@ -75,6 +75,7 @@
 
 use crate::interlude::*;
 
+use crate::long_poll::LongPollHub;
 use crate::part_store::bucket_summary::BucketSummary;
 use crate::rev::Limits;
 use crate::rev::Page;
@@ -136,6 +137,46 @@ strike! {
     pub enum LogKey {
         Member { obj: ObjKey, part: PartKey },
         Access { part: PartKey, principal: PeerKey },
+    }
+}
+
+/// What a long-poll on the log can watch: the unit a commit reports its changes in
+/// ([`PartStoreServe::long_poll`]).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LogInterest {
+    /// A part's rows: its member rows, and its access rows (they move verdicts of the part's
+    /// route).
+    Part(PartKey),
+    /// An object's member rows in every part.
+    Object(ObjKey),
+    /// Any access row of any part. A grant or a revocation moves the verdict of every object
+    /// route that lives in the part, and the store does not index which, so object routes watch
+    /// all of them. Access changes are rare.
+    Access,
+}
+
+impl LogKey {
+    /// The interests a row of this key is a change of.
+    pub fn interests(&self) -> [LogInterest; 2] {
+        match self {
+            Self::Member { obj, part } => [
+                LogInterest::Part(part.clone()),
+                LogInterest::Object(obj.clone()),
+            ],
+            Self::Access { part, .. } => [LogInterest::Part(part.clone()), LogInterest::Access],
+        }
+    }
+}
+
+impl LogRoutes {
+    /// What a poll on these routes watches, appended to `out`: each route's own interest, and
+    /// [`LogInterest::Access`] if there is an object route (see there).
+    pub fn interests_into(&self, out: &mut Vec<LogInterest>) {
+        out.extend(self.parts.keys().cloned().map(LogInterest::Part));
+        out.extend(self.objects.keys().cloned().map(LogInterest::Object));
+        if !self.objects.is_empty() {
+            out.push(LogInterest::Access);
+        }
     }
 }
 
@@ -573,6 +614,16 @@ pub trait PartStoreServe {
     /// A handle on the latest committed rev, moved from the commit path after the commit is
     /// visible to reads (as [`RevSource::watch`](crate::rev::RevSource::watch)).
     fn watch(&self) -> RevWatch;
+    /// The store's long-poll hub: polls park on it by [`LogInterest`] and are woken only by
+    /// commits that changed one of their interests.
+    ///
+    /// The store calls [`LongPollHub::committed`] from its commit path, once per commit that
+    /// stamped rows and after the commit is visible to reads (as for [`watch`](Self::watch)):
+    /// the commit's rev, and for each interest the number of log rows the commit stamped on it
+    /// (a member row is one on its part and one on its object, an access row one on its part
+    /// and one on [`LogInterest::Access`]). Exactly [`LogKey::interests`] of the rows stamped,
+    /// summed; a commit that stamps nothing tells nothing. Every clone is the same hub.
+    fn long_poll(&self) -> LongPollHub<LogInterest>;
     /// The store's current [generation](Generation): the one every [`PartSummary`] carries.
     fn generation(&self) -> impl Future<Output = Res<Generation>> + Send;
     /// The log rows `principal` may read on `routes` in `(after, until]`, with each route's

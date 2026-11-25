@@ -7,15 +7,20 @@
 //! responder's calls take or return, so no lock on it is ever held across an await.
 //!
 //! Time is a [`Timer`]: the crate builds for `wasm32-unknown-unknown`, where there is no tokio
-//! timer, so the embedder supplies the sleep its runtime has.
-
-use std::pin::pin;
-
-use futures::future::Either;
+//! timer, so the embedder supplies the sleep its runtime has
+//! ([`RuntimeTimer`](crate::long_poll::RuntimeTimer) is the runtime's own).
+//!
+//! A hold parks on the store's [long-poll hub](crate::long_poll), by the routes the round
+//! names, so a commit wakes the round only if it changed one of them.
 
 use crate::interlude::*;
 
+use crate::long_poll::Linger;
+use crate::long_poll::LongPollHub;
+use crate::long_poll::Outcome;
+pub use crate::long_poll::Timer;
 use crate::part_store::AuthorizedPage;
+use crate::part_store::LogInterest;
 use crate::part_store::PartStoreServe;
 use crate::replay::server::Round;
 use crate::replay::wire::Route;
@@ -23,16 +28,9 @@ use crate::replay::wire::SessionError;
 use crate::replay::wire::SessionPage;
 use crate::replay::wire::UpdateSession;
 use crate::rev::Rev;
-use crate::rev::RevWatch;
 
 #[cfg(test)]
 mod tests;
-
-/// A runtime's sleep. Dropping the future cancels it. The future is `Send` and owns what it
-/// needs, so it does not borrow the timer.
-pub trait Timer {
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + use<Self>;
-}
 
 /// Serves one client connection's replay requests from a part store, one at a time. It owns
 /// every buffer a round needs and reuses them across rounds, so a round allocates only what
@@ -40,13 +38,17 @@ pub trait Timer {
 ///
 /// Every call is cancel safe: dropping its future part way leaves nothing behind. The calls keep
 /// no state between requests (law 9), the buffers are refilled by the next call, and a dropped
-/// hold drops its sleep and its wait on the watch with it.
+/// hold drops its sleep and its parked poll with it.
 pub struct Responder<S, T> {
     store: S,
     timer: T,
-    /// The store's watch, held for the responder's life: a hold waits on it without
-    /// subscribing per round.
-    watch: RevWatch,
+    /// The store's long-poll hub, held for the responder's life.
+    polls: LongPollHub<LogInterest>,
+    /// How long a hold waits, after the first commit that concerns it, for more to arrive
+    /// (see [`Responder::with_linger`]).
+    linger: Duration,
+    /// What the current round's hold watches.
+    interests: Vec<LogInterest>,
     round: Round,
     read: AuthorizedPage,
     page: SessionPage,
@@ -62,11 +64,13 @@ where
     T: Timer,
 {
     pub fn new(store: S, timer: T) -> Self {
-        let watch = store.watch();
+        let polls = store.long_poll();
         Self {
             store,
             timer,
-            watch,
+            polls,
+            linger: Duration::ZERO,
+            interests: default(),
             round: default(),
             read: default(),
             page: SessionPage {
@@ -78,6 +82,15 @@ where
         }
     }
 
+    /// Let a hold wait `linger` after the first commit that concerns it, or until its page is
+    /// full, before it answers, so a burst of commits is one answer instead of one each. The
+    /// window is fixed from that first commit and never extends past the hold's own deadline.
+    /// The default is no linger: a hold answers as soon as a commit carries it a row.
+    pub fn with_linger(mut self, linger: Duration) -> Self {
+        self.linger = linger;
+        self
+    }
+
     /// Answer one round of `principal`'s.
     ///
     /// `resolve` fills the round from the request: the caller's
@@ -85,9 +98,11 @@ where
     /// under whatever guards its server. Its error is the answer.
     ///
     /// The read runs to the store's latest rev. When it carries no row and the round holds
-    /// (law 13), the responder waits for a commit past that rev and reads again, until a read
-    /// carries rows or the hold runs out; the page is then the last read's, so a held round
-    /// answers with verdicts and progress as of its end. Every read decides the verdicts afresh
+    /// (law 13), the responder parks on the store's long-poll hub, watching the round's routes
+    /// (and access changes, which move verdicts), and reads again when a commit that changed
+    /// one of them is ready, until a read carries rows or the hold runs out. A commit on other
+    /// routes neither wakes the round nor costs it a read. The page is the last read's, so a
+    /// held round answers with verdicts and progress as of its end. Every read decides the verdicts afresh
     /// (law 7), so a hold never carries a row access no longer allows.
     ///
     /// The `Err` of the outer result is the store's: the request goes unanswered.
@@ -102,26 +117,29 @@ where
         let mut until = self.store.latest_rev().await?;
         self.read_round(principal, until).await?;
         if self.read.rows.entries.is_empty() && !self.round.hold().is_zero() {
-            // One sleep for the whole hold, made once: the hold is a deadline, not a delay
-            // that each wake restarts.
-            let mut expired = pin!(self.timer.sleep(self.round.hold()));
+            // One deadline for the whole hold, fixed now: each park below waits to it, so a
+            // wake that finds nothing does not restart the hold.
+            let deadline = self.polls.now() + self.round.hold();
+            self.interests.clear();
+            self.round.routes().interests_into(&mut self.interests);
+            let linger = Linger {
+                window: self.linger,
+                min_amount: self.round.limits().max_entries.get() as u64,
+            };
             while self.read.rows.entries.is_empty() {
-                let woke = match futures::future::select(
-                    pin!(self.watch.wait_past(until)),
-                    expired.as_mut(),
-                )
-                .await
-                {
-                    Either::Left((head, _)) => Some(head),
-                    Either::Right(((), _)) => None,
-                };
-                let Some(head) = woke else {
-                    break;
-                };
-                // The commit may be on routes the round does not name; the loop then waits
-                // again, past the new head, on the same deadline.
-                until = head;
-                self.read_round(principal, until).await?;
+                // Parked from the rev this read ran to: a commit past it that raced the park
+                // wakes the poll at once (law 6 of the long-poll).
+                let waiting = self.polls.park(&self.interests, until, deadline, linger);
+                match waiting.wait(&self.timer).await {
+                    Outcome::TimedOut => break,
+                    // The commit may only have touched a route's access or a part the page
+                    // does not carry; the loop then parks again, past the new head, on the
+                    // same deadline.
+                    Outcome::Ready { through_rev } => {
+                        until = through_rev;
+                        self.read_round(principal, until).await?;
+                    }
+                }
             }
         }
         self.round.answer(&mut self.read, until, &mut self.page);

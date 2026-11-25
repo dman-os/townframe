@@ -281,6 +281,17 @@ impl BuckId {
         Self::new(Self::MAX_LEVEL, u16::from_be_bytes([bytes[0], bytes[1]]))
     }
 
+    /// The order a bucket's leaves are paged in: by the deepest bucket a key hashes to, then by
+    /// key (`PartStoreServe::bucket_leaves`). It is not the order of the keys themselves, so a
+    /// page's `next_after` is past its `after` by this order and may be below it by key order.
+    #[must_use]
+    pub fn leaf_cmp(a: &ObjKey, b: &ObjKey) -> std::cmp::Ordering {
+        Self::deepest_from_obj_key(a)
+            .index()
+            .cmp(&Self::deepest_from_obj_key(b).index())
+            .then_with(|| a.cmp(b))
+    }
+
     #[inline]
     #[must_use]
     pub fn from_obj_key(level: BuckLevel, obj_key: &ObjKey) -> Self {

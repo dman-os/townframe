@@ -48,7 +48,7 @@
 //!    event for a target the round asked for whose route was dropped since is legitimate and
 //!    is skipped for that route only. A summary entry for a part not asked is ignored (PartLifecycle law 3). A bucket or leaf page for a bucket
 //!    not asked is ignored (bucket law 7). A leaf page whose `next_after` is not past the
-//!    `after` it answers makes no progress and fails its call, so a peer cannot page one
+//!    `after` it answers, in the order leaves are paged in (`BuckId::leaf_cmp`), makes no progress and fails its call, so a peer cannot page one
 //!    bucket for ever (the walk trusts `next_after` for where a bucket ends). Asserts inside sub-machines guard only the
 //!    parent's own bugs.
 //!

@@ -30,3 +30,8 @@ console_error_panic_hook = "0.1.7"
 [[bin]]
 name = "big_automata_web"
 path = "main.rs"
+
+# The browser tier of `x/bench.ts`: a Playwright spec that prints the page's `BENCH_RECORD`
+# lines. Reported, never gated: a browser has no instruction counter.
+[package.metadata.bench]
+web = { dir = "src/big_automata_web", spec = "e2e/bench.spec.ts" }

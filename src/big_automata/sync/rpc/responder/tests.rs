@@ -111,6 +111,9 @@ impl PartStoreServe for CountingStore {
     fn watch(&self) -> RevWatch {
         self.count(self.inner.watch())
     }
+    fn long_poll(&self) -> crate::long_poll::LongPollHub<crate::part_store::LogInterest> {
+        self.count(self.inner.long_poll())
+    }
     fn generation(&self) -> impl Future<Output = Res<crate::part_store::Generation>> + Send {
         self.count(self.inner.generation())
     }

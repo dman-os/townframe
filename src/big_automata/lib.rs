@@ -14,15 +14,20 @@ pub use ids::ObjKey;
 pub use ids::PartKey;
 pub use ids::PeerKey;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod bench;
 pub mod driver;
 pub mod durable_outbox;
 pub mod fingerprint;
 mod ids;
 mod kit;
+pub mod long_poll;
 pub mod okv;
 pub mod part_store;
 pub mod replay;
 pub mod rev;
+#[cfg(test)]
+mod scaling;
 pub mod sync;
 
 #[derive(Default, Debug, Clone, Copy)]
