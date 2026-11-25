@@ -367,7 +367,7 @@ clap_complete = "4.5"
 iroh = "1"
 iroh-tickets = "1"
 # iroh-blobs = "0.103.0"
-iroh-blobs = { git = "https://github.com/dman-os/iroh-blobs", rev = "b3d641036c807b30d9fc62fd22a83801a38386d3" }
+iroh-blobs = { git = "https://github.com/dman-os/iroh-blobs", rev = "8e077111e91f818af22cc549b52b7369110e59bb" }
 
 
 #
