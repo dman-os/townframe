@@ -4,7 +4,6 @@
 //! client library's recorder (`intxt_core::client`).
 
 use big_cabinet_core::DocId;
-use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
@@ -21,7 +20,7 @@ use serde::Serialize;
 
 /// The operations of other authorities intxt's handler calls (`intxt_nodule`), which the cartridge
 /// requests and an operator grants the nodule.
-pub const REQUIRED_OPERATIONS: [&str; 8] = [
+pub const REQUIRED_OPERATIONS: [&str; 7] = [
     MintDrawerCapability::XRPC.nsid,
     CreateDrawer::XRPC.nsid,
     MintDocCapability::XRPC.nsid,
@@ -29,7 +28,6 @@ pub const REQUIRED_OPERATIONS: [&str; 8] = [
     ReadDatums::XRPC.nsid,
     ListDocDrawers::XRPC.nsid,
     AddDoc::XRPC.nsid,
-    CreateDoc::XRPC.nsid,
 ];
 
 /// Creates an intxt (ADR 036 §2): a drawer, marked as an intxt, with a title and an empty body.

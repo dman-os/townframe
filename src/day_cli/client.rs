@@ -160,11 +160,6 @@ pub struct NodeClient {
     transport: Transport,
     mode: Mode,
     #[cfg(unix)]
-    // The descriptor client API is shared by commands added on top of NodeClient.
-    #[expect(
-        dead_code,
-        reason = "descriptor socket is used by native command integrations"
-    )]
     fd_socket: Option<std::path::PathBuf>,
     socket: SocketState,
 }
@@ -535,11 +530,6 @@ impl NodeClient {
     }
     /// Sends a descriptor batch to `blobs.importFile`, preserving one result per path.
     #[cfg(unix)]
-    // The descriptor import entry point is consumed by command integrations.
-    #[expect(
-        dead_code,
-        reason = "descriptor import is used by native command integrations"
-    )]
     pub async fn import_files(
         &self,
         operation: &str,

@@ -6,8 +6,8 @@
 impl Default for intxt_core::generic::Intxt
 impl From < Included > for intxt_core::client::AddedToIntxt
 pub const intxt_core::cartridge::AUTHORITY: & str
-pub const intxt_core::cartridge::HANDLER_ARTIFACT: & str
-pub const intxt_core::methods::REQUIRED_OPERATIONS: [& str ; 8]
+pub const intxt_core::cartridge::HANDLER_COMPONENT: & str
+pub const intxt_core::methods::REQUIRED_OPERATIONS: [& str ; 7]
 pub enum intxt_core::annotation::Motivation { # [serde (rename = "assessing")] Assessing, # [serde (rename = "bookmarking")] Bookmarking, # [serde (rename = "classifying")] Classifying, # [serde (rename = "commenting")] Commenting, # [serde (rename = "describing")] Describing, # [serde (rename = "editing")] Editing, # [serde (rename = "highlighting")] Highlighting, # [serde (rename = "identifying")] Identifying, # [serde (rename = "linking")] Linking, # [serde (rename = "moderating")] Moderating, # [serde (rename = "questioning")] Questioning, # [serde (rename = "replying")] Replying, # [serde (rename = "tagging")] Tagging, # [datum (other)] Unknown (String) }
 pub enum intxt_core::annotation::Progress { # [serde (rename = "pending")] Pending, # [serde (rename = "in_progress")] InProgress, # [serde (rename = "completed")] Completed, # [datum (other)] Unknown (String) }
 pub enum intxt_core::annotation::StructureKind { # [serde (rename = "task")] Task, # [serde (rename = "decision")] Decision, # [serde (rename = "section")] Section, # [datum (other)] Unknown (String) }
@@ -30,7 +30,7 @@ pub impl intxt_core::capture::Imported::fn is_empty (& self) -> bool
 pub impl intxt_core::client::Caller < H >::async fn actor (& self) -> Result < Uuid7 , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn add_part (& self , intxt : & DrawerId , part : & DatumReference ,) -> Result < Included , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn call < M : Unary > (& self , input : M) -> Result < M :: Output , IntxtError >
-pub impl intxt_core::client::Caller < H >::async fn commit_holders (& self , drawer : & DrawerId , sha : & str) -> Result < BTreeSet < DocId > , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn commit_holders (& self , drawer : & DrawerId , sha : & str ,) -> Result < BTreeSet < DocId > , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn datum_keys (& self , doc : & DocId) -> Result < BTreeSet < DatumKey > , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn doc_capability (& self , scope : DocScope) -> Result < CapId , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn include (& self , intxt : & DrawerId , mut set : BTreeMap < DatumKey , Value > , entries : & [DatumKey] ,) -> Result < Vec < Included > , IntxtError >
@@ -40,14 +40,14 @@ pub impl intxt_core::client::Caller < H >::async fn record_observations (& self 
 pub impl intxt_core::client::Caller < H >::async fn remove_entries (& self , intxt : & DrawerId , entries : & BTreeSet < DatumKey > , also : & BTreeSet < DatumKey > ,) -> Result < () , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn share (& self , intxt : & DrawerId , doc : & DocId) -> Result < () , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn try_read (& self , doc : & DocId , key : & DatumKey ,) -> Result < (Vec < ChangeHash > , Option < Value >) , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn write_capability < 'k > (& self , doc : & DocId , keys : impl IntoIterator < Item = & 'k DatumKey > ,) -> Result < CapId , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn write_datums (& self , doc : & DocId , set : BTreeMap < DatumKey , Value > , remove : BTreeSet < DatumKey > ,) -> Result < () , IntxtError >
 pub impl intxt_core::client::Caller < H >::fn acting_as (mut self , actor : Uuid7) -> Self
 pub impl intxt_core::client::Caller < H >::fn command (& self , step : & str , content : & impl Serialize) -> Result < CommandId , IntxtError >
 pub impl intxt_core::client::Caller < H >::fn new (transport : H , context : RequestContext , capability : Option < & str > , command_base : String ,) -> Self
 pub impl intxt_core::generic::Intxt::fn named_in (text : & str) -> Vec < DocId >
 pub impl intxt_core::generic::Intxt::fn reference (drawer : & DocId) -> DatumReference
-pub intxt_core::cartridge::fn cartridge (handler : Artifact) -> Cartridge
-pub intxt_core::cartridge::fn handler_artifact (wasm : & [u8]) -> Artifact
+pub intxt_core::cartridge::fn cartridge (wasm : & [u8]) -> FixtureCartridge
 pub intxt_core::client::fn key (tag : & str , slot : & str) -> Result < DatumKey , IntxtError >
 pub intxt_core::client::fn to_value (value : & impl Serialize) -> Value
 pub intxt_core::fn declarations () -> Universe
@@ -97,7 +97,7 @@ pub struct intxt_core::work::AgentSession  { harness: String, session_id: String
 pub struct intxt_core::work::CommitFile  { path: String, status: FileStatus, old_path: Option < String >, extra: Extra }
 pub struct intxt_core::work::File  { worktree: DatumReference, blob: Option < DatumReference >, extra: Extra }
 pub struct intxt_core::work::GitClone  { repo: Option < DatumReference >, machine: ActorUrl, path: String, vcs: Vec < Vcs >, extra: Extra }
-pub struct intxt_core::work::GitCommit  { raw: Bytes, parents: Vec < String >, change_id: Option < String >, author: GitIdent, committer: GitIdent, message: String, files: Vec < CommitFile >, extra: Extra }
+pub struct intxt_core::work::GitCommit  { parents: Vec < String >, change_id: Option < String >, author: GitIdent, committer: GitIdent, message: String, files: Vec < CommitFile >, extra: Extra }
 pub struct intxt_core::work::GitCommitEntry  { tip: String, base: Option < String >, pack: DatumReference, extra: Extra }
 pub struct intxt_core::work::GitIdent  { name: String, email: String, at: Timestamp, extra: Extra }
 pub struct intxt_core::work::GitObservation  { head: Option < String >, reference: Option < String >, from: Option < String >, to: Option < String >, reflog: Option < String >, extra: Extra }

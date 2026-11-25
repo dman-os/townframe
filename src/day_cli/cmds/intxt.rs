@@ -68,7 +68,6 @@ use big_cartridges_core::protocol::SetCartridgeEnabled;
 use big_cartridges_core::protocol::SetCartridgeGrant;
 use big_cartridges_core::registry::version_key;
 use big_cartridges_core::registry::version_pin;
-use big_cartridges_core::test_support::sign_as_example;
 use big_dispatch_core::Readiness;
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
@@ -508,11 +507,11 @@ fn report(summary: &capture::Summary, verbose: bool) {
     }
 }
 
-/// Installs intxt with the handler component `wasm` through ADR 044's cartridge flow, the way a
+/// Installs intxt with the handler component `wasm` through ADR 044's and ADR 047's cartridge flow, the way a
 /// node hosts any nodule's handler (`big_node`'s `nodule_wasm` e2e): the bytes go into the blob
-/// store first, because the registry refuses a version whose artifacts it cannot find and the
-/// executor loads them from there when the nodule is enabled; the cartridge's artifact names them
-/// by their BLAKE3. The version is then published to the node's registry, installed by the pin of
+/// store first, because the registry refuses a version whose components it cannot find and the
+/// executor loads them from there when the nodule is enabled; the cartridge's component names them
+/// by their BLAKE3. The version's payloads are then staged and the envelope published to the node's registry, installed by the pin of
 /// the version just published, granted the methods its handler calls, and enabled.
 ///
 /// The envelope is signed as the fixture namespace's owner, the namespace intxt's cartridge sits
@@ -524,14 +523,16 @@ fn report(summary: &capture::Summary, verbose: bool) {
 pub(crate) async fn install(client: &NodeClient, wasm: &[u8]) -> Res<NoduleRecord> {
     put_blob(client, wasm).await?;
 
-    let cartridge = sign_as_example(intxt_core::cartridge::cartridge(
-        intxt_core::cartridge::handler_artifact(wasm),
-    ));
-    let (cartridge_id, version) = (cartridge.id.clone(), cartridge.version.clone());
+    let fixture = intxt_core::cartridge::cartridge(wasm);
+    let (cartridge_id, version) = (fixture.id.clone(), fixture.version.clone());
+    // The payloads (Lexicons, sidecars, components) are datums of the registry document the
+    // envelope pins (ADR 047 §1), so they are staged first and the envelope that carries their
+    // pins is published, signed as the fixture namespace's owner.
+    let staged = call(client, fixture.stage_request()).await?;
     call(
         client,
         PublishCartridgeVersion {
-            envelope: cartridge,
+            envelope: fixture.publishable(staged),
         },
     )
     .await?;

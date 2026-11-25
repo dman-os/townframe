@@ -149,13 +149,7 @@ impl<H: HttpTransport> Recorder<'_, H> {
         doc: &DocId,
         set: BTreeMap<DatumKey, Value>,
     ) -> Result<WriteReceipt, IntxtError> {
-        let capability = self
-            .caller
-            .doc_capability(DocScope {
-                write: [doc.clone()].into(),
-                ..DocScope::default()
-            })
-            .await?;
+        let capability = self.caller.write_capability(doc, set.keys()).await?;
         self.caller
             .call(WriteDatums {
                 capability,
