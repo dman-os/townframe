@@ -717,7 +717,9 @@ async fn cipher_reader_reads_plaintext_windows() -> Res<()> {
         let mut keys = MapKeySource::default();
         keys.0.insert(c_hash, key.clone());
 
-        let reader = CipherReader::open(&store, &keys, c_hash, p_len).await?;
+        let reader = CipherReader::open(&store, &keys, c_hash, p_len)
+            .await?
+            .expect("the true length opens");
         assert_eq!(reader.plaintext_len(), p_len);
 
         let want = |offset: u64, size: usize| -> Vec<u8> {
@@ -755,22 +757,21 @@ async fn cipher_reader_reads_plaintext_windows() -> Res<()> {
             );
         }
 
-        // A length the ciphertext cannot hold is rejected at open.
+        // A length the ciphertext cannot hold doesn't open.
         assert!(
             CipherReader::open(&store, &keys, c_hash, p_len + 4096)
-                .await
-                .is_err(),
+                .await?
+                .is_none(),
             "a ciphertext too short for the claimed plaintext must not open"
         );
-        // A length that is too *small* can still fit the wire - the body
-        // only bounds it from below - so it has to be caught by the final
-        // record's own extent when the tail is read.
-        let short = CipherReader::open(&store, &keys, c_hash, 4 * payload_max as u64).await?;
+        // A length that is too *small* still fits the wire - the body only
+        // bounds it from below - so open checks it against the final record's
+        // own extent.
         assert!(
-            short
-                .read_plaintext_at(4 * payload_max as u64 - 1, 1)
-                .is_err(),
-            "a length that contradicts the final record must fail"
+            CipherReader::open(&store, &keys, c_hash, 4 * payload_max as u64)
+                .await?
+                .is_none(),
+            "a length that contradicts the final record must not open"
         );
     }
     Ok(())
