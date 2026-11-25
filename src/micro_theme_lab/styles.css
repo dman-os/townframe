@@ -92,7 +92,9 @@
   gap: var(--ct-dimension-spacing-2);
 }
 
-.ct-theme-lab [data-part="label"] {
+/* Scoped to the toolbar's own label: a bare `[data-part="label"]` rule also matched the `label`
+   part of every kit Button inside the canvas and recoloured it text-muted, whatever its fill. */
+.ct-theme-lab [data-part="toolbar"] > [data-part="label"] {
   color: var(--ct-color-text-muted);
   font-size: var(--ct-dimension-font-size-sm);
 }
