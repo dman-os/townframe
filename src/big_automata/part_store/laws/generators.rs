@@ -26,6 +26,10 @@ pub(super) fn any_level() -> impl Strategy<Value = AccessLevel> {
 /// The strategy of the objects a generated sequence draws from.
 pub(super) type Objs = BoxedStrategy<ObjKey>;
 
+pub fn part_writes() -> impl Strategy<Value = Vec<PartWrite>> {
+    writes_over(any_obj().boxed())
+}
+
 pub(super) fn writes_over(any_obj: Objs) -> impl Strategy<Value = Vec<PartWrite>> {
     use proptest::collection::vec;
     let any_obj = move || any_obj.clone();

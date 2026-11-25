@@ -296,10 +296,12 @@ async fn assert_no_scans(statements: BTreeMap<String, Vec<SqlValue>>) -> Res<()>
             let plan = db
                 .execute(&format!("EXPLAIN QUERY PLAN {sql}"), params.clone())
                 .await?;
-            let mut searched_entries = false;
+            let mut entries_plan = None;
             for row in plan.result_set.rows {
                 let detail = row.get::<String>("detail")?;
-                searched_entries |= detail.starts_with("SEARCH big_automata_okv_entries");
+                if detail.starts_with("SEARCH big_automata_okv_entries") {
+                    entries_plan = Some(detail.clone());
+                }
                 if detail.starts_with("SCAN") && !batch_sized(&detail) {
                     scans.push(format!(
                         "{detail}\n    in {}",
@@ -307,11 +309,17 @@ async fn assert_no_scans(statements: BTreeMap<String, Vec<SqlValue>>) -> Res<()>
                     ));
                 }
             }
-            // A key set is looked up in the entries' indexes, however many keys it holds.
+            // A key set is looked up by the entries' primary key `(namespace_id, key)`, the
+            // index that holds each key once, not walked through `(namespace_id, rev, key)`.
             if sql.contains("json_each") && sql.contains("big_automata_okv_entries") {
+                let line = entries_plan.unwrap_or_else(|| {
+                    panic!("a key set statement does not search the entries: {sql}")
+                });
+                println!("PLAN okv key set: {line}");
                 assert!(
-                    searched_entries,
-                    "a key set statement does not search the entries: {sql}"
+                    line.contains("PRIMARY KEY")
+                        && !line.contains("big_automata_okv_entries_by_rev"),
+                    "a key set is not served by the primary key: {line}\n    in {sql}"
                 );
             }
         }

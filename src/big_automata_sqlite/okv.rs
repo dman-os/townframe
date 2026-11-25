@@ -202,13 +202,24 @@ impl<D: PartDb> SqliteOkv<D> {
         let mut group_bytes = 0_usize;
         let mut last_seen: Option<(Rev, Vec<u8>)> = None;
         loop {
-            let mut query = Sql::new(
+            // A key set is looked up in the primary key `(namespace_id, key)`, then the matches
+            // sorted. Left to itself the planner walks `(namespace_id, rev, key)` instead, to
+            // get `ORDER BY rev, key` for free, which reads every entry of the window and
+            // probes the set once for each: a cost of the table, not of the key set. The
+            // primary key of a WITHOUT ROWID table is the table itself, named like an autoindex.
+            let mut query = Sql::new(if matches!(selector, Selector::Keys(_)) {
+                "SELECT key
+                      , rev
+                      , value
+                   FROM big_automata_okv_entries INDEXED BY sqlite_autoindex_big_automata_okv_entries_1
+                  WHERE namespace_id = "
+            } else {
                 "SELECT key
                       , rev
                       , value
                    FROM big_automata_okv_entries
-                  WHERE namespace_id = ",
-            );
+                  WHERE namespace_id = "
+            });
             query.bind(self.namespace);
             match &last_seen {
                 None => query.push(" AND rev > ").bind(sql::rev_to_sql(after)),

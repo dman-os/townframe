@@ -272,12 +272,14 @@ fn leaves_page_in_key_order_when_keys_share_a_bucket() -> Res<()> {
         let mut paged = Vec::new();
         loop {
             let bucks = [(BuckId::ROOT, after.clone())];
-            let leaves = store.bucket_leaves(&principal, &part, &bucks, 0, 1).await?;
+            let leaves = store
+                .bucket_leaves(&principal, &part, &bucks, 0, 1, usize::MAX)
+                .await?;
             assert_eq!(
                 leaves,
-                oracle.bucket_leaves(&principal, &part, &bucks, 0, 1)
+                oracle.bucket_leaves(&principal, &part, &bucks, 0, 1, usize::MAX)
             );
-            let Some(leaf) = leaves.expect("readable").remove(0).pop() else {
+            let Some(leaf) = leaves.expect("readable").remove(0).entries.pop() else {
                 break;
             };
             after = Some(leaf.obj.clone());

@@ -4,6 +4,7 @@
 use big_automata::BuckLevel;
 use big_automata::part_store::AuthorizedPage;
 use big_automata::part_store::LeafEntry;
+use big_automata::part_store::LeafPage;
 use big_automata::part_store::LogRoutes;
 use big_automata::part_store::ObjPayload;
 use big_automata::part_store::PartDirtyCount;
@@ -263,6 +264,10 @@ pub async fn bucket_list(
     ))
 }
 
+/// Rows read per statement while a leaf page fills: a page ends at its limit or byte budget,
+/// so the bucket is never read whole.
+const LEAF_CHUNK: usize = 32;
+
 pub async fn bucket_leaves(
     x: &impl QueryExecutor,
     principal: &PeerKey,
@@ -270,7 +275,8 @@ pub async fn bucket_leaves(
     bucks: &[(BuckId, Option<ObjKey>)],
     since: Rev,
     limit: usize,
-) -> Res<Option<Vec<Vec<LeafEntry>>>> {
+    byte_budget: usize,
+) -> Res<Option<Vec<LeafPage>>> {
     if !permits(x, principal, part).await? {
         return Ok(None);
     }
@@ -278,11 +284,11 @@ pub async fn bucket_leaves(
     for (buck, after) in bucks {
         let changed_at = queries::bucket_changed_at(x, part.blob(), buck_raw(*buck)).await?;
         if changed_at.is_none_or(|changed_at| sql::rev_from_sql(changed_at) <= since) {
-            leaves.push(Vec::new());
+            leaves.push(LeafPage::default());
             continue;
         }
         let (start, end) = deepest_range(*buck);
-        let (after_buck, after_key) = match after {
+        let (mut after_buck, mut after_key) = match after {
             None => (-1, Vec::new()),
             Some(after) => {
                 let index = deepest_index(after);
@@ -293,31 +299,45 @@ pub async fn bucket_leaves(
                 (index, after.blob())
             }
         };
-        let rows = queries::bucket_leaves(
-            x,
-            part.blob(),
-            start,
-            end,
-            after_buck,
-            after_key,
-            sql::limit(limit),
-        )
-        .await?;
-        leaves.push(
-            rows.into_iter()
-                .map(|row| LeafEntry {
-                    obj: ObjKey::from_blob(&row.obj_key),
-                    live: (row.live == 1).then(|| {
-                        PayloadDigest(
-                            row.digest
-                                .expect("a live member has a payload")
-                                .try_into()
-                                .expect("a stored digest is 32 bytes"),
-                        )
-                    }),
-                })
-                .collect(),
-        );
+        // One more row than the page can hold is all it can need (the one that sets `more`).
+        let chunk = LEAF_CHUNK.min(limit.saturating_add(1));
+        let mut taken = Vec::new();
+        let page = loop {
+            let rows = queries::bucket_leaves(
+                x,
+                part.blob(),
+                start,
+                end,
+                after_buck,
+                after_key.clone(),
+                sql::limit(chunk),
+            )
+            .await?;
+            let exhausted = rows.len() < chunk;
+            if let Some(last) = rows.last() {
+                after_buck = last.buck;
+                after_key = last.obj_key.clone();
+            }
+            taken.extend(rows.into_iter().map(|row| LeafEntry {
+                obj: ObjKey::from_blob(&row.obj_key),
+                live: (row.live == 1).then(|| {
+                    PayloadDigest(
+                        row.digest
+                            .expect("a live member has a payload")
+                            .try_into()
+                            .expect("a stored digest is 32 bytes"),
+                    )
+                }),
+            }));
+            // The same prefix rule as the law; `more` set means the entry that ended the page
+            // was read, so no further chunk is needed.
+            let page = LeafPage::collect(taken, limit, byte_budget);
+            if page.more || exhausted {
+                break page;
+            }
+            taken = page.entries;
+        };
+        leaves.push(page);
     }
     Ok(Some(leaves))
 }

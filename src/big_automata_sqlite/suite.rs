@@ -94,6 +94,7 @@ store_laws!(
     a_partless_object_is_listed_until_its_payload_is_dropped,
     dropping_is_atomic_with_its_transaction,
     generations_identify_the_log,
+    leaf_pages_are_the_longest_prefix_within_the_byte_budget,
 );
 
 #[test]

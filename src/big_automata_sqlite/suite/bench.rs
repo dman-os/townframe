@@ -173,13 +173,20 @@ async fn serve_round(store: &Store, part: &PartKey, principal: &PeerKey, size: u
 
         let started = Instant::now();
         let leaves = store
-            .bucket_leaves(principal, part, &[(BuckId::new(1, 0), None)], 0, BATCH)
+            .bucket_leaves(
+                principal,
+                part,
+                &[(BuckId::new(1, 0), None)],
+                0,
+                BATCH,
+                usize::MAX,
+            )
             .await?;
         samples
             .entry("bucket_leaves_page")
             .or_default()
             .push(started.elapsed());
-        assert!(leaves.expect("readable")[0].len() <= BATCH);
+        assert!(leaves.expect("readable")[0].entries.len() <= BATCH);
     }
     for (what, samples) in samples {
         println!("BENCH serve size={size} {what}: p50 {:?}", median(samples));

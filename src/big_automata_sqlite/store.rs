@@ -5,7 +5,7 @@ use big_automata::BuckLevel;
 use big_automata::part_store::AccessLevel;
 use big_automata::part_store::AuthorizedPage;
 use big_automata::part_store::Generation;
-use big_automata::part_store::LeafEntry;
+use big_automata::part_store::LeafPage;
 use big_automata::part_store::LogEntry;
 use big_automata::part_store::LogKey;
 use big_automata::part_store::LogRoutes;
@@ -338,9 +338,11 @@ impl<D: PartDb> PartStoreServe for SqlitePartStore<D> {
         bucks: &[(BuckId, Option<ObjKey>)],
         since: Rev,
         limit: usize,
-    ) -> Res<Option<Vec<Vec<LeafEntry>>>> {
+        byte_budget: usize,
+    ) -> Res<Option<Vec<LeafPage>>> {
         Ok(snapshot!(self, reader => {
-            serve::bucket_leaves(&reader, principal, part, bucks, since, limit).await?
+            serve::bucket_leaves(&reader, principal, part, bucks, since, limit, byte_budget)
+                .await?
         }))
     }
 }

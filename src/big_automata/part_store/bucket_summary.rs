@@ -33,7 +33,6 @@ impl BucketFingerprint {
         self.0 = self.0.wrapping_sub(Fingerprint::new(seed, value).as_u64());
     }
 
-    #[cfg(test)]
     fn as_u64(&self) -> u64 {
         self.0
     }
