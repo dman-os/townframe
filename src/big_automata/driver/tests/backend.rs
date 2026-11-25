@@ -2,6 +2,7 @@
 
 use crate::driver::backend_laws::BackendRig;
 use crate::driver::backend_laws::sync_backend_laws;
+use crate::driver::memory::LwwPayload;
 use crate::driver::memory::MemoryBackend;
 use crate::interlude::*;
 use crate::part_store::ObjPayload;
@@ -20,6 +21,20 @@ async fn observe(backend: &MemoryBackend, obj: &ObjKey) -> Res<Option<ObjState>>
         .obj_states(std::slice::from_ref(obj))
         .await?
         .remove(0))
+}
+
+/// Two writes of one object at the same time: the same `written_at`, told apart by the writer
+/// alone, which is the order the memory backend breaks the tie by.
+fn concurrent_payloads() -> (ObjPayload, ObjPayload) {
+    let write = |value: u8, writer: u8| {
+        LwwPayload {
+            value: serde_json::json!(value),
+            written_at: 5,
+            writer_id: PeerKey::new(&[writer]),
+        }
+        .into_payload()
+    };
+    (write(1, 1), write(2, 2))
 }
 
 /// Downloads from a second store standing in for the peer.
@@ -62,6 +77,10 @@ impl BackendRig for Download {
     fn fail_next_write(&self, backend: &MemoryBackend) {
         backend.fail_next_write();
     }
+
+    fn concurrent_payloads(&self) -> (ObjPayload, ObjPayload) {
+        concurrent_payloads()
+    }
 }
 
 /// Takes the payload from the job: the peer holds nothing, and holds it nowhere.
@@ -90,6 +109,10 @@ impl BackendRig for Hinted {
 
     fn fail_next_write(&self, backend: &MemoryBackend) {
         backend.fail_next_write();
+    }
+
+    fn concurrent_payloads(&self) -> (ObjPayload, ObjPayload) {
+        concurrent_payloads()
     }
 }
 

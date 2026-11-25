@@ -3,15 +3,17 @@
 
 use crate::interlude::*;
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::Ordering as AtomicOrdering;
 
 use super::ObjJob;
 use super::PeerCursors;
 use super::Settle;
 use super::SyncBackend;
+use crate::part_store::ObjPayload;
 use crate::part_store::PartStoreRead;
 use crate::part_store::laws;
 use crate::part_store::memory::MemoryPartStore;
@@ -101,6 +103,57 @@ impl PeerCursors for MemoryPeerCursors {
     }
 }
 
+/// The payload a [`MemoryBackend`] can merge: a last-writer-wins register. Two nodes that wrote
+/// different payloads for one object each keep the one with the greater `(written_at,
+/// writer_id)`, so both settle on it however the exchange interleaves.
+///
+/// Nothing outside the memory backend knows this shape: the core types carry any JSON as the
+/// payload, and a real backend merges in its own way (automerge documents, content-addressed
+/// blobs).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LwwPayload {
+    pub value: serde_json::Value,
+    #[serde(rename = "writtenAt")]
+    pub written_at: u64,
+    #[serde(rename = "writerId")]
+    pub writer_id: PeerKey,
+}
+
+impl LwwPayload {
+    pub fn into_payload(self) -> ObjPayload {
+        serde_json::to_value(self).expect(ERROR_JSON)
+    }
+
+    /// Whether a peer's `incoming` payload replaces the `held` one.
+    ///
+    /// Two [`LwwPayload`]s are ordered by `written_at`, then `writer_id`, and `incoming` wins
+    /// only when greater: applying it is idempotent, and applying two payloads in either order
+    /// leaves the greater, so concurrent writes converge. Equal metadata must carry equal
+    /// values (one writer does not stamp two payloads alike), which is asserted. A payload that
+    /// is not an [`LwwPayload`] has no order to merge by: it replaces what is held (an
+    /// overwrite, which does not converge under concurrent writes) unless it is equal to it.
+    fn wins(incoming: &ObjPayload, held: &ObjPayload) -> bool {
+        match (Self::deserialize(incoming), Self::deserialize(held)) {
+            (Ok(incoming), Ok(held)) => {
+                match (incoming.written_at, &incoming.writer_id)
+                    .cmp(&(held.written_at, &held.writer_id))
+                {
+                    Ordering::Greater => true,
+                    Ordering::Less => false,
+                    Ordering::Equal => {
+                        assert_eq!(
+                            incoming.value, held.value,
+                            "equal LWW metadata must not diverge in payload value"
+                        );
+                        false
+                    }
+                }
+            }
+            _ => incoming != held,
+        }
+    }
+}
+
 /// Where a [`MemoryBackend`] gets an object's payload.
 enum Payloads {
     /// From another store that stands in for the peer, on `fetch`.
@@ -120,6 +173,8 @@ enum Payloads {
 /// [`hinted`](Self::hinted) **takes the payload from the job**: `record` applies the removals,
 /// the job's payload hint and the adds in one transaction and answers `Done`; `fetch` has
 /// nothing to do.
+///
+/// Both merge a peer's payload instead of overwriting with it: see [`LwwPayload`].
 ///
 /// Both run [`backend_laws`](super::backend_laws).
 pub struct MemoryBackend {
@@ -160,7 +215,7 @@ impl MemoryBackend {
     /// The next write fails after staging everything, before it commits: a transaction that
     /// is atomic leaves the store as it was.
     pub fn fail_next_write(&self) {
-        self.fail_next_write.store(true, Ordering::SeqCst);
+        self.fail_next_write.store(true, AtomicOrdering::SeqCst);
     }
 
     /// Whether a job moves the payload: any job that adds, and a content job (no parts at
@@ -169,12 +224,24 @@ impl MemoryBackend {
         !job.add.is_empty() || job.remove.is_empty()
     }
 
+    /// Whether a peer's payload for `obj` replaces what the backend holds: when it holds none,
+    /// or the peer's wins under [`LwwPayload`]'s order.
+    async fn adopts(&self, obj: &ObjKey, incoming: &ObjPayload) -> Res<bool> {
+        let held = self
+            .local
+            .obj_states(std::slice::from_ref(obj))
+            .await?
+            .remove(0)
+            .and_then(|state| state.content);
+        Ok(held.is_none_or(|(held, _)| LwwPayload::wins(incoming, &held)))
+    }
+
     async fn write(&self, writes: Vec<PartWrite>) -> Res<()> {
         let mut tx = self.local.begin();
         for write in writes {
             laws::stage(&self.local, &mut tx, write).await?;
         }
-        if self.fail_next_write.swap(false, Ordering::SeqCst) {
+        if self.fail_next_write.swap(false, AtomicOrdering::SeqCst) {
             // dropped uncommitted: rolled back
             eyre::bail!("the write was told to fail");
         }
@@ -195,7 +262,9 @@ impl SyncBackend for MemoryBackend {
         if !job.remove.is_empty() {
             writes.push(PartWrite::RemoveMembers(members(&job.remove)));
         }
-        if let (Payloads::Hint, Some(payload)) = (&self.payloads, &job.payload) {
+        if let (Payloads::Hint, Some(payload)) = (&self.payloads, &job.payload)
+            && self.adopts(&job.obj, payload).await?
+        {
             writes.push(PartWrite::SetPayloads(vec![(
                 job.obj.clone(),
                 payload.clone(),
@@ -225,6 +294,9 @@ impl SyncBackend for MemoryBackend {
         let Some((payload, _)) = state.and_then(|state| state.content) else {
             eyre::bail!("the peer no longer holds the payload of {:?}", job.obj);
         };
+        if !self.adopts(&job.obj, &payload).await? {
+            return Ok(());
+        }
         self.write(vec![PartWrite::SetPayloads(vec![(job.obj, payload)])])
             .await
     }
