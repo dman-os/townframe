@@ -60,12 +60,15 @@
   }
 }
 
-/* Hover and pressed lift only the unselected tabs: a hover rule at the same weight as the
+/* The list is the sunken well, so an unselected tab climbs the surface ladder from it: hover is
+   `surface`, pressed is `surface-raised`, each a step above the well in both schemes (hover used to
+   be `canvas`, which is the very colour of the well in the dark scheme, so it changed nothing
+   there). Hover and pressed lift only the unselected tabs: a hover rule at the same weight as the
    selected rule used to win by coming first in the cascade of specificity, so hovering the selected
    tab repainted it as an unselected one. The selected tab, a filled surface like a button's, takes
    the button's brightness steps instead. */
 .ct-tabs [data-part="tab"][data-state="inactive"]:hover:not(:disabled) {
-  background: var(--ct-color-canvas);
+  background: var(--ct-color-surface);
   color: var(--ct-color-text);
 }
 
