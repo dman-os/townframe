@@ -501,7 +501,9 @@ impl HeldNode {
             secrets,
         } = self;
         drop(node);
+        eprintln!("INSTR heldnode stop: begin");
         stop.stop().await?;
+        eprintln!("INSTR heldnode stop: stages done, secrets.stop");
         // The node's config held the other reference and went with the boot.
         Arc::try_unwrap(secrets)
             .unwrap_or_else(|_| panic!("the stopped node still holds the secret store"))

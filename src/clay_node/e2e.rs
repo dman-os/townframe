@@ -127,6 +127,7 @@ async fn run_fixture(composition: &NodeComposition) -> BTreeMap<String, String> 
     let package = WasmPackage::from_env("dispatch")
         .await
         .expect("the prepared dispatch component is valid");
+    eprintln!("INSTR fixture: package loaded");
     let context = InitialContext {
         publications: [(
             "view".to_owned(),
@@ -142,6 +143,7 @@ async fn run_fixture(composition: &NodeComposition) -> BTreeMap<String, String> 
     let (runtime, driver) = WasmRuntime::initialize(&host, instance.clone(), &package, context)
         .await
         .unwrap_or_else(|error| panic!("the fixture activates: {error}"));
+    eprintln!("INSTR fixture: initialized");
     let sink = Arc::new(TextSink(Mutex::new(Vec::new())));
     let session = runtime
         .mount("view", Arc::clone(&sink) as _)
@@ -151,6 +153,7 @@ async fn run_fixture(composition: &NodeComposition) -> BTreeMap<String, String> 
                 host.fault(&instance)
             )
         });
+    eprintln!("INSTR fixture: mounted");
     let reports = sink.0.lock().unwrap().clone();
     let [report] = reports.as_slice() else {
         panic!("the fixture renders one report, got {reports:?}");
@@ -234,7 +237,9 @@ async fn a_wasmtime_micro_calls_a_granted_method_through_the_composition() {
         "a micro outside the install table has no egress"
     );
 
+    eprintln!("INSTR t: run_fixture begin");
     let attempts = run_fixture(&composition).await;
+    eprintln!("INSTR t: run_fixture done");
 
     let granted = attempts["granted"]
         .strip_prefix("ok(")
@@ -289,7 +294,9 @@ async fn a_serving_composition_holds_the_node_where_day_finds_it() {
         "{refused}"
     );
 
+    eprintln!("INSTR t: serving stop");
     composition.stop().await.unwrap();
+    eprintln!("INSTR t: serving stopped");
     assert_eq!(
         node_dir.probe_socket().await.unwrap(),
         day_node::SocketState::Absent
@@ -310,7 +317,9 @@ async fn a_micro_installed_with_no_methods_calls_nothing() {
     .await
     .unwrap();
 
+    eprintln!("INSTR t: run_fixture begin");
     let attempts = run_fixture(&composition).await;
+    eprintln!("INSTR t: run_fixture done");
 
     for name in ["granted", "ungranted", "forged"] {
         let outcome = &attempts[name];
@@ -382,8 +391,11 @@ async fn a_node_dials_the_ticket_in_its_bootstrap_file() {
     // The ticket outlived the boot: the node dials it again with no file.
     let settings = day_node::NodeSettings::load(phone_dir.path()).unwrap();
     assert_eq!(settings.peers.unwrap().bootstrap, [host.address()]);
+    eprintln!("INSTR t: phone.stop");
     phone.stop().await.unwrap();
+    eprintln!("INSTR t: host.stop");
     host.stop().await.unwrap();
+    eprintln!("INSTR t: done");
 }
 
 /// The interim document capability is bound to the micro's actor and scoped to the drawers its

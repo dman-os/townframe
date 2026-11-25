@@ -356,6 +356,7 @@ impl BigNode {
                 .await?,
             );
         }
+        eprintln!("INSTR bignode boot: pushing stage at line 359");
         stop.stages.push(self.register_late_built_ins());
         (self.listeners, self.unix_clients, self.fd_clients) =
             attach_listeners(self, attachments.listeners, stop).await?;
@@ -411,6 +412,7 @@ impl BigNode {
                 namespace: blobs_namespace,
             })
             .await?;
+            eprintln!("INSTR bignode boot: pushing stage at line 414");
             stop.stages.push(Stage::Service(blobs_stop));
             let (indexes, index_stop) = Indexes::boot(
                 Arc::clone(&repo),
@@ -419,6 +421,7 @@ impl BigNode {
                 config.index_concurrency,
             )
             .await?;
+            eprintln!("INSTR bignode boot: pushing stage at line 422");
             stop.stages.push(Stage::Indexes(index_stop));
             let (drawer_access, provider) = open_drawer_access(
                 &repo,
@@ -443,6 +446,7 @@ impl BigNode {
                 datum_ref: Some(Arc::clone(&indexes.datum_ref)),
             })
             .await?;
+            eprintln!("INSTR bignode boot: pushing stage at line 446");
             stop.stages.push(Stage::Service(docs_stop));
             let drawers = start_drawers(provider, &docs, &mut stop).await?;
             // The blob workers are configured with the drawers they maintain blobs for, so the registry is created (or found) before they start; the registry reads artifact bytes from the blob service and keeps them pinned through the workers, so it boots after both and stops before dispatch and nodules.
@@ -643,6 +647,7 @@ fn register_built_ins(
 async fn boot_authority(config: &Config, node_id: &str, stop: &mut StopToken) -> Res<Authority> {
     let (authority, authority_stop) =
         big_cabinet::authority::boot(&config.secrets, node_id, config.sql.clone()).await?;
+    eprintln!("INSTR bignode boot: pushing stage at line 646");
     stop.stages.push(Stage::Service(authority_stop));
     Ok(authority)
 }
@@ -650,6 +655,7 @@ async fn boot_authority(config: &Config, node_id: &str, stop: &mut StopToken) ->
 /// Boots the repo and stages its stop.
 async fn boot_repo(config: big_repo::Config, stop: &mut StopToken) -> Res<SharedBigRepo> {
     let (repo, repo_stop) = BigRepo::boot(config).await?;
+    eprintln!("INSTR bignode boot: pushing stage at line 653");
     stop.stages.push(Stage::Repo(repo_stop));
     Ok(repo)
 }
@@ -694,6 +700,7 @@ async fn boot_cartridges(
         sql,
     })
     .await?;
+    eprintln!("INSTR bignode boot: pushing stage at line 697");
     stop.stages.push(Stage::Service(cartridges_stop));
     Ok(cartridges)
 }
@@ -738,6 +745,7 @@ async fn open_drawer_access(
         Arc::clone(&indexes.datum_set),
     )
     .await?;
+    eprintln!("INSTR bignode boot: pushing stage at line 741");
     stop.stages.push(Stage::Service(policy_stop));
     Ok((access, provider))
 }
@@ -751,6 +759,7 @@ async fn start_drawers(
     stop: &mut StopToken,
 ) -> Res<Drawers> {
     let (worker, worker_stop) = provider.start(docs.client.clone());
+    eprintln!("INSTR bignode boot: pushing stage at line 754");
     stop.stages.push(Stage::DrawerWorker {
         worker,
         stop: worker_stop,
@@ -764,6 +773,7 @@ async fn start_drawers(
         unreachable!("drawer worker was constructed last");
     };
     let (drawers, drawers_stop) = big_cabinet::boot_drawers(DrawerConfig { worker }).await?;
+    eprintln!("INSTR bignode boot: pushing stage at line 767");
     stop.stages.push(Stage::Service(drawers_stop));
     Ok(drawers)
 }
@@ -787,6 +797,7 @@ async fn attach_listeners(
             Authorization::identity(node.authority.root),
         )
         .await?;
+        eprintln!("INSTR bignode boot: pushing stage at line 790");
         stop.stages.push(Stage::Listener(listener));
         bound.unix_socket = Some(path.clone());
         clients = Some(connections);
@@ -803,6 +814,7 @@ async fn attach_listeners(
                 Authorization::identity(node.authority.root),
             )
             .await?;
+            eprintln!("INSTR bignode boot: pushing stage at line 806");
             stop.stages.push(Stage::Listener(listener));
             bound.fd_socket = Some(fd_path);
             fd_clients = Some(connections);
@@ -810,6 +822,7 @@ async fn attach_listeners(
     }
     if let Some(address) = requested.tcp {
         let (listener, address) = Listener::tcp(address, node.dispatch.client.clone()).await?;
+        eprintln!("INSTR bignode boot: pushing stage at line 813");
         stop.stages.push(Stage::Listener(listener));
         bound.tcp = Some(address);
     }
@@ -837,6 +850,7 @@ async fn attach_peers(
         identity,
     )
     .await?;
+    eprintln!("INSTR bignode boot: pushing stage at line 840");
     stop.stages.push(Stage::Peers(peers_stop));
     Ok(peers)
 }
@@ -916,11 +930,13 @@ where
     // executor and nodule stages, so shutdown unbinds them only after the nodule service (their
     // consumer, which holds the router) has stopped, and before the services behind them and
     // dispatch stop.
+    eprintln!("INSTR bignode boot: pushing stage at line 919");
     stop.stages.push(register_built_ins(
         dispatch, authority, docs, drawers, blobs, cartridges,
     ));
     let (executor, executor_stop) =
         host(ExecutorDeps::of(&blobs.service, &dispatch.client)).await?;
+    eprintln!("INSTR bignode boot: pushing stage at line 924");
     stop.stages.push(Stage::Service(executor_stop));
     let config_drawer = drawers.local().config_id.clone();
     grant_drawer(
@@ -1038,6 +1054,7 @@ where
         granted: cartridges.granted.clone(),
     })
     .await?;
+    eprintln!("INSTR bignode boot: pushing stage at line 1041");
     stop.stages.push(Stage::Service(nodules_stop));
     Ok((executor, nodules))
 }
@@ -1099,6 +1116,7 @@ async fn boot_dispatch(
         authority: authority.client.clone(),
         namespace,
     });
+    eprintln!("INSTR bignode boot: pushing stage at line 1102");
     stop.stages.push(Stage::Service(dispatch_stop));
     let mut delegators = Vec::with_capacity(2);
     for subject in [nodules_actor, micros_actor.actor.actor_id] {
@@ -1151,6 +1169,7 @@ async fn boot_dispatch(
             }
         })
         .expect("a fresh stop token accepts tasks");
+    eprintln!("INSTR bignode boot: pushing stage at line 1154");
     stop.stages.push(Stage::Service(retract));
     Ok((dispatch, (delegators[0], micros_actor, delegators[1])))
 }
@@ -1257,6 +1276,17 @@ impl StopToken {
         let mut failure: Option<utils_rs::prelude::eyre::Report> = None;
         let mut panic = None;
         while let Some(stage) = self.stages.pop() {
+            let label = match &stage {
+                Stage::Service(_) => "Service",
+                Stage::Indexes(_) => "Indexes",
+                Stage::Repo(_) => "Repo",
+                Stage::DrawerWorker { .. } => "DrawerWorker",
+                Stage::Listener(_) => "Listener",
+                Stage::Peers(_) => "Peers",
+                Stage::BuiltIns { .. } => "BuiltIns",
+            };
+            let n = self.stages.len();
+            eprintln!("INSTR bignode stop: stage {n} {label} begin");
             match AssertUnwindSafe(stage.stop()).catch_unwind().await {
                 Ok(Ok(())) => (),
                 Ok(Err(error)) => {
@@ -1273,6 +1303,7 @@ impl StopToken {
                     }
                 }
             }
+            eprintln!("INSTR bignode stop: stage {n} {label} done");
         }
         if let Some(panic) = panic {
             std::panic::resume_unwind(panic);

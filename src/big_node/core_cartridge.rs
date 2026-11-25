@@ -437,6 +437,7 @@ impl BigNode {
         let operator = Authorization::identity(self.authority.root);
         let id = &package.cartridge.id;
         let version = &package.cartridge.version;
+        eprintln!("INSTR publish_version: begin");
         let published = self
             .cartridges
             .client
@@ -480,6 +481,7 @@ impl BigNode {
                         .await?;
                 }
             }
+            eprintln!("INSTR publish_version: staging");
             let staged = self
                 .cartridges
                 .client
@@ -495,6 +497,7 @@ impl BigNode {
                     },
                 )
                 .await?;
+            eprintln!("INSTR publish_version: staged");
             // The pins are part of what a signature covers, so the envelope takes the staged
             // pins before it is signed.
             let mut envelope = package.cartridge.clone();
@@ -513,6 +516,7 @@ impl BigNode {
                 )
                 .await?;
         }
+        eprintln!("INSTR publish_version: published, GetCartridge");
         let doc_id = self
             .cartridges
             .client
@@ -541,6 +545,7 @@ impl BigNode {
             )
             .await?
             .capability_id;
+        eprintln!("INSTR publish_version: cap minted");
         let heads = self
             .docs
             .client
@@ -556,6 +561,7 @@ impl BigNode {
             )
             .await?
             .heads;
+        eprintln!("INSTR publish_version: done");
         Ok(version_pin(doc_id, version, heads))
     }
 }

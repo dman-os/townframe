@@ -92,6 +92,7 @@ impl Core {
             return Ok(None);
         }
         let entry = DrawerDocEntry::new(access);
+        eprintln!("INSTR publish_entry t={:?} writing roster drawer={drawer} doc={doc}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
         let receipt = self
             .write_roster(
                 context,
@@ -104,9 +105,11 @@ impl Core {
                 BTreeSet::new(),
             )
             .await?;
+        eprintln!("INSTR publish_entry t={:?} roster written drawer={drawer} doc={doc}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
         #[cfg(test)]
         self.crash_at(super::CrashPoint::RosterWritten)?;
         self.state.put_doc(drawer, doc, access).await?;
+        eprintln!("INSTR publish_entry t={:?} put_doc done drawer={drawer} doc={doc}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
         Ok(Some(receipt))
     }
 

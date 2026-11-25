@@ -203,7 +203,9 @@ impl NodeComposition {
                     serve,
                 } = config;
                 let dir = NodeDir::new(root);
+                eprintln!("INSTR boot: begin");
                 prepare_settings(&dir, &bootstrap).await?;
+                eprintln!("INSTR boot: settings prepared");
                 // The holder takes the node's lock as `day` does, so `day` and any other host
                 // find the directory held instead of booting the same storage a second time.
                 // A serving host (desktop) holds the lock with its socket, which `day` reaches;
@@ -220,11 +222,14 @@ impl NodeComposition {
                         dir.root().display()
                     )
                 })?;
+                eprintln!("INSTR boot: lock taken");
                 let booted = Booted::boot(&dir, lock, LockRole::Serve, schemas).await?;
+                eprintln!("INSTR boot: Booted::boot done");
                 let minting = Minting::of(booted.node());
                 // Started here, on the node's runtime, before anything that can fail below, and
                 // stopped with it.
                 let follower = HandlesFollower::start(minting.clone());
+                eprintln!("INSTR boot: follower started");
                 match install_all(&minting, installs).await {
                     Ok(installed) => Ok((booted, installed, minting, follower)),
                     Err(error) => {
@@ -344,9 +349,12 @@ impl NodeComposition {
             minting,
             follower,
         } = self;
+        eprintln!("INSTR stop: follower.stop");
         follower.stop().await;
+        eprintln!("INSTR stop: follower stopped");
         drop((installed, minting));
         let stopped = runtime.spawn(booted.stop()).await.expect(ERROR_TOKIO);
+        eprintln!("INSTR stop: booted stopped");
         // Dropping a runtime inside an async context panics; this does not wait for threads.
         runtime.shutdown_background();
         stopped

@@ -851,15 +851,18 @@ impl Registry {
     async fn settled(&self, done: impl Fn(&State) -> bool + Send + Sync + 'static) {
         let done = Arc::new(done);
         let mut changed = self.subscribe().await;
+        eprintln!("INSTR settled: subscribed");
         loop {
             let check = Arc::clone(&done);
             if self.query(move |state| check(state)).await {
                 return;
             }
+            eprintln!("INSTR settled: not yet, waiting for change");
             changed
                 .changed()
                 .await
                 .expect("the registry outlives its waiters");
+            eprintln!("INSTR settled: woke");
         }
     }
 
@@ -867,15 +870,18 @@ impl Registry {
         &self,
         params: StageCartridgeVersion,
     ) -> Result<Cartridge, CartridgesError> {
+        eprintln!("INSTR stage: waiting gate");
         let _gate = self
             .gate
             .acquire()
             .await
             .expect("the registry's gate is never closed");
         let id = params.id.clone();
+        eprintln!("INSTR stage: gate acquired");
         let version = params.version.clone();
         // Refuse a component whose bytes are not here before any document is made for it.
         self.check_components(&id, &params.components).await?;
+        eprintln!("INSTR stage: components checked");
         let doc = self
             .query({
                 let id = id.clone();
@@ -907,6 +913,7 @@ impl Registry {
                 }
             })
             .await?;
+        eprintln!("INSTR stage: primary doc queried: {}", doc.is_some());
         let (doc, current_heads) = match doc {
             Some(doc) => {
                 let read = read_doc(&self.docs, self.capability, &doc).await?;
@@ -925,13 +932,16 @@ impl Registry {
                     .await?;
                 // The registry's projection follows its drawer: wait until it serves the new
                 // document, so a publish that follows this stage finds its cartridge.
+                eprintln!("INSTR stage: doc created {} heads, settling", receipt.doc_id);
                 let created = id.clone();
                 self.settled(move |state| state.primary_doc(&created).is_some())
                     .await;
+                eprintln!("INSTR stage: settled");
                 (receipt.doc_id, receipt.heads)
             }
         };
 
+        eprintln!("INSTR stage: staging blobs");
         let blob_heads = self
             .stage_blobs(&doc, &version, &params.components, current_heads)
             .await?;
@@ -1632,6 +1642,7 @@ impl Registry {
                     hold_ms: if caught_up { POLL_HOLD_MS } else { 0 },
                 }) => page.map_err(docs_error)?,
             };
+            eprintln!("INSTR follow: polled after={after} through={} caught_up={} events={:?}", page.through, page.caught_up, page.events.iter().map(|e| match e { DatumEvent::Datum { doc_id, .. } => format!("datum {doc_id}"), DatumEvent::Leave { doc_id, .. } => format!("leave {doc_id}") }).collect::<Vec<_>>());
             after = page.through;
             // Events are facts about documents; the fold re-reads each document, so only the
             // last word per document matters. A `leave` for a document never held is

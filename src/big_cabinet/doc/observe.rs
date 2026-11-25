@@ -285,6 +285,7 @@ impl DocsService {
         let mut rows: BTreeMap<DocId, BTreeMap<DatumKey, ObservedDatum>> = BTreeMap::new();
         // The documents a predicate fact in this page touched: move-in or move-out candidates.
         let mut moved: BTreeSet<DocId> = BTreeSet::new();
+        let summary: Vec<String> = entries.iter().map(|e| format!("{}/{}", e.key.doc_id, e.key.datum_key)).collect();
         for entry in entries {
             if !drawers.is_empty() && ROSTER_TAGS.contains(&entry.key.datum_key.tag().as_str()) {
                 moved.extend(
@@ -325,6 +326,9 @@ impl DocsService {
             .await
             .map_err(repository)?;
         let move_ins: BTreeSet<DocId> = moved.intersection(&matching).cloned().collect();
+        if !moved.is_empty() {
+            eprintln!("INSTR page_events t={:?} rev={revision} entries={summary:?} moved={moved:?} candidates={candidates:?} matching={matching:?}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
+        }
         // The kinds the caller reaches each matching document at; an unreached one delivers
         // nothing.
         let kinds = match authority {
