@@ -15,6 +15,7 @@ pub use ids::PartKey;
 pub use ids::PeerKey;
 
 pub mod driver;
+pub mod durable_outbox;
 pub mod fingerprint;
 mod ids;
 mod kit;

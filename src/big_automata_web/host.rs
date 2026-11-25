@@ -111,7 +111,100 @@ async fn run() {
     std::mem::forget(endpoint);
 }
 
+/// The echo protocol of the accept probe: the dialer opens one bi stream, sends `ECHO_REQUEST`,
+/// finishes its side, and the acceptor writes the same bytes back.
+const ECHO_ALPN: &[u8] = b"townframe/echo-probe/0";
+const ECHO_REQUEST: &[u8] = b"hello through the relay";
+
+/// `?mode=accept`: the page accepts echo connections and publishes its endpoint id in `#node_id`.
+async fn run_accept() {
+    let fixture = fetch_fixture().await;
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(iroh::RelayMode::custom([fixture.relay_url]))
+        .alpns(vec![ECHO_ALPN.to_vec()])
+        .bind()
+        .await
+        .expect("binding the browser endpoint");
+    // The home relay is connected: a dialer that knows only our id and this relay reaches us.
+    endpoint.online().await;
+    show("node_id", &endpoint.id().to_string());
+    let counters = std::rc::Rc::new(std::cell::Cell::new((0u32, 0u32)));
+    while let Some(incoming) = endpoint.accept().await {
+        let counters = counters.clone();
+        // One task per connection: the loop must keep accepting while a dialer lingers.
+        wasm_bindgen_futures::spawn_local(async move {
+            let connection = incoming
+                .accept()
+                .expect("accepting an incoming connection")
+                .await
+                .expect("completing the handshake");
+            let (mut send, mut recv) =
+                connection.accept_bi().await.expect("the dialer's stream");
+            let request = recv.read_to_end(1 << 16).await.expect("reading the request");
+            send.write_all(&request).await.expect("echoing");
+            send.finish().expect("finishing the echo");
+            let (echoed, closed) = counters.get();
+            counters.set((echoed + 1, closed));
+            show("echoed", &(echoed + 1).to_string());
+            // The dialer closes once it has the echo; observing that is the other half of the
+            // connection's life cycle working.
+            connection.closed().await;
+            let (echoed, closed) = counters.get();
+            counters.set((echoed, closed + 1));
+            show("closed", &(closed + 1).to_string());
+        });
+    }
+}
+
+/// `?mode=dial&target=<id>`: dial another page's endpoint through the relay and check the echo.
+async fn run_dial(target: iroh::EndpointId) {
+    let fixture = fetch_fixture().await;
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(iroh::RelayMode::custom([fixture.relay_url.clone()]))
+        .bind()
+        .await
+        .expect("binding the browser endpoint");
+    let addr = iroh::EndpointAddr::new(target).with_relay_url(fixture.relay_url);
+    let connection = endpoint
+        .connect(addr, ECHO_ALPN)
+        .await
+        .expect("dialing the accepting page");
+    let (mut send, mut recv) = connection.open_bi().await.expect("opening a stream");
+    send.write_all(ECHO_REQUEST).await.expect("sending");
+    send.finish().expect("finishing the request");
+    let echo = recv.read_to_end(1 << 16).await.expect("reading the echo");
+    assert_eq!(echo, ECHO_REQUEST, "the echo differs from the request");
+    connection.close(0u8.into(), b"done");
+    // `close` only queues the CONNECTION_CLOSE; dropping the endpoint at the end of this task
+    // would cancel it before it is sent and the acceptor would never see the close.
+    // `Endpoint::close` drains it first.
+    endpoint.close().await;
+    show("echo", &String::from_utf8(echo).expect("the echo is text"));
+}
+
 pub fn main() {
     console_error_panic_hook::set_once();
-    wasm_bindgen_futures::spawn_local(run());
+    let search = web_sys::window()
+        .expect("the host runs in a window")
+        .location()
+        .search()
+        .expect("the location has a query");
+    let param = |name: &str| {
+        search
+            .trim_start_matches('?')
+            .split('&')
+            .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+            .map(str::to_owned)
+    };
+    match param("mode").as_deref() {
+        None => wasm_bindgen_futures::spawn_local(run()),
+        Some("accept") => wasm_bindgen_futures::spawn_local(run_accept()),
+        Some("dial") => {
+            let target = param("target").expect("dial mode takes target=<endpoint id>");
+            wasm_bindgen_futures::spawn_local(run_dial(
+                target.parse().expect("target is an endpoint id"),
+            ));
+        }
+        Some(other) => panic!("unknown mode {other}"),
+    }
 }

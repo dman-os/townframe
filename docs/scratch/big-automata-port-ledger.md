@@ -1169,6 +1169,20 @@ tombstones at or below the lowest registered cursor can be pruned (live rows are
 never pruned). A consumer that never reports holds pruning back, which is visible, not silent.
 The outbox then needs no floor rev of its own.
 
+**Durable outbox: delivered (lane `agent/outbox`, 2026-11-25).** `big_automata::durable_outbox`
+(laws in its module docs): `WantsTable` (record, withdraw, land in the caller's okv tx),
+`Outbox` (sans-IO machine over `KeyedScheduler`), `OutboxHandle::start` (the loop). Also
+`KeyedScheduler` stopped-before-replaced (`replace` returns `Option<TaskId>`, the driver reports
+`stopped(task)` for every task it drained from the stop queue) and okv consumer pruning
+(`register_consumer`, `report_cursor`, `unregister_consumer`, `consumers`, `prune` on `OkvStore`).
+Decisions taken for the operator to confirm: identity is opaque `ByteKey` and the version is a
+fresh random `u64` per identity change (equality only); priority is last-record-wins and
+providers union under an equal identity; aging is `queued_at - priority * aging` (default one
+level per 60 s, `Duration::MAX` is strict); `C` default 4, `M` default 16, where `M` bounds
+fetches plus landings in flight (so a slow store backs up new fetches); a provider disconnect
+cancels its fetches without counting a failure; no durable "first seen" other than the
+writer's millisecond clock.
+
 **Browser runtime (operator, 2026-11-25).**
 - **Portable `service_utils`.** axum is not tied to tokio TCP (only `axum::serve` is); the iroh
   handler already runs hyper's http1 server over `IrohHttpStream`. Swap the glue (tokio

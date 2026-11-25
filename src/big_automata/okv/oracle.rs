@@ -8,6 +8,7 @@ use std::num::NonZeroUsize;
 
 use crate::interlude::*;
 use crate::okv::Mutation;
+use crate::okv::Pruned;
 use crate::okv::Selector;
 use crate::okv::row_bytes;
 use crate::rev::Entry;
@@ -23,12 +24,20 @@ strike! {
             rev: Rev,
             mutations: Vec<Mutation<K, V>>,
         }>,
+        /// The registered consumers and their cursors.
+        consumers: BTreeMap<String, Rev>,
+        /// Tombstones at or below this rev have been pruned: the highest floor any prune used.
+        pruned_through: Rev,
     }
 }
 
 impl<K, V> Default for Oracle<K, V> {
     fn default() -> Self {
-        Self { log: default() }
+        Self {
+            log: default(),
+            consumers: default(),
+            pruned_through: 0,
+        }
     }
 }
 
@@ -49,7 +58,47 @@ where
         rev
     }
 
-    /// Every key's current row: its last mutation, at that mutation's rev.
+    /// Register `consumer` and return its cursor.
+    pub fn register(&mut self, consumer: &str) -> Rev {
+        *self.consumers.entry(consumer.to_owned()).or_insert(0)
+    }
+
+    /// Move `consumer`'s cursor forward; a lower cursor changes nothing.
+    pub fn report(&mut self, consumer: &str, cursor: Rev) {
+        assert!(
+            cursor <= self.latest_rev(),
+            "cursor {cursor} past the latest rev"
+        );
+        let held = self
+            .consumers
+            .get_mut(consumer)
+            .expect("a report for a consumer that is not registered");
+        *held = (*held).max(cursor);
+    }
+
+    pub fn unregister(&mut self, consumer: &str) {
+        self.consumers.remove(consumer);
+    }
+
+    pub fn consumers(&self) -> &BTreeMap<String, Rev> {
+        &self.consumers
+    }
+
+    /// Drop every tombstone at or below the lowest registered cursor, none when there is no
+    /// consumer.
+    pub fn prune(&mut self) -> Pruned {
+        let floor = self.consumers.values().copied().min().unwrap_or(0);
+        let tombstones = self
+            .state()
+            .values()
+            .filter(|entry| entry.value.is_none() && entry.rev <= floor)
+            .count();
+        self.pruned_through = self.pruned_through.max(floor);
+        Pruned { floor, tombstones }
+    }
+
+    /// Every key's current row: its last mutation, at that mutation's rev, minus the
+    /// tombstones a prune dropped.
     pub fn state(&self) -> BTreeMap<K, Entry<K, V>> {
         let mut state = BTreeMap::new();
         for batch in &self.log {
@@ -65,6 +114,7 @@ where
                 );
             }
         }
+        state.retain(|_, entry| entry.value.is_some() || entry.rev > self.pruned_through);
         state
     }
 

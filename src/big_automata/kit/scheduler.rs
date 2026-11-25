@@ -54,6 +54,16 @@ strike! {
     }
 }
 
+/// What [`Scheduler::stop`] retired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stopped {
+    pub retry: Retry,
+    /// The driver was handed the task, so it may still be running: the task is in the stop
+    /// queue and the driver confirms when it has ended. `false` for a task that never left
+    /// the spawn queue or was waiting out a backoff: nothing runs and nothing is confirmed.
+    pub running: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchedulerCounts {
     pub live: usize,
@@ -122,18 +132,27 @@ impl<Seed> Scheduler<Seed> {
     /// Cancel a task. One still waiting out its backoff, or still in the spawn queue, simply
     /// vanishes; one the driver may be running enters the stop queue so the driver aborts it.
     /// Returns `None` if the task was already retired.
-    pub fn stop(&mut self, id: TaskId) -> Option<Retry> {
+    ///
+    /// [`Stopped::running`] tells the caller whether the task may still be running: the abort
+    /// is only a request, and the driver confirms the task has ended some time after it, so a
+    /// caller that must not start a replacement beside the old task waits for that (see
+    /// [`keyed::KeyedScheduler`]).
+    pub fn stop(&mut self, id: TaskId) -> Option<Stopped> {
         let retry = self.live.remove(&id)?;
         if let Some(delayed) = self.delayed.remove(&id) {
             self.due.remove(&(delayed.due_at, id));
-            return Some(retry);
+            return Some(Stopped {
+                retry,
+                running: false,
+            });
         }
         let queued_len = self.spawn_queue.len();
         self.spawn_queue.retain(|task| task.id != id);
-        if self.spawn_queue.len() == queued_len {
+        let running = self.spawn_queue.len() == queued_len;
+        if running {
             self.stop_queue.push(id);
         }
-        Some(retry)
+        Some(Stopped { retry, running })
     }
 
     /// The task failed: retire it and queue `seed` again after a backoff. Returns the new task

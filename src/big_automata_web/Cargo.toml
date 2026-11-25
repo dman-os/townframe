@@ -24,7 +24,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
-web-sys = { workspace = true, features = ["Window", "Document", "Element", "Response"] }
+web-sys = { workspace = true, features = ["Window", "Document", "Element", "Response", "Location"] }
 console_error_panic_hook = "0.1.7"
 
 [[bin]]
