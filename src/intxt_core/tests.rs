@@ -427,6 +427,33 @@ fn the_pr_block_reader_agrees_with_the_golden_vectors() {
 }
 
 #[test]
+fn splitting_a_description_removes_the_block_and_the_blank_lines_that_framed_it() {
+    let links = sample_links();
+    let block = links.block();
+    let cases = [
+        // After the text, between two texts, before the text, alone, and absent.
+        (format!("Intro.\n\n{block}\n"), "Intro."),
+        (
+            format!("Intro.\n\n{block}\n\nFooter.\n"),
+            "Intro.\n\nFooter.\n",
+        ),
+        (format!("{block}\n\nFooter."), "Footer."),
+        (block.clone(), ""),
+    ];
+    for (description, text) in cases {
+        let (shown, named) = generic::PrLinks::split(&description).unwrap();
+        assert_eq!(shown, text, "{description:?}");
+        assert_eq!(named, links);
+    }
+    let (shown, named) = generic::PrLinks::split("Just words.\n").unwrap();
+    assert_eq!(shown, "Just words.\n");
+    assert!(named.intxts.is_empty());
+
+    let malformed = "<details>\n<summary>intxt</summary>\n\n```json\n{ \"$type\": \"org.example.intxt.prLinks\", \"intxts\": [{ \"ref\": 5 }] }\n```\n\n</details>";
+    assert!(generic::PrLinks::split(malformed).is_err());
+}
+
+#[test]
 fn the_pr_block_writer_inserts_replaces_and_is_idempotent() {
     let links = sample_links();
     let block = links.block();
