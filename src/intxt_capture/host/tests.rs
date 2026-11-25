@@ -603,8 +603,9 @@ fn a_subagent_transcript_is_imported_once_the_session_has_its_document() {
     assert!(next.batch.session.subagents[0].imported.turns.is_empty());
 }
 
-#[test]
-fn a_post_hook_before_the_transcript_shows_the_call_records_an_uncaused_op_and_counts_it() {
+/// A session whose `t9` call edited `late.txt` before the transcript showed it: the call's post
+/// hook is committed, recording op 0 without a cause.
+fn session_with_an_uncaused_op() -> Env {
     let env = Env::new();
     env.append(&env.transcript, &[user("u1", None, "go")]);
     let start = prepare(&env.hook("SessionStart", json!({})), &env.session_state).unwrap();
@@ -624,10 +625,78 @@ fn a_post_hook_before_the_transcript_shows_the_call_records_an_uncaused_op_and_c
         &env.session_state,
     )
     .unwrap();
-    assert_eq!(post.batch.uncaused_tool_calls, 1);
+    assert_eq!(post.batch.uncaused_tool_calls, 0);
+    assert!(post.batch.worktrees[0].cause_backfills.is_empty());
     assert_eq!(post.batch.worktrees[0].ops.len(), 1);
     assert_eq!(post.batch.worktrees[0].ops[0].cause, None);
     assert_eq!(post.batch.worktrees[0].ops[0].changes[0].path, "late.txt");
+    let recorded = recorded_for(&post, 1);
+    post.commit(recorded).unwrap();
+    env
+}
+
+#[test]
+fn a_later_hook_backfills_the_cause_of_an_op_recorded_before_the_transcript_showed_its_call() {
+    let env = session_with_an_uncaused_op();
+    env.append(
+        &env.transcript,
+        &[tool_use("a1", "u1", "t9", "Bash", json!({"command": "x"}))],
+    );
+
+    let later = prepare(&env.hook("UserPromptSubmit", json!({})), &env.session_state).unwrap();
+    assert_eq!(later.batch.uncaused_tool_calls, 0);
+    let [worktree] = &later.batch.worktrees[..] else {
+        panic!("the worktree owed a cause is batched");
+    };
+    assert!(worktree.ops.is_empty());
+    let [backfill] = &worktree.cause_backfills[..] else {
+        panic!("the one withheld cause is backfilled");
+    };
+    assert_eq!(backfill.seq, 0);
+    assert_eq!(backfill.cause.tool_use_id, "t9");
+    let turn = backfill.cause.turn.as_ref().expect("the turn is known now");
+    assert!(
+        later.batch.session.imported.turns[turn]
+            .tool_calls
+            .iter()
+            .any(|call| call.id == "t9")
+    );
+    let recorded = recorded_for(&later, 1);
+    later.commit(recorded).unwrap();
+
+    // Backfilled once: the session ends with nothing owed and nothing counted.
+    let stop = prepare(&env.hook("Stop", json!({})), &env.session_state).unwrap();
+    assert_eq!(stop.batch.uncaused_tool_calls, 0);
+    assert!(
+        stop.batch
+            .worktrees
+            .iter()
+            .all(|worktree| worktree.cause_backfills.is_empty())
+    );
+}
+
+#[test]
+fn a_call_the_transcript_never_shows_stays_uncaused_and_is_counted_once_when_the_session_ends() {
+    let env = session_with_an_uncaused_op();
+    for event in ["UserPromptSubmit", "SubagentStop"] {
+        let hook = prepare(&env.hook(event, json!({})), &env.session_state).unwrap();
+        assert_eq!(hook.batch.uncaused_tool_calls, 0, "{event}");
+        assert!(
+            hook.batch
+                .worktrees
+                .iter()
+                .all(|worktree| worktree.cause_backfills.is_empty()),
+            "{event}"
+        );
+        let recorded = recorded_for(&hook, 1);
+        hook.commit(recorded).unwrap();
+    }
+    let end = prepare(&env.hook("SessionEnd", json!({})), &env.session_state).unwrap();
+    assert_eq!(end.batch.uncaused_tool_calls, 1);
+    end.commit(RecordedIds::default()).unwrap();
+
+    let after = prepare(&env.hook("Stop", json!({})), &env.session_state).unwrap();
+    assert_eq!(after.batch.uncaused_tool_calls, 0);
 }
 
 #[test]
