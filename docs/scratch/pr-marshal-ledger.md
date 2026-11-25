@@ -1,9 +1,9 @@
 # PR marshal ledger
 
-- Status: active
-- Owner: nodules lane (PR marshal for every lane)
-- Updated: 2026-11-25
-- Scope: what lands on main, in what order, and what the operator reviews next, across all lanes' stacks.
+Status: active
+Owner: nodules lane (PR marshal for every lane)
+Updated: 2026-11-25
+Scope: what lands on main, in what order, and what the operator reviews next, across all lanes' stacks
 
 ## Role (operator, 2026-11-25)
 
