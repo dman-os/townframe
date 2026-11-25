@@ -15,6 +15,7 @@ pub fn NavButtonSpecimens() -> Element {
             description: "data-kind sidebar|back|forward decides the glyph, and the accessible name is the kind's label; data-part icon holds a glyph or three bars. Always a 48px target. A disabled button keeps its place and ignores its click.".to_string(),
             Row { label: "sidebar".to_string(),
                 NavButton { kind: NavButtonKind::Sidebar, onclick: move |()| presses += 1 }
+                NavButton { kind: NavButtonKind::HideSidebar, onclick: move |()| presses += 1 }
             }
             Row { label: "back".to_string(),
                 NavButton { kind: NavButtonKind::Back, onclick: move |()| presses += 1 }
