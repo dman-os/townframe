@@ -65,7 +65,7 @@ fn outbox_machine_fetches_every_want(bencher: Bencher, rows: usize) {
 
 /// Two in-memory nodes, N objects, the real driver; the clock is the paused one, so only the
 /// work is timed.
-#[divan::bench(args = [1_000, 10_000])]
+#[divan::bench(args = [1_000, 3_000])]
 fn whole_sync(bencher: Bencher, objects: usize) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()

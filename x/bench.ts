@@ -25,6 +25,7 @@ import {
   type Env,
   failures,
   formatParams,
+  fromDivanOutput,
   fromGungraunSummary,
   overScaled,
   parseAccepts,
@@ -329,7 +330,10 @@ async function runTier(
         ...features(spec),
       ]);
       return {
-        partials: recordsFromOutput(output),
+        partials: [
+          ...recordsFromOutput(output),
+          ...fromDivanOutput(output, crate),
+        ],
         profile: "bench",
         target: "native",
       };

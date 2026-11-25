@@ -6,6 +6,7 @@ import {
   compare,
   CrossBasisError,
   failures,
+  fromDivanOutput,
   fromGungraunSummary,
   noiseOf,
   overScaled,
@@ -158,6 +159,30 @@ Deno.test("gungraun's summary becomes an instruction-count record", () => {
   eq(
     fromGungraunSummary({ ...summary, profiles: [{ tool: "DHAT" }] }, "c"),
     [],
+  );
+});
+
+Deno.test("divan's tree becomes wall_ns records by median", () => {
+  const output = [
+    "Timer precision: 10 ns",
+    "wall                               fastest       │ slowest       │ median        │ mean          │ samples │ iters",
+    "├─ okv_write                                     │               │               │               │         │",
+    "│  ├─ 10000                        2.426 ms      │ 13.82 ms      │ 4.444 ms      │ 5.181 ms      │ 100     │ 100",
+    "│  ╰─ 100000                       50.7 ms       │ 189.2 ms      │ 58.25 ms      │ 64.08 ms      │ 100     │ 100",
+    "├─ plain                           900 ns        │ 2.1 µs        │ 1.5 µs        │ 1.6 µs        │ 100     │ 1000",
+    "╰─ whole_sync                                    │               │               │               │         │",
+    "   ╰─ 1000                         30.91 ms      │ 124.6 ms      │ 0.5 s         │ 52.02 ms      │ 100     │ 100",
+  ].join("\n");
+  eq(
+    fromDivanOutput(output, "big_automata").map((
+      r,
+    ) => [r.bench, r.params.n, r.value]),
+    [
+      ["big_automata::wall::okv_write", "10000", 4_444_000],
+      ["big_automata::wall::okv_write", "100000", 58_250_000],
+      ["big_automata::wall::plain", undefined, 1500],
+      ["big_automata::wall::whole_sync", "1000", 500_000_000],
+    ],
   );
 });
 

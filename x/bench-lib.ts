@@ -189,6 +189,52 @@ export function fromGungraunSummary(
   return records;
 }
 
+const DIVAN_UNITS: Record<string, number> = {
+  ps: 1e-3,
+  ns: 1,
+  "µs": 1e3,
+  us: 1e3,
+  ms: 1e6,
+  s: 1e9,
+};
+
+/**
+ * The median times of a divan run, as `wall_ns` records. divan has no machine-readable output,
+ * so this reads its tree: a function is a node, each of its arguments a child whose row ends
+ * `fastest │ slowest │ median │ mean │ samples │ iters`. A function without arguments carries
+ * its own row. `bench` is the bench target's name, which divan prints as the tree's root.
+ */
+export function fromDivanOutput(output: string, crate: string): Partial[] {
+  const records: Partial[] = [];
+  const names: string[] = [];
+  // deno-lint-ignore no-control-regex
+  const plain = output.replace(/\u001b\[[0-9;]*m/g, "");
+  for (const line of plain.split("\n")) {
+    const row = /^((?:[│ ]{3})*)(?:├─|╰─) (.*)$/.exec(line);
+    if (!row) continue;
+    const depth = row[1].length / 3;
+    const cells = row[2].split("│").map((cell) => cell.trim());
+    const [name, ...fastest] = cells[0].split(/\s{2,}/);
+    names.length = depth;
+    names[depth] = name;
+    const median = /^([\d.]+)\s*(ps|ns|µs|us|ms|s)$/.exec(cells[2] ?? "");
+    if (!median || fastest.length === 0) continue;
+    const value = Number(median[1]) * DIVAN_UNITS[median[2]];
+    // `fn` then its argument, or the function alone
+    const [fn, arg] = names.length >= 2 && /^[\d_]+$/.test(name)
+      ? [names[depth - 1], name]
+      : [name, undefined];
+    records.push({
+      bench: `${crate}::wall::${fn}`,
+      metric: "wall_ns",
+      value,
+      unit: "ns",
+      params: arg === undefined ? {} : { n: arg.replaceAll("_", "") },
+    });
+  }
+  return records;
+}
+
 /** The value at `keys` under nested objects, or undefined where the path breaks. */
 const path = (value: unknown, ...keys: string[]): unknown =>
   keys.reduce((node, key) => isObject(node) ? node[key] : undefined, value);

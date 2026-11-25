@@ -77,3 +77,18 @@ async fn whole_sync_costs_by_size_and_round_trip() {
         );
     }
 }
+
+/// A part holding more objects than the default `max_tracked` (1024) times three has never
+/// synced in this harness: 3000 objects sync in two rounds, 3500 do not finish (under an hour of
+/// virtual time the wait is still pending, or the loop spins). Pinned here, not fixed, by the
+/// bench lane; see the benchmarking skill's findings.
+#[tokio::test(start_paused = true)]
+async fn whole_sync_of_a_part_beyond_three_pages_completes() {
+    let report = n0_future::time::timeout(
+        Duration::from_secs(3600),
+        sync_once(4_000, Duration::ZERO, |_| {}, clock()),
+    )
+    .await
+    .expect("4000 objects sync within an hour of virtual time");
+    assert_eq!(report.objects, 4_000);
+}
