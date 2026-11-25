@@ -536,7 +536,13 @@ async fn long_test_mirrored_cost_by_known_drawers() {
         started.elapsed(),
         projected.len(),
     );
+    let before = crate::doc::gate::instr_snapshot(); // INSTR
     let answer = median_wall("projected").await;
+    let after = crate::doc::gate::instr_snapshot(); // INSTR
+    let names = ["gate_total", "reconstruct", "claim_status", "native_signed", "native_current", "entries(claim)", "read_signature", "actor_binding", "aliases", "datum_value(claim)", "predecessors", "sig_verify", "attribution", "entries(current)", "hydrate(read)", "version", "verifies(count)"]; // INSTR
+    for (name, (b, a)) in names.iter().zip(before.iter().zip(&after)) { // INSTR
+        println!("INSTRGATE {name} total_ms={:.1} per_verify_us={:.1}", (a - b) as f64 / 1e6, (a - b) as f64 / 1e3 / ((after[16] - before[16]).max(1)) as f64); // INSTR
+    } // INSTR
     assert_eq!(answer.groups.len(), known + 2 * mirrored_count);
     assert_eq!(answer.docs.len(), 0);
 

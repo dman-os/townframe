@@ -72,6 +72,35 @@ pub(crate) enum Verdict {
     },
 }
 
+// INSTR: cumulative nanoseconds per gate phase, process-wide. Nested phases overlap their parents.
+pub(crate) const GATE_TOTAL: usize = 0; // INSTR
+pub(crate) const RECONSTRUCT: usize = 1; // INSTR
+pub(crate) const CLAIM_STATUS: usize = 2; // INSTR
+pub(crate) const NATIVE_SIGNED: usize = 3; // INSTR
+pub(crate) const NATIVE_CURRENT: usize = 4; // INSTR
+pub(crate) const ENTRIES: usize = 5; // INSTR
+pub(crate) const READ_SIGNATURE: usize = 6; // INSTR
+pub(crate) const ACTOR_BINDING: usize = 7; // INSTR
+pub(crate) const ALIASES: usize = 8; // INSTR
+pub(crate) const DATUM_VALUE: usize = 9; // INSTR
+pub(crate) const PREDECESSORS: usize = 10; // INSTR
+pub(crate) const SIG_VERIFY: usize = 11; // INSTR
+pub(crate) const ATTRIBUTION: usize = 12; // INSTR
+pub(crate) const ENTRIES_CURRENT: usize = 13; // INSTR
+pub(crate) const HYDRATE_READ: usize = 14; // INSTR
+pub(crate) const VERSION: usize = 15; // INSTR
+pub(crate) const VERIFIES: usize = 16; // INSTR
+pub(crate) static INSTR_NS: [std::sync::atomic::AtomicU64; 17] = [const { std::sync::atomic::AtomicU64::new(0) }; 17]; // INSTR
+pub(crate) fn instr<T>(slot: usize, body: impl FnOnce() -> T) -> T { // INSTR
+    let started = std::time::Instant::now(); // INSTR
+    let out = body(); // INSTR
+    INSTR_NS[slot].fetch_add(u64::try_from(started.elapsed().as_nanos()).unwrap(), std::sync::atomic::Ordering::Relaxed); // INSTR
+    out // INSTR
+} // INSTR
+pub(crate) fn instr_snapshot() -> Vec<u64> { // INSTR
+    INSTR_NS.iter().map(|slot| slot.load(std::sync::atomic::Ordering::Relaxed)).collect() // INSTR
+} // INSTR
+
 pub(crate) struct Gate<'a> {
     doc: &'a Automerge,
     heads: &'a [ChangeHash],
@@ -122,9 +151,14 @@ impl<'a> Gate<'a> {
     }
 
     pub(crate) fn verify(&self, key: &DatumKey) -> Verdict {
+        INSTR_NS[VERIFIES].fetch_add(1, std::sync::atomic::Ordering::Relaxed); // INSTR
+        instr(GATE_TOTAL, || self.verify_inner(key)) // INSTR
+    } // INSTR
+
+    fn verify_inner(&self, key: &DatumKey) -> Verdict { // INSTR
         assert_ne!(key.tag().as_str(), Dmeta::ID, "dmeta is not a signed datum");
         let mut pending: Option<String> = None;
-        let entries = match reconstruct_current_claims(self.doc, key, self.heads, self.budget) {
+        let entries = match instr(RECONSTRUCT, || reconstruct_current_claims(self.doc, key, self.heads, self.budget)) { // INSTR
             Ok(entries) => entries,
             Err(error) => return unreadable(error),
         };
@@ -152,7 +186,7 @@ impl<'a> Gate<'a> {
                     .map(|url| (claim.claim.actor_uuid, url.clone())),
                 _ => None,
             };
-            match self.claim_status(entry.result) {
+            match instr(CLAIM_STATUS, || self.claim_status(entry.result)) { // INSTR
                 Status::Valid => {
                     datum_heads.insert(introduction);
                     authors.extend(author);
@@ -176,7 +210,7 @@ impl<'a> Gate<'a> {
         {
             native
         } else {
-            match self.native(key, &datum_heads) {
+            match instr(NATIVE_SIGNED, || self.native(key, &datum_heads)) { // INSTR
                 Ok(native) => native,
                 Err(error) => return unreadable(error),
             }
@@ -184,7 +218,7 @@ impl<'a> Gate<'a> {
         let current = if self.heads == datum_heads.as_slice() {
             signed.clone()
         } else {
-            match self.native(key, self.heads) {
+            match instr(NATIVE_CURRENT, || self.native(key, self.heads)) { // INSTR
                 Ok(native) => native,
                 Err(error) => return unreadable(error),
             }
@@ -299,7 +333,7 @@ fn attribution(claim: &ReconstructedClaim) -> Status {
         actor_url: actor_url.clone(),
         delegation: Some(certificate.clone()),
     };
-    match Attribution::verify(certificate, &issuer, claim.claim.actor_uuid, &actor) {
+    match instr(ATTRIBUTION, || Attribution::verify(certificate, &issuer, claim.claim.actor_uuid, &actor)) { // INSTR
         Ok(_) => Status::Valid,
         Err(error @ (AttributionError::Unsupported(_) | AttributionError::ResourceLimit)) => {
             Status::Pending(format!("attribution: {error}"))
