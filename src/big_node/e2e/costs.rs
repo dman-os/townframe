@@ -706,7 +706,7 @@ async fn dispatch_costs(table: &mut Table) {
         capability: capability(
             &node,
             DocScope {
-                read: BTreeSet::from([note.doc_id.clone()]),
+                read: DocScope::read_all([note.doc_id.clone()]),
                 ..DocScope::default()
             },
         )

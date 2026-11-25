@@ -104,7 +104,7 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
             .mint_doc(
                 &carol,
                 DocScope {
-                    read: [doc.clone()].into(),
+                    read: DocScope::read_all([doc.clone()]),
                     ..Default::default()
                 },
             )
@@ -116,7 +116,7 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
         .mint_doc(
             &bob,
             DocScope {
-                read: [doc.clone()].into(),
+                read: DocScope::read_all([doc.clone()]),
                 ..Default::default()
             },
         )

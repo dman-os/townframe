@@ -372,6 +372,29 @@ impl DocsService {
             .map_err(authority_error)
     }
 
+    fn read_kinds(authority: &DomainAuthority<DocScope>, document: &DocId) -> DatumKinds {
+        match authority {
+            DomainAuthority::Identity(_) => DatumKinds::All,
+            DomainAuthority::Scoped(scope) => scope
+                .read
+                .get(document)
+                .or_else(|| scope.write.get(document))
+                .cloned()
+                .unwrap_or(DatumKinds::All),
+        }
+    }
+
+    async fn authorize_read(
+        &self,
+        context: &RequestContext,
+        authority: &DomainAuthority<DocScope>,
+        document: &DocId,
+    ) -> Result<DatumKinds, DocsError> {
+        self.authorize(context, authority, AccessRequest::Read(document))
+            .await?;
+        Ok(Self::read_kinds(authority, document))
+    }
+
     async fn allowed(
         access_policy: &dyn DocAccess,
         context: &RequestContext,
@@ -398,7 +421,7 @@ impl DocsService {
             DomainAuthority::Scoped(scope) => {
                 let (document, needed) = match request {
                     AccessRequest::Read(doc)
-                        if scope.read.contains(doc) || scope.write.contains_key(doc) =>
+                        if scope.read.contains_key(doc) || scope.write.contains_key(doc) =>
                     {
                         return Ok(true);
                     }
@@ -441,7 +464,7 @@ impl DocsService {
             .iter()
             .filter(|doc| {
                 scope.write.contains_key(*doc)
-                    || (needed == DrawerAccess::Read && scope.read.contains(*doc))
+                    || (needed == DrawerAccess::Read && scope.read.contains_key(*doc))
             })
             .cloned()
             .collect();

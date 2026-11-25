@@ -140,7 +140,8 @@ pub(super) fn metadata_capability(
                 return Err(service_utils_rs::ClientError::Method(DocsError::Denied));
             }
             let write_docs: BTreeSet<_> = scope.write.keys().cloned().collect();
-            for document in scope.read.union(&write_docs) {
+            let read_docs: BTreeSet<_> = scope.read.keys().cloned().collect();
+            for document in read_docs.union(&write_docs) {
                 let known = sql.query(
                     "SELECT EXISTS (
                          SELECT 1 FROM big_cabinet_drawers
