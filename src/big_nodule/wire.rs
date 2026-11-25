@@ -14,10 +14,10 @@ use serde_json::json;
 use service_client_core_rs::xrpc::write_context_headers;
 use service_core_rs::xrpc::DOMAIN_ERROR_FIELD;
 use service_core_rs::xrpc::DOMAIN_ERROR_STATUS;
+use service_core_rs::xrpc::NODULE_BLOBS_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CONFIG_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CONFIG_DOC_HEADER;
-use service_core_rs::xrpc::NODULE_BLOBS_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_DRAWER_CAPABILITY_HEADER;
 use service_core_rs::xrpc::bearer_header_value;
 use service_utils_rs::HttpMetadata;
@@ -89,7 +89,7 @@ pub fn delivery_headers(
                 .expect("a capability id is a valid header value"),
         );
     }
-    if let Some(capability) = capabilities.config {
+    if let Some(capability) = capabilities.docs {
         headers.insert(
             NODULE_CONFIG_CAPABILITY_HEADER,
             Authorization::id_text(capability)

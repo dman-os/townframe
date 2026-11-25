@@ -74,41 +74,35 @@ impl DocsService {
             let DomainAuthority::Scoped(scope) = &caller.authority else {
                 return Err(DocsError::Denied);
             };
-            let access = scope
+            let reach = scope
                 .drawers
                 .get(drawer_id)
-                .copied()
-                .filter(|held| *held >= DrawerAccess::Read)
+                .filter(|held| held.access >= DrawerAccess::Read)
                 .ok_or(DocsError::Denied)?;
-            Some(BTreeMap::from([(drawer_id.clone(), access)]))
+            Some(BTreeMap::from([(drawer_id.clone(), reach.clone())]))
         } else {
             None
         };
-        let selector_doc = params.selector.doc_id();
-        match &drawer {
-            Some(drawers) => {
-                let candidates = BTreeSet::from([selector_doc.clone()]);
-                let readable = self
-                    .access
-                    .scoped_docs(context, drawers, Some(&candidates))
-                    .await
-                    .map_err(access_error)?;
-                if !readable
-                    .get(selector_doc)
-                    .is_some_and(|held| *held >= DrawerAccess::Read)
-                {
-                    return Ok(Vec::new());
-                }
-            }
-            None => {
-                self.authorize(
-                    context,
-                    &caller.authority,
-                    AccessRequest::Read(selector_doc),
-                )
-                .await?;
-            }
-        }
+        // Owned: `into_query` below consumes the selector.
+        let selector_doc = &params.selector.doc_id().clone();
+        let selector_kinds = match &drawer {
+            Some(drawers) => Self::reach_drawers(
+                self.access.as_ref(),
+                context,
+                drawers,
+                &BTreeSet::from([selector_doc.clone()]),
+                DrawerAccess::Read,
+            )
+            .await?
+            .remove(selector_doc),
+            None => Some(
+                self.authorize_read(context, &caller.authority, selector_doc)
+                    .await?,
+            ),
+        };
+        let Some(selector_kinds) = selector_kinds else {
+            return Ok(Vec::new());
+        };
         let Some(store) = &self.datum_ref else {
             return Err(DocsError::Repository(
                 "datum-ref index is not configured on this repository".into(),
@@ -121,38 +115,53 @@ impl DocsService {
         if edges.is_empty() {
             return Ok(Vec::new());
         }
-        let candidates = edges
+        // Both ends of an edge are resolved at the kinds the caller reaches them at, so an edge
+        // is shown only for datums of those kinds on each end. The selector's own document is
+        // already resolved above, so only the other ends are looked up.
+        let candidates: BTreeSet<_> = edges
             .iter()
-            .map(|edge| edge.origin.doc_id.clone())
+            .flat_map(|edge| [&edge.origin.doc_id, &edge.target.doc_id])
+            .filter(|doc| *doc != selector_doc)
+            .cloned()
             .collect();
-        let readable: BTreeSet<_> = match drawer {
-            Some(drawers) => self
-                .access
-                .scoped_docs(context, &drawers, Some(&candidates))
-                .await
-                .map_err(access_error)?
-                .into_iter()
-                .filter_map(|(doc, held)| (held >= DrawerAccess::Read).then_some(doc))
-                .collect(),
-            None => {
-                Self::allowed_docs(
-                    self.access.as_ref(),
-                    context,
-                    &caller.authority,
-                    &candidates,
-                    DrawerAccess::Read,
-                )
-                .await?
+        let mut reached = if candidates.is_empty() {
+            BTreeMap::new()
+        } else {
+            match &drawer {
+                Some(drawers) => {
+                    Self::reach_drawers(
+                        self.access.as_ref(),
+                        context,
+                        drawers,
+                        &candidates,
+                        DrawerAccess::Read,
+                    )
+                    .await?
+                }
+                None => {
+                    Self::reach(
+                        self.access.as_ref(),
+                        context,
+                        &caller.authority,
+                        &candidates,
+                        DrawerAccess::Read,
+                    )
+                    .await?
+                }
             }
         };
+        reached.insert(selector_doc.clone(), selector_kinds);
         Ok(edges
             .into_iter()
-            .filter(|edge| readable.contains(&edge.origin.doc_id))
             .filter(|edge| {
-                Self::read_kinds(&caller.authority, &edge.origin.doc_id)
-                    .allows(&edge.origin.datum_key)
-                    && Self::read_kinds(&caller.authority, &edge.target.doc_id)
-                        .allows(&edge.target.datum_key)
+                // The origin must be readable. A target the caller does not reach is shown as
+                // before, unnarrowed: reading the edge discloses its id and datum key only.
+                reached
+                    .get(&edge.origin.doc_id)
+                    .is_some_and(|kinds| kinds.allows(&edge.origin.datum_key))
+                    && reached
+                        .get(&edge.target.doc_id)
+                        .is_none_or(|kinds| kinds.allows(&edge.target.datum_key))
             })
             .map(QueriedDatumRef::from)
             .collect())
