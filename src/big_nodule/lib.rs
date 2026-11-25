@@ -552,12 +552,30 @@ impl NoduleService {
     /// rather than looked up in a grant table: this domain has no entitlements beyond the
     /// handles it minted.
     fn scope_of<'a>(&self, caller: &'a Invocation<NoduleScope>) -> Res<Option<&'a NoduleScope>> {
+        let kind = match &caller.authority {
+            DomainAuthority::Operator => "operator",
+            DomainAuthority::Identity(_) => "identity",
+            DomainAuthority::Scoped(_) => "scoped",
+        };
+        tracing::info!(
+            target: "instr",
+            kind,
+            handle = ?caller.handle,
+            via = ?caller.via,
+            signer = ?caller.signer.actor_id,
+            rights = ?caller.rights,
+            "INSTR nodule scope_of"
+        ); // INSTR
         if !caller.rights.contains(Rights::USE) {
+            tracing::info!(target: "instr", kind, "INSTR nodule scope_of denied: no USE right"); // INSTR
             return Err(NodulesError::Denied);
         }
         match &caller.authority {
             DomainAuthority::Operator => Ok(None),
-            DomainAuthority::Identity(_) => Err(NodulesError::Denied),
+            DomainAuthority::Identity(_) => {
+                tracing::info!(target: "instr", "INSTR nodule scope_of denied: identity that is not the operator"); // INSTR
+                Err(NodulesError::Denied)
+            }
             DomainAuthority::Scoped(scope) => Ok(Some(scope)),
         }
     }
@@ -658,8 +676,20 @@ impl NoduleService {
         authorization: Authorization,
         params: InstallCartridge,
     ) -> Res<CartridgeInstallRecord> {
-        let caller = self.caller(context, authorization).await?;
+        tracing::info!(
+            target: "instr",
+            authority = ?authorization.authority,
+            signer_cap = ?authorization.signer,
+            "INSTR nodule install presented"
+        ); // INSTR
+        let caller = self
+            .caller(context, authorization)
+            .await
+            .inspect_err(|error| {
+                tracing::info!(target: "instr", ?error, "INSTR nodule install: caller refused"); // INSTR
+            })?;
         let scope = self.scope_of(&caller)?.cloned();
+        tracing::info!(target: "instr", scope = ?scope, "INSTR nodule install scope_of result"); // INSTR
         let context = context.clone();
         self.state
             .ask(|reply| Command::Install {

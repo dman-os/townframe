@@ -36,7 +36,7 @@ const BETA: &str = example_cartridge!("beta");
 const GAMMA: &str = example_cartridge!("gamma");
 /// The operation alpha requests; beta and gamma (and, when registered, a built-in) all serve it.
 const BETA_PING: &str = "org.example.beta.ping";
-const NATIVE: &str = "native-ping";
+pub(super) const NATIVE: &str = "native-ping";
 
 impl Node {
     async fn route(&self, pattern: &str, provider: Option<&str>) -> Result<(), NodulesError> {
@@ -66,7 +66,7 @@ impl Node {
             .map(|locked| locked.provider.as_str())
     }
 
-    fn register_native(&self) {
+    pub(super) fn register_native(&self) {
         self.dispatch
             .router
             .register(

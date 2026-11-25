@@ -76,7 +76,8 @@ pub fn id(publisher: &str) -> CartridgeId {
 /// The authority methods are required: their provider is registered before the nodule service
 /// reconciles. The nodules methods are optional because theirs is registered after the node is
 /// assembled (`BigNode::register_late_built_ins`), so a required request for one would hold the
-/// nodule at `ProviderMissing` through boot. Either way the grant below is what admits a call.
+/// nodule at `ProviderMissing` through boot. The nodule service reconciles when the provider
+/// registers, so the optional requests resolve then. Either way the grant below is what admits a call.
 ///
 /// The grants of the three reads are privileged, because the service answers a nodule an
 /// unscoped read of every cartridge only on a privileged grant of that very method

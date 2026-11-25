@@ -411,6 +411,10 @@ pub(crate) struct State {
     applied_heads: BTreeMap<CartridgeId, Vec<ChangeHash>>,
     records: BTreeMap<CartridgeId, NoduleRecord>,
     observed_heads: Vec<ChangeHash>,
+    /// The non-nodule claimants of every operation contract a request named in the last
+    /// reconcile, as it resolved them. A claims change in dispatch matters to this service
+    /// exactly when it moves one of these (see `reconcile_if_claims_moved`).
+    observed_claims: BTreeMap<String, Vec<String>>,
     /// Memoized per-envelope admission, shared with the config-mutation closures.
     admission_cache: Arc<AdmissionCache>,
     /// The revision the executor was last asked to host for each cartridge. A cartridge is here exactly
@@ -448,6 +452,7 @@ pub(crate) struct State {
     missing_authority: BTreeMap<CartridgeId, MissingAuthorityLookup>,
 }
 
+mod claims;
 mod holds;
 
 fn nodule_actor(actor: &OpenedActor) -> NoduleActor {
@@ -1048,6 +1053,7 @@ impl State {
             reported_unreadable_routes: BTreeSet::new(),
             records: BTreeMap::new(),
             observed_heads: Vec::new(),
+            observed_claims: BTreeMap::new(),
             admission_cache: Arc::default(),
             hosted: BTreeMap::new(),
             reensure: Arc::default(),
@@ -1063,6 +1069,7 @@ impl State {
             grant_requests,
             missing_authority: BTreeMap::new(),
         };
+        let mut claims = claims::Claims::follow(&state.stores.dispatch);
         let context = RequestContext::root();
         // The boot reconcile may already have started initializers, and the config documents it
         // loads run tasks; a failure here must not leave them running behind a service that
@@ -1125,6 +1132,8 @@ impl State {
                         changed.expect("nodule config watch closed while the state actor was running");
                         state.reconcile_if_moved().await?;
                     },
+                    // A provider registered or unregistered in dispatch (see `claims`).
+                    () = claims.changed() => state.reconcile_if_claims_moved().await?,
                     // A cartridge config document moved: a grant written elsewhere, or by this
                     // actor (which already reconciled it, so the heads below say nothing moved).
                     () = state.docs_changed.notified() => {
@@ -1133,14 +1142,7 @@ impl State {
                 }
             }
             state.docs.stop_all().await;
-            // Dispatch outlives this service and its router keeps every provider registered, but
-            // an executor's provider reaches back into dispatch (a Wasm guest's outgoing calls
-            // go through dispatch's client), which would make dispatch own itself through the
-            // router. Withdrawing the registrations at shutdown breaks that cycle; a restart
-            // derives them again from the config.
-            for cartridge_id in state.records.keys() {
-                state.stores.dispatch.unbind(&cartridge_id.to_string());
-            }
+            state.unbind_nodules();
             Res::Ok(())
         };
         tasks
@@ -1401,6 +1403,13 @@ impl State {
         if let Some(scope) = &scope
             && !(scope.admit && scope.cartridges.contains(&resolved.cartridge.id))
         {
+            tracing::info!(
+                target: "instr",
+                admit = scope.admit,
+                cartridge = %resolved.cartridge.id,
+                scoped_cartridges = ?scope.cartridges,
+                "INSTR nodule install denied: scope does not admit this cartridge"
+            ); // INSTR
             return Err(NodulesError::Denied);
         }
         // The core cartridge is installed at the version the node's build carries and no other,
@@ -1780,8 +1789,12 @@ impl State {
         // records would keep reporting `granted: true`. Check only those capabilities' liveness
         // and run the full reconcile, which re-applies or re-reports the grant, just when one
         // died.
+        // The claims are checked here as well as followed by the loop: the loop's change may not
+        // be handled yet when a read arrives (commands are polled first), and a read made after a
+        // provider registered must not answer from before it.
         if snapshot.heads != self.observed_heads
             || has_unapplied
+            || self.claims_moved()
             || self.any_applied_grant_dead(context).await?
         {
             drop(self.reconcile(context, snapshot, Trigger::Change).await?);
@@ -1862,6 +1875,7 @@ impl State {
         snapshot: StoreSnapshot<NoduleConfig>,
         trigger: Trigger,
     ) -> Res<BTreeMap<CartridgeId, NodulesError>> {
+        self.observed_claims.clear();
         let mut resolved = snapshot.value.resolve(&self.admission_cache);
         self.sync_schemas(&mut resolved);
         let mut revoke_errors: BTreeMap<CartridgeId, NodulesError> = BTreeMap::new();
@@ -2594,11 +2608,14 @@ impl State {
                 );
                 continue;
             }
-            let offers = providers.offers(
-                &request.contract,
-                self.stores
-                    .native_offers(&request.contract, request.is_operation_call()),
-            );
+            let native = self
+                .stores
+                .native_offers(&request.contract, request.is_operation_call());
+            if request.is_operation_call() {
+                self.observed_claims
+                    .insert(request.contract.clone(), claims::external(native.clone()));
+            }
+            let offers = providers.offers(&request.contract, native);
             statuses.insert(
                 request.binding.clone(),
                 RequestStatus::evaluate(&request, &offers, pinned),

@@ -548,14 +548,17 @@ impl BigNode {
     /// provider (which holds the peers handle, attached after the node is built). Everything else
     /// is registered earlier by [`register_built_ins`], before the nodule service reconciles.
     ///
-    /// These two stay late on purpose: no nodule can require a nodules or node method today. If
-    /// one ever does, a nodule would be held at `ProviderMissing` at boot just as the early
-    /// built-ins once were, and the fix is a reconcile-on-claims-change trigger in the nodule
-    /// service, a separate design, not moving these earlier.
+    /// These two stay late on purpose, and a nodule may request their methods: the nodule service
+    /// follows the router's claims (`Router::follow_claims`) and reconciles when a provider a
+    /// request names registers, so a request registered against here resolves as soon as this
+    /// runs. Until then it is `noProvider`: a required request holds its nodule at
+    /// `ProviderMissing` for that stretch of boot, which is why the core cartridge declares these
+    /// optional.
     ///
     /// Like the early ones, they are unbound first on stop (the returned stage runs before any
     /// service stops) to break the router-to-client cycle and to stop routing to services about
-    /// to go away.
+    /// to go away. The stage retires the claims signal before it unbinds, so the nodule service,
+    /// which is still running then, does not reconcile against claims being withdrawn.
     fn register_late_built_ins(&self) -> Stage {
         let provider = ServiceProvider::default().serve(&self.nodules.client);
         provider.register(&self.dispatch.router, "builtin:nodules");
@@ -1217,6 +1220,10 @@ impl Stage {
                 router,
                 provider_ids,
             } => {
+                // The nodule service follows the router's claims and outlives the first of these
+                // stages: closing the signal first tells it the node is stopping, so unbinding
+                // does not send it to re-resolve requests against the services stopping next.
+                router.retire_claims();
                 for provider_id in provider_ids {
                     router.unbind(provider_id);
                 }
