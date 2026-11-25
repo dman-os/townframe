@@ -17,6 +17,7 @@ pub mod drawer;
 pub mod list_details;
 pub mod list_row;
 pub mod nav_button;
+pub mod nav_rack;
 pub mod panel_page;
 pub mod scrub_strip;
 pub mod sections;

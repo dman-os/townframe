@@ -77,7 +77,7 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
             app_bar: rsx! {
                 AppBar {
                     title: "Settings",
-                    leading: rsx! { PresentationSlot { reference: props.micro.shell.nav_button.clone() } },
+                    leading: rsx! { PresentationSlot { reference: props.micro.shell.navigation_rack.clone() } },
                 }
             },
         div { class: "ct-settings", "data-state": "list",
@@ -176,7 +176,7 @@ pub fn SettingsSection(props: SettingsSectionProps) -> Element {
                 app_bar: rsx! {
                     AppBar {
                         title: row.value.title.clone(),
-                        leading: rsx! { PresentationSlot { reference: props.micro.shell.nav_button.clone() } },
+                        leading: rsx! { PresentationSlot { reference: props.micro.shell.navigation_rack.clone() } },
                     }
                 },
                 div { "data-part": "detail",

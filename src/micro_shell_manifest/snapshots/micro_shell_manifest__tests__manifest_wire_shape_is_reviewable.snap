@@ -26,12 +26,12 @@ endpoints:
     nsid: org.example.dayframe.shell.getTheme
   home:
     $type: "org.example.clay.micro.manifest#viewEndpoint"
-  nav-button:
-    $type: "org.example.clay.micro.manifest#viewEndpoint"
-    implements: org.example.dayframe.shell.navButton
   navigate:
     $type: "org.example.clay.micro.manifest#methodEndpoint"
     nsid: org.example.dayframe.shell.navigate
+  navigation-rack:
+    $type: "org.example.clay.micro.manifest#viewEndpoint"
+    implements: org.example.dayframe.shell.navigationRack
   open-sheet:
     $type: "org.example.clay.micro.manifest#methodEndpoint"
     nsid: org.example.dayframe.shell.openSheet

@@ -17,6 +17,7 @@ mod drawer;
 mod list_details;
 mod list_row;
 mod nav_button;
+mod nav_rack;
 mod panel_page;
 mod scrub_strip;
 mod sections;

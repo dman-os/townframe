@@ -160,9 +160,9 @@ fn the_shell_supplies_what_settings_requires_under_its_endpoint_names() {
             .collect::<Vec<_>>(),
         [
             (
-                micro_shell_manifest::NAV_BUTTON,
+                micro_shell_manifest::NAVIGATION_RACK,
                 shell.clone(),
-                micro_shell_manifest::NAV_BUTTON
+                micro_shell_manifest::NAVIGATION_RACK
             ),
             (
                 micro_shell_manifest::OPENED,
@@ -185,7 +185,7 @@ fn a_requirement_resolves_by_nsid_whatever_the_provider_names_the_endpoint() {
         .unwrap();
     shell.manifest.endpoints.insert("which-row".into(), opened);
     shell.manifest.endpoints.insert(
-        micro_shell_manifest::NAV_BUTTON.into(),
+        micro_shell_manifest::NAVIGATION_RACK.into(),
         Endpoint::View { implements: None },
     );
     let (resolved, errors) = requirements::resolve(&[
@@ -200,8 +200,8 @@ fn a_requirement_resolves_by_nsid_whatever_the_provider_names_the_endpoint() {
         resolved[1][micro_shell_manifest::OPENED].publication,
         "which-row"
     );
-    // The nav button no longer implements its contract, so nothing supplies it.
-    assert_eq!(resolved[1][micro_shell_manifest::NAV_BUTTON].provider, None);
+    // The navigation rack no longer implements its contract, so nothing supplies it.
+    assert_eq!(resolved[1][micro_shell_manifest::NAVIGATION_RACK].provider, None);
 }
 
 /// The shell (eager), Settings (on demand) and Sample (eager) as the desktop links them, plus a

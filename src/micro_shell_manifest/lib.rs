@@ -37,7 +37,7 @@ pub use declarations::Shell;
 pub use declarations::ShellArrangement;
 pub use declarations::ShellFrame;
 pub use declarations::ShellHome;
-pub use declarations::ShellNavButton;
+pub use declarations::ShellNavigationRack;
 pub use declarations::ShellPanels;
 mod theme;
 pub use theme::GET_THEME;
@@ -64,13 +64,14 @@ pub const CONFIG_KEY: &str = "main";
 pub const FRAME: &str = "frame";
 /// The home panel's presentation, which the shell contributes to its own panels collection.
 pub const HOME: &str = "home";
-/// The sidebar/back button presentation (ADR 032 §5). A micro requires it under a binding of
-/// this same name and mounts it in its own app bar through a presentation slot. It shows
-/// **back** while the current context can go back and **open the sidebar** otherwise, and acts
-/// on the shell's state.
-pub const NAV_BUTTON: &str = "nav-button";
-/// The contract NSID a requirement of [`NAV_BUTTON`] names.
-pub const NAV_BUTTON_CONTRACT: &str = "org.example.dayframe.shell.navButton";
+/// The navigation rack presentation (ADR 058, amending ADR 032 §5). A micro requires it under a
+/// binding of this same name and mounts it through a presentation slot wherever it wants the
+/// rack. It is a group of separate buttons (sidebar toggle, back, forward), which ones depending
+/// on the width class, the position it is mounted in and whether the sidebar is shown, and it
+/// acts on the shell's state.
+pub const NAVIGATION_RACK: &str = "navigation-rack";
+/// The contract NSID a requirement of [`NAVIGATION_RACK`] names.
+pub const NAVIGATION_RACK_CONTRACT: &str = "org.example.dayframe.shell.navigationRack";
 
 /// Calls, each published under its own name; a requirement binds one under the same name.
 /// [`NAVIGATE`]: [`NavigateRequest`] in, CBOR `()` out.
@@ -194,13 +195,13 @@ impl Default for ShellConfig {
 }
 
 /// The shell's package declaration: it declares the panels collection, publishes its frame, its
-/// home panel, its sidebar/back button, its navigation and theme calls, contributes the home panel to
+/// home panel, its navigation rack, its navigation and theme calls, contributes the home panel to
 /// its own collection, and registers the frame as a shell root.
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
         .view::<ShellFrame>()
         .view::<ShellHome>()
-        .view::<ShellNavButton>()
+        .view::<ShellNavigationRack>()
         .method(NAVIGATE, NAVIGATE_CONTRACT)
         .method(BACK, BACK_CONTRACT)
         .method(FORWARD, FORWARD_CONTRACT)

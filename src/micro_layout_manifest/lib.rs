@@ -48,10 +48,10 @@ pub const PANELS_BINDING: &str = "panels";
 /// (the layout's own `layout.panels` collection, bound as [`PANELS_BINDING`], is the panels it
 /// arranges inside itself).
 pub const SHELL_PANELS_BINDING: &str = "shell-panels";
-/// The local binding name under which the layout requires the shell's sidebar/back button for
+/// The local binding name under which the layout requires the shell's navigation rack for
 /// its app bar. The binding is a local name: the catalog resolves the requirement by the
-/// contract it names ([`micro_shell_manifest::NAV_BUTTON_CONTRACT`]) to the micro serving it.
-pub const SHELL_NAV_BUTTON: &str = micro_shell_manifest::NAV_BUTTON;
+/// contract it names ([`micro_shell_manifest::NAVIGATION_RACK_CONTRACT`]) to the micro serving it.
+pub const SHELL_NAVIGATION_RACK: &str = micro_shell_manifest::NAVIGATION_RACK;
 /// Schema NSIDs of [`PANELS`] keys (the contributor's registration id, text) and values
 /// ([`Panel`]), and of its selector (the whole collection).
 pub const PANEL_KEY_SCHEMA: &str = "org.example.dayframe.layout.panelKey";
@@ -122,14 +122,14 @@ impl DeclaredCollection for LayoutPanels {
 }
 
 /// The Layout micro's package declaration: it declares the panels collection, publishes its
-/// view, requires the shell's sidebar/back button, and contributes the view as a list panel the
+/// view, requires the shell's navigation rack, and contributes the view as a list panel the
 /// shell's home offers.
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
         .view::<LayoutView>()
         .requires(
-            SHELL_NAV_BUTTON,
-            micro_shell_manifest::NAV_BUTTON_CONTRACT,
+            SHELL_NAVIGATION_RACK,
+            micro_shell_manifest::NAVIGATION_RACK_CONTRACT,
             Necessity::Required,
         )
         .config::<LayoutArrangement>()

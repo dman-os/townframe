@@ -46,17 +46,17 @@ use clay_mdk::hooks::Stylesheet;
 use dioxus::prelude::*;
 use micro_shell_manifest::ThemeSheet;
 use micro_theme_lab_manifest::SHELL_GET_THEME;
-use micro_theme_lab_manifest::SHELL_NAV_BUTTON;
+use micro_theme_lab_manifest::SHELL_NAVIGATION_RACK;
 use micro_theme_lab_manifest::SHELL_SET_THEME;
 use micro_theme_lab_manifest::ThemeLabView;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-/// What the view asks of the host: the shell's sidebar/back button, and the theme calls, which a
+/// What the view asks of the host: the shell's navigation rack, and the theme calls, which a
 /// view may await (`Capability::call` runs them on a task of the incarnation).
 #[derive(Clone)]
 struct Host {
-    nav_button: Capability,
+    navigation_rack: Capability,
     get_theme: Capability,
     set_theme: Capability,
 }
@@ -69,7 +69,7 @@ async fn activate(context: Context) -> Result<(), Error> {
             .clone()
     };
     let host = Host {
-        nav_button: required(SHELL_NAV_BUTTON),
+        navigation_rack: required(SHELL_NAVIGATION_RACK),
         get_theme: required(SHELL_GET_THEME),
         set_theme: required(SHELL_SET_THEME),
     };
@@ -112,7 +112,7 @@ fn view(host: Host) -> Element {
     let mut status = use_signal(|| Status::Idle);
     let mut applying = use_signal(|| false);
 
-    let leading = rsx! { PresentationSlot { reference: host.nav_button.clone() } };
+    let leading = rsx! { PresentationSlot { reference: host.navigation_rack.clone() } };
     let applied_css = match &*applied.read() {
         Some(Ok(sheet)) => sheet.css.clone(),
         Some(Err(error)) => {
@@ -233,7 +233,7 @@ fn view(host: Host) -> Element {
     )
 }
 
-/// The lab's frame: the app bar with `leading` (the shell's sidebar/back button), then `body`.
+/// The lab's frame: the app bar with `leading` (the shell's navigation rack), then `body`.
 /// Every state of the view goes through it, so none leaves the panel without a way out.
 fn page(leading: Element, body: Element) -> Element {
     rsx! {

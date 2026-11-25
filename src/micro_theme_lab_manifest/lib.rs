@@ -1,6 +1,6 @@
 //! Engine-neutral declarations of the theme lab micro: the end user's theme editor. It publishes
 //! one presentation, contributes it as a list panel the shell's home offers, and requires three
-//! of the shell's publications: the sidebar/back button for its app bar, and the `get-theme` and
+//! of the shell's publications: the navigation rack for its app bar, and the `get-theme` and
 //! `set-theme` calls it edits the host's theme through. It holds no configuration of its own:
 //! the applied theme is stored by the shell (`micro_shell_manifest::ShellTheme`). The wasm guest
 //! reads only the constants; the composition root reads `manifest()`.
@@ -25,7 +25,7 @@ pub const PANELS_BINDING: &str = "panels";
 /// The local binding names under which it requires what it uses of the shell. They are local
 /// names: the catalog resolves each requirement by the contract it names to the micro serving
 /// it.
-pub const SHELL_NAV_BUTTON: &str = micro_shell_manifest::NAV_BUTTON;
+pub const SHELL_NAVIGATION_RACK: &str = micro_shell_manifest::NAVIGATION_RACK;
 pub const SHELL_GET_THEME: &str = micro_shell_manifest::GET_THEME;
 pub const SHELL_SET_THEME: &str = micro_shell_manifest::SET_THEME;
 
@@ -51,8 +51,8 @@ pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
         .view::<ThemeLabView>()
         .requires(
-            SHELL_NAV_BUTTON,
-            micro_shell_manifest::NAV_BUTTON_CONTRACT,
+            SHELL_NAVIGATION_RACK,
+            micro_shell_manifest::NAVIGATION_RACK_CONTRACT,
             Necessity::Required,
         )
         .requires(
@@ -108,9 +108,9 @@ mod tests {
                     .endpoints
                     .values()
                     .any(|endpoint| match endpoint {
-                        clay_mdk::Endpoint::Method { nsid } => *nsid == request.contract,
+                        clay_mdk::Endpoint::Method { nsid } => nsid == request.contract.nsid(),
                         clay_mdk::Endpoint::View { implements } => {
-                            implements.as_ref() == Some(&request.contract)
+                            implements.as_ref() == Some(request.contract.nsid())
                         }
                         _ => false,
                     }),

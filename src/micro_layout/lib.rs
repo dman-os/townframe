@@ -32,10 +32,10 @@ use micro_layout_manifest::LayoutConfig;
 use micro_layout_manifest::LayoutPanels;
 use micro_layout_manifest::LayoutView;
 use micro_layout_manifest::Panel;
-use micro_layout_manifest::SHELL_NAV_BUTTON;
+use micro_layout_manifest::SHELL_NAVIGATION_RACK;
 
 /// Bind the panels collection and the arrangement facet, and publish the view over them. The
-/// shell's sidebar/back button is required (the view mounts it in its app bar), so the layout can
+/// shell's navigation rack is required (the view mounts it in its app bar), so the layout can
 /// be left on a compact host.
 async fn activate(context: Context) -> Result<(), Error> {
     let panels: Collection<String, Panel> = context
@@ -44,12 +44,12 @@ async fn activate(context: Context) -> Result<(), Error> {
     let config = context
         .config::<LayoutArrangement>()?
         .expect("manifest declares the layout configuration");
-    let nav_button = context
-        .require(SHELL_NAV_BUTTON)
+    let navigation_rack = context
+        .require(SHELL_NAVIGATION_RACK)
         .expect("a required binding is always resolved")
         .clone();
     context
-        .publish::<LayoutView>(move || view(panels.clone(), config.clone(), nav_button.clone()))?;
+        .publish::<LayoutView>(move || view(panels.clone(), config.clone(), navigation_rack.clone()))?;
     Ok(())
 }
 
@@ -64,18 +64,18 @@ const STYLES: &str = include_str!("styles.css");
 fn view(
     panels: Collection<String, Panel>,
     config: Facet<LayoutConfig>,
-    nav_button: Capability,
+    navigation_rack: Capability,
 ) -> Element {
     let rows = use_rows(&panels);
     let snapshot = use_facet(&config);
     let mut failure = use_signal(|| None::<String>);
     // Every state is the body of one frame (see `framed`). `Loading` is also what a released or
     // revoked document watch reads as, so it must keep the frame's app bar (the shell's
-    // sidebar/back button): without it a compact host has no way out of the panel.
+    // navigation rack): without it a compact host has no way out of the panel.
     let arrangement = match snapshot.state {
         FacetState::Loading => {
             return framed(
-                rsx! { PresentationSlot { reference: nav_button } },
+                rsx! { PresentationSlot { reference: navigation_rack } },
                 rsx! { p { role: "status", "Loading layout…" } },
             );
         }
@@ -84,7 +84,7 @@ fn view(
         FacetState::Present(arrangement) => arrangement,
     };
     framed(
-        rsx! { PresentationSlot { reference: nav_button } },
+        rsx! { PresentationSlot { reference: navigation_rack } },
         rsx! {
             div { "data-part": "toggles", role: "toolbar", "aria-label": "Panels",
                 for row in rows.iter() {
@@ -153,7 +153,7 @@ fn view(
     )
 }
 
-/// The layout's frame: the app bar with `leading` (the shell's sidebar/back button), then `body`.
+/// The layout's frame: the app bar with `leading` (the shell's navigation rack), then `body`.
 /// Every state of the view goes through it, so no state leaves the panel without a way out.
 fn framed(leading: Element, body: Element) -> Element {
     rsx! {

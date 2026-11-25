@@ -13,8 +13,8 @@ endpoints:
   view:
     $type: "org.example.clay.micro.manifest#viewEndpoint"
 requires:
-  - binding: nav-button
-    contract: org.example.dayframe.shell.navButton
+  - binding: navigation-rack
+    contract: org.example.dayframe.shell.navigationRack
   - binding: get-theme
     contract: org.example.dayframe.shell.getTheme
   - binding: set-theme
