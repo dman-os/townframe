@@ -97,7 +97,7 @@ People and agents name things the way they already know them, never by internal 
 - **Sessions:** `current` is the session being recorded in this worktree right now, and `last` is the most recently ended one. Any session can also be named by its short id. If `current` is ambiguous (two agents running in one worktree), the command fails and lists the candidates with their short ids.
 - **Turns** within a session: `<session>:20-45`.
 
-Things intxt creates have **short ids, as in jj**. Each object has a stable random id, rendered in an alphabet that can't be mistaken for a git hash. A short id is the shortest prefix that is unique among what is currently visible, and is always printed with the rest of the id dimmed. The same scheme serves dpaths, so it lives in a shared crate (`short_ids`). Petnames are an open question (3 below).
+Things intxt creates have **short ids, as in jj**. Each object has a stable random id, rendered in an alphabet that can't be mistaken for a git hash. A short id is the shortest prefix that is unique among what is currently visible, and is always printed with the rest of the id dimmed. The same scheme serves dpaths, so it lives in a shared crate (`short_ids`). Participants are named by usernames (open question 3, settled by D72).
 
 ## Unstable commands
 
@@ -203,7 +203,7 @@ Reading order is no longer only a choice of sort: FDR 010's guides give an autho
 
 1. ~~**Which sessions a branch brings**~~ Settled 2026-11-12 (ledger D61): the sessions whose observed ops produced content in the branch's commits.
 2. **Addressing a thread** to a participant: a mention in the body, or an assignment datum (ADR 041 reserves "whose turn a thread is waiting on")?
-3. **Petnames:** for participants (`comment list --for dman-os`), for intxts instead of short ids, or both? The operator floated `day x intxt dman-os`.
+3. ~~**Petnames**~~ Settled 2026-11-19 (ledger D72): participants have **usernames**, not petnames (`comment list --for dman-os`). A username is bound within one intxt and reuses the name the participant's higher-level identity carries. Intxts keep short ids.
 4. **Carving by turns:** when `--from … --turns` takes part of a session, does the new intxt reference the whole session document, or does that need a finer document layout?
 5. **The noun:** is it "item", or another word?
 6. **The capture keep ref:** `refs/intxt/keep/*` shows in `git log --all`. Does an alternates object store, which would hide it, come before or after the alpha?
