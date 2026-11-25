@@ -40,8 +40,11 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
-    let cargo = std::env::var_os("CARGO").expect("cargo sets it for a build script");
-    let status = Command::new(cargo)
+    // `cargo` from `PATH`, not `$CARGO`: cargo sets `$CARGO` to the toolchain's own binary, which
+    // would bypass the mbx shim the dev shell puts first on `PATH`, and with it the managed
+    // target of the guest workspace (the nested build would neither find it when it has been
+    // pruned nor share the machine-wide cache).
+    let status = Command::new("cargo")
         .args(["build", "--locked", "--manifest-path"])
         .arg(&manifest)
         .args(["-p", GUEST, "--target", "wasm32-wasip3", "--release"])
