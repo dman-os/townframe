@@ -89,6 +89,16 @@ decision is made or a finding turns up. Findings go here, not only in chat.
   upstream. This week has no bandwidth to reach Keyline.
 - 2026-11-17: The lane owns its stack. Pushing needs no permission. No attribution trailers.
 
+- 2026-11-17: **Verification split approved:**
+  - Quint + TLC full-graph conformance for each interacting machine (Apalache only where
+    symbolic depth is needed);
+  - Kani for small self-contained pieces;
+  - proptest for APIs;
+  - a bespoke DST simulator for liveness;
+  - shared test tooling in a new dev-only crate `test_utils_rs`.
+
+  The first machine is `WatermarkMachine`, done with both Quint+TLC and Kani to compare them.
+
 ## Phase 0 — what has to change
 
 ### Keyline: what it changes for us
@@ -573,13 +583,157 @@ need:
 5. **CI placement:** quint goes in the Lint job, as #117 does. proptest and DST seeds run under
    nextest on CI or mothership, never on the laptop.
 
-**Dependency:** this needs #117's `formal-tools.nix` and the `quint-connect` pin. Either wait for
-#117 or carry those two pieces in this stack, coordinated with #117's owner.
+**Dependency, resolved 2026-11-17:** #117 has no owner and is blocked on the operator's
+review. The operator said to split out what we need. **#167** carries `formal-tools.nix` (as of
+`b3b614d3`), its devshell and package wiring, and the `quint-connect` pin, on top of #165.
+`nix eval .#packages.x86_64-linux.quint` gives `quint-0.33.0`, and the version assert passes.
+#117 will conflict trivially on those hunks when it rebases. The stack is tracked on GitHub
+(`gh stack link 164 165 167`); local `gh stack` tracking only knows layers 01 and 02.
+
+**Testing strategy (operator, 2026-11-17).** Streamline testing across the repo, with **one
+shared crate** that supports four approaches:
+
+| Approach | For | Existing art |
+|---|---|---|
+| End-to-end | whole features | crate-local `e2e` modules; `big_repo/test2/harness` (converge, topo, heads, dump, fixtures); `big_sync/test/stress.rs`; `big_ndk_testing` |
+| Formal verification | state machines and small self-contained pieces | quint + quint-connect (#117 pattern, now #167) |
+| Property ("prop") testing | APIs | proptest model tests against an oracle (`big_cabinet`, `big_blobs`, `clay_*`); `src/proptest-regressions/` |
+| Deterministic simulation (DST) | liveness, convergence under faults | none yet |
+
+Today the support code is scattered across per-crate harnesses plus `utils_rs::table_tests!`.
+`src/test_fixtures/` holds a single image and is not a crate. A shared crate should hold:
+- the quint-connect driver scaffolding, including the coverage assertion;
+- proptest oracle and strategy helpers, and the regression-path convention;
+- the DST simulator: seeded RNG, virtual clock, simulated transport with faults;
+- convergence assertions.
+
+Name and scope are to be decided with the operator. Mind symbol proliferation.
+
+**Liveness: can we model it?** Partly.
+- quint has temporal operators (`always`, `eventually`, fairness), and Apalache can check
+  temporal properties over bounded executions. But #117 needed about 7.5 min for *safety* at
+  depth 3, and depth 4 didn't fit.
+- So liveness in quint is realistic only for tiny, self-contained machines, such as
+  `WatermarkMachine` with two streams and three jobs.
+- Proposal:
+  - **quint for safety** invariants per machine;
+  - **liveness in DST** as "eventually converges / every waiter resolves within N simulated
+    steps under fair scheduling and healed partitions";
+  - quint temporal checks only where a model stays tiny.
+
+**DST options (survey, 2026-11-17):**
+- **Our sans-IO machines (big_automata, a sans-IO `big_repo::runtime`) need no framework.** A
+  hand-written simulator in the FoundationDB / TigerBeetle VOPR style drives the machines
+  directly, owns time, RNG and message delivery, and injects faults. samod's
+  `samod-test-harness` is the reference. This is the cleanest fit, and it works single-threaded
+  (browser, wasmCloud).
+- **For tokio-shaped code we keep** (runtime2 until it's replaced, node-level e2e):
+  - **madsim**, a drop-in tokio replacement that also intercepts libc time and randomness
+    (used by RisingWave);
+  - **turmoil**, which runs on tokio and simulates many hosts in one thread with a simulated
+    network and filesystem (no disk fault injection; links are pairwise);
+  - **shuttle / loom** are interleaving explorers for in-process concurrency, not whole-system
+    DST; `loom` is already in the workspace.
+
+  The common guidance is madsim or turmoil for real tokio code, and a bespoke simulator for
+  sans-IO designs. Sources: <https://s2.dev/blog/dst>,
+  <https://notes.eatonphil.com/2024-08-20-deterministic-simulation-testing.html>,
+  <https://refpath.github.io/nuif/research/items/deterministic-simulation-testing.html>.
+- **Rewind VM** (fzakaria, rewindvm.dev, MIT; posts from 10-03, 10-24 and 11-05) is **not
+  Nix-only**. It runs "a Nix build, a test suite or any Linux command" in a KVM guest with a
+  patched kernel. The monitor owns time, interrupts and RNG, so every run is a function of its
+  inputs (seed included).
+  - It can replay failures, scrub through them, fork them under different interleavings
+    (`rewind check` perturbs the schedule), and export replayable `.rwd` runs.
+  - Limits: **one vCPU** (true-parallel races are out of reach); no preemption between
+    syscalls; **loopback-only network**; **x86_64 Linux with KVM only**, so not mothership
+    (aarch64); replay only on the same CPU vendor.
+  - Fit: a black-box tool for catching and replaying flaky *existing* tests (big_repo `test2`,
+    big_node stress seeds like S1) on an x86 CI runner with KVM. It complements, not replaces,
+    in-process DST of our machines. Worth a trial on S1.
+
+**Tool choice, Quint vs the alternatives (survey, 2026-11-17).** The operator asked why Quint
+has mindshare and whether Aristotle and the others are better.
+
+| Tool | What it verifies | Tied to our Rust how | Fit for us |
+|---|---|---|---|
+| **Quint** (+ TLC / Apalache) | Protocol specs with TLA+ semantics in typed, programmable syntax. TLC checks safety exhaustively, and liveness under stated fairness; Apalache does bounded symbolic checks. | quint-connect trace replay, or **full-graph conformance**: export TLC's reachable state graph, and a Rust test checks every (state, event) pair against `step` | **Interacting state machines**: big_automata, the doc runtime. The mindshare comes from TLA+ power with a programmer-friendly syntax plus a real Rust link (Informal Systems / Malachite). |
+| **Kani** (AWS) | Bounded model checking of the *actual Rust code*: no panics or overflows, user assertions, contracts | None needed, it checks the code itself | **Small self-contained pieces**: `WatermarkMachine` and `Scheduler` over bounded event sequences, fingerprint and id encodings. No spec drift is possible. Bounded; async and big collections get expensive. Used in production CI on Rust std. |
+| **Verus** | Full functional-correctness proofs in a Rust dialect | Proofs live beside the code (own toolchain) | Highest annotation cost. Only if a component needs proofs, not bounded checks. |
+| **Aristotle** (Harmonic) | An *AI prover* for Lean 4. Also checks C and Verilog per Harmonic. | A Rust→Lean extraction pipeline (Charon/Aeneas or hax) whose proofs the Lean kernel re-checks | Functional correctness of pure algorithms, e.g. crypto (arXiv 2605.30106). Doesn't fit concurrent or interacting machines. The spec is still ours to write. Commercial API. **Not for this lane now.** |
+| Stateright | Explicit-state model checking of Rust actor code | Runs the Rust directly | No commits since 2025-07; documented false negatives in "eventually" over cycles. **Avoid.** |
+| P (AWS) | Communicating state machines, plus PObserve on production logs | — | Needs .NET and Java, no Rust integration. |
+
+**Strongest evidence: flotilla's research issue** (flotilla-org/flotilla#3109, 2026-10-12). It
+asks our exact question for Rust lifecycle machines. Their decision:
+- **Quint specs, with TLC as the exhaustive CI gate**, Apalache for deeper bounded checks, and a
+  Rust simulator for fast sampling.
+- **Full-graph conformance** as the main link: "A Rust test checks every (state, event) pair, so
+  `step` accepts exactly the transitions the spec allows". quint-connect trace replay is used
+  only for code too rich for the full graph.
+- Spike numbers:
+  - TLC: 9,377 states in 7.2 s, mostly JVM start-up.
+  - Full-graph conformance: milliseconds, and it **caught both planted bugs**.
+  - Trace replay: caught only one of the two.
+- Gotcha: `quint run --seed` defaults to a single sample and can report "ok" falsely, so always
+  pass `--max-samples`.
+
+**Implication for #117's pattern:** #117 uses Apalache to depth 3 (about 7.5 min) plus trace
+replay. For small machines, **TLC with full-graph conformance is cheaper and stronger**. Proposal:
+- Quint + TLC full-graph conformance for each big_automata machine;
+- Apalache only where a model needs symbolic depth;
+- Kani harnesses on the pure pieces;
+- proptest for APIs;
+- the bespoke DST simulator for liveness.
+
+**TLC is not a quint backend:** `quint verify` drives Apalache only. TLC runs on the TLA+ from
+`quint compile --target=tlaplus` (<https://quint-lang.org/docs/model-checkers>), which is the
+route flotilla's spike took, plus a converter from TLC's dumped state graph. So `formal-tools`
+must also provision `tla2tools.jar` (TLC). The JSON-limit fix to Apalache 0.62.4 also unblocked
+`compile --target=tlaplus` (per #117's comments).
+
+**`WatermarkMachine` read for modelling (2026-11-17; `src/big_automata/watermark.rs`).**
+Found before writing any spec:
+- **W-1 (bug):** `add_job` opens every slot with `ready: true`. `drain()` takes the leading run
+  of ready slots as the watermark, so unsettled jobs count as done, and the watermark passes
+  unacked work. That violates the cursor rule (advance only on ack or obsolescence), and
+  `settle_*` setting `ready = true` becomes a no-op. Expected `ready: false`.
+- **W-2 (bug):** `add_job` skips when `cursor <= last_emitted.unwrap_or_default()`. If
+  `Cursor::default()` is a real cursor (0), a fresh stream's first job at cursor 0 is dropped.
+  Compare against `Option` instead.
+- **W-3 (semantics):** `add_job` lets different streams carry *different* lanes at the same
+  cursor and key, but `settle_on_cursor(key, cursor, lane)` removes the whole waiter and panics
+  if any stream's lane differs. Either mixed lanes per cursor are illegal (assert in `add_job`)
+  or `settle_on_cursor` should settle only that lane's streams, like `settle_all_on_lane`.
+- **W-4 (gap):** obsolescence, where a newer cursor for the same key supersedes an older
+  pending one, is not expressed here. Is it the caller's job (`CursorSyncMachine`), or should
+  `add_job` on a newer cursor settle the older waiter for that key?
+- **W-5:** `retire_stream` is `todo!()`. What happens to its waiters (drop that stream from
+  every waiter, remove empty waiters and jobs)?
+- **W-6 (tests):** `tests` holds two empty fns without `#[test]`.
+
+These go to the operator's file-by-file pass (FIXMEs in `watermark.rs`), not edited by this
+lane. The spec waits on W-3, W-4 and W-5.
+
+**DST at n0 (survey, 2026-11-17).** n0's `patchbay` (MIT/Apache-2.0) builds **Linux
+network-namespace emulations** (veth, nftables, tc netem) and runs real code in them. iroh's
+0.98 release used it as a NAT-traversal test matrix. It is **not deterministic**: "It does not
+virtualize per-node clocks or provide deterministic virtual time." It needs unprivileged user
+namespaces, `tc` and `nft`. **Fit:** transport and holepunching e2e for `big_node/peers*` and
+relays in CI. Not a DST substitute.
+
+**Shared test crate placement (operator offered `utils_rs` or a new `test_utils_rs`).**
+Recommendation: **`test_utils_rs`**, used only as a dev-dependency.
+- `utils_rs` is a production dependency of wasm guests and declares target contracts.
+- Test tooling (proptest, quint-connect, the DST simulator, convergence checks) must stay out of
+  the production and guest closure.
+- `utils_rs::table_tests!` can stay where it is, or move later.
 
 **Open:**
-- When does #117 land, and who owns it now?
-- Do we want liveness (temporal) properties in quint, or leave liveness to DST?
-- Which machine does the operator want modelled first? The suggestion is `WatermarkMachine`.
+- Name and scope of the shared test crate.
+- Which machine to model first. The suggestion is `WatermarkMachine`.
+- Whether to trial Rewind on S1, which needs an x86 KVM host: the laptop, or a CI runner with
+  `/dev/kvm`.
 
 ### W5 — Performance
 

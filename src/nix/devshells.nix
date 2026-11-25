@@ -5,6 +5,7 @@ _: {
     { pkgs, inputs', ... }:
     let
       tools = import ./toolchains.nix { inherit pkgs; };
+      formalTools = import ./formal-tools.nix { inherit pkgs; };
       mbx = inputs'.mr-boxington.packages.mbx;
       inherit (tools) rustRust rustAndroid rustFull;
 
@@ -196,6 +197,7 @@ _: {
         cargo-udeps
         cargo-nextest
         cargo-machete
+        formalTools
       ];
 
       kotliLintTools = with pkgs; [

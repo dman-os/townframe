@@ -313,6 +313,7 @@ qrcode = { version = "0.14.1", default-features = false }
 # testing
 insta = { version =  "1.44", features = ["yaml", "filters"] }
 proptest = "1.12"
+quint-connect = "=0.1.2"
 tempfile = "3"
 loom = "0.7.2"
 
