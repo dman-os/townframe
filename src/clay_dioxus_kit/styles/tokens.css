@@ -31,6 +31,8 @@
     --ct-alert-radius: var(--ct-dimension-radius-md);
     --ct-button-radius: var(--ct-dimension-radius-md);
     --ct-chip-radius: var(--ct-dimension-radius-pill);
+    /* Status chips are information, not controls: a small rounded rectangle, not a pill (ADR 057 section 5). */
+    --ct-chip-status-radius: var(--ct-dimension-radius-sm);
     --ct-sheet-radius: var(--ct-dimension-radius-xl);
     --ct-drawer-radius: 0;
     --ct-list-row-radius: var(--ct-dimension-radius-md);

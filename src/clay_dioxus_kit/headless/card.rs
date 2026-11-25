@@ -1,7 +1,7 @@
 //! A bounded group of related content (`ct-card`).
 //!
 //! Parts: `header`, `content`, `footer`, each optional and in that order. Axis: `data-variant`
-//! (`tonal`, `sunken`, `plain`, `outlined`) and `data-status` (`info`, `success`, `warning`, `danger`, the
+//! (`tonal`, `sunken`, `plain`, `outlined`; `sunken` sits inside a surface, never on the canvas) and `data-status` (`info`, `success`, `warning`, `danger`, the
 //! same axis and colour roles as `Alert`; absent is neutral). A card has no role of its own: it is a visual grouping, and a
 //! caller who wants it announced names it with a heading inside the header.
 use super::Status;
@@ -14,7 +14,8 @@ pub enum CardVariant {
     /// The surface one step above its background.
     #[default]
     Tonal,
-    /// The sunken surface, for a well that holds other content.
+    /// The sunken surface, for a well that holds other content. It sits inside a surface (a tonal
+    /// card, a panel), one step below it, and never directly on the canvas.
     Sunken,
     /// No fill: it only groups and pads.
     Plain,

@@ -178,15 +178,15 @@
       },
       "3": {
         "light": "#FFDAD6",
-        "dark": "#93000A"
+        "dark": "#3A1D1B"
       },
       "4": {
         "light": "#F7BDB7",
-        "dark": "#A62F29"
+        "dark": "#4A2623"
       },
       "5": {
         "light": "#EDA199",
-        "dark": "#B94C43"
+        "dark": "#5C302C"
       },
       "6": {
         "light": "#E2847B",
@@ -232,15 +232,15 @@
       },
       "3": {
         "light": "#D3EFDB",
-        "dark": "#0F4A27"
+        "dark": "#17301F"
       },
       "4": {
         "light": "#B6DBC0",
-        "dark": "#175B32"
+        "dark": "#1E3B28"
       },
       "5": {
         "light": "#99C7A5",
-        "dark": "#206C3D"
+        "dark": "#264832"
       },
       "6": {
         "light": "#7CB48B",
@@ -286,15 +286,15 @@
       },
       "3": {
         "light": "#FFE7BD",
-        "dark": "#5A3A00"
+        "dark": "#372C14"
       },
       "4": {
         "light": "#FDDDA8",
-        "dark": "#724B03"
+        "dark": "#45371B"
       },
       "5": {
         "light": "#FBD392",
-        "dark": "#8A5C08"
+        "dark": "#554324"
       },
       "6": {
         "light": "#F9C87C",

@@ -10,7 +10,7 @@ use clay_dioxus_kit::CardVariant;
 use clay_dioxus_kit::Status;
 use dioxus::prelude::*;
 
-/// `Card`: the four variants side by side with all three parts, and a card with only its content.
+/// `Card`: the four variants (the sunken one inside a tonal card) with all three parts, and a card with only its content.
 #[component]
 pub fn CardSpecimens() -> Element {
     rsx! {
@@ -21,7 +21,6 @@ pub fn CardSpecimens() -> Element {
             div { class: "grid grid-cols-[repeat(auto-fit,minmax(16rem,1fr))] gap-4",
                 for (variant , name) in [
                     (CardVariant::Tonal, "Tonal"),
-                    (CardVariant::Sunken, "Sunken"),
                     (CardVariant::Plain, "Plain"),
                     (CardVariant::Outlined, "Outlined"),
                 ] {
@@ -31,6 +30,14 @@ pub fn CardSpecimens() -> Element {
                         CardFooter {
                             Button { variant: ButtonVariant::Ghost, onclick: |()| {}, "Dismiss" }
                             Button { onclick: |()| {}, "Open" }
+                        }
+                    }
+                }
+                Card { key: "sunken", variant: CardVariant::Tonal,
+                    CardHeader { "Sunken, inside a tonal card" }
+                    CardContent {
+                        Card { variant: CardVariant::Sunken,
+                            CardContent { "A sunken card is a well one step below the surface it sits in; it never sits on the canvas." }
                         }
                     }
                 }
@@ -62,7 +69,7 @@ pub fn CardSpecimens() -> Element {
                 Card {
                     CardContent { "Only content." }
                 }
-                Card { variant: CardVariant::Sunken,
+                Card { variant: CardVariant::Outlined,
                     CardHeader { "Header and content" }
                     CardContent { "No footer." }
                 }
