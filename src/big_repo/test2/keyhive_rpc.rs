@@ -326,3 +326,35 @@ async fn wait_for_local_agent_access(
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
+
+/// A drawer invite is a group-membership grant (`add_member_to_group`) on a
+/// group that already governs documents, issued while the reader is connected.
+/// The reader must observe access to the group's documents through the
+/// notification path alone, with no reconnect and no manual keyhive sync.
+#[tokio::test(flavor = "multi_thread")]
+async fn group_member_grant_reaches_connected_peer_without_manual_sync() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(226, 227, "Source", "Phone").await?;
+
+    let group = pair.left().repo.create_group_with_parents(vec![]).await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "group-grant"))
+        .map_err(|err| crate::ferr!("failed creating group doc: {err:?}"))?;
+    let doc = pair
+        .left()
+        .repo
+        .create_doc_with_parents(initial, vec![group.clone().into()])
+        .await?;
+    let doc_id = doc.document_id();
+
+    let phone = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    pair.left()
+        .repo
+        .add_member_to_group(phone, &group, keyhive_core::access::Access::Read)
+        .await?;
+
+    wait_for_local_agent_access(&pair.right().repo, doc_id, true, "Phone").await?;
+    drop(doc);
+    Ok(())
+}
