@@ -212,6 +212,13 @@ The same mount renders to HTML with the same generated tag and a declarative sha
   constructor finds `this.shadowRoot` and adopts into it instead of calling `attachShadow` (which would throw), and
   replaces the `<style>` elements with the shared adopted sheets once defined. Without JavaScript the declarative root
   alone renders correctly, which is what a read-only viewer needs.
+- **Hydration-safe emission.** intxt's viewer is moving to Dioxus fullstack with hydration. The fork's hydration is
+  marker-less: it walks the vnode template and descends into an element only where the template element has children
+  (`packages/web/src/hydration/walk.rs`, `emit_element`). The declarative root is therefore a server-only serialisation
+  step on the `<ct-...>` element: in the vnode tree the mount element is childless, the `<template shadowrootmode>`
+  is never a `template` vnode child, and the client never re-sets the root with `innerHTML`, so the walk neither sees
+  nor disturbs the root. The DSD layer carries a hydration test: render a page with a ct mount carrying DSD, hydrate it,
+  and assert there is no mismatch and the shadow root is the same one that was server-rendered.
 - **A client island replaces the root's content; it does not hydrate.** intxt's viewer will need this for very large
   pull requests: the server-rendered `<ct-...>` element with its declarative root is the first paint, and on the client a
   live mount takes the same element over and replaces the root's content with its own render (no Dioxus hydration
