@@ -59,6 +59,8 @@ This document contains the help content for the `day` command-line program.
 * [`day exec intxt record install`↴](#day-exec-intxt-record-install)
 * [`day exec intxt record install claude-code`↴](#day-exec-intxt-record-install-claude-code)
 * [`day exec intxt record hook`↴](#day-exec-intxt-record-hook)
+* [`day exec intxt record pause`↴](#day-exec-intxt-record-pause)
+* [`day exec intxt record resume`↴](#day-exec-intxt-record-resume)
 * [`day exec intxt record acp`↴](#day-exec-intxt-record-acp)
 * [`day exec intxt record git-rewrite`↴](#day-exec-intxt-record-git-rewrite)
 * [`day completions`↴](#day-completions)
@@ -881,7 +883,7 @@ Examples:
 
 Report how intxt is set up on this machine and in this worktree
 
-Checks, in order: `day` and `intxt` on the PATH, the node and its server, intxt's cartridge on the node, the intxts the node remembers, the Claude Code hooks that record sessions, git's `post-rewrite` hook, and the intxt this worktree is on. Each prints one line, `ok`, `warn` or `fail`, with the command that fixes anything not ok. It changes nothing and does not start the node: with no server running, the checks that read the node are skipped (`day node start --bg` runs them). Exits 1 when a check fails.
+Checks, in order: `day` and `intxt` on the PATH, the node and its server, intxt's cartridge on the node, the intxts the node remembers, whether recording is paused (`record pause`), the Claude Code hooks that record sessions, git's `post-rewrite` hook, and the intxt this worktree is on. Each prints one line, `ok`, `warn` or `fail`, with the command that fixes anything not ok. It changes nothing and does not start the node: with no server running, the checks that read the node are skipped (`day node start --bg` runs them). Exits 1 when a check fails.
 
 **Usage:** `day exec intxt doctor [OPTIONS]`
 
@@ -959,6 +961,8 @@ Recording moves raw data into the node's capture drawer. Nothing in it calls for
 
 * `install` — Write a harness's hook configuration
 * `hook` — Record one Claude Code hook invocation: the hook's JSON on stdin
+* `pause` — Stop recording: every capture hook (Claude Code's, git's) and `record acp` then does nothing
+* `resume` — Record again: remove the marker `record pause` wrote
 * `acp` — Record an ACP session: run the agent command, passing everything through
 * `git-rewrite` — Record the commits git's `post-rewrite` hook reports as replaced (stdin: `<old> <new>` per line) in this worktree's capture
 
@@ -1002,6 +1006,26 @@ Record one Claude Code hook invocation: the hook's JSON on stdin
 The command of the hooks `install claude-code` writes. Observes the session's transcript and worktrees, puts changed binary files in the node's blob store, and records everything in the node's capture drawer. It prints nothing unless it has something to report or `--verbose` is given, and then only to stderr; it never exits with status 2, which Claude Code feeds back to the model.
 
 **Usage:** `day exec intxt record hook`
+
+
+
+## `day exec intxt record pause`
+
+Stop recording: every capture hook (Claude Code's, git's) and `record acp` then does nothing
+
+Writes a marker in capture's state directory (`<node dir>/intxt/paused`). While it is there, each hook returns success at once, before it reads its input, reaches the node or starts a server, and an ACP session runs unrecorded. Sessions that run while paused are not caught up on resume. Pausing twice changes nothing; `intxt doctor` reports the state.
+
+**Usage:** `day exec intxt record pause`
+
+
+
+## `day exec intxt record resume`
+
+Record again: remove the marker `record pause` wrote
+
+Resuming a recording that is on changes nothing.
+
+**Usage:** `day exec intxt record resume`
 
 
 
