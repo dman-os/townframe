@@ -1082,3 +1082,49 @@ inside the transaction. This ties together:
 - hydration time;
 - the doc worker's live-object property, which is up for sacrifice (Decisions, 2026-11-17);
 - the transaction design.
+
+## 2026-11-26: service rework, cut A item from the operator via nodules
+- `service_core_rs/xrpc.rs` names nodule specifics in six consts: `NODULE_CAPABILITY_HEADER`,
+  `NODULE_CONFIG_DOC_HEADER`, `NODULE_CONFIG_CAPABILITY_HEADER`, `NODULE_DRAWER_CAPABILITY_HEADER`,
+  `NODULE_BLOBS_CAPABILITY_HEADER`, `NODULE_ACTOR_CAPABILITY_HEADER`. They carry the per-request
+  authority the nodule host hands a guest. Consumers are `big_ndk` (`cx.rs`) and `big_nodule`
+  (`wire.rs`, `egress.rs`, e2e). Catalog: `docs/scratch/protocol-headers-catalog.md` on
+  `stack/node-103-topology`.
+- Goal: generic service code stops naming nodules.
+- Shape (lead's proposal):
+  - a tiny contract crate, e.g. `nodule_wire`, that owns the header names together with a typed
+    `GuestAuthority` (encode to and decode from request metadata);
+  - `service_core_rs` keeps only a generic, protocol-agnostic way to carry named request
+    metadata;
+  - `big_ndk`'s guardrails allow the contract crate.
+
+  Header string values stay the same, so it's no wire change and belongs in cut A. Revisit
+  whether the cut B `protocol!` block can declare such metadata slots per protocol.
+
+## 2026-11-26: big_repo direction (operator)
+- **No key-value datum projection in big_repo.** If one ever happens, it lives in big_cabinet's
+  datum-set index. big_repo offers "commit these change bytes across N docs in one transaction";
+  the cabinet keeps any metadata it wants.
+- **All write-path findings** (big-repo-port-ledger §2: in-memory mutation before durability,
+  per-event transactions, the CGKA op event firing before it is durable, the sequential
+  persist loop) **must be resolved** by the new runtime.
+- **Read-time authorization is ours.** `subduction_keyhive/src/policy.rs` on `keyline-take-2`
+  says whether an author's write counts "is the materializer's decision, made at read time".
+  Subduction only checks the requestor holds at least Relay.
+- **Keyline storage.** Upstream ships only `MemoryKeyline`, which persists through keyhive's event
+  log and archives and replays them on load. Its design doc says relays want a materializing
+  database backend, so our SQL Keyline is the intended kind of backend.
+- **Checkpointing vs invitations.** keyhive #262 (a CGKA Add wraps an Invitation sealing root
+  secrets) may make most causal checkpoints unnecessary. Uncovered concurrent epochs may still
+  need one. Verify with a test during the port. If invitations suffice, remote content stops
+  hydrating without a handle (`reconcile_causal_coverage`, `doc_worker.rs:1508`).
+- **Memory before disk in subduction_keyhive** (ingest into in-memory keyhive, then persist;
+  recovery is sender retry plus startup full-projection reconciliation) is deliberate upstream.
+  Raise it once our SQL Keyline offers a persist-then-apply alternative.
+- **For big_cabinet:**
+  - explore clients holding the Automerge doc and sending change bytes; the node verifies,
+    encrypts and commits, and adds a dmeta-signature commit on top;
+  - stream unsigned keystroke changes to live watchers over ephemeral messages
+    (`subduction_ephemeral`), and sign and commit once on a debounce.
+- **dmeta signatures as map entries keyed by signer, instead of a list:** a cabinet decision.
+  Only needed if the cabinet wants hydration-free writes.
