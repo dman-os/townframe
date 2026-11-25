@@ -18,7 +18,10 @@ impl Core {
         doc: &DocId,
     ) -> Result<Option<WriteReceipt>, DrawersError> {
         let (_meta, docs_group, _sensitive) = self.groups(drawer).await?;
-        let listed = self.state.doc_entry(drawer, doc).await?.is_some();
+        let listed = self
+            .roster_entry(context, drawer, &doc_entry_key(doc))
+            .await?
+            .is_some();
         let granted = self.docs_group_level(&docs_group, doc).await?.is_some();
         if !listed && !granted {
             return Ok(None);
@@ -33,13 +36,15 @@ impl Core {
                     BTreeSet::from([doc_entry_key(doc)]),
                 )
                 .await?;
-            self.state.remove_doc(drawer, doc).await?;
             #[cfg(test)]
             self.crash_at(super::CrashPoint::RosterRemoved)?;
             receipt
         } else {
             self.roster_receipt(context, drawer).await?
         };
+        // The row goes with the datum, in the worker's settle, and the revoke below waits for
+        // it, so no row keeps listing a doc whose grant is already gone (ADR 019).
+        self.settle_roster(&receipt).await?;
         if granted {
             self.big_repo
                 .revoke_doc_access(doc.clone(), docs_group)

@@ -43,7 +43,7 @@ mod remove_doc;
 mod revoke;
 mod state;
 mod successor;
-mod sqlite {
+pub(crate) mod sqlite {
     include!("drawer/sqlite/gen.rs");
 }
 
@@ -191,9 +191,10 @@ pub(crate) struct Projection {
     pub(crate) commands: tokio::sync::mpsc::Sender<access::PolicyCommand>,
 }
 
-/// The projection rows a drawer doc's roster datums state.
+/// What a drawer doc's roster datums state that this service reads back itself: the child
+/// entries (discovery follows them) and the meta-doc references. The doc entries are not read
+/// back: the datum-set worker projects those into membership rows.
 struct RosterRows {
-    docs: BTreeMap<DocId, Access>,
     children: BTreeMap<DrawerId, Access>,
     meta_docs: BTreeMap<String, DrawerMetaDoc>,
 }
@@ -775,13 +776,12 @@ impl Core {
         .await
     }
 
-    /// Split a drawer doc's datums into the rows the projection stores: doc entries, child
-    /// entries (both only at access levels this build knows), and meta-doc references by kind.
+    /// Split a drawer doc's datums into child entries (only at access levels this build knows)
+    /// and meta-doc references by kind.
     fn read_roster(
         drawer_id: &DrawerId,
         datums: BTreeMap<DatumKey, big_cabinet_core::doc::DatumRead>,
     ) -> Result<RosterRows, DrawersError> {
-        let mut docs = BTreeMap::new();
         let mut children = BTreeMap::new();
         let mut meta_docs = BTreeMap::new();
         for (key, datum) in datums {
@@ -809,7 +809,7 @@ impl Core {
                 meta_docs.insert(format!("{kind}/{name}"), entry);
                 continue;
             }
-            if tag != DrawerDocEntry::ID && tag != DrawerChildEntry::ID {
+            if tag != DrawerChildEntry::ID {
                 continue;
             }
             let Some(target) = entry_target(&key) else {
@@ -820,62 +820,98 @@ impl Core {
             let unreadable = |error: serde_json::Error| {
                 DrawersError::RosterUnreadable(format!("{key} on {drawer_id}: {error}"))
             };
-            if tag == DrawerDocEntry::ID {
-                let entry: big_cabinet_core::drawer::DrawerDocEntry =
-                    serde_json::from_value(value).map_err(unreadable)?;
-                if let Some(access) = entry.access.known() {
-                    docs.insert(target, access);
-                }
-            } else {
-                let entry: big_cabinet_core::drawer::DrawerChildEntry =
-                    serde_json::from_value(value).map_err(unreadable)?;
-                if let Some(access) = entry.access.known() {
-                    children.insert(target, access);
-                }
+            let entry: big_cabinet_core::drawer::DrawerChildEntry =
+                serde_json::from_value(value).map_err(unreadable)?;
+            if let Some(access) = entry.access.known() {
+                children.insert(target, access);
             }
         }
         Ok(RosterRows {
-            docs,
             children,
             meta_docs,
         })
     }
 
-    /// Every datum `doc` currently carries, read as this service at current heads.
-    pub(crate) async fn read_all_datums(
+    /// The datums `doc` currently carries (`None` for every one), read as this service at current
+    /// heads, with the heads they were read at.
+    pub(crate) async fn read_datums(
         &self,
         context: &RequestContext,
         doc: &DocId,
-    ) -> Result<BTreeMap<DatumKey, big_cabinet_core::doc::DatumRead>, DrawersError> {
-        let read = self
-            .as_signer(
+        datums: Option<std::collections::BTreeSet<DatumKey>>,
+    ) -> Result<big_cabinet_core::doc::DatumsRead, DrawersError> {
+        self.as_signer(
+            context,
+            self.issuer,
+            DocScope {
+                read: DocScope::read_all([doc.clone()]),
+                ..Default::default()
+            },
+            |Authorization {
+                 authority: capability,
+                 ..
+             }| async move {
+                self.docs()
+                    .call(
+                        context.child(),
+                        big_cabinet_core::doc::ReadDatums {
+                            capability,
+                            doc_id: doc.clone(),
+                            at: big_cabinet_core::doc::At::Current,
+                            datums,
+                            optimistic: false,
+                        },
+                    )
+                    .await
+                    .map_err(docs_error)
+            },
+        )
+        .await
+    }
+
+    /// The access the roster entry `key` (a `docEntry` or `childEntry`) on `drawer` states, read
+    /// from the drawer doc itself rather than from the membership rows: the rows lag the doc until
+    /// the datum-set worker settles, and an idempotent operation must judge by what the roster
+    /// says. `None` when the slot is absent, or holds a value that confers nothing (not accepted,
+    /// or an access level this build does not know), the same entries the rows omit.
+    pub(crate) async fn roster_entry(
+        &self,
+        context: &RequestContext,
+        drawer: &DrawerId,
+        key: &DatumKey,
+    ) -> Result<Option<Access>, DrawersError> {
+        let mut read = self
+            .read_datums(
                 context,
-                self.issuer,
-                DocScope {
-                    read: DocScope::read_all([doc.clone()]),
-                    ..Default::default()
-                },
-                |Authorization {
-                     authority: capability,
-                     ..
-                 }| async move {
-                    self.docs()
-                        .call(
-                            context.child(),
-                            big_cabinet_core::doc::ReadDatums {
-                                capability,
-                                doc_id: doc.clone(),
-                                at: big_cabinet_core::doc::At::Current,
-                                datums: None,
-                                optimistic: false,
-                            },
-                        )
-                        .await
-                        .map_err(docs_error)
-                },
+                drawer,
+                Some(std::collections::BTreeSet::from([key.clone()])),
             )
             .await?;
-        Ok(read.datums)
+        let Some(big_cabinet_core::doc::DatumRead::Accepted { value, .. }) =
+            read.datums.remove(key)
+        else {
+            return Ok(None);
+        };
+        let access = if key.tag().as_str() == DrawerDocEntry::ID {
+            serde_json::from_value::<DrawerDocEntry>(value)
+                .ok()
+                .map(|entry| entry.access)
+        } else {
+            serde_json::from_value::<DrawerChildEntry>(value)
+                .ok()
+                .map(|entry| entry.access)
+        };
+        Ok(access.and_then(|access| access.known()))
+    }
+
+    /// Wait until the datum-set worker has settled the roster write `receipt` describes, so the
+    /// membership rows reflect it: the read-your-writes barrier every roster writer and every
+    /// reader of the rows that must see a prior write crosses.
+    pub(crate) async fn settle_roster(&self, receipt: &WriteReceipt) -> Result<(), DrawersError> {
+        self.datum_set
+            .settled_through(&self.big_repo, &receipt.doc_id, &receipt.heads)
+            .await
+            .map_err(|error| DrawersError::Storage(error.to_string()))
     }
 
     async fn admit_meta_docs(
@@ -1016,6 +1052,10 @@ impl Core {
             };
             let initial = crate::drawer::create::record_of(&drawer_id, &descriptor);
             let (record, _) = self.rescan(context, &initial).await?;
+            // The child links are the datum-set worker's projection of this roster; wait for it
+            // to have settled the doc just read before following them.
+            let current = self.roster_receipt(context, &drawer_id).await?;
+            self.settle_roster(&current).await?;
             for (child_id, _) in self.state.children_of(&drawer_id).await? {
                 if visited.insert(child_id.clone()) && self.state.drawer(&child_id).await?.is_none()
                 {

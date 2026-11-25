@@ -22,6 +22,10 @@ impl DrawerService {
             .await?
             .ok_or_else(|| DrawersError::UnknownDrawer(params.drawer_id.clone()))?;
         let (record, descriptor) = core.rescan(context, &record).await?;
+        // The doc and child rows are the datum-set worker's projection of the roster; this is
+        // the drawer as its doc says now, so wait for the worker to catch up with it.
+        let current = core.roster_receipt(context, &record.drawer_id).await?;
+        core.settle_roster(&current).await?;
         let mut meta_docs = core.state.meta_docs_of(&record.drawer_id).await?;
         if access < Access::Read {
             meta_docs.remove(&MetaRoot::Sensitive);

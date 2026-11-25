@@ -186,7 +186,11 @@ impl Core {
         child: &DrawerId,
         access: Access,
     ) -> Result<Option<WriteReceipt>, DrawersError> {
-        if self.state.child_entry(parent, child).await? == Some(access) {
+        if self
+            .roster_entry(context, parent, &child_entry_key(child))
+            .await?
+            == Some(access)
+        {
             return Ok(None);
         }
         let entry = DrawerChildEntry::new(access);
@@ -202,7 +206,9 @@ impl Core {
                 BTreeSet::new(),
             )
             .await?;
-        self.state.put_child(parent, child, access).await?;
+        // The child row is the datum-set worker's to project from the entry just written; the
+        // barrier is what makes `link`'s caller see it.
+        self.settle_roster(&receipt).await?;
         Ok(Some(receipt))
     }
 
@@ -248,10 +254,14 @@ impl Core {
                 }
             }
         }
-        match written {
-            Some(receipt) => Ok(receipt),
-            None => self.roster_receipt(context, parent).await,
-        }
+        let receipt = match written {
+            Some(receipt) => receipt,
+            None => self.roster_receipt(context, parent).await?,
+        };
+        // An entry found already listed may still be on its way into the rows: a prior attempt
+        // wrote it and was interrupted before the worker settled.
+        self.settle_roster(&receipt).await?;
+        Ok(receipt)
     }
 
     pub(crate) async fn resume_add_child(
