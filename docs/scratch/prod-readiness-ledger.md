@@ -1176,3 +1176,17 @@ inside the transaction. This ties together:
   async mutexes. **Not authorized for use** until we know whether they have the futurelock
   problem (a guard held by a future parked in `select!`/`FuturesUnordered` blocks every other
   waiter). Survey the other additions as well.
+
+### Upstream-support work before big_repo (operator, 2026-11-26)
+- **SQL Keyline:** crate `keyline_sqlite` in townframe, on `sqlite_rs`. It implements
+  upstream's `Keyline` trait, plus an insert inside an already-open transaction, and is checked
+  against upstream's conformance suite and differentially against `MemoryKeyline`. In progress.
+- **CGKA prepare/apply** in our keyhive fork (`keyline/townframe`). The lane first writes a repro
+  for the concurrent-epoch gap. In progress.
+- **Gap: `sqlite_rs` has no browser backend.** It has native and `wasm32-wasip3` (host SQLite
+  over `townframe:sqlite`) only, so `big_automata_sqlite` and `keyline_sqlite` don't run in the
+  browser. That contradicts "nothing native-only". Add a wasm32-unknown-unknown backend (SQLite
+  on OPFS, synchronous access handles in a dedicated worker) as part of the planned
+  `sqlite_rs` → `sqlite_utils_rs` rename. Queued as upstream-support work.
+- **ARK issue draft** about the concurrent-epoch gap left by #24's nudge-edit removal: file it
+  after the repro confirms the gap.
