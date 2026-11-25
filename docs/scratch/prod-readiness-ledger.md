@@ -1187,6 +1187,7 @@ inside the transaction. This ties together:
   over `townframe:sqlite`) only, so `big_automata_sqlite` and `keyline_sqlite` don't run in the
   browser. That contradicts "nothing native-only". Add a wasm32-unknown-unknown backend (SQLite
   on OPFS, synchronous access handles in a dedicated worker) as part of the planned
-  `sqlite_rs` → `sqlite_utils_rs` rename. Queued as upstream-support work.
+  `sqlite_rs` → `sqlite_utils_rs` rename. **Timing (operator):** done when big_repo goes to
+  the browser, not before.
 - **ARK issue draft** about the concurrent-epoch gap left by #24's nudge-edit removal: file it
   after the repro confirms the gap.
