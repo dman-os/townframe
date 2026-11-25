@@ -72,7 +72,7 @@ fn run() -> Res<ExitCode> {
         &parsed,
         Ok(Cli {
             command: StaticCommands::Node {
-                command: cmds::node::NodeCommands::Start { bg: false }
+                command: cmds::node::NodeCommands::Start { bg: false, .. }
             },
             ..
         })
@@ -230,7 +230,7 @@ fn try_static_cli(parsed: Result<Cli, clap::Error>) -> Res<StaticCliResult> {
     let owns_signals = matches!(
         cli.command,
         StaticCommands::Node {
-            command: cmds::node::NodeCommands::Start { bg: false }
+            command: cmds::node::NodeCommands::Start { bg: false, .. }
         }
     );
     lazy::rt()

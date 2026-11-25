@@ -49,6 +49,9 @@ clap-markdown = { workspace = true, optional = true }
 shadow-rs = { workspace = true, features = ["build"] }
 
 #
+# time
+jiff.workspace = true
+#
 # async
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync", "signal", "net", "process", "io-util"] }
 

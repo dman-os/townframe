@@ -110,6 +110,7 @@ mod library {
                             .await
                             .expect("the test stops the server by sending")
                     },
+                    None,
                 )
                 .await
             });
@@ -371,7 +372,7 @@ mod library {
         let held = dir.try_lock(LockRole::Command).unwrap().unwrap_err();
         assert_eq!(held.pid, Some(std::process::id()));
         // A second server is refused before it touches the node's storage.
-        let error = crate::cmds::serve::serve(&dir, |_| Ok(()), async {})
+        let error = crate::cmds::serve::serve(&dir, |_| Ok(()), async {}, None)
             .await
             .unwrap_err();
         assert!(
@@ -463,6 +464,7 @@ mod library {
                     async {
                         stopped.await.expect("the test stops the server by sending");
                     },
+                    None,
                 )
                 .await
             }
@@ -1035,6 +1037,50 @@ mod blackbox {
         assert!(stopped.status.success(), "{}", text(&stopped));
         let stopped = text(&stopped);
         assert!(stopped.contains("server stopped"), "{stopped}");
+    }
+
+    /// A background server started with `--idle-exit` stops by itself once the node has been
+    /// idle that long, releasing the node and removing its socket (ADR 052).
+    #[test]
+    fn a_server_with_an_idle_exit_stops_by_itself() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        // At `info`, so the server's log says why it stopped.
+        let started = Command::new(day_bin())
+            .env("RUST_LOG", "info")
+            .env("NO_COLOR", "1")
+            .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+            .arg("--node")
+            .arg(sandbox.node())
+            .args(["node", "start", "--bg", "--idle-exit", "2s"])
+            .output()
+            .unwrap();
+        assert!(
+            started.status.success(),
+            "{}",
+            String::from_utf8_lossy(&started.stderr)
+        );
+        assert!(sandbox.socket().exists(), "serving once started");
+        // Returns once the server has exited and let go of the node.
+        day_node::NodeDir::new(sandbox.node())
+            .wait_for_lock_release()
+            .unwrap();
+        assert!(!sandbox.socket().exists(), "the idle server removed its socket");
+        let log = std::fs::read_to_string(sandbox.node().join("run/serve.log")).unwrap();
+        assert!(log.contains("idle for its idle period"), "{log}");
+        assert!(!log.contains("Error"), "{log}");
+    }
+
+    /// `--idle-exit` takes a duration, and refuses anything else before it starts a server.
+    #[test]
+    fn idle_exit_takes_a_duration() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        let refused = sandbox.day(&["node", "start", "--bg", "--idle-exit", "soon"]);
+        assert!(!refused.status.success());
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(stderr.contains("not a duration"), "{stderr}");
+        assert!(!sandbox.socket().exists());
     }
 
     /// Output whose reader has gone away (`day exec ... | head`) ends the command with status 0

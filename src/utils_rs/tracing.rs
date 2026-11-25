@@ -94,6 +94,10 @@ pub fn setup_tracing_at(default_level: &str, file: Option<LogFile>) -> Res<()> {
         let file = file.filter(|_| std::env::var("DAY_LOG_FILE").as_deref() != Ok("off"));
         let layer = match file {
             Some(LogFile { directory, prefix }) => {
+                // The builder prunes old files before it creates the directory, and says so on
+                // stderr when the directory is missing.
+                std::fs::create_dir_all(&directory)
+                    .wrap_err_with(|| format!("creating the log directory {}", directory.display()))?;
                 let appender = tracing_appender::rolling::RollingFileAppender::builder()
                     .rotation(tracing_appender::rolling::Rotation::DAILY)
                     .filename_prefix(prefix)

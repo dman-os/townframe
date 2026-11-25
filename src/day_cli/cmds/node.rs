@@ -23,6 +23,11 @@ pub enum NodeCommands {
         /// Serve from a background server and return once it is serving
         #[arg(long)]
         bg: bool,
+        /// Stop by itself once the node has been idle this long, such as `10m` or `1h 30m`:
+        /// no client connected and no work in progress (ADR 052). Without it the server runs
+        /// until `day node stop`
+        #[arg(long, value_name = "DURATION", value_parser = super::serve::parse_idle_exit)]
+        idle_exit: Option<std::time::Duration>,
     },
     /// Stop the background server and return once it has exited
     Stop,
@@ -38,7 +43,7 @@ pub enum NodeCommands {
 pub async fn run(command: NodeCommands) -> Res<ExitCode> {
     match command {
         NodeCommands::Init { dir, relay, json } => super::init::run(dir, relay, json).await,
-        NodeCommands::Start { bg } => super::serve::start(bg).await,
+        NodeCommands::Start { bg, idle_exit } => super::serve::start(bg, idle_exit).await,
         NodeCommands::Stop => super::serve::stop().await,
         NodeCommands::Status { json } => super::status::run(json).await,
     }

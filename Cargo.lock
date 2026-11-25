@@ -3806,6 +3806,7 @@ dependencies = [
  "insta",
  "intxt_capture",
  "intxt_core",
+ "jiff",
  "libc",
  "method_core",
  "rand 0.9.5",
