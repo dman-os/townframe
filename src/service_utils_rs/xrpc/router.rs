@@ -11,6 +11,8 @@ use crate::host::Host;
 use crate::lifecycle::Spawner;
 use crate::middleware::Handler;
 use crate::operation::Envelope;
+use async_lock::Semaphore;
+use async_lock::SemaphoreGuardArc;
 use axum::Router;
 use axum::extract::Path;
 use axum::extract::RawQuery;
@@ -45,8 +47,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::Semaphore;
 use tracing::Instrument;
 
 /// A registered operation handler. [`XrpcRouter::mount`] builds one from a
@@ -177,7 +177,7 @@ type SubscriptionFuture =
 
 /// Starts an opened subscription's pump on the upgraded socket, holding the admission permit for
 /// as long as it runs.
-type SocketPump = Box<dyn FnOnce(OnUpgrade, OwnedSemaphorePermit) + Send>;
+type SocketPump = Box<dyn FnOnce(OnUpgrade, SemaphoreGuardArc) + Send>;
 
 /// The text frames of a subscription socket. `End` has no frame: the server closes the socket.
 #[derive(Serialize)]
@@ -188,6 +188,52 @@ enum SocketFrame<'a, E, R> {
     },
     Event(&'a E),
     Error(&'a R),
+}
+
+/// An upgraded HTTP connection as tokio I/O, for [`WsIo`]. It is `hyper_util::rt::TokioIo`
+/// without that crate's `tokio` feature, which enables tokio's `net` and so has no browser build.
+struct UpgradedIo(hyper::upgrade::Upgraded);
+
+impl tokio::io::AsyncRead for UpgradedIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let mut read = hyper::rt::ReadBuf::new(buf.initialize_unfilled());
+        match hyper::rt::Read::poll_read(Pin::new(&mut self.0), cx, read.unfilled()) {
+            std::task::Poll::Ready(Ok(())) => {
+                let filled = read.filled().len();
+                buf.advance(filled);
+                std::task::Poll::Ready(Ok(()))
+            }
+            other => other,
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for UpgradedIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        hyper::rt::Write::poll_write(Pin::new(&mut self.0), cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        hyper::rt::Write::poll_flush(Pin::new(&mut self.0), cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        hyper::rt::Write::poll_shutdown(Pin::new(&mut self.0), cx)
+    }
 }
 
 /// Writes the frames the host's pump delivers to `frames` onto the WebSocket that `on_upgrade`
@@ -206,7 +252,7 @@ async fn write_socket<P: Subscription>(
         },
         _ = owner.cancelled() => return,
     };
-    let (read, write) = tokio::io::split(hyper_util::rt::TokioIo::new(upgraded));
+    let (read, write) = tokio::io::split(UpgradedIo(upgraded));
     let mut socket = WsIo::new(write, false);
     // The socket is server-to-client: the client sends nothing but its close, so the read half
     // is only watched for that, or for the connection ending. A ping's pong would have to share
@@ -575,19 +621,16 @@ async fn dispatch(
             &message,
         );
     }
-    let _admission = match router
+    let Some(_admission) = router
         .admission_pool(operation.long_poll)
-        .try_acquire_owned()
-    {
-        Ok(permit) => permit,
-        Err(_) => {
-            return error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                request_id,
-                "Unavailable",
-                "XRPC handler admission is currently full",
-            );
-        }
+        .try_acquire_arc()
+    else {
+        return error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            request_id,
+            "Unavailable",
+            "XRPC handler admission is currently full",
+        );
     };
     let body = tokio::select! {
         biased;
@@ -633,7 +676,7 @@ async fn dispatch(
             .unwrap_or(crate::TransportContext::Http),
     });
     let call = match context.remaining_budget() {
-        Some(remaining) => match tokio::time::timeout(remaining, call).await {
+        Some(remaining) => match n0_future::time::timeout(remaining, call).await {
             Ok(result) => result,
             Err(_) => {
                 return error_response(
@@ -700,16 +743,13 @@ async fn dispatch_subscription(
         }
     };
     let request_id = Some(context.request_id);
-    let permit = match admission.try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            return error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                request_id,
-                "Unavailable",
-                "XRPC handler admission is currently full",
-            );
-        }
+    let Some(permit) = admission.try_acquire_arc() else {
+        return error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            request_id,
+            "Unavailable",
+            "XRPC handler admission is currently full",
+        );
     };
     let Some(on_upgrade) = parts.extensions.get::<OnUpgrade>().cloned() else {
         return error_response(

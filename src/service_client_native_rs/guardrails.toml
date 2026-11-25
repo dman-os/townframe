@@ -7,7 +7,12 @@ allow_external_api_types = false
 [api]
 target = "x86_64-unknown-linux-gnu"
 default_features = true
-features = ["iroh"]
+features = ["iroh", "xrpc"]
 
 [builds.native]
+features = ["iroh", "xrpc"]
+
+# The portable core: the direct and irpc transports, the websocket framing and the iroh
+# transport. XRPC over TCP or a Unix socket (`xrpc`) is the native extra.
+[builds.wasm32-unknown-unknown]
 features = ["iroh"]

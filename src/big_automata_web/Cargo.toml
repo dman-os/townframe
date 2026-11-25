@@ -4,8 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 # The browser host of big_automata's sync stack: a wasm32 page that pulls a part from a native
-# peer over iroh (relay-only in the browser). Test-only: its peer is `big_automata_iroh`'s
-# `web_fixture` example, and `x/big-automata-web.ts` builds, serves and wires the two.
+# peer over iroh (relay-only in the browser), and serves one to it. Test-only: its peer is
+# `big_automata_iroh`'s `web_fixture` example, and `x/big-automata-web.ts` builds, serves and
+# wires the two.
 
 [lints]
 workspace = true
@@ -14,6 +15,8 @@ workspace = true
 # `test-support` carries the memory backend and cursor table the host syncs into.
 big_automata = { path = "../big_automata", features = ["test-support"] }
 big_automata_iroh = { path = "../big_automata_iroh" }
+method_core.workspace = true
+service_utils_rs = { workspace = true, features = ["iroh-http"] }
 service_client_iroh_rs.workspace = true
 # The crypto provider is the host's choice (`service_client_iroh_rs` takes none): rustls over
 # `ring`, which builds for wasm32-unknown-unknown.

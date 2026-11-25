@@ -16,13 +16,12 @@ service_core_rs.workspace = true
 service_client_core_rs.workspace = true
 service_client_iroh_rs.workspace = true
 
-# The serving half (`serve`) is a native host: it sits on `service_utils_rs`'s host stack and
-# its native client, whose tokio `net` and mio have no browser build. The calling half above is
-# all a browser needs.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The serving half (`serve`) sits on `service_utils_rs`'s portable core and the client's portable
+# transports, so a browser node serves too; its timer is n0-future's and its clock web-time's.
 service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
-tokio = { workspace = true, features = ["time"] }
+n0-future.workspace = true
+web-time.workspace = true
 
 [dev-dependencies]
 big_automata = { path = "../big_automata", features = ["test-support"] }

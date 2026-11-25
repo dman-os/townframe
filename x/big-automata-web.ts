@@ -8,7 +8,7 @@
 // The peer is `big_automata_iroh`'s `web_fixture` example: an in-process iroh relay and a node
 // serving a part store through it. Its first stdout line (relay URL, node id, the part and its
 // object count) is served as `/fixture.json`, which the page reads to connect. The peer runs
-// until its stdin closes (its commands, `dial <id>`, are served at `POST /dial/<id>`), so this script's death (however it ends) takes the peer along.
+// until its stdin closes (its commands, `dial <id>` and `pull <id>`, are served at `POST /dial/<id>` and `POST /pull/<id>`), so this script's death (however it ends) takes the peer along.
 
 import { $ } from "./utils.ts";
 
@@ -53,6 +53,7 @@ await site.join("index.html").writeText(`<!doctype html>
   <body>
     <p>status: <span id="status">connecting</span></p>
     <p>objects: <span id="objects"></span> of <span id="expected"></span></p>
+    <p>serving: <span id="served"></span> objects</p>
     <p>accept probe: node <span id="node_id"></span>, echoed <span id="echoed"></span>, closed <span id="closed"></span>, echo <span id="echo"></span></p>
     <script type="module">
       import init from "./big_automata_web.js";
@@ -121,6 +122,11 @@ if (!buildOnly) {
     // accept probe) and answers `ok` or `err <why>`.
     if (request.method === "POST" && name.startsWith("dial/")) {
       return new Response(await command(`dial ${name.slice("dial/".length)}`));
+    }
+    // `POST /pull/<endpoint id>`: the fixture syncs part 1 from that page (`?mode=serve`) over
+    // the relay and answers `synced <objects>` or `err <why>`.
+    if (request.method === "POST" && name.startsWith("pull/")) {
+      return new Response(await command(`pull ${name.slice("pull/".length)}`));
     }
     if (name === "fixture.json") {
       return new Response(fixture, {

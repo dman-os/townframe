@@ -94,14 +94,14 @@ pub struct Spawner {
 }
 
 impl Spawner {
-    pub fn spawn<F>(&self, future: F) -> Option<tokio::task::JoinHandle<F::Output>>
+    pub fn spawn<F>(&self, future: F) -> Option<n0_future::task::JoinHandle<F::Output>>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
         let token = self.track()?;
         let failed = Arc::clone(&self.failed);
-        Some(tokio::spawn(
+        Some(n0_future::task::spawn(
             async move {
                 let _token = token;
                 match AssertUnwindSafe(future).catch_unwind().await {

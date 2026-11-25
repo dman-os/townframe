@@ -1,3 +1,4 @@
+use async_lock::SemaphoreGuardArc;
 use method_core::ContextError;
 pub use service_core_rs::cancellation::CancellationKey;
 pub use service_core_rs::cancellation::CancellationReceiver;
@@ -18,6 +19,8 @@ pub struct TaskActivity {
     peak_active: std::sync::atomic::AtomicUsize,
     stream_pumps: std::sync::atomic::AtomicUsize,
     peak_stream_pumps: std::sync::atomic::AtomicUsize,
+    // A `Notify` rather than an event: `notify_one` stores a permit, so a change that lands
+    // between a caller's check and its `wait_for_change` is not lost. It needs no runtime.
     changed: tokio::sync::Notify,
 }
 
@@ -99,8 +102,8 @@ impl TaskActivity {
 }
 
 pub struct Admission {
-    unary_permits: Arc<tokio::sync::Semaphore>,
-    stream_permits: Arc<tokio::sync::Semaphore>,
+    unary_permits: Arc<async_lock::Semaphore>,
+    stream_permits: Arc<async_lock::Semaphore>,
     activity: Arc<TaskActivity>,
     cancellations: CancellationReceiver,
     max_handlers: usize,
@@ -124,8 +127,8 @@ impl Admission {
     ) -> Arc<Self> {
         assert!(max_handlers > 0 && max_stream_pumps > 0);
         Arc::new(Self {
-            unary_permits: Arc::new(tokio::sync::Semaphore::new(max_handlers)),
-            stream_permits: Arc::new(tokio::sync::Semaphore::new(max_stream_pumps)),
+            unary_permits: Arc::new(async_lock::Semaphore::new(max_handlers)),
+            stream_permits: Arc::new(async_lock::Semaphore::new(max_stream_pumps)),
             activity: Arc::new(TaskActivity::default()),
             cancellations: receiver,
             max_handlers,
@@ -140,14 +143,11 @@ impl Admission {
         self.cancellations.register_cancellation(signal)
     }
 
-    pub async fn acquire_unary(&self) -> tokio::sync::OwnedSemaphorePermit {
-        Arc::clone(&self.unary_permits)
-            .acquire_owned()
-            .await
-            .expect("owned IRPC unary semaphore lives")
+    pub async fn acquire_unary(&self) -> SemaphoreGuardArc {
+        self.unary_permits.acquire_arc().await
     }
-    pub fn try_acquire_stream(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        Arc::clone(&self.stream_permits).try_acquire_owned().ok()
+    pub fn try_acquire_stream(&self) -> Option<SemaphoreGuardArc> {
+        self.stream_permits.try_acquire_arc()
     }
     pub fn activity(&self) -> Arc<TaskActivity> {
         Arc::clone(&self.activity)

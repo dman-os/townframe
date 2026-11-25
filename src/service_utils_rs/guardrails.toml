@@ -5,4 +5,9 @@ allowed_dependencies = ["method_core", "service_client_core_rs", "service_client
 allow_external_api_types = false
 
 [builds.native]
+features = ["iroh-http", "net"]
+
+# The portable core: hosts, admission, the XRPC router and the iroh protocol handler, so a
+# browser node can serve a service to its peers. TCP and Unix serving (`net`) are native extras.
+[builds.wasm32-unknown-unknown]
 features = ["iroh-http"]

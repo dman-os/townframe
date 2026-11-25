@@ -1,10 +1,12 @@
 version = 1
 role = "application"
-dependency_reason = "The browser host of the big_automata sync stack: drives a PeerDriver over big_automata_iroh's PeerRpcClient on service_client_iroh_rs's iroh transport, syncing into big_automata's memory backend."
+dependency_reason = "The browser host of the big_automata sync stack: drives a PeerDriver over big_automata_iroh's PeerRpcClient on service_client_iroh_rs's iroh transport, syncing into big_automata's memory backend, and (`?mode=serve`) hosts the big_automata service over big_automata_iroh and service_utils_rs's iroh handler for a native peer to pull from."
 allowed_dependencies = [
     "big_automata",
     "big_automata_iroh",
+    "method_core",
     "service_client_iroh_rs",
+    "service_utils_rs",
     "utils_rs",
 ]
 allow_external_api_types = false

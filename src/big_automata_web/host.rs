@@ -1,4 +1,5 @@
-//! The page: sync one part from a native peer over iroh and report it to the DOM.
+//! The page: sync one part from a native peer over iroh and report it to the DOM, or serve one
+//! (`?mode=serve`).
 //!
 //! `fixture.json` (written by `x/big-automata-web.ts` from the `web_fixture` example's first
 //! line of output) names the peer's relay and node id, the part to want, and how many objects
@@ -21,10 +22,28 @@ use big_automata::driver::RouteUpdate;
 use big_automata::driver::memory::MemoryBackend;
 use big_automata::driver::memory::MemoryPeerCursors;
 use big_automata::part_store::PartStoreRead;
+use big_automata::part_store::laws::add;
+use big_automata::part_store::laws::grant;
+use big_automata::part_store::laws::principal;
+use big_automata::part_store::laws::set;
+use big_automata::part_store::laws::stage;
 use big_automata::part_store::memory::MemoryPartStore;
+use big_automata::part_store::oracle::PartWrite;
+use big_automata::replay::wire::ReplayProtocol;
+use big_automata::sync::rpc::SyncRpcProtocol;
 use big_automata_iroh::PeerRpcClient;
+use big_automata_iroh::serve::ReplayBinding;
+use big_automata_iroh::serve::SyncRpcBinding;
+use big_automata_iroh::serve::boot;
+use method_core::ContextError;
 use serde::Deserialize;
+use service_client_iroh_rs::IROH_XRPC_HTTP_ALPN;
 use service_client_iroh_rs::IrohHttp;
+use service_utils_rs::RequestContext;
+use service_utils_rs::ServerBinding;
+use service_utils_rs::TransportContext;
+use service_utils_rs::xrpc::XrpcRouter;
+use service_utils_rs::xrpc::iroh_protocol_handler;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
@@ -111,6 +130,70 @@ async fn run() {
     std::mem::forget(endpoint);
 }
 
+/// Objects the serving page publishes in part 1, in as many commits so a puller sees more than
+/// one rev. The fixture's own part has a different count, so a page that pulled instead of
+/// serving would show.
+const SERVED_OBJECTS: u8 = 5;
+
+async fn commit(store: &MemoryPartStore, writes: Vec<PartWrite>) {
+    let mut tx = store.begin();
+    for write in writes {
+        stage(store, &mut tx, write)
+            .await
+            .expect("the memory store cannot fail");
+    }
+    tx.commit().expect("the writes change a row");
+}
+
+/// `?mode=serve`: the page hosts the real big_automata service (the replay and sync rpc
+/// protocols over a part store) behind the iroh protocol handler, and a native peer pulls
+/// from it through the relay. `#node_id` carries the endpoint id once its home relay is
+/// connected, `#served` the object count of the published part.
+async fn run_serve() {
+    let fixture = fetch_fixture().await;
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(iroh::RelayMode::custom([fixture.relay_url]))
+        .bind()
+        .await
+        .expect("binding the browser endpoint");
+
+    let store = MemoryPartStore::default();
+    commit(&store, vec![grant(&[(1, 0)])]).await;
+    for obj in 1..=SERVED_OBJECTS {
+        commit(&store, vec![set(&[(obj, obj * 10)]), add(&[(obj, 1)])]).await;
+    }
+    // Every dialer acts as the principal the part is granted to: the page has no one to tell
+    // peers apart, as the native fixture.
+    let principal_of =
+        |_: &RequestContext, _: &TransportContext| -> Result<PeerKey, ContextError> {
+            Ok(principal(0))
+        };
+    let (replay, stop) = boot(store, principal_of);
+    let mut router = XrpcRouter::new(1 << 20);
+    <ReplayBinding<_> as ServerBinding<ReplayProtocol>>::mount(
+        &mut router,
+        ReplayBinding::new(Arc::clone(&replay.host)),
+    )
+    .expect("mount the replay protocol");
+    <SyncRpcBinding<_> as ServerBinding<SyncRpcProtocol>>::mount(
+        &mut router,
+        SyncRpcBinding::new(Arc::clone(&replay.host)),
+    )
+    .expect("mount the sync rpc protocol");
+    let iroh_router = iroh::protocol::Router::builder(endpoint.clone())
+        .accept(
+            IROH_XRPC_HTTP_ALPN,
+            iroh_protocol_handler(router.into_router(), 4, 16),
+        )
+        .spawn();
+    // The home relay is connected: a dialer that knows only our id and this relay reaches us.
+    endpoint.online().await;
+    show("served", &SERVED_OBJECTS.to_string());
+    show("node_id", &endpoint.id().to_string());
+    // The service outlives this function: the page keeps serving.
+    std::mem::forget((iroh_router, replay, stop, endpoint));
+}
+
 /// The echo protocol of the accept probe: the dialer opens one bi stream, sends `ECHO_REQUEST`,
 /// finishes its side, and the acceptor writes the same bytes back.
 const ECHO_ALPN: &[u8] = b"townframe/echo-probe/0";
@@ -130,7 +213,7 @@ async fn run_accept() {
     show("node_id", &endpoint.id().to_string());
     let counters = std::rc::Rc::new(std::cell::Cell::new((0u32, 0u32)));
     while let Some(incoming) = endpoint.accept().await {
-        let counters = counters.clone();
+        let counters = std::rc::Rc::clone(&counters);
         // One task per connection: the loop must keep accepting while a dialer lingers.
         wasm_bindgen_futures::spawn_local(async move {
             let connection = incoming
@@ -199,6 +282,7 @@ pub fn main() {
     match param("mode").as_deref() {
         None => wasm_bindgen_futures::spawn_local(run()),
         Some("accept") => wasm_bindgen_futures::spawn_local(run_accept()),
+        Some("serve") => wasm_bindgen_futures::spawn_local(run_serve()),
         Some("dial") => {
             let target = param("target").expect("dial mode takes target=<endpoint id>");
             wasm_bindgen_futures::spawn_local(run_dial(

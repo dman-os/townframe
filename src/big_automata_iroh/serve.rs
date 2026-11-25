@@ -1,14 +1,14 @@
 //! The serving half: [`ReplayService`] answers the three methods of [`ReplayProtocol`] and the
 //! three of its sibling [`SyncRpcProtocol`] from a part store, and [`boot`] hosts both the way
-//! `big_blobs` hosts its service. It sits on `service_utils_rs`'s host and a tokio timer, so it
-//! is a native serving host: the `serve` feature, which a browser build turns off.
+//! `big_blobs` hosts its service. It sits on `service_utils_rs`'s host and an n0-future timer, and
+//! builds for the browser too.
 //!
-//! `Instant` is std's: `big_automata` takes its `web_time::Instant`, which is std's on every
-//! native target.
+//! `Instant` is `web_time`'s, as `big_automata` takes: std's on native targets and a clock a
+//! browser has.
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Instant;
+use web_time::Instant;
 
 use big_automata::PeerKey;
 use big_automata::part_store::PartStoreServe;
@@ -46,12 +46,13 @@ use service_utils_rs::ResponseEnvelope;
 use service_utils_rs::StopToken;
 use service_utils_rs::TransportContext;
 
-/// The tokio sleep a held round waits on.
-struct TokioTimer;
+/// The sleep a held round waits on: tokio's natively and the browser's `setTimeout` on wasm,
+/// both through n0-future.
+struct SleepTimer;
 
-impl Timer for TokioTimer {
+impl Timer for SleepTimer {
     fn sleep(&self, duration: std::time::Duration) -> impl Future<Output = ()> + Send + use<> {
-        tokio::time::sleep(duration)
+        n0_future::time::sleep(duration)
     }
 }
 
@@ -96,8 +97,8 @@ where
 
     /// A responder for one call. It subscribes to the store's watch and starts with empty
     /// buffers, so a call pays for the page it builds and nothing carried over from another.
-    fn responder(&self) -> Responder<S, TokioTimer> {
-        Responder::new(self.store.clone(), TokioTimer)
+    fn responder(&self) -> Responder<S, SleepTimer> {
+        Responder::new(self.store.clone(), SleepTimer)
     }
 
     fn server(&self) -> std::sync::MutexGuard<'_, ReplayServer> {
