@@ -409,7 +409,8 @@ async fn filesystem_provenance_restart_case(
             .service
             .provider
             .register_local_pair(&blobs.service.store, &blobs.service.roots, pair)
-            .await?;
+            .await?
+            .expect("the fixture's claim describes its own pair");
         drop(tag);
         (blobs, stop, sql)
     };
