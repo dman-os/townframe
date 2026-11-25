@@ -28,6 +28,7 @@ use big_nodule::egress;
 use big_nodule::executor::HandlerSpec;
 use big_nodule::executor::Hosted;
 use big_nodule::executor::NoduleExecutor;
+use big_nodule::executor::RoutineCapabilities;
 use big_nodule::wire::delivery_headers;
 use big_nodule::wire::gateway_error;
 use big_nodule::wire::provider_result;
@@ -163,10 +164,9 @@ impl HttpTransport for Egress {
 
 struct NativeProvider {
     jobs: mpsc::UnboundedSender<Job>,
-    /// The nodule's own dispatch capability, replaced in place when its grants change.
-    capability: Mutex<Option<CapId>>,
+    routine_keys: BTreeMap<String, String>,
+    routine_capabilities: Mutex<BTreeMap<String, RoutineCapabilities>>,
     config_doc: Mutex<big_cabinet_core::dmeta::DocId>,
-    config_capability: Mutex<Option<CapId>>,
 }
 
 #[async_trait]
@@ -190,6 +190,17 @@ impl Provider for NativeProvider {
             Some(Body::Descriptors(_)) => return Err(big_nodule::wire::descriptor_body_refused()),
         };
         let (reply, answer) = oneshot::channel();
+        let routine_key = self
+            .routine_keys
+            .get(operation)
+            .expect("dispatch routed an operation without an admitted routine");
+        let capabilities = self
+            .routine_capabilities
+            .lock()
+            .expect("routine capabilities lock")
+            .get(routine_key)
+            .expect("a ready routine has capabilities")
+            .clone();
         let job = Job {
             path: format!("/xrpc/{operation}"),
             headers: delivery_headers(
@@ -197,11 +208,7 @@ impl Provider for NativeProvider {
                 request,
                 context,
                 &self.config_doc.lock().expect("config doc lock").clone(),
-                *self
-                    .config_capability
-                    .lock()
-                    .expect("config capability lock"),
-                *self.capability.lock().expect("capability lock"),
+                &capabilities,
             ),
             body,
             reply,
@@ -297,12 +304,11 @@ impl NoduleExecutor for NativeExecutor {
                 {
                     // The grants may have changed since the last ensure: the nodule is told
                     // the capability that is live now, on its next request.
-                    *running.provider.capability.lock().expect("capability lock") = spec.capability;
                     *running
                         .provider
-                        .config_capability
+                        .routine_capabilities
                         .lock()
-                        .expect("config capability lock") = spec.config_capability;
+                        .expect("routine capabilities lock") = spec.routine_capabilities.clone();
                     *running.provider.config_doc.lock().expect("config doc lock") =
                         spec.config_doc.clone();
                     return Hosted::Ready(Arc::clone(&running.provider) as Arc<dyn Provider>);
@@ -331,9 +337,13 @@ impl NoduleExecutor for NativeExecutor {
         );
         let provider = Arc::new(NativeProvider {
             jobs: started.jobs,
-            capability: Mutex::new(spec.capability),
+            routine_keys: spec
+                .routines
+                .iter()
+                .map(|(operation, routine)| (operation.clone(), routine.routine_key.clone()))
+                .collect(),
+            routine_capabilities: Mutex::new(spec.routine_capabilities.clone()),
             config_doc: Mutex::new(spec.config_doc.clone()),
-            config_capability: Mutex::new(spec.config_capability),
         });
         self.hosted.lock().expect("hosted lock").insert(
             spec.cartridge_id.clone(),

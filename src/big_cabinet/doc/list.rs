@@ -9,17 +9,14 @@ impl DocsService {
         params: ListDatums,
     ) -> Result<DatumListing, DocsError> {
         let caller = self.invocation(context, params.capability).await?;
-        self.authorize(
-            context,
-            &caller.authority,
-            AccessRequest::Read(&params.doc_id),
-        )
-        .await?;
+        let kinds = self
+            .authorize_read(context, &caller.authority, &params.doc_id)
+            .await?;
         let document = self.handle(&params.doc_id).await?;
         document
             .with_document_read(|doc| {
                 context.validate()?;
-                list_datums(doc, &params.at, params.with_authors)
+                list_datums(doc, &params.at, params.with_authors, &kinds)
             })
             .await
     }
@@ -38,6 +35,7 @@ pub(super) fn list_datums(
     doc: &Automerge,
     at: &At,
     with_authors: bool,
+    kinds: &DatumKinds,
 ) -> Result<DatumListing, DocsError> {
     let heads = resolve(doc, at)?;
     let historical = match at {
@@ -45,7 +43,10 @@ pub(super) fn list_datums(
         At::Heads(_) => Some(doc.fork_at(&heads).map_err(repository)?),
     };
     let view = historical.as_ref().unwrap_or(doc);
-    let keys = present_keys(doc, &heads)?;
+    let keys = present_keys(doc, &heads)?
+        .into_iter()
+        .filter(|key| kinds.allows(key))
+        .collect::<Vec<_>>();
     let mut authors = BTreeMap::new();
     if with_authors {
         let gate = Gate::new(doc, &heads);

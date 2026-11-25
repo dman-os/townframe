@@ -30,8 +30,17 @@ use tokio::sync::Notify;
 /// A routine's executable export and the component that contains it.
 #[derive(Clone)]
 pub struct RoutineSpec {
+    pub routine_key: String,
     pub component: String,
     pub export: String,
+}
+
+/// Capabilities selected for one manifest routine. Empty service handles are omitted.
+#[derive(Clone, Default)]
+pub struct RoutineCapabilities {
+    pub dispatch: Option<CapId>,
+    pub config: Option<CapId>,
+    pub drawers: Option<CapId>,
 }
 
 /// Everything an executor needs to host one nodule revision's routine components.
@@ -43,17 +52,14 @@ pub struct HandlerSpec {
     pub components: BTreeMap<String, ManifestComponent>,
     /// The operation-to-export routing established by the admitted nodule routines.
     pub routines: BTreeMap<String, RoutineSpec>,
-    /// The cartridge config document and its attenuated settings capability delivered to the guest.
+    /// The cartridge config document; each routine capability carries its own config handle.
     pub config_doc: big_cabinet_core::dmeta::DocId,
-    pub config_capability: Option<CapId>,
+
     /// The nodule's durable actor, which component outgoing calls are made as: the executor signs
     /// them with `actor.capability`, never with anything the component says about itself.
     pub actor: OpenedActor,
-    /// The dispatch capability minted from the nodule's operation grants, which components are told
-    /// so they can present it on their own outgoing calls. `None` when nothing is granted. It
-    /// changes whenever the grants do, and `ensure` runs on every reconcile, so an executor that
-    /// already hosts the revision takes the new value from the spec.
-    pub capability: Option<CapId>,
+    /// The routine-scoped capability bundles, keyed by the routine key in the manifest.
+    pub routine_capabilities: BTreeMap<String, RoutineCapabilities>,
     /// Ask the state actor to call `ensure` again for this cartridge.
     pub reensure: Reensure,
 }

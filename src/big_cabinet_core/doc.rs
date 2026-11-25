@@ -363,17 +363,28 @@ impl DatumKinds {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocScope {
-    pub read: BTreeSet<DocId>,
+    pub read: BTreeMap<DocId, DatumKinds>,
     pub write: BTreeMap<DocId, DatumKinds>,
     pub create: BTreeSet<String>,
     pub drawers: BTreeMap<DocId, DrawerAccess>,
 }
 
 impl DocScope {
+    /// Builds a document-wide read grant, retaining the explicit datum-kind shape.
+    pub fn read_all<I>(documents: I) -> BTreeMap<DocId, DatumKinds>
+    where
+        I: IntoIterator<Item = DocId>,
+    {
+        documents
+            .into_iter()
+            .map(|document| (document, DatumKinds::All))
+            .collect()
+    }
+
     /// Refuse a scope that names a document or drawer whose id is not a document id.
     pub fn ensure_doc_ids(&self) -> Result<(), DocsError> {
         self.read
-            .iter()
+            .keys()
             .chain(self.write.keys())
             .chain(self.drawers.keys())
             .try_for_each(DocsError::ensure_doc_id)

@@ -8,7 +8,7 @@ async fn heads(node: &Node, actor: &OpenedActor, doc_id: &DocId) -> Vec<ChangeHa
         .mint_doc(
             actor,
             DocScope {
-                read: [doc_id.clone()].into(),
+                read: DocScope::read_all([doc_id.clone()]),
                 ..Default::default()
             },
         )
@@ -538,7 +538,7 @@ async fn anchored_queries_are_narrowed_to_the_capability_scope() {
         .capability(
             &fx.bob,
             DocScope {
-                read: [fx.doc_outside.clone()].into(),
+                read: DocScope::read_all([fx.doc_outside.clone()]),
                 ..Default::default()
             },
         )
@@ -1047,7 +1047,7 @@ async fn roster_write_polled_on_the_drawer_doc_delivers_only_the_changed_entry_r
         node.mint_doc(
             &alice,
             DocScope {
-                read: [drawer.clone()].into(),
+                read: DocScope::read_all([drawer.clone()]),
                 ..Default::default()
             },
         )
@@ -1156,7 +1156,7 @@ async fn move_in_delivers_older_rows_move_out_leaves_and_resume_does_not_redeliv
         node.mint_doc(
             &alice,
             DocScope {
-                read: [moving.clone()].into(),
+                read: DocScope::read_all([moving.clone()]),
                 ..Default::default()
             },
         )

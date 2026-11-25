@@ -55,7 +55,7 @@ impl Node {
                         .capability(
                             actor,
                             DocScope {
-                                read: BTreeSet::from([origin.clone()]),
+                                read: DocScope::read_all([origin.clone()]),
                                 write: if stealth {
                                     std::collections::BTreeMap::new()
                                 } else {
@@ -95,7 +95,7 @@ impl Node {
                         .capability(
                             actor,
                             DocScope {
-                                read: BTreeSet::from([source.clone()]),
+                                read: DocScope::read_all([source.clone()]),
                                 write: std::collections::BTreeMap::from([(
                                     target.clone(),
                                     big_cabinet_core::doc::DatumKinds::All,
@@ -348,7 +348,7 @@ async fn branching_from_a_datum_kind_limited_source_is_refused() {
         .capability(
             &alice,
             DocScope {
-                read: BTreeSet::from([origin.doc_id.clone()]),
+                read: DocScope::read_all([origin.doc_id.clone()]),
                 write: BTreeMap::from([(
                     origin.doc_id.clone(),
                     DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
