@@ -3,6 +3,7 @@
 //! plain HTTP, since a nodule's operations have no Rust request type.
 
 use super::cartridges::operator;
+use utils_rs::activity::HoldKind;
 use super::dispatch::narrowed;
 use super::dispatch::operations;
 use super::nodule_wasm::Spec;
@@ -699,6 +700,58 @@ async fn draining_closes_the_listener_first_and_keeps_the_clients_it_had_accepte
     // Idle once the last client has gone.
     drop(client);
     clients.wait_until_idle().await.unwrap();
+
+    shutdown(node, stop).await;
+}
+
+/// Every open connection, over the Unix socket or TCP, holds the node's activity (ADR 052), so a
+/// server that exits when idle never does so under a connected client; the holds go with the
+/// clients.
+#[tokio::test]
+async fn open_connections_hold_the_node_busy_until_they_close() {
+    let secrets = secrets().await;
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("run/node.sock");
+    let (node, stop, spec) = boot_listening(
+        &secrets,
+        Listeners {
+            unix_socket: Some(socket.clone()),
+            fd_socket: None,
+            tcp: Some("127.0.0.1:0".parse().unwrap()),
+        },
+    )
+    .await;
+    let labels = |node: &BigNode| {
+        let mut labels = node
+            .activity
+            .snapshot()
+            .holds
+            .into_iter()
+            .map(|hold| (hold.kind, hold.label))
+            .collect::<Vec<_>>();
+        labels.sort();
+        labels
+    };
+    assert_eq!(labels(&node), Vec::new());
+
+    let unix_client = XrpcClient::unix(&socket, MAX_RESPONSE).unwrap();
+    let (status, _) = post(&unix_client, &spec.echo(), None, json!({ "n": 1 })).await;
+    assert_eq!(status, 200);
+    let tcp_client = tcp_client(&node);
+    // Refused for want of a capability, but connected all the same.
+    post(&tcp_client, &spec.echo(), None, json!({ "n": 2 })).await;
+    assert_eq!(
+        labels(&node),
+        vec![
+            (HoldKind::Client, "TCP connection".to_owned()),
+            (HoldKind::Client, "Unix socket connection".to_owned()),
+        ]
+    );
+
+    drop(unix_client);
+    drop(tcp_client);
+    node.activity.idle_for(std::time::Duration::ZERO).await;
+    assert_eq!(labels(&node), Vec::new());
 
     shutdown(node, stop).await;
 }

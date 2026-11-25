@@ -36,6 +36,8 @@ use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
+use utils_rs::activity::Activity;
+use utils_rs::activity::HoldKind;
 use utils_rs::prelude::Res;
 use utils_rs::prelude::eyre::WrapErr;
 use utils_rs::prelude::eyre::bail;
@@ -92,14 +94,15 @@ impl Listener {
     pub(crate) async fn tcp(
         address: SocketAddr,
         dispatch: Client<DispatchProtocol>,
+        activity: Activity,
     ) -> Res<(Self, SocketAddr)> {
         let listener = tokio::net::TcpListener::bind(address)
             .await
             .wrap_err_with(|| format!("binding {address}"))?;
         let bound = listener.local_addr()?;
         let router = big_dispatch::xrpc_router(dispatch, Anonymous::Refused, Edge::Tcp);
-        let (task, shutdown) = service_utils_rs::xrpc::serve_with_connection_limit(
-            listener,
+        let (task, shutdown) = service_utils_rs::xrpc::serve_with_acceptor(
+            HeldTcp { listener, activity },
             router.into_router(),
             MAX_CONNECTIONS,
         )
@@ -121,6 +124,7 @@ impl Listener {
         path: &Path,
         dispatch: Client<DispatchProtocol>,
         operator: Authorization,
+        activity: Activity,
     ) -> Res<(Self, UnixClients)> {
         use std::os::unix::fs::MetadataExt;
         let listener = bind_owner_only(path).await?;
@@ -139,6 +143,7 @@ impl Listener {
                 connections,
                 drain: drain_requested,
                 closed,
+                activity,
             },
             router.into_router(),
             MAX_CONNECTIONS,
@@ -167,6 +172,7 @@ impl Listener {
         path: &Path,
         dispatch: Client<DispatchProtocol>,
         operator: Authorization,
+        activity: Activity,
     ) -> Res<(Self, FdClients)> {
         use std::os::unix::fs::MetadataExt;
 
@@ -244,10 +250,12 @@ impl Listener {
                 let dispatch = dispatch.clone();
                 let operator = operator;
                 let connections = connections.clone();
+                let hold = activity.hold(HoldKind::Client, "descriptor socket connection");
                 tasks.spawn(async move {
                     connections.send_modify(|open| *open += 1);
                     let result = serve_fd_connection(stream, credentials, dispatch, operator).await;
                     connections.send_modify(|open| *open -= 1);
+                    drop(hold);
                     if let Err(error) = result {
                         tracing::debug!(%error, "descriptor socket connection refused");
                     }
@@ -281,6 +289,7 @@ impl Listener {
         _path: &Path,
         _dispatch: Client<DispatchProtocol>,
         _operator: Authorization,
+        _activity: Activity,
     ) -> Res<(Self, UnixClients)> {
         bail!("Unix socket listeners are only available on Unix platforms")
     }
@@ -535,29 +544,68 @@ struct OwnerOnly {
     closed: watch::Sender<bool>,
     /// The number of admitted connections still open.
     connections: watch::Sender<usize>,
+    /// The node's activity: each admitted connection holds it until it ends (ADR 052).
+    activity: Activity,
 }
 
-/// An admitted connection, counted open until it is dropped: the serving loop drops the stream
-/// when the connection ends, so the count falls whichever side closed it.
-struct Counted {
-    inner: tokio::net::UnixStream,
-    connections: watch::Sender<usize>,
+/// An admitted connection, open until it is dropped: the serving loop drops the stream when the
+/// connection ends, so its hold on the node's activity (ADR 052) is released, and the listener's
+/// own count (the Unix socket's, for draining) falls, whichever side closed it.
+struct Counted<S> {
+    inner: S,
+    connections: Option<watch::Sender<usize>>,
+    _hold: utils_rs::activity::Hold,
 }
 
-impl Counted {
-    fn new(inner: tokio::net::UnixStream, connections: watch::Sender<usize>) -> Self {
-        connections.send_modify(|open| *open += 1);
-        Self { inner, connections }
+impl<S> Counted<S> {
+    fn new(
+        inner: S,
+        connections: Option<watch::Sender<usize>>,
+        activity: &Activity,
+        label: &'static str,
+    ) -> Self {
+        if let Some(connections) = &connections {
+            connections.send_modify(|open| *open += 1);
+        }
+        Self {
+            inner,
+            connections,
+            _hold: activity.hold(HoldKind::Client, label),
+        }
     }
 }
 
-impl Drop for Counted {
+impl<S> Drop for Counted<S> {
     fn drop(&mut self) {
-        self.connections.send_modify(|open| *open -= 1);
+        if let Some(connections) = &self.connections {
+            connections.send_modify(|open| *open -= 1);
+        }
     }
 }
 
-impl tokio::io::AsyncRead for Counted {
+/// The TCP listener's acceptor: [`service_utils_rs`]'s own, with each connection holding the
+/// node's activity until it ends.
+struct HeldTcp {
+    listener: tokio::net::TcpListener,
+    activity: Activity,
+}
+
+impl ConnectionAcceptor for HeldTcp {
+    type Stream = Counted<tokio::net::TcpStream>;
+    type Peer = SocketAddr;
+
+    fn accept(&mut self) -> AcceptFuture<'_, Self::Stream, Self::Peer> {
+        Box::pin(async move {
+            let (stream, peer) = self.listener.accept().await?;
+            Ok((
+                Counted::new(stream, None, &self.activity, "TCP connection"),
+                peer,
+            ))
+        })
+    }
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Counted<S> {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -567,7 +615,7 @@ impl tokio::io::AsyncRead for Counted {
     }
 }
 
-impl tokio::io::AsyncWrite for Counted {
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Counted<S> {
     fn poll_write(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -592,7 +640,7 @@ impl tokio::io::AsyncWrite for Counted {
 }
 
 impl ConnectionAcceptor for OwnerOnly {
-    type Stream = Counted;
+    type Stream = Counted<tokio::net::UnixStream>;
     type Peer = PeerCredentials;
 
     fn accept(&mut self) -> AcceptFuture<'_, Self::Stream, Self::Peer> {
@@ -625,7 +673,15 @@ impl ConnectionAcceptor for OwnerOnly {
                     continue;
                 };
                 if admits(self.owner_uid, &peer) {
-                    return Ok((Counted::new(stream, self.connections.clone()), peer));
+                    return Ok((
+                        Counted::new(
+                            stream,
+                            Some(self.connections.clone()),
+                            &self.activity,
+                            "Unix socket connection",
+                        ),
+                        peer,
+                    ));
                 }
                 tracing::warn!(
                     uid = peer.uid,

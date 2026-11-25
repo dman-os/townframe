@@ -283,6 +283,9 @@ pub struct BigNode {
     pub fd_clients: Option<FdClients>,
     /// The network attachment, when the config asked for one.
     pub peers: Option<peers::Peers>,
+    /// What the node is doing that it should finish before it stops by itself (ADR 052): its
+    /// services take holds here, and a server that exits when idle awaits it.
+    pub activity: utils_rs::activity::Activity,
 }
 
 /// What the config attaches to a booted node, taken before the config is consumed.
@@ -500,6 +503,7 @@ impl BigNode {
                 #[cfg(unix)]
                 fd_clients: None,
                 peers: None,
+                activity: utils_rs::activity::Activity::new(),
             };
             node.attach(attachments, &mut stop).await?;
             Ok(node)
@@ -744,6 +748,7 @@ async fn attach_listeners(
             &path,
             node.dispatch.client.clone(),
             Authorization::identity(node.authority.root),
+            node.activity.clone(),
         )
         .await?;
         stop.stages.push(Stage::Listener(listener));
@@ -760,6 +765,7 @@ async fn attach_listeners(
                 &fd_path,
                 node.dispatch.client.clone(),
                 Authorization::identity(node.authority.root),
+                node.activity.clone(),
             )
             .await?;
             stop.stages.push(Stage::Listener(listener));
@@ -768,7 +774,8 @@ async fn attach_listeners(
         }
     }
     if let Some(address) = requested.tcp {
-        let (listener, address) = Listener::tcp(address, node.dispatch.client.clone()).await?;
+        let (listener, address) =
+            Listener::tcp(address, node.dispatch.client.clone(), node.activity.clone()).await?;
         stop.stages.push(Stage::Listener(listener));
         bound.tcp = Some(address);
     }
