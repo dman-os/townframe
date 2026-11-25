@@ -4,10 +4,10 @@ pub mod decide_peer_strat;
 use decide_peer_strat::*;
 
 use crate::kit::mpsc;
+use crate::kit::scheduler::TaskId;
 use crate::part_store::ObjPayload;
 use crate::part_store::PartStoreRead;
 use crate::sync::rpc::BigSyncRpcClient;
-use crate::kit::scheduler::TaskId;
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug)]]

@@ -11,6 +11,7 @@ use std::num::NonZeroUsize;
 
 use crate::interlude::*;
 
+use crate::kit::scheduler::Instant;
 use crate::part_store::AuthorizedPage;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
@@ -31,7 +32,6 @@ use crate::replay::wire::UpdateSession;
 use crate::replay::wire::Verdict;
 use crate::rev::Limits;
 use crate::rev::Rev;
-use crate::kit::scheduler::Instant;
 
 #[cfg(test)]
 mod tests;
