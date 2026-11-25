@@ -175,6 +175,10 @@ async fn run_dial(target: iroh::EndpointId) {
     let echo = recv.read_to_end(1 << 16).await.expect("reading the echo");
     assert_eq!(echo, ECHO_REQUEST, "the echo differs from the request");
     connection.close(0u8.into(), b"done");
+    // `close` only queues the CONNECTION_CLOSE; dropping the endpoint at the end of this task
+    // would cancel it before it is sent and the acceptor would never see the close.
+    // `Endpoint::close` drains it first.
+    endpoint.close().await;
     show("echo", &String::from_utf8(echo).expect("the echo is text"));
 }
 
