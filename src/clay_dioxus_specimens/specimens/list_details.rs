@@ -65,9 +65,14 @@ fn ListDetailsSpecimen(width_px: f64, initially_open: Option<&'static str>) -> E
     let width = WidthClass::from_px(width_px);
     let mut open = use_signal(|| initially_open.map(str::to_owned));
     let mut weights = use_signal(|| vec![1.0, 2.0]);
+    // The list column's own gutter: the kit's `list` part is bare, so a column that holds rows
+    // brings the inline padding (the shell's list micros do the same), and the rows stay flush
+    // with each other.
     let list = rsx! {
-        for title in SETTINGS {
-            SettingsRow { key: "{title}", title }
+        div { class: "px-3 py-2",
+            for title in SETTINGS {
+                SettingsRow { key: "{title}", title }
+            }
         }
     };
     let current = open();
