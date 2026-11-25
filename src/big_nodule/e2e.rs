@@ -1147,7 +1147,6 @@ impl Node {
             authorization,
             SetCartridgeGrant {
                 cartridge_id: id(cartridge_id),
-                component: Component::Nodule,
                 grant,
                 value,
             },
@@ -1167,8 +1166,7 @@ impl Node {
             .await
             .datums
             .keys()
-            .filter(|key| key.tag().as_str() == big_cartridges_core::config::NoduleGrant::ID)
-            .filter_map(|key| GrantKey::from_slot(key.slot_bytes()))
+            .filter_map(GrantKey::from_datum_key)
             .filter(|grant| matches!(grant, GrantKey::Drawer(_)))
             .collect();
         for grant in held {
@@ -1186,7 +1184,7 @@ impl Node {
                 self.operator(),
                 cartridge_id,
                 GrantKey::Drawer(drawer),
-                Some(GrantBody::drawer(access.into())),
+                Some(GrantBody::access(access.into())),
             )
             .await
             .unwrap();
@@ -1202,9 +1200,8 @@ impl Node {
             .await
             .datums
             .keys()
-            .filter(|key| key.tag().as_str() == big_cartridges_core::config::NoduleGrant::ID)
-            .filter_map(|key| GrantKey::from_slot(key.slot_bytes()))
-            .filter(|grant| !matches!(grant, GrantKey::Drawer(_)))
+            .filter_map(GrantKey::from_datum_key)
+            .filter(|grant| matches!(grant, GrantKey::Method(_) | GrantKey::Authority(_)))
             .collect();
         let wanted: BTreeSet<GrantKey> = methods
             .operations
@@ -1225,7 +1222,7 @@ impl Node {
                 self.operator(),
                 cartridge_id,
                 grant,
-                Some(GrantBody::method(methods.privileged)),
+                Some(GrantBody::present()),
             )
             .await
             .unwrap();
@@ -2053,8 +2050,8 @@ async fn invalid_imported_grants_are_refused_per_nodule_and_repairable() {
         .write_cartridge_datums(
             example_cartridge!("photos"),
             BTreeMap::from([(
-                bad_grant.datum_key(Component::Nodule),
-                json!({ "$type": big_cartridges_core::config::NoduleGrant::ID, "access": "Read" }),
+                bad_grant.datum_key(),
+                json!({ "$type": big_cartridges_core::config::MethodGrant::ID, "access": "Read" }),
             )]),
         )
         .await;
@@ -2093,7 +2090,7 @@ async fn invalid_imported_grants_are_refused_per_nodule_and_repairable() {
         operator,
         example_cartridge!("photos"),
         bad_grant,
-        Some(GrantBody::method(false)),
+        Some(GrantBody::present()),
     )
     .await
     .unwrap();
@@ -2182,14 +2179,9 @@ async fn install_creates_the_cartridge_config_document_and_reinstall_reuses_it_w
     )
     .await;
     let grant = GrantKey::Method("org.example.remote.ping".to_owned());
-    node.set_grant(
-        operator,
-        photos,
-        grant.clone(),
-        Some(GrantBody::method(false)),
-    )
-    .await
-    .unwrap();
+    node.set_grant(operator, photos, grant.clone(), Some(GrantBody::present()))
+        .await
+        .unwrap();
 
     // Uninstalling keeps the document, so a reinstall (this node's, or a sister's) finds the
     // settings and the grant where they were left, in the same document.
@@ -2209,10 +2201,7 @@ async fn install_creates_the_cartridge_config_document_and_reinstall_reuses_it_w
     );
     let left = node.read_doc(installed.config_doc.clone()).await;
     assert!(left.datums.contains_key(&photos_settings_key()));
-    assert!(
-        left.datums
-            .contains_key(&grant.datum_key(Component::Nodule))
-    );
+    assert!(left.datums.contains_key(&grant.datum_key()));
 
     node.restart_nodules().await.unwrap();
     node.admit(operator, cartridge(photos, "1.0.0", true))
@@ -2228,7 +2217,7 @@ async fn install_creates_the_cartridge_config_document_and_reinstall_reuses_it_w
         panic!("the settings survived the uninstall");
     };
     assert_eq!(value["thumbnails"], json!(false));
-    assert!(doc.datums.contains_key(&grant.datum_key(Component::Nodule)));
+    assert!(doc.datums.contains_key(&grant.datum_key()));
     // The reinstall starts disabled, as any install does: enablement is per node and per install.
     assert!(!node.get(operator, photos).await.unwrap().enabled);
     node.shutdown().await;
@@ -2259,31 +2248,17 @@ async fn clearing_the_config_deletes_settings_and_grants_of_both_components_and_
     )
     .await;
     let nodule_grant = GrantKey::Method("org.example.remote.ping".to_owned());
-    let micro_grant = GrantKey::Authority("org.example.remote".to_owned());
-    node.set_grant(
-        operator,
-        photos,
-        nodule_grant.clone(),
-        Some(GrantBody::method(false)),
-    )
-    .await
-    .unwrap();
-    node.call(
-        operator,
-        SetCartridgeGrant {
-            cartridge_id: id(photos),
-            component: Component::Micro,
-            grant: micro_grant.clone(),
-            value: Some(GrantBody::method(false)),
-        },
-    )
-    .await
-    .unwrap();
+    let other_grant = GrantKey::Authority("org.example.remote".to_owned());
+    for grant in [&nodule_grant, &other_grant] {
+        node.set_grant(operator, photos, grant.clone(), Some(GrantBody::present()))
+            .await
+            .unwrap();
+    }
     let before = node.cartridge_doc(photos).await;
     for key in [
         photos_settings_key(),
-        nodule_grant.datum_key(Component::Nodule),
-        micro_grant.datum_key(Component::Micro),
+        nodule_grant.datum_key(),
+        other_grant.datum_key(),
     ] {
         assert!(before.datums.contains_key(&key), "{key}");
     }
@@ -2315,7 +2290,7 @@ async fn clearing_the_config_deletes_settings_and_grants_of_both_components_and_
         operator,
         schema,
         GrantKey::Method("org.example.remote.ping".to_owned()),
-        Some(GrantBody::method(false)),
+        Some(GrantBody::present()),
     )
     .await
     .unwrap();
@@ -2377,7 +2352,7 @@ async fn grants_are_separate_datums_so_two_made_separately_both_apply() {
         operator,
         photos,
         GrantKey::Drawer(present.clone()),
-        Some(GrantBody::drawer(EntryAccess::Read)),
+        Some(GrantBody::access(EntryAccess::Read)),
     )
     .await
     .unwrap();
@@ -2386,12 +2361,12 @@ async fn grants_are_separate_datums_so_two_made_separately_both_apply() {
         operator,
         photos,
         GrantKey::Drawer(originated.clone()),
-        Some(GrantBody::drawer(EntryAccess::Write)),
+        Some(GrantBody::access(EntryAccess::Write)),
     )
     .await
     .unwrap();
     let both = node.cartridge_doc(photos).await;
-    let key = |drawer: &DrawerId| GrantKey::Drawer(drawer.clone()).datum_key(Component::Nodule);
+    let key = |drawer: &DrawerId| GrantKey::Drawer(drawer.clone()).datum_key();
     assert_eq!(both.datums[&key(&present)], one.datums[&key(&present)]);
     assert!(both.datums.contains_key(&key(&originated)));
 
@@ -2414,14 +2389,13 @@ async fn grants_are_separate_datums_so_two_made_separately_both_apply() {
         })
     );
 
-    // A grant states what its kind takes, and a component the cartridge does not contribute has
-    // no grants.
+    // A grant states what its kind takes, and a cartridge that is not installed has no grants.
     assert!(matches!(
         node.set_grant(
             operator,
             photos,
             GrantKey::Method("org.example.remote.ping".to_owned()),
-            Some(GrantBody::drawer(EntryAccess::Read)),
+            Some(GrantBody::access(EntryAccess::Read)),
         )
         .await,
         Err(CartridgesError::Rejected(_))
@@ -2430,14 +2404,13 @@ async fn grants_are_separate_datums_so_two_made_separately_both_apply() {
         node.call(
             operator,
             SetCartridgeGrant {
-                cartridge_id: id(photos),
-                component: Component::Micro,
+                cartridge_id: id(example_cartridge!("never")),
                 grant: GrantKey::Method("org.example.remote.ping".to_owned()),
-                value: Some(GrantBody::method(false)),
+                value: Some(GrantBody::present()),
             },
         )
         .await,
-        Err(CartridgesError::Rejected(_))
+        Err(CartridgesError::UnknownCartridge(_))
     ));
     node.shutdown().await;
 }

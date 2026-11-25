@@ -1,0 +1,28 @@
+{
+  "$defs": {
+    "DrawerGrant": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.cartridges.grant.drawer/<drawerId>`: the cartridge may use the drawer at\n`access`, capped by what its `#drawers` permbinds declare (ADR 049 §4.1).",
+      "properties": {
+        "access": {
+          "knownValues": [
+            "Relay",
+            "Read",
+            "Write",
+            "Admin"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "access"
+      ],
+      "title": "DrawerGrant",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridges.grant.drawer"
+    }
+  },
+  "$ref": "#/$defs/DrawerGrant",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

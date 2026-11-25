@@ -237,9 +237,9 @@ impl TestNode {
         self.record(cartridge_id).await
     }
 
-    /// Grants the nodule of `cartridge_id` the methods in `methods`, each as a grant datum of its
-    /// own in the cartridge's config document, so it holds them as a dispatch capability minted
-    /// from them. Grants already made stay. The grant is bounded by what the nodule's cartridge
+    /// Grants the cartridge `cartridge_id` the methods in `methods`, each as a grant datum of its
+    /// own in the cartridge's config document, so its nodule holds them as a dispatch capability
+    /// minted from them. A grant states no privilege, so `methods.privileged` is not carried. Grants already made stay. The grant is bounded by what the nodule's cartridge
     /// requested and by the nodule service's own dispatch authority, and the record says whether
     /// it was applied.
     pub async fn grant(&self, cartridge_id: &CartridgeId, methods: DispatchScope) -> NoduleRecord {
@@ -251,17 +251,16 @@ impl TestNode {
         for grant in grants {
             self.nodules(SetCartridgeGrant {
                 cartridge_id: cartridge_id.clone(),
-                component: Component::Nodule,
                 grant,
-                value: Some(GrantBody::method(methods.privileged)),
+                value: Some(GrantBody::present()),
             })
             .await;
         }
         self.record(cartridge_id).await
     }
 
-    /// Clears the grant datums for `methods` from the config document of the nodule of
-    /// `cartridge_id`, which revokes them: the nodule is re-minted a capability without them.
+    /// Clears the grant datums for `methods` from the config document of `cartridge_id`, which
+    /// revokes them: the nodule is re-minted a capability without them.
     pub async fn revoke(&self, cartridge_id: &CartridgeId, methods: DispatchScope) -> NoduleRecord {
         let grants = methods
             .operations
@@ -271,7 +270,6 @@ impl TestNode {
         for grant in grants {
             self.nodules(SetCartridgeGrant {
                 cartridge_id: cartridge_id.clone(),
-                component: Component::Nodule,
                 grant,
                 value: None,
             })

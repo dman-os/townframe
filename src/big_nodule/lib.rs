@@ -354,7 +354,6 @@ impl NoduleService {
             .ask(|reply| Command::SetGrant {
                 context,
                 cartridge_id: params.cartridge_id,
-                component: params.component,
                 grant: params.grant,
                 value: params.value,
                 reply,

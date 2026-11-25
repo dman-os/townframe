@@ -12,7 +12,7 @@
       "type": "object"
     },
     "main": {
-      "description": "Deletes the cartridge's settings datums and every grant datum, nodule and micro, from its\nconfig document. The install, if any, stays: the cartridge keeps running with no settings and\nno grants.",
+      "description": "Deletes the cartridge's settings datums and every grant datum from its\nconfig document. The install, if any, stays: the cartridge keeps running with no settings and\nno grants.",
       "errors": [
         {
           "name": "Denied"
