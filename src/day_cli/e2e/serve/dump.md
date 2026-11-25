@@ -35,15 +35,8 @@ $ sh -c '"$DAY" dump node | grep -o "^ *\"\(present\|originated\|known drawers\|
 "originated"
 "present"
 
-$ day dump carts
-{
-  "installs": {
-    "installs": []
-  },
-  "nodules": {
-    "nodules": []
-  }
-}
+$ sh -c '"$DAY" dump carts | grep -c "^ *\"cartridgeId\": \"did:key:[^\"]*/core\",$"'
+2
 
 $ day dump grants
 {

@@ -11,3 +11,5 @@ features = []
 
 [builds.native]
 features = ["schemars"]
+
+[builds.wasm32-wasip3]
