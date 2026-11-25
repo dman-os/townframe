@@ -290,14 +290,13 @@ impl BuckId {
 
     /// The next id in bucket order. It does not roll over to the next level: the last bucket of
     /// a level steps to a non-canonical id past it (`(1, 15)` to `(1, 16)`), which still sorts
-    /// before the next level and lists nothing at its own.
+    /// before the next level and lists nothing at its own. The last bucket of the deepest level
+    /// steps to level `MAX_LEVEL + 1`, which sorts after every bucket and is no level a request
+    /// may ask for: a walk that sees the step leave its working level is done, where an id that
+    /// stayed on the last bucket would list it again for ever.
     #[inline]
     pub fn increment(&self) -> Self {
-        if *self == Self::new(Self::MAX_LEVEL, u16::MAX) {
-            *self
-        } else {
-            Self(self.0 + 1)
-        }
+        Self(self.0 + 1)
     }
 }
 
@@ -305,6 +304,68 @@ impl BuckId {
 mod tests {
     use super::*;
     use serde::Deserialize;
+
+    /// Every canonical id of a level, in bucket order.
+    fn level_ids(level: u8) -> impl Iterator<Item = BuckId> {
+        let width = 1u32 << (u32::from(level) * u32::from(BuckId::BITS_PER_LEVEL));
+        (0..width).map(move |index| BuckId::new(level, index as u16))
+    }
+
+    #[test]
+    fn the_last_bucket_of_a_level_steps_to_a_non_canonical_id_before_the_next_level() {
+        for level in 0..BuckId::MAX_LEVEL {
+            let last = level_ids(level).last().expect("a level has buckets");
+            assert_eq!(
+                last,
+                BuckId::new(level, u16::MAX),
+                "the clamp of an index past the end is the last bucket"
+            );
+            let past = last.increment();
+            assert_eq!(past.level(), level, "the step stays on the level it left");
+            assert_ne!(
+                BuckId::new(past.level(), past.index()),
+                past,
+                "level {level}: {past:?} is not a bucket of the level"
+            );
+            assert!(past > last, "level {level}");
+            assert!(
+                past < BuckId::new(level + 1, 0),
+                "level {level}: {past:?} sorts before the next level's first bucket"
+            );
+        }
+    }
+
+    #[test]
+    fn the_last_bucket_of_the_deepest_level_steps_past_every_level() {
+        let last = BuckId::new(BuckId::MAX_LEVEL, u16::MAX);
+        let past = last.increment();
+        // A step that stayed on the last bucket would make a listing from it list it again.
+        assert_ne!(past, last);
+        assert!(past > last);
+        assert_eq!(past.level(), BuckId::MAX_LEVEL + 1);
+        assert!(past.level() > BuckId::MAX_LEVEL);
+    }
+
+    #[test]
+    fn increment_is_the_next_bucket_inside_a_level() {
+        for level in 0..=BuckId::MAX_LEVEL {
+            let ids = level_ids(level).collect::<Vec<_>>();
+            for pair in ids.windows(2) {
+                assert_eq!(pair[0].increment(), pair[1], "level {level}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_deepest_range_of_the_last_bucket_reaches_the_last_deepest_index() {
+        // A bucket covers the deepest indices that `to_level` maps onto it, the last bucket of
+        // every level included: the top deepest index belongs to the last bucket of each level.
+        let deepest = BuckId::new(BuckId::MAX_LEVEL, u16::MAX);
+        for level in 0..=BuckId::MAX_LEVEL {
+            let last = BuckId::new(level, u16::MAX);
+            assert_eq!(deepest.to_level(level), last, "level {level}");
+        }
+    }
 
     #[test]
     fn every_key_renders_as_one_multibase_encoding() {

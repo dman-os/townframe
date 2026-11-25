@@ -2,6 +2,7 @@
 //! machines pulling from a responder's memory part store.
 
 mod harness;
+mod last_bucket;
 mod walk;
 
 use super::*;
@@ -272,7 +273,10 @@ fn walk_converges(scenario: harness::Scenario) -> Res<harness::Driver<MemoryPart
         };
         let hidden_before = payloads(PartStoreRead::obj_states(&requester, &hidden).await?);
 
-        let mut driver = Driver::new(requester, Responder::new(responder, scenario.leaf_cap));
+        let mut driver = Driver::new(
+            requester,
+            Responder::new(responder, scenario.leaf_cap).with_leaf_byte_budget(scenario.leaf_bytes),
+        );
         driver.run(&parts).await?;
 
         for part in &parts {
@@ -297,8 +301,9 @@ fn walk_converges(scenario: harness::Scenario) -> Res<harness::Driver<MemoryPart
                         walk,
                         Walk::Clean | Walk::Walked { working_level: 0 }
                     ));
-                    let page =
-                        u64::from(scenario.leaf_cap.min(BucketMachine::LEAF_BUCKET_LIMIT_HINT));
+                    let page = u64::try_from(scenario.page_entries())
+                        .expect(ERROR_IMPOSSIBLE)
+                        .min(u64::from(BucketMachine::LEAF_BUCKET_LIMIT_HINT));
                     assert!(
                         traffic.leaf_requests <= divergence.responder_len.div_ceil(page),
                         "{part}: {traffic:?} for {divergence:?}"
@@ -397,6 +402,7 @@ fn identical_stores_compare_only_the_root() -> Res<()> {
         requester: objs,
         readable: vec![true; usize::from(PARTS)],
         leaf_cap: BucketMachine::LEAF_BUCKET_LIMIT_HINT,
+        leaf_bytes: crate::sync::rpc::LEAF_PAGE_BYTE_BUDGET,
     };
     let driver = walk_converges(scenario.clone())?;
     for part in scenario.parts() {
@@ -453,6 +459,7 @@ fn unauthorized_parts_converge_to_nothing() -> Res<()> {
         ],
         readable: vec![true, false, false],
         leaf_cap: 1,
+        leaf_bytes: crate::sync::rpc::LEAF_PAGE_BYTE_BUDGET,
     })
     .map(drop)
 }
@@ -483,6 +490,7 @@ fn a_pending_membership_misses_a_removal_its_payload_overtakes() -> Res<()> {
         }],
         readable: vec![false, true, true],
         leaf_cap: 1,
+        leaf_bytes: crate::sync::rpc::LEAF_PAGE_BYTE_BUDGET,
     })
     .map(drop)
 }

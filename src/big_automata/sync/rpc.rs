@@ -22,9 +22,14 @@
 //! 5. **Leaves** return, per asked bucket, its member entries (live with their fingerprint under
 //!    the request's seed, dead without) after `after`, at most the limit (the hint, at least 1
 //!    and at most the responder's cap, which is at most [`MAX_LEAF_PAGE`]; a hint above the
-//!    cap is capped, not refused), each page echoing the `after` it answers and carrying
-//!    `next_after` exactly when the bucket has more (the walk drops a redelivered page by the
-//!    echo). A bucket unchanged past `since` answers an empty page.
+//!    cap is capped, not refused), and at most [`LEAF_PAGE_BYTE_BUDGET`] encoded bytes of
+//!    entries (each costing [`bucket::BucketObjPageEntry::wire_bytes`] of its key's width), whichever
+//!    ends the page first; a page always carries its first entry, however wide, and a page that
+//!    stops for bytes stops before the entry that did not fit, never past it. Each page echoes
+//!    the `after` it answers and carries `next_after` exactly when the bucket has more (the walk
+//!    drops a redelivered page by the echo). A bucket unchanged past `since` answers an empty
+//!    page. A page is empty only when the bucket is finished: a page with no entries reads as
+//!    done, so a budget that could empty one would strand the rest.
 //!    A request naming more than [`MAX_LEAF_BUCKETS`] buckets is refused whole with
 //!    `TooManyBuckets { cap }` before the store is read, and the asker never sends one.
 //!    A request that is malformed whatever the store holds (a bucket id beyond the deepest level
@@ -64,6 +69,20 @@ pub const MAX_LEAF_BUCKETS: usize = 64;
 
 /// Ceiling on the entries of one leaf page, whatever the hint.
 pub const MAX_LEAF_PAGE: u32 = 1024;
+
+/// Ceiling on the encoded size of one leaf page's entries, whatever the hint.
+///
+/// The entry cap alone leaves a page's cost unbounded: an object key is any byte string
+/// (`ByteKey` has no length limit), so [`MAX_LEAF_PAGE`] entries of long keys is as large as the
+/// asker's keys are wide, and the page is remote input to the walk's buffer. At 64 KiB the
+/// entry cap still binds for ordinary keys (about 1560 entries of 32-byte keys fit, against a
+/// cap of 1024) and the budget binds once a page averages wider than about 50 bytes a key.
+///
+/// A page is never empty for want of room: one entry goes out even when it alone is over the
+/// budget, because a page with no entries reads as the bucket's end, which would strand the
+/// tail. A responder may be built with a smaller budget
+/// ([`responder::RpcResponder::with_leaf_byte_budget`]); this is the default and the largest.
+pub const LEAF_PAGE_BYTE_BUDGET: usize = 64 * 1024;
 
 // Reads, but procedures: their parameters are maps and lists, which a query string cannot carry.
 service_core_rs::service_method!(summary::PartSummariesRequest => summary::PartSummariesResponse, summary::PartSummariesError, procedure("org.townframe.bigsync.rpc.partSummaries"));

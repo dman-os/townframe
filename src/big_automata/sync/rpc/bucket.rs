@@ -74,6 +74,29 @@ structstruck::strike! {
 }
 
 impl BucketObjPageEntry {
+    /// The most bytes a fingerprint takes on the wire: postcard frames a `u64` as a varint of up
+    /// to ten bytes, and the fingerprint is a hash, so a fixed ten is the bound that does not
+    /// depend on its value.
+    const FP_WIRE_BYTES: usize = 10;
+
+    /// The most bytes one entry adds to its page on the wire, from its key's width alone.
+    ///
+    /// An entry is the key (postcard frames a byte string as a varint length and the bytes), the
+    /// `Option` tag of the fingerprint, and the fingerprint. The key is the only variable part
+    /// (identity is the byte string, any length is a key), and the fingerprint is counted at its
+    /// widest, so the cost of a page is decided from the keys without reading a payload or
+    /// hashing, and a dead entry (no fingerprint) is charged as if it carried one.
+    #[must_use]
+    pub const fn wire_bytes(key_len: usize) -> usize {
+        // Base-128 groups, and one byte even for zero.
+        let length_prefix = if key_len == 0 {
+            1
+        } else {
+            (usize::BITS - key_len.leading_zeros()).div_ceil(7) as usize
+        };
+        length_prefix + key_len + 1 + Self::FP_WIRE_BYTES
+    }
+
     /// A leaf entry's fingerprint: the object and its payload digest under the request's seed.
     /// Both sides compute it from the digest stored at write time, so neither rereads payloads.
     pub fn fingerprint(

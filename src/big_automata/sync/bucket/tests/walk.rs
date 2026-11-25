@@ -556,7 +556,8 @@ async fn run_case(case: WalkCase) -> Res<(Vec<Delta>, BTreeSet<Delta>)> {
     let requester = MemoryPartStore::default();
     harness::build(&requester, &case.scenario.requester, &[]).await?;
     let expected = oracle(&requester, &responder_store, &part).await?;
-    let mut responder = Responder::new(responder_store, case.scenario.leaf_cap);
+    let mut responder = Responder::new(responder_store, case.scenario.leaf_cap)
+        .with_leaf_byte_budget(case.scenario.leaf_bytes);
     let Some(remote_size) = responder.part_summary(&part).await? else {
         // No member of the part at the responder: nothing to walk, nothing to emit.
         assert_eq!(expected, BTreeSet::new());
@@ -580,9 +581,7 @@ async fn run_case(case: WalkCase) -> Res<(Vec<Delta>, BTreeSet<Delta>)> {
         return Ok((vec![], expected));
     }
     // The page the machine is asked for is no bigger than the responder will give.
-    let leaf_hint = case
-        .leaf_hint
-        .min(usize::try_from(case.scenario.leaf_cap).expect(ERROR_IMPOSSIBLE));
+    let leaf_hint = case.leaf_hint.min(case.scenario.page_entries());
     let mut machine = BucketMachine::with_limits(
         part.clone(),
         case.working_level,
@@ -685,6 +684,7 @@ fn law_1_the_difference_of_two_stores_is_emitted_exactly() -> Res<()> {
         ],
         readable: vec![true; usize::from(harness::PARTS)],
         leaf_cap: 2,
+        leaf_bytes: crate::sync::rpc::LEAF_PAGE_BYTE_BUDGET,
     };
     let (emitted, expected) = futures::executor::block_on(run_case(WalkCase {
         scenario,
