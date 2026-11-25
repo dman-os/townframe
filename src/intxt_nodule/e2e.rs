@@ -537,7 +537,7 @@ async fn summarize_intxts_answers_each_drawer_in_order() {
     assert!(found.updated.is_some());
     assert_eq!(
         found.link.as_deref(),
-        Some(generic::Intxt::reference(&first).to_string().as_str())
+        Some(generic::Intxt::reference(&first, []).to_string().as_str())
     );
     assert_eq!(found.reason, None);
     let missing: &IntxtSummary = &summarized.results[3];

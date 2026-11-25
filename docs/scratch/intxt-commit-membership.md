@@ -22,6 +22,8 @@ The text is an ADR 035 `doc` reference (`dtxt:doc:<doc id>`, added 2026-11-17 by
 
 ### The grammar of the line
 
+**Superseded 2026-11-17 (operator): the line scan is replaced by the PR description block** (`intxt-review-micro.md`, "The PR description block"; `PrLinks::read` in intxt_core, vectors in `src/intxt_core/testdata/pr_block.json`). What follows describes the removed `Intxt::named_in`.
+
 What `Intxt::named_in` does, written so a reader in another language (the review micro) can implement it from this section. The golden vectors are `src/intxt_core/testdata/named_in.json`, an array of `{ name, body, drawers }`; a reader is correct when `named_in(body)` equals `drawers` for every case (`named_in_agrees_with_the_golden_vectors` runs them against the Rust reader). There is no `intxt:` keyword: the reader looks for the reference itself, and the `intxt: ` prefix in the examples is a convention for humans.
 
 1. **Where.** Every occurrence of the exact, lowercase text `dtxt:doc:` anywhere in the body starts a candidate. It need not be at the start of a line or a word (`https://example.org/?u=dtxt:doc:…` finds one), and the body is not split into lines first. Matching is case-sensitive here: `DTXT:DOC:` is not found, although the reference grammar elsewhere accepts a capital scheme.

@@ -604,12 +604,15 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
         let shown = show(&short).await;
         assert!(shown.contains("\"Two files\""), "{shown}");
         assert!(shown.contains("b and c"), "{shown}");
+        // The link names the drawer's descriptor document and hints at this node.
+        let link = packaging.reference(&drawer).unwrap();
         assert!(
-            shown.contains(&format!(
-                "link: dtxt:doc:{drawer}\n"
-            )),
-            "{shown}"
+            link.to_string()
+                .starts_with(&format!("dtxt:doc:{drawer}?via=")),
+            "{link}"
         );
+        assert_eq!(link.via().len(), 1, "{link}");
+        assert!(shown.contains(&format!("link: {link}\n")), "{shown}");
         // `new` put the worktree on the intxt, so naming none is naming it, until `use`
         // takes the worktree off it.
         let mut on = Vec::new();
@@ -673,8 +676,7 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
             packaging.which(&mut out, name).await.unwrap();
             String::from_utf8(out).unwrap()
         };
-        let held_line =
-            format!("{short}  \"Two files\"  link: dtxt:doc:{drawer}\n");
+        let held_line = format!("{short}  \"Two files\"  link: {link}\n");
         assert_eq!(which(&tip).await, held_line);
         assert_eq!(which("feat/x~1").await, held_line);
         // A unique prefix names the commit as well.
@@ -1366,11 +1368,26 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
             .create(&mut out, "Port the sync", None, None)
             .await
             .unwrap();
-        let link = generic::Intxt::reference(&drawer).to_string();
+        // `pr-block` prints the block the description carries: this intxt's link (hinting at this
+        // node) and title.
+        let mut printed = Vec::new();
+        packaging
+            .pr_block(&mut printed, &[drawer.to_string()])
+            .await
+            .unwrap();
+        let printed = String::from_utf8(printed).unwrap();
+        let reference = packaging.reference(&drawer).unwrap();
+        let link = reference.to_string();
+        assert!(link.contains("?via="), "{link}");
+        let block = generic::PrLinks::read(&printed).unwrap();
+        assert_eq!(block.intxts.len(), 1, "{printed}");
+        assert_eq!(block.intxts[0].reference.via(), reference.via(), "{printed}");
+        assert_eq!(block.intxts[0].title.as_deref(), Some("Port the sync"));
+        let description = block.write_into("Part of the port.\n").unwrap();
         let answer = |title: &str, updated_at: &str| {
             json!({
                 "title": title, "state": "open", "merged_at": null,
-                "body": format!("Part of the port.\n\nintxt: {link}\n"),
+                "body": description,
                 "head": {"ref": "feat/x", "sha": "4c1f0a"},
                 "base": {"ref": "main", "sha": "9a0e11"},
                 "updated_at": updated_at,
@@ -1392,6 +1409,22 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
                 .unwrap();
             String::from_utf8(out).unwrap()
         };
+
+        // A malformed block fails the pull rather than naming nothing.
+        let broken = packaging
+            .github_pull(&mut Vec::new(), "o/r#12", async |_| {
+                Ok(json!({
+                    "title": "t", "state": "open", "merged_at": null,
+                    "body": "<details>\n\n```json\n{\"$type\": \"org.example.intxt.prLinks\", \"intxts\": [{}]}\n```\n\n</details>",
+                    "head": {"ref": "feat/x", "sha": "4c1f0a"},
+                    "base": {"ref": "main", "sha": "9a0e11"},
+                    "updated_at": "2026-11-17T09:00:00Z",
+                    "html_url": "https://github.com/o/r/pull/12"
+                }))
+            })
+            .await;
+        let broken = format!("{:#}", broken.unwrap_err());
+        assert!(broken.contains("intxt block") && broken.contains("ref"), "{broken}");
 
         let first = pull("First title", "2026-11-17T10:00:00Z", "o/r#12").await;
         assert!(

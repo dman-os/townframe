@@ -17,6 +17,7 @@ use crate::interlude::*;
 
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
+use big_cabinet_core::DocReference;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
@@ -302,6 +303,15 @@ impl<'a> Packaging<'a> {
     pub(crate) fn acting_as(mut self, actor: big_cabinet_core::dmeta::Uuid7) -> Self {
         self.caller = self.caller.acting_as(actor);
         self
+    }
+
+    /// The text that names `drawer`'s intxt outside the node ([`generic::Intxt::reference`]),
+    /// hinting at this node and the peers it is configured to sync with.
+    pub(crate) fn reference(&self, drawer: &DocId) -> Res<DocReference> {
+        let via = crate::context::NodeDir::new(self.node_dir.to_owned())
+            .settings()?
+            .via_keys()?;
+        Ok(generic::Intxt::reference(drawer, via))
     }
 
     pub(super) fn identity(&self) -> Res<Identity> {
@@ -686,7 +696,9 @@ impl<'a> Packaging<'a> {
         .await?;
         self.remember(&drawer_id).await?;
         if let Some(doc) = &shared {
-            self.caller.share(&drawer_id, doc, DrawerAccess::Write).await?;
+            self.caller
+                .share(&drawer_id, doc, DrawerAccess::Write)
+                .await?;
             self.record_commits_doc(&drawer_id, doc).await?;
         }
         let live = self.live_intxts().await?;
@@ -694,7 +706,11 @@ impl<'a> Packaging<'a> {
         let short = shown(&ids, &drawer_id.to_string());
         writeln!(out, "intxt {short} \"{title}\"")?;
         if shared.is_some() {
-            writeln!(out, "  shares the commits document of {}", with.unwrap_or_default())?;
+            writeln!(
+                out,
+                "  shares the commits document of {}",
+                with.unwrap_or_default()
+            )?;
         }
         if let Some(identity) = identity::resolve(self.cwd)? {
             host::put_on_intxt(&identity, Some(drawer_id.to_string()))?;
@@ -1185,7 +1201,7 @@ impl<'a> Packaging<'a> {
                 "{}  \"{}\"  link: {}",
                 shown(&ids, &drawer.to_string()),
                 title.title,
-                generic::Intxt::reference(drawer)
+                self.reference(drawer)?
             )?;
         }
         Ok(())
@@ -1212,7 +1228,7 @@ impl<'a> Packaging<'a> {
             writeln!(out, "{description}")?;
         }
         // The text that names this intxt on any node, for a PR description or a commit message.
-        writeln!(out, "link: {}", generic::Intxt::reference(&drawer))?;
+        writeln!(out, "link: {}", self.reference(&drawer)?)?;
         let mut commits = Vec::new();
         let mut changes = Vec::new();
         let mut refs = Vec::new();
@@ -1348,7 +1364,39 @@ impl<'a> Packaging<'a> {
             shown(&intxts, &drawer.to_string()),
             view.title.title
         )?;
-        writeln!(out, "link: {}", generic::Intxt::reference(&drawer))?;
+        writeln!(out, "link: {}", self.reference(&drawer)?)?;
+        Ok(())
+    }
+
+    /// `day x intxt pr-block`: the block that names `names` (default: the intxt this worktree is
+    /// on) in a PR description ([`generic::PrLinks::block`]), with each intxt's title and the
+    /// refs it tracks.
+    pub(crate) async fn pr_block(&self, out: &mut impl Write, names: &[String]) -> Res<()> {
+        let names: Vec<Option<&str>> = if names.is_empty() {
+            vec![None]
+        } else {
+            names.iter().map(|name| Some(name.as_str())).collect()
+        };
+        let mut links = generic::PrLinks::default();
+        for name in names {
+            let (drawer, _) = self.resolve(name).await?;
+            let view = self.load(&drawer).await?;
+            let mut link = generic::PrLink::new(self.reference(&drawer)?);
+            link.title = Some(view.title.title.clone());
+            for (entry, _) in &view.entries {
+                if entry.tag().as_str() == work::GitRefEntry::ID {
+                    // The slot is `<clone>/<ref>`; readers without access see the ref.
+                    let slot = String::from_utf8_lossy(entry.slot_bytes()).into_owned();
+                    if let Some((_, reference)) = slot.split_once('/')
+                        && !link.refs.iter().any(|seen| seen == reference)
+                    {
+                        link.refs.push(reference.to_owned());
+                    }
+                }
+            }
+            links.intxts.push(link);
+        }
+        writeln!(out, "{}", links.block())?;
         Ok(())
     }
 

@@ -270,6 +270,17 @@ pub enum IntxtCommands {
         #[arg(long, conflicts_with = "intxt")]
         none: bool,
     },
+    /// Print the block that names intxts in a PR description
+    ///
+    /// Prints a collapsed `<details>` holding a JSON code block (`org.example.intxt.prLinks`) with
+    /// each intxt's `dtxt:doc:` reference (hinting at this node and the peers it syncs with), title
+    /// and tracked refs, to paste at the end of the description. Default: the intxt this worktree
+    /// is on. Reading a PR with `day x intxt github pull` finds the intxts it names there.
+    #[command(after_long_help = "Examples:\n  day x intxt pr-block\n  day x intxt pr-block qx qy")]
+    PrBlock {
+        /// The intxts: short ids, or full drawer ids. Default: the one this worktree is on
+        intxts: Vec<String>,
+    },
     /// Say what is recorded in this worktree and which intxts include it
     ///
     /// Run it in a worktree: it lists the ops and sessions capture recorded here, and the
@@ -320,8 +331,8 @@ pub enum GithubCommands {
     /// writes its title, description, state, branches, shas and update time into the node's
     /// GitHub document for the repository, which a micro can read. Pulling again overwrites it
     /// only when GitHub says the pull request changed. Prints the title and the intxts the
-    /// description names (a line `intxt: dtxt:datum:…` per intxt, as `day x intxt show` prints
-    /// under `link:`).
+    /// description's intxt block names (`day x intxt pr-block` prints one); a malformed block is
+    /// an error.
     #[command(
         after_long_help = "Examples:\n  day x intxt github pull dman-os/townframe#140\n  day x intxt github pull https://github.com/dman-os/townframe/pull/140"
     )]
@@ -450,6 +461,12 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
                 packaging
                     .show(&mut std::io::stdout(), intxt.as_deref())
                     .await
+            })
+            .await
+        }
+        IntxtCommands::PrBlock { intxts } => {
+            with_packaging(async |packaging| {
+                packaging.pr_block(&mut std::io::stdout(), &intxts).await
             })
             .await
         }

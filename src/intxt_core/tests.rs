@@ -308,22 +308,154 @@ fn the_adr_examples_are_valid_datums() {
     codec_round_trip::<annotation::AnnotationsEntry>(json!({"empty": true}));
 }
 
-/// A PR description names the intxts it belongs to, one reference each, among any other text.
-#[test]
-fn a_pr_description_names_its_intxts() {
+fn node(byte: u8) -> big_cabinet_core::dmeta::MultibaseKey {
+    big_cabinet_core::dmeta::MultibaseKey::try_from([byte; 32].as_slice()).unwrap()
+}
+
+/// Two links as an author's tooling would write them: the first with a title, refs and a hint
+/// naming two nodes, the second a bare reference.
+fn sample_links() -> generic::PrLinks {
     let first: big_cabinet_core::DocId = "z11111111111111111111111111111111".parse().unwrap();
     let second: big_cabinet_core::DocId = "z11111111111111111111111111111112".parse().unwrap();
-    let reference = generic::Intxt::reference(&first).to_string();
-    assert_eq!(reference, "dtxt:doc:z11111111111111111111111111111111");
-    let body = format!(
-        "Splits the reference parser.\n\n\
-         Intxt: {reference}.\n\
-         Also [the follow-up](dtxt:doc:{second}) and `{reference}` again.\n\
-         Not a doc: dtxt:datum:{second}/org.example.intxt/main\n\
-         Not a reference: dtxt:doc:nope\n"
+    let mut with_title =
+        generic::PrLink::new(generic::Intxt::reference(&first, [node(7), node(3)]));
+    with_title.title = Some("intxt: commits live with the intxt".into());
+    with_title.refs = vec!["refs/heads/stack/intxt-16".into()];
+    generic::PrLinks {
+        intxts: vec![
+            with_title,
+            generic::PrLink::new(generic::Intxt::reference(&second, [])),
+        ],
+        ..Default::default()
+    }
+}
+
+/// A reference names the intxt's descriptor document, and the `via` hint it carries survives the
+/// block while equality ignores it.
+#[test]
+fn the_pr_block_keeps_the_reference_with_its_via_hint() {
+    let links = sample_links();
+    let reference = &links.intxts[0].reference;
+    assert_eq!(
+        reference.to_string(),
+        format!(
+            "dtxt:doc:z11111111111111111111111111111111?via={}|{}",
+            node(3),
+            node(7)
+        )
     );
-    assert_eq!(generic::Intxt::named_in(&body), [first, second]);
-    assert!(generic::Intxt::named_in("dtxt:doc:self").is_empty());
+    let read = generic::PrLinks::read(&links.block()).unwrap();
+    assert_eq!(read, links);
+    assert_eq!(read.intxts[0].reference.via(), [node(3), node(7)]);
+    assert_eq!(read.intxts[1].reference.via(), []);
+    assert_eq!(read.intxts[0].title, links.intxts[0].title);
+    assert_eq!(read.intxts[0].refs, links.intxts[0].refs);
+}
+
+/// The golden vectors of the PR description block (`docs/scratch/intxt-review-micro.md`, "The PR
+/// description block"): every case's description reads as exactly the listed links (the block's
+/// own JSON, `$type` left out, `via` included), or is an error. A reader in another language is
+/// correct when it agrees on every case. A case that reads also survives writing back: the links
+/// replace their own block and read the same.
+#[test]
+fn the_pr_block_reader_agrees_with_the_golden_vectors() {
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        description: String,
+        links: Option<Value>,
+        #[serde(default)]
+        error: bool,
+    }
+    let cases: Vec<Case> = serde_json::from_str(include_str!("testdata/pr_block.json")).unwrap();
+    assert!(cases.len() >= 20);
+    assert!(cases.iter().any(|case| case.error));
+    for case in cases {
+        let read = generic::PrLinks::read(&case.description);
+        if case.error {
+            assert!(read.is_err(), "{}: {read:?}", case.name);
+            continue;
+        }
+        let read = read.unwrap_or_else(|error| panic!("{}: {error}", case.name));
+        assert_eq!(
+            serde_json::to_value(&read).unwrap(),
+            case.links.unwrap(),
+            "{}",
+            case.name
+        );
+        // Writing the links back leaves a description that reads the same and writes the same.
+        let written = read.write_into(&case.description).unwrap();
+        assert_eq!(
+            serde_json::to_value(generic::PrLinks::read(&written).unwrap()).unwrap(),
+            serde_json::to_value(&read).unwrap(),
+            "{}",
+            case.name
+        );
+        assert_eq!(read.write_into(&written).unwrap(), written, "{}", case.name);
+    }
+}
+
+#[test]
+fn the_pr_block_writer_inserts_replaces_and_is_idempotent() {
+    let links = sample_links();
+    let block = links.block();
+    assert!(block.starts_with("<details>\n<summary>intxt</summary>\n\n```json\n{"));
+    assert!(block.ends_with("}\n```\n\n</details>"));
+    assert!(block.contains("\"$type\": \"org.example.intxt.prLinks\""));
+
+    // Into an empty description: the block alone.
+    assert_eq!(links.write_into("").unwrap(), block);
+
+    // After existing text: that text stays as it was, set off by a blank line.
+    let text = "Splits the parser.\n\n- one\n- two\n";
+    let inserted = links.write_into(text).unwrap();
+    assert_eq!(inserted, format!("{text}\n{block}"));
+    assert_eq!(
+        links.write_into("No newline at the end").unwrap(),
+        format!("No newline at the end\n\n{block}")
+    );
+
+    // Over an existing block: only the block changes, text before and after is untouched.
+    let before = format!("Intro.\n\n{block}\n\nFooter.\n");
+    let mut newer = links.clone();
+    newer.intxts.pop();
+    newer.intxts[0].title = Some("renamed".into());
+    let replaced = newer.write_into(&before).unwrap();
+    assert_eq!(
+        replaced,
+        format!("Intro.\n\n{}\n\nFooter.\n", newer.block())
+    );
+    assert_eq!(generic::PrLinks::read(&replaced).unwrap(), newer);
+
+    // Idempotent: writing the same links again returns the same text, with LF and CRLF alike.
+    assert_eq!(links.write_into(&inserted).unwrap(), inserted);
+    assert_eq!(newer.write_into(&replaced).unwrap(), replaced);
+    let crlf = text.replace('\n', "\r\n");
+    let once = links.write_into(&crlf).unwrap();
+    assert!(!once.replace("\r\n", "").contains('\n'), "{once:?}");
+    assert_eq!(links.write_into(&once).unwrap(), once);
+    assert_eq!(generic::PrLinks::read(&once).unwrap(), links);
+
+    // A malformed block is not replaced silently.
+    let broken =
+        "<details>\n\n```json\n{\"$type\": \"org.example.intxt.prLinks\"\n```\n\n</details>";
+    assert!(links.write_into(broken).is_err());
+
+    // Carried fields round trip: the block's extras come back on write.
+    let carried = format!(
+        "<details>\n<summary>intxt</summary>\n\n```json\n{}\n```\n\n</details>",
+        json!({
+            "$type": "org.example.intxt.prLinks",
+            "tickets": ["T-1"],
+            "intxts": [{"ref": "dtxt:doc:z11111111111111111111111111111111", "note": 1}]
+        })
+    );
+    let read = generic::PrLinks::read(&carried).unwrap();
+    assert_eq!(read.extra["tickets"], json!(["T-1"]));
+    assert_eq!(read.intxts[0].extra["note"], json!(1));
+    let rewritten = read.write_into(&carried).unwrap();
+    assert_eq!(generic::PrLinks::read(&rewritten).unwrap(), read);
+    assert!(rewritten.contains("\"tickets\"") && rewritten.contains("\"note\""));
 }
 
 /// Carrying is not operating: a peer's future fields and vocabulary values survive the whole
@@ -511,36 +643,4 @@ fn a_thread_waits_on_whoever_did_not_write_last_and_is_unseen_until_recorded() {
     // A version no verified author wrote is someone else's.
     let anonymous = annotation::Thread::group(vec![posted("0193-c", None, &[], &["h"])]).remove(0);
     assert!(anonymous.waiting_on(&ada));
-}
-
-/// The golden vectors of the PR-description line (`docs/scratch/intxt-commit-membership.md`,
-/// "The grammar of the line"): every case's body names exactly the listed drawers, in order. A
-/// reader in another language is correct when it agrees on every case.
-#[test]
-fn named_in_agrees_with_the_golden_vectors() {
-    #[derive(serde::Deserialize)]
-    struct Case {
-        name: String,
-        body: String,
-        drawers: Vec<String>,
-    }
-    let cases: Vec<Case> = serde_json::from_str(include_str!("testdata/named_in.json")).unwrap();
-    assert!(cases.len() >= 12);
-    for case in cases {
-        let named: Vec<String> = generic::Intxt::named_in(&case.body)
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        assert_eq!(named, case.drawers, "{}", case.name);
-        // The written reference is one the reader finds.
-        for drawer in &case.drawers {
-            let id: big_cabinet_core::DocId = drawer.parse().unwrap();
-            assert_eq!(
-                generic::Intxt::named_in(&generic::Intxt::reference(&id).to_string()),
-                [id],
-                "{}",
-                case.name
-            );
-        }
-    }
 }
