@@ -144,15 +144,16 @@ fn part_store_leaf_paging_is_linear() {
                     &[(BuckId::ROOT, after.clone())],
                     0,
                     1024,
+                    crate::part_store::LEAF_PAGE_BYTE_BUDGET,
                 ))
                 .expect("leaves")
                 .expect("readable")
                 .remove(0);
-                let Some(last) = page.last() else {
+                let Some(last) = page.entries.last() else {
                     break;
                 };
                 after = Some(last.obj.clone());
-                read += page.len();
+                read += page.entries.len();
             }
             assert_eq!(read, n);
         })
