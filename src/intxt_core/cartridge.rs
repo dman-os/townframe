@@ -252,11 +252,21 @@ pub fn build_of(version: &Version) -> &str {
     version.0.build.as_str()
 }
 
-/// The version to publish `build` at, given the version the node runs (none when it runs no
-/// intxt): one patch after it, which the registry orders after it. A legacy version without a
-/// patch counter (`0.1.0`, `0.1.0+<hash>`) counts as patch 0, so it becomes `0.1.1+<build>`.
-pub fn next_version(running: Option<&Version>, build: &str) -> Version {
-    version(running.map_or(0, |running| running.0.patch) + 1, build)
+/// The version to publish `build` at, given the `known` versions: the one the node runs and the
+/// ones the registry has held (it refuses a version that does not order after the newest it has
+/// had, even one since removed from the node). One patch after the highest, which the registry
+/// orders after all of them. A legacy version without a patch counter (`0.1.0`,
+/// `0.1.0+<hash>`) counts as patch 0, so with no other it becomes `0.1.1+<build>`.
+pub fn next_version<'a>(known: impl IntoIterator<Item = &'a Version>, build: &str) -> Version {
+    version(
+        known
+            .into_iter()
+            .map(|known| known.0.patch)
+            .max()
+            .unwrap_or(0)
+            + 1,
+        build,
+    )
 }
 
 /// Writes the cartridge's permbinds and its nodule's routines, as the ADR 047 datums themselves.
@@ -500,24 +510,29 @@ mod tests {
     #[test]
     fn the_version_to_publish_orders_after_the_running_one() {
         let parse = |text: &str| text.parse::<Version>().unwrap();
-        assert_eq!(next_version(None, "aaaa").to_string(), "0.1.1+aaaa");
+        assert_eq!(next_version([], "aaaa").to_string(), "0.1.1+aaaa");
         assert_eq!(
-            next_version(Some(&parse("0.1.0+legacyhandlerhash")), "bbbb").to_string(),
+            next_version([&parse("0.1.0+legacyhandlerhash")], "bbbb").to_string(),
             "0.1.1+bbbb"
         );
         assert_eq!(
-            next_version(Some(&parse("0.1.0")), "bbbb").to_string(),
+            next_version([&parse("0.1.0")], "bbbb").to_string(),
             "0.1.1+bbbb"
         );
         assert_eq!(
-            next_version(Some(&parse("0.1.4+aaaa")), "bbbb").to_string(),
+            next_version([&parse("0.1.4+aaaa")], "bbbb").to_string(),
             "0.1.5+bbbb"
         );
-        let first = next_version(None, "ffff");
-        let second = next_version(Some(&first), "0000");
-        let third = next_version(Some(&second), "ffff");
+        let first = next_version([], "ffff");
+        let second = next_version([&first], "0000");
+        let third = next_version([&second], "ffff");
         assert!(first < second && second < third, "{first} {second} {third}");
         assert_eq!(build_of(&third), "ffff");
+        // The registry has held a newer version than the one the node runs: after the newest.
+        assert_eq!(
+            next_version([&parse("0.1.2+aaaa"), &parse("0.1.5+cccc")], "dddd").to_string(),
+            "0.1.6+dddd"
+        );
         assert_eq!(build_of(&parse("0.1.3+abcd")), "abcd");
     }
 

@@ -28,6 +28,7 @@ use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
 use big_cartridges_core::protocol::GetCartridge;
 use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::ListCartridges;
 use big_cartridges_core::protocol::PublishCartridgeVersion;
 use big_cartridges_core::protocol::SetCartridgeEnabled;
 use big_cartridges_core::protocol::SetCartridgeGrant;
@@ -93,8 +94,22 @@ pub async fn install<H: HttpTransport>(
                 .is_some_and(|version| build_of(version) == build)
     });
     if !current {
+        // The registry refuses a version that does not order after the newest it has held, which
+        // can be newer than the one the node runs (a removed or since-replaced install).
+        let held = caller
+            .call(ListCartridges {})
+            .await?
+            .cartridges
+            .into_iter()
+            .find(|record| record.id == cartridge_id);
         fixture.version = next_version(
-            present.as_ref().and_then(|record| record.version.as_ref()),
+            present
+                .iter()
+                .filter_map(|record| record.version.as_ref())
+                .chain(
+                    held.iter()
+                        .flat_map(|record| record.versions.iter().map(|summary| &summary.version)),
+                ),
             &build,
         );
     }
