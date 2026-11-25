@@ -43,7 +43,10 @@ fn stopping_a_running_task_enters_the_stop_queue() {
     let mut s = Scheduler::default();
     let id = s.queue(t(0), Seed::Diff);
     drained(&mut s);
-    assert!(s.stop(id).expect("live").running, "the driver may be running it");
+    assert!(
+        s.stop(id).expect("live").running,
+        "the driver may be running it"
+    );
     assert_eq!(s.drain_stop_queue().collect::<Vec<_>>(), vec![id]);
     assert_eq!(s.counts().live, 0);
 }
@@ -53,7 +56,10 @@ fn stopping_a_running_task_enters_the_stop_queue() {
 fn stopping_a_queued_task_never_reaches_the_driver() {
     let mut s = Scheduler::default();
     let id = s.queue(t(0), Seed::Diff);
-    assert!(!s.stop(id).expect("live").running, "it never reached the driver");
+    assert!(
+        !s.stop(id).expect("live").running,
+        "it never reached the driver"
+    );
     assert_eq!(
         s.counts(),
         SchedulerCounts {
