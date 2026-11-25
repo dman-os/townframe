@@ -9,17 +9,21 @@
 use super::*;
 use crate::index::datum_ref::DatumRefEdge;
 use crate::index::datum_ref::DatumRefQuery;
+use crate::index::datum_ref::DatumRefTarget;
 use crate::index::datum_set::DatumRoute;
 
 trait DatumRefSelectorQuery {
-    fn doc_id(&self) -> &DocId;
+    /// The document the selector names, which the caller must be able to read. A key selector
+    /// names none: its referrers are filtered by readability of the documents holding them.
+    fn doc_id(&self) -> Option<&DocId>;
     fn into_query(self) -> DatumRefQuery;
 }
 
 impl DatumRefSelectorQuery for DatumRefSelector {
-    fn doc_id(&self) -> &DocId {
+    fn doc_id(&self) -> Option<&DocId> {
         match self {
-            Self::Origin { doc_id, .. } | Self::Target { doc_id, .. } => doc_id,
+            Self::Origin { doc_id, .. } | Self::Target { doc_id, .. } => Some(doc_id),
+            Self::Key { .. } => None,
         }
     }
 
@@ -41,19 +45,24 @@ impl DatumRefSelectorQuery for DatumRefSelector {
                 doc_id,
                 datum_key: None,
             } => DatumRefQuery::TargetDoc(doc_id),
+            Self::Key { key } => DatumRefQuery::Key(key),
         }
     }
 }
 
 impl From<DatumRefEdge> for QueriedDatumRef {
     fn from(edge: DatumRefEdge) -> Self {
+        let (target_doc_id, target_datum_key, ref_heads) = match edge.target {
+            DatumRefTarget::Route { route, heads } => (Some(route.doc_id), route.datum_key, heads),
+            DatumRefTarget::Key(key) => (None, key, Vec::new()),
+        };
         Self {
             origin_doc_id: edge.origin.doc_id,
             origin_datum_key: edge.origin.datum_key,
             path: edge.path,
-            target_doc_id: edge.target.doc_id,
-            target_datum_key: edge.target.datum_key,
-            ref_heads: edge.ref_heads,
+            target_doc_id,
+            target_datum_key,
+            ref_heads,
         }
     }
 }
@@ -66,6 +75,12 @@ impl DocsService {
     ) -> Result<Vec<QueriedDatumRef>, DocsError> {
         let caller = self.invocation(context, params.capability).await?;
         use big_cabinet_core::drawer::DrawerAccess;
+        if let Some(drawer_id) = &params.drawer_id {
+            DocsError::ensure_doc_id(drawer_id)?;
+        }
+        if let Some(doc_id) = params.selector.doc_id() {
+            DocsError::ensure_doc_id(doc_id)?;
+        }
         let drawer = if let Some(drawer_id) = &params.drawer_id {
             let DomainAuthority::Scoped(scope) = &caller.authority else {
                 return Err(DocsError::Denied);
@@ -80,9 +95,8 @@ impl DocsService {
         } else {
             None
         };
-        let selector_doc = params.selector.doc_id();
-        match &drawer {
-            Some(drawers) => {
+        match (params.selector.doc_id(), &drawer) {
+            (Some(selector_doc), Some(drawers)) => {
                 let candidates = BTreeSet::from([selector_doc.clone()]);
                 let readable = self
                     .access
@@ -96,7 +110,7 @@ impl DocsService {
                     return Ok(Vec::new());
                 }
             }
-            None => {
+            (Some(selector_doc), None) => {
                 self.authorize(
                     context,
                     &caller.authority,
@@ -104,6 +118,7 @@ impl DocsService {
                 )
                 .await?;
             }
+            (None, _) => {}
         }
         let Some(store) = &self.datum_ref else {
             return Err(DocsError::Repository(

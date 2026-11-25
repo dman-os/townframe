@@ -254,6 +254,12 @@ pub enum DocsError {
     },
     #[error("a command id is 1..=256 bytes")]
     InvalidCommand,
+    /// A document id arrived in a request that is not the 32 bytes every document id is. Ids are
+    /// variable-width keys on the wire (ADR 012), but a document's id is its ed25519 key, so
+    /// only a 32-byte one can name a document; refusing here keeps the width from ever reaching
+    /// the repository, where it is an invariant.
+    #[error("{doc_id} is not a document id: a document id is 32 bytes wide")]
+    InvalidDocId { doc_id: DocId },
     #[error("command {command} is still in flight; retry once it resolves")]
     CommandInFlight { command: CommandId },
     #[error("command {command} was already used for a different request")]
@@ -266,6 +272,14 @@ pub enum DocsError {
     SetAndRemoved { datum_key: DatumKey },
     #[error("datum {datum_key} value is invalid: {reason}")]
     InvalidValue { datum_key: DatumKey, reason: String },
+    #[error(
+        "datum {datum_key} is not content-addressed: its kind does not declare its slot a hash of its value"
+    )]
+    NotContentAddressed { datum_key: DatumKey },
+    #[error("datum {datum_key} does not hash to its key: {reason}")]
+    ContentHashMismatch { datum_key: DatumKey, reason: String },
+    #[error("no document the caller can read holds a copy of {datum_key} that hashes to its key")]
+    KeyRefUnresolved { datum_key: DatumKey },
     #[error(
         "datum {datum_key} value is too large: it needs {observed} {limit} and the limit is {maximum}"
     )]
@@ -301,6 +315,19 @@ pub enum DocsError {
     UnrelatedHistory,
 }
 
+impl DocsError {
+    /// Refuse `doc_id` unless it is the 32 bytes a document id is. Call this where an id enters
+    /// from a request, before it reaches anything that derives the document's key from it.
+    pub fn ensure_doc_id(doc_id: &DocId) -> Result<(), Self> {
+        doc_id
+            .to_bytes32()
+            .map(drop)
+            .map_err(|_| Self::InvalidDocId {
+                doc_id: doc_id.clone(),
+            })
+    }
+}
+
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -309,6 +336,17 @@ pub struct DocScope {
     pub write: BTreeSet<DocId>,
     pub create: BTreeSet<String>,
     pub drawers: BTreeMap<DocId, DrawerAccess>,
+}
+
+impl DocScope {
+    /// Refuse a scope that names a document or drawer whose id is not a document id.
+    pub fn ensure_doc_ids(&self) -> Result<(), DocsError> {
+        self.read
+            .iter()
+            .chain(&self.write)
+            .chain(self.drawers.keys())
+            .try_for_each(DocsError::ensure_doc_id)
+    }
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -410,6 +448,9 @@ pub enum DatumRefSelector {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         datum_key: Option<DatumKey>,
     },
+    /// Every `#keyRef` naming `key` (ADR 035 §2.9), whichever document holds the referrer. A key
+    /// reference names no document, so it has no `Target` to select by.
+    Key { key: DatumKey },
 }
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -427,11 +468,37 @@ pub struct QueriedDatumRef {
     pub origin_doc_id: DocId,
     pub origin_datum_key: DatumKey,
     pub path: String,
-    pub target_doc_id: DocId,
+    /// The document the reference names; absent for a `#keyRef`, which names a datum by its key
+    /// alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_doc_id: Option<DocId>,
     pub target_datum_key: DatumKey,
     #[serde(with = "crate::reference::head_list")]
     #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub ref_heads: Vec<ChangeHash>,
+}
+
+/// Resolve a `#keyRef` (ADR 035 §2.9): read the content-addressed datum `key` names from some
+/// document the caller can read that holds a copy hashing to the key.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveKeyRef {
+    pub capability: CapId,
+    pub key: DatumKey,
+}
+
+/// The copy [`ResolveKeyRef`] found: which document it was read from, at which heads, and the value,
+/// which hashes to the key.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedKeyRef {
+    pub doc_id: DocId,
+    #[serde(with = "crate::reference::head_list")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
+    pub heads: Vec<ChangeHash>,
+    pub value: Json,
 }
 
 /// The result of [`QueryDatumRefs`].
@@ -531,6 +598,7 @@ method_core::methods! {
     ListDatums => DatumListing, procedure, "listDatums";
     PollDatums => DatumPage, procedure, "pollDatums";
     QueryDatumRefs => QueriedDatumRefs, procedure, "queryDatumRefs";
+    ResolveKeyRef => ResolvedKeyRef, procedure, "resolveKeyRef";
     UnsafeInspectDatum => UnsafeDatumInspection, procedure, "unsafeInspectDatum";
     InspectDatumClaims => DatumClaimsInspection, procedure, "inspectDatumClaims";
     GetDocAvailability => DocAvailability, query, "getDocAvailability";
@@ -548,6 +616,7 @@ declare_service_protocol! {
             ListDatums(ListDatums),
             PollDatums(PollDatums),
             QueryDatumRefs(QueryDatumRefs),
+            ResolveKeyRef(ResolveKeyRef),
             UnsafeInspectDatum(UnsafeInspectDatum),
             InspectDatumClaims(InspectDatumClaims),
             GetDocAvailability(GetDocAvailability)

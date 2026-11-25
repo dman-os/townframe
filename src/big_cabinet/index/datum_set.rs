@@ -11,6 +11,7 @@ use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumTag;
 use big_cabinet_core::DocId;
 use big_cabinet_core::datum::CompiledSchema;
+use big_cabinet_core::datum::ReferenceTarget;
 use big_cabinet_core::datum::declared_references;
 use big_cabinet_core::datum::hydrate_value;
 use big_cabinet_core::drawer::DrawerAccess;
@@ -53,6 +54,7 @@ use utils_rs::prelude::async_trait;
 use utils_rs::prelude::ferr;
 
 use super::datum_ref::DatumRefEdge;
+use super::datum_ref::DatumRefTarget;
 use crate::doc::gate::Gate;
 use crate::doc::gate::Verdict;
 use crate::schema::SchemaRepo;
@@ -555,6 +557,8 @@ impl DatumSetStore {
                     // so the edges its last accepted value published are stale.
                     if self.extracts_references(key.tag().as_str()) {
                         queries::delete_edges(&transaction, doc_id.clone(), key.to_string())
+                            .await?;
+                        queries::delete_key_edges(&transaction, doc_id.clone(), key.to_string())
                             .await?;
                     }
                 }
@@ -1254,11 +1258,16 @@ fn edges_from(
             .map(|found| DatumRefEdge {
                 origin: route.clone(),
                 path: found.path,
-                target: DatumRoute {
-                    doc_id: found.reference.document().resolve(&route.doc_id),
-                    datum_key: found.reference.key().clone(),
+                target: match found.target {
+                    ReferenceTarget::Datum { reference, heads } => DatumRefTarget::Route {
+                        route: DatumRoute {
+                            doc_id: reference.document().resolve(&route.doc_id),
+                            datum_key: reference.key().clone(),
+                        },
+                        heads,
+                    },
+                    ReferenceTarget::Key(key) => DatumRefTarget::Key(key),
                 },
-                ref_heads: found.heads,
             })
             .collect())
     })();
@@ -1275,17 +1284,36 @@ async fn write_edges(
 ) -> Res<()> {
     for (route, edges) in edges {
         queries::delete_edges(db, route.doc_id.to_string(), route.datum_key.to_string()).await?;
-        for edge in &edges {
-            queries::insert_edge(
-                db,
-                edge.origin.doc_id.to_string(),
-                edge.origin.datum_key.to_string(),
-                edge.path.clone(),
-                edge.target.doc_id.to_string(),
-                edge.target.datum_key.to_string(),
-                serde_json::to_vec(&edge.ref_heads)?,
-            )
+        queries::delete_key_edges(db, route.doc_id.to_string(), route.datum_key.to_string())
             .await?;
+        for edge in &edges {
+            match &edge.target {
+                DatumRefTarget::Route {
+                    route: target,
+                    heads,
+                } => {
+                    queries::insert_edge(
+                        db,
+                        edge.origin.doc_id.to_string(),
+                        edge.origin.datum_key.to_string(),
+                        edge.path.clone(),
+                        target.doc_id.to_string(),
+                        target.datum_key.to_string(),
+                        serde_json::to_vec(heads)?,
+                    )
+                    .await?;
+                }
+                DatumRefTarget::Key(key) => {
+                    queries::insert_key_edge(
+                        db,
+                        edge.origin.doc_id.to_string(),
+                        edge.origin.datum_key.to_string(),
+                        edge.path.clone(),
+                        key.to_string(),
+                    )
+                    .await?;
+                }
+            }
         }
     }
     Ok(())
