@@ -1195,3 +1195,19 @@ async fn resume_with_final_record_already_spilled() -> Res<()> {
     tokio::try_join!(r_a.shutdown(), r_b.shutdown())?;
     Ok(())
 }
+
+/// A plaintext stream that fails part way must fail the import, not leave it
+/// waiting: the blob worker's decrypt pass feeds `ensure_stored` a stream that
+/// errors when the ciphertext contradicts the claimed length.
+#[tokio::test(flavor = "multi_thread")]
+async fn ensure_stored_fails_when_its_stream_fails() -> Res<()> {
+    let (store, _virtuals) =
+        iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
+    let store = Store::from(store);
+    let stream = futures::stream::iter([
+        Ok(bytes::Bytes::from_static(b"first chunk")),
+        Err(std::io::Error::other("decode failed")),
+    ]);
+    assert!(ensure_stored(&store, stream).await.is_err());
+    Ok(())
+}
