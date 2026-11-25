@@ -33,6 +33,9 @@ pub struct HandlerSpec {
     /// The handler artifact as the envelope declares it: key, digest, size and media type. Its
     /// bytes are retained and fetched through the `Blob` datum the config document carries.
     pub handler: Artifact,
+    /// The cartridge config document and its attenuated settings capability delivered to the guest.
+    pub config_doc: big_cabinet_core::dmeta::DocId,
+    pub config_capability: Option<CapId>,
     /// The nodule's durable actor, which the handler's outgoing calls are made as: the executor
     /// signs them with `actor.capability`, never with anything the handler says about itself.
     pub actor: OpenedActor,

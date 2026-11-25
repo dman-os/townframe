@@ -13,6 +13,7 @@ pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 6, name: "006_cartridge_rename.sql", sql: include_str!("migrations/006_cartridge_rename.sql") },
     Migration { version: 7, name: "007_shared_config_drawer.sql", sql: include_str!("migrations/007_shared_config_drawer.sql") },
     Migration { version: 8, name: "008_config_docs.sql", sql: include_str!("migrations/008_config_docs.sql") },
+    Migration { version: 9, name: "009_applied_settings.sql", sql: include_str!("migrations/009_applied_settings.sql") },
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,6 +74,26 @@ pub async fn applied_operations(db: &impl crate::sqlite_rs_alias::QueryExecutor)
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct AppliedSettingsRow {
+    pub cartridge_id: String,
+    pub doc_id: String,
+    pub kinds: String,
+    pub capability_id: Vec<u8>,
+}
+impl crate::sqlite_rs_alias::FromRow for AppliedSettingsRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(4)?;
+        Ok(AppliedSettingsRow { cartridge_id: row.get::<String>("cartridge_id")?, doc_id: row.get::<String>("doc_id")?, kinds: row.get::<String>("kinds")?, capability_id: row.get::<Vec<u8>>("capability_id")? })
+    }
+}
+
+pub const APPLIED_SETTINGS_SQL: &str = include_str!("queries/applied_settings.sql");
+pub async fn applied_settings(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<AppliedSettingsRow>> {
+    let set = db.query(APPLIED_SETTINGS_SQL, &[]).await?;
+    set.all()
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConfigDocsRow {
     pub cartridge_id: String,
     pub doc_id: String,
@@ -98,6 +119,11 @@ pub async fn delete_applied_grant(db: &impl crate::sqlite_rs_alias::Executor, ca
 pub const DELETE_APPLIED_OPERATIONS_SQL: &str = include_str!("queries/delete_applied_operations.sql");
 pub async fn delete_applied_operations(db: &impl crate::sqlite_rs_alias::Executor, cartridge_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(DELETE_APPLIED_OPERATIONS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id)]).await
+}
+
+pub const DELETE_APPLIED_SETTINGS_SQL: &str = include_str!("queries/delete_applied_settings.sql");
+pub async fn delete_applied_settings(db: &impl crate::sqlite_rs_alias::Executor, cartridge_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_APPLIED_SETTINGS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id)]).await
 }
 
 pub const DELETE_INIT_DONE_SQL: &str = include_str!("queries/delete_init_done.sql");
@@ -175,6 +201,11 @@ pub async fn upsert_applied_grant(db: &impl crate::sqlite_rs_alias::Executor, ca
 pub const UPSERT_APPLIED_OPERATIONS_SQL: &str = include_str!("queries/upsert_applied_operations.sql");
 pub async fn upsert_applied_operations(db: &impl crate::sqlite_rs_alias::Executor, cartridge_id: String, scope: String, capability_id: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(UPSERT_APPLIED_OPERATIONS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id), crate::sqlite_rs_alias::IntoValue::into_value(scope), crate::sqlite_rs_alias::IntoValue::into_value(capability_id)]).await
+}
+
+pub const UPSERT_APPLIED_SETTINGS_SQL: &str = include_str!("queries/upsert_applied_settings.sql");
+pub async fn upsert_applied_settings(db: &impl crate::sqlite_rs_alias::Executor, cartridge_id: String, doc_id: String, kinds: String, capability_id: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(UPSERT_APPLIED_SETTINGS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id), crate::sqlite_rs_alias::IntoValue::into_value(doc_id), crate::sqlite_rs_alias::IntoValue::into_value(kinds), crate::sqlite_rs_alias::IntoValue::into_value(capability_id)]).await
 }
 
 pub const UPSERT_CONFIG_DOC_SQL: &str = include_str!("queries/upsert_config_doc.sql");

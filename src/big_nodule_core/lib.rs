@@ -23,12 +23,14 @@
 //! prefix: a Lexicon file under it is the nodule's own, and one outside it is a vendored copy that
 //! must be the contract of a request or an operation the nodule implements.
 
+use big_cabinet_core::DatumTag;
 use big_cabinet_core::datum::GrammarError;
 use big_cabinet_core::datum::Nsid;
 use big_cabinet_core::datum::is_nsid;
 use big_cabinet_core::datum::operation;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::datum::parse_ref;
+use big_cabinet_core::doc::DatumKinds;
 
 use big_cartridges_core::Nodule;
 use big_cartridges_core::Permbind;
@@ -163,8 +165,23 @@ pub trait NoduleAdmission {
     fn datum_lexicons(&self) -> Box<dyn Iterator<Item = &IndexMap<String, Value>> + '_>;
     fn registrable_datums(&self, authority: Option<&str>) -> RegistrableDatums<'_>;
     fn admit(&self, authority: Option<&str>) -> Result<Admitted>;
+    /// The datum tags the cartridge declares as settings: what a nodule's settings capability may
+    /// write in its config document (ADR 044 §6).
+    fn settings_kinds(&self) -> DatumKinds;
 }
 impl NoduleAdmission for ResolvedCartridge {
+    fn settings_kinds(&self) -> DatumKinds {
+        DatumKinds::Only(
+            self.cartridge
+                .settings
+                .iter()
+                .map(|nsid| {
+                    DatumTag::new(nsid.to_string()).expect("a settings NSID is a valid datum tag")
+                })
+                .collect(),
+        )
+    }
+
     /// The requests that call an operation (no `access`): the ones a dispatch grant can satisfy.
     fn operation_requests(&self) -> Vec<Request> {
         self.cartridge

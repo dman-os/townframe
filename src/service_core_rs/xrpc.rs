@@ -14,6 +14,10 @@ pub const TIMEOUT_HEADER: &str = "x-timeout-ms";
 /// Carries the nodule's own dispatch capability as a bare id, set by the host on every delivery
 /// to a nodule that was granted operations.
 pub const NODULE_CAPABILITY_HEADER: &str = "x-nodule-capability";
+/// The nodule's cartridge config document id, delivered alongside its settings capability.
+pub const NODULE_CONFIG_DOC_HEADER: &str = "x-nodule-config-doc";
+/// The nodule's capability to read its config document and write declared settings datums.
+pub const NODULE_CONFIG_CAPABILITY_HEADER: &str = "x-nodule-config-capability";
 pub const DOMAIN_ERROR_FIELD: &str = "operationError";
 pub const DOMAIN_ERROR_STATUS: StatusCode = StatusCode::BAD_REQUEST;
 /// The `Authorization` scheme of every XRPC hop, including its separating space.
