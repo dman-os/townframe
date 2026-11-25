@@ -705,51 +705,6 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
     node.shutdown().await;
 }
 
-/// The nodule service holds every authority but no privilege, so a grant of every authority is
-/// applied while one that asks for privileged methods is refused at the mint and reported on the
-/// record, whatever it names.
-#[tokio::test]
-async fn a_privileged_grant_is_not_applied_though_every_authority_is() {
-    let probe = Probe::new();
-    let node = node_hosting(&probe).await;
-    let operator = node.operator();
-    node.admit(
-        operator,
-        with_requests(
-            init_cartridge("alpha", "1.0.0", &[PING], &[], &[]),
-            vec![necessity(REMOTE, Necessity::Optional)],
-        ),
-    )
-    .await
-    .unwrap();
-    node.set_enabled(ALPHA, true).await;
-    let grant = |privileged| {
-        node.set_methods(
-            ALPHA,
-            DispatchScope {
-                authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
-                privileged,
-                ..Default::default()
-            },
-        )
-    };
-    let status = grant(false).await.methods.unwrap();
-    assert!(status.granted, "{status:?}");
-    assert!(!status.desired.privileged);
-
-    let status = grant(true).await.methods.unwrap();
-    assert!(!status.granted, "{status:?}");
-    assert!(
-        status
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("exceeds the dispatch authority"),
-        "{status:?}"
-    );
-    node.shutdown().await;
-}
-
 #[tokio::test]
 async fn a_required_request_needs_configuration_until_granted_and_an_optional_one_does_not() {
     let probe = Probe::new();

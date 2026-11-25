@@ -439,9 +439,8 @@ pub(super) async fn set_operations(
                 operator.metadata(),
                 SetCartridgeGrant {
                     cartridge_id: spec.cartridge.clone(),
-                    component: Component::Nodule,
                     grant,
-                    value: Some(GrantBody::method(methods.privileged)),
+                    value: Some(GrantBody::present()),
                 },
             )
             .await
@@ -618,9 +617,9 @@ async fn a_guest_can_write_only_its_declared_settings() {
             &spec.config(),
             json!({
                 "action": "write",
-                "tag": "org.example.daybook.nodule.grant",
-                "slot": "method:org.example.other.ping",
-                "value": {"privileged": false},
+                "tag": <big_cartridges_core::config::MethodGrant as big_cabinet_core::datum::DatumMember>::ID,
+                "slot": "org.example.other.ping",
+                "value": {"empty": true},
             }),
             Default::default(),
         )

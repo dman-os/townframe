@@ -1,0 +1,17 @@
+{
+  "defs": {
+    "main": {
+      "nullable": [
+        "empty"
+      ],
+      "properties": {
+        "empty": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.cartridges.grant.authority",
+  "lexicon": 1
+}
