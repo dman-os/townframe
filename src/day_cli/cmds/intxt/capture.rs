@@ -99,11 +99,10 @@ impl CaptureCommands {
     /// The hook's JSON from stdin, captured against the node `--node` names.
     async fn hook(verbose: bool) -> Res<()> {
         let node_dir = lazy::config().await?.node_dir.clone();
-        super::ensure_server(&node_dir).await?;
         let mut input = Vec::new();
         std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)
             .wrap_err("reading the hook's JSON from stdin")?;
-        let client = lazy::node().await?;
+        let client = super::ensure_server(&node_dir).await?;
         let summary = run(&client, node_dir.root(), &input).await?;
         Self::report(&summary, verbose);
         Ok(())
@@ -113,11 +112,10 @@ impl CaptureCommands {
     /// in (the current directory).
     async fn rewritten(kind: RewriteKind, verbose: bool) -> Res<()> {
         let node_dir = lazy::config().await?.node_dir.clone();
-        super::ensure_server(&node_dir).await?;
         let mut input = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
             .wrap_err("reading post-rewrite's pairs from stdin")?;
-        let client = lazy::node().await?;
+        let client = super::ensure_server(&node_dir).await?;
         let cwd = std::env::current_dir()?;
         let recorded = git_rewrite(&client, node_dir.root(), &cwd, &input).await?;
         if verbose {

@@ -541,6 +541,85 @@ impl NodeDir {
             })?
     }
 
+    /// Opens the one connection to the holder `held`, once its boot lock says its socket is up.
+    /// The inner `Err` is a failed connect (the holder shutting down, or only probing the lock);
+    /// any other failure is the outer error.
+    ///
+    /// The holder must answer a request on it, which proves it accepted: a connect alone can sit
+    /// in the backlog of a listener about to close. A holder that has finished its own command
+    /// closes its socket and exits once the connections it accepted have ended, so every call
+    /// goes over this one connection, and a refusal or a reset means the holder is on its way out.
+    async fn attach_held(&self, held: &LockHeld) -> Res<Result<Attached, reqwest::Error>> {
+        let waiting = self.clone();
+        tokio::task::spawn_blocking(move || waiting.wait_until_serving())
+            .await
+            .expect(ERROR_TOKIO)?;
+        let socket = match &held.socket {
+            Some(socket) => socket.clone(),
+            None => self.socket_path()?,
+        };
+        let http = reqwest::Client::builder()
+            .unix_socket(socket.as_path())
+            .pool_max_idle_per_host(1)
+            .pool_idle_timeout(None)
+            .build()?;
+        match http
+            .get(format!("http://localhost/xrpc/{}", big_node::GET_NODE_INFO))
+            .send()
+            .await
+        {
+            Ok(_) => Ok(Ok(Attached {
+                http,
+                role: held.role,
+                fd_socket: self.fd_socket_path()?,
+            })),
+            Err(error) if error.is_connect() => Ok(Err(error)),
+            Err(error) => {
+                Err(error).wrap_err_with(|| format!("connecting to {}", socket.display()))
+            }
+        }
+    }
+
+    /// Attaches to the process holding the node without ever booting it here, for a caller that
+    /// must not become the holder (a capture hook, which starts a server instead). `None` is no
+    /// server to attach to: nobody holds the node, or its socket is absent or refuses
+    /// connections, the holder's idle exit having closed its listener. Those are the I/O kinds
+    /// `NotFound` and `ConnectionRefused`, read off the error's `source` chain; any other
+    /// failure is an error. A holder that is still shutting down is waited out first, so a
+    /// `None` leaves the node free to start a server on.
+    pub async fn attach_server(&self) -> Res<Option<Attached>> {
+        let held = match self.try_lock(LockRole::Command)? {
+            Ok(_free) => return Ok(None),
+            Err(held) => held,
+        };
+        let error = match self.attach_held(&held).await? {
+            Ok(attached) => return Ok(Some(attached)),
+            Err(error) => error,
+        };
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        let absent_or_refused = std::iter::from_fn(|| {
+            let current = source?;
+            source = current.source();
+            Some(current)
+        })
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
+        });
+        if !absent_or_refused {
+            return Err(error)
+                .wrap_err_with(|| format!("connecting to the node at {}", self.root().display()));
+        }
+        let waiting = self.clone();
+        tokio::task::spawn_blocking(move || waiting.wait_for_lock_release())
+            .await
+            .expect(ERROR_TOKIO)?;
+        Ok(None)
+    }
+
     async fn acquire(
         &self,
         role: LockRole,
@@ -558,42 +637,8 @@ impl NodeDir {
                 }
                 Err(held) => held,
             };
-            // The holder's socket is up once its boot lock is released.
-            let waiting = self.clone();
-            tokio::task::spawn_blocking(move || waiting.wait_until_serving())
-                .await
-                .expect(ERROR_TOKIO)?;
-            let socket = match &held.socket {
-                Some(socket) => socket.clone(),
-                None => self.socket_path()?,
-            };
-            // A holder that has finished its own command closes its socket and exits once the
-            // connections it accepted have ended. So this client opens one connection before
-            // anything else, proves the holder accepted it by having it answer a request (a
-            // connect alone can sit in the backlog of a listener about to close), and makes
-            // every call over it. A refusal or a reset means the holder is on its way out.
-            let http = reqwest::Client::builder()
-                .unix_socket(socket.as_path())
-                .pool_max_idle_per_host(1)
-                .pool_idle_timeout(None)
-                .build()?;
-            match http
-                .get(format!("http://localhost/xrpc/{}", big_node::GET_NODE_INFO))
-                .send()
-                .await
-            {
-                Ok(_) => {
-                    return Ok(Reached::Attached(Attached {
-                        http,
-                        role: held.role,
-                        fd_socket: self.fd_socket_path()?,
-                    }));
-                }
-                Err(error) if error.is_connect() => {}
-                Err(error) => {
-                    return Err(error)
-                        .wrap_err_with(|| format!("connecting to {}", socket.display()));
-                }
+            if let Ok(attached) = self.attach_held(&held).await? {
+                return Ok(Reached::Attached(attached));
             }
             // No socket: the holder is shutting down, or it was only a process probing the lock.
             // Either way the lock is the signal, so wait for it to be free and try again.
@@ -625,6 +670,26 @@ mod tests {
         assert_eq!(held.role, Some(LockRole::Serve));
         // Returns at once instead of blocking: nothing is booting.
         dir.wait_until_serving().unwrap();
+    }
+
+    /// `attach_server` never boots: with nobody holding the node, and with a holder whose
+    /// listener is gone (a socket file that refuses connections, as after an idle exit), it
+    /// answers `None` once the holder lets go, leaving the node free to start a server on. The
+    /// holder drops its lock concurrently with the attach, and both orders end in `None`: the
+    /// lock already free, or waited out after the refusal.
+    #[tokio::test]
+    async fn attach_server_finds_no_server_when_nobody_holds_the_node_or_its_listener_is_gone() {
+        let tmp = short_tempdir();
+        let dir = NodeDir::new(tmp.path().to_path_buf());
+        dir.init().await.unwrap();
+        assert!(dir.attach_server().await.unwrap().is_none());
+
+        let mut lock = dir.try_lock(LockRole::Serve).unwrap().unwrap();
+        lock.serving().unwrap();
+        drop(std::os::unix::net::UnixListener::bind(dir.socket_path().unwrap()).unwrap());
+        let release = std::thread::spawn(move || drop(lock));
+        assert!(dir.attach_server().await.unwrap().is_none());
+        release.join().unwrap();
     }
 
     #[test]

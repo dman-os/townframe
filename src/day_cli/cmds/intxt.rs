@@ -776,17 +776,26 @@ const CAPTURE_IDLE_EXIT: std::time::Duration = std::time::Duration::from_secs(10
 
 /// Capture runs against the node's server only, and starts one in the background when none is
 /// serving (as `day node start --bg` does), which stops by itself after [`CAPTURE_IDLE_EXIT`]
-/// idle. Booting the node in
-/// the hook's own process instead would be paid on every hook, and parallel tool calls run
-/// parallel hooks, of which only one process can hold the node. The socket is probed, not
-/// connected to through [`NodeClient`], which would boot the node in this process. Nothing is
-/// printed: a hook's stdout is the harness's to read.
-pub(crate) async fn ensure_server(dir: &day_node::NodeDir) -> Res<()> {
-    if dir.probe_socket().await? == day_node::SocketState::Live {
-        return Ok(());
-    }
-    crate::cmds::serve::ensure_background(dir, Some(CAPTURE_IDLE_EXIT)).await?;
-    Ok(())
+/// idle. Booting the node in the hook's own process instead would be paid on every hook, and
+/// parallel tool calls run parallel hooks, of which only one process can hold the node. So the
+/// client is attached to the server's socket ([`NodeClient::attach_server`]), never made through
+/// [`NodeClient::connect`], which would boot the node here. Nothing is printed: a hook's stdout is
+/// the harness's to read.
+///
+/// A server can idle out between being found and being connected to (ADR 052 section 4): its
+/// listener closes and the socket is refused or gone. The client that lost that race starts a
+/// server and attaches once more; a second miss, or any other failure, is the error.
+pub(crate) async fn ensure_server(dir: &day_node::NodeDir) -> Res<Arc<NodeClient>> {
+    lazy::node_from(async {
+        if let Some(client) = NodeClient::attach_server(dir).await? {
+            return Ok(client);
+        }
+        crate::cmds::serve::ensure_background(dir, Some(CAPTURE_IDLE_EXIT)).await?;
+        NodeClient::attach_server(dir)
+            .await?
+            .ok_or_eyre("the server just started is not accepting connections")
+    })
+    .await
 }
 
 /// Calls `input`'s operation and decodes its answer; a non-success answer is the operation's own

@@ -193,9 +193,8 @@ struct Recording {
 impl Recording {
     async fn connect() -> Res<Self> {
         let node_dir = lazy::config().await?.node_dir.clone();
-        super::ensure_server(&node_dir).await?;
         Ok(Self {
-            client: lazy::node().await?,
+            client: super::ensure_server(&node_dir).await?,
             sessions_dir: capture::sessions_dir(node_dir.root()),
             node_dir: node_dir.root().to_owned(),
             known: BTreeSet::new(),
