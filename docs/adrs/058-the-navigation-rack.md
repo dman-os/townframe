@@ -58,8 +58,9 @@ platform back gesture.
 ### 2.3 With the sidebar shown
 
 When the sidebar is shown (docked on a wide host, or open as the drawer on a compact one), the shell draws the same
-controls in the sidebar's header, in the same place on screen, and every mounted rack hides itself. The header begins
-with the app's mark, a 🌞 for now: a plain mark, not a control, and shown only there. There is no menu behind it yet;
+controls in the sidebar's header, in the same place on screen, and every mounted rack hides itself. The controls come
+first, at the floating rack's offsets, so nothing moves when the sidebar opens; the app's mark follows them, a 🌞 for
+now: a plain mark, not a control, and shown only there. There is no menu behind it yet;
 nothing is added before there is something to put there.
 
 On a compact host the sidebar's footer carries forward.
