@@ -66,6 +66,7 @@ tracing.workspace = true
 proptest = { version = "1.12", default-features = false, features = ["std", "bit-set"], optional = true }
 
 [dev-dependencies]
+postcard.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
 # The driver's tests run on a paused clock.

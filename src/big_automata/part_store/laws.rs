@@ -31,7 +31,11 @@
 //! | dropping is a batch of its transaction | [`dropping_is_atomic_with_its_transaction`], [`differential`] |
 //! | a transaction is atomic: nothing before commit, everything after, nothing on rollback | [`writes_are_atomic`] |
 //! | a write that changes nothing stamps nothing | [`unchanged_writes_stamp_nothing`] |
-//! | all of the above over generated sequences, authorized reads by random principals included | [`differential`] |
+//! | many keys sharing deep buckets: every level counts every member under it and its leaves list them in order, whole or paged | [`crowded_buckets_count_and_list_every_member`] |
+//! | a bucket's summary does not depend on the order its members were written, pending first or live first | [`bucket_summaries_ignore_write_order`] |
+//! | removals and payload changes inside one deep bucket move its path only, and a change undone restores the fingerprints | [`bucket_summaries_follow_changes_inside_one_bucket`] |
+//! | a listing ends at the last bucket of a level: nothing past it at its level, then the next level's own start, and no repeat at the deepest level | [`a_listing_ends_at_the_last_bucket_of_a_level`] |
+//! | all of the above over generated sequences, authorized reads by random principals included | [`differential`], and over keys that crowd into shared deep buckets, [`crowded_differential`] |
 //! | the rev stream laws over the log | [`LogStreams`] with [`crate::rev::laws`] |
 
 use std::pin::pin;
@@ -56,6 +60,7 @@ use crate::part_store::PartStoreServe;
 use crate::part_store::PartStoreWrite;
 use crate::part_store::PayloadDigest;
 use crate::part_store::ReadVerdict;
+use crate::part_store::bucket_summary::BucketSummary;
 use crate::part_store::oracle::PartOracle;
 use crate::part_store::oracle::PartWrite;
 use crate::rev::Limits;
@@ -69,6 +74,15 @@ use crate::rev::laws::WakeCount;
 use crate::rev::laws::any_limits;
 use crate::rev::laws::limits;
 
+mod crowd;
+pub use crowd::bucket_summaries_follow_changes_inside_one_bucket;
+pub use crowd::bucket_summaries_ignore_write_order;
+pub use crowd::crowd_ops;
+pub use crowd::crowded_buckets_count_and_list_every_member;
+pub use crowd::crowded_differential;
+pub use crowd::obj_in_bucket;
+mod edges;
+pub use edges::a_listing_ends_at_the_last_bucket_of_a_level;
 mod generators;
 pub use generators::part_ops;
 use generators::*;
@@ -126,10 +140,18 @@ pub struct Harness<B: Backend> {
     /// The responder's watch ([`PartStoreServe::watch`]).
     serve_watch: RevWatch,
     oracle: PartOracle,
+    /// The objects [`Harness::check`] reads states and bucket paths for: the writes the harness
+    /// is fed stay within them.
+    objs: Vec<ObjKey>,
 }
 
 impl<B: Backend> Harness<B> {
     pub async fn open(backend: &B) -> Res<Self> {
+        Self::open_over(backend, (0..OBJS).map(obj).collect()).await
+    }
+
+    /// A harness whose checks cover `objs`, the universe the writes it is fed are drawn from.
+    pub async fn open_over(backend: &B, objs: Vec<ObjKey>) -> Res<Self> {
         let store = backend.open().await?;
         let watch = RevSource::watch(&store);
         let serve_watch = PartStoreServe::watch(&store);
@@ -151,6 +173,7 @@ impl<B: Backend> Harness<B> {
             watch,
             serve_watch,
             oracle: PartOracle::with_generation(generation),
+            objs,
         })
     }
 
@@ -217,14 +240,14 @@ impl<B: Backend> Harness<B> {
     pub async fn check(&self) -> Res<()> {
         let store = &self.store;
         let oracle = &self.oracle;
-        let objs = (0..OBJS).map(obj).collect::<Vec<_>>();
+        let objs = &self.objs;
         let parts = (0..PARTS).map(part).collect::<Vec<_>>();
         let principals = (0..PRINCIPALS).map(principal).collect::<Vec<_>>();
         let latest = oracle.latest_rev();
 
         assert_eq!(store.generation().await?, oracle.generation(), "generation");
         assert_eq!(
-            store.obj_states(&objs).await?,
+            store.obj_states(objs).await?,
             objs.iter()
                 .map(|obj| oracle.obj_state(obj))
                 .collect::<Vec<_>>(),
@@ -304,18 +327,38 @@ impl<B: Backend> Harness<B> {
                         ),
                         "bucket list of {part} for {principal} since {since}"
                     );
-                    let bucks = [(BuckId::ROOT, None), (BuckId::new(1, 3), None)];
+                    // Every bucket the check knows, whole: the deep ones are where members
+                    // share a bucket and its (deepest bucket, key) order shows.
+                    let bucks = ids.iter().map(|id| (*id, None)).collect::<Vec<_>>();
+                    let expected = oracle.bucket_leaves(principal, part, &bucks, since, usize::MAX);
                     assert_eq!(
                         store
                             .bucket_leaves(principal, part, &bucks, since, usize::MAX)
                             .await?,
-                        oracle.bucket_leaves(principal, part, &bucks, since, usize::MAX),
+                        expected,
                         "leaves of {part} for {principal} since {since}"
                     );
+                    // And resumed: each bucket after its first member, two at a time.
+                    if let Some(whole) = expected {
+                        let resumed = bucks
+                            .iter()
+                            .zip(&whole)
+                            .filter_map(|((id, _), members)| {
+                                Some((*id, Some(members.first()?.obj.clone())))
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            store
+                                .bucket_leaves(principal, part, &resumed, since, 2)
+                                .await?,
+                            oracle.bucket_leaves(principal, part, &resumed, since, 2),
+                            "resumed leaves of {part} for {principal} since {since}"
+                        );
+                    }
                 }
             }
             assert_eq!(
-                store.readable_obj_states(principal, &objs).await?,
+                store.readable_obj_states(principal, objs).await?,
                 objs.iter()
                     .map(|obj| oracle.readable_obj_state(principal, obj))
                     .collect::<Vec<_>>(),
@@ -1377,7 +1420,16 @@ fn window(latest: Rev, after: u8, until: u8) -> Option<(Rev, Rev)> {
 
 /// Every law's check over an arbitrary run of commits, rollbacks, cursor moves and log reads.
 pub async fn differential<B: Backend>(backend: &B, ops: Vec<PartOp>) -> Res<()> {
-    let mut harness = Harness::open(backend).await?;
+    differential_over(backend, (0..OBJS).map(obj).collect(), ops).await
+}
+
+/// [`differential`] with the checks covering `objs`, the universe `ops` draws from.
+async fn differential_over<B: Backend>(
+    backend: &B,
+    objs: Vec<ObjKey>,
+    ops: Vec<PartOp>,
+) -> Res<()> {
+    let mut harness = Harness::open_over(backend, objs).await?;
     for op in ops {
         match op {
             // generated drops of members' payloads are caller bugs (law 2): not issued

@@ -48,6 +48,28 @@ fn collapse_and_tombstones() -> Res<()> {
 }
 
 #[test]
+fn crowded_buckets_count_and_list_every_member() -> Res<()> {
+    block_on(laws::crowded_buckets_count_and_list_every_member(&Memory))
+}
+
+#[test]
+fn bucket_summaries_ignore_write_order() -> Res<()> {
+    block_on(laws::bucket_summaries_ignore_write_order(&Memory))
+}
+
+#[test]
+fn bucket_summaries_follow_changes_inside_one_bucket() -> Res<()> {
+    block_on(laws::bucket_summaries_follow_changes_inside_one_bucket(
+        &Memory,
+    ))
+}
+
+#[test]
+fn a_listing_ends_at_the_last_bucket_of_a_level() -> Res<()> {
+    block_on(laws::a_listing_ends_at_the_last_bucket_of_a_level(&Memory))
+}
+
+#[test]
 fn generations_identify_the_log() -> Res<()> {
     block_on(laws::generations_identify_the_log(&Memory))
 }
@@ -178,6 +200,12 @@ proptest! {
     #[test]
     fn differential(ops in laws::part_ops()) {
         block_on(laws::differential(&Memory, ops))
+            .map_err(|err| TestCaseError::fail(format!("{err:?}")))?;
+    }
+
+    #[test]
+    fn crowded_differential(ops in laws::crowd_ops()) {
+        block_on(laws::crowded_differential(&Memory, ops))
             .map_err(|err| TestCaseError::fail(format!("{err:?}")))?;
     }
 

@@ -14,6 +14,17 @@ const PARTS: u8 = 3;
 const PRINCIPALS: u8 = 3;
 /// Small, so a handful of members already pages.
 const LEAF_CAP: u32 = 3;
+/// Between one wide entry and two: a page of wide keys stops at the budget, one of narrow keys
+/// at the cap, and the widest key of all is over the budget by itself.
+const LEAF_BYTES: usize = 700;
+
+/// An object key whose width follows its index (2, 402 or 902 bytes: entries of 14, 415 and 915
+/// bytes), so the byte budget meets entries of different cost in one bucket.
+fn dkey(index: u16) -> ObjKey {
+    let mut bytes = index.to_be_bytes().to_vec();
+    bytes.resize([2, 402, 902][usize::from(index % 3)], 0);
+    ObjKey::new(&bytes)
+}
 
 #[derive(Debug, Clone)]
 enum Op {
@@ -41,7 +52,7 @@ enum Op {
 
 fn writes() -> impl Strategy<Value = Vec<PartWrite>> {
     use proptest::collection::vec;
-    let obj = || (0..OBJS).prop_map(okey);
+    let obj = || (0..OBJS).prop_map(dkey);
     let part = || (0..PARTS).prop_map(crate::part_store::laws::part);
     let who = || (0..PRINCIPALS).prop_map(crate::part_store::laws::principal);
     let write = prop_oneof![
@@ -85,12 +96,15 @@ fn ops() -> impl Strategy<Value = Vec<Op>> {
 
 /// The bucket of object `index` at `level`.
 fn bucket(level: u8, index: u16) -> BuckId {
-    BuckId::from_obj_key(level, &okey(index))
+    BuckId::from_obj_key(level, &dkey(index))
 }
 
 async fn run(ops: Vec<Op>) {
     let mut rig = Rig::new();
-    let responder = rig.responder().with_leaf_cap(LEAF_CAP);
+    let responder = rig
+        .responder()
+        .with_leaf_cap(LEAF_CAP)
+        .with_leaf_byte_budget(LEAF_BYTES);
     for op in ops {
         match op {
             Op::Commit(writes) => {
@@ -180,8 +194,8 @@ async fn run(ops: Vec<Op>) {
                         let after = match kind {
                             0 => None,
                             // in the bucket by construction
-                            1 | 2 => Some(okey(bucket_of)),
-                            _ => Some(okey(other)),
+                            1 | 2 => Some(dkey(bucket_of)),
+                            _ => Some(dkey(other)),
                         };
                         (bucket(level, bucket_of), after)
                     })
@@ -216,13 +230,25 @@ async fn run(ops: Vec<Op>) {
                             .iter()
                             .zip(all)
                             .map(|((buck, after), entries)| {
-                                let next_after =
-                                    (entries.len() > limit).then(|| entries[limit - 1].obj.clone());
+                                // The entries up to the limit, stopping before the one that
+                                // would carry the page past the budget; the first is always in.
+                                let mut bytes = 0;
+                                let mut page = Vec::new();
+                                for entry in entries.iter().take(limit) {
+                                    let cost =
+                                        BucketObjPageEntry::wire_bytes(entry.obj.as_bytes().len());
+                                    if !page.is_empty() && bytes + cost > LEAF_BYTES {
+                                        break;
+                                    }
+                                    bytes += cost;
+                                    page.push(entry.clone());
+                                }
+                                let next_after = (page.len() < entries.len())
+                                    .then(|| page.last().expect("a non-empty page").obj.clone());
                                 let page = LeafBucketPage {
                                     after: after.clone(),
-                                    entries: entries
+                                    entries: page
                                         .into_iter()
-                                        .take(limit)
                                         .map(|entry| BucketObjPageEntry {
                                             fp: entry.live.map(|digest| {
                                                 BucketObjPageEntry::fingerprint(

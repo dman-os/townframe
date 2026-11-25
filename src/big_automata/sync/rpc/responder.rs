@@ -9,6 +9,7 @@ use crate::interlude::*;
 use crate::part_store::LeafEntry;
 use crate::part_store::PartStoreServe;
 use crate::part_store::bucket_summary::BucketSummary;
+use crate::sync::rpc::LEAF_PAGE_BYTE_BUDGET;
 use crate::sync::rpc::MAX_LEAF_BUCKETS;
 use crate::sync::rpc::MAX_LEAF_PAGE;
 use crate::sync::rpc::MAX_LIST_BUCKETS;
@@ -36,6 +37,9 @@ pub struct RpcResponder<S> {
     store: S,
     /// The most entries one leaf page carries; at most [`MAX_LEAF_PAGE`].
     leaf_cap: u32,
+    /// The most encoded bytes one leaf page's entries add up to, past its first entry; at most
+    /// [`LEAF_PAGE_BYTE_BUDGET`].
+    leaf_byte_budget: usize,
 }
 
 impl<S: PartStoreServe> RpcResponder<S> {
@@ -43,6 +47,7 @@ impl<S: PartStoreServe> RpcResponder<S> {
         Self {
             store,
             leaf_cap: MAX_LEAF_PAGE,
+            leaf_byte_budget: LEAF_PAGE_BYTE_BUDGET,
         }
     }
 
@@ -53,6 +58,16 @@ impl<S: PartStoreServe> RpcResponder<S> {
             "a leaf cap is within 1..={MAX_LEAF_PAGE}"
         );
         self.leaf_cap = leaf_cap;
+        self
+    }
+
+    /// A responder that stops a leaf page at fewer encoded bytes than the protocol's maximum.
+    pub fn with_leaf_byte_budget(mut self, leaf_byte_budget: usize) -> Self {
+        assert!(
+            (1..=LEAF_PAGE_BYTE_BUDGET).contains(&leaf_byte_budget),
+            "a leaf byte budget is within 1..={LEAF_PAGE_BYTE_BUDGET}"
+        );
+        self.leaf_byte_budget = leaf_byte_budget;
         self
     }
 
@@ -134,8 +149,8 @@ impl<S: PartStoreServe> RpcResponder<S> {
         Ok(Ok(out))
     }
 
-    /// Law 5: per asked bucket, its members after `after`, at most the limit, each page echoing
-    /// the `after` it answers.
+    /// Law 5: per asked bucket, its members after `after`, at most the limit and the byte budget,
+    /// each page echoing the `after` it answers.
     pub async fn leaf_buckets(
         &self,
         principal: &PeerKey,
@@ -189,12 +204,26 @@ impl<S: PartStoreServe> RpcResponder<S> {
             .into_iter()
             .zip(leaves)
             .map(|((buck_id, after), mut entries)| {
-                let done = entries.len() <= limit;
-                entries.truncate(limit);
+                // The longest prefix within the limit and the byte budget. It stops before the
+                // entry that does not fit instead of skipping it for a narrower one: the next
+                // page resumes after the last entry taken, so a skipped entry is never read.
+                // The first entry is always taken (an empty page reads as the bucket's end).
+                let mut bytes = 0usize;
+                let mut taken = 0usize;
+                for entry in entries.iter().take(limit) {
+                    bytes += BucketObjPageEntry::wire_bytes(entry.obj.as_bytes().len());
+                    if taken > 0 && bytes > self.leaf_byte_budget {
+                        break;
+                    }
+                    taken += 1;
+                }
+                // The probe entry past the limit, or an entry the budget turned away, is left.
+                let done = taken == entries.len();
+                entries.truncate(taken);
                 let next_after = (!done).then(|| {
                     entries
                         .last()
-                        .expect("a page past its limit is not empty")
+                        .expect("a page of a bucket with more is not empty")
                         .obj
                         .clone()
                 });

@@ -33,6 +33,8 @@ use crate::sync::bucket::calc_working_level;
 use crate::sync::bucket::filter_buckets;
 use crate::sync::bucket::filter_objects;
 use crate::sync::bucket::summaries_agree;
+use crate::sync::rpc::LEAF_PAGE_BYTE_BUDGET;
+use crate::sync::rpc::bucket::BucketObjPageEntry;
 use crate::sync::rpc::bucket::BucketsError;
 use crate::sync::rpc::bucket::GetChangedBucketsRequest;
 use crate::sync::rpc::bucket::LeafBucketsRequest;
@@ -57,6 +59,8 @@ pub const SINCE: Rev = 0;
 /// Machine commands one walk may take before it is declared not to terminate. Far above what
 /// any generated walk needs: each object costs at most a sync and a share of a leaf page.
 const STEP_CAP: usize = 100_000;
+/// Listings one [`list_dirty`] may make before it is declared not to terminate.
+const LIST_CAP: usize = 256;
 
 pub fn obj(index: u16) -> ObjKey {
     ObjKey::new(&index.to_be_bytes())
@@ -102,19 +106,29 @@ pub struct ObjSpec {
 /// they leave tombstones) and grant the requester `readable`.
 pub async fn build<S: Store>(store: &S, objs: &[ObjSpec], readable: &[PartKey]) -> Res<()> {
     let index = |at: usize| u16::try_from(at).expect("specs stay under u16::MAX objects");
+    let keyed = objs
+        .iter()
+        .enumerate()
+        .map(|(at, spec)| (obj(index(at)), spec.clone()))
+        .collect::<Vec<_>>();
+    build_keyed(store, &keyed, readable).await
+}
+
+/// [`build`] over objects the caller names, for keys that must land in chosen buckets.
+pub async fn build_keyed<S: Store>(
+    store: &S,
+    objs: &[(ObjKey, ObjSpec)],
+    readable: &[PartKey],
+) -> Res<()> {
     let members_where = |kinds: &[Member]| {
         objs.iter()
-            .enumerate()
-            .flat_map(|(at, spec)| {
+            .flat_map(|(key, spec)| {
                 spec.parts
                     .iter()
                     .enumerate()
                     .filter(|(_, member)| kinds.contains(member))
                     .map(move |(p, _)| {
-                        (
-                            obj(index(at)),
-                            part(u8::try_from(p).expect(ERROR_IMPOSSIBLE)),
-                        )
+                        (key.clone(), part(u8::try_from(p).expect(ERROR_IMPOSSIBLE)))
                     })
             })
             .collect::<Vec<_>>()
@@ -124,8 +138,7 @@ pub async fn build<S: Store>(store: &S, objs: &[ObjSpec], readable: &[PartKey]) 
         .set_payloads(
             &mut tx,
             objs.iter()
-                .enumerate()
-                .filter_map(|(at, spec)| Some((obj(index(at)), spec.payload.clone()?)))
+                .filter_map(|(key, spec)| Some((key.clone(), spec.payload.clone()?)))
                 .collect(),
         )
         .await?;
@@ -183,6 +196,12 @@ impl<S: Store> Responder<S> {
             principal: requester_principal(),
             traffic: default(),
         }
+    }
+
+    /// The responder stopping a leaf page at `leaf_byte_budget` encoded bytes.
+    pub fn with_leaf_byte_budget(mut self, leaf_byte_budget: usize) -> Self {
+        self.rpc = self.rpc.with_leaf_byte_budget(leaf_byte_budget);
+        self
     }
 
     pub fn store(&self) -> &S {
@@ -273,7 +292,9 @@ pub async fn list_dirty<S: Store>(
     mut offset: BuckId,
     working_level: BuckLevel,
 ) -> Res<Option<Vec<BucketSummary>>> {
-    loop {
+    // A listing past a page relists at most once per page of the part's buckets; far above what
+    // any part here needs.
+    for _ in 0..LIST_CAP {
         let listed = responder
             .changed_buckets(GetChangedBucketsRequest {
                 part_key: part.clone(),
@@ -292,6 +313,7 @@ pub async fn list_dirty<S: Store>(
             FilteredBuckets::Handoff(dirty) => return Ok(Some(dirty)),
         }
     }
+    panic!("the listing of {part} from {offset:?} did not terminate");
 }
 
 /// How the requester's walk of one part went.
@@ -322,6 +344,8 @@ pub struct Driver<S> {
     pub room: usize,
     pub walks: BTreeMap<PartKey, Walk>,
     pub applied: BTreeMap<PartKey, Applied>,
+    /// The level every part is walked at, when not the one its size picks.
+    pub working_level: Option<BuckLevel>,
 }
 
 impl<S: Store> Driver<S> {
@@ -333,6 +357,7 @@ impl<S: Store> Driver<S> {
             room: 8,
             walks: default(),
             applied: default(),
+            working_level: None,
         }
     }
 
@@ -365,7 +390,9 @@ impl<S: Store> Driver<S> {
                 self.walks.insert(part.clone(), Walk::Refused);
                 continue;
             };
-            let working_level = calc_working_level(remote_size, BuckId::MAX_LEVEL);
+            let working_level = self
+                .working_level
+                .unwrap_or_else(|| calc_working_level(remote_size, BuckId::MAX_LEVEL));
             let dirty = self
                 .list(part, BuckId::ROOT, working_level)
                 .await?
@@ -374,8 +401,14 @@ impl<S: Store> Driver<S> {
                 self.walks.insert(part.clone(), Walk::Clean);
                 continue;
             }
-            let mut machine =
-                BucketMachine::new(part.clone(), BuckId::MAX_LEVEL, remote_size, SINCE);
+            let mut machine = BucketMachine::with_limits(
+                part.clone(),
+                working_level,
+                remote_size,
+                SINCE,
+                BucketMachine::BUFFER_TARGET as usize,
+                BucketMachine::LEAF_BUCKET_LIMIT_HINT as usize,
+            );
             machine.on_bucket_page(dirty, &mut out);
             machine.pull(self.room, &mut out);
             queue.extend(out.drain(..).map(|cmd| (part.clone(), cmd)));
@@ -630,11 +663,22 @@ pub struct Scenario {
     pub readable: Vec<bool>,
     /// The responder's hard cap on a leaf page.
     pub leaf_cap: u32,
+    /// The responder's byte budget for a leaf page.
+    pub leaf_bytes: usize,
 }
 
 impl Scenario {
     pub fn parts(&self) -> Vec<PartKey> {
         (0..PARTS).map(part).collect()
+    }
+
+    /// The most entries a leaf page of this scenario's objects holds: the cap, or what the byte
+    /// budget lets through (at least one entry, whatever it costs).
+    pub fn page_entries(&self) -> usize {
+        let cost = BucketObjPageEntry::wire_bytes(obj(0).as_bytes().len());
+        usize::try_from(self.leaf_cap)
+            .expect(ERROR_IMPOSSIBLE)
+            .min((self.leaf_bytes / cost).max(1))
     }
 
     pub fn readable_parts(&self) -> Vec<PartKey> {
@@ -679,14 +723,17 @@ pub fn scenarios() -> impl Strategy<Value = Scenario> {
             Just(2),
             Just(BucketMachine::LEAF_BUCKET_LIMIT_HINT)
         ],
+        // The entries here cost 14 bytes: one, two or the whole page.
+        prop_oneof![Just(1usize), Just(30), Just(LEAF_PAGE_BYTE_BUDGET)],
     )
-        .prop_map(|(pairs, readable, leaf_cap)| {
+        .prop_map(|(pairs, readable, leaf_cap, leaf_bytes)| {
             let (responder, requester) = pairs.into_iter().unzip();
             Scenario {
                 responder,
                 requester,
                 readable,
                 leaf_cap,
+                leaf_bytes,
             }
         })
 }
