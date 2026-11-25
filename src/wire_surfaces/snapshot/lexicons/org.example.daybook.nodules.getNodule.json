@@ -15,7 +15,10 @@
           "type": "array"
         },
         "privileged": {
-          "type": "boolean"
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object"

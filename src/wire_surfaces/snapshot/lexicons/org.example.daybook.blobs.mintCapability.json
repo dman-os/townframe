@@ -50,9 +50,13 @@
     },
     "MintBlobsCapability": {
       "nullable": [
+        "capability",
         "subject"
       ],
       "properties": {
+        "capability": {
+          "type": "string"
+        },
         "rights": {
           "ref": "#Rights",
           "type": "ref"

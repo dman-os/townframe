@@ -464,6 +464,13 @@
         },
         "schema": {
           "type": "string"
+        },
+        "uses": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RoutineUse"
+          },
+          "description": "What the micro reaches of the cartridge's permbinds, declared once for the micro as a\nroutine declares its own (ADR 049 §3). The host mints the micro's handles from these\nnarrowed by the permbinds' rules and intersected with the cartridge's grants; a micro with\nno `uses` can call nothing.",
+          "type": "object"
         }
       },
       "required": [
