@@ -73,19 +73,53 @@ impl Install {
     }
 }
 
-/// Installs capture's `post-rewrite` hook in the clone of the worktree at `root`.
-///
-/// The hooks directory is `git rev-parse --git-path hooks`, which follows `core.hooksPath` and is
-/// the clone's own directory shared by all its linked worktrees. Installing is idempotent: our
-/// hook is rewritten only when its text differs, and made executable if it is not.
-pub fn install_post_rewrite(root: &Path) -> Result<Install, Error> {
-    let hooks = PathBuf::from(Git::new(root).text(&[
+/// The clone's `post-rewrite` hook path: `git rev-parse --git-path hooks`, which follows
+/// `core.hooksPath` and is the clone's own directory shared by all its linked worktrees.
+fn post_rewrite_path(root: &Path) -> Result<PathBuf, Error> {
+    Ok(PathBuf::from(Git::new(root).text(&[
         "rev-parse",
         "--path-format=absolute",
         "--git-path",
         "hooks",
-    ])?);
-    let path = hooks.join("post-rewrite");
+    ])?)
+    .join("post-rewrite"))
+}
+
+/// What the clone of a worktree has at its `post-rewrite` path, read without changing anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PostRewrite {
+    Absent(PathBuf),
+    /// A hook carrying [`MARKER`]: capture's.
+    Ours(PathBuf),
+    /// A hook that is not capture's, which capture never overwrites.
+    Foreign(PathBuf),
+}
+
+/// Looks at the `post-rewrite` hook of the clone of the worktree at `root`, as
+/// [`install_post_rewrite`] would find it.
+pub fn inspect_post_rewrite(root: &Path) -> Result<PostRewrite, Error> {
+    let path = post_rewrite_path(root)?;
+    match std::fs::read(&path) {
+        Ok(existing)
+            if String::from_utf8_lossy(&existing)
+                .lines()
+                .any(|line| line == MARKER) =>
+        {
+            Ok(PostRewrite::Ours(path))
+        }
+        Ok(_) => Ok(PostRewrite::Foreign(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(PostRewrite::Absent(path)),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Installs capture's `post-rewrite` hook in the clone of the worktree at `root`.
+///
+/// The hook's path is [`post_rewrite_path`]'s. Installing is idempotent: our
+/// hook is rewritten only when its text differs, and made executable if it is not.
+pub fn install_post_rewrite(root: &Path) -> Result<Install, Error> {
+    let path = post_rewrite_path(root)?;
+    let hooks = path.parent().expect("a hook path has a directory");
     let wanted = script();
     match std::fs::read(&path) {
         Ok(existing) => {
@@ -101,7 +135,7 @@ pub fn install_post_rewrite(root: &Path) -> Result<Install, Error> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    std::fs::create_dir_all(&hooks)?;
+    std::fs::create_dir_all(hooks)?;
     // Through a temporary file in the same directory, so git never runs a half-written hook.
     let temporary = hooks.join("post-rewrite.intxt-tmp");
     std::fs::write(&temporary, wanted)?;

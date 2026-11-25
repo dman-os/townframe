@@ -47,6 +47,7 @@
 //! of each.
 
 pub(crate) mod capture;
+mod doctor;
 mod edit;
 mod github;
 mod hooks;
@@ -332,6 +333,20 @@ pub enum IntxtCommands {
     /// intxts that include this worktree's commits, its clone's tracked refs or its sessions.
     #[command(after_long_help = "Examples:\n  day x intxt status")]
     Status,
+    /// Report how intxt is set up on this machine and in this worktree
+    ///
+    /// Checks, in order: `day` and `intxt` on the PATH, the node and its server, intxt's
+    /// cartridge on the node, the intxts the node remembers, the Claude Code hooks that record
+    /// sessions, git's `post-rewrite` hook, and the intxt this worktree is on. Each prints one
+    /// line, `ok`, `warn` or `fail`, with the command that fixes anything not ok. It changes
+    /// nothing and does not start the node: with no server running, the checks that read the
+    /// node are skipped (`day node start --bg` runs them). Exits 1 when a check fails.
+    #[command(after_long_help = "Examples:\n  intxt doctor\n  intxt doctor --json")]
+    Doctor {
+        /// Print the checks as JSON: `[{check, status, detail, fix}]`
+        #[arg(long)]
+        json: bool,
+    },
     /// Record one Claude Code hook invocation: the hook's JSON on stdin (the old spelling of
     /// `record hook` and `record git-rewrite`, kept for hooks already installed)
     ///
@@ -630,6 +645,7 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
         IntxtCommands::Status => {
             with_packaging(async |packaging| packaging.status(&mut std::io::stdout()).await).await
         }
+        IntxtCommands::Doctor { json } => doctor::run(json).await,
         IntxtCommands::Install { handler } => install(&handler).await,
         IntxtCommands::Capture { verbose, command } => {
             capture::CaptureCommands::run(command, verbose).await

@@ -50,6 +50,7 @@ This document contains the help content for the `day` command-line program.
 * [`day exec intxt use`↴](#day-exec-intxt-use)
 * [`day exec intxt pr-block`↴](#day-exec-intxt-pr-block)
 * [`day exec intxt status`↴](#day-exec-intxt-status)
+* [`day exec intxt doctor`↴](#day-exec-intxt-doctor)
 * [`day exec intxt github`↴](#day-exec-intxt-github)
 * [`day exec intxt github pull`↴](#day-exec-intxt-github-pull)
 * [`day exec intxt github ls`↴](#day-exec-intxt-github-ls)
@@ -544,6 +545,7 @@ Record agent work and its git history, and package it (`day x intxt --help`)
 * `use` — Say which intxt this worktree is on, or put it on another
 * `pr-block` — Print the block that names intxts in a PR description
 * `status` — Say what is recorded in this worktree and which intxts include it
+* `doctor` — Report how intxt is set up on this machine and in this worktree
 * `github` — Work with GitHub pull requests
 * `record` — Recording: the hooks that record sessions, the ACP proxy, git's side of rewrites
 
@@ -872,6 +874,24 @@ Run it in a worktree: it lists the ops and sessions capture recorded here, and t
 
 Examples:
   day x intxt status
+
+
+
+## `day exec intxt doctor`
+
+Report how intxt is set up on this machine and in this worktree
+
+Checks, in order: `day` and `intxt` on the PATH, the node and its server, intxt's cartridge on the node, the intxts the node remembers, the Claude Code hooks that record sessions, git's `post-rewrite` hook, and the intxt this worktree is on. Each prints one line, `ok`, `warn` or `fail`, with the command that fixes anything not ok. It changes nothing and does not start the node: with no server running, the checks that read the node are skipped (`day node start --bg` runs them). Exits 1 when a check fails.
+
+**Usage:** `day exec intxt doctor [OPTIONS]`
+
+Examples:
+  intxt doctor
+  intxt doctor --json
+
+###### **Options:**
+
+* `--json` — Print the checks as JSON: `[{check, status, detail, fix}]`
 
 
 

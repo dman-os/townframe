@@ -821,6 +821,47 @@ mod blackbox {
                 .output()
                 .unwrap()
         }
+
+        /// `day x intxt doctor` as the operator would run it: in a git worktree of the sandbox,
+        /// with `day` and `intxt` (a link to it) on a `PATH` of the sandbox's own and `HOME` in
+        /// the sandbox, so the settings it reads are the sandbox's.
+        fn doctor(&self, args: &[&str]) -> std::process::Output {
+            let bin = self.tmp.path().join("bin");
+            let worktree = self.tmp.path().join("worktree");
+            let home = self.tmp.path().join("home");
+            if !bin.exists() {
+                std::fs::create_dir_all(&bin).unwrap();
+                std::os::unix::fs::symlink(day_bin(), bin.join("day")).unwrap();
+                std::os::unix::fs::symlink(day_bin(), bin.join("intxt")).unwrap();
+                std::fs::create_dir_all(&home).unwrap();
+                std::fs::create_dir(&worktree).unwrap();
+                assert!(
+                    Command::new("git")
+                        .args(["init", "-q"])
+                        .current_dir(&worktree)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            )))
+            .unwrap();
+            Command::new(day_bin())
+                .env("RUST_LOG", "error")
+                .env("NO_COLOR", "1")
+                .env("XDG_RUNTIME_DIR", self.runtime_dir())
+                .env("HOME", home)
+                .env("PATH", path)
+                .current_dir(&worktree)
+                .arg("--node")
+                .arg(self.node())
+                .args(["x", "intxt", "doctor"])
+                .args(args)
+                .output()
+                .unwrap()
+        }
     }
 
     impl Drop for Sandbox {
@@ -1039,6 +1080,90 @@ mod blackbox {
         assert!(stopped.contains("server stopped"), "{stopped}");
     }
 
+    /// With no server serving, doctor succeeds: the absent server is fine (capture starts one),
+    /// the checks that read the node are skipped with the command to run them, and nothing is
+    /// started.
+    #[test]
+    fn doctor_without_a_server_skips_the_node_side_checks() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        let output = sandbox.doctor(&[]);
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success(),
+            "{text}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(text.contains("ok    server: none is serving"), "{text}");
+        for check in ["cartridge", "intxts"] {
+            assert!(
+                text.contains(&format!("warn  {check}: skipped")),
+                "{check}: {text}"
+            );
+        }
+        assert!(text.contains("fix: day node start --bg"), "{text}");
+        assert!(
+            text.contains("warn  claude-hooks: no intxt recording hook"),
+            "{text}"
+        );
+        assert!(
+            !sandbox.socket().exists(),
+            "doctor must not leave a server behind"
+        );
+    }
+
+    /// A settings file that is not JSON (Claude Code's own tolerates trailing commas, the
+    /// install refuses them) fails doctor and is named with the parse error.
+    #[test]
+    fn doctor_fails_on_a_settings_file_with_a_trailing_comma() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        // Creates the sandbox's HOME.
+        sandbox.doctor(&["--json"]);
+        let settings = sandbox.tmp.path().join("home/.claude/settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, "{ \"hooks\": {}, }").unwrap();
+        let output = sandbox.doctor(&[]);
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert_eq!(output.status.code(), Some(1), "{text}");
+        assert!(
+            text.contains("fail  claude-hooks:")
+                && text.contains(&format!("{} is not valid JSON", settings.display())),
+            "{text}"
+        );
+    }
+
+    /// `--json` prints every check, in order, with the fields the report promises.
+    #[test]
+    fn doctor_json_lists_every_check() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        let output = sandbox.doctor(&["--json"]);
+        let checks: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        let names: Vec<_> = checks
+            .iter()
+            .map(|check| check["check"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "binaries",
+                "node",
+                "server",
+                "cartridge",
+                "intxts",
+                "claude-hooks",
+                "git",
+                "worktree"
+            ]
+        );
+        for check in &checks {
+            assert!(["ok", "warn", "fail"].contains(&check["status"].as_str().unwrap()));
+            assert!(check["detail"].is_string());
+            assert!(check["fix"].is_null() == (check["status"] == "ok"));
+        }
+    }
+
     /// A background server started with `--idle-exit` stops by itself once the node has been
     /// idle that long, releasing the node and removing its socket (ADR 052).
     #[test]
@@ -1065,7 +1190,10 @@ mod blackbox {
         day_node::NodeDir::new(sandbox.node())
             .wait_for_lock_release()
             .unwrap();
-        assert!(!sandbox.socket().exists(), "the idle server removed its socket");
+        assert!(
+            !sandbox.socket().exists(),
+            "the idle server removed its socket"
+        );
         let log = std::fs::read_to_string(sandbox.node().join("run/serve.log")).unwrap();
         assert!(log.contains("idle for its idle period"), "{log}");
         assert!(!log.contains("Error"), "{log}");

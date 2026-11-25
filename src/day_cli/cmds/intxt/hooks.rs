@@ -16,7 +16,7 @@ const OLD_COMMANDS: &[&str] = &["day x intxt capture"];
 
 /// The hook events recorded (ADR 039 §4), and whether the event filters on a tool name (and so
 /// is given `"matcher": "*"`; the other events take no matcher, or match everything without one).
-const EVENTS: &[(&str, bool)] = &[
+pub(super) const EVENTS: &[(&str, bool)] = &[
     ("SessionStart", false),
     ("UserPromptSubmit", false),
     ("PreToolUse", true),
@@ -82,6 +82,32 @@ pub(super) fn merge(settings: &mut Value) -> Res<Vec<(&'static str, Change)>> {
         changes.push((event, outcome));
     }
     Ok(changes)
+}
+
+/// How many recorded events of `settings` run [`COMMAND`], and how many still run an old
+/// command. Read-only; a `settings` without a well-formed `hooks` object counts none.
+pub(super) fn recording(settings: &Value) -> (usize, usize) {
+    let (mut current, mut old) = (0, 0);
+    for &(event, _) in EVENTS {
+        let commands: Vec<&str> = settings
+            .pointer(&format!("/hooks/{event}"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|group| group.get("hooks")?.as_array())
+            .flatten()
+            .filter_map(|entry| entry.get("command")?.as_str())
+            .collect();
+        if commands.contains(&COMMAND) {
+            current += 1;
+        } else if commands
+            .iter()
+            .any(|command| OLD_COMMANDS.contains(command))
+        {
+            old += 1;
+        }
+    }
+    (current, old)
 }
 
 /// The settings file the install writes: the project's by default, the user's with `--user`.
