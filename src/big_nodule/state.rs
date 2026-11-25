@@ -876,7 +876,15 @@ async fn apply_nodule_capabilities(
             .iter()
             .filter(|(_, grant)| grant.privileged)
             .filter_map(|(key, _)| match key {
-                GrantKey::Method(nsid) => Some(nsid.clone()),
+                // Only a method that is privileged for dispatch names a privilege: a grant may
+                // be privileged for the service's own check without dispatch holding the method
+                // so (`listCartridgeInstalls`), and the delegator's set, which a mint is covered
+                // by, is the privileged built-ins.
+                GrantKey::Method(nsid)
+                    if method_lexicon::builtin_method(nsid).is_some_and(|m| m.privileged) =>
+                {
+                    Some(nsid.clone())
+                }
                 _ => None,
             })
             .collect();
