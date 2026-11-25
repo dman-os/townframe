@@ -946,6 +946,20 @@ mod tests {
         secrets.stop().await.unwrap();
     }
 
+    /// `blobs.upload_hold_grace_secs` in `node.json` is what `Booted::boot` hands the blob store as the
+    /// upload hold grace; absent, the store's 24 hour default applies.
+    #[test]
+    fn blob_settings_carry_the_upload_hold_grace() {
+        let set: BlobSettings = serde_json::from_str(r#"{"upload_hold_grace_secs": 90}"#).unwrap();
+        assert_eq!(
+            set.upload_hold_grace(),
+            Some(std::time::Duration::from_secs(90))
+        );
+        let absent: BlobSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.upload_hold_grace(), None);
+        assert!(absent.is_default());
+    }
+
     /// Updating the settings of a version 1 node moves its seed first, so the rewritten file
     /// does not strand the identity.
     #[tokio::test]
