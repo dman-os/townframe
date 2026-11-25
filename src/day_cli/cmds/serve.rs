@@ -12,9 +12,9 @@ use crate::context::LockRole;
 use crate::context::NodeDir;
 use crate::context::SocketState;
 use crate::interlude::*;
+use crate::out::out;
 
 use std::future::Future;
-use std::io::Write;
 use tokio::io::AsyncBufReadExt;
 
 /// What the foreground server prints, once, when it is serving. `start --bg` waits for this line.
@@ -83,9 +83,9 @@ async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
                 .unix_socket
                 .as_ref()
                 .expect("the server boots with its socket attached");
-            let mut stdout = std::io::stdout().lock();
-            writeln!(stdout, "{READY_PREFIX}{}", socket.display())?;
-            stdout.flush()?;
+            let mut out = out();
+            writeln!(out, "{READY_PREFIX}{}", socket.display())?;
+            out.flush()?;
             Ok(())
         },
         async {
@@ -109,10 +109,11 @@ async fn start_background(dir: &NodeDir) -> Res<ExitCode> {
             tokio::task::spawn_blocking(move || waiting.wait_until_serving())
                 .await
                 .expect(ERROR_TOKIO)?;
-            println!(
+            writeln!(
+                out(),
                 "a server is already running on {}",
                 dir.socket_path()?.display()
-            );
+            )?;
             return Ok(ExitCode::SUCCESS);
         }
         let waiting = dir.clone();
@@ -155,17 +156,19 @@ async fn start_background(dir: &NodeDir) -> Res<ExitCode> {
         line.starts_with(READY_PREFIX),
         "the server's first line was not its readiness line: {line:?}"
     );
-    println!(
+    writeln!(
+        out(),
         "node serving in the background (pid {pid}) on {}",
         line.trim_end()
             .strip_prefix(READY_PREFIX)
             .expect("the line starts with the readiness prefix, as checked above")
-    );
+    )?;
     Ok(ExitCode::SUCCESS)
 }
 
 /// `day node stop`: signals the background server and returns once it has exited.
 pub async fn stop() -> Res<ExitCode> {
+    let mut out = out();
     let conf = lazy::config().await?;
     let dir = &conf.node_dir;
     let held = match dir.try_lock(LockRole::Command)? {
@@ -173,16 +176,19 @@ pub async fn stop() -> Res<ExitCode> {
             // Nobody has the node. A socket file left behind is a server that died uncleanly.
             if dir.probe_socket().await? == SocketState::Stale {
                 std::fs::remove_file(dir.socket_path()?)?;
-                println!("no server running; removed its stale socket");
+                writeln!(out, "no server running; removed its stale socket")?;
             } else {
-                println!("no server running");
+                writeln!(out, "no server running")?;
             }
             return Ok(ExitCode::SUCCESS);
         }
         Err(held) => held,
     };
     if held.role != Some(LockRole::Serve) {
-        println!("no server running; {held} has the node open for a command");
+        writeln!(
+            out,
+            "no server running; {held} has the node open for a command"
+        )?;
         return Ok(ExitCode::SUCCESS);
     }
     let pid = held
@@ -198,6 +204,6 @@ pub async fn stop() -> Res<ExitCode> {
     tokio::task::spawn_blocking(move || dir.wait_for_lock_release())
         .await
         .expect(ERROR_TOKIO)?;
-    println!("server stopped (pid {pid})");
+    writeln!(out, "server stopped (pid {pid})")?;
     Ok(ExitCode::SUCCESS)
 }

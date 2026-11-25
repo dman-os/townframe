@@ -6,6 +6,11 @@ edition.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The hidden `day docs` command that renders the man pages and the Markdown reference from the clap
+# definitions (`cargo x cli`). Off by default so that ordinary builds do not pay for it.
+docs = ["dep:clap_mangen", "dep:clap-markdown"]
+
 [[bin]]
 name = "day"
 path = "main.rs"
@@ -31,6 +36,10 @@ big_cabinet_core = { workspace = true, features = ["manifest"] }
 # cli
 clap = { workspace = true, features = ["derive", "env", "string"] }
 clap_complete.workspace = true
+clap_mangen = { workspace = true, optional = true }
+clap-markdown = { workspace = true, optional = true }
+# build info for `day --version`: the commit, the branch and when it was built
+shadow-rs = { workspace = true, features = ["build"] }
 
 #
 # async
@@ -65,6 +74,9 @@ rand.workspace = true
 # fs and os
 directories.workspace = true
 libc = "0.2"
+
+[build-dependencies]
+shadow-rs = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
 #

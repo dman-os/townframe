@@ -11,6 +11,9 @@ pub enum NodeCommands {
         /// member of
         #[arg(long)]
         relay: bool,
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
     /// Serve the node on its socket in the foreground until SIGTERM or Ctrl-C
     ///
@@ -34,7 +37,7 @@ pub enum NodeCommands {
 
 pub async fn run(command: NodeCommands) -> Res<ExitCode> {
     match command {
-        NodeCommands::Init { dir, relay } => super::init::run(dir, relay).await,
+        NodeCommands::Init { dir, relay, json } => super::init::run(dir, relay, json).await,
         NodeCommands::Start { bg } => super::serve::start(bg).await,
         NodeCommands::Stop => super::serve::stop().await,
         NodeCommands::Status { json } => super::status::run(json).await,

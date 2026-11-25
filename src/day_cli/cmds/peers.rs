@@ -1,5 +1,6 @@
 use crate::context::SocketState;
 use crate::interlude::*;
+use crate::out::out;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum PeersCommands {
@@ -9,13 +10,17 @@ pub enum PeersCommands {
         ticket: String,
     },
     /// List the bootstrap peers and, when a server is serving, who it is connected to
-    Ls,
+    Ls {
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub async fn run(command: PeersCommands) -> Res<ExitCode> {
     match command {
         PeersCommands::Add { ticket } => add(&ticket).await,
-        PeersCommands::Ls => ls().await,
+        PeersCommands::Ls { json } => ls(json).await,
     }
 }
 
@@ -24,6 +29,7 @@ pub async fn run(command: PeersCommands) -> Res<ExitCode> {
 /// the new peer. Adding the first peer also creates the `peers` section, which is what makes the
 /// server attach the network endpoint at all.
 async fn add(ticket: &str) -> Res<ExitCode> {
+    let mut out = out();
     let conf = lazy::config().await?;
     let dir = &conf.node_dir;
     let changed = dir
@@ -34,38 +40,52 @@ async fn add(ticket: &str) -> Res<ExitCode> {
                 .add_bootstrap(ticket)
         })
         .await?;
-    println!(
+    writeln!(out,
         "{}",
         if changed {
             "added to the bootstrap list"
         } else {
             "already in the bootstrap list"
         }
-    );
+    )?;
     if changed && dir.probe_socket().await? == SocketState::Live {
-        println!("the running server dials it after `day node stop` and `day node start --bg`");
+        writeln!(
+            out,
+            "the running server dials it after `day node stop` and `day node start --bg`"
+        )?;
     }
     Ok(ExitCode::SUCCESS)
 }
 
-async fn ls() -> Res<ExitCode> {
+async fn ls(as_json: bool) -> Res<ExitCode> {
+    let mut out = out();
     let conf = lazy::config().await?;
     let settings = conf.node_dir.settings()?;
     let bootstrap = settings
         .peers
         .as_ref()
         .map_or(&[][..], |peers| peers.bootstrap.as_slice());
-    println!("bootstrap {}", bootstrap.len());
-    for ticket in bootstrap {
-        println!("  {ticket}");
-    }
     let client = lazy::node().await?;
-    match crate::cmds::status::node_info(&client).await?.peers {
-        None => println!("connected none attached ({})", client.mode().peers_note()),
+    let peers = crate::cmds::status::node_info(&client).await?.peers;
+    if as_json {
+        let listed = json!({ "bootstrap": bootstrap, "peers": peers });
+        writeln!(out, "{}", serde_json::to_string_pretty(&listed)?)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    writeln!(out, "bootstrap {}", bootstrap.len())?;
+    for ticket in bootstrap {
+        writeln!(out, "  {ticket}")?;
+    }
+    match peers {
+        None => writeln!(
+            out,
+            "connected none attached ({})",
+            client.mode().peers_note()
+        )?,
         Some(peers) => {
-            println!("connected {}", peers.connected.len());
+            writeln!(out, "connected {}", peers.connected.len())?;
             for peer in &peers.connected {
-                println!("  {peer}");
+                writeln!(out, "  {peer}")?;
             }
         }
     }

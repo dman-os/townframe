@@ -1,5 +1,6 @@
 use crate::client::NodeClient;
 use crate::interlude::*;
+use crate::out::out;
 
 use big_nodule_core::protocol::ListNodules;
 use big_nodule_core::protocol::NoduleRecord;
@@ -12,6 +13,7 @@ use big_nodule_core::protocol::NoduleRecord;
 /// operations are not exposed by any dispatch operation (the router's table is reachable only in
 /// the process that booted it), so they are reported as not exposed.
 pub async fn run(as_json: bool) -> Res<ExitCode> {
+    let mut out = out();
     let conf = lazy::config().await?;
     let client = lazy::node().await?;
     let info = node_info(&client).await?;
@@ -40,35 +42,40 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
             "peers": info.peers,
             "relay": conf.node_dir.settings()?.relay,
         });
-        println!("{}", serde_json::to_string_pretty(&status)?);
+        writeln!(out, "{}", serde_json::to_string_pretty(&status)?)?;
         return Ok(exit);
     }
-    println!("node      {}", info.node_id);
-    println!("path      {}", conf.node_dir.root().display());
-    println!("mode      {}", client.mode().as_str());
-    println!(
+    writeln!(out, "node      {}", info.node_id)?;
+    writeln!(out, "path      {}", conf.node_dir.root().display())?;
+    writeln!(out, "mode      {}", client.mode().as_str())?;
+    writeln!(
+        out,
         "socket    {} ({})",
         socket_path.display(),
         serde_json::to_value(client.socket_state())?
             .as_str()
             .expect("socket states serialize as strings")
-    );
+    )?;
     let enabled = nodules.iter().filter(|nodule| nodule.enabled).count();
-    println!("nodules   {enabled} enabled of {}", nodules.len());
+    writeln!(out, "nodules   {enabled} enabled of {}", nodules.len())?;
     for nodule in &nodules {
-        println!("{}", nodule_line(nodule));
+        writeln!(out, "{}", nodule_line(nodule))?;
     }
     if conf.node_dir.settings()?.relay {
-        println!("relay     yes");
+        writeln!(out, "relay     yes")?;
     }
-    println!("services  not exposed by the node");
+    writeln!(out, "services  not exposed by the node")?;
     match &info.peers {
-        None => println!("peers     none attached ({})", client.mode().peers_note()),
+        None => writeln!(
+            out,
+            "peers     none attached ({})",
+            client.mode().peers_note()
+        )?,
         Some(peers) => {
-            println!("peers     {} connected", peers.connected.len());
-            println!("  address {}", peers.address);
+            writeln!(out, "peers     {} connected", peers.connected.len())?;
+            writeln!(out, "  address {}", peers.address)?;
             for peer in &peers.connected {
-                println!("  {peer}");
+                writeln!(out, "  {peer}")?;
             }
         }
     }

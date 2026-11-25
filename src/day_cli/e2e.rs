@@ -922,6 +922,108 @@ mod blackbox {
         );
     }
 
+    /// Output whose reader has gone away (`day exec ... | head`) ends the command with status 0
+    /// and nothing on stderr: the broken pipe is not a failure and not a panic. The pipe's read
+    /// end is closed before the command starts, so its first write fails with `EPIPE` however
+    /// little it writes.
+    #[test]
+    fn a_closed_stdout_ends_the_command_quietly() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        for args in [
+            &["completions", "bash"][..],
+            &["exec", "--get", "org.example.daybook.nodules.listNodules"],
+        ] {
+            let (reader, writer) = std::io::pipe().unwrap();
+            drop(reader);
+            let output = Command::new(day_bin())
+                .env("RUST_LOG", "error")
+                .env("NO_COLOR", "1")
+                .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+                .arg("--node")
+                .arg(sandbox.node())
+                .args(args)
+                .stdout(writer)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(0), "{args:?}: {stderr}");
+            assert_eq!(stderr, "", "{args:?}");
+        }
+    }
+
+    /// Tracing is the server's log: a command other than `node start` narrates nothing at the
+    /// default level, and an explicit `RUST_LOG` brings the narration back.
+    #[test]
+    fn commands_log_only_warnings_unless_rust_log_says_otherwise() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        let status = |rust_log: Option<&str>| {
+            let mut command = Command::new(day_bin());
+            command
+                .env("NO_COLOR", "1")
+                .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+                .arg("--node")
+                .arg(sandbox.node())
+                .args(["node", "status", "--json"]);
+            match rust_log {
+                Some(filter) => command.env("RUST_LOG", filter),
+                None => command.env_remove("RUST_LOG"),
+            };
+            command.output().unwrap()
+        };
+        let quiet = status(None);
+        assert_eq!(
+            String::from_utf8_lossy(&quiet.stderr),
+            "",
+            "the default level shows nothing for a command that works"
+        );
+        let loud = status(Some("debug"));
+        assert!(
+            !loud.stderr.is_empty(),
+            "RUST_LOG=debug is honoured over the command's default"
+        );
+    }
+
+    /// Colour is for terminals: tracing written to a pipe carries no ANSI escapes even when
+    /// `NO_COLOR` is not set (the formatter colours unconditionally unless it is told not to).
+    #[test]
+    fn tracing_to_a_pipe_carries_no_colour() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        let output = Command::new(day_bin())
+            .env("RUST_LOG", "debug")
+            .env_remove("NO_COLOR")
+            .env_remove("CLICOLOR_FORCE")
+            .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+            .arg("--node")
+            .arg(sandbox.node())
+            .args(["node", "status", "--json"])
+            .output()
+            .unwrap();
+        assert!(!output.stderr.is_empty(), "debug tracing reaches stderr");
+        assert!(
+            !output.stderr.contains(&0x1b),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// `--version` reports the build: the package version, then the commit it was built from
+    /// (shadow-rs), while `-V` stays the one-line version.
+    #[test]
+    fn the_long_version_names_the_commit_and_the_build() {
+        let sandbox = Sandbox::new();
+        let long = sandbox.day(&["--version"]);
+        let long = String::from_utf8_lossy(&long.stdout);
+        assert!(long.starts_with("day "), "{long}");
+        for field in ["branch:", "commit_hash:", "build_time:", "build_env:"] {
+            assert!(long.contains(field), "no {field} in {long}");
+        }
+        let short = sandbox.day(&["-V"]);
+        assert_eq!(String::from_utf8_lossy(&short.stdout).lines().count(), 1);
+    }
+
     /// A server killed without cleaning up leaves a socket and no lock: every command still
     /// works, and `node stop` and `node start` clean up after it.
     #[test]
