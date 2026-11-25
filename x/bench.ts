@@ -586,7 +586,16 @@ async function main() {
       } finally {
         await run(["git", "checkout", "--detach", head]);
       }
-      const headRecords = await runSelected(selections, false);
+      let headRecords: BenchRecord[];
+      try {
+        headRecords = await runSelected(selections, false);
+      } catch (error) {
+        // a scaling test timing out is the loudest way a quadratic path shows
+        console.log(
+          `gate FAILED: the benches did not run to the end at head: ${error}`,
+        );
+        Deno.exit(1);
+      }
       await append(headRecords);
       let failed = false;
       // Scaling needs no base: a count that grows more than linearly with its input fails on

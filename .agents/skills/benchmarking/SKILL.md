@@ -91,4 +91,46 @@ silences the gate; do not raise a threshold to make a PR pass.
 
 ## What does not work, and why
 
-FINDINGS-PLACEHOLDER
+Recorded from runs on mothership-alpha (2026-11-25), not guessed:
+
+- **Wall time in CI.** Shared runners are too noisy to gate on; wall is recorded, never compared
+  by the gate (15% noise threshold, reported only).
+- **Allocation counts miss non-allocating loops.** Replacing every replay target in one update
+  allocates nothing at either size, so only the instruction bench (`replay_replace_every_target`)
+  sees that path. Use both tiers for a hot path.
+- **Setup is instrumented too.** Callgrind runs the setup under valgrind (about 50x slower), so
+  a 100k-row setup costs minutes. Instruction benches use 1k/10k (replay: 1,638/16,380); the
+  wall tier keeps 10k/100k.
+- **Hardware counters (`perf_event_open`).** Not used: the gate counts instructions in software
+  (callgrind). Whether GitHub's VMs expose them is unmeasured; `bench.yml` has a probe step for
+  the first real run.
+- **valgrind and the runner.** valgrind 3.27.1 comes from the repo's nixpkgs and is in the dev
+  and `ci-rust` shells. `gungraun-runner` is not in nixpkgs; `x/bench.ts` installs the version
+  `Cargo.lock` pins (0.20.0) with `cargo install --locked` into `target/gungraun-tools`.
+  Gungraun's `summary.json` is version 7: `profiles[].data.total.metrics.Ir.values.new`.
+- **divan has no JSON output**, so `fromDivanOutput` reads its tree table (median column). Its
+  format is not a contract; the parser has a test against a captured sample.
+- **wasm and dev-dependencies.** `cargo clippy --all-targets --target wasm32-unknown-unknown`
+  already fails on the base commit (49 errors for `utils_rs`: tokio's `net`/mio and proptest's
+  `wait-timeout` come in through dev-dependencies). Check wasm with the library builds:
+  `cargo clippy -p big_automata --lib --all-features --target wasm32-unknown-unknown --config
+  'resolver.feature-unification="selected"'` (clean, as are `utils_rs` and `big_automata_web`).
+  The bench targets are empty on wasm by cfg but cannot be compiled there for the same reason.
+- **Counting allocator in wasm.** `big_automata_web`'s `?mode=bench` installs it and reports
+  allocations and `performance.now()` timings through `big_automata::bench::sync_once`; the
+  host builds for wasm32. The Playwright run (`e2e/bench.spec.ts`) was **not executed**.
+- **Whole sync stalls above about 3,000 objects.** With default `DriverConfig`, 3,000 objects
+  sync in 2 rounds (8 calls) and 3,500 or more never finish, in under 5 s of real time and an
+  hour of virtual time; `max_tracked = 1M` does not cure it. Pinned by the failing
+  `driver::tests::bench::whole_sync_of_a_part_beyond_three_pages_completes`, not diagnosed or
+  fixed. It also means the whole-sync bench cannot go to 10k/100k yet (the divan bench runs 1k
+  and 3k).
+- **`requeue_spawned`** (kit scheduler) rebuilds the whole spawn queue per call, so a budgeted
+  driver using it is quadratic; nothing but tests calls it today.
+
+**Unproven on GitHub.** The gate was run end to end on mothership-alpha, base against head, with
+a planted regression, and not on a GitHub runner. Until a CI section goes green, unverified are:
+the runner's valgrind (nix build or cache hit), cache behaviour (`rust-cache` and the
+flakehub cache with a second checkout of the base commit in one job), the job's duration (the
+gated tiers run twice, and callgrind is slow), whether `perf_event_open` exists there, and the
+`Playwright` browser tier.
