@@ -327,7 +327,7 @@ impl DrawerAccess {
                     AuthorityServiceError::UnrecognizedActor,
                 ))
             })?;
-        let state = State::open(sql.clone()).await?;
+        let state = State::open(sql.clone(), datum_set.drawer_changes()).await?;
         let grants = Arc::new(
             crate::grants::Grants::open(sql.clone(), authority.clone(), namespace)
                 .await

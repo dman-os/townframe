@@ -37,12 +37,6 @@ pub async fn begin_op(db: &impl crate::sqlite_rs_alias::Executor, command_id: St
     db.execute(BEGIN_OP_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(command_id), crate::sqlite_rs_alias::IntoValue::into_value(request_digest), crate::sqlite_rs_alias::IntoValue::into_value(actor_uuid), crate::sqlite_rs_alias::IntoValue::into_value(op_json), crate::sqlite_rs_alias::IntoValue::into_value(created_at)]).await
 }
 
-pub const CHILD_ENTRY_SQL: &str = include_str!("queries/child_entry.sql");
-pub async fn child_entry(db: &impl crate::sqlite_rs_alias::QueryExecutor, parent_id: String, child_id: String) -> SqlResult<Option<String>> {
-    let set = db.query(CHILD_ENTRY_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(parent_id), crate::sqlite_rs_alias::IntoValue::into_value(child_id)]).await?;
-    set.optional()
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChildrenOfRow {
     pub child_id: String,
@@ -61,25 +55,9 @@ pub async fn children_of(db: &impl crate::sqlite_rs_alias::QueryExecutor, parent
     set.all()
 }
 
-pub const CLEAR_CHILDREN_SQL: &str = include_str!("queries/clear_children.sql");
-pub async fn clear_children(db: &impl crate::sqlite_rs_alias::Executor, parent_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(CLEAR_CHILDREN_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(parent_id)]).await
-}
-
-pub const CLEAR_DOCS_SQL: &str = include_str!("queries/clear_docs.sql");
-pub async fn clear_docs(db: &impl crate::sqlite_rs_alias::Executor, drawer_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(CLEAR_DOCS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id)]).await
-}
-
 pub const CLEAR_META_DOCS_SQL: &str = include_str!("queries/clear_meta_docs.sql");
 pub async fn clear_meta_docs(db: &impl crate::sqlite_rs_alias::Executor, drawer_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(CLEAR_META_DOCS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id)]).await
-}
-
-pub const DOC_ENTRY_SQL: &str = include_str!("queries/doc_entry.sql");
-pub async fn doc_entry(db: &impl crate::sqlite_rs_alias::QueryExecutor, drawer_id: String, doc_id: String) -> SqlResult<Option<String>> {
-    let set = db.query(DOC_ENTRY_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id), crate::sqlite_rs_alias::IntoValue::into_value(doc_id)]).await?;
-    set.optional()
 }
 
 #[derive(Clone, Debug, PartialEq)]
