@@ -15,6 +15,8 @@ impl fmt :: Display for big_cartridges_core::VersionReq
 impl fmt :: Display for big_cartridges_core::config::Component
 impl fmt :: Display for big_cartridges_core::config::GrantKey
 impl schemars :: JsonSchema for big_cartridges_core::config::GrantKey
+impl std :: ops :: Deref for big_cartridges_core::test_support::FixtureCartridge
+impl std :: ops :: DerefMut for big_cartridges_core::test_support::FixtureCartridge
 pub big_cartridges_core::config::fn config_declarations () -> Vec < big_cabinet_core :: datum :: Declaration >
 pub big_cartridges_core::config::fn config_identity_key () -> DatumKey
 pub big_cartridges_core::config::fn install_key (cartridge_id : & CartridgeId) -> DatumKey
@@ -75,6 +77,14 @@ pub impl big_cartridges_core::request::Necessity::fn is_required (& self) -> boo
 pub impl big_cartridges_core::signature::Cartridge::fn sign_with (& mut self , sign : impl FnOnce (& [u8]) -> [u8 ; 64])
 pub impl big_cartridges_core::signature::Cartridge::fn signing_message (& self) -> Vec < u8 >
 pub impl big_cartridges_core::signature::Cartridge::fn verify_signature (& self) -> Result < () , SignatureError >
+pub impl big_cartridges_core::test_support::FixtureCartridge::fn new (cartridge : Cartridge) -> Self
+pub impl big_cartridges_core::test_support::FixtureCartridge::fn publishable (& self , staged : Cartridge) -> Cartridge
+pub impl big_cartridges_core::test_support::FixtureCartridge::fn stage_request (& self) -> protocol :: StageCartridgeVersion
+pub impl big_cartridges_core::test_support::FixtureCartridge::fn staged (& self , staged : Cartridge) -> Cartridge
+pub impl big_cartridges_core::test_support::FixtureCartridge::fn with_lexicon (& mut self , file : IndexMap < String , serde_json :: Value >) -> & mut Self
+pub impl big_cartridges_core::test_support::FixtureCartridge::fn with_sidecar (& mut self , nsid : & str , document : IndexMap < String , serde_json :: Value > ,) -> & mut Self
+pub impl big_cartridges_core::test_support::FixtureCartridge::fn with_wasm (& mut self , key : & str , bytes : & [u8]) -> & mut Self
+pub impl big_cartridges_core::test_support::FixtureCartridge::fn with_wasm_digest (& mut self , key : & str , digest : Digest , size : u64) -> & mut Self
 pub macro big_cartridges_core::example_cartridge! { ($ name : literal) }
 pub macro big_cartridges_core::example_namespace! { () }
 pub mod big_cartridges_core::catalog
@@ -121,6 +131,7 @@ pub struct big_cartridges_core::protocol::StageCartridgeVersion  { id: Cartridge
 pub struct big_cartridges_core::protocol::WatchCartridges  { after: Option < CartridgesCursor >, limit: u32, hold_ms: u32 }
 pub struct big_cartridges_core::registry::CartridgeIdentity  { id: CartridgeId, extra: Extra }
 pub struct big_cartridges_core::signature::CartridgeSignature  { alg: String, value: String, extra: Extra }
+pub struct big_cartridges_core::test_support::FixtureCartridge  { resolved: ResolvedCartridge, blobs: BTreeMap < Digest , Vec < u8 > > }
 pub use big_cartridges_core::manifest :: Component
 pub use big_cartridges_core::manifest :: ComponentExport
 pub use big_cartridges_core::manifest :: Initializer

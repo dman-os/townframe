@@ -67,6 +67,7 @@ use big_cartridges_core::CartridgeId;
 use big_cartridges_core::protocol::CartridgeInstallRecord;
 use big_cartridges_core::protocol::CartridgeInstalls;
 use big_cartridges_core::protocol::CartridgesError;
+use big_cartridges_core::protocol::CartridgesProtocol;
 use big_cartridges_core::protocol::ClearCartridgeConfig;
 use big_cartridges_core::protocol::InstallCartridge;
 use big_cartridges_core::protocol::ListCartridgeInstalls;
@@ -150,6 +151,11 @@ pub struct NodulesConfig {
     pub dispatch: Arc<big_dispatch::Router>,
     pub dispatch_client: Client<DispatchProtocol>,
     pub dispatch_authority: CapId,
+    /// The cartridges service that resolves a pinned version's payloads at install, and the
+    /// handle presented to it: a read-only one (no `publish`) the operator introduced to the
+    /// nodule service's own actor, whose capability is the `signer`.
+    pub cartridges: Client<CartridgesProtocol>,
+    pub cartridges_authorization: Authorization,
     pub executor: Option<Arc<dyn executor::NoduleExecutor>>,
     pub schemas: Arc<SchemaRepo>,
     /// Whether the dev takeover hook is on (`dev.allow_slot_takeover` in `node.json`, ADR 045 §5).
@@ -190,6 +196,21 @@ pub(crate) fn docs_error(error: ClientError<DocsError>) -> NodulesError {
             NodulesError::AuthorityUnavailable(msg)
         }
         ClientError::Method(DocsError::Denied) => NodulesError::Denied,
+        ClientError::Method(other) => NodulesError::Storage(other.to_string()),
+        ClientError::Transport { message, .. } => NodulesError::Storage(message),
+    }
+}
+
+/// A failure of the cartridges service while resolving a pinned version that no refusal of the
+/// pin explains.
+pub(crate) fn cartridges_error(error: ClientError<CartridgesError>) -> NodulesError {
+    match error {
+        ClientError::Method(CartridgesError::Context(error)) => error.into(),
+        ClientError::Method(CartridgesError::Authority(error)) => NodulesError::Authority(error),
+        ClientError::Method(CartridgesError::AuthorityUnavailable(message)) => {
+            NodulesError::AuthorityUnavailable(message)
+        }
+        ClientError::Method(CartridgesError::Denied) => NodulesError::Denied,
         ClientError::Method(other) => NodulesError::Storage(other.to_string()),
         ClientError::Transport { message, .. } => NodulesError::Storage(message),
     }
@@ -662,6 +683,8 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         datum_store,
         docs: config.docs,
         docs_capability: doc_cap.capability_id,
+        cartridges: config.cartridges,
+        cartridges_authorization: config.cartridges_authorization,
         shared_config_drawer: config.shared_config_drawer,
         parent: config.actor,
         parent_path: config.actor_path,

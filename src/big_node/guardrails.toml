@@ -32,3 +32,4 @@ default_features = true
 features = []
 
 [builds.native]
+features = ["test-support"]
