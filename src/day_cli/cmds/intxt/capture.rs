@@ -243,9 +243,12 @@ async fn capture_node(client: &NodeClient, node_dir: &Path) -> Res<CaptureNode> 
     Ok(node)
 }
 
-/// The idempotency key of a batch: the session, each worktree's sequence range and the last turn
-/// the batch carries, so a retried hook (same state, same observations) sends the same key and a
-/// later one a different key.
+/// The idempotency key of a batch: a digest of the session, each worktree's sequence range and
+/// cause backfills, and the last turn the batch carries, so a retried hook (same state, same
+/// observations) sends the same key and a later one a different key. The description grows with
+/// the batch (one `+cause` per backfilled op, and a Stop or SessionEnd resolves every cause
+/// withheld during the session), but every command id starts from the key and a command id is
+/// at most 256 bytes, so the key is the fixed-length hex of the description's hash.
 fn idempotency_key(batch: &intxt_core::capture::Batch) -> String {
     let mut key = batch.session.session_id.clone();
     for worktree in &batch.worktrees {
@@ -270,7 +273,7 @@ fn idempotency_key(batch: &intxt_core::capture::Batch) -> String {
             agent.imported.turns.len()
         ));
     }
-    key
+    blake3::hash(key.as_bytes()).to_hex()[..32].to_owned()
 }
 
 /// The directory of the host's per-session state files: a hook session's, and an ACP session's
@@ -356,4 +359,62 @@ pub(crate) async fn record_prepared(
         .await?;
     prepared.commit(recorded.clone())?;
     Ok(Some(recorded))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A batch of a session that ends having resolved `backfills` withheld causes.
+    fn batch(session_id: &str, backfills: u64) -> intxt_core::capture::Batch {
+        let backfills: Vec<_> = (0..backfills)
+            .map(|seq| {
+                json!({ "seq": seq, "cause": { "turn": "turn-1", "toolUseId": format!("toolu_{seq}") } })
+            })
+            .collect();
+        serde_json::from_value(json!({
+            "session": {
+                "sessionId": session_id,
+                "imported": { "turns": {} },
+                "subagents": [],
+            },
+            "worktrees": [{
+                "identity": {
+                    "root": "/repo", "clonePath": "/repo", "cloneId": "clone",
+                    "worktreeId": "0123456789abcdef0123456789abcdef",
+                    "remotes": [], "roots": [],
+                },
+                "docs": {},
+                "nextSeq": 0,
+                "ops": [],
+                "commits": {},
+                "refs": {},
+                "reflogGap": false,
+                "causeBackfills": backfills,
+            }],
+            "uncausedToolCalls": 0,
+        }))
+        .unwrap()
+    }
+
+    /// The longest command id the recorder builds from a key: `<key>/<step>/<16 hex>`.
+    fn command_of(key: &str) -> Result<CommandId, impl std::fmt::Debug> {
+        CommandId::try_from(format!("{key}/remove-entries/0123456789abcdef"))
+    }
+
+    #[test]
+    fn a_stop_that_backfills_many_causes_keys_a_valid_command_id() {
+        let key = idempotency_key(&batch("3f0c9a52-7d1e-4b8a-9c66-0a1b2c3d4e5f", 400));
+        command_of(&key).unwrap();
+        assert_eq!(
+            key,
+            idempotency_key(&batch("3f0c9a52-7d1e-4b8a-9c66-0a1b2c3d4e5f", 400)),
+            "a retried hook sends the same key"
+        );
+        assert_ne!(
+            key,
+            idempotency_key(&batch("3f0c9a52-7d1e-4b8a-9c66-0a1b2c3d4e5f", 401)),
+            "a batch with another backfill sends another key"
+        );
+    }
 }

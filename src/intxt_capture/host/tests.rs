@@ -1121,6 +1121,36 @@ fn a_rewrite_is_observed_with_the_commit_it_made() {
     prepared.commit(recorded).unwrap();
 }
 
+/// An agent's `git commit --amend` runs the `post-rewrite` hook inside its Bash call: the call's
+/// window is open in the worktree and its turn is not in the transcript yet.
+#[test]
+fn a_rewrite_inside_a_window_whose_turn_is_unknown_records_uncaused_moves() {
+    let env = Env::new();
+    env.append(&env.transcript, &[user("u1", None, "go")]);
+    let start = prepare(&env.hook("SessionStart", json!({})), &env.session_state).unwrap();
+    let recorded = recorded_for(&start, 0);
+    start.commit(recorded).unwrap();
+    let pre = prepare(
+        &env.tool_hook("PreToolUse", "Bash", "t9", json!({})),
+        &env.session_state,
+    )
+    .unwrap();
+    pre.commit(RecordedIds::default()).unwrap();
+    let old = env.repo.git(&["rev-parse", "HEAD"]);
+    env.repo.git(&["commit", "-q", "--amend", "-m", "amended"]);
+    let new = env.repo.git(&["rev-parse", "HEAD"]);
+
+    let identity = identity::resolve(&env.repo.root).unwrap().unwrap();
+    let pairs = crate::git_hooks::parse_post_rewrite(&format!("{old} {new}\n")).unwrap();
+    let prepared = prepare_rewrite(&identity, &pairs).unwrap();
+    let [worktree] = &prepared.batch.worktrees[..] else {
+        panic!("one worktree: {:?}", prepared.batch.worktrees);
+    };
+    assert!(!worktree.ops.is_empty());
+    assert!(worktree.ops.iter().all(|op| op.cause.is_none()));
+    assert!(worktree.commits.contains_key(&new));
+}
+
 #[test]
 fn a_failed_install_is_recorded_and_tried_again_at_the_next_observation() {
     let env = Env::new();
