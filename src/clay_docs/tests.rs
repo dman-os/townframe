@@ -51,7 +51,6 @@ fn grant(
                         write: true,
                         create: true,
                         delete: true,
-                        ..Default::default()
                     }],
                 })
                 .collect(),

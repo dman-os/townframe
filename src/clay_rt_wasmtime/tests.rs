@@ -1330,7 +1330,7 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
                 document: route.document.clone(),
                 branch: route.branch.clone(),
                 facets: vec![clay_docs::FacetAccess {
-                    tag: route.tag.clone().into(),
+                    tag: route.tag.clone(),
                     key_id: Some(route.key_id.clone()),
                     read: true,
                     write: true,
