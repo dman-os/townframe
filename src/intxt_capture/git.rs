@@ -276,7 +276,7 @@ fn sha(text: &str) -> Option<String> {
 }
 
 /// The commit `sha` as a datum: author and committer, message, and the paths it changed against
-/// its first parent, with renames detected. `change_id` is none: git does not know it, and a
+/// its first parent, with renames detected, and its patch id. `change_id` is none: git does not know it, and a
 /// caller that read the commit through jj sets it.
 pub fn commit(git: &Git, sha: &str) -> Result<GitCommit, Error> {
     let shown = git.run(&[
@@ -339,6 +339,19 @@ pub fn commit(git: &Git, sha: &str) -> Result<GitCommit, Error> {
             extra: Extra::default(),
         });
     }
+    // A merge's patch depends on which parent is taken and a root has none to compare with, so
+    // neither has a patch id; a commit that changes nothing has an empty patch and none either.
+    let patch_id = match parents[..] {
+        [ref parent] => {
+            let patch = git.run(&["diff-tree", "-p", "--no-ext-diff", parent, sha])?;
+            let printed = git.run_with_input(&["patch-id", "--stable"], &[], &patch)?;
+            String::from_utf8_lossy(&printed)
+                .split_whitespace()
+                .next()
+                .map(str::to_owned)
+        }
+        _ => None,
+    };
     Ok(GitCommit {
         parents,
         change_id: None,
@@ -346,6 +359,7 @@ pub fn commit(git: &Git, sha: &str) -> Result<GitCommit, Error> {
         committer: ident(cn, ce, ct)?,
         message: message.trim_end().to_owned(),
         files,
+        patch_id,
         extra: Extra::default(),
     })
 }

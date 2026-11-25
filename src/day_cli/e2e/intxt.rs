@@ -1065,6 +1065,20 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
         );
         // The old commits are still held: the comment is still on the first.
         assert!(!shifted.contains("outdated"), "{shifted}");
+        // The rebased commit is the old one rewritten (same patch id): its lookup finds the
+        // intxt holding it and the one holding the commit it replaced, here the same document.
+        let lookup = intxt_core::client::Caller::new(
+            client,
+            service_utils_rs::RequestContext::root(),
+            None,
+            "test-rewrites".to_owned(),
+        );
+        let holders = lookup.commit_holders(&drawer, &second).await.unwrap();
+        assert_eq!(holders.len(), 1);
+        assert_eq!(
+            lookup.commit_holders(&drawer, &rebased).await.unwrap(),
+            holders
+        );
 
         // 5. An edit of the commented text.
         std::fs::write(
