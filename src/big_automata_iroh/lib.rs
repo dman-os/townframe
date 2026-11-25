@@ -7,10 +7,9 @@
 //!
 //! The serving half, [`serve`], hosts those protocols from a part store: `ReplayService`
 //! answers the six methods and `boot` hosts them the way `big_blobs` hosts its service. It
-//! supplies what the sans-IO half cannot: a lock around the session table, a tokio timer for
-//! held rounds, and the embedder's mapping from a request to the principal whose access the
-//! store decides by. It sits on the native host stack (tokio `net`), which has no browser build,
-//! so the module and its dependencies exist on every target except the wasm32 ones.
+//! supplies what the sans-IO half cannot: a lock around the session table and the embedder's mapping from a request to the principal whose access the
+//! store decides by. It sits on `service_utils_rs`'s portable core (no TCP or Unix serving), so
+//! a browser node serves the protocols to its peers over iroh too.
 //!
 //! The protocols' laws live in `big_automata::replay` and `big_automata::sync::rpc`; this crate
 //! adds no protocol semantics.
@@ -18,7 +17,6 @@
 mod client;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod e2e;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod serve;
 
 pub use client::PeerRpcClient;

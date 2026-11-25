@@ -1262,7 +1262,6 @@ dependencies = [
  "serde_path_to_error",
  "serde_urlencoded",
  "sync_wrapper",
- "tokio",
  "tower",
  "tower-layer",
  "tower-service",
@@ -1462,6 +1461,7 @@ dependencies = [
  "iroh",
  "iroh-relay",
  "method_core",
+ "n0-future",
  "serde_json",
  "service_client_core_rs",
  "service_client_iroh_rs",
@@ -1470,6 +1470,7 @@ dependencies = [
  "service_utils_rs",
  "tokio",
  "utils_rs",
+ "web-time",
 ]
 
 [[package]]
@@ -1480,9 +1481,11 @@ dependencies = [
  "big_automata_iroh",
  "console_error_panic_hook",
  "iroh",
+ "method_core",
  "serde",
  "serde_json",
  "service_client_iroh_rs",
+ "service_utils_rs",
  "utils_rs",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -14802,6 +14805,7 @@ dependencies = [
  "http",
  "irpc",
  "method_core",
+ "n0-future",
  "rand 0.9.5",
  "reqwest 0.12.28",
  "serde",
@@ -14842,6 +14846,7 @@ dependencies = [
 name = "service_utils_rs"
 version = "0.1.0"
 dependencies = [
+ "async-lock",
  "axum",
  "futures",
  "hyper",
@@ -14850,6 +14855,7 @@ dependencies = [
  "irpc",
  "method_core",
  "mime",
+ "n0-future",
  "opentelemetry",
  "opentelemetry_sdk",
  "reqwest 0.12.28",
@@ -14860,6 +14866,7 @@ dependencies = [
  "service_client_iroh_rs",
  "service_client_native_rs",
  "service_core_rs",
+ "service_utils_rs",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

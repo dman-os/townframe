@@ -18,12 +18,22 @@
 //! takes it along. `dial <endpoint id>` dials that endpoint (a browser page) over the relay with
 //! the echo probe's ALPN, sends `ECHO_REQUEST`, and answers with one stdout line, `ok` when the
 //! echo matches or `err <why>`: the probe of whether a browser endpoint can accept.
+//! `pull <endpoint id>` runs a `PeerDriver` against that endpoint (a page serving big_automata
+//! over iroh, `?mode=serve`) until part 1 is fully synced into a local store, and answers
+//! `synced <objects>`, the part's member count there, or `err <why>`.
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use big_automata::PeerKey;
 use big_automata::driver::memory::LwwPayload;
+use big_automata::driver::DriverConfig;
+use big_automata::driver::Facts;
+use big_automata::driver::PeerDriver;
+use big_automata::driver::RouteUpdate;
+use big_automata::driver::memory::MemoryBackend;
+use big_automata::driver::memory::MemoryPeerCursors;
+use big_automata::part_store::PartStoreRead;
 use big_automata::part_store::laws::add;
 use big_automata::part_store::laws::grant;
 use big_automata::part_store::laws::part;
@@ -33,6 +43,7 @@ use big_automata::part_store::memory::MemoryPartStore;
 use big_automata::part_store::oracle::PartWrite;
 use big_automata::replay::wire::ReplayProtocol;
 use big_automata::sync::rpc::SyncRpcProtocol;
+use big_automata_iroh::PeerRpcClient;
 use big_automata_iroh::serve::ReplayBinding;
 use big_automata_iroh::serve::SyncRpcBinding;
 use big_automata_iroh::serve::boot;
@@ -41,6 +52,7 @@ use iroh_relay::server::Server;
 use iroh_relay::server::ServerConfig;
 use method_core::ContextError;
 use service_client_iroh_rs::IROH_XRPC_HTTP_ALPN;
+use service_client_iroh_rs::IrohHttp;
 use service_utils_rs::RequestContext;
 use service_utils_rs::ServerBinding;
 use service_utils_rs::TransportContext;
@@ -81,6 +93,44 @@ async fn dial_echo(
     } else {
         Err(format!("echo differs: {echo:?}"))
     }
+}
+
+/// Syncs part 1 from the page serving at `target` into a fresh local store, through the relay,
+/// and returns how many objects the part holds there.
+async fn pull_part(
+    node: &iroh::Endpoint,
+    relay_url: &iroh::RelayUrl,
+    target: iroh::EndpointId,
+) -> Result<u64, String> {
+    let addr = iroh::EndpointAddr::new(target).with_relay_url(relay_url.clone());
+    let rpc = PeerRpcClient::over_iroh(IrohHttp::new(node.clone(), addr, 1 << 20));
+    let local = MemoryPartStore::default();
+    let peer = PeerKey::new(target.as_bytes());
+    let facts = Facts::new();
+    let (driver, driver_loop) = PeerDriver::start(
+        DriverConfig::new(peer.clone(), "memory"),
+        Arc::new(std::time::Instant::now),
+        facts.clone(),
+        MemoryBackend::hinted(local.clone()),
+        MemoryPeerCursors::default(),
+        local.clone(),
+    );
+    let driver_task = tokio::spawn(driver_loop);
+    driver
+        .update_routes(RouteUpdate {
+            added_parts: vec![part(1)],
+            ..Default::default()
+        })
+        .await;
+    driver.connect(rpc);
+    let synced = facts.wait_for_full_sync([(peer, part(1))]).await;
+    drop(driver);
+    driver_task.abort();
+    synced.map_err(|err| format!("sync: {err:?}"))?;
+    local
+        .member_count(&part(1))
+        .await
+        .map_err(|err| format!("member_count: {err:?}"))
 }
 
 /// Objects published in the part, in two commits so the page pulls more than one rev.
@@ -156,13 +206,20 @@ async fn main() {
 
     let mut commands = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = commands.next_line().await.unwrap() {
-        let target = line
-            .strip_prefix("dial ")
+        let (command, target) = line
+            .split_once(' ')
             .unwrap_or_else(|| panic!("unknown fixture command {line:?}"));
-        let target: iroh::EndpointId = target.trim().parse().expect("dial takes an endpoint id");
-        match dial_echo(&node, &relay_url, target).await {
-            Ok(()) => println!("ok"),
-            Err(why) => println!("err {why}"),
+        let target: iroh::EndpointId = target.trim().parse().expect("commands take an endpoint id");
+        match command {
+            "dial" => match dial_echo(&node, &relay_url, target).await {
+                Ok(()) => println!("ok"),
+                Err(why) => println!("err {why}"),
+            },
+            "pull" => match pull_part(&node, &relay_url, target).await {
+                Ok(objects) => println!("synced {objects}"),
+                Err(why) => println!("err {why}"),
+            },
+            other => panic!("unknown fixture command {other:?}"),
         }
     }
 
