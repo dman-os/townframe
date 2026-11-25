@@ -199,7 +199,11 @@ fn law_3_a_leaf_page_forward_in_leaf_order_but_below_by_key_is_accepted() {
     rig.sync.leaf_replied(leaf, Reply::Answer(first));
     let (second, _, asked) = rig.flush().leaves().remove(0);
     assert_eq!(asked[0].after, Some(after.clone()));
-    let page = leaf_page(Some(after.clone()), &[(2, PartObjDelta::New)], Some(next.clone()));
+    let page = leaf_page(
+        Some(after.clone()),
+        &[(2, PartObjDelta::New)],
+        Some(next.clone()),
+    );
     rig.sync.leaf_replied(second, Reply::Answer(page));
     let (_, _, asked) = rig.flush().leaves().remove(0);
     assert_eq!(
