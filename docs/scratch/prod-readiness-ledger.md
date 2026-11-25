@@ -1051,3 +1051,8 @@ claytxt #344), on nodules' ping. Design and audit: `docs/scratch/service-macro-r
   - the operator approved the renames, and nodules is flagging them in its review summary.
 - **Deferred to the big_repo rework:** waking every held poll on every commit (O(n), about 2 SQL
   queries per poll). Move held polls to subscriptions, with one reader fanning out to waiters.
+- **Deferred (operator, 2026-11-25):**
+  - Port the big_node perf harness (`src/big_node/e2e/costs.rs`) onto `utils_rs::testing::alloc_count`
+    when big_node is made to work on the web.
+  - Re-audit UUID use once big_automata and big_sync are done. That builds on
+    `docs/scratch/uuid-audit.md`, and the sim's random store generations were the latest instance.
