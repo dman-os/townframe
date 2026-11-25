@@ -383,9 +383,11 @@ pub use big_cabinet_core::datum::content_hash :: ContentHashError
 pub use big_cabinet_core::datum::datum_core :: DatumMember
 pub use big_cabinet_core::datum::datum_core :: DatumShape
 pub use big_cabinet_core::datum::datum_core :: Extra
+pub use big_cabinet_core::datum::datum_core :: InvalidNsid
 pub use big_cabinet_core::datum::datum_core :: KnownString
 pub use big_cabinet_core::datum::datum_core :: Member
 pub use big_cabinet_core::datum::datum_core :: MemberSchema
+pub use big_cabinet_core::datum::datum_core :: Nsid
 pub use big_cabinet_core::datum::datum_core :: Openness
 pub use big_cabinet_core::datum::datum_core :: Shape
 pub use big_cabinet_core::datum::datum_core :: ShapeError
