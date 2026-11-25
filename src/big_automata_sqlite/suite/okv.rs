@@ -6,12 +6,15 @@ use std::sync::atomic::Ordering;
 
 use big_automata::okv::Mutation;
 use big_automata::okv::OkvStore;
+use big_automata::okv::Selector;
 use big_automata::okv::laws::Backend;
 use big_automata::okv::laws::Bytes;
 use big_automata::okv::laws::OkvStreams;
 use big_automata::okv::laws::{self};
 use big_automata::part_store::PartStoreWrite;
+use big_automata::rev::Page;
 use big_automata::rev::RevSource;
+use big_automata::rev::laws::limits;
 use big_automata::rev::laws::{self as stream_laws};
 use futures::executor::block_on;
 use proptest::prelude::*;
@@ -169,6 +172,59 @@ fn okv_and_part_store_share_a_transaction() -> Res<()> {
         // A second handle on the same name sees the committed table.
         let reopened = SqliteOkv::open(&store, "wants").await?;
         assert_eq!(reopened.latest_rev().await?, 1);
+        Ok(())
+    })
+}
+
+/// A key set far past SQLite's variable limit is one bound parameter, and selects exactly its
+/// members: the live ones, the tombstones among them, and nothing for keys never written.
+#[test]
+fn a_key_set_past_the_variable_limit_selects_its_members() -> Res<()> {
+    const KEYS: u32 = 40_000;
+    block_on(async {
+        let db = SqliteOkvBackend.open().await?;
+        let table = SqliteOkvBackend.table(&db).await?;
+        let key = |index: u32| index.to_be_bytes().to_vec();
+        let mut tx = SqliteOkvBackend.begin(&db).await?;
+        let puts = (0..KEYS)
+            .map(|index| Mutation::Put {
+                key: key(index),
+                value: key(index),
+            })
+            .collect();
+        table.apply(&mut tx, puts).await?;
+        table
+            .apply(&mut tx, vec![Mutation::Delete { key: key(2) }])
+            .await?;
+        SqliteOkvBackend.commit(tx).await?;
+
+        // Every even key, and as many again that were never written.
+        let asked = (0..KEYS)
+            .step_by(2)
+            .chain(KEYS..KEYS + KEYS / 2)
+            .map(key)
+            .collect();
+        let mut page = Page::default();
+        table
+            .read(
+                &Selector::Keys(asked),
+                0,
+                2,
+                limits(usize::MAX / 2, None),
+                &mut page,
+            )
+            .await?;
+        assert_eq!(page.through, 2);
+        assert_eq!(page.entries.len(), usize::try_from(KEYS / 2)?);
+        // Revision 1 holds the puts in key order, then revision 2 the tombstone.
+        let tombstone = page.entries.last().expect("a tombstone");
+        assert_eq!((tombstone.key.as_slice(), tombstone.rev), (&key(2)[..], 2));
+        assert_eq!(tombstone.value, None);
+        assert!(
+            page.entries[..page.entries.len() - 1]
+                .iter()
+                .all(|entry| entry.rev == 1 && entry.value.as_ref() == Some(&entry.key))
+        );
         Ok(())
     })
 }

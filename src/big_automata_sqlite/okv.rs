@@ -18,6 +18,7 @@
 //!   for a statement or two, so none may be called while holding an open [`SqlitePartTx`].
 //!   `prune` is one `DELETE` bounded by the lowest registered cursor.
 
+use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 use std::ops::Bound;
 
@@ -26,6 +27,7 @@ use big_automata::okv::Mutation;
 use big_automata::okv::OkvStore;
 use big_automata::okv::Pruned;
 use big_automata::okv::Selector;
+use big_automata::okv::row_bytes;
 use big_automata::rev::Entry;
 use big_automata::rev::Limits;
 use big_automata::rev::Page;
@@ -97,20 +99,31 @@ impl<D: PartDb> SqliteOkv<D> {
     }
 }
 
-/// What a row costs against a byte budget: the same charge as `big_automata::okv`'s, so every
-/// backend's pages agree.
-fn row_bytes(key: &[u8], value: Option<&[u8]>) -> usize {
-    key.len() + value.map_or(0, <[u8]>::len)
-}
-
 /// `AND` the selector's key predicate onto a statement. `Keys` is never empty here: an empty
 /// set selects nothing and the caller does not ask.
 fn push_selector(query: &mut Sql, selector: &Selector<Vec<u8>>) {
     match selector {
         Selector::All => {}
         Selector::Keys(keys) => {
-            query.push(" AND key IN ");
-            query.bind_list(keys.iter().cloned());
+            // One bound parameter however many keys: a JSON array of hex strings, so the set is
+            // never limited by SQLite's variable count.
+            let mut hex = String::with_capacity(keys.len() * 6);
+            hex.push('[');
+            for (index, key) in keys.iter().enumerate() {
+                if index != 0 {
+                    hex.push(',');
+                }
+                hex.push('"');
+                for byte in key {
+                    write!(hex, "{byte:02x}").expect(ERROR_IMPOSSIBLE);
+                }
+                hex.push('"');
+            }
+            hex.push(']');
+            query
+                .push(" AND key IN (SELECT unhex(value) FROM json_each(")
+                .bind(hex)
+                .push("))");
         }
         Selector::Range(KeyRange { start, end }) => {
             match start {
@@ -223,7 +236,7 @@ impl<D: PartDb> SqliteOkv<D> {
                 {
                     return Ok(());
                 }
-                group_bytes = group_bytes.saturating_add(row_bytes(&key, value.as_deref()));
+                group_bytes = group_bytes.saturating_add(row_bytes(&key, value.as_ref()));
                 last_seen = Some((rev, key.clone()));
                 group.push(Entry { key, rev, value });
                 // A revision that cannot fit once the page has entries is not worth reading

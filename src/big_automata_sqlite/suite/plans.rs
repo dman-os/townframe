@@ -187,9 +187,12 @@ impl OkvBackend for RecordingOkvBackend {
     }
 }
 
-/// A scan of the batch's own rows: a `VALUES` list, or the CTE of the part count update.
+/// A scan of the batch's own rows: a `VALUES` list, the `json_each` of a bound key set, or the CTE of the part count update.
 fn batch_sized(detail: &str) -> bool {
-    detail.contains("CONSTANT ROW") || detail.contains("VALUES CLAUSE") || detail == "SCAN delta"
+    detail.contains("CONSTANT ROW")
+        || detail.contains("json_each")
+        || detail.contains("VALUES CLAUSE")
+        || detail == "SCAN delta"
 }
 
 #[test]
@@ -293,14 +296,23 @@ async fn assert_no_scans(statements: BTreeMap<String, Vec<SqlValue>>) -> Res<()>
             let plan = db
                 .execute(&format!("EXPLAIN QUERY PLAN {sql}"), params.clone())
                 .await?;
+            let mut searched_entries = false;
             for row in plan.result_set.rows {
                 let detail = row.get::<String>("detail")?;
+                searched_entries |= detail.starts_with("SEARCH big_automata_okv_entries");
                 if detail.starts_with("SCAN") && !batch_sized(&detail) {
                     scans.push(format!(
                         "{detail}\n    in {}",
                         sql.split_whitespace().collect::<Vec<_>>().join(" ")
                     ));
                 }
+            }
+            // A key set is looked up in the entries' indexes, however many keys it holds.
+            if sql.contains("json_each") && sql.contains("big_automata_okv_entries") {
+                assert!(
+                    searched_entries,
+                    "a key set statement does not search the entries: {sql}"
+                );
             }
         }
         assert!(
