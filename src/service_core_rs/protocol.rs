@@ -75,7 +75,7 @@ macro_rules! declare_service_protocol {
 
 #[macro_export]
 macro_rules! service_method {
-    ($params:ty => $output:ty, $error:ty, $kind:ident($nsid:literal) $(, $attribute:ident)*) => {
+    ($params:ty => $output:ty, $error:ty, $kind:ident($nsid:literal) $(, $attribute:ident $(($($argument:expr),*))?)*) => {
         impl ::method_core::Method for $params {
             type Output = $output;
             type Error = $error;
@@ -83,7 +83,7 @@ macro_rules! service_method {
             // names `::method_core::ByteBody` as its `$output`.
             const XRPC: ::method_core::XrpcMethod =
                 ::method_core::XrpcMethod::$kind($nsid).with_output_schema(stringify!($output))
-                    $(.$attribute())*;
+                    $(.$attribute($($($argument),*)?))*;
         }
         ::method_core::__method_schema!($params, $output, $error);
     };

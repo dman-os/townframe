@@ -174,9 +174,10 @@ fn emit() -> Reply {
 }
 
 /// `put` and `read`: forwards the call to the node's blobs service through dispatch, streaming the
-/// body each way. The query string names the blobs handle (`capability`, and `blobId` for a
-/// read), which is a parameter of the blobs method; the guest authenticates to dispatch with its
-/// own nodule capability, as any hop does.
+/// body each way. A put presents the blobs handle the routine was delivered for its `blobs.put`
+/// permbind (ADR 049 §6.2); a read's query names the handle for the blob it reads (`capability`
+/// and `blobId`), which grants decide. The guest authenticates to dispatch with its own nodule
+/// capability, as any hop does.
 async fn forward_blob(cx: &Cx, nsid: &str, body: XrpcBody) -> Reply {
     let invalid = |message: &str| Reply {
         status: http::StatusCode::BAD_REQUEST,
@@ -185,8 +186,17 @@ async fn forward_blob(cx: &Cx, nsid: &str, body: XrpcBody) -> Reply {
                 .expect("a JSON value serializes"),
         ),
     };
-    let Some((operation, query)) = nsid.split_once('?') else {
-        return invalid("blob calls need query parameters");
+    let (operation, query) = nsid.split_once('?').unwrap_or((nsid, ""));
+    let is_put = operation.ends_with(".put");
+    let query = if is_put {
+        let Some(blobs) = cx.blobs_capability() else {
+            return invalid("no blobs capability was delivered for put");
+        };
+        format!("capability={blobs}")
+    } else if query.is_empty() {
+        return invalid("a blob read needs query parameters");
+    } else {
+        query.to_owned()
     };
     let Some(authority) = cx.nodule_capability() else {
         return invalid("no nodule capability");
@@ -202,7 +212,6 @@ async fn forward_blob(cx: &Cx, nsid: &str, body: XrpcBody) -> Reply {
         },
     )
     .expect("context headers are valid HTTP");
-    let is_put = operation.ends_with(".put");
     let request = XrpcRequest {
         method: if is_put { Method::POST } else { Method::GET },
         path: format!(

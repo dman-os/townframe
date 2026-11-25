@@ -41,6 +41,7 @@ pub struct RoutineCapabilities {
     pub dispatch: Option<CapId>,
     pub config: Option<CapId>,
     pub drawers: Option<CapId>,
+    pub blobs: Option<CapId>,
 }
 
 /// Everything an executor needs to host one nodule revision's routine components.
