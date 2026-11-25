@@ -91,8 +91,6 @@ use crate::interlude::*;
 
 mod facts;
 #[cfg(any(test, feature = "test-support"))]
-pub mod cursor_laws;
-#[cfg(any(test, feature = "test-support"))]
 pub mod memory;
 mod run;
 #[cfg(any(test, feature = "test-support"))]
@@ -111,7 +109,6 @@ pub use run::DriverConfig;
 pub use run::PeerDriver;
 pub use run::RouteUpdate;
 
-use crate::rev::Rev;
 use crate::sync::PeerCursor;
 
 /// The backend the driver syncs into: the cut of the backend contract in
