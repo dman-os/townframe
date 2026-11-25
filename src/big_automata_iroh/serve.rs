@@ -11,9 +11,9 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use big_automata::PeerKey;
+use big_automata::long_poll::RuntimeTimer;
 use big_automata::part_store::PartStoreServe;
 use big_automata::replay::responder::Responder;
-use big_automata::replay::responder::Timer;
 use big_automata::replay::server::ReplayServer;
 use big_automata::replay::wire::CloseSession;
 use big_automata::replay::wire::PageSession;
@@ -45,15 +45,6 @@ use service_utils_rs::RequestContext;
 use service_utils_rs::ResponseEnvelope;
 use service_utils_rs::StopToken;
 use service_utils_rs::TransportContext;
-
-/// The tokio sleep a held round waits on.
-struct TokioTimer;
-
-impl Timer for TokioTimer {
-    fn sleep(&self, duration: std::time::Duration) -> impl Future<Output = ()> + Send + use<> {
-        tokio::time::sleep(duration)
-    }
-}
 
 /// The embedder's mapping from a request to the principal it acts as.
 type PrincipalOf = dyn Fn(&RequestContext, &TransportContext) -> Result<PeerKey, ContextError>
@@ -96,8 +87,8 @@ where
 
     /// A responder for one call. It subscribes to the store's watch and starts with empty
     /// buffers, so a call pays for the page it builds and nothing carried over from another.
-    fn responder(&self) -> Responder<S, TokioTimer> {
-        Responder::new(self.store.clone(), TokioTimer)
+    fn responder(&self) -> Responder<S, RuntimeTimer> {
+        Responder::new(self.store.clone(), RuntimeTimer)
     }
 
     fn server(&self) -> std::sync::MutexGuard<'_, ReplayServer> {

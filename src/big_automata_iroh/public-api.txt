@@ -9,7 +9,6 @@ impl Handler < LeafBucketsRequest > for big_automata_iroh::serve::ReplayService 
 impl Handler < PageSession > for big_automata_iroh::serve::ReplayService < S >
 impl Handler < PartSummariesRequest > for big_automata_iroh::serve::ReplayService < S >
 impl Handler < UpdateSession > for big_automata_iroh::serve::ReplayService < S >
-impl Timer for big_automata_iroh::serve::TokioTimer
 pub big_automata_iroh::serve::fn boot < S > (store : S , principal_of : impl Fn (& RequestContext , & TransportContext) -> Result < PeerKey , ContextError > + Send + Sync + 'static ,) -> (Replay < S > , StopToken) where S : PartStoreServe + Clone + Send + Sync + 'static ,
 pub mod big_automata_iroh::serve
 pub struct big_automata_iroh::serve::Replay< S >  { service: Arc < ReplayService < S > >, host: Arc < Host < Arc < ReplayService < S > > > >, client: Client < ReplayProtocol >, rpc_client: Client < SyncRpcProtocol > }
