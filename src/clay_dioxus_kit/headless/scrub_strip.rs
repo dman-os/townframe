@@ -588,10 +588,10 @@ pub fn ScrubStrip(
         if !renderer.measures_layout() {
             return;
         }
-        let element = mounted
-            .peek()
-            .clone()
-            .expect("a measure follows the overlay's mount");
+        // A resize can be reported before the mount event is handled; the mount measures.
+        let Some(element) = mounted.peek().clone() else {
+            return;
+        };
         spawn(async move {
             let measured = element
                 .get_client_rect()
