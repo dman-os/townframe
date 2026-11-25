@@ -148,6 +148,7 @@ pub impl big_cabinet_core::authority::Authorization::fn metadata (& self) -> Htt
 pub impl big_cabinet_core::authority::CapId::const fn from_bytes (bytes : [u8 ; 16]) -> Self
 pub impl big_cabinet_core::authority::CapId::fn as_bytes (& self) -> & [u8 ; 16]
 pub impl big_cabinet_core::authority::CapId::fn new_random () -> Self
+pub impl big_cabinet_core::authority::ResolvedAuthority::fn is_operator_root (& self) -> bool
 pub impl big_cabinet_core::authority::Rights::const fn all () -> Self
 pub impl big_cabinet_core::authority::Rights::const fn contains (self , other : Self) -> bool
 pub impl big_cabinet_core::authority::Rights::const fn empty () -> Self

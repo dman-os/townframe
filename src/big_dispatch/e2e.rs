@@ -127,7 +127,6 @@ async fn harness() -> Harness {
     let (dispatch, dispatch_stop) = crate::boot(DispatchConfig {
         authority: authority.client.clone(),
         namespace,
-        operator: authority.service.operator_uuid(),
     });
     Harness {
         authority,
@@ -561,7 +560,7 @@ async fn a_service_provider_routes_by_nsid_and_carries_the_services_own_errors()
         "scope": { "authorities": ["org.example"] },
         "rights": Rights::USE,
     });
-    // The operator's identity is admitted by dispatch and mints in the service.
+    // The operator's root capability is admitted by dispatch and mints in the service.
     let minted = h.invoke(operator, MINT, request.clone()).await.unwrap();
     assert!(minted.get("capabilityId").is_some(), "{minted}");
 

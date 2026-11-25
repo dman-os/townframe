@@ -7,7 +7,7 @@
 //!
 //! - **Unix socket.** The kernel vouches for the peer's uid when it connects. Only the uid the
 //!   node runs as is admitted, and it acts as the operator: an anonymous request is the
-//!   operator's identity, and a presented bearer token narrows it. Every other uid is closed
+//!   operator's root capability, and a presented bearer token narrows it. Every other uid is closed
 //!   before a byte is read. The socket lives in a directory only its owner can enter.
 //! - **TCP.** Nothing about the connection says who it is, so only the capability each request
 //!   presents counts.

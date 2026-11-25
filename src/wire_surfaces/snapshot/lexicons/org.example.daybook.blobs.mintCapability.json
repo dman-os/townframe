@@ -78,7 +78,7 @@
       "type": "array"
     },
     "main": {
-      "description": "Mints a blobs handle for `scope` and `rights`, authorized by the request's `Authorization`\ncredential rather than a body field: the node operator's identity may mint any scope, and a\nblobs handle may mint only a subset of its own scope and rights.",
+      "description": "Mints a blobs handle for `scope` and `rights`, authorized by the request's `Authorization`\ncredential rather than a body field: the node operator's root capability may mint any scope, and a\nblobs handle may mint only a subset of its own scope and rights.",
       "errors": [
         {
           "name": "Denied"

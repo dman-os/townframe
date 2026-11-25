@@ -1434,7 +1434,11 @@ async fn metadata_protocol_respects_root_and_child_audiences() {
             );
             assert_eq!(
                 node.core()
-                    .reach(&RequestContext::root(), actor.actor.actor_id, doc)
+                    .reach(
+                        &RequestContext::root(),
+                        Holder::Actor(actor.actor.actor_id),
+                        doc
+                    )
                     .await
                     .unwrap()
                     .map(|(access, _)| access),

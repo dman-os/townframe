@@ -11,7 +11,7 @@
 //! The adapter is not an authorization boundary. Dispatch admission has already run when
 //! [`Provider::call`] is entered. The credential dispatch admitted ([`Caller::authorization`])
 //! is handed on as the request's `Authorization: Bearer` metadata, the way an XRPC server hands
-//! it to any service, and the service checks it itself: an identity (the operator) satisfies
+//! it to any service, and the service checks it itself: the operator's root capability satisfies
 //! both layers, while a dispatch-minted handle is not understood by a service's domain, which
 //! admits only its own handles. Resource capabilities (`capability` fields) stay in the input.
 

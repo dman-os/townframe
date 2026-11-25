@@ -134,7 +134,7 @@ pub struct StatBlob {
 /// so a handle minted ahead of time reads whatever a drawer comes to hold. A drawer reach covers
 /// every `blobInventory` meta doc of the drawer, public and sensitive, by kind. There is no
 /// read-everything scope. A handle can only be minted with a scope its minter covers, so a scope
-/// only ever narrows; the node operator's own identity covers every scope.
+/// only ever narrows; the node operator's root capability covers every scope.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -169,7 +169,7 @@ impl BlobsScope {
 }
 
 /// Mints a blobs handle for `scope` and `rights`, authorized by the request's `Authorization`
-/// credential rather than a body field: the node operator's identity may mint any scope, and a
+/// credential rather than a body field: the node operator's root capability may mint any scope, and a
 /// blobs handle may mint only a subset of its own scope and rights.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
