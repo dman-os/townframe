@@ -97,12 +97,6 @@ workspace: cargo-leptos assumes each package lives under its workspace root and
 failed with "Could not remove base" when the crate was a member of
 `src/wasm_utils_rs`, whose root is a sibling directory.
 
-Each manifest crate declares
-`[package.metadata.townframe] routines = "../plug_name_routines"`.
-`cargo x plug build-oci --plug-root src/plug_name_manifest` runs its native
-`manifest` binary, builds the sibling routines component, and packages both
-under the existing logical plug ID. Wasmtime is not a dependency of xtask.
-
 ## Build directories and feature resolution
 
 Cargo runs through [mbx](https://mr-boxington.jdx.dev/) (mr-boxington), pinned
