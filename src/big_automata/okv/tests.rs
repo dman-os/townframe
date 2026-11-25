@@ -18,6 +18,7 @@ use super::memory::MemoryTx;
 use super::*;
 use crate::rev::Entry;
 use crate::rev::Page;
+use crate::rev::RevStream;
 use crate::rev::laws::WakeCount;
 use crate::rev::laws::limits;
 use crate::rev::laws::{self as stream_laws};
@@ -96,6 +97,29 @@ fn get_reads_your_writes() -> Res<()> {
 #[test]
 fn tables_commit_together() -> Res<()> {
     block_on(laws::tables_commit_together(&Memory))
+}
+
+#[test]
+fn consumer_cursors() -> Res<()> {
+    block_on(laws::consumer_cursors(&Memory))
+}
+
+#[test]
+#[should_panic(expected = "past the committed rev")]
+fn report_past_the_latest_rev_panics() {
+    block_on(laws::report_past_the_latest_rev_panics(&Memory))
+        .expect("the law panics before returning");
+}
+
+#[test]
+#[should_panic(expected = "unregistered consumer")]
+fn report_unregistered_panics() {
+    block_on(laws::report_unregistered_panics(&Memory)).expect("the law panics before returning");
+}
+
+#[test]
+fn prune_by_lowest_cursor() -> Res<()> {
+    block_on(laws::prune_by_lowest_cursor(&Memory))
 }
 
 #[test]
@@ -321,6 +345,65 @@ fn read_reuses_the_callers_page() -> Res<()> {
         page.entries.as_ptr(),
         buffer,
         "the read reallocated the page"
+    );
+    Ok(())
+}
+
+/// A registered stream consumer hears every tombstone: pruning waits for its reported cursor,
+/// and what it reports is what a restarted stream can skip.
+#[test]
+fn a_registered_stream_hears_each_tombstone_before_it_is_pruned() -> Res<()> {
+    let db = MemoryDb::default();
+    let table: Table = db.table();
+    let mut tx = db.begin();
+    block_on(OkvStore::apply(
+        &table,
+        &mut tx,
+        vec![put(1, b"a"), put(2, b"b")],
+    ))?;
+    block_on(OkvStore::apply(
+        &table,
+        &mut tx,
+        vec![Mutation::Delete { key: vec![1] }],
+    ))?;
+    tx.commit()?;
+
+    assert_eq!(block_on(OkvStore::register_consumer(&table, "walker"))?, 0);
+    let mut stream = RevStream::new(table.clone(), Selector::All, 0);
+    let mut page = Page::default();
+    block_on(stream.next_into(&mut page, limits(10, None)))?;
+    assert_eq!(
+        page.entries,
+        vec![
+            Entry {
+                key: vec![2],
+                rev: 1,
+                value: Some(b"b".to_vec())
+            },
+            Entry {
+                key: vec![1],
+                rev: 2,
+                value: None
+            },
+        ]
+    );
+    let pruned = block_on(OkvStore::prune(&table))?;
+    assert_eq!(pruned.tombstones, 0, "the walker has not reported yet");
+
+    block_on(OkvStore::report_cursor(&table, "walker", page.through))?;
+    assert_eq!(block_on(OkvStore::prune(&table))?.tombstones, 1);
+    // A restart registers again, resumes at its cursor and reads only the live row.
+    let cursor = block_on(OkvStore::register_consumer(&table, "walker"))?;
+    assert_eq!(cursor, 2);
+    let mut restarted = RevStream::new(table.clone(), Selector::All, 0);
+    block_on(restarted.next_into(&mut page, limits(10, None)))?;
+    assert_eq!(
+        page.entries,
+        vec![Entry {
+            key: vec![2],
+            rev: 1,
+            value: Some(b"b".to_vec())
+        }]
     );
     Ok(())
 }

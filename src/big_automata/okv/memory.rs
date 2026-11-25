@@ -22,6 +22,7 @@ use tokio::sync::watch;
 use crate::interlude::*;
 use crate::okv::Mutation;
 use crate::okv::OkvStore;
+use crate::okv::Pruned;
 use crate::okv::Selector;
 use crate::okv::row_bytes;
 use crate::rev::Entry;
@@ -69,6 +70,8 @@ pub(crate) struct OkvTable<K, V> {
     rows_by_rev: BTreeMap<Rev, BTreeMap<K, Option<V>>>,
     /// Where each key's row lives in `rows_by_rev`.
     rev_by_key: BTreeMap<K, Rev>,
+    /// The registered consumers and the rev each has gone past (see [`crate::okv`]).
+    consumers: BTreeMap<String, Rev>,
 }
 
 trait ErasedTable: Any + Send {
@@ -254,6 +257,21 @@ where
         })
     }
 
+    /// Run `change` on the committed table inside one critical section.
+    fn with_table_mut<R>(&self, change: impl FnOnce(&mut OkvTable<K, V>) -> R) -> R {
+        surelock::key::lock_scope(|key| {
+            let (mut state, _key) = key.lock(&self.db.state);
+            let table = (state
+                .tables
+                .get_mut(&self.table)
+                .expect(ERROR_IMPOSSIBLE)
+                .as_mut() as &mut dyn Any)
+                .downcast_mut::<OkvTable<K, V>>()
+                .expect(ERROR_IMPOSSIBLE);
+            change(table)
+        })
+    }
+
     /// This table's stage in `tx`, recording the table's base rev on first touch.
     fn stage<'tx>(&self, tx: &'tx mut MemoryTx) -> &'tx mut Stage<K, V> {
         assert!(
@@ -281,6 +299,7 @@ impl<K, V> Default for OkvTable<K, V> {
             rev: 0,
             rows_by_rev: default(),
             rev_by_key: default(),
+            consumers: default(),
         }
     }
 }
@@ -322,6 +341,52 @@ where
     pub(crate) fn publish(&mut self, rev: Rev) {
         assert!(rev > self.rev, "okv revs must strictly increase");
         self.rev = rev;
+    }
+
+    /// Register `consumer` and return its cursor, `0` if it is new.
+    pub(crate) fn register_consumer(&mut self, consumer: &str) -> Rev {
+        *self.consumers.entry(consumer.to_owned()).or_insert(0)
+    }
+
+    /// Move `consumer`'s cursor forward; a cursor at or below the recorded one changes nothing.
+    pub(crate) fn report_cursor(&mut self, consumer: &str, cursor: Rev) {
+        assert!(
+            cursor <= self.rev,
+            "okv cursor {cursor} past the committed rev {committed}",
+            committed = self.rev
+        );
+        let held = self
+            .consumers
+            .get_mut(consumer)
+            .unwrap_or_else(|| panic!("okv cursor reported by unregistered consumer {consumer:?}"));
+        *held = (*held).max(cursor);
+    }
+
+    pub(crate) fn unregister_consumer(&mut self, consumer: &str) {
+        self.consumers.remove(consumer);
+    }
+
+    pub(crate) fn consumers(&self) -> BTreeMap<String, Rev> {
+        self.consumers.clone()
+    }
+
+    /// Drop every tombstone at or below the lowest registered cursor. Live rows stay, no rev
+    /// is consumed and nothing wakes: a reader sees only fewer tombstones.
+    pub(crate) fn prune(&mut self) -> Pruned {
+        let floor = self.consumers.values().copied().min().unwrap_or(0);
+        let mut tombstones = 0;
+        for (_, rows) in self.rows_by_rev.range_mut(..=floor) {
+            rows.retain(|key, value| {
+                let live = value.is_some();
+                if !live {
+                    self.rev_by_key.remove(key).expect(ERROR_IMPOSSIBLE);
+                    tombstones += 1;
+                }
+                live
+            });
+        }
+        self.rows_by_rev.retain(|_, rows| !rows.is_empty());
+        Pruned { floor, tombstones }
     }
 
     /// The key's row and the rev that wrote it: `None` for a key never written, `Some((rev,
@@ -478,5 +543,29 @@ where
             None => self.with_table(|table| table.get(key).and_then(|(_rev, value)| value.clone())),
         };
         std::future::ready(Ok(value))
+    }
+
+    fn register_consumer(&self, consumer: &str) -> impl Future<Output = Res<Rev>> + Send {
+        std::future::ready(Ok(
+            self.with_table_mut(|table| table.register_consumer(consumer))
+        ))
+    }
+
+    fn report_cursor(&self, consumer: &str, cursor: Rev) -> impl Future<Output = Res<()>> + Send {
+        self.with_table_mut(|table| table.report_cursor(consumer, cursor));
+        std::future::ready(Ok(()))
+    }
+
+    fn unregister_consumer(&self, consumer: &str) -> impl Future<Output = Res<()>> + Send {
+        self.with_table_mut(|table| table.unregister_consumer(consumer));
+        std::future::ready(Ok(()))
+    }
+
+    fn consumers(&self) -> impl Future<Output = Res<BTreeMap<String, Rev>>> + Send {
+        std::future::ready(Ok(self.with_table(OkvTable::consumers)))
+    }
+
+    fn prune(&self) -> impl Future<Output = Res<Pruned>> + Send {
+        std::future::ready(Ok(self.with_table_mut(OkvTable::prune)))
     }
 }

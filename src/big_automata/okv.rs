@@ -10,6 +10,26 @@
 //! so a rollback consumes no rev. [`OkvStore::get`] reads a key inside the same transaction. The store moves its [`RevWatch`](crate::rev::RevWatch) from
 //! the transaction's commit, never by hand, and never for a rollback.
 //!
+//! # Pruning by consumer cursors
+//!
+//! A delete keeps its row as a tombstone, and a table whose rows are deleted as they are
+//! handled (a queue of wants) would grow one tombstone per key ever written. Live rows are
+//! state and are never dropped, but a tombstone only matters to a reader that has not yet gone
+//! past its rev, so consumers say how far they have gone and the store drops what all of them
+//! have passed:
+//!
+//! - a consumer [registers](OkvStore::register_consumer) under a name, which holds pruning back
+//!   from cursor 0, and [reports](OkvStore::report_cursor) the rev it has gone past: every row
+//!   at or below it has been taken in, the tombstones among them included. A consumer that
+//!   never reports holds pruning back, visibly: [`OkvStore::consumers`] lists every cursor.
+//! - [`OkvStore::prune`] drops the tombstones at or below the lowest registered cursor. With no
+//!   consumer registered it drops nothing: an unknown reader may still need them.
+//!
+//! These verbs are not part of a transaction: a report is a hint that can only delay a prune
+//! when lost, and a prune changes no live row, consumes no rev and wakes nobody. A registered
+//! reader never misses a tombstone; one that reads from a rev below the floor without being
+//! registered sees the live rows and only the tombstones above the floor.
+//!
 //! Byte budgets: an entry costs its key bytes plus its value bytes against
 //! [`Limits::max_bytes`](crate::rev::Limits) (a tombstone's value costs nothing). Every backend
 //! charges the same so their pages agree.
@@ -71,6 +91,16 @@ impl<K: Ord> Selector<K> {
     }
 }
 
+/// What [`OkvStore::prune`] dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pruned {
+    /// The lowest registered cursor, which tombstones at or below were dropped for: `0` when
+    /// no consumer is registered, which drops nothing.
+    pub floor: Rev,
+    /// How many tombstones this call dropped (not counting ones an earlier prune dropped).
+    pub tombstones: usize,
+}
+
 /// An okv store: a [`RevSource`] over its rows, plus the transactional verbs.
 ///
 /// Implementations assign `apply`'s rev inside the caller's transaction (the counter is part of
@@ -105,6 +135,26 @@ pub trait OkvStore: RevSource<Selector = Selector<<Self as RevSource>::Key>> {
         tx: &mut Self::Tx,
         key: &Self::Key,
     ) -> impl Future<Output = Res<Option<Self::Value>>> + Send;
+
+    /// Register `consumer` and return its cursor: `0` for a new consumer, which holds every
+    /// tombstone back, and the stored cursor for one registered before (a restart registers
+    /// again and resumes). Durable with the table where the table is.
+    fn register_consumer(&self, consumer: &str) -> impl Future<Output = Res<Rev>> + Send;
+
+    /// Record that `consumer` has gone past `cursor`. A cursor is monotone: one at or below the
+    /// recorded one changes nothing. Panics for a consumer that is not registered, and for a
+    /// cursor past the table's latest rev: both are caller bugs.
+    fn report_cursor(&self, consumer: &str, cursor: Rev) -> impl Future<Output = Res<()>> + Send;
+
+    /// Stop holding pruning back for `consumer`. A consumer that is not registered is a
+    /// no-op.
+    fn unregister_consumer(&self, consumer: &str) -> impl Future<Output = Res<()>> + Send;
+
+    /// Every registered consumer and its cursor.
+    fn consumers(&self) -> impl Future<Output = Res<BTreeMap<String, Rev>>> + Send;
+
+    /// Drop the tombstones at or below the lowest registered cursor; see the module docs.
+    fn prune(&self) -> impl Future<Output = Res<Pruned>> + Send;
 }
 
 /// What a row costs against a byte budget; see the module docs.

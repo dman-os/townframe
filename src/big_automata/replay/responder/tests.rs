@@ -8,6 +8,7 @@ use futures::channel::oneshot;
 use futures::executor::block_on;
 
 use super::*;
+use crate::kit::scheduler::Instant;
 use crate::part_store::laws;
 use crate::part_store::laws::add;
 use crate::part_store::laws::grant;
@@ -28,7 +29,6 @@ use crate::replay::wire::SessionId;
 use crate::replay::wire::SessionUpdated;
 use crate::replay::wire::TargetId;
 use crate::replay::wire::Verdict;
-use crate::kit::scheduler::Instant;
 
 /// A timer whose sleeps end only when the test says so.
 #[derive(Clone, Default)]
