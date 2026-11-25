@@ -62,6 +62,10 @@ use crate::rev::laws::any_limits;
 use crate::rev::laws::limits;
 use future_form::Sendable;
 
+mod generators;
+pub use generators::part_ops;
+use generators::*;
+
 type Tx<B> = <<B as Backend>::Store as PartStoreWrite<Sendable>>::Tx;
 
 /// What a backend supplies to run the laws.
@@ -1239,74 +1243,6 @@ pub async fn differential<B: Backend>(backend: &B, ops: Vec<PartOp>) -> Res<()> 
         }
     }
     Ok(())
-}
-
-fn any_obj() -> impl Strategy<Value = ObjKey> {
-    (0..OBJS).prop_map(obj)
-}
-fn any_part() -> impl Strategy<Value = PartKey> {
-    (0..PARTS).prop_map(part)
-}
-fn any_principal() -> impl Strategy<Value = PeerKey> {
-    (0..PRINCIPALS).prop_map(principal)
-}
-fn any_payload() -> impl Strategy<Value = ObjPayload> {
-    (0u8..3).prop_map(payload)
-}
-fn any_level() -> impl Strategy<Value = AccessLevel> {
-    prop_oneof![
-        Just(AccessLevel::Pull),
-        Just(AccessLevel::Read),
-        Just(AccessLevel::Write),
-        Just(AccessLevel::Admin),
-    ]
-}
-
-pub fn part_writes() -> impl Strategy<Value = Vec<PartWrite>> {
-    use proptest::collection::vec;
-    let write = prop_oneof![
-        1 => vec(any_part(), 0..2).prop_map(PartWrite::EnsureParts),
-        3 => vec((any_obj(), any_payload()), 1..3).prop_map(PartWrite::SetPayloads),
-        3 => vec((any_obj(), any_part()), 1..3).prop_map(PartWrite::AddMembers),
-        2 => vec((any_obj(), any_part()), 1..3).prop_map(PartWrite::RemoveMembers),
-        2 => vec((any_part(), any_principal(), any_level()), 1..3).prop_map(PartWrite::GrantAccess),
-        1 => vec((any_part(), any_principal()), 1..3).prop_map(PartWrite::RevokeAccess),
-    ];
-    vec(write, 1..4)
-}
-
-fn any_routes() -> impl Strategy<Value = LogRoutes> {
-    use proptest::collection::btree_map;
-    (
-        btree_map(any_part(), 0u64..6, 0..3),
-        btree_map(any_obj(), 0u64..6, 0..3),
-    )
-        .prop_map(|(parts, objects)| LogRoutes { parts, objects })
-}
-
-fn any_selector() -> impl Strategy<Value = LogSelector> {
-    prop_oneof![
-        Just(LogSelector::All),
-        any_routes().prop_map(LogSelector::Routes),
-    ]
-}
-
-pub fn part_ops() -> impl Strategy<Value = Vec<PartOp>> {
-    use proptest::collection::vec;
-    let op = prop_oneof![
-        4 => part_writes().prop_map(PartOp::Commit),
-        1 => part_writes().prop_map(PartOp::Rollback),
-        1 => vec((any_principal(), any_part(), 0u64..8), 1..3).prop_map(PartOp::SetPeerCursors),
-        2 => (any_selector(), any::<u8>(), any::<u8>(), any_limits()).prop_map(
-            |(selector, after, until, limits)| PartOp::Read { selector, after, until, limits }
-        ),
-        2 => (any_principal(), any_routes(), any::<u8>(), any::<u8>(), any_limits()).prop_map(
-            |(principal, routes, after, until, limits)| PartOp::ReadAuthorized {
-                principal, routes, after, until, limits
-            }
-        ),
-    ];
-    vec(op, 0..25)
 }
 
 /// Runs the rev stream laws of [`crate::rev::laws`] over a part store's log.

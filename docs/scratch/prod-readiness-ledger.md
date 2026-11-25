@@ -865,3 +865,34 @@ is relied on for. Known so far:
 
 Questions: one canonicalization (JCS) everywhere? multihash prefix for stored digests? domain
 separation tags everywhere?
+
+## Metadata privacy audit (operator, 2026-11-18)
+
+The biggest privacy violations are usually metadata harvesting rather than content harvesting.
+Audit how well the system respects metadata privacy, especially when running through relays.
+
+**Known starting points:**
+- **One node key.** big_node uses one Ed25519 seed as the iroh endpoint key, the keyhive
+  individual and the subduction signer (ADR 033 §6). Every connection therefore announces the
+  node's long-lived keyhive identity to the relay and to every peer and network observer, and
+  links all of that node's traffic across peers and time.
+- **Separating the keys.** The operator's direction is to decouple the endpoint key from the
+  principal, possibly with distinct endpoint keys (per peer, per session, or rotating) for one
+  identity.
+  - Check whether iroh supports one process holding several endpoint keys (several
+    endpoints, or per-connection keys), and what that costs in relay registrations and
+    discovery.
+  - Then the principal is proven per request or per session, not by the connection key. The
+    big_automata replay binding already treats the endpoint as a transport fact and gets the
+    principal from a seam the layer above owns (port ledger, "Audit decisions").
+- **What relays see.** Endpoint ids, connection timing and sizes, which nodes talk to which.
+  Browser nodes are relay-only, so they expose all of this to the relay operator.
+- **What responders see.** big_sync requests name parts, objects and cursors (who follows
+  what); keyhive membership is visible to members; peer summaries and dirty counts. We removed
+  one leak already: `PartSummary.latest_cursor` no longer moves on other principals' access
+  changes.
+- **Discovery.** What iroh discovery (DNS, pkarr) publishes about a node.
+- **Logs and telemetry.** Peer ids, part keys and object keys in tracing; the `INSTR` logs.
+
+**Deliverable:** a threat model (relay, peer, network observer, logs), an inventory of what each
+can link, and the changes ranked by cost.
