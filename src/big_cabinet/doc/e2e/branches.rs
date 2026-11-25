@@ -12,6 +12,7 @@ use automerge::transaction::Transactable;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::ReferenceDocId;
 use big_cabinet_core::dmeta::BranchPath;
+use big_cabinet_core::doc::DatumKinds;
 use big_cabinet_core::reference::head_text;
 
 fn command(text: &str) -> CommandId {
@@ -56,9 +57,12 @@ impl Node {
                             DocScope {
                                 read: BTreeSet::from([origin.clone()]),
                                 write: if stealth {
-                                    BTreeSet::new()
+                                    std::collections::BTreeMap::new()
                                 } else {
-                                    BTreeSet::from([origin.clone()])
+                                    std::collections::BTreeMap::from([(
+                                        origin.clone(),
+                                        big_cabinet_core::doc::DatumKinds::All,
+                                    )])
                                 },
                                 create: BTreeSet::from([PLACEMENT.into()]),
                                 ..DocScope::default()
@@ -92,7 +96,10 @@ impl Node {
                             actor,
                             DocScope {
                                 read: BTreeSet::from([source.clone()]),
-                                write: BTreeSet::from([target.clone()]),
+                                write: std::collections::BTreeMap::from([(
+                                    target.clone(),
+                                    big_cabinet_core::doc::DatumKinds::All,
+                                )]),
                                 ..DocScope::default()
                             },
                         )
@@ -262,7 +269,10 @@ async fn a_historical_branch_pins_its_concrete_parent_and_preserves_inherited_br
                     .capability(
                         &alice,
                         DocScope {
-                            write: BTreeSet::from([origin.doc_id.clone()]),
+                            write: std::collections::BTreeMap::from([(
+                                origin.doc_id.clone(),
+                                big_cabinet_core::doc::DatumKinds::All,
+                            )]),
                             create: BTreeSet::from([PLACEMENT.into()]),
                             ..DocScope::default()
                         },
@@ -322,6 +332,50 @@ async fn a_historical_branch_pins_its_concrete_parent_and_preserves_inherited_br
         &DatumReference::parse(&origin_reference(&origin.doc_id))
             .unwrap()
             .pinned(origin.heads.clone())
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn branching_from_a_datum_kind_limited_source_is_refused() {
+    let node = Node::boot().await;
+    let alice = node.writer("alice").await;
+    let origin = node
+        .create(&alice, "create", [(key("main"), note("origin"))])
+        .await
+        .unwrap();
+    let capability = node
+        .capability(
+            &alice,
+            DocScope {
+                read: BTreeSet::from([origin.doc_id.clone()]),
+                write: BTreeMap::from([(
+                    origin.doc_id.clone(),
+                    DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+                )]),
+                create: BTreeSet::from([PLACEMENT.into()]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        op(node
+            .client()
+            .call(
+                RequestContext::root(),
+                BranchDoc {
+                    capability,
+                    command: "limited-source".to_owned().try_into().unwrap(),
+                    doc_id: origin.doc_id,
+                    at: At::Current,
+                    path: "/limited".into(),
+                    stealth: false,
+                    placement: PLACEMENT.into(),
+                },
+            )
+            .await),
+        Err(DocsError::Denied)
     );
     node.stop().await;
 }

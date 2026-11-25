@@ -571,7 +571,10 @@ impl Node {
                 Authorization::identity(self.drawers_actor.capability).metadata(),
                 MintDocCapability {
                     scope: DocScope {
-                        write: BTreeSet::from([config_doc.clone()]),
+                        write: std::collections::BTreeMap::from([(
+                            config_doc.clone(),
+                            big_cabinet_core::doc::DatumKinds::All,
+                        )]),
                         ..DocScope::default()
                     },
                     rights: Rights::USE,
@@ -612,7 +615,10 @@ impl Node {
                 self.operator().metadata(),
                 MintDocCapability {
                     scope: DocScope {
-                        write: BTreeSet::from([doc_id.clone()]),
+                        write: std::collections::BTreeMap::from([(
+                            doc_id.clone(),
+                            big_cabinet_core::doc::DatumKinds::All,
+                        )]),
                         ..DocScope::default()
                     },
                     rights: Rights::USE,

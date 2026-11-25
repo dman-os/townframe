@@ -135,9 +135,12 @@ async fn metadata_issuer_mints_only_requested_documents_without_root_or_content_
     let exact = |document: DocId, write| DocScope {
         read: BTreeSet::from([document.clone()]),
         write: if write {
-            BTreeSet::from([document])
+            std::collections::BTreeMap::from([(
+                document.clone(),
+                big_cabinet_core::doc::DatumKinds::All,
+            )])
         } else {
-            BTreeSet::new()
+            std::collections::BTreeMap::new()
         },
         ..Default::default()
     };
@@ -212,7 +215,10 @@ async fn metadata_issuer_mints_only_requested_documents_without_root_or_content_
                 capability: capability(
                     &node,
                     DocScope {
-                        write: BTreeSet::from([drawer.clone()]),
+                        write: std::collections::BTreeMap::from([(
+                            drawer.clone(),
+                            big_cabinet_core::doc::DatumKinds::All,
+                        )]),
                         ..Default::default()
                     },
                 )
