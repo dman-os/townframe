@@ -4,6 +4,8 @@
  * class, which decides the placement and the size (KIT-104). Shares the scrim and the panel's
  * surface with the drawer (overlay.css).
  *
+ * Tokens: --ct-sheet-radius|shadow (ADR 057).
+ *
  * No panel covers the whole host, so the scrim is always reachable: a bottom sheet is 5/6 of the
  * host's height, a side sheet is at most 5/6 of its width and 24rem (medium) or 32rem (expanded)
  * wide.
@@ -21,11 +23,15 @@
   flex-direction: row;
 }
 
+.ct-sheet > [data-part="panel"] {
+  box-shadow: var(--ct-sheet-shadow);
+}
+
 .ct-sheet[data-placement="bottom"] [data-part="panel"] {
   width: 100%;
   height: 83.3333%;
-  border-top-left-radius: var(--ct-dimension-radius-xl);
-  border-top-right-radius: var(--ct-dimension-radius-xl);
+  border-top-left-radius: var(--ct-sheet-radius);
+  border-top-right-radius: var(--ct-sheet-radius);
   animation: ct-overlay-slide-in-bottom var(--ct-motion-duration-enter)
     var(--ct-motion-easing-enter) both;
 }
@@ -34,8 +40,8 @@
   width: 24rem;
   max-width: 83.3333%;
   height: 100%;
-  border-top-left-radius: var(--ct-dimension-radius-xl);
-  border-bottom-left-radius: var(--ct-dimension-radius-xl);
+  border-top-left-radius: var(--ct-sheet-radius);
+  border-bottom-left-radius: var(--ct-sheet-radius);
   animation: ct-overlay-slide-in-trailing var(--ct-motion-duration-enter)
     var(--ct-motion-easing-enter) both;
 }

@@ -1,0 +1,19 @@
+/*
+ * The identity sheet (ADR 057 section 2.2): the app's look, as one sheet in the `identity` layer
+ * above `kit` and below `user`. The kit's skins carry structure, states, focus and legibility with a
+ * quiet default (no borders on containers, no shadows in the flow, no decorative gradients); what
+ * two reasonable themes would choose differently is a component token the kit's skins read
+ * (`--ct-<component>-radius|border|shadow|fill`, listed in `../tokens.css`). This sheet sets those
+ * tokens, and where a token is not enough, restyles the parts by their `data-part` vocabulary.
+ * Changing the app's look means editing this file, never a skin and never Rust.
+ *
+ * What this sheet must not do (ADR 057 section 5): decorative gradients, glow or frosted glass;
+ * coloured borders or stripes to mark status or emphasis; a shadow on anything in the flow; an edge
+ * on a container nested in a container; pills or badges for what is not a control or a count; emoji
+ * as icons; low-contrast body text.
+ *
+ * It is empty on purpose until the shipped identity is judged on the theme lab board (ADR 057
+ * section 7, step 4): with this sheet empty the board shows the kit's quiet default.
+ *
+ * Imported with `layer(identity)` by `tailwind.css`, so the rules here carry no `@layer` of their own.
+ */

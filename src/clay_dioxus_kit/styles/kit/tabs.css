@@ -21,7 +21,7 @@
   max-width: 100%;
   padding: var(--ct-dimension-spacing-1);
   overflow-x: auto;
-  border-radius: var(--ct-dimension-radius-md);
+  border-radius: var(--ct-tabs-radius);
   background: var(--ct-color-surface-sunken);
 }
 
@@ -37,7 +37,11 @@
   min-height: 2.5rem;
   padding-inline: var(--ct-dimension-spacing-3);
   border: 0;
-  border-radius: var(--ct-dimension-radius-sm);
+  /* The list's radius less its padding, so the tab nests concentrically in the list. */
+  border-radius: max(
+    0px,
+    calc(var(--ct-tabs-radius) - var(--ct-dimension-spacing-1))
+  );
   background: transparent;
   color: var(--ct-color-text-muted);
   font-family: var(--ct-font-family);

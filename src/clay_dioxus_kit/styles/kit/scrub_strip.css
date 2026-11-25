@@ -165,9 +165,9 @@
   min-width: calc(var(--ct-strip-cell) * 1.9);
   height: calc(var(--ct-strip-cell) * 1.4);
   padding-inline: var(--ct-dimension-spacing-3);
-  border-radius: var(--ct-dimension-radius-md);
+  border-radius: var(--ct-scrub-bubble-radius);
   background: var(--ct-color-surface-raised);
-  box-shadow: var(--ct-elevation-md);
+  box-shadow: var(--ct-scrub-bubble-shadow);
   color: var(--ct-color-text);
   font-size: min(calc(var(--ct-strip-cell) * 0.86), 1rem);
   font-weight: var(--ct-font-weight-semibold);

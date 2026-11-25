@@ -1,7 +1,8 @@
 /*
  * ct-chip (headless/chip.rs). Parts: label, remove. Axes: data-variant (filled|outline),
  * data-status (info|success|warning|danger; absent is neutral). State on a toggle chip:
- * data-state (on|off).
+ * data-state (on|off). Tokens: --ct-chip-radius|border (ADR 057); the outline variant's hairline is
+ * its definition, so it is not the token's.
  */
 .ct-chip {
   --ct-chip-tone: var(--ct-color-border);
@@ -11,8 +12,8 @@
   gap: var(--ct-dimension-spacing-1);
   min-height: 1.75rem;
   padding-inline: var(--ct-dimension-spacing-3);
-  border: var(--ct-dimension-border-width-thin) solid var(--ct-chip-tone);
-  border-radius: var(--ct-dimension-radius-pill);
+  border: var(--ct-chip-border);
+  border-radius: var(--ct-chip-radius);
   background: var(--ct-color-surface-sunken);
   color: var(--ct-color-text);
   font-family: var(--ct-font-family);
@@ -48,6 +49,7 @@
 
 .ct-chip[data-variant="outline"],
 .ct-chip[data-variant="outline"][data-status] {
+  border: var(--ct-dimension-border-width-hairline) solid var(--ct-color-border);
   background: transparent;
 }
 
