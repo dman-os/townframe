@@ -5,7 +5,10 @@
 //! here is only what the driver adds. Every wait is bounded in virtual time (`within`), so a
 //! driver that stalls fails the test.
 
+mod backend;
+mod crashes;
 mod full_sync;
 mod laws;
+mod mutual;
 mod reconnect;
 mod rig;
