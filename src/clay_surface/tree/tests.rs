@@ -1660,6 +1660,59 @@ fn custom_elements_carry_attributes_listeners_and_children_through_the_host_vdom
     assert!(host_tree.listener_id("x-card", "click").is_some());
 }
 
+/// The interpreter and the host own some names. A guest that could write them would steer the
+/// host's own machinery: `data-dioxus-shadow-sheet` is adopted as a constructable sheet without
+/// passing the stylesheet sanitizer, so a `url()` in it would fetch on the guest's behalf, and
+/// `data-dioxus-id` is the interpreter's node id. The `ct-` tags are the host-generated element
+/// names (ADR 059), and `exportparts` is the host's to write.
+#[test]
+fn host_owned_names_are_refused_from_a_guest() {
+    let on_element = |attribute: Mutation| {
+        SurfaceTree::new().apply(&[element("div", None), Mutation::SetId(1), attribute])
+    };
+    for (name, value) in [
+        (
+            "data-dioxus-shadow-sheet",
+            "p { background: url(https://evil.example/x.png) }",
+        ),
+        ("data-dioxus-shadow-sheet", "@import \"https://evil.example/x.css\";"),
+        ("data-dioxus-id", "3"),
+        ("data-dioxus-anything-else", ""),
+        ("data-ct-sheet", "p { color: red }"),
+        ("data-ct-anything", ""),
+        ("exportparts", "tab"),
+    ] {
+        assert!(
+            matches!(
+                on_element(text_attr(name, None, value)),
+                Err(PresentationError::Unsupported(_))
+            ),
+            "{name} must be refused"
+        );
+    }
+    for tag in ["ct-diff-1a2b3c4d", "ct-x"] {
+        assert_eq!(
+            SurfaceTree::new().apply(&[element(tag, None)]),
+            Err(PresentationError::Unsupported(format!(
+                "element tag or namespace: <{tag}> in None"
+            ))),
+            "{tag}"
+        );
+    }
+    // What a guest legitimately writes stays admitted: Pierre's code view marks its own shadow
+    // host, hands it a sheet that fetches nothing, and stands a scroller in for the document's;
+    // the mdk's slot marker is the guest's own.
+    for (name, value) in [
+        ("data-dioxus-shadow", ""),
+        ("data-dioxus-shadow-sheet", "@layer base { p { color: red } }"),
+        ("data-dioxus-scroll-proxy", "document"),
+        ("data-clay-slot", "7"),
+    ] {
+        on_element(text_attr(name, None, value)).unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+    assert!(SurfaceTree::new().apply(&[element("x-ct-card", None)]).is_ok());
+}
+
 #[test]
 fn custom_element_names_are_validated_and_capped_per_surface() {
     // A refused batch poisons the tree, so each bad name gets a fresh one.
