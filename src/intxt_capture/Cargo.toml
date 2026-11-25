@@ -22,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 similar = "2.7"
 thiserror.workspace = true
+tracing.workspace = true
 uuid = { workspace = true, features = ["v7", "v8"] }
 
 [dev-dependencies]

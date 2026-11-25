@@ -4,7 +4,10 @@
 //! A transcript is JSONL, one record per line, appended as the session runs. A
 //! [`TranscriptImporter`] reads it incrementally: [`TranscriptImporter::import`] takes the bytes
 //! after [`TranscriptImporter::offset`], consumes whole lines only (a partial last line waits for
-//! the next call) and returns the datums that changed. The importer serializes, so a hook process
+//! the next call) and returns the datums that changed. A whole line that isn't JSON is the
+//! harness's own damage (Claude Code has written a record cut off mid-string and carried on with
+//! the next line): it is skipped and reported in [`Imported::skipped`], so one bad record never
+//! stops a session's recording. The importer serializes, so a hook process
 //! persists it between invocations. Importing in any chunking yields the same datums as one call.
 //!
 //! One importer reads one transcript file. A subagent's transcript is its own file and its own
@@ -59,8 +62,6 @@ pub enum ImportError {
     Io(#[from] std::io::Error),
     #[error("the transcript is {len} bytes, shorter than the offset {offset} already imported")]
     Shrank { len: u64, offset: u64 },
-    #[error("transcript line at byte {at}: {reason}")]
-    Line { at: u64, reason: String },
     #[error("transcript record {uuid}: {reason}")]
     Record { uuid: String, reason: String },
 }
@@ -79,6 +80,17 @@ pub struct Imported {
     /// Ids of the subagents whose calls returned in this call; each has a transcript
     /// `agent-<id>.jsonl` of its own, and its session id is `agent-<id>`.
     pub spawned: Vec<String>,
+    /// The whole lines of this call that weren't JSON, skipped. Whatever record they held is
+    /// missing from the datums.
+    pub skipped: Vec<SkippedLine>,
+}
+
+/// A transcript line the importer skipped because it wasn't JSON.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkippedLine {
+    /// The line's byte offset in the transcript.
+    pub at: u64,
+    pub reason: String,
 }
 
 impl Imported {
@@ -271,12 +283,13 @@ impl TranscriptImporter {
             if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            let record: Record =
-                serde_json::from_slice(line).map_err(|error| ImportError::Line {
+            match serde_json::from_slice::<Record>(line) {
+                Ok(record) => self.record(record)?,
+                Err(error) => self.out.skipped.push(SkippedLine {
                     at: line_at,
                     reason: error.to_string(),
-                })?;
-            self.record(record)?;
+                }),
+            }
         }
         self.offset += end as u64 + 1;
 

@@ -7198,6 +7198,7 @@ dependencies = [
  "similar 2.7.0",
  "tempfile",
  "thiserror 2.0.21",
+ "tracing",
  "uuid",
 ]
 
