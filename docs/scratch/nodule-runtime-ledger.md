@@ -131,6 +131,13 @@ D-numbers are stable names; the archive holds each one's original text.
 - **Blob scope and drawer reach (#244 node-67):** `BlobsScope.drawers` reaches drawers monotonically under covers; `blobs.read` and `stat` admit a digest pinned in an inventory of a reached drawer. A docs scope's drawer reach reads the drawer's own document (D55).
 - **CI:** draft PRs skip checks; only the tip is greened. Full suites run on GitHub CI; local runs are narrow.
 
+## Handoff (2026-11-25 night)
+
+- **#381 node-97, micros nodule** (on #379): draft. Owes the wire bless (the `DispatchScope` privileged set and the `capability` field on four mint methods). `cargo x` hits the mbx rmeta "not writeable" fault on mothership-alpha even in a separate worktree (`~/scratch/wt-97x`); report it to claytxt (mbx). claytxt swaps `clay_node` onto `micros.handles`. Follow-up: drawer mirroring (ADR 052 §2 step 4).
+- **#382 node-101, blob-binding crash** (on #94 lineup): a pin test plus the fix (a stale cipherBlob is replaced or deferred). Still owes: whether the operator's node at `~/.local/share/day` boots cleanly or needs a repair (don't run one), and the ping to intxt (it restores the hooks, reinstalls `day`, re-runs `intxt install`).
+- **#383 node-102, gate verdicts** (on #361): only the cost split and per-phase INSTR exist. The profile run on alpha left an empty log. Still owed: the profile (`BIG_CABINET_KNOWN=300 cargo nextest run --release -p big_cabinet -E 'test(long_test_mirrored_cost)'`), then `docs/scratch/gate-verdicts-in-the-index.md`, then the operator's go.
+- Line-up into stack #101 is still owed for #360 #361 #362 #364 #379 #381 #382 #383, then `gh stack link`, after claytxt's three main PRs (facet port, legacy exclusion, mltools).
+
 ## To do
 
 Items are open unless noted; verify against the stack before starting.
