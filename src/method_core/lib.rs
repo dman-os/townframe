@@ -61,6 +61,8 @@ pub enum HttpInput {
 /// `output.encoding` (ADR 042 §1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Encoding {
+    /// File descriptors passed by the native descriptor socket; the body has no wire serialization.
+    Descriptors,
     /// `application/json`: the body is one JSON value, the only case before ADR 042.
     Json,
     /// Raw octets, never a value that lands whole in memory. `mime` is the media type the
@@ -176,6 +178,17 @@ impl XrpcMethod {
             "only a procedure has a request body"
         );
         self.input_encoding = Encoding::Bytes { mime: None };
+        self.input = HttpInput::Query;
+        self
+    }
+
+    /// The request body is a batch of file descriptors from the native descriptor socket.
+    pub const fn descriptors_input(mut self) -> Self {
+        assert!(
+            matches!(self.kind, MethodKind::Procedure),
+            "only a procedure has a request body"
+        );
+        self.input_encoding = Encoding::Descriptors;
         self.input = HttpInput::Query;
         self
     }

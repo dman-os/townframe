@@ -316,7 +316,7 @@ async fn admit_input(
     body: Body,
     entry: &ProviderEntry,
     contract: Option<&MethodContract>,
-) -> Res<(Value, Option<ByteBody>)> {
+) -> Res<(Value, Option<Body>)> {
     let refuse = |message: String| Err(DispatchError::InvalidInput(message));
     let is_query = entry.operation_kind == Some(OperationKind::Query);
     let coerce = |query: &str| -> Res<Value> {
@@ -357,7 +357,7 @@ async fn admit_input(
         expected: expected.to_owned(),
         found: body.case().to_owned(),
     };
-    let (input, bytes) = match (entry.input, &invocation.http, body) {
+    let (input, body) = match (entry.input, &invocation.http, body) {
         (Encoding::Json, Some(HttpForm::Get { query }), _) => (coerce(query)?, None),
         (Encoding::Json, _, _) if !parameters.is_null() => {
             return refuse("a method with a JSON body takes no separate parameters".to_owned());
@@ -367,6 +367,8 @@ async fn admit_input(
         }
         (Encoding::Json, _, Body::Json(input)) => (input, None),
         (Encoding::Json, _, body @ Body::Bytes(_)) => return Err(mismatch("JSON", &body)),
+        #[cfg(unix)]
+        (Encoding::Json, _, body @ Body::Descriptors(_)) => return Err(mismatch("JSON", &body)),
         (Encoding::Bytes { mime }, http, Body::Bytes(raw)) => {
             if let (Some(declared), Some(sent)) = (mime, raw.mime.as_deref())
                 && !essence(sent).eq_ignore_ascii_case(declared)
@@ -381,9 +383,23 @@ async fn admit_input(
                 _ if parameters.is_null() => Value::Object(Default::default()),
                 _ => parameters,
             };
-            (input, Some(raw))
+            (input, Some(Body::Bytes(raw)))
         }
+        #[cfg(unix)]
+        (Encoding::Descriptors, _, Body::Descriptors(descriptors)) => {
+            let input = match &invocation.http {
+                Some(HttpForm::Post { query }) => coerce(query)?,
+                _ if parameters.is_null() => Value::Object(Default::default()),
+                _ => parameters,
+            };
+            (input, Some(Body::Descriptors(descriptors)))
+        }
+        (Encoding::Descriptors, _, body) => return Err(mismatch("descriptors", &body)),
         (Encoding::Bytes { .. }, _, body @ Body::Json(_)) => return Err(mismatch("bytes", &body)),
+        #[cfg(unix)]
+        (Encoding::Bytes { .. }, _, body @ Body::Descriptors(_)) => {
+            return Err(mismatch("bytes", &body));
+        }
     };
     if let Some(contract) = contract
         && let Err(violations) = contract.check_request(&input)
@@ -393,7 +409,7 @@ async fn admit_input(
             violations.join("; ")
         ));
     }
-    Ok((input, bytes))
+    Ok((input, body))
 }
 
 /// The media type without its parameters: `application/json; charset=utf-8` is

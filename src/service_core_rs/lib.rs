@@ -1,5 +1,7 @@
 pub mod cancellation;
 pub mod context;
+#[cfg(unix)]
+pub mod descriptor;
 pub mod operation;
 pub mod protocol;
 pub mod xrpc;
@@ -14,7 +16,10 @@ pub use cancellation::cancellation_channel;
 pub use context::HttpMetadata;
 pub use context::RequestContext;
 pub use context::TraceContext;
+#[cfg(unix)]
+pub use descriptor::DescriptorBody;
 pub use irpc as __irpc;
+pub use operation::Body;
 pub use operation::ClientError;
 pub use operation::Envelope;
 pub use operation::EventFrame;

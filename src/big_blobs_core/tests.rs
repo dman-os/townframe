@@ -397,6 +397,7 @@ fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
     unary::<MintBlobsCapability, BlobsProtocol>();
     unary::<PutBlob, BlobsProtocol>();
     unary::<ReadBlob, BlobsProtocol>();
+    unary::<ImportFile, BlobsProtocol>();
     unary::<StatBlob, BlobsProtocol>();
     let _: Option<<PutBlob as method_core::Method>::Output> = None::<BlobInfo>;
     assert_eq!(
@@ -404,6 +405,7 @@ fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
         [
             MintBlobsCapability::XRPC,
             PutBlob::XRPC,
+            ImportFile::XRPC,
             ReadBlob::XRPC,
             StatBlob::XRPC
         ]
@@ -416,6 +418,11 @@ fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
             "Capability",
         ),
         (PutBlob::XRPC, "org.example.daybook.blobs.put", "BlobInfo"),
+        (
+            ImportFile::XRPC,
+            "org.example.daybook.blobs.importFile",
+            "ImportFileOutput",
+        ),
         (ReadBlob::XRPC, "org.example.daybook.blobs.read", "ByteBody"),
         (StatBlob::XRPC, "org.example.daybook.blobs.stat", "BlobStat"),
     ] {
@@ -431,6 +438,11 @@ fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
     );
     assert_eq!(PutBlob::XRPC.output_encoding, method_core::Encoding::Json);
     assert_eq!(PutBlob::XRPC.input, method_core::HttpInput::Query);
+    assert_eq!(
+        ImportFile::XRPC.input_encoding,
+        method_core::Encoding::Descriptors
+    );
+    const { assert!(ImportFile::XRPC.local_only) };
     assert_eq!(ReadBlob::XRPC.kind, method_core::MethodKind::Query);
     assert_eq!(
         ReadBlob::XRPC.output_encoding,
