@@ -1,0 +1,59 @@
+{
+  "defs": {
+    "Nsid": {
+      "type": "string"
+    },
+    "main": {
+      "nullable": [
+        "create",
+        "delete",
+        "read",
+        "write"
+      ],
+      "properties": {
+        "create": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": "string"
+        },
+        "delete": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "nsid": {
+          "ref": "#Nsid",
+          "type": "ref"
+        },
+        "read": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": "string"
+        },
+        "write": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "nsid",
+        "description"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.cartridge.datum",
+  "lexicon": 1
+}

@@ -1,0 +1,36 @@
+{
+  "defs": {
+    "datumLocation": {
+      "description": "A position inside a datum: a `dtxt:datum:` address with no query; a fragment, when present, is interpreted by the datum's type.",
+      "format": "uri",
+      "type": "string"
+    },
+    "datumPin": {
+      "properties": {
+        "heads": {
+          "description": "The document heads the location is read at, as multibase base58btc. Absent: the document's current frontier.",
+          "items": {
+            "type": "string"
+          },
+          "minLength": 1,
+          "type": "array"
+        },
+        "ref": {
+          "ref": "#datumLocation",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "type": "object"
+    },
+    "datumRef": {
+      "description": "A whole datum: a `dtxt:datum:` address with no query and no fragment.",
+      "format": "uri",
+      "type": "string"
+    }
+  },
+  "id": "org.example.daybook.defs",
+  "lexicon": 1
+}

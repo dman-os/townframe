@@ -1,0 +1,35 @@
+{
+  "defs": {
+    "Digest": {
+      "type": "string"
+    },
+    "main": {
+      "properties": {
+        "bytes": {
+          "ref": "org.example.daybook.defs#datumPin",
+          "type": "ref"
+        },
+        "digest": {
+          "ref": "#Digest",
+          "type": "ref"
+        },
+        "mediaType": {
+          "type": "string"
+        },
+        "size": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "bytes",
+        "digest",
+        "size",
+        "mediaType"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.cartridge.wasm",
+  "lexicon": 1
+}

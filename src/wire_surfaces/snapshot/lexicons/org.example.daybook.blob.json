@@ -1,0 +1,44 @@
+{
+  "defs": {
+    "main": {
+      "nullable": [
+        "inline",
+        "urls"
+      ],
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "inline": {
+          "items": {
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "lengthOctets": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mime": {
+          "type": "string"
+        },
+        "urls": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "mime",
+        "lengthOctets",
+        "digest"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.blob",
+  "lexicon": 1
+}

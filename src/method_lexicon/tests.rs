@@ -6,7 +6,7 @@ use serde_json::json;
 /// Every built-in method: its NSID with the result of assembling its Lexicon.
 fn every_builtin() -> Vec<(&'static str, Result<Value, super::MethodLexiconError>)> {
     let mut all: Vec<_> = super::builtin_methods()
-        .map(|(nsid, assemble)| (nsid, assemble()))
+        .map(|(nsid, _, assemble)| (nsid, assemble()))
         .collect();
     all.sort_by_key(|(nsid, _)| *nsid);
     all
@@ -187,7 +187,7 @@ fn a_common_error_is_named_as_dispatch_names_its_refusals() {
 #[test]
 fn every_builtin_error_enum_names_its_context_variant_context() {
     let mut failures = Vec::new();
-    for (method, _, schemas) in super::builtin_list() {
+    for (method, _, _, schemas) in super::builtin_list() {
         let nsid = method.nsid;
         let schemas = schemas();
         let error = serde_json::to_value(&schemas.error).unwrap();

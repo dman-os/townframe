@@ -781,6 +781,26 @@ pub fn overlap(
     Ok(true)
 }
 
+/// Runs the `wire-surfaces` binary, which owns the generation (it needs the corpus crates, which
+/// xtask must not depend on) and the evolution rules; xtask only invokes it, so `--bless` here
+/// is `wire-surfaces bless` and the check is `wire-surfaces check`.
+pub fn wire(root: &Path, bless: bool) -> Res<bool> {
+    let status = std::process::Command::new("cargo")
+        .current_dir(root)
+        .args([
+            "run",
+            "--quiet",
+            "-p",
+            "wire_surfaces",
+            "--bin",
+            "wire-surfaces",
+            "--",
+        ])
+        .arg(if bless { "bless" } else { "check" })
+        .status()?;
+    Ok(status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

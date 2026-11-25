@@ -1,0 +1,199 @@
+{
+  "$defs": {
+    "Initializer": {
+      "additionalProperties": true,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "mode": {
+          "knownValues": [
+            "once",
+            "everyStart"
+          ],
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/Nsid"
+        }
+      },
+      "required": [
+        "key",
+        "target",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "LocalState": {
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "knownValues": [
+            "sqlite",
+            "kv"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "Nodule": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "bindings": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "initialization": {
+          "items": {
+            "$ref": "#/$defs/Initializer"
+          },
+          "type": "array"
+        },
+        "localState": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LocalState"
+          },
+          "type": "object"
+        },
+        "revisionedStores": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RevisionedStore"
+          },
+          "type": "object"
+        },
+        "routines": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Routine"
+          },
+          "type": "object"
+        }
+      },
+      "title": "Nodule",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.nodule"
+    },
+    "Nsid": {
+      "type": "string"
+    },
+    "RevisionedStore": {
+      "additionalProperties": true,
+      "properties": {
+        "entry": {
+          "$ref": "#/$defs/Nsid"
+        },
+        "mode": {
+          "knownValues": [
+            "frontier",
+            "log"
+          ],
+          "type": "string"
+        },
+        "selector": {
+          "$ref": "#/$defs/Nsid"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Nsid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "selector",
+        "entry",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "Routine": {
+      "additionalProperties": true,
+      "properties": {
+        "impl": {
+          "oneOf": [
+            {
+              "additionalProperties": true,
+              "properties": {
+                "$type": {
+                  "const": "org.example.daybook.componentExport"
+                },
+                "component": {
+                  "type": "string"
+                },
+                "export": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$type",
+                "component",
+                "export"
+              ],
+              "type": "object",
+              "x-lexicon-id": "org.example.daybook.componentExport"
+            },
+            {
+              "additionalProperties": true,
+              "properties": {
+                "$type": {
+                  "not": {
+                    "enum": [
+                      "org.example.daybook.componentExport"
+                    ]
+                  },
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$type"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "implements": {
+          "$ref": "#/$defs/Nsid"
+        },
+        "uses": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RoutineUse"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "impl",
+        "implements"
+      ],
+      "type": "object"
+    },
+    "RoutineUse": {
+      "additionalProperties": true,
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "delete": {
+          "type": "boolean"
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "write": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/Nodule",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}
