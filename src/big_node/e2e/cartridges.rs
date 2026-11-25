@@ -3,12 +3,19 @@
 use super::blobs::put_cap;
 use super::*;
 use big_blobs_core::BlobInfo;
-use big_blobs_core::PutBlob;
+use big_cabinet_core::DatumPin;
+use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
-use big_cartridges_core::Artifact;
+use big_cabinet_core::reference::DatumReference;
+use big_cabinet_core::reference::Location;
+use big_cabinet_core::reference::ReferenceDocId;
+
 use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Component as ManifestComponent;
 use big_cartridges_core::Digest;
+use big_cartridges_core::Version;
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::protocol::CartridgeChanges;
 use big_cartridges_core::protocol::CartridgesCursor;
@@ -24,13 +31,18 @@ use big_cartridges_core::protocol::PublishCartridgeVersion;
 use big_cartridges_core::protocol::PublishedCartridgeVersion;
 use big_cartridges_core::protocol::RemoveCartridge;
 use big_cartridges_core::protocol::RemoveCartridgeVersion;
+use big_cartridges_core::protocol::ResolveCartridgePin;
+use big_cartridges_core::protocol::ResolveCartridgeVersion;
 use big_cartridges_core::protocol::WatchCartridges;
 use big_cartridges_core::registry::identity_key;
 use big_cartridges_core::registry::version_key;
+use big_cartridges_core::registry::version_pin;
 use big_cartridges_core::signature::SignatureError;
+use big_cartridges_core::test_support::FixtureCartridge;
 use big_cartridges_core::test_support::cartridge_id;
 use big_cartridges_core::test_support::sign_as_example;
 use big_cartridges_core::test_support::sign_with_seed;
+use method_core::ByteBody;
 use service_utils_rs::ClientError;
 use std::time::Duration;
 
@@ -68,34 +80,61 @@ fn operation<E>(error: ClientError<E>) -> E {
 
 async fn put(node: &BigNode, bytes: &[u8]) -> BlobInfo {
     node.blobs
-        .client
-        .call(
+        .put(
             RequestContext::root(),
-            PutBlob {
-                capability: put_cap(node).await,
-                bytes: bytes.to_vec().into(),
-            },
+            put_cap(node).await,
+            ByteBody::from_bytes(bytes.to_vec()),
         )
         .await
         .unwrap()
 }
 
-/// `id` at `version` with one artifact, `handler`, holding `info`'s bytes, not yet signed.
-fn unsigned(id: &str, version: &str, info: &BlobInfo) -> Cartridge {
-    let mut cartridge = Cartridge::new(id.parse().unwrap(), version.parse().unwrap());
-    cartridge.artifacts.push(Artifact {
-        key: "handler".into(),
-        digest: Digest(info.blob_id.to_bytes32()),
-        size: Some(info.length_octets),
-        media_type: Some("application/wasm".into()),
-        extra: Default::default(),
-    });
-    cartridge
+/// `id` at `version` with one component, `handler`, holding `info`'s bytes.
+fn fixture(id: &str, version: &str, info: &BlobInfo) -> FixtureCartridge {
+    let mut fixture = FixtureCartridge::new(Cartridge::new(
+        id.parse().unwrap(),
+        version.parse().unwrap(),
+    ));
+    fixture.with_wasm_digest(
+        "handler",
+        Digest(info.blob_id.to_bytes32()),
+        info.length_octets,
+    );
+    fixture
+}
+
+/// [`fixture`] as the envelope the registry's staging of its payloads hands back; `info`'s bytes must be in the
+/// blob store: the envelope the registry's staging of those payloads hands back, not yet signed.
+/// A version already published is not staged again; its own pins are reused, so the same call
+/// yields the same envelope before and after it is published.
+async fn unsigned(node: &BigNode, id: &str, version: &str, info: &BlobInfo) -> Cartridge {
+    let fixture = fixture(id, version, info);
+    if let Ok(published) = get_version(node, id, version).await {
+        return fixture.staged(published.envelope);
+    }
+    let staged = stage(node, operator(node), &fixture).await.unwrap();
+    fixture.staged(staged)
+}
+
+async fn stage(
+    node: &BigNode,
+    authorization: Authorization,
+    fixture: &FixtureCartridge,
+) -> Result<Cartridge, CartridgesError> {
+    node.cartridges
+        .client
+        .call_with(
+            RequestContext::root(),
+            authorization.metadata(),
+            fixture.stage_request(),
+        )
+        .await
+        .map_err(operation)
 }
 
 /// `photos` under the example namespace, signed by its owner as an external publisher would.
-fn photos(version: &str, info: &BlobInfo) -> Cartridge {
-    sign_as_example(unsigned(PHOTOS, version, info))
+async fn photos(node: &BigNode, version: &str, info: &BlobInfo) -> Cartridge {
+    sign_as_example(unsigned(node, PHOTOS, version, info).await)
 }
 
 /// A write to one version slot of a registry document, as a synced change from another node
@@ -109,7 +148,10 @@ async fn write_version_datum(node: &BigNode, doc_id: &DocId, envelope: &Cartridg
                 capability: capability(
                     node,
                     DocScope {
-                        write: BTreeSet::from([doc_id.clone()]),
+                        write: std::collections::BTreeMap::from([(
+                            doc_id.clone(),
+                            big_cabinet_core::doc::DatumKinds::All,
+                        )]),
                         ..DocScope::default()
                     },
                 )
@@ -173,6 +215,7 @@ async fn mint(node: &BigNode, scope: CartridgesScope) -> Authorization {
             MintCartridgesCapability {
                 scope,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -249,12 +292,15 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
     let (node, stop, _sql) = boot_memory(&secrets).await;
     let operator = operator(&node);
     let info = put(&node, b"photos handler v1").await;
-    let published = publish(&node, operator, photos("1.0.0", &info))
+    let published = publish(&node, operator, photos(&node, "1.0.0", &info).await)
         .await
         .unwrap();
     assert!(!published.unchanged);
-    assert_eq!(published.record.envelope, photos("1.0.0", &info));
-    publish(&node, operator, photos("1.1.0", &info))
+    assert_eq!(
+        published.record.envelope,
+        photos(&node, "1.0.0", &info).await
+    );
+    publish(&node, operator, photos(&node, "1.1.0", &info).await)
         .await
         .unwrap();
 
@@ -305,8 +351,11 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
         )
         .await
         .unwrap();
-    assert_eq!(version.envelope, photos("1.0.0", &info));
-    assert_eq!(version.revision, photos("1.0.0", &info).revision());
+    assert_eq!(version.envelope, photos(&node, "1.0.0", &info).await);
+    assert_eq!(
+        version.revision,
+        photos(&node, "1.0.0", &info).await.revision()
+    );
     assert_eq!(version.conflict, None);
 
     // A read handle lists and gets but does not publish or remove; a publish handle does; an
@@ -333,7 +382,7 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
         .await
         .unwrap();
     assert_eq!(
-        publish(&node, reader, photos("2.0.0", &info)).await,
+        publish(&node, reader, photos(&node, "2.0.0", &info).await).await,
         Err(CartridgesError::Denied)
     );
     assert_eq!(
@@ -350,7 +399,7 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
             .map_err(operation),
         Err(CartridgesError::Denied)
     );
-    publish(&node, publisher, photos("2.0.0", &info))
+    publish(&node, publisher, photos(&node, "2.0.0", &info).await)
         .await
         .unwrap();
     assert_eq!(
@@ -377,6 +426,7 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
                         ..Default::default()
                     },
                     rights: Rights::USE,
+                    subject: None,
                 }
             )
             .await
@@ -392,17 +442,17 @@ async fn a_published_version_never_changes_content() {
     let (node, stop, _sql) = boot_memory(&secrets).await;
     let operator = operator(&node);
     let info = put(&node, b"photos handler").await;
-    let first = publish(&node, operator, photos("1.0.0", &info))
+    let first = publish(&node, operator, photos(&node, "1.0.0", &info).await)
         .await
         .unwrap();
-    let again = publish(&node, operator, photos("1.0.0", &info))
+    let again = publish(&node, operator, first.record.envelope.clone())
         .await
         .unwrap();
     assert!(again.unchanged);
     assert_eq!(again.record, first.record);
 
-    let mut changed = photos("1.0.0", &info);
-    changed.title = Some("Photos, renamed".into());
+    let mut changed = photos(&node, "1.0.0", &info).await;
+    changed.name = Some("Photos, renamed".into());
     let changed = sign_as_example(changed);
     assert_eq!(
         publish(&node, operator, changed.clone()).await,
@@ -427,7 +477,7 @@ async fn a_published_version_never_changes_content() {
         )
         .await
         .unwrap();
-    assert_eq!(kept.envelope.title, None);
+    assert_eq!(kept.envelope.name, None);
 
     // Removal leaves a tombstone: the label is never reused for other content, though the
     // identical envelope may be published again.
@@ -447,7 +497,7 @@ async fn a_published_version_never_changes_content() {
         publish(&node, operator, changed).await,
         Err(CartridgesError::VersionExists { .. })
     ));
-    let restored = publish(&node, operator, photos("1.0.0", &info))
+    let restored = publish(&node, operator, first.record.envelope.clone())
         .await
         .unwrap();
     assert_eq!(restored.record.revision, first.record.revision);
@@ -455,15 +505,24 @@ async fn a_published_version_never_changes_content() {
 }
 
 #[tokio::test]
-async fn publishing_refuses_artifacts_whose_bytes_are_not_local() {
+async fn staging_refuses_components_whose_bytes_are_not_local() {
     let secrets = secrets().await;
     let (node, stop, _sql) = boot_memory(&secrets).await;
     let absent = BlobInfo {
         blob_id: big_blobs_core::BlobId::new(Digest::of(b"never stored").0),
         length_octets: 12,
     };
+    let mut fixture = FixtureCartridge::new(Cartridge::new(
+        PHOTOS.parse().unwrap(),
+        "1.0.0".parse().unwrap(),
+    ));
+    fixture.with_wasm_digest(
+        "handler",
+        Digest(absent.blob_id.to_bytes32()),
+        absent.length_octets,
+    );
     assert_eq!(
-        publish(&node, operator(&node), photos("1.0.0", &absent)).await,
+        stage(&node, operator(&node), &fixture).await,
         Err(CartridgesError::ArtifactUnavailable {
             id: cartridge_id("photos"),
             artifact: "handler".into(),
@@ -484,13 +543,104 @@ async fn publishing_refuses_artifacts_whose_bytes_are_not_local() {
     shutdown(node, stop).await;
 }
 
+/// The registry resolves an install pin from the pin alone, as exactly the revision it selects:
+/// a version's pin resolves as its label does, at any heads from its publish on. A pin taken
+/// before the version was published, one naming its own document or another datum is refused,
+/// and one at heads this node has not seen is refused as recoverable.
+#[tokio::test]
+async fn an_install_pin_resolves_as_the_revision_it_selects() {
+    let secrets = secrets().await;
+    let (node, stop, _sql) = boot_memory(&secrets).await;
+    let (v1, v2): (Version, Version) = ("1.0.0".parse().unwrap(), "1.1.0".parse().unwrap());
+    let version = |version: &Version| {
+        FixtureCartridge::new(Cartridge::new(PHOTOS.parse().unwrap(), version.clone()))
+    };
+    let first = node.publish_fixture(&version(&v1)).await;
+    let second = node.publish_fixture(&version(&v2)).await;
+    let resolve = |pin: DatumPin| {
+        node.cartridges.client.call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            ResolveCartridgePin { pin },
+        )
+    };
+    let by_label = node
+        .cartridges
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            ResolveCartridgeVersion {
+                id: cartridge_id("photos"),
+                version: v2.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolve(second.clone()).await.unwrap(), by_label);
+
+    let reference = second.location().reference();
+    let ReferenceDocId::Concrete(doc) = reference.document().clone() else {
+        panic!("a published version's pin names its registry document");
+    };
+    let later = reference.heads().to_vec();
+    let earlier = first.location().reference().heads().to_vec();
+    assert_eq!(
+        resolve(version_pin(doc.clone(), &v1, later.clone()))
+            .await
+            .unwrap()
+            .cartridge
+            .version,
+        v1,
+        "a version's envelope never changes, so later heads select it as well"
+    );
+    let at = |document: ReferenceDocId, key| {
+        DatumPin::new(
+            Location::new(
+                DatumReference::new(document, key).pinned(later.iter().copied()),
+                None,
+            )
+            .unwrap(),
+        )
+    };
+    for (pin, why) in [
+        (
+            version_pin(doc.clone(), &v2, earlier),
+            "before the version was published",
+        ),
+        (
+            at(ReferenceDocId::SelfDoc, version_key(&v2)),
+            "naming its own document",
+        ),
+        (
+            at(ReferenceDocId::Concrete(doc.clone()), identity_key()),
+            "naming another datum",
+        ),
+    ] {
+        assert!(
+            matches!(
+                resolve(pin).await,
+                Err(ClientError::Method(CartridgesError::Rejected(_)))
+            ),
+            "{why}"
+        );
+    }
+    assert!(matches!(
+        resolve(version_pin(doc, &v2, [ChangeHash([7; 32])])).await,
+        Err(ClientError::Method(
+            CartridgesError::PinnedEnvelopeUnreadable { .. }
+        ))
+    ));
+    shutdown(node, stop).await;
+}
+
 #[tokio::test]
 async fn artifacts_are_retained_while_published_and_released_after_removal() {
     let secrets = secrets().await;
     let (node, stop, sql) = boot_memory(&secrets).await;
     let operator = operator(&node);
     let info = put(&node, b"retained handler bytes").await;
-    publish(&node, operator, photos("1.0.0", &info))
+    publish(&node, operator, photos(&node, "1.0.0", &info).await)
         .await
         .unwrap();
     let doc = node
@@ -587,7 +737,7 @@ async fn the_registry_is_rebuilt_from_its_drawer_after_a_restart() {
     let (node, stop) = boot(Arc::new(SqliteRuntime::new(Default::default()))).await;
     let operator = operator(&node);
     let info = put(&node, b"persistent handler").await;
-    let published = publish(&node, operator, photos("1.0.0", &info))
+    let published = publish(&node, operator, photos(&node, "1.0.0", &info).await)
         .await
         .unwrap();
     let drawer = node.registry_drawer.clone();
@@ -602,7 +752,7 @@ async fn the_registry_is_rebuilt_from_its_drawer_after_a_restart() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     // The node still remembers what it first saw for the label, so the label stays immutable.
-    let mut changed = photos("1.0.0", &info);
+    let mut changed = photos(&node, "1.0.0", &info).await;
     changed.description = Some("different".into());
     let changed = sign_as_example(changed);
     assert!(matches!(
@@ -623,6 +773,11 @@ async fn the_watch_observes_publish_and_remove_from_a_cursor() {
     assert!(start.reset && start.caught_up && start.changes.is_empty());
 
     let info = put(&node, b"watched handler").await;
+    // Staging creates the cartridge's document, which the watch reports as a change of its own,
+    // so the cursor is taken once that has settled and the publish is the only change after it.
+    let watched = photos(&node, "1.0.0", &info).await;
+    let start = watch(&node, None, 10_000).await.unwrap();
+    assert!(start.reset && start.caught_up);
     let held = {
         let node = &node;
         let cursor = start.through;
@@ -631,9 +786,7 @@ async fn the_watch_observes_publish_and_remove_from_a_cursor() {
     let publishing = async {
         // The watch is parked before the publish lands.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        publish(&node, operator, photos("1.0.0", &info))
-            .await
-            .unwrap();
+        publish(&node, operator, watched).await.unwrap();
     };
     let (published, ()) = tokio::join!(held, publishing);
     assert!(!published.reset && published.caught_up);
@@ -684,7 +837,7 @@ async fn a_version_rewritten_by_a_synced_write_is_surfaced_and_the_first_seen_co
     let (node, stop, _sql) = boot_memory(&secrets).await;
     let operator = operator(&node);
     let info = put(&node, b"conflicted handler").await;
-    let original = photos("1.0.0", &info);
+    let original = photos(&node, "1.0.0", &info).await;
     publish(&node, operator, original.clone()).await.unwrap();
     let record = node
         .cartridges
@@ -702,7 +855,7 @@ async fn a_version_rewritten_by_a_synced_write_is_surfaced_and_the_first_seen_co
     // Another node's write arrives as an ordinary datum write on the document: the test writes
     // it directly, as the synced change would land.
     let mut rewritten = original.clone();
-    rewritten.title = Some("Rewritten elsewhere".into());
+    rewritten.name = Some("Rewritten elsewhere".into());
     write_version_datum(&node, &record.doc_id, &sign_as_example(rewritten)).await;
 
     let version = loop {
@@ -747,7 +900,12 @@ async fn an_envelope_must_carry_its_namespace_owners_signature() {
 
     // Unsigned under a namespace that is not the node's: the node will not sign for it.
     assert_eq!(
-        publish(&node, operator, unsigned(PHOTOS, "1.0.0", &info)).await,
+        publish(
+            &node,
+            operator,
+            unsigned(&node, PHOTOS, "1.0.0", &info).await
+        )
+        .await,
         Err(CartridgesError::UnsignedForeignNamespace {
             namespace: big_cartridges_core::example_namespace!().into(),
         })
@@ -757,30 +915,36 @@ async fn an_envelope_must_carry_its_namespace_owners_signature() {
         publish(
             &node,
             operator,
-            sign_with_seed(unsigned(PHOTOS, "1.0.0", &info), &[9; 32])
+            sign_with_seed(unsigned(&node, PHOTOS, "1.0.0", &info).await, &[9; 32])
         )
         .await,
         Err(CartridgesError::Signature(SignatureError::Invalid(_)))
     ));
     // A signature that no longer matches the envelope it is attached to.
-    let mut tampered = photos("1.0.0", &info);
-    tampered.title = Some("edited after signing".into());
+    let mut tampered = photos(&node, "1.0.0", &info).await;
+    tampered.name = Some("edited after signing".into());
     assert!(matches!(
         publish(&node, operator, tampered).await,
         Err(CartridgesError::Signature(SignatureError::Invalid(_)))
     ));
     // A DID whose method cannot be verified without resolution fails closed, signed or not.
-    let web = sign_as_example(unsigned("did:web:example.com/photos", "1.0.0", &info));
+    let web = sign_as_example(unsigned(&node, "did:web:example.com/photos", "1.0.0", &info).await);
     assert_eq!(
         publish(&node, operator, web).await,
         Err(CartridgesError::Signature(
             SignatureError::UnsupportedMethod("web".into())
         ))
     );
-    assert!(list(&node).await.is_empty());
+    // Staging made the cartridge's document, but no version was published.
+    assert!(
+        list(&node)
+            .await
+            .iter()
+            .all(|cartridge| cartridge.versions.is_empty())
+    );
 
     // The owner's signature is accepted, and survives the round trip through the drawer.
-    let published = publish(&node, operator, photos("1.0.0", &info))
+    let published = publish(&node, operator, photos(&node, "1.0.0", &info).await)
         .await
         .unwrap();
     published.record.envelope.verify_signature().unwrap();
@@ -809,7 +973,7 @@ async fn the_node_signs_unsigned_envelopes_under_its_own_publisher_did() {
     );
 
     let own = format!("{publisher}/mine");
-    let published = publish(&node, operator, unsigned(&own, "1.0.0", &info))
+    let published = publish(&node, operator, unsigned(&node, &own, "1.0.0", &info).await)
         .await
         .unwrap();
     assert!(published.record.envelope.signature.is_some());
@@ -824,10 +988,10 @@ async fn a_new_label_must_order_after_every_label_the_cartridge_has_or_had() {
     let (node, stop, _sql) = boot_memory(&secrets).await;
     let operator = operator(&node);
     let info = put(&node, b"ordered handler").await;
-    publish(&node, operator, photos("1.0.0", &info))
+    publish(&node, operator, photos(&node, "1.0.0", &info).await)
         .await
         .unwrap();
-    publish(&node, operator, photos("1.1.0", &info))
+    publish(&node, operator, photos(&node, "1.1.0", &info).await)
         .await
         .unwrap();
 
@@ -838,20 +1002,21 @@ async fn a_new_label_must_order_after_every_label_the_cartridge_has_or_had() {
         newest: Box::new(newest.parse().unwrap()),
     };
     assert_eq!(
-        publish(&node, operator, photos("0.9.0", &info)).await,
+        publish(&node, operator, photos(&node, "0.9.0", &info).await).await,
         Err(downgrade("0.9.0", "1.1.0"))
     );
     assert_eq!(
-        publish(&node, operator, photos("1.0.5", &info)).await,
+        publish(&node, operator, photos(&node, "1.0.5", &info).await).await,
         Err(downgrade("1.0.5", "1.1.0"))
     );
     assert_eq!(
-        publish(&node, operator, photos("1.1.0-rc.1", &info)).await,
+        publish(&node, operator, photos(&node, "1.1.0-rc.1", &info).await).await,
         Err(downgrade("1.1.0-rc.1", "1.1.0"))
     );
     // Republishing an existing label's identical content is not a new label.
+    let v100 = photos(&node, "1.0.0", &info).await;
     assert!(
-        publish(&node, operator, photos("1.0.0", &info))
+        publish(&node, operator, v100.clone())
             .await
             .unwrap()
             .unchanged
@@ -859,7 +1024,7 @@ async fn a_new_label_must_order_after_every_label_the_cartridge_has_or_had() {
 
     // A removed version still counts: the newest label stays the bar after it is gone, and the
     // older one's identical content may still be published again.
-    publish(&node, operator, photos("1.2.0", &info))
+    publish(&node, operator, photos(&node, "1.2.0", &info).await)
         .await
         .unwrap();
     for version in ["1.2.0", "1.0.0"] {
@@ -877,13 +1042,11 @@ async fn a_new_label_must_order_after_every_label_the_cartridge_has_or_had() {
             .unwrap();
     }
     assert_eq!(
-        publish(&node, operator, photos("1.1.5", &info)).await,
+        publish(&node, operator, photos(&node, "1.1.5", &info).await).await,
         Err(downgrade("1.1.5", "1.2.0"))
     );
-    publish(&node, operator, photos("1.0.0", &info))
-        .await
-        .unwrap();
-    publish(&node, operator, photos("1.2.1", &info))
+    publish(&node, operator, v100).await.unwrap();
+    publish(&node, operator, photos(&node, "1.2.1", &info).await)
         .await
         .unwrap();
     shutdown(node, stop).await;
@@ -895,7 +1058,7 @@ async fn a_synced_version_with_a_bad_signature_is_surfaced_and_never_served() {
     let (node, stop, _sql) = boot_memory(&secrets).await;
     let operator = operator(&node);
     let info = put(&node, b"forged handler").await;
-    publish(&node, operator, photos("1.0.0", &info))
+    publish(&node, operator, photos(&node, "1.0.0", &info).await)
         .await
         .unwrap();
     let record = node
@@ -911,8 +1074,10 @@ async fn a_synced_version_with_a_bad_signature_is_surfaced_and_never_served() {
         .await
         .unwrap();
 
-    // Another node's write of a version signed by the wrong key lands on the document.
-    let forged = sign_with_seed(unsigned(PHOTOS, "1.1.0", &info), &[9; 32]);
+    // Another node's write of a version signed by the wrong key lands on the document. The
+    // genuine 1.1.0 is staged first: once the forged one is there the label can no longer be.
+    let genuine_110 = photos(&node, "1.1.0", &info).await;
+    let forged = sign_with_seed(unsigned(&node, PHOTOS, "1.1.0", &info).await, &[9; 32]);
     write_version_datum(&node, &record.doc_id, &forged).await;
     let listed = loop {
         let record = node
@@ -949,17 +1114,15 @@ async fn a_synced_version_with_a_bad_signature_is_surfaced_and_never_served() {
     // The genuine versions are untouched.
     assert_eq!(
         get_version(&node, PHOTOS, "1.0.0").await.unwrap().envelope,
-        photos("1.0.0", &info)
+        photos(&node, "1.0.0", &info).await
     );
 
     // The bad copy never reserved the label: the owner publishes the genuine 1.1.0 over it.
-    let genuine = publish(&node, operator, photos("1.1.0", &info))
-        .await
-        .unwrap();
-    assert_eq!(genuine.record.envelope, photos("1.1.0", &info));
+    let genuine = publish(&node, operator, genuine_110.clone()).await.unwrap();
+    assert_eq!(genuine.record.envelope, genuine_110);
     assert_eq!(
         get_version(&node, PHOTOS, "1.1.0").await.unwrap().envelope,
-        photos("1.1.0", &info)
+        genuine_110
     );
     shutdown(node, stop).await;
 }
@@ -977,7 +1140,9 @@ async fn a_handle_presented_by_an_actor_it_is_not_bound_to_is_refused() {
         },
     )
     .await;
-    publish(&node, held, photos("1.0.0", &info)).await.unwrap();
+    publish(&node, held, photos(&node, "1.0.0", &info).await)
+        .await
+        .unwrap();
 
     // The handle is bound to the operator: another actor presenting its id under its own signer
     // is refused for a write and a read alike.
@@ -986,7 +1151,7 @@ async fn a_handle_presented_by_an_actor_it_is_not_bound_to_is_refused() {
         signer: bystander(&node).await.signer,
     };
     assert_eq!(
-        publish(&node, stolen, photos("1.1.0", &info)).await,
+        publish(&node, stolen, photos(&node, "1.1.0", &info).await).await,
         Err(CartridgesError::Denied)
     );
     let list_as = async |authorization: Authorization| {
@@ -1029,7 +1194,11 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
                 .call_with(
                     RequestContext::root(),
                     authorization.metadata(),
-                    MintCartridgesCapability { scope, rights },
+                    MintCartridgesCapability {
+                        scope,
+                        rights,
+                        subject: None,
+                    },
                 )
                 .await
                 .map_err(operation)
@@ -1047,19 +1216,23 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
     .await
     .unwrap();
 
-    publish(&node, handle, photos("1.0.0", &info))
+    publish(&node, handle, photos(&node, "1.0.0", &info).await)
         .await
         .unwrap();
     assert_eq!(
-        publish(&node, handle, unsigned(&own, "1.0.0", &info)).await,
+        publish(&node, handle, unsigned(&node, &own, "1.0.0", &info).await).await,
         Err(CartridgesError::NamespaceNotPermitted {
             namespace: node.cartridges.publisher.clone()
         })
     );
     // The node's convenience signing is not a way around the scope, and removal is scoped too.
-    publish(&node, operator(&node), unsigned(&own, "1.0.0", &info))
-        .await
-        .unwrap();
+    publish(
+        &node,
+        operator(&node),
+        unsigned(&node, &own, "1.0.0", &info).await,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         node.cartridges
             .client
@@ -1096,7 +1269,7 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
     )
     .await
     .unwrap();
-    publish(&node, narrower, photos("2.0.0", &info))
+    publish(&node, narrower, photos(&node, "2.0.0", &info).await)
         .await
         .unwrap();
     assert_eq!(
@@ -1162,10 +1335,25 @@ async fn clays_package_pair_is_published_under_the_nodes_did_and_signed_by_it() 
     );
     assert_eq!(envelope.version.to_string(), "2.0.0");
     envelope.verify_signature().unwrap();
-    let artifact = envelope.artifact("component").unwrap();
-    assert_eq!(artifact.digest, Digest::of(COMPONENT));
-    assert_eq!(artifact.size, Some(COMPONENT.len() as u64));
-    assert_eq!(artifact.media_type.as_deref(), Some("application/wasm"));
+    let resolved = node
+        .cartridges
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            ResolveCartridgeVersion {
+                id: envelope.id.clone(),
+                version: envelope.version.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    let ManifestComponent::Wasm(component) = &resolved.components["component"] else {
+        panic!("micro component is not wasm")
+    };
+    assert_eq!(component.digest, Digest::of(COMPONENT));
+    assert_eq!(component.size, COMPONENT.len() as u64);
+    assert_eq!(component.media_type, "application/wasm");
     let micro = envelope.micro().unwrap();
     assert_eq!(
         micro.schema,
@@ -1185,7 +1373,7 @@ async fn clays_package_pair_is_published_under_the_nodes_did_and_signed_by_it() 
     assert!(
         node.blobs
             .service
-            .stat(&big_blobs_core::BlobId::new(artifact.digest.0))
+            .stat(&big_blobs_core::BlobId::new(component.digest.0))
             .await
             .unwrap()
             .is_some()
@@ -1236,9 +1424,96 @@ async fn clays_package_pair_is_published_under_the_nodes_did_and_signed_by_it() 
 }
 
 /// A document an author made outside the registry drawer, in the node's local drawer, holding
-/// the cartridge identity and the given versions as they would be written by the author's tooling.
-async fn author_document(node: &BigNode, command: &str, id: &str, versions: &[Cartridge]) -> DocId {
+/// the cartridge identity and the given versions as they would be written by the author's tooling:
+/// the payload datums, the typed components pinning their blobs, and each version's envelope
+/// pinning both, signed by `sign` (given the version's index). Returns the document and the
+/// envelopes as written.
+async fn author_document(
+    node: &BigNode,
+    command: &str,
+    id: &str,
+    versions: &[FixtureCartridge],
+    sign: impl Fn(usize, Cartridge) -> Cartridge,
+) -> (DocId, Vec<Cartridge>) {
     let placement = format!("drawer {}", node.drawers.local().present_id);
+    let (doc, envelopes) = write_registry_doc(node, placement, command, id, versions, sign).await;
+    (doc, envelopes)
+}
+
+/// Creates a registry-shaped document in `placement` and writes `versions` into it in the order
+/// the registry's staging does (see [`author_document`]), without going through the registry
+/// service: the way a version reaches a node that did not publish it, or whose component bytes are
+/// not in its blob store.
+pub(super) async fn write_registry_doc(
+    node: &BigNode,
+    placement: String,
+    command: &str,
+    id: &str,
+    versions: &[FixtureCartridge],
+    sign: impl Fn(usize, Cartridge) -> Cartridge,
+) -> (DocId, Vec<Cartridge>) {
+    use big_blobs_core::Blob;
+    use big_cabinet_core::DatumKey;
+    use big_cabinet_core::doc::ChangeHash;
+    use big_cabinet_core::reference::DatumReference;
+    use big_cabinet_core::reference::Location;
+    use big_cabinet_core::reference::ReferenceDocId;
+    use big_cartridges_core::registry::artifact_key;
+    use big_cartridges_core::registry::component_key;
+    use big_cartridges_core::registry::lexicon_key;
+    use big_cartridges_core::registry::sidecar_key;
+
+    let pin_for = |doc: &DocId, key: DatumKey, heads: &[ChangeHash]| {
+        DatumPin::new(
+            Location::new(
+                DatumReference::new(ReferenceDocId::Concrete(doc.clone()), key)
+                    .pinned(heads.iter().copied()),
+                None,
+            )
+            .unwrap(),
+        )
+    };
+    let mut payload = BTreeMap::from([(
+        identity_key(),
+        serde_json::to_value(big_cartridges_core::registry::CartridgeIdentity {
+            id: id.parse().unwrap(),
+            extra: Default::default(),
+        })
+        .unwrap(),
+    )]);
+    for fixture in versions {
+        let version = &fixture.version;
+        for (nsid, file) in &fixture.resolved.lexicons {
+            payload.insert(
+                lexicon_key(version, nsid),
+                serde_json::to_value(file).unwrap(),
+            );
+        }
+        for (nsid, document) in &fixture.resolved.sidecars {
+            payload.insert(
+                sidecar_key(version, nsid),
+                serde_json::to_value(document).unwrap(),
+            );
+        }
+        for (key, component) in &fixture.resolved.components {
+            let ManifestComponent::Wasm(wasm) = component else {
+                panic!("a fixture component is wasm")
+            };
+            let blob = Blob {
+                mime: wasm.media_type.clone(),
+                length_octets: wasm.size,
+                digest: wasm.digest.to_string(),
+                inline: None,
+                urls: None,
+                extra: Default::default(),
+            };
+            let mut raw = serde_json::to_value(&blob).unwrap();
+            raw.as_object_mut()
+                .unwrap()
+                .retain(|_, value| !value.is_null());
+            payload.insert(artifact_key(version, key), raw);
+        }
+    }
     let create = capability(
         node,
         DocScope {
@@ -1247,14 +1522,8 @@ async fn author_document(node: &BigNode, command: &str, id: &str, versions: &[Ca
         },
     )
     .await;
-    let mut datums = BTreeMap::from([(identity_key(), json!({ "id": id }))]);
-    for version in versions {
-        datums.insert(
-            version_key(&version.version),
-            serde_json::to_value(version).unwrap(),
-        );
-    }
-    node.docs
+    let created = node
+        .docs
         .client
         .call(
             RequestContext::root(),
@@ -1262,12 +1531,111 @@ async fn author_document(node: &BigNode, command: &str, id: &str, versions: &[Ca
                 capability: create,
                 command: CommandId::try_from(command.to_owned()).unwrap(),
                 placement,
-                datums,
+                datums: payload,
             },
         )
         .await
-        .unwrap()
-        .doc_id
+        .unwrap();
+    let doc = created.doc_id.clone();
+    let write_capability = capability(
+        node,
+        DocScope {
+            write: BTreeMap::from([(doc.clone(), big_cabinet_core::doc::DatumKinds::All)]),
+            ..DocScope::default()
+        },
+    )
+    .await;
+    let write = async |set: BTreeMap<DatumKey, serde_json::Value>| {
+        node.docs
+            .client
+            .call(
+                RequestContext::root(),
+                WriteDatums {
+                    capability: write_capability,
+                    command: None,
+                    doc_id: doc.clone(),
+                    mode: WriteMode::AtCurrent,
+                    set,
+                    remove: BTreeSet::new(),
+                },
+            )
+            .await
+            .unwrap()
+            .heads
+    };
+    let mut typed = BTreeMap::new();
+    for fixture in versions {
+        for (key, component) in &fixture.resolved.components {
+            let ManifestComponent::Wasm(wasm) = component else {
+                panic!("a fixture component is wasm")
+            };
+            let mut wasm = wasm.clone();
+            wasm.bytes = pin_for(&doc, artifact_key(&fixture.version, key), &created.heads);
+            typed.insert(
+                component_key(&fixture.version, key),
+                serde_json::to_value(ManifestComponent::Wasm(wasm)).unwrap(),
+            );
+        }
+    }
+    let heads = if typed.is_empty() {
+        created.heads.clone()
+    } else {
+        write(typed).await
+    };
+    let mut envelopes = Vec::new();
+    for (index, fixture) in versions.iter().enumerate() {
+        let version = &fixture.version;
+        let mut template = Cartridge::new(fixture.id.clone(), version.clone());
+        template.lexicons = fixture
+            .resolved
+            .lexicons
+            .keys()
+            .map(|nsid| {
+                (
+                    nsid.clone(),
+                    pin_for(&doc, lexicon_key(version, nsid), &heads),
+                )
+            })
+            .collect();
+        template.sidecars = fixture
+            .resolved
+            .sidecars
+            .keys()
+            .map(|nsid| {
+                (
+                    nsid.clone(),
+                    pin_for(&doc, sidecar_key(version, nsid), &heads),
+                )
+            })
+            .collect();
+        template.components = fixture
+            .resolved
+            .components
+            .keys()
+            .map(|key| {
+                (
+                    key.clone(),
+                    pin_for(&doc, component_key(version, key), &heads),
+                )
+            })
+            .collect();
+        envelopes.push(sign(index, fixture.staged(template)));
+    }
+    if !envelopes.is_empty() {
+        write(
+            envelopes
+                .iter()
+                .map(|envelope| {
+                    (
+                        version_key(&envelope.version),
+                        serde_json::to_value(envelope).unwrap(),
+                    )
+                })
+                .collect(),
+        )
+        .await;
+    }
+    (doc, envelopes)
 }
 
 /// Installs the cartridge document `doc_id`, found in `drawer`, into the registry as `authorization`
@@ -1293,7 +1661,7 @@ pub(super) async fn import_document(
             operator(node).metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    read: BTreeSet::from([doc_id.clone()]),
+                    read: DocScope::read_all([doc_id.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
@@ -1360,14 +1728,15 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     let info = put(&node, b"authored handler").await;
 
     // Authored and signed by the namespace owner outside the registry.
-    let genuine = photos("1.0.0", &info);
-    let doc = author_document(
+    let (doc, mut authored) = author_document(
         &node,
         "author photos",
         PHOTOS,
-        std::slice::from_ref(&genuine),
+        &[fixture(PHOTOS, "1.0.0", &info)],
+        |_, envelope| sign_as_example(envelope),
     )
     .await;
+    let genuine = authored.remove(0);
     let record = import_document(&node, operator, &present, &doc)
         .await
         .unwrap();
@@ -1390,7 +1759,7 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     // The document is the author's, entered at Read: the registry serves it and never writes it,
     // so neither a new version nor a removal lands in it.
     assert_eq!(
-        publish(&node, operator, photos("1.1.0", &info)).await,
+        stage(&node, operator, &fixture(PHOTOS, "1.1.0", &info)).await,
         Err(CartridgesError::Denied)
     );
     assert_eq!(
@@ -1415,10 +1784,24 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
 
     // A tampered document: signed by another key, and one version edited after signing.
     let other = "did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z/other";
-    let forged = sign_with_seed(unsigned(other, "1.0.0", &info), &[9; 32]);
-    let mut edited = sign_as_example(unsigned(other, "1.1.0", &info));
-    edited.title = Some("edited after signing".into());
-    let tampered = author_document(&node, "author other", other, &[forged, edited]).await;
+    let (tampered, _) = author_document(
+        &node,
+        "author other",
+        other,
+        &[
+            fixture(other, "1.0.0", &info),
+            fixture(other, "1.1.0", &info),
+        ],
+        |index, envelope| match index {
+            0 => sign_with_seed(envelope, &[9; 32]),
+            _ => {
+                let mut edited = sign_as_example(envelope);
+                edited.name = Some("edited after signing".into());
+                edited
+            }
+        },
+    )
+    .await;
     let record = import_document(&node, operator, &present, &tampered)
         .await
         .unwrap();
@@ -1434,7 +1817,10 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     // A document that is not a cartridge document is refused, and a handle's namespace scope applies
     // to the id the document names.
     let no_identity = {
-        let doc = author_document(&node, "author anonymous", PHOTOS, &[]).await;
+        let (doc, _) = author_document(&node, "author anonymous", PHOTOS, &[], |_, envelope| {
+            envelope
+        })
+        .await;
         // Drop the identity: a plain document in the same drawer.
         node.docs
             .client
@@ -1444,7 +1830,10 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
                     capability: capability(
                         &node,
                         DocScope {
-                            write: BTreeSet::from([doc.clone()]),
+                            write: std::collections::BTreeMap::from([(
+                                doc.clone(),
+                                big_cabinet_core::doc::DatumKinds::All,
+                            )]),
                             ..DocScope::default()
                         },
                     )
@@ -1472,7 +1861,14 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
         },
     )
     .await;
-    let outside = author_document(&node, "author scoped", PHOTOS, &[genuine]).await;
+    let (outside, _) = author_document(
+        &node,
+        "author scoped",
+        PHOTOS,
+        &[fixture(PHOTOS, "1.0.0", &info)],
+        |_, envelope| sign_as_example(envelope),
+    )
+    .await;
     assert!(matches!(
         import_document(&node, scoped, &present, &outside).await,
         Err(CartridgesError::NamespaceNotPermitted { .. })
@@ -1498,4 +1894,143 @@ async fn listed_ids(node: &BigNode) -> Vec<big_cartridges_core::CartridgeId> {
         .into_iter()
         .map(|record| record.id)
         .collect()
+}
+
+#[tokio::test]
+async fn an_installed_cartridge_is_ready_after_a_restart_with_its_settings_intact() {
+    use big_cartridges_core::config::Component;
+    use big_cartridges_core::protocol::ListCartridgeInstalls;
+    use big_cartridges_core::protocol::SetCartridgeEnabled;
+    use big_dispatch_core::Readiness;
+    use big_nodule_core::protocol::GetNodule;
+
+    // A nodule with no handler hosts nothing, so it is ready as soon as it is enabled and the
+    // test needs no component bytes; its one declared settings datum is what is kept.
+    const SETTINGS: &str = "org.example.settingsprobe.settings";
+    let settings_file = serde_json::from_value(json!({
+        "lexicon": 1,
+        "id": SETTINGS,
+        "defs": { "main": {
+            "type": "object",
+            "properties": { "thumbnails": { "type": "boolean" } }
+        } }
+    }))
+    .unwrap();
+    let mut cartridge = FixtureCartridge::new(Cartridge::new(
+        example_cartridge!("settingsprobe").parse().unwrap(),
+        "1.0.0".parse().unwrap(),
+    ));
+    cartridge.authority = Some("org.example.settingsprobe".into());
+    cartridge.nodule = Some(Default::default());
+    cartridge.with_lexicon(settings_file);
+    cartridge.settings.insert(SETTINGS.parse().unwrap());
+    let cartridge_id: CartridgeId = example_cartridge!("settingsprobe").parse().unwrap();
+
+    let directory = tempfile::tempdir().unwrap();
+    let secrets = secrets().await;
+    let sql_path = directory.path().join("cabinet.sqlite");
+    let boot = async || {
+        let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+        let config = config(
+            Arc::clone(&secrets),
+            runtime.database(&sql_path, &[], "_sqlite_rs_migrations"),
+            big_repo::Storage::in_directory(&runtime, &directory.path().join("repo"), None)
+                .unwrap(),
+        );
+        BigNode::boot(config).await.unwrap()
+    };
+    let operator = |node: &BigNode| Authorization::identity(node.authority.root);
+    let record = async |node: &BigNode| {
+        node.nodules
+            .client
+            .call_with(
+                RequestContext::root(),
+                operator(node).metadata(),
+                GetNodule {
+                    cartridge_id: cartridge_id.clone(),
+                },
+            )
+            .await
+            .unwrap()
+    };
+    let config_doc = async |node: &BigNode| {
+        node.nodules
+            .client
+            .call_with(
+                RequestContext::root(),
+                operator(node).metadata(),
+                ListCartridgeInstalls {},
+            )
+            .await
+            .unwrap()
+            .installs
+            .into_iter()
+            .find(|row| row.cartridge_id == cartridge_id)
+            .expect("the cartridge is installed")
+            .install
+            .config_doc
+    };
+
+    let (node, stop) = boot().await;
+    super::nodule_wasm::admit(&node, cartridge).await;
+    node.nodules
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            SetCartridgeEnabled {
+                cartridge_id: cartridge_id.clone(),
+                component: Component::Nodule,
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(record(&node).await.readiness, Readiness::Ready);
+    let doc = config_doc(&node).await;
+    let settings_key = DatumKey::from_text(SETTINGS, "main").unwrap();
+    node.docs
+        .client
+        .call(
+            RequestContext::root(),
+            WriteDatums {
+                capability: capability(
+                    &node,
+                    DocScope {
+                        write: std::collections::BTreeMap::from([(
+                            doc.clone(),
+                            big_cabinet_core::doc::DatumKinds::All,
+                        )]),
+                        ..DocScope::default()
+                    },
+                )
+                .await,
+                command: None,
+                doc_id: doc.clone(),
+                mode: WriteMode::AtCurrent,
+                set: BTreeMap::from([(
+                    settings_key.clone(),
+                    json!({ "$type": SETTINGS, "thumbnails": false }),
+                )]),
+                remove: BTreeSet::new(),
+            },
+        )
+        .await
+        .unwrap();
+    shutdown(node, stop).await;
+
+    // The same directory boots the same node: the install, its enablement and the settings are
+    // in its documents, and the service reconciles them to Ready without anyone installing again.
+    let (node, stop) = boot().await;
+    assert_eq!(config_doc(&node).await, doc);
+    let record = record(&node).await;
+    assert_eq!(record.readiness, Readiness::Ready, "{record:?}");
+    assert_eq!(record.error, None);
+    let DatumRead::Accepted { value, .. } =
+        &super::blobs::all_datums(&node, &doc).await.datums[&settings_key]
+    else {
+        panic!("the settings survived the restart");
+    };
+    assert_eq!(value["thumbnails"], json!(false));
+    shutdown(node, stop).await;
 }

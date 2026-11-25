@@ -1,0 +1,23 @@
+{
+  "$defs": {
+    "NetGrant": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.cartridges.grant.net/<host[:port]>`: the cartridge may use the network to\nreach the host, on the one port when it is given and on any port otherwise (see\n[`NetTarget`]).",
+      "properties": {
+        "empty": {
+          "description": "A member with nothing to say states `true` (the empty-member convention).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "NetGrant",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridges.grant.net"
+    }
+  },
+  "$ref": "#/$defs/NetGrant",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

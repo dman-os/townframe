@@ -46,6 +46,8 @@ These rules hold for every kind in §3. Most were already decided for `db+datum:
 7. **One canonical spelling.** Each reference has exactly one canonical string: the encoding rules below, heads sorted, percent-escapes uppercase, nothing escaped that does not need to be. Writers emit the canonical form, so equal references compare equal as strings and indexes can key on them. Parsers accept non-canonical input and canonicalize.
 8. **Stored references split off the version.** The URL with `?heads=` is the text form: what a CLI prints, a link carries and a person pastes. Inside a datum the version is a sibling field: a reference position holds the URL without its query, and an optional sibling array holds the heads. Re-pinning a reference to newer heads is the common write, and keeping it in its own field means it rewrites only that field, not the string naming the target. The fragment stays in the URL field: it changes when the position changes, not when the pin moves (an Automerge cursor survives revisions, so re-pinning an annotation leaves its fragment alone).
 
+9. Removed 2026-11-17 (operator): no user needed key references; intxt keys commits per intxt and finds them with `Predicate::HasKey`.
+
 ## 3. Decision: one scheme, kinds as namespaces
 
 ```

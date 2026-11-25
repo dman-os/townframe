@@ -20,7 +20,7 @@ use big_nodule_core::protocol::NoduleRecord;
 use method_core::Method;
 use service_utils_rs::ClientError;
 
-/// The operator's identity narrowed to a dispatch handle that covers `scope` only.
+/// The operator's root capability narrowed to a dispatch handle that covers `scope` only.
 pub(super) async fn narrowed(node: &BigNode, scope: DispatchScope) -> Authorization {
     let operator = Authorization::identity(node.authority.root);
     let capability = node
@@ -61,14 +61,10 @@ async fn call(
         .call_with(
             RequestContext::root(),
             authorization.metadata(),
-            big_dispatch_core::Invoke {
-                operation: operation.to_owned(),
-                input,
-                context: Default::default(),
-            },
+            big_dispatch_core::Invoke::json(operation, input, Default::default()),
         )
         .await
-        .map(|output| output.output)
+        .map(|output| output.body.into_json())
         .map_err(|error| match error {
             ClientError::Method(error) => error,
             ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
@@ -106,7 +102,7 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
         ),
         (
             "builtin:nodules",
-            big_nodule_core::protocol::AdmitNodule::XRPC.nsid,
+            big_cartridges_core::protocol::InstallCartridge::XRPC.nsid,
         ),
         ("builtin:node", crate::GET_NODE_INFO),
     ] {
@@ -125,20 +121,46 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
     // which never holds privilege, reaches exactly the second kind.
     {
         use big_cabinet_core::authority as authority_methods;
+        use big_cartridges_core::protocol as cartridge_methods;
         use big_nodule_core::protocol as nodule_methods;
         for (nsid, privileged) in [
             (authority_methods::OpenActor::XRPC.nsid, true),
             (authority_methods::MintCapability::XRPC.nsid, true),
             (authority_methods::AttenuateCapability::XRPC.nsid, false),
             (authority_methods::RetractCapability::XRPC.nsid, false),
-            (nodule_methods::AdmitNodule::XRPC.nsid, true),
-            (nodule_methods::SetNoduleMethodGrants::XRPC.nsid, true),
+            (cartridge_methods::InstallCartridge::XRPC.nsid, true),
+            (cartridge_methods::SetCartridgeEnabled::XRPC.nsid, true),
+            (cartridge_methods::UninstallCartridge::XRPC.nsid, true),
+            (cartridge_methods::SetCartridgeGrant::XRPC.nsid, true),
+            (cartridge_methods::ClearCartridgeConfig::XRPC.nsid, true),
+            (cartridge_methods::ListCartridgeInstalls::XRPC.nsid, false),
+            // Filing a request and awaiting its answer are a cartridge's own and reachable by its
+            // routines; answering and listing the answers are the operator's.
+            (cartridge_methods::RequestCartridgeGrant::XRPC.nsid, false),
+            (
+                cartridge_methods::AwaitCartridgeGrantRequest::XRPC.nsid,
+                false,
+            ),
+            (
+                cartridge_methods::ListCartridgeGrantRequests::XRPC.nsid,
+                true,
+            ),
+            (
+                cartridge_methods::AnswerCartridgeGrantRequest::XRPC.nsid,
+                true,
+            ),
+            (cartridge_methods::ListCartridgeGrants::XRPC.nsid, true),
+            (cartridge_methods::AwaitCartridgeGrants::XRPC.nsid, true),
+            (nodule_methods::SetNoduleDevTakeover::XRPC.nsid, true),
             (nodule_methods::ListNodules::XRPC.nsid, false),
             (nodule_methods::MintNoduleCapability::XRPC.nsid, false),
             (big_blobs_core::PutBlob::XRPC.nsid, false),
         ] {
             assert_eq!(
-                router.resolve(nsid).unwrap().privileged,
+                router
+                    .resolve(nsid)
+                    .unwrap_or_else(|error| panic!("{nsid}: {error:?}"))
+                    .privileged,
                 privileged,
                 "{nsid}"
             );
@@ -206,7 +228,7 @@ async fn built_in_and_nodule_operations_share_one_router_and_one_admission() {
     let reading = capability(
         &node,
         DocScope {
-            read: BTreeSet::from([receipt.doc_id.clone()]),
+            read: DocScope::read_all([receipt.doc_id.clone()]),
             ..DocScope::default()
         },
     )
@@ -257,7 +279,7 @@ async fn built_in_and_nodule_operations_share_one_router_and_one_admission() {
     let unrelated = capability(
         &node,
         DocScope {
-            read: BTreeSet::from([other.doc_id]),
+            read: DocScope::read_all([other.doc_id]),
             ..DocScope::default()
         },
     )

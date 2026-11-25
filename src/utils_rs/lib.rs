@@ -3,6 +3,7 @@ pub mod census;
 pub mod lru;
 mod macros;
 pub mod testing;
+pub mod tracing;
 
 pub mod prelude {
     pub use crate::interlude::*;
@@ -152,77 +153,6 @@ pub type DHashMapRef<'a, K, V> = dashmap::mapref::one::Ref<'a, K, V>;
 pub type DHashMapMutRef<'a, K, V> = dashmap::mapref::one::RefMut<'a, K, V>;
 
 pub use cheapstr::CHeapStr;
-
-// FIXME: why this take 7ms on debug builds?
-/// Build the color-eyre hook with color disabled when stderr is not a terminal
-/// or `NO_COLOR` is set.
-///
-/// color-eyre 0.6 applies its owo-colors styles unconditionally, ignoring
-/// both `NO_COLOR` and TTY detection, so ANSI leaks into piped output (e.g.
-/// the CLI e2e snapshots). A blank theme renders plain text instead.
-pub(crate) fn eyre_hook_builder() -> color_eyre::config::HookBuilder {
-    let builder = color_eyre::config::HookBuilder::default();
-    if std::env::var_os("NO_COLOR").is_some()
-        || !std::io::IsTerminal::is_terminal(&std::io::stderr())
-    {
-        builder.theme(color_eyre::config::Theme::new())
-    } else {
-        builder
-    }
-}
-
-pub fn setup_tracing() -> Res<()> {
-    let default_filter = "info,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn";
-    #[cfg(not(target_arch = "wasm32"))]
-    let filter = {
-        if std::env::var("RUST_BACKTRACE").is_err() {
-            // std::env::set_var("RUST_BACKTRACE", "1");
-        }
-        std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_owned())
-    };
-
-    #[cfg(target_arch = "wasm32")]
-    let filter = default_filter;
-
-    use tracing_subscriber::prelude::*;
-    let registry = tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(filter))
-        .with(
-            tracing_subscriber::fmt::layer()
-                .compact()
-                .with_writer(std::io::stderr)
-                //.with_timer(tracing_subscriber::fmt::time::time()),
-                .with_timer(tracing_subscriber::fmt::time::uptime()),
-        )
-        .with(tracing_error::ErrorLayer::default());
-
-    #[cfg(target_os = "android")]
-    let registry = registry.with(tracing_android::layer("org.example.daybook")?);
-
-    registry.try_init().map_err(|err| ferr!(err))?;
-
-    // color_eyre::install()?;
-    let (eyre_panic_hook, eyre_hook) = eyre_hook_builder().try_into_hooks()?;
-    std::panic::set_hook(Box::new(move |panic_info| {
-        let report = eyre_panic_hook.panic_report(panic_info);
-        println!("{report}");
-
-        // - Tokio does not exit the process when a task panics, so we define a custom
-        //   panic hook to implement this behaviour.
-        std::process::exit(1);
-    }));
-    eyre_hook.install()?;
-
-    Ok(())
-}
-
-// Ensure that the `tracing` stack is only initialised once using `once_cell`
-pub fn setup_tracing_once() {
-    static TRACING: std::sync::Once = std::sync::Once::new();
-    TRACING.call_once(|| {
-        setup_tracing().expect("setup tracing error");
-    });
-}
 
 static APP_STARTUP_INSTANT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
@@ -859,7 +789,7 @@ impl AbortableJoinSet {
         let caller = std::panic::Location::caller();
         let caller_file = caller.file();
         let caller_line = caller.line();
-        let span = tracing::Span::current();
+        let span = ::tracing::Span::current();
         let mut guard = self.inner.lock().expect(ERROR_MUTEX);
         let Some(join_set) = guard.as_mut() else {
             return Err(AbortableJoinSetError::Aborted);
@@ -881,7 +811,7 @@ impl AbortableJoinSet {
                 fut.await;
                 done_tx.send(()).ok();
             },
-            tracing::debug_span!(parent: &span, "task", file = caller_file, line = caller_line),
+            ::tracing::debug_span!(parent: &span, "task", file = caller_file, line = caller_line),
         ));
         Ok(TaskHandle { abort, done_rx })
     }

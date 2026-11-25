@@ -1,0 +1,14 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "empty": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.drawer.selfDoc",
+  "lexicon": 1
+}

@@ -38,7 +38,6 @@ use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::Bundle;
 use big_cabinet_core::datum::Universe;
-use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsError;
@@ -54,6 +53,8 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::ResolvedCartridge;
 use big_cartridges_core::protocol::CartridgeChanges;
 use big_cartridges_core::protocol::CartridgeList;
 use big_cartridges_core::protocol::CartridgePublisher;
@@ -73,6 +74,9 @@ use big_cartridges_core::protocol::PublishCartridgeVersion;
 use big_cartridges_core::protocol::PublishedCartridgeVersion;
 use big_cartridges_core::protocol::RemoveCartridge;
 use big_cartridges_core::protocol::RemoveCartridgeVersion;
+use big_cartridges_core::protocol::ResolveCartridgePin;
+use big_cartridges_core::protocol::ResolveCartridgeVersion;
+use big_cartridges_core::protocol::StageCartridgeVersion;
 use big_cartridges_core::protocol::WatchCartridges;
 use big_cartridges_core::registry::registry_universe;
 use big_cartridges_core::signature::did_key;
@@ -99,15 +103,64 @@ const SCOPE_PREFIX: &str = "CartridgeService/scope/v1/";
 
 static REGISTRY_UNIVERSE: LazyLock<Universe> = LazyLock::new(registry_universe);
 
-/// The schema registration group for the registry's datums (the envelope and the cartridge identity).
-/// The `Blob` Lexicon the artifact references use is registered beside it by big_blobs.
-pub fn schema_group() -> SchemaRegistrationGroup<'static> {
+/// The schema registration groups for the registry's datums: the envelope and the cartridge
+/// identity (declared by the registry's own universe), and the payload tags a version's pins name
+/// (Lexicons, sidecars and typed components). Lexicons and components are open objects: a Lexicon
+/// is validated by Lexicon admission and a component by the typed view the registry resolves it
+/// through, so the datum schema only has to admit the write. A sidecar is a JSON Schema document,
+/// so it is stored as its JSON text (`{ schema }`): stored as an object, its `$bytes` and `$type`
+/// property names would be read as the atproto values they describe. The text is a hole the
+/// Lexicon cannot type, and the tag's own supplement says what fills it: JSON that the JSON Schema
+/// 2020-12 meta-schema accepts. The `Blob` Lexicon the artifact references use is registered beside
+/// them by big_blobs.
+pub fn schema_groups() -> [SchemaRegistrationGroup<'static>; 2] {
+    use big_cartridges_core::registry::COMPONENT_TAG;
+    use big_cartridges_core::registry::LEXICON_TAG;
+    use big_cartridges_core::registry::SIDECAR_TAG;
     let bundle = Bundle::new(&REGISTRY_UNIVERSE, Vec::new());
     let lexicons = bundle.lexicons().expect("registry lexicons publish");
     let registrations = lexicons
         .into_iter()
         .map(|lexicon| SchemaRegistration::new(lexicon.id, lexicon.file));
-    SchemaRegistrationGroup::new(Some(bundle), registrations, Vec::new())
+    let open = |tag: &str| {
+        SchemaRegistration::new(
+            tag,
+            serde_json::json!({
+                "lexicon": 1,
+                "id": tag,
+                "defs": { "main": { "type": "object", "properties": {} } }
+            }),
+        )
+    };
+    let sidecar = SchemaRegistration::new(
+        SIDECAR_TAG,
+        serde_json::json!({
+            "lexicon": 1,
+            "id": SIDECAR_TAG,
+            "defs": { "main": {
+                "type": "object",
+                "required": ["schema"],
+                "properties": { "schema": { "type": "string" } }
+            } }
+        }),
+    )
+    .with_supplement(serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": "#/$defs/Sidecar",
+        "$defs": { "Sidecar": {
+            "type": "object",
+            "properties": { "schema": {
+                "type": "string",
+                "contentMediaType": "application/schema+json",
+                "contentSchema": { "$ref": "https://json-schema.org/draft/2020-12/schema" }
+            } }
+        } }
+    }));
+    let payloads = [open(LEXICON_TAG), sidecar, open(COMPONENT_TAG)];
+    [
+        SchemaRegistrationGroup::new(Some(bundle), registrations, Vec::new()),
+        SchemaRegistrationGroup::new(None, payloads, Vec::new()),
+    ]
 }
 
 type Res<T> = std::result::Result<T, CartridgesError>;
@@ -266,8 +319,7 @@ pub type NodeSigner = Arc<dyn Fn(&[u8]) -> [u8; 64] + Send + Sync>;
 
 /// What the embedder hands the service: the authority it mints handles from, the docs service it
 /// reads and writes the registry drawer through, the drawer (from [`ensure_registry_drawer`]) and
-/// the actor holding Admin on it, the namespace it mints handles in, the operator whose identity
-/// administers the registry, the blob service it checks artifact bytes against, the node's
+/// the actor holding Admin on it, the namespace it mints handles in, the blob service it checks artifact bytes against, the node's
 /// publisher key, and the database.
 pub struct CartridgesConfig {
     pub authority: Client<AuthorityProtocol>,
@@ -275,7 +327,6 @@ pub struct CartridgesConfig {
     pub registry_drawer: DrawerId,
     pub actor: OpenedActor,
     pub namespace: Namespace,
-    pub operator: Uuid7,
     pub blobs: Arc<BlobService>,
     pub drawers: Client<DrawersProtocol>,
     pub node_key: NodeKey,
@@ -285,7 +336,6 @@ pub struct CartridgesConfig {
 /// The hosted surface: it settles who the caller is, then hands the work to the registry.
 pub struct CartridgeService {
     capabilities: DomainCapabilities,
-    operator: Uuid7,
     registry: Arc<Registry>,
     /// The `did:key` of the node's key, and the key's signer: an unsigned envelope in this
     /// namespace is signed by the node on publish.
@@ -307,7 +357,7 @@ impl CartridgeService {
             .map_err(authority_error)
     }
 
-    /// What the caller may do: everything for the operator's identity, the scope of a handle this
+    /// What the caller may do: everything for the operator's root capability, the scope of a handle this
     /// domain minted, nothing for any other identity.
     fn scope_of<'a>(
         &self,
@@ -317,7 +367,7 @@ impl CartridgeService {
             return Err(CartridgesError::Denied);
         }
         match &caller.authority {
-            DomainAuthority::Identity(actor) if *actor == self.operator => Ok(None),
+            DomainAuthority::Operator => Ok(None),
             DomainAuthority::Identity(_) => Err(CartridgesError::Denied),
             DomainAuthority::Scoped(scope) => Ok(Some(scope)),
         }
@@ -368,13 +418,24 @@ impl CartridgeService {
             .mint(
                 context,
                 &caller,
-                None,
+                params.subject,
                 params.scope,
                 params.rights,
                 Vec::new(),
             )
             .await
             .map_err(authority_error)
+    }
+
+    async fn stage(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: StageCartridgeVersion,
+    ) -> Res<Cartridge> {
+        self.write_caller(context, authorization, &params.id.namespace)
+            .await?;
+        self.registry.stage(params).await
     }
 
     async fn publish(
@@ -486,6 +547,26 @@ impl CartridgeService {
         self.registry.version(&params.id, &params.version).await
     }
 
+    async fn resolve_version(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: ResolveCartridgeVersion,
+    ) -> Res<ResolvedCartridge> {
+        self.read_caller(context, authorization).await?;
+        self.registry.resolved(&params.id, &params.version).await
+    }
+
+    async fn resolve_pin(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: ResolveCartridgePin,
+    ) -> Res<ResolvedCartridge> {
+        self.read_caller(context, authorization).await?;
+        self.registry.resolved_at(&params.pin).await
+    }
+
     /// The long poll of ADR 023: answers at once when there is a change past the cursor (or the
     /// caller must reset), otherwise holds until one lands, the hold expires, or the service
     /// stops. An expired hold is an ordinary empty page.
@@ -540,6 +621,7 @@ macro_rules! handlers {
     )*};
 }
 handlers! {
+    StageCartridgeVersion => stage: Cartridge;
     MintCartridgesCapability => mint: Capability;
     PublishCartridgeVersion => publish: PublishedCartridgeVersion;
     RemoveCartridgeVersion => remove_version: ();
@@ -549,6 +631,8 @@ handlers! {
     ListCartridges => list: CartridgeList;
     GetCartridge => get: CartridgeRecord;
     GetCartridgeVersion => get_version: CartridgeVersionRecord;
+    ResolveCartridgeVersion => resolve_version: ResolvedCartridge;
+    ResolveCartridgePin => resolve_pin: ResolvedCartridge;
     WatchCartridges => watch: CartridgeChanges;
 }
 
@@ -556,6 +640,7 @@ service_utils_rs::bind_service_protocol! {
     pub struct CartridgesBinding for CartridgesProtocol => CartridgesMessage {
         unary {
             MintCartridgesCapability(MintCartridgesCapability),
+            StageCartridgeVersion(StageCartridgeVersion),
             PublishCartridgeVersion(PublishCartridgeVersion),
             RemoveCartridgeVersion(RemoveCartridgeVersion),
             RemoveCartridge(RemoveCartridge),
@@ -564,6 +649,8 @@ service_utils_rs::bind_service_protocol! {
             ListCartridges(ListCartridges),
             GetCartridge(GetCartridge),
             GetCartridgeVersion(GetCartridgeVersion),
+            ResolveCartridgeVersion(ResolveCartridgeVersion),
+            ResolveCartridgePin(ResolveCartridgePin),
             WatchCartridges(WatchCartridges)
         }
         stream {}
@@ -578,6 +665,8 @@ pub struct Cartridges {
     pub client: Client<CartridgesProtocol>,
     /// The node's publisher DID, the namespace unsigned envelopes are signed for.
     pub publisher: String,
+    /// The drawer the registry's documents live in, which installs pin versions in.
+    pub registry_drawer: DrawerId,
 }
 
 /// Boot the registry on `config.registry_drawer`: scan the drawer into the served state, wait for
@@ -592,7 +681,10 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
             Authorization::identity(config.actor.capability).metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    drawers: BTreeMap::from([(config.registry_drawer.clone(), Access::Write)]),
+                    drawers: BTreeMap::from([(
+                        config.registry_drawer.clone(),
+                        big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+                    )]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
@@ -611,7 +703,7 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
             &tasks,
             config.docs,
             capability,
-            config.registry_drawer,
+            config.registry_drawer.clone(),
             registry::DocImport {
                 authority: config.authority.clone(),
                 drawers: config.drawers,
@@ -641,7 +733,6 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
     let publisher = did_key(&config.node_key.public_key);
     let service = Arc::new(CartridgeService {
         capabilities,
-        operator: config.operator,
         registry,
         publisher: publisher.clone(),
         node_key: config.node_key,
@@ -654,7 +745,17 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
             host,
             client,
             publisher,
+            registry_drawer: config.registry_drawer,
         },
         host_stop.then(follow_stop).then(domain_stop),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn registry_schema_groups_follow_the_node_boot_admission_path() {
+        big_cabinet::schema::SchemaRepo::open(super::schema_groups())
+            .expect("cartridge and nodule registry schemas admit at node boot");
+    }
 }

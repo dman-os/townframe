@@ -1,0 +1,40 @@
+{
+  "defs": {
+    "Nsid": {
+      "type": "string"
+    },
+    "main": {
+      "nullable": [
+        "minRevision"
+      ],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "minRevision": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "necessity": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": "string"
+        },
+        "nsid": {
+          "ref": "#Nsid",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "nsid",
+        "description"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.cartridge.method",
+  "lexicon": 1
+}

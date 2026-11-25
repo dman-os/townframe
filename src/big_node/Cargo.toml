@@ -9,6 +9,10 @@ workspace = true
 [lib]
 path = "lib.rs"
 
+[features]
+# Publishing cartridge fixtures through a booted node (`BigNode::publish_fixture`).
+test-support = ["big_cartridges_core/test-support"]
+
 [dependencies]
 #
 # internal
@@ -26,6 +30,7 @@ big_repo.workspace = true
 big_nodule_core.workspace = true
 big_sync.workspace = true
 big_sync_core.workspace = true
+method_core.workspace = true
 secrets_rs.workspace = true
 service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
@@ -40,6 +45,7 @@ async-trait.workspace = true
 iroh.workspace = true
 iroh-tickets.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 serde_json.workspace = true
 data-encoding.workspace = true
 iroh-blobs.workspace = true
@@ -49,13 +55,14 @@ tracing.workspace = true
 [dev-dependencies]
 #
 # internal
-method_core.workspace = true
 method_lexicon.workspace = true
 big_cartridges_core = { workspace = true, features = ["test-support"] }
 
 #
 # misc
+bytes.workspace = true
 keyring-core = { version = "1.0", default-features = false }
 tempfile.workspace = true
 rand.workspace = true
+rustix = { workspace = true, features = ["pipe"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

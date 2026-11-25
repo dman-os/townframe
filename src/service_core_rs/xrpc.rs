@@ -14,6 +14,14 @@ pub const TIMEOUT_HEADER: &str = "x-timeout-ms";
 /// Carries the nodule's own dispatch capability as a bare id, set by the host on every delivery
 /// to a nodule that was granted operations.
 pub const NODULE_CAPABILITY_HEADER: &str = "x-nodule-capability";
+/// The nodule's cartridge config document id, delivered alongside its settings capability.
+pub const NODULE_CONFIG_DOC_HEADER: &str = "x-nodule-config-doc";
+/// The nodule's capability to read its config document and write declared settings datums.
+pub const NODULE_CONFIG_CAPABILITY_HEADER: &str = "x-nodule-config-capability";
+/// The drawer capability for the routine's granted drawer set, when one is present.
+pub const NODULE_DRAWER_CAPABILITY_HEADER: &str = "x-nodule-drawer-capability";
+/// The blobs capability the routine's operations need (ADR 049 §6.2), when one is present.
+pub const NODULE_BLOBS_CAPABILITY_HEADER: &str = "x-nodule-blobs-capability";
 pub const DOMAIN_ERROR_FIELD: &str = "operationError";
 pub const DOMAIN_ERROR_STATUS: StatusCode = StatusCode::BAD_REQUEST;
 /// The `Authorization` scheme of every XRPC hop, including its separating space.
@@ -103,6 +111,9 @@ pub fn request_context(
         crate::HttpMetadata {
             authorization: header_string(headers, AUTHORIZATION_HEADER)?,
             idempotency_key: header_string(headers, IDEMPOTENCY_KEY_HEADER)?,
+            range: header_string(headers, "range")?
+                .as_deref()
+                .and_then(method_core::ByteRange::from_header),
         },
     ))
 }

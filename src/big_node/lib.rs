@@ -1,12 +1,18 @@
 #![recursion_limit = "256"]
 
 mod blob_boot;
+#[cfg(any(test, feature = "test-support"))]
+mod fixture;
 mod info;
 mod listeners;
 pub mod peers;
 
 pub use info::GET_NODE_INFO;
+pub use info::GetNodeInfo;
 pub use info::NodeInfo;
+pub use info::NodeInfoError;
+#[cfg(unix)]
+pub use listeners::FdClients;
 use listeners::Listener;
 pub use listeners::Listeners;
 pub use listeners::UnixClients;
@@ -38,6 +44,8 @@ use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cartridges::Cartridges;
 use big_cartridges::CartridgesConfig;
 use big_cartridges::RegistryDrawerConfig;
+use big_cartridges_core::protocol::CartridgesScope;
+use big_cartridges_core::protocol::MintCartridgesCapability;
 use big_dispatch::Dispatch;
 use big_dispatch::DispatchConfig;
 use big_dispatch::ServiceProvider;
@@ -61,6 +69,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
 use utils_rs::prelude::Res;
+use utils_rs::prelude::eyre;
 
 /// What a nodule executor's factory returns: the executor and the token that stops it.
 pub type HostedExecutor = (Arc<dyn NoduleExecutor>, service_utils_rs::StopToken);
@@ -116,6 +125,14 @@ pub struct Config {
     /// nodule service lets a dev build run as an installed cartridge, with its data and grants.
     /// Fixed at boot, so no nodule or runtime call can turn it on.
     pub allow_slot_takeover: bool,
+    /// The machine-loopback switch (`net.allow_host_loopback` in `node.json`): whether a nodule
+    /// that holds a `grant/net` for `host.daybook.internal:<port>` reaches that port on the
+    /// machine's own loopback. A guest's own `127.0.0.1` and `localhost` never do. Fixed at
+    /// boot, so no nodule or runtime call can turn it on.
+    pub allow_host_loopback: bool,
+    /// How long an upload nothing references keeps its bytes (`blobs.upload_hold_grace_secs` in
+    /// `node.json`); `None` is [`big_blobs::service::DEFAULT_UPLOAD_HOLD_GRACE`].
+    pub upload_hold_grace: Option<std::time::Duration>,
 }
 
 /// A node's id: the public half of its identity seed in lowercase hex, which is its keyhive
@@ -130,13 +147,58 @@ pub fn node_id(identity_seed: &[u8; 32]) -> String {
     )
 }
 
+/// The keyring service holding a node's identity seed. It is the node's own, apart from the
+/// services of the parts it hosts (`big_cabinet.authority` keeps the wrapping key).
+const IDENTITY_SERVICE: &str = "big_node.identity";
+
+fn identity_key_name(node_id: &str) -> String {
+    format!("seed.{node_id}")
+}
+
+/// A node's identity seed in the keyring, filed under the node id derived from it. The seed is
+/// created once at init and never regenerated; [`delete_secrets`] removes it with the node's
+/// other entries.
+pub struct IdentityKeyring<'a>(pub &'a SecretStore);
+
+impl IdentityKeyring<'_> {
+    /// Stores `identity_seed`. Storing the seed already there changes nothing.
+    pub async fn store(&self, identity_seed: &[u8; 32]) -> Res<()> {
+        self.0
+            .set_secret(
+                IDENTITY_SERVICE,
+                &identity_key_name(&node_id(identity_seed)),
+                identity_seed,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Loads the seed of the node `node_id`; an error when the keyring has none or it is damaged.
+    pub async fn load(&self, node_id: &str) -> Res<[u8; 32]> {
+        let seed = self
+            .0
+            .get_secret(IDENTITY_SERVICE, &identity_key_name(node_id))
+            .await?
+            .ok_or_else(|| {
+                eyre::eyre!("the identity key of node {node_id} is not in the keyring")
+            })?;
+        seed.try_into()
+            .map_err(|_| eyre::eyre!("the identity key of node {node_id} is not 32 bytes"))
+    }
+}
+
 /// Removes every keyring entry the node with `identity_seed` keeps in `secrets`, for tearing a
 /// node down for good: its actor keys can no longer be opened afterwards. The list of entries
 /// lives here, next to [`Config::secrets`], so a service that starts keeping one is added once.
 /// Returns how many entries existed and were removed.
 pub async fn delete_secrets(secrets: &SecretStore, identity_seed: &[u8; 32]) -> Res<usize> {
     let node_id = node_id(identity_seed);
-    let removed = [big_cabinet::authority::delete_wrapping_key(secrets, &node_id).await?];
+    let removed = [
+        secrets
+            .delete_secret(IDENTITY_SERVICE, &identity_key_name(&node_id))
+            .await?,
+        big_cabinet::authority::delete_wrapping_key(secrets, &node_id).await?,
+    ];
     Ok(removed.into_iter().filter(|removed| *removed).count())
 }
 
@@ -216,6 +278,9 @@ pub struct BigNode {
     /// to serve its own command drains them before it stops the node, so it never closes a
     /// client that is still connected.
     pub unix_clients: Option<UnixClients>,
+    /// The descriptor socket's connections, when the node serves the native import transport.
+    #[cfg(unix)]
+    pub fd_clients: Option<FdClients>,
     /// The network attachment, when the config asked for one.
     pub peers: Option<peers::Peers>,
 }
@@ -264,15 +329,17 @@ impl BigNode {
             );
         }
         stop.stages.push(self.register_late_built_ins());
-        (self.listeners, self.unix_clients) =
+        (self.listeners, self.unix_clients, self.fd_clients) =
             attach_listeners(self, attachments.listeners, stop).await?;
         Ok(())
     }
 
     /// Boots a production node: its nodules' handlers are Wasm components.
     pub async fn boot(config: Config) -> Res<(Self, StopToken)> {
-        Self::boot_with(config, |deps| async move {
-            let (wasm, stop) = big_nodule_wasm::boot(deps.blobs, deps.dispatch).await?;
+        let allow_host_loopback = config.allow_host_loopback;
+        Self::boot_with(config, move |deps| async move {
+            let (wasm, stop) =
+                big_nodule_wasm::boot(deps.blobs, deps.dispatch, allow_host_loopback).await?;
             Ok((wasm as Arc<dyn NoduleExecutor>, stop))
         })
         .await
@@ -290,14 +357,14 @@ impl BigNode {
     {
         let mut stop = StopToken::default();
         let attachments = Attachments::of(&config);
-        // Boxed: booting every service inline makes this future large enough (in debug builds)
-        // that a caller awaiting it, such as a test that reboots a node, overflows its stack.
+        // Boxed: booting every service inline makes this future large enough (in debug builds); a caller awaiting it, such as a test that reboots a node, overflows its stack.
+
         let boot: Res<Self> = Box::pin(async {
-            let schemas = Arc::new(config.schemas.with_groups([
-                big_blobs::schema::registration(),
-                big_nodule::schema_group(),
-                big_cartridges::schema_group(),
-            ])?);
+            let schemas = Arc::new(
+                config
+                    .schemas
+                    .with_groups(schema_groups().into_iter().map(|(_, group)| group))?,
+            );
             let node_id = node_id(&config.repo.node_identity_seed);
             let authority = boot_authority(&config, &node_id, &mut stop).await?;
             let (docs_actor, docs_namespace) = open_actor(&authority, "documents").await?;
@@ -307,14 +374,13 @@ impl BigNode {
                 open_actor(&authority, "cartridges").await?;
             let (dispatch_actor, dispatch_namespace) = open_actor(&authority, "dispatch").await?;
             let (blobs_actor, blobs_namespace) = open_actor(&authority, "blobs").await?;
-
             let repo = boot_repo(config.repo, &mut stop).await?;
             let (blobs, blobs_stop) = big_blobs::boot(big_blobs::Config {
+                upload_hold_grace: config.upload_hold_grace,
                 storage: config.blob_storage,
                 sql: config.sql.clone(),
                 authority: authority.client.clone(),
                 namespace: blobs_namespace,
-                operator: authority.service.operator_uuid(),
             })
             .await?;
             stop.stages.push(Stage::Service(blobs_stop));
@@ -351,8 +417,8 @@ impl BigNode {
             .await?;
             stop.stages.push(Stage::Service(docs_stop));
             let drawers = start_drawers(provider, &docs, &mut stop).await?;
-            // The blob workers are configured with the drawers they maintain blobs for, so the
-            // registry drawer is created (or found) there, before they start.
+            // The blob workers are configured with the drawers they maintain blobs for, so the registry is created (or found) before they start; the registry reads artifact bytes from the blob service and keeps them pinned through the workers, so it boots after both and stops before dispatch and nodules.
+
             let (blob_workers, registry_drawer) = blob_boot::boot(
                 config.sql.clone(),
                 &blobs,
@@ -367,9 +433,6 @@ impl BigNode {
                 &mut stop,
             )
             .await?;
-            // The registry reads artifact bytes from the blob service and keeps them pinned
-            // through the workers, so it boots after both and stops before either. Dispatch and
-            // the nodule service, its future consumers, boot after it.
             let cartridges = boot_cartridges(
                 &authority,
                 &docs,
@@ -401,6 +464,7 @@ impl BigNode {
                 host,
                 &blobs,
                 &cartridges,
+                &drawer_access,
                 schemas,
                 config.allow_slot_takeover,
                 config.sql,
@@ -433,6 +497,8 @@ impl BigNode {
                 registry_drawer,
                 listeners: Listeners::default(),
                 unix_clients: None,
+                #[cfg(unix)]
+                fd_clients: None,
                 peers: None,
             };
             node.attach(attachments, &mut stop).await?;
@@ -569,7 +635,6 @@ async fn boot_cartridges(
         registry_drawer: registry_drawer.clone(),
         actor: actor.clone(),
         namespace,
-        operator: authority.service.operator_uuid(),
         blobs: Arc::clone(&blobs.service),
         node_key: big_cartridges::NodeKey {
             public_key: authority.service.node_public_key(),
@@ -592,10 +657,25 @@ async fn boot_cartridges(
     Ok(cartridges)
 }
 
-/// Opens the drawer access policy the docs service consults, as the drawers actor. The
-/// authority's root identity is handed to it as the operator, the cabinet's superuser: it reaches
-/// every drawer on this node without a standing grant, so it can lend a handle on a drawer that
-/// synced in from a peer, where no local actor holds one.
+/// The schema groups the node's own services declare, each with the crate that owns it: blobs,
+/// nodules and the cartridge registry. The owner names the group in the wire-surface snapshot.
+pub fn schema_groups() -> Vec<(&'static str, big_cabinet::SchemaRegistrationGroup<'static>)> {
+    let mut groups = vec![
+        ("big_blobs", big_blobs::schema::registration()),
+        ("big_nodule", big_nodule::schema_group()),
+    ];
+    groups.extend(
+        big_cartridges::schema_groups()
+            .into_iter()
+            .map(|group| ("big_cartridges", group)),
+    );
+    groups
+}
+
+/// Opens the drawer access policy the docs service consults, as the drawers actor. The policy
+/// knows the operator only as the holder of the authority's root capability, the cabinet's
+/// superuser: that capability reaches every drawer on this node without a standing grant, so it
+/// can lend a handle on a drawer that synced in from a peer, where no local actor holds one.
 async fn open_drawer_access(
     repo: &SharedBigRepo,
     authority: &Authority,
@@ -613,7 +693,6 @@ async fn open_drawer_access(
         authority.client.clone(),
         drawers_actor.capability,
         namespace,
-        authority.service.operator_uuid(),
         sql.clone(),
         Arc::clone(&indexes.datum_set),
     )
@@ -655,9 +734,11 @@ async fn attach_listeners(
     node: &BigNode,
     requested: Listeners,
     stop: &mut StopToken,
-) -> Res<(Listeners, Option<UnixClients>)> {
+) -> Res<(Listeners, Option<UnixClients>, Option<FdClients>)> {
     let mut bound = Listeners::default();
     let mut clients = None;
+    #[cfg(unix)]
+    let mut fd_clients = None;
     if let Some(path) = requested.unix_socket {
         let (listener, connections) = Listener::unix(
             &path,
@@ -666,15 +747,32 @@ async fn attach_listeners(
         )
         .await?;
         stop.stages.push(Stage::Listener(listener));
-        bound.unix_socket = Some(path);
+        bound.unix_socket = Some(path.clone());
         clients = Some(connections);
+        #[cfg(unix)]
+        {
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("node");
+            let fd_path = path.with_file_name(format!("{stem}.fd.sock"));
+            let (listener, connections) = Listener::fd(
+                &fd_path,
+                node.dispatch.client.clone(),
+                Authorization::identity(node.authority.root),
+            )
+            .await?;
+            stop.stages.push(Stage::Listener(listener));
+            bound.fd_socket = Some(fd_path);
+            fd_clients = Some(connections);
+        }
     }
     if let Some(address) = requested.tcp {
         let (listener, address) = Listener::tcp(address, node.dispatch.client.clone()).await?;
         stop.stages.push(Stage::Listener(listener));
         bound.tcp = Some(address);
     }
-    Ok((bound, clients))
+    Ok((bound, clients, fd_clients))
 }
 
 /// Starts the peers service. It is the last attachment, so it stops first: no connection is
@@ -742,6 +840,7 @@ async fn boot_nodules<Host, Hosting>(
     host: Host,
     blobs: &big_blobs::Blobs,
     cartridges: &Cartridges,
+    drawer_access: &DrawerAccess,
     schemas: Arc<SchemaRepo>,
     allow_slot_takeover: bool,
     sql: Database,
@@ -765,19 +864,89 @@ where
         host(ExecutorDeps::of(&blobs.service, &dispatch.client)).await?;
     stop.stages.push(Stage::Service(executor_stop));
     let config_drawer = drawers.local().config_id.clone();
-    grant_drawer_admin(drawers, drawers_actor, nodules_actor, &config_drawer).await?;
+    grant_drawer(
+        drawers,
+        drawers_actor,
+        nodules_actor,
+        &config_drawer,
+        EntryAccess::Admin,
+    )
+    .await?;
+    // Installs pin versions in the registry's documents, which the nodule service reads at the
+    // pinned heads and never writes.
+    grant_drawer(
+        drawers,
+        drawers_actor,
+        nodules_actor,
+        &cartridges.registry_drawer,
+        EntryAccess::Read,
+    )
+    .await?;
+    // The cartridge config documents live in a drawer of their own that the nodule service
+    // creates, and so administers (ADR 044 §1).
+    let shared_config_drawer =
+        big_nodule::ensure_shared_config_drawer(big_nodule::SharedConfigDrawerConfig {
+            drawers,
+            actor: nodules_actor,
+            access: drawer_access,
+            sql: sql.clone(),
+        })
+        .await?;
+    // The nodule service resolves the versions its installs pin through the cartridges service,
+    // presenting a read-only handle the operator introduces to it, bound to its own actor.
+    let cartridges_handle = cartridges
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(authority.root).metadata(),
+            MintCartridgesCapability {
+                scope: CartridgesScope::default(),
+                rights: Rights::USE,
+                subject: Some(nodules_actor.actor.actor_id),
+            },
+        )
+        .await?
+        .capability_id;
+    // The nodule service mints each routine's blobs handle for the blobs operations its permbinds
+    // name (ADR 049 §6.2), so it holds, as their delegator, a handle for every operation-level
+    // blobs flag. Only the operator's root capability mints a blobs handle unscoped by another, so the
+    // operator introduces this one to the service's actor.
+    let blobs_delegator = blobs
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(authority.root).metadata(),
+            big_blobs_core::MintBlobsCapability {
+                scope: big_blobs_core::protocol::BlobsScope {
+                    put: true,
+                    ..Default::default()
+                },
+                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                subject: Some(nodules_actor.actor.actor_id),
+            },
+        )
+        .await?
+        .capability_id;
     let (nodules, nodules_stop) = big_nodule::boot(NodulesConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
         drawers: drawers.client.clone(),
         config_drawer,
+        registry_drawer: cartridges.registry_drawer.clone(),
+        shared_config_drawer,
         actor: nodules_actor.clone(),
         actor_path: "nodules".into(),
         namespace,
-        operator: authority.service.operator_uuid(),
         dispatch: Arc::clone(&dispatch.router),
         dispatch_client: dispatch.client.clone(),
         dispatch_authority,
+        cartridges: cartridges.client.clone(),
+        cartridges_authorization: Authorization {
+            authority: cartridges_handle,
+            signer: nodules_actor.capability,
+        },
+        blobs: blobs.client.clone(),
+        blobs_capability: blobs_delegator,
         executor: Some(Arc::clone(&executor)),
         schemas,
         allow_slot_takeover,
@@ -809,7 +978,6 @@ async fn boot_dispatch(
     let (dispatch, dispatch_stop) = big_dispatch::boot(DispatchConfig {
         authority: authority.client.clone(),
         namespace,
-        operator: authority.service.operator_uuid(),
     });
     stop.stages.push(Stage::Service(dispatch_stop));
     let capability = dispatch
@@ -853,14 +1021,16 @@ async fn boot_dispatch(
     Ok((dispatch, capability))
 }
 
-/// Mints the drawers actor's admin capability over `drawer` and grants admin to `subject`, which
-/// is how a service's actor becomes able to write a drawer the drawers actor owns: the nodule
-/// service over the node's config drawer, the cartridge registry over its registry drawer.
-async fn grant_drawer_admin(
+/// Mints the drawers actor's admin capability over `drawer` and grants `access` to `subject`, which
+/// is how a service's actor becomes able to use a drawer the drawers actor owns: the nodule
+/// service over the node's config drawer (Admin) and the registry drawer (Read, to read the
+/// versions its installs pin), the cartridge registry over its registry drawer (Admin).
+async fn grant_drawer(
     drawers: &Drawers,
     issuer: &OpenedActor,
     subject: &OpenedActor,
     drawer: &DrawerId,
+    access: EntryAccess,
 ) -> Res<()> {
     let cap = drawers
         .client
@@ -885,7 +1055,8 @@ async fn grant_drawer_admin(
                 capability: cap.capability_id,
                 drawer_id: drawer.clone(),
                 subject_id: subject.actor.actor_id,
-                access: EntryAccess::Admin,
+                access,
+                durable: false,
             },
         )
         .await?;
@@ -971,6 +1142,27 @@ impl StopToken {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn delete_secrets_removes_the_identity_entry() {
+        let keyring = keyring_core::mock::Store::new().expect("mock keyring")
+            as Arc<keyring_core::CredentialStore>;
+        let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
+        let seed = [42_u8; 32];
+        let identity = IdentityKeyring(&secrets);
+        identity.store(&seed).await.unwrap();
+        assert_eq!(identity.load(&node_id(&seed)).await.unwrap(), seed);
+
+        assert_eq!(delete_secrets(&secrets, &seed).await.unwrap(), 1);
+        assert!(identity.load(&node_id(&seed)).await.is_err());
+        assert_eq!(delete_secrets(&secrets, &seed).await.unwrap(), 0);
+        secrets.stop().await.unwrap();
     }
 }
 

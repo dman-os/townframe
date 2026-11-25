@@ -1,29 +1,32 @@
-//! Nodule admission over [`Cartridge`] envelopes (ADR 027 §2–4, §6–8).
+//! Nodule admission over [`big_cartridges_core::Cartridge`] envelopes (ADR 027 §2–4, §6–8).
 //!
-//! [`admit_cartridge_nodule`] validates the carrying [`Cartridge`] envelope, extracts its [`Nodule`]
-//! contribution, checks the contribution schema and nodule admission rules, and verifies that
-//! every artifact the handler names is declared in the envelope. [`InstalledNodule`] is the admitted
-//! result that [`crate::config::NoduleConfig`] resolves, with its enablement, configuration,
-//! artifact availability, and readiness.
+//! [`admit_resolved_cartridge`] validates the carrying [`big_cartridges_core::Cartridge`] envelope, extracts its
+//! [`Nodule`] contribution, checks the contribution schema and nodule admission rules, and
+//! verifies that every component a routine names is resolved. [`InstalledNodule`] is the admitted result that
+//! [`crate::config::NoduleConfig`] resolves, with its enablement, artifact availability, and
+//! readiness.
 
 use crate::Admitted;
 use crate::Nodule;
+use crate::NoduleAdmission;
 use crate::NoduleError;
-use big_cabinet_core::datum::DatumMember;
-use big_cartridges_core::Artifact;
-use big_cartridges_core::Cartridge;
+
+use big_cabinet_core::dmeta::DocId;
 use big_cartridges_core::CartridgeError;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Component as ManifestComponent;
+use big_cartridges_core::ResolvedCartridge;
 use big_cartridges_core::Revision;
 use big_cartridges_core::Version;
+use big_cartridges_core::config::Component;
+
 use big_dispatch_core::Readiness;
-use indexmap::IndexMap;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
+
 use std::collections::BTreeMap;
 
-/// Availability of an artifact declared in the carrying [`Cartridge`] envelope.
+/// Availability of an artifact declared in the carrying [`big_cartridges_core::Cartridge`] envelope.
 ///
 /// Admission records every artifact the handler references as [`Self::Unavailable`] from the
 /// envelope metadata alone. Only a node's executor, which loads the bytes, can establish
@@ -34,6 +37,13 @@ use std::collections::BTreeMap;
 pub enum ArtifactState {
     Unavailable,
     Available,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Artifact {
+    pub digest: big_cartridges_core::Digest,
+    pub size: Option<u64>,
+    pub media_type: Option<String>,
 }
 
 /// The cartridge whose code fills a slot under a dev takeover, and the version of it that does.
@@ -48,47 +58,48 @@ pub struct FilledBy {
 /// An admitted nodule installed in a standalone [`Inventory`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct InstalledNodule {
+    /// The cartridge config document containing this nodule's settings and grants.
     pub cartridge_id: CartridgeId,
+    pub config_doc: DocId,
     pub version: Version,
     pub revision: Revision,
+    pub resolved: ResolvedCartridge,
     pub nodule: Nodule,
     pub admitted: Admitted,
     pub artifacts: BTreeMap<String, (Artifact, ArtifactState)>,
     pub enabled: bool,
-    pub config: Option<IndexMap<String, Value>>,
     /// Set when a dev takeover fills this slot: `cartridge_id` is the slot, while `version`,
     /// `revision`, `nodule`, `admitted` and `artifacts` are the filler's.
     pub filled_by: Option<FilledBy>,
-    configured: bool,
 }
 
 impl InstalledNodule {
     #[expect(
         clippy::too_many_arguments,
-        reason = "crate-private constructor assembling validated fields"
+        reason = "constructor maps the persisted install record fields one-for-one"
     )]
     pub(crate) fn new(
         cartridge_id: CartridgeId,
+        config_doc: DocId,
         version: Version,
         revision: Revision,
+        resolved: ResolvedCartridge,
         nodule: Nodule,
         admitted: Admitted,
         artifacts: BTreeMap<String, (Artifact, ArtifactState)>,
         enabled: bool,
-        config: Option<IndexMap<String, Value>>,
-        configured: bool,
     ) -> Self {
         Self {
             cartridge_id,
+            config_doc,
             version,
             revision,
+            resolved,
             nodule,
             admitted,
             artifacts,
             enabled,
-            config,
             filled_by: None,
-            configured,
         }
     }
 
@@ -100,12 +111,6 @@ impl InstalledNodule {
             .collect()
     }
 
-    /// Whether an operator has set `config` explicitly. Unconfigured settings are the selected
-    /// revision's defaults and follow an upgrade; configured settings are kept and re-validated.
-    pub fn is_configured(&self) -> bool {
-        self.configured
-    }
-
     /// Readiness as the inventory alone can tell it, which is what a node without an executor
     /// reports. An enabled nodule with a handler never yields [`Readiness::Ready`] here, since
     /// only an executor can serve a handler; one without a handler hosts nothing (admission
@@ -113,7 +118,7 @@ impl InstalledNodule {
     pub fn readiness(&self) -> Readiness {
         if !self.enabled {
             Readiness::Disabled
-        } else if self.nodule.handler.is_none() {
+        } else if self.artifacts.is_empty() {
             Readiness::Ready
         } else if self
             .artifacts
@@ -173,57 +178,64 @@ pub enum InventoryError {
     InvalidRoute { pattern: String, reason: String },
     #[error("nodule for cartridge `{0}` is not installed")]
     UnknownCartridge(CartridgeId),
-    #[error("nodule for cartridge `{0}` declares no config schema")]
-    NoConfigSchema(CartridgeId),
+    #[error(
+        "cartridge `{0}` contributes neither a nodule nor a micro, so there is nothing to install"
+    )]
+    NothingToInstall(CartridgeId),
+    #[error("invalid grant `{grant}`: {reason}")]
+    InvalidGrant { grant: String, reason: String },
+    #[error("cartridge `{id}` has no `{component}` component to {action}")]
+    NoComponent {
+        id: CartridgeId,
+        component: Component,
+        action: &'static str,
+    },
 }
 
 type Result<T> = std::result::Result<T, InventoryError>;
 
 pub(crate) type AdmittedContribution = (
+    ResolvedCartridge,
     Nodule,
     Admitted,
     BTreeMap<String, (Artifact, ArtifactState)>,
 );
 
-pub(crate) fn admit_cartridge_nodule(cartridge: &Cartridge) -> Result<AdmittedContribution> {
+pub(crate) fn admit_resolved_cartridge(
+    resolved: &ResolvedCartridge,
+) -> Result<AdmittedContribution> {
+    let cartridge = &resolved.cartridge;
     cartridge.validate()?;
-    let Some(contribution) = cartridge.nodule() else {
-        return Err(InventoryError::MissingContribution(cartridge.id.clone()));
-    };
-    if contribution.schema != Nodule::ID {
-        return Err(InventoryError::UnsupportedSchema {
-            id: cartridge.id.clone(),
-            schema: contribution.schema.clone(),
-        });
-    }
-    let payload = Value::Object(
-        contribution
-            .description
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-    );
-    let nodule: Nodule =
-        serde_json::from_value(payload).map_err(|err| InventoryError::InvalidContribution {
-            id: cartridge.id.clone(),
-            reason: err.to_string(),
-        })?;
-    let admitted = nodule.admit(cartridge.authority.as_deref())?;
+    let nodule = cartridge
+        .nodule
+        .clone()
+        .ok_or_else(|| InventoryError::MissingContribution(cartridge.id.clone()))?;
+    let admitted = resolved.admit(cartridge.authority.as_deref())?;
     let mut artifacts = BTreeMap::new();
     for key in &admitted.artifacts {
-        let Some(artifact) = cartridge.artifact(key) else {
+        let Some(component) = resolved.components.get(key) else {
             return Err(InventoryError::MissingArtifact {
                 id: cartridge.id.clone(),
                 artifact: key.clone(),
             });
         };
-        if artifact.size.is_none() {
-            return Err(InventoryError::ArtifactSizeRequired {
+        let ManifestComponent::Wasm(wasm) = component else {
+            return Err(InventoryError::MissingArtifact {
                 id: cartridge.id.clone(),
                 artifact: key.clone(),
             });
-        }
-        artifacts.insert(key.clone(), (artifact.clone(), ArtifactState::Unavailable));
+        };
+        artifacts.insert(
+            key.clone(),
+            (
+                Artifact {
+                    digest: wasm.digest,
+                    size: Some(wasm.size),
+                    media_type: Some(wasm.media_type.clone()),
+                },
+                ArtifactState::Unavailable,
+            ),
+        );
     }
-    Ok((nodule, admitted, artifacts))
+    Ok((resolved.clone(), nodule, admitted, artifacts))
 }

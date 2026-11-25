@@ -17,11 +17,11 @@ fn setup_tracing() -> Res<()> {
         // if std::env::var("RUST_BACKTRACE_TEST").is_err() {
         //     std::env::set_var("RUST_BACKTRACE", "1");
         // }
-        std::env::var("RUST_LOG_TEST").unwrap_or_else(|_| default_filter.to_owned())
+        crate::tracing::instr_off_filter(std::env::var("RUST_LOG_TEST").ok(), default_filter)
     };
 
     #[cfg(target_arch = "wasm32")]
-    let filter = default_filter;
+    let filter = crate::tracing::instr_off_filter(None, default_filter);
 
     // #[cfg(test)]
     // console_subscriber::init();
@@ -54,7 +54,7 @@ fn setup_tracing() -> Res<()> {
     registry.try_init().map_err(|err| ferr!(err))?;
 
     // color_eyre::install()?;
-    let (eyre_panic_hook, eyre_hook) = crate::eyre_hook_builder().try_into_hooks()?;
+    let (eyre_panic_hook, eyre_hook) = crate::tracing::eyre_hook_builder().try_into_hooks()?;
     std::panic::set_hook(Box::new(move |panic_info| {
         let report = eyre_panic_hook.panic_report(panic_info);
         eprintln!("{report}");

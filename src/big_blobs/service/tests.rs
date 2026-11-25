@@ -28,10 +28,10 @@ async fn reopen(
 ) -> Res<(Blobs, StopToken, Database)> {
     let sql = runtime.database(directory.join("local.sqlite"), &[], "test_migrations");
     let (blobs, stop) = boot(Config {
+        upload_hold_grace: None,
         storage: Storage::filesystem(directory.join("store")).await?,
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
-        operator: Uuid7::new(),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([7; 16]),
@@ -59,6 +59,89 @@ async fn ciphertext(store: &Store, hash: Hash) -> Res<Vec<u8>> {
     Ok(bytes)
 }
 
+/// A put streams its body into the store and answers the id the node hashed (ADR 042 §6): the
+/// same one for the same bytes however they are chunked, a no-op when the node already holds
+/// them, and a typed `TooLarge` when the body is over the limit, whether it says so up front or
+/// only shows it while it streams.
+#[tokio::test]
+async fn a_put_is_authoritative_idempotent_and_refuses_an_item_over_the_limit() -> Res<()> {
+    let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+    let (blobs, stop) = boot(Config {
+        upload_hold_grace: None,
+        storage: Storage::memory().unwrap(),
+        sql: runtime.ephemeral(&[])?,
+        authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+        namespace: Namespace {
+            namespace_id: Uuid7::new(),
+            capability: CapId::from_bytes([7; 16]),
+        },
+    })
+    .await?;
+    let chunked = |chunks: &[&'static [u8]]| {
+        ByteBody::new(futures::stream::iter(
+            chunks
+                .iter()
+                .map(|chunk| Ok(Bytes::from_static(chunk)))
+                .collect::<Vec<_>>(),
+        ))
+    };
+    let first = blobs
+        .service
+        .put(chunked(&[b"hello ", b"world"]), 64)
+        .await
+        .unwrap();
+    assert_eq!(first.length_octets, 11);
+    // The same bytes in one piece, and again: the same answer, no earlier `stat` needed.
+    let whole = blobs
+        .service
+        .put(ByteBody::from_bytes(Bytes::from_static(b"hello world")), 64)
+        .await
+        .unwrap();
+    assert_eq!(whole, first);
+    assert_eq!(
+        blobs.service.stat(&first.blob_id).await?,
+        Some(first.clone())
+    );
+
+    let too_large = BlobsError::TooLarge { limit_octets: 10 };
+    // A body that states its length is refused before it is read...
+    let stated = ByteBody::from_bytes(Bytes::from_static(b"hello world"));
+    assert_eq!(blobs.service.put(stated, 10).await.unwrap_err(), too_large);
+    // ...and one that does not is refused once it has gone over.
+    let unstated = chunked(&[b"hello ", b"world"]);
+    assert_eq!(
+        blobs.service.put(unstated, 10).await.unwrap_err(),
+        too_large
+    );
+    // A body that fails mid-stream is that item's refusal, and nothing of it is held: the
+    // store's importer waits forever on a failed source, so the service ends the stream itself.
+    let failing = ByteBody::new(futures::stream::iter([
+        Ok(Bytes::from_static(b"partial")),
+        Err(std::io::Error::other("connection reset")),
+    ]));
+    let Err(BlobsError::Unreadable { reason }) = blobs.service.put(failing, 64).await else {
+        panic!("a failed body is refused as unreadable");
+    };
+    assert!(reason.contains("connection reset"), "{reason}");
+    assert!(
+        blobs
+            .service
+            .stat(&BlobId::new(*iroh_blobs::Hash::new(b"partial").as_bytes()))
+            .await?
+            .is_none()
+            || !blobs
+                .service
+                .ownership
+                .contains(&BlobId::new(*iroh_blobs::Hash::new(b"partial").as_bytes()))
+                .await?,
+        "the partial body is not held"
+    );
+    // The service is released by `stop`, which waits for no handle to outlive it.
+    drop(blobs);
+    stop.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn shutdown_recovers_pending_effects_after_service_handles_drop() -> Res<()> {
     let directory = tempfile::tempdir()?;
@@ -69,10 +152,10 @@ async fn shutdown_recovers_pending_effects_after_service_handles_drop() -> Res<(
     ] {
         let sql = runtime.ephemeral(&[])?;
         let (blobs, stop) = boot(Config {
+            upload_hold_grace: None,
             storage,
             sql: sql.clone(),
             authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
-            operator: Uuid7::new(),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: CapId::from_bytes([7; 16]),
@@ -132,10 +215,10 @@ async fn shutdown_drains_cancelled_publication_before_closing_store() -> Res<()>
     let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
     let sql = runtime.ephemeral(&[])?;
     let (blobs, stop) = boot(Config {
+        upload_hold_grace: None,
         storage: Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
-        operator: Uuid7::new(),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([7; 16]),
@@ -194,10 +277,10 @@ async fn complete_virtual_outboard_is_unavailable_after_final_owner_release() ->
     let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
     let sql = runtime.ephemeral(&[])?;
     let (blobs, stop) = boot(Config {
+        upload_hold_grace: None,
         storage: Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
-        operator: Uuid7::new(),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([7; 16]),
@@ -518,5 +601,138 @@ async fn filesystem_boot_discards_provenance_after_committed_last_release_before
         0
     );
     stop.stop().await;
+    Ok(())
+}
+
+/// A drawer reach reads exactly the blobs pinned in a `blobInventory` meta doc of that drawer:
+/// any of its inventories, on either root, whatever they are named, and nothing else.
+#[tokio::test]
+async fn a_drawer_reach_reads_exactly_the_blobs_its_inventories_pin() -> Res<()> {
+    use big_cabinet_core::drawer::DrawerAccess;
+    let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+    let sql = runtime.ephemeral(&[])?;
+    sql.apply_migrations(
+        "test_drawers",
+        &[
+            sqlite_rs::Migration {
+                version: 1,
+                name: "drawers",
+                sql: include_str!("../../big_cabinet/drawer/sqlite/migrations/001_drawers.sql"),
+            },
+            sqlite_rs::Migration {
+                version: 2,
+                name: "metadata",
+                sql: include_str!(
+                    "../../big_cabinet/drawer/sqlite/migrations/003_meta_doc_roots.sql"
+                ),
+            },
+        ],
+    )
+    .await?;
+    let (admission, admission_stop) = crate::admission::Admission::boot(sql.clone()).await?;
+    let (blobs, stop) = boot(Config {
+        upload_hold_grace: None,
+        storage: Storage::memory().unwrap(),
+        sql: sql.clone(),
+        authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+        namespace: Namespace {
+            namespace_id: Uuid7::new(),
+            capability: CapId::from_bytes([7; 16]),
+        },
+    })
+    .await?;
+    let drawer = big_cabinet_core::DocId::new([1; 32]);
+    let other_drawer = big_cabinet_core::DocId::new([2; 32]);
+    let blob = |byte: u8| BlobId::new([byte; 32]);
+    // Three inventories on `drawer` (a default one and a second, differently named one on the
+    // sensitive root, plus a public one) and one on `other_drawer`.
+    for (owner, root, name, inventory, pinned) in [
+        (&drawer, "public", "ciphertext", [11; 32], blob(21)),
+        (&drawer, "sensitive", "plaintext", [12; 32], blob(22)),
+        (&drawer, "sensitive", "intxt-bob", [13; 32], blob(23)),
+        (&other_drawer, "public", "ciphertext", [14; 32], blob(24)),
+    ] {
+        let inventory = big_cabinet_core::DocId::new(inventory);
+        sql.execute(
+            "INSERT INTO big_cabinet_drawer_meta_docs (drawer_id, root, kind, name, doc_id) VALUES (?, ?, 'blobInventory', ?, ?)",
+            (owner.to_string(), root, name, inventory.to_string()),
+        )
+        .await?;
+        admission
+            .pins(
+                &inventory,
+                1,
+                &std::collections::BTreeMap::from([(pinned, 5)]),
+                true,
+            )
+            .await?;
+    }
+    // A meta doc of another kind on the drawer pins nothing a handle may read.
+    sql.execute(
+        "INSERT INTO big_cabinet_drawer_meta_docs (drawer_id, root, kind, name, doc_id) VALUES (?, 'public', 'other', 'x', ?)",
+        (drawer.to_string(), big_cabinet_core::DocId::new([15; 32]).to_string()),
+    )
+    .await?;
+    admission
+        .pins(
+            &big_cabinet_core::DocId::new([15; 32]),
+            1,
+            &std::collections::BTreeMap::from([(blob(25), 5)]),
+            true,
+        )
+        .await?;
+
+    let scope = |drawer_access: &[(&big_cabinet_core::DocId, DrawerAccess)]| BlobsScope {
+        drawers: drawer_access
+            .iter()
+            .map(|(drawer, access)| ((*drawer).clone(), *access))
+            .collect(),
+        ..Default::default()
+    };
+    let reading = scope(&[(&drawer, DrawerAccess::Read)]);
+    for held in [21, 22, 23] {
+        blobs
+            .service
+            .authorize_read(&reading, &blob(held))
+            .await
+            .unwrap();
+    }
+    // Another drawer's blob, a blob of a non-inventory meta doc, and an uninventoried blob.
+    for refused in [24, 25, 99] {
+        assert_eq!(
+            blobs.service.authorize_read(&reading, &blob(refused)).await,
+            Err(BlobsError::Denied),
+            "blob {refused}"
+        );
+    }
+    // A reach below `Read` reads nothing, and a named blob is read whatever the drawers.
+    let relay = scope(&[(&drawer, DrawerAccess::Relay)]);
+    assert_eq!(
+        blobs.service.authorize_read(&relay, &blob(21)).await,
+        Err(BlobsError::Denied)
+    );
+    let named = BlobsScope {
+        read: std::collections::BTreeSet::from([blob(24)]),
+        ..relay
+    };
+    blobs
+        .service
+        .authorize_read(&named, &blob(24))
+        .await
+        .unwrap();
+    // Reaching both drawers reads both.
+    let both = scope(&[
+        (&drawer, DrawerAccess::Write),
+        (&other_drawer, DrawerAccess::Read),
+    ]);
+    blobs
+        .service
+        .authorize_read(&both, &blob(24))
+        .await
+        .unwrap();
+
+    drop(blobs);
+    stop.stop().await;
+    admission_stop.stop().await;
     Ok(())
 }

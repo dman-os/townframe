@@ -4,8 +4,6 @@ use big_blobs_core::BlobInfo;
 use big_blobs_core::BlobsError;
 use big_blobs_core::BlobsProtocol;
 use big_blobs_core::BlobsScope;
-use big_blobs_core::MAX_PUT_BYTES;
-use big_blobs_core::MAX_READ_BYTES;
 use big_blobs_core::MintBlobsCapability;
 use big_blobs_core::PutBlob;
 use big_blobs_core::ReadBlob;
@@ -17,6 +15,9 @@ use big_cabinet_core::drawer::MetaRoot;
 use big_cabinet_core::drawer::protocol::CreateMetaDoc;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use method_core::ByteBody;
+use method_core::ByteRange;
+use method_core::Method;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
 use service_client_native_rs::XrpcClient;
@@ -25,7 +26,19 @@ use service_utils_rs::ClientError;
 mod nodule_artifacts;
 
 use super::cartridges::operator;
-use super::listeners::post;
+
+/// Puts `bytes` through the node's blobs service with a fresh put handle: the node's answer is the
+/// authoritative [`BlobInfo`].
+pub(super) async fn put_bytes(node: &BigNode, bytes: &[u8]) -> BlobInfo {
+    node.blobs
+        .put(
+            RequestContext::root(),
+            put_cap(node).await,
+            ByteBody::from_bytes(bytes.to_vec()),
+        )
+        .await
+        .unwrap()
+}
 
 pub(super) async fn drawer_cap(node: &BigNode, drawer: &DocId) -> CapId {
     node.drawers
@@ -128,7 +141,7 @@ pub(super) async fn all_datums(node: &BigNode, document: &DocId) -> DatumsRead {
                 capability: capability(
                     node,
                     DocScope {
-                        read: BTreeSet::from([document.clone()]),
+                        read: DocScope::read_all([document.clone()]),
                         ..Default::default()
                     },
                 )
@@ -143,8 +156,13 @@ pub(super) async fn all_datums(node: &BigNode, document: &DocId) -> DatumsRead {
         .unwrap()
 }
 
-/// A blobs handle the node operator mints over the wire, from its identity credential alone.
-async fn blob_cap(node: &BigNode, scope: BlobsScope) -> CapId {
+/// A blobs handle the node operator mints over the wire, from its identity credential alone,
+/// bound to `subject` or, when `None`, to the operator.
+async fn blob_cap(
+    node: &BigNode,
+    scope: BlobsScope,
+    subject: Option<big_cabinet_core::dmeta::Uuid7>,
+) -> CapId {
     node.blobs
         .client
         .call_with(
@@ -153,7 +171,7 @@ async fn blob_cap(node: &BigNode, scope: BlobsScope) -> CapId {
             MintBlobsCapability {
                 scope,
                 rights: Rights::USE,
-                subject: None,
+                subject,
             },
         )
         .await
@@ -162,23 +180,45 @@ async fn blob_cap(node: &BigNode, scope: BlobsScope) -> CapId {
 }
 
 pub(super) async fn put_cap(node: &BigNode) -> CapId {
+    put_cap_for(node, None).await
+}
+
+/// [`put_cap`] bound to `subject`. A nodule's blobs handle is minted here, by the harness, because
+/// the blobs service only lets the operator or a blobs handle mint: a nodule actor presenting its
+/// method permbind cannot call `mintCapability` itself. The flow where the guest mints its own
+/// handle waits on that permission-model decision.
+pub(super) async fn put_cap_for(
+    node: &BigNode,
+    subject: Option<big_cabinet_core::dmeta::Uuid7>,
+) -> CapId {
     blob_cap(
         node,
         BlobsScope {
             put: true,
             ..Default::default()
         },
+        subject,
     )
     .await
 }
 
 pub(super) async fn read_cap(node: &BigNode, blob: &BlobId) -> CapId {
+    read_cap_for(node, blob, None).await
+}
+
+/// [`read_cap`] bound to `subject`; minted by the harness for the same reason as [`put_cap_for`].
+pub(super) async fn read_cap_for(
+    node: &BigNode,
+    blob: &BlobId,
+    subject: Option<big_cabinet_core::dmeta::Uuid7>,
+) -> CapId {
     blob_cap(
         node,
         BlobsScope {
             read: BTreeSet::from([*blob]),
             ..Default::default()
         },
+        subject,
     )
     .await
 }
@@ -214,13 +254,10 @@ async fn named_inventory_distribution_is_root_scoped_and_survives_restart() {
     }
     let info = node
         .blobs
-        .client
-        .call(
+        .put(
             RequestContext::root(),
-            PutBlob {
-                capability: put_cap(&node).await,
-                bytes: b"root-scoped inventory bytes".to_vec().into(),
-            },
+            put_cap(&node).await,
+            ByteBody::from_bytes(b"root-scoped inventory bytes".to_vec()),
         )
         .await
         .unwrap();
@@ -482,13 +519,10 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
         .unwrap();
     let info = node
         .blobs
-        .client
-        .call(
+        .put(
             RequestContext::root(),
-            PutBlob {
-                capability: put_cap(&node).await,
-                bytes: b"self-child inventory bytes".to_vec().into(),
-            },
+            put_cap(&node).await,
+            ByteBody::from_bytes(b"self-child inventory bytes".to_vec()),
         )
         .await
         .unwrap();
@@ -506,7 +540,10 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
                 capability: capability(
                     &node,
                     DocScope {
-                        write: BTreeSet::from([child.clone()]),
+                        write: std::collections::BTreeMap::from([(
+                            child.clone(),
+                            big_cabinet_core::doc::DatumKinds::All,
+                        )]),
                         ..Default::default()
                     },
                 )
@@ -602,22 +639,8 @@ async fn put_blob_keeps_independent_durable_standalone_holds() {
     ))
     .await
     .unwrap();
-    let request = PutBlob {
-        capability: put_cap(&node).await,
-        bytes: b"independent protocol uploads".to_vec().into(),
-    };
-    let first: BlobInfo = node
-        .blobs
-        .client
-        .call(RequestContext::root(), request.clone())
-        .await
-        .unwrap();
-    let second: BlobInfo = node
-        .blobs
-        .client
-        .call(RequestContext::root(), request)
-        .await
-        .unwrap();
+    let first: BlobInfo = put_bytes(&node, b"independent protocol uploads").await;
+    let second: BlobInfo = put_bytes(&node, b"independent protocol uploads").await;
     assert_eq!(first, second);
     // Two puts of the same bytes are two holds, neither released by the other.
     assert_eq!(holds(&sql, &first.blob_id).await, (2, 2, 0));
@@ -640,21 +663,8 @@ async fn a_document_retaining_a_put_blobs_bytes_releases_its_upload_holds() {
     ))
     .await
     .unwrap();
-    let request = PutBlob {
-        capability: put_cap(&node).await,
-        bytes: b"independent protocol uploads".to_vec().into(),
-    };
-    let first: BlobInfo = node
-        .blobs
-        .client
-        .call(RequestContext::root(), request.clone())
-        .await
-        .unwrap();
-    node.blobs
-        .client
-        .call(RequestContext::root(), request)
-        .await
-        .unwrap();
+    let first: BlobInfo = put_bytes(&node, b"independent protocol uploads").await;
+    put_bytes(&node, b"independent protocol uploads").await;
     assert_eq!(holds(&sql, &first.blob_id).await, (2, 2, 0));
     let placement = format!("drawer {}", node.drawers.local().present_id);
     let document = node
@@ -725,13 +735,10 @@ async fn blob_capabilities_bound_ranges_and_revocation() {
     let put = put_cap(&node).await;
     let info = node
         .blobs
-        .client
-        .call(
+        .put(
             RequestContext::root(),
-            PutBlob {
-                capability: put,
-                bytes: b"bounded blob bytes".to_vec().into(),
-            },
+            put,
+            ByteBody::from_bytes(b"bounded blob bytes".to_vec()),
         )
         .await
         .unwrap();
@@ -749,39 +756,49 @@ async fn blob_capabilities_bound_ranges_and_revocation() {
         .await
         .unwrap_err();
     assert!(matches!(denied, ClientError::Method(BlobsError::Denied)));
-    let range = node
+    // A range is part of the request, not of the call's parameters: it selects the octets the
+    // stream yields and says where they sit in the whole.
+    let part = node
         .blobs
-        .client
-        .call(
+        .read(
             RequestContext::root(),
-            ReadBlob {
-                capability: read,
-                blob_id: info.blob_id,
-                offset: 8,
-                length: 4,
-            },
+            read,
+            info.blob_id,
+            Some(ByteRange::Between { start: 8, end: 11 }),
         )
         .await
         .unwrap();
-    assert_eq!(range.bytes.as_slice(), b"blob");
-    assert_eq!(range.length_octets, 18);
-    let invalid = node
+    assert_eq!(
+        part.span,
+        Some(method_core::ByteSpan {
+            start: 8,
+            total: 18
+        })
+    );
+    assert_eq!(part.collect(4).await.unwrap().as_ref(), b"blob");
+    let whole = node
         .blobs
-        .client
-        .call(
+        .read(RequestContext::root(), read, info.blob_id, None)
+        .await
+        .unwrap();
+    assert_eq!(whole.length, Some(18));
+    assert_eq!(
+        whole.collect(18).await.unwrap().as_ref(),
+        b"bounded blob bytes"
+    );
+    let unsatisfiable = node
+        .blobs
+        .read(
             RequestContext::root(),
-            ReadBlob {
-                capability: read,
-                blob_id: info.blob_id,
-                offset: 0,
-                length: big_blobs_core::MAX_READ_BYTES + 1,
-            },
+            read,
+            info.blob_id,
+            Some(ByteRange::From(18)),
         )
         .await
         .unwrap_err();
     assert!(matches!(
-        invalid,
-        ClientError::Method(BlobsError::InvalidInput { .. })
+        unsatisfiable,
+        ClientError::Method(BlobsError::RangeNotSatisfiable { total_octets: 18 })
     ));
     node.authority
         .client
@@ -832,13 +849,10 @@ async fn filesystem_store_has_one_owner_and_reopens_with_bytes() {
     let put = put_cap(&node).await;
     let info = node
         .blobs
-        .client
-        .call(
+        .put(
             RequestContext::root(),
-            PutBlob {
-                capability: put,
-                bytes: b"persistent bytes".to_vec().into(),
-            },
+            put,
+            ByteBody::from_bytes(b"persistent bytes".to_vec()),
         )
         .await
         .unwrap();
@@ -871,11 +885,12 @@ async fn filesystem_store_has_one_owner_and_reopens_with_bytes() {
 
 /// A host client stores a file over the node's socket: the operator reaches the blobs service as
 /// itself (no token), mints its own put and read handles from the `Authorization` credential, and
-/// the bytes travel as the datum model's `$bytes` object. The largest put the service accepts is
-/// `MAX_PUT_BYTES` octets, which is about 10.7 MiB of base64 on the wire and fits the 16 MiB body
-/// the listener takes; a JSON array of numbers would not.
+/// the bytes travel as the raw body of the request and of the response (ADR 042), with the
+/// capability and the blob id as query parameters. A file well past the 8 MiB a JSON value forced
+/// is put whole; a `Range` reads part of it back as `206 Partial Content`; and what the node
+/// returns is authoritative: the id it hashed, the same one every time.
 #[tokio::test]
-async fn the_operator_stores_and_reads_a_file_over_the_socket_as_a_bytes_object() {
+async fn the_operator_stores_and_reads_a_file_over_the_socket_as_raw_bytes() {
     let secrets = secrets().await;
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("run/node.sock");
@@ -887,11 +902,11 @@ async fn the_operator_stores_and_reads_a_file_over_the_socket_as_a_bytes_object(
     );
     cfg.listeners = super::listeners::unix(&socket);
     let (node, stop) = BigNode::boot(cfg).await.unwrap();
-    // A 1 MiB range is about 1.4 MiB of base64, over the default 1 MiB response bound.
     let client = XrpcClient::unix(&socket, 2 << 20).unwrap();
     let blobs = Client::new(Transport::<BlobsProtocol>::xrpc(client.clone()));
+    // A capability id is a query parameter's text.
     let mint = async |scope: BlobsScope| {
-        blobs
+        let id = blobs
             .call_with(
                 RequestContext::root(),
                 operator(&node).metadata(),
@@ -903,91 +918,98 @@ async fn the_operator_stores_and_reads_a_file_over_the_socket_as_a_bytes_object(
             )
             .await
             .unwrap()
-            .capability_id
+            .capability_id;
+        serde_json::to_value(id)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned()
     };
     let put = mint(BlobsScope {
         put: true,
         ..Default::default()
     })
     .await;
+    let url = |nsid: &str, query: &[(&str, &str)]| {
+        let mut url = client.base_url().join(&format!("xrpc/{nsid}")).unwrap();
+        url.query_pairs_mut().extend_pairs(query);
+        url
+    };
 
-    let file: Vec<u8> = (0..MAX_PUT_BYTES).map(|at| (at * 31 % 251) as u8).collect();
-    let info = blobs
-        .call(
-            RequestContext::root(),
-            PutBlob {
-                capability: put,
-                bytes: file.clone().into(),
-            },
-        )
-        .await
-        .unwrap();
+    // 24 MiB: three times the old cap, and over the 16 MiB a JSON body may be.
+    let file: Vec<u8> = (0..24 * 1024 * 1024)
+        .map(|at| (at * 31 % 251) as u8)
+        .collect();
+    let put_file = async || {
+        let response = client
+            .http_client()
+            .post(url(PutBlob::XRPC.nsid, &[("capability", &put)]))
+            .header("content-type", "application/octet-stream")
+            .body(file.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        response.json::<BlobInfo>().await.unwrap()
+    };
+    let info = put_file().await;
     assert_eq!(info.length_octets, file.len() as u64);
+    // Putting what the node holds returns the same answer, with nothing asked first.
+    assert_eq!(put_file().await, info);
 
     let read = mint(BlobsScope {
         read: BTreeSet::from([info.blob_id]),
         ..Default::default()
     })
     .await;
-    let mut returned = Vec::with_capacity(file.len());
-    while returned.len() < file.len() {
-        let range = blobs
-            .call(
-                RequestContext::root(),
-                ReadBlob {
-                    capability: read,
-                    blob_id: info.blob_id,
-                    offset: returned.len() as u64,
-                    length: MAX_READ_BYTES,
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(range.length_octets, file.len() as u64);
-        returned.extend_from_slice(range.bytes.as_slice());
-    }
+    let blob_id = info.blob_id.to_string();
+    let read_url = url(
+        ReadBlob::XRPC.nsid,
+        &[("capability", &read), ("blobId", &blob_id)],
+    );
+    let whole = client
+        .http_client()
+        .get(read_url.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(whole.status().as_u16(), 200);
+    assert_eq!(whole.headers()["accept-ranges"], "bytes");
+    assert_eq!(whole.headers()["content-length"], file.len().to_string());
     assert!(
-        returned == file,
+        whole.bytes().await.unwrap() == file,
         "the file read back differs from the file put"
     );
-
-    // One more octet than the service accepts is refused by name.
-    let oversized = blobs
-        .call(
-            RequestContext::root(),
-            PutBlob {
-                capability: put,
-                bytes: vec![0; MAX_PUT_BYTES + 1].into(),
-            },
-        )
+    let part = client
+        .http_client()
+        .get(read_url.clone())
+        .header("range", "bytes=1000-1999")
+        .send()
         .await
-        .unwrap_err();
-    assert!(matches!(
-        oversized,
-        ClientError::Method(BlobsError::InvalidInput { .. })
-    ));
+        .unwrap();
+    assert_eq!(part.status().as_u16(), 206);
+    assert_eq!(
+        part.headers()["content-range"],
+        format!("bytes 1000-1999/{}", file.len())
+    );
+    assert_eq!(part.bytes().await.unwrap().as_ref(), &file[1000..2000]);
 
-    // On the wire the payload is the `$bytes` object. The array of numbers the protocol used to
-    // carry is no longer a value of the type.
-    let nsid = "org.example.daybook.blobs.put";
-    let (status, body) = post(
-        &client,
-        nsid,
-        None,
-        json!({"capability": put, "bytes": {"$bytes": "aGk="}}),
-    )
-    .await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body["lengthOctets"], 2, "{body}");
-    let (status, body) = post(
-        &client,
-        nsid,
-        None,
-        json!({"capability": put, "bytes": [104, 105]}),
-    )
-    .await;
+    // The capability still rules: a read handle cannot put, and the put handle cannot read.
+    let (status, body) = {
+        let response = client
+            .http_client()
+            .post(url(PutBlob::XRPC.nsid, &[("capability", &read)]))
+            .body(vec![1, 2, 3])
+            .send()
+            .await
+            .unwrap();
+        (
+            response.status().as_u16(),
+            response.json::<Value>().await.unwrap(),
+        )
+    };
     assert_eq!(status, 400, "{body}");
-    drop(blobs);
+    assert_eq!(body["error"], "Denied", "{body}");
     shutdown(node, stop).await;
 }
 
@@ -1104,13 +1126,10 @@ async fn blobs_handles_are_minted_by_the_operator_and_a_handle_only_narrows() {
     let put = mint(operator, put_only.clone(), Rights::USE).await.unwrap();
     let put_bytes = async |bytes: &[u8]| {
         node.blobs
-            .client
-            .call(
+            .put(
                 RequestContext::root(),
-                PutBlob {
-                    capability: put.authority,
-                    bytes: bytes.to_vec().into(),
-                },
+                put.authority,
+                ByteBody::from_bytes(bytes.to_vec()),
             )
             .await
             .unwrap()
@@ -1152,6 +1171,7 @@ async fn blobs_handles_are_minted_by_the_operator_and_a_handle_only_narrows() {
         BlobsScope {
             put: true,
             read: BTreeSet::from([a, b]),
+            ..Default::default()
         },
         Rights::USE | Rights::NARROW,
     )
@@ -1169,13 +1189,14 @@ async fn blobs_handles_are_minted_by_the_operator_and_a_handle_only_narrows() {
             BlobsScope {
                 put: true,
                 read: BTreeSet::from([a, b, c]),
+                ..Default::default()
             },
             Rights::USE,
         )
         .await,
     );
 
-    // Only the operator's identity mints from nothing: another actor's identity is refused, and
+    // Only the operator's root capability mints from nothing: another actor's identity is refused, and
     // a request with no credential is unauthenticated.
     denied(
         mint(
@@ -1207,5 +1228,171 @@ async fn blobs_handles_are_minted_by_the_operator_and_a_handle_only_narrows() {
         ),
         "{anonymous:?}"
     );
+    shutdown(node, stop).await;
+}
+
+/// A handle reaching a drawer reads the blobs its inventories pin, through real handles: the
+/// operator mints the reach, a narrower handle can only be minted for a drawer it holds at no more
+/// than its own access, and a blob the drawer does not pin is refused.
+#[tokio::test]
+async fn a_blobs_handle_reaching_a_drawer_reads_what_the_drawer_inventories_pin() {
+    let secrets = secrets().await;
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let sql = runtime.ephemeral(&[]).unwrap();
+    let (node, stop) = BigNode::boot(config(
+        Arc::clone(&secrets),
+        sql.clone(),
+        big_repo::Storage::memory(&runtime).unwrap(),
+    ))
+    .await
+    .unwrap();
+    let drawer = node.drawers.local().originated_id.clone();
+    let unheld = DocId::new([9; 32]);
+    // The default sensitive inventory and a second, differently named one.
+    let inventories = [
+        inventory(&node, &drawer, MetaRoot::Sensitive, "plaintext").await,
+        inventory(&node, &drawer, MetaRoot::Sensitive, "intxt-bob").await,
+    ];
+    let info = put_bytes(&node, b"a blob a drawer inventories").await;
+    let loose = put_bytes(&node, b"a blob no drawer inventories").await;
+    let placement = format!("drawer {}", node.drawers.local().present_id);
+    node.docs
+        .client
+        .call(
+            RequestContext::root(),
+            CreateDoc {
+                capability: capability(
+                    &node,
+                    DocScope {
+                        create: BTreeSet::from([placement.clone()]),
+                        ..Default::default()
+                    },
+                )
+                .await,
+                command: "drawer-reach-content".to_owned().try_into().unwrap(),
+                placement,
+                datums: BTreeMap::from([(
+                    DatumKey::from_text(big_blobs_core::Blob::ID, "main").unwrap(),
+                    json!({
+                        "mime": "application/octet-stream",
+                        "digest": info.blob_id.digest_str(),
+                        "lengthOctets": info.length_octets,
+                    }),
+                )]),
+            },
+        )
+        .await
+        .unwrap();
+    let mut changes = node
+        .blob_workers
+        .parts
+        .open_revision_reader_all(0)
+        .await
+        .unwrap()
+        .unwrap();
+    loop {
+        let mut ready = true;
+        for inventory in &inventories {
+            ready &= node
+                .blob_workers
+                .parts
+                .member_count(big_blobs::workers::inventory_part(inventory))
+                .await
+                .unwrap()
+                > 0;
+        }
+        if ready {
+            break;
+        }
+        changes.next(RevisionReadLimits::default()).await.unwrap();
+    }
+    drop(changes);
+    // The pins reach the admission projection after the inventory part gains the member, so wait
+    // on its change feed until the digest is pinned in an inventory of the drawer.
+    let mut admission_changes = node.blob_workers.mirrors.subscribe_changes();
+    loop {
+        let pinned: Vec<(String,)> = sql
+            .query(
+                "SELECT pair.digest FROM big_blobs_admission_pairs AS pair JOIN big_cabinet_drawer_meta_docs AS meta ON meta.doc_id = pair.inventory_id WHERE meta.drawer_id = ? AND pair.digest = ? AND pair.length_octets IS NOT NULL",
+                (drawer.to_string(), info.blob_id.to_string()),
+            )
+            .await
+            .unwrap()
+            .all()
+            .unwrap();
+        if !pinned.is_empty() {
+            break;
+        }
+        admission_changes.changed().await.unwrap();
+    }
+
+    let mint = async |authorization: Authorization, drawers: &[(&DocId, DrawerAccess)], rights| {
+        node.blobs
+            .client
+            .call_with(
+                RequestContext::root(),
+                authorization.metadata(),
+                MintBlobsCapability {
+                    scope: BlobsScope {
+                        drawers: drawers
+                            .iter()
+                            .map(|(drawer, access)| ((*drawer).clone(), *access))
+                            .collect(),
+                        ..Default::default()
+                    },
+                    rights,
+                    subject: None,
+                },
+            )
+            .await
+            .map(|capability| Authorization {
+                authority: capability.capability_id,
+                signer: authorization.signer,
+            })
+    };
+    let operator = operator(&node);
+    let reading = mint(
+        operator,
+        &[(&drawer, DrawerAccess::Read)],
+        Rights::USE | Rights::NARROW,
+    )
+    .await
+    .unwrap();
+    let unheld_reach = mint(operator, &[(&unheld, DrawerAccess::Read)], Rights::USE)
+        .await
+        .unwrap();
+    let read = async |handle: Authorization, blob: BlobId| {
+        let body = node
+            .blobs
+            .read(RequestContext::root(), handle.authority, blob, None)
+            .await?;
+        Ok::<_, ClientError<BlobsError>>(body.collect(1 << 20).await.unwrap())
+    };
+    assert_eq!(
+        read(reading, info.blob_id).await.unwrap().as_ref(),
+        b"a blob a drawer inventories"
+    );
+    for (handle, blob) in [(reading, loose.blob_id), (unheld_reach, info.blob_id)] {
+        assert!(
+            matches!(
+                read(handle, blob).await,
+                Err(ClientError::Method(BlobsError::Denied))
+            ),
+            "{blob}"
+        );
+    }
+    // A handle mints only drawer reaches it holds, at no more than the access it holds.
+    mint(reading, &[(&drawer, DrawerAccess::Read)], Rights::USE)
+        .await
+        .unwrap();
+    for refused in [
+        mint(reading, &[(&drawer, DrawerAccess::Write)], Rights::USE).await,
+        mint(reading, &[(&unheld, DrawerAccess::Read)], Rights::USE).await,
+    ] {
+        assert!(
+            matches!(refused, Err(ClientError::Method(BlobsError::Denied))),
+            "{refused:?}"
+        );
+    }
     shutdown(node, stop).await;
 }

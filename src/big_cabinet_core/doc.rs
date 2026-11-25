@@ -1,4 +1,5 @@
 use crate::DatumKey;
+use crate::DatumTag;
 use crate::authority::AuthorityServiceError;
 use crate::authority::CapId;
 use crate::authority::Capability;
@@ -34,6 +35,12 @@ pub use inspection::UnsafeDatumInspection;
 pub use inspection::UnsafeInspectDatum;
 pub use inspection::VerifiedSignatureEvidence;
 
+/// A caller-chosen retry key. It deduplicates retries of one request **on the node that received
+/// it, and only there**: the command ledger is per node, never replicated. A command id is not a
+/// global name. Two nodes that run the same id each execute the command, so a create under a
+/// fixed id on two nodes makes two documents; to converge on one document across nodes, use a
+/// name that is resolved in replicated state (for example a metadata document's `kind`/`name`
+/// slot), not a command id.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
@@ -245,15 +252,22 @@ pub enum DocsError {
     Access(String),
     #[error("document repository failed: {0}")]
     Repository(String),
-    #[error("document is not locally available")]
-    DocNotFound,
-    #[error("requested heads are unknown: {heads:?}")]
+    #[error("document {doc_id} is not locally available")]
+    DocNotFound { doc_id: DocId },
+    #[error("requested heads are unknown in document {doc_id}: {heads:?}")]
     UnknownHeads {
+        doc_id: DocId,
         #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
         heads: Vec<ChangeHash>,
     },
     #[error("a command id is 1..=256 bytes")]
     InvalidCommand,
+    /// A document id arrived in a request that is not the 32 bytes every document id is. Ids are
+    /// variable-width keys on the wire (ADR 012), but a document's id is its ed25519 key, so
+    /// only a 32-byte one can name a document; refusing here keeps the width from ever reaching
+    /// the repository, where it is an invariant.
+    #[error("{doc_id} is not a document id: a document id is 32 bytes wide")]
+    InvalidDocId { doc_id: DocId },
     #[error("command {command} is still in flight; retry once it resolves")]
     CommandInFlight { command: CommandId },
     #[error("command {command} was already used for a different request")]
@@ -301,14 +315,142 @@ pub enum DocsError {
     UnrelatedHistory,
 }
 
+impl DocsError {
+    /// Refuse `doc_id` unless it is the 32 bytes a document id is. Call this where an id enters
+    /// from a request, before it reaches anything that derives the document's key from it.
+    pub fn ensure_doc_id(doc_id: &DocId) -> Result<(), Self> {
+        doc_id
+            .to_bytes32()
+            .map(drop)
+            .map_err(|_| Self::InvalidDocId {
+                doc_id: doc_id.clone(),
+            })
+    }
+}
+
+/// The datum kinds writable through a document capability.
+/// `All` covers every datum; `Only` covers datum keys whose tags are in its set.
+/// A requested `Only` grant is covered only when its tags are a subset of the held grant's tags.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DatumKinds {
+    All,
+    Only(BTreeSet<DatumTag>),
+}
+
+impl DatumKinds {
+    /// Returns whether this grant permits writing the datum key.
+    pub fn allows(&self, key: &DatumKey) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(tags) => tags.contains(key.tag()),
+        }
+    }
+
+    /// Returns whether the requested grant is covered by this grant.
+    pub fn covers(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::All, _) => true,
+            (Self::Only(_), Self::All) => false,
+            (Self::Only(held), Self::Only(requested)) => requested.is_subset(held),
+        }
+    }
+
+    /// Returns whether no datum kind is permitted.
+    pub fn admits_nothing(&self) -> bool {
+        matches!(self, Self::Only(tags) if tags.is_empty())
+    }
+
+    /// The kinds permitted by either grant. A document reached through two grants (two drawers
+    /// that both hold it) is held at the union of what each lets through.
+    pub fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Only(mut held), Self::Only(more)) => {
+                held.extend(more);
+                Self::Only(held)
+            }
+            _ => Self::All,
+        }
+    }
+}
+
+/// What a document scope reaches through one granted drawer: the access it holds on the drawer
+/// and, mirroring `DocScope.read`/`write`, the datum kinds it may read and the kinds it may write
+/// in every document the drawer contains. `access` is kept beside the kinds because it carries
+/// more than they do: it is the ceiling the drawer policy proves and queries documents at
+/// (`Relay`, `Admin`), and creation in the drawer needs `Write` on it. A reach whose `write` kinds
+/// are empty never writes, whatever its `access`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DrawerReach {
+    pub access: DrawerAccess,
+    pub read: DatumKinds,
+    pub write: DatumKinds,
+}
+
+impl DrawerReach {
+    /// Builds a reach that admits every datum kind for reading and writing: broad access, an
+    /// explicit choice.
+    pub fn all_kinds(access: DrawerAccess) -> Self {
+        Self {
+            access,
+            read: DatumKinds::All,
+            write: DatumKinds::All,
+        }
+    }
+
+    /// The kinds this reach reads. As for a document named in `DocScope.read`/`write`, an
+    /// entry with `read` kinds reads those, and one with only `write` kinds reads its write
+    /// kinds.
+    pub fn readable(&self) -> &DatumKinds {
+        if self.read.admits_nothing() {
+            &self.write
+        } else {
+            &self.read
+        }
+    }
+
+    /// Returns whether the requested reach is covered by this one: no stronger drawer access,
+    /// and no read or write kind this reach does not hold.
+    pub fn covers(&self, other: &Self) -> bool {
+        self.access >= other.access
+            && self.read.covers(&other.read)
+            && self.write.covers(&other.write)
+    }
+}
+
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocScope {
-    pub read: BTreeSet<DocId>,
-    pub write: BTreeSet<DocId>,
+    pub read: BTreeMap<DocId, DatumKinds>,
+    pub write: BTreeMap<DocId, DatumKinds>,
     pub create: BTreeSet<String>,
-    pub drawers: BTreeMap<DocId, DrawerAccess>,
+    pub drawers: BTreeMap<DocId, DrawerReach>,
+}
+
+impl DocScope {
+    /// Builds a document-wide read grant, retaining the explicit datum-kind shape.
+    pub fn read_all<I>(documents: I) -> BTreeMap<DocId, DatumKinds>
+    where
+        I: IntoIterator<Item = DocId>,
+    {
+        documents
+            .into_iter()
+            .map(|document| (document, DatumKinds::All))
+            .collect()
+    }
+
+    /// Refuse a scope that names a document or drawer whose id is not a document id.
+    pub fn ensure_doc_ids(&self) -> Result<(), DocsError> {
+        self.read
+            .keys()
+            .chain(self.write.keys())
+            .chain(self.drawers.keys())
+            .try_for_each(DocsError::ensure_doc_id)
+    }
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -329,6 +471,8 @@ pub struct MintDocCapability {
 #[serde(rename_all = "camelCase")]
 pub struct CreateDoc {
     pub capability: CapId,
+    /// Deduplicates retries of this create on this node only. Another node given the same id
+    /// creates its own, different document.
     pub command: CommandId,
     pub placement: String,
     pub datums: BTreeMap<DatumKey, Json>,
@@ -555,5 +699,101 @@ declare_service_protocol! {
         stream {
             ObserveDocAvailability(ObserveDocAvailability)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_errors_name_their_document() {
+        let doc_id = DocId::new([7; 32]);
+        for error in [
+            DocsError::DocNotFound {
+                doc_id: doc_id.clone(),
+            },
+            DocsError::UnknownHeads {
+                doc_id: doc_id.clone(),
+                heads: vec![],
+            },
+        ] {
+            assert!(
+                error.to_string().contains(&doc_id.to_string()),
+                "{error} does not name {doc_id}"
+            );
+        }
+    }
+
+    fn only(tags: &[&str]) -> DatumKinds {
+        DatumKinds::Only(
+            tags.iter()
+                .map(|tag| DatumTag::new(*tag).unwrap())
+                .collect(),
+        )
+    }
+
+    fn reach(access: DrawerAccess, read: &[&str], write: &[&str]) -> DrawerReach {
+        DrawerReach {
+            access,
+            read: only(read),
+            write: only(write),
+        }
+    }
+
+    #[test]
+    fn a_drawer_reach_covers_only_no_stronger_access_and_no_wider_kinds() {
+        let held = reach(
+            DrawerAccess::Write,
+            &["org.example.a", "org.example.b"],
+            &["org.example.a"],
+        );
+        for (requested, covered) in [
+            (DrawerReach::all_kinds(DrawerAccess::Read), false),
+            (reach(DrawerAccess::Read, &["org.example.a"], &[]), true),
+            (
+                reach(
+                    DrawerAccess::Write,
+                    &["org.example.a", "org.example.b"],
+                    &["org.example.a"],
+                ),
+                true,
+            ),
+            // A kind held only for reading is not held for writing.
+            (reach(DrawerAccess::Write, &[], &["org.example.b"]), false),
+            (reach(DrawerAccess::Write, &["org.example.c"], &[]), false),
+            (reach(DrawerAccess::Admin, &["org.example.a"], &[]), false),
+        ] {
+            assert_eq!(held.covers(&requested), covered, "{requested:?}");
+        }
+        assert!(DrawerReach::all_kinds(DrawerAccess::Write).covers(&held));
+    }
+
+    #[test]
+    fn a_reach_with_only_write_kinds_reads_them_and_one_with_read_kinds_reads_those() {
+        assert_eq!(
+            reach(DrawerAccess::Write, &[], &["org.example.y"]).readable(),
+            &only(&["org.example.y"])
+        );
+        assert_eq!(
+            reach(DrawerAccess::Write, &["org.example.x"], &["org.example.y"]).readable(),
+            &only(&["org.example.x"])
+        );
+    }
+
+    #[test]
+    fn kinds_union_is_the_widest_of_both() {
+        assert_eq!(
+            only(&["org.example.a"]).union(only(&["org.example.b"])),
+            only(&["org.example.a", "org.example.b"])
+        );
+        assert_eq!(
+            only(&["org.example.a"]).union(DatumKinds::All),
+            DatumKinds::All
+        );
+        assert_eq!(
+            DatumKinds::All.union(only(&["org.example.a"])),
+            DatumKinds::All
+        );
     }
 }

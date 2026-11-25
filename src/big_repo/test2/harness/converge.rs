@@ -72,7 +72,7 @@ pub(crate) async fn converge(
         let settled = current == previous;
         history.push(current.clone());
         if settled {
-            tracing::warn!(rounds = round, "INSTR converge rounds"); // INSTR
+            tracing::warn!(target: "instr", rounds = round, "INSTR converge rounds"); // INSTR
             return Ok(());
         }
         previous = current;

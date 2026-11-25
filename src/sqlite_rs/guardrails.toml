@@ -19,3 +19,327 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 
 [migrations]
 "src/sqlite_rs/sqlite/migrations/001_init.sql" = "4b120de9406d4a70fa7fcedaf8df15b1cd54dbcc1b8704af0197d420691bc1d3"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/gen_tests.rs"
+symbol = "module::all_query_destinations_and_row_shapes"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native.rs"
+symbol = "module::Database::begin"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/migrations.rs"
+symbol = "module::migration_status"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/migrations.rs"
+symbol = "module::tests::failure_rolls_back_schema_and_history_but_keeps_previous_versions"
+ceiling = 4
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/migrations.rs"
+symbol = "module::tests::migration_control_statements_and_version_gaps_are_rejected"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::abandoned_pending_rollback_discards_connection"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::cancelled_commit_retains_writer_until_job_finishes"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::concurrent_readers_and_single_writer"
+ceiling = 4
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::dropped_tx_rolls_back"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::execute_batch_counts_all_statements_without_stale_changes"
+ceiling = 5
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::execute_supports_returning"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::failed_commit_rolls_back_before_reusing_connection"
+ceiling = 3
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::idle_eviction_closes_and_reopens"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::invalid_utf8_is_a_decode_error"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::last_database_drop_releases_runtime_and_workers"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::many_databases_share_workers"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::migration_checksum_change_is_an_error"
+ceiling = 3
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::migrations_and_roundtrip"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::named_and_positional_params_both_bind"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests.rs"
+symbol = "module::owned_tx_commits_and_rolls_back"
+ceiling = 4
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::builder_binds_values_lists_tuples_and_identifiers"
+ceiling = 6
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::cancelled_open_retains_ephemeral_directory_until_worker_finishes"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::cancelled_savepoint_operations_are_ordered_before_parent_work"
+ceiling = 3
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::cancelled_statement_closes_connection_before_removing_directory"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::cardinality_decode_and_custom_rows"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::closure_decoders_enforce_cardinality_and_propagate_errors"
+ceiling = 4
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::drain_workers_waits_for_cancelled_jobs_on_every_worker"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::ephemeral_database_lifetime_follows_clones_and_transactions"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::ephemeral_directory_is_removed_when_last_handle_drops"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::nested_savepoints_and_raw_transaction_control"
+ceiling = 5
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::parameter_containers_and_tuples_work_across_executors::read"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::parameter_containers_and_tuples_work_across_executors::write"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::read_snapshot_is_pinned_at_begin_and_rejects_writes"
+ceiling = 6
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/native/tests/surface.rs"
+symbol = "module::shared_database_migration_histories_are_independent_and_atomic"
+ceiling = 4
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/sqlite_rs/query.rs"
+symbol = "module::tests::backend_ref_uses_native_query_surface_and_cardinality"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"

@@ -445,7 +445,7 @@ utils_rs::table_tests! {
             RequestContext::root(),
             ReadDatums {
                 capability: node.capability(&alice, DocScope {
-                    read: BTreeSet::from([document.clone()]),
+                    read: DocScope::read_all([document.clone()]),
                     ..DocScope::default()
                 }).await.unwrap(),
                 doc_id: document.clone(),

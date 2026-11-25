@@ -1,0 +1,190 @@
+{
+  "defs": {
+    "DatumRefSelector": {
+      "nullable": [
+        "datumKey"
+      ],
+      "properties": {
+        "by": {
+          "enum": [
+            "origin",
+            "target"
+          ],
+          "type": "string"
+        },
+        "datumKey": {
+          "type": "string"
+        },
+        "docId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "by"
+      ],
+      "type": "object"
+    },
+    "QueriedDatumRef": {
+      "properties": {
+        "originDatumKey": {
+          "type": "string"
+        },
+        "originDocId": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "refHeads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "targetDatumKey": {
+          "type": "string"
+        },
+        "targetDocId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "originDocId",
+        "originDatumKey",
+        "path",
+        "targetDocId",
+        "targetDatumKey",
+        "refHeads"
+      ],
+      "type": "object"
+    },
+    "QueriedDatumRefs": {
+      "properties": {
+        "refs": {
+          "items": {
+            "ref": "#QueriedDatumRef",
+            "type": "ref"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "refs"
+      ],
+      "type": "object"
+    },
+    "QueryDatumRefs": {
+      "nullable": [
+        "drawerId"
+      ],
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "drawerId": {
+          "type": "string"
+        },
+        "selector": {
+          "ref": "#DatumRefSelector",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "capability",
+        "selector"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "InvalidCommand"
+        },
+        {
+          "name": "UnrelatedHistory"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Access"
+        },
+        {
+          "name": "Repository"
+        },
+        {
+          "name": "DocNotFound"
+        },
+        {
+          "name": "UnknownHeads"
+        },
+        {
+          "description": "A document id arrived in a request that is not the 32 bytes every document id is. Ids are\nvariable-width keys on the wire (ADR 012), but a document's id is its ed25519 key, so\nonly a 32-byte one can name a document; refusing here keeps the width from ever reaching\nthe repository, where it is an invariant.",
+          "name": "InvalidDocId"
+        },
+        {
+          "name": "CommandInFlight"
+        },
+        {
+          "name": "CommandReused"
+        },
+        {
+          "name": "UnknownSchema"
+        },
+        {
+          "name": "SystemDatum"
+        },
+        {
+          "name": "SetAndRemoved"
+        },
+        {
+          "name": "InvalidValue"
+        },
+        {
+          "name": "ValueTooLarge"
+        },
+        {
+          "name": "Conflict"
+        },
+        {
+          "name": "BaseNotAccepted"
+        },
+        {
+          "name": "Pending"
+        },
+        {
+          "name": "ResourceRefused"
+        },
+        {
+          "name": "Unsupported"
+        },
+        {
+          "name": "MalformedEvidence"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#QueryDatumRefs",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#QueriedDatumRefs",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.docs.queryDatumRefs",
+  "lexicon": 1
+}

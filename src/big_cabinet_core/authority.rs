@@ -226,6 +226,7 @@ impl Authorization {
         HttpMetadata {
             authorization: Some(self.header_value()),
             idempotency_key: None,
+            range: None,
         }
     }
 
@@ -292,6 +293,15 @@ mod bearer_tests {
 pub struct ResolvedAuthority {
     pub capability: Capability,
     pub actor: Option<Actor>,
+}
+
+impl ResolvedAuthority {
+    /// Whether the resolved capability is the operator's root capability, the identity
+    /// capability the authority created at init under [`OPERATOR_OBJECT`]. Domains recognize the
+    /// operator by this and by nothing they were configured with.
+    pub fn is_operator_root(&self) -> bool {
+        self.actor.is_some() && self.capability.object == OPERATOR_OBJECT
+    }
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]

@@ -1,0 +1,327 @@
+{
+  "defs": {
+    "DatumEvent": {
+      "properties": {
+        "datum": {
+          "ref": "#ObservedDatum",
+          "type": "ref"
+        },
+        "datumKey": {
+          "type": "string"
+        },
+        "docId": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "datum",
+            "leave"
+          ],
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "DatumPage": {
+      "properties": {
+        "caughtUp": {
+          "type": "boolean"
+        },
+        "events": {
+          "items": {
+            "ref": "#DatumEvent",
+            "type": "ref"
+          },
+          "type": "array"
+        },
+        "through": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "events",
+        "through",
+        "caughtUp"
+      ],
+      "type": "object"
+    },
+    "DatumSelection": {
+      "properties": {
+        "keys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "selection": {
+          "enum": [
+            "all",
+            "of"
+          ],
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "selection"
+      ],
+      "type": "object"
+    },
+    "DatumVersion": {
+      "properties": {
+        "clock": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "heads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "heads",
+        "clock"
+      ],
+      "type": "object"
+    },
+    "ObservedDatum": {
+      "nullable": [
+        "docHeads"
+      ],
+      "properties": {
+        "docHeads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "state": {
+          "enum": [
+            "present",
+            "removed"
+          ],
+          "type": "string"
+        },
+        "version": {
+          "ref": "#DatumVersion",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "PollDatums": {
+      "properties": {
+        "after": {
+          "default": 0,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "capability": {
+          "type": "string"
+        },
+        "datums": {
+          "ref": "#DatumSelection",
+          "type": "ref"
+        },
+        "holdMs": {
+          "default": 0,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "limit": {
+          "default": 0,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "predicate": {
+          "ref": "#Predicate",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "capability",
+        "predicate",
+        "datums"
+      ],
+      "type": "object"
+    },
+    "Predicate": {
+      "nullable": [
+        "targetDoc"
+      ],
+      "properties": {
+        "atLeast": {
+          "enum": [
+            "Relay",
+            "Read",
+            "Write",
+            "Admin"
+          ],
+          "type": "string"
+        },
+        "clause": {
+          "enum": [
+            "hasTag",
+            "hasKey",
+            "isDoc",
+            "inDrawer",
+            "hasReferenceTo",
+            "and",
+            "or",
+            "not"
+          ],
+          "type": "string"
+        },
+        "clauses": {
+          "items": {
+            "ref": "#Predicate",
+            "type": "ref"
+          },
+          "type": "array"
+        },
+        "docId": {
+          "type": "string"
+        },
+        "drawerId": {
+          "type": "string"
+        },
+        "inner": {
+          "ref": "#Predicate",
+          "type": "ref"
+        },
+        "key": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "targetDoc": {
+          "type": "string"
+        },
+        "targetTag": {
+          "type": "string"
+        },
+        "transitive": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "clause"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "description": "One long poll over the datum-set frontier (ADR 023, ADR 025).\n\nThe predicate selects documents and the selection names which of their datums are delivered.\nA current-state read is a poll from `after = 0` with `hold_ms = 0`, paged until `caught_up`.",
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "InvalidCommand"
+        },
+        {
+          "name": "UnrelatedHistory"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Access"
+        },
+        {
+          "name": "Repository"
+        },
+        {
+          "name": "DocNotFound"
+        },
+        {
+          "name": "UnknownHeads"
+        },
+        {
+          "description": "A document id arrived in a request that is not the 32 bytes every document id is. Ids are\nvariable-width keys on the wire (ADR 012), but a document's id is its ed25519 key, so\nonly a 32-byte one can name a document; refusing here keeps the width from ever reaching\nthe repository, where it is an invariant.",
+          "name": "InvalidDocId"
+        },
+        {
+          "name": "CommandInFlight"
+        },
+        {
+          "name": "CommandReused"
+        },
+        {
+          "name": "UnknownSchema"
+        },
+        {
+          "name": "SystemDatum"
+        },
+        {
+          "name": "SetAndRemoved"
+        },
+        {
+          "name": "InvalidValue"
+        },
+        {
+          "name": "ValueTooLarge"
+        },
+        {
+          "name": "Conflict"
+        },
+        {
+          "name": "BaseNotAccepted"
+        },
+        {
+          "name": "Pending"
+        },
+        {
+          "name": "ResourceRefused"
+        },
+        {
+          "name": "Unsupported"
+        },
+        {
+          "name": "MalformedEvidence"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#PollDatums",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#DatumPage",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.docs.pollDatums",
+  "lexicon": 1
+}

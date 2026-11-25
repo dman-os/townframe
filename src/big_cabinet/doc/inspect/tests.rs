@@ -479,6 +479,7 @@ async fn unknown_heads_resource_refusal_and_unsupported_values_are_not_rejection
     let mut request = fixture.request();
     request.heads.push(unknown);
     let expected = DocsError::UnknownHeads {
+        doc_id: request.doc_id.clone(),
         heads: vec![unknown],
     };
     assert_eq!(
@@ -722,7 +723,7 @@ async fn inspection_scope_is_distinct_and_retracting_the_introduced_actor_revoke
             .metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    read: BTreeSet::from([document.clone()]),
+                    read: DocScope::read_all([document.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
@@ -920,6 +921,7 @@ async fn direct_irpc_and_xrpc_share_exact_heads_evidence_and_denials() {
         let mut unknown = fixture.request();
         unknown.heads = vec![ChangeHash([92; 32])];
         let expected = DocsError::UnknownHeads {
+            doc_id: unknown.doc_id.clone(),
             heads: unknown.heads.clone(),
         };
         assert_eq!(

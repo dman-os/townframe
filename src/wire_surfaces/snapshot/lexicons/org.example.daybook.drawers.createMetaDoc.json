@@ -1,0 +1,172 @@
+{
+  "defs": {
+    "CreateMetaDoc": {
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "drawerId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "root": {
+          "enum": [
+            "public",
+            "sensitive"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "command",
+        "drawerId",
+        "kind",
+        "name",
+        "root"
+      ],
+      "type": "object"
+    },
+    "MetaDocCreated": {
+      "properties": {
+        "docId": {
+          "type": "string"
+        },
+        "drawerId": {
+          "type": "string"
+        },
+        "heads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "root": {
+          "enum": [
+            "public",
+            "sensitive"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "drawerId",
+        "kind",
+        "name",
+        "root",
+        "docId",
+        "heads"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "SelfChild"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Docs"
+        },
+        {
+          "name": "DocsUnavailable"
+        },
+        {
+          "description": "Keyhive storage or the engine failed; nothing the caller named is at fault.",
+          "name": "Keyhive"
+        },
+        {
+          "description": "A named group or doc id that is not a 32-byte Ed25519 point.",
+          "name": "InvalidKey"
+        },
+        {
+          "description": "A Keyhive group this node does not hold, perhaps not yet synced.",
+          "name": "UnknownGroup"
+        },
+        {
+          "description": "A principal group the caller named that this node does not hold.",
+          "name": "UnknownPrincipal"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "UnknownDrawer"
+        },
+        {
+          "description": "A peer this node has not met: its keyhive identity arrives with a live connection.",
+          "name": "UnknownPeer"
+        },
+        {
+          "name": "SelfDoc"
+        },
+        {
+          "name": "AlreadyDrawer"
+        },
+        {
+          "name": "NotAnEntry"
+        },
+        {
+          "name": "ForeignLayout"
+        },
+        {
+          "name": "CommandInFlight"
+        },
+        {
+          "name": "CommandReused"
+        },
+        {
+          "name": "RosterUnreadable"
+        },
+        {
+          "name": "InvalidMetaDocSlot"
+        },
+        {
+          "name": "SuccessorCycle"
+        },
+        {
+          "name": "SuccessorSelf"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#CreateMetaDoc",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#MetaDocCreated",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.drawers.createMetaDoc",
+  "lexicon": 1
+}

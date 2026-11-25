@@ -11,12 +11,14 @@
 //! back). The executor does not touch the router: it calls [`Reensure::request`] on the handle
 //! in the spec and the state actor runs the reconcile that calls `ensure` again.
 
+use crate::requests::MissingAuthorityLookup;
 use async_trait::async_trait;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::OpenedActor;
-use big_cabinet_core::datum::operation::OperationKind;
-use big_cartridges_core::Artifact;
+
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Component as ManifestComponent;
+
 use big_cartridges_core::Revision;
 use big_dispatch::Provider;
 use big_dispatch_core::Readiness;
@@ -26,27 +28,49 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::Notify;
 
-/// Everything an executor needs to host one nodule revision's handler.
+/// A routine's executable export and the component that contains it.
+#[derive(Clone)]
+pub struct RoutineSpec {
+    pub routine_key: String,
+    pub component: String,
+    pub export: String,
+}
+
+/// Capabilities selected for one manifest routine. Empty service handles are omitted.
+#[derive(Clone, Default)]
+pub struct RoutineCapabilities {
+    pub dispatch: Option<CapId>,
+    /// The docs handle: the cartridge config document and the routine's `#datum` kinds in each
+    /// drawer it was granted.
+    pub docs: Option<CapId>,
+    pub drawers: Option<CapId>,
+    pub blobs: Option<CapId>,
+}
+
+/// Everything an executor needs to host one nodule revision's routine components.
 pub struct HandlerSpec {
     pub cartridge_id: CartridgeId,
     pub revision: Revision,
-    /// The handler artifact as the envelope declares it: key, digest, size and media type. Its
-    /// bytes are retained and fetched through the `Blob` datum the config document carries.
-    pub handler: Artifact,
-    /// The nodule's durable actor, which the handler's outgoing calls are made as: the executor
-    /// signs them with `actor.capability`, never with anything the handler says about itself.
+    /// The wasm components declared by the envelope, keyed by component key. Each component is
+    /// loaded once per cartridge revision; routines below select which one serves an operation.
+    pub components: BTreeMap<String, ManifestComponent>,
+    /// The operation-to-export routing established by the admitted nodule routines.
+    pub routines: BTreeMap<String, RoutineSpec>,
+    /// The cartridge config document; each routine capability carries its own config handle.
+    pub config_doc: big_cabinet_core::dmeta::DocId,
+
+    /// The nodule's durable actor, which component outgoing calls are made as: the executor signs
+    /// them with `actor.capability`, never with anything the component says about itself.
     pub actor: OpenedActor,
-    /// The dispatch capability minted from the nodule's operation grants, which the handler is
-    /// told so it can present it on its own outgoing calls. `None` when nothing is granted. It
-    /// changes whenever the grants do, and `ensure` runs on every reconcile, so an executor that
-    /// already hosts the revision takes the new value from the spec.
-    pub capability: Option<CapId>,
-    /// The operations the handler implements, by NSID (`None` kind for a foreign contract).
-    pub operations: BTreeMap<String, Option<OperationKind>>,
+    /// The routine-scoped capability bundles, keyed by the routine key in the manifest.
+    pub routine_capabilities: BTreeMap<String, RoutineCapabilities>,
     /// Ask the state actor to call `ensure` again for this cartridge.
     pub reensure: Reensure,
+    /// What [`egress::call`](crate::egress::call) refines a routine's refused call with: an
+    /// method its `uses` declare that no grant covers yet is the cartridge's missing
+    /// authority, not a denial. Kept current by the state actor; hold it for the workload's life.
+    pub missing_authority: MissingAuthorityLookup,
 }
-
 /// What an executor reports for a revision it was asked to host.
 pub enum Hosted {
     /// The handler can be called now through this provider.

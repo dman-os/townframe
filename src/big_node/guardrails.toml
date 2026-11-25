@@ -32,3 +32,58 @@ default_features = true
 features = []
 
 [builds.native]
+features = ["test-support"]
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/big_node/blob_boot.rs"
+symbol = "module::metadata_capability"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/big_node/e2e/blobs/mod.rs"
+symbol = "module::a_blobs_handle_reaching_a_drawer_reads_what_the_drawer_inventories_pin"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/big_node/e2e/blobs/mod.rs"
+symbol = "module::holds"
+ceiling = 3
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/big_node/e2e/blobs/nodule_artifacts.rs"
+symbol = "module::retained"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/big_node/e2e/cartridges.rs"
+symbol = "module::retained"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/big_node/e2e/mod.rs"
+symbol = "module::failed_docs_recovery_unwinds_the_partial_node"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"

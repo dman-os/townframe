@@ -3,13 +3,15 @@
 //! A service is reached through `Client<Proto>`, whose calls name the operation by its request
 //! type. Dispatch names it by NSID and hands over JSON, so [`ServiceProvider`] holds one typed
 //! route per unary operation of every protocol mounted on it: the route decodes the JSON as the
-//! operation's request, calls the client and encodes the output. The routes come from
+//! operation's request, calls the client and encodes the output. A method with a byte body takes
+//! its request stream in the call's envelope and answers its output stream as the dispatch
+//! body, moved and never encoded. The routes come from
 //! [`Protocol::visit_unary`], so they follow the protocol declaration and cannot drift from it.
 //!
 //! The adapter is not an authorization boundary. Dispatch admission has already run when
 //! [`Provider::call`] is entered. The credential dispatch admitted ([`Caller::authorization`])
 //! is handed on as the request's `Authorization: Bearer` metadata, the way an XRPC server hands
-//! it to any service, and the service checks it itself: an identity (the operator) satisfies
+//! it to any service, and the service checks it itself: the operator's root capability satisfies
 //! both layers, while a dispatch-minted handle is not understood by a service's domain, which
 //! admits only its own handles. Resource capabilities (`capability` fields) stay in the input.
 
@@ -23,10 +25,14 @@ use crate::ProviderState;
 use crate::Router;
 use async_trait::async_trait;
 use big_cabinet_core::datum::operation::OperationKind;
+use big_dispatch_core::Body;
 use big_dispatch_core::InvocationContext;
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use method_core::ByteBody;
+use method_core::Encoding;
 use method_core::MethodKind;
+use method_core::XrpcMethod;
 use serde_json::Value;
 use serde_json::json;
 use service_client_native_rs::Client;
@@ -45,13 +51,18 @@ use std::sync::Arc;
 /// upstream being unreachable.
 const BAD_GATEWAY: u16 = 502;
 
-type RouteFn = dyn Fn(RequestContext, HttpMetadata, Value) -> BoxFuture<'static, Result<Value, ProviderError>>
+type RouteFn = dyn Fn(
+        RequestContext,
+        HttpMetadata,
+        Value,
+        Option<Body>,
+    ) -> BoxFuture<'static, Result<Body, ProviderError>>
     + Send
     + Sync;
 
 struct Route {
     kind: OperationKind,
-    privileged: bool,
+    method: XrpcMethod,
     call: Box<RouteFn>,
 }
 
@@ -88,17 +99,30 @@ where
             MethodKind::Subscription => unreachable!("a unary operation is never a subscription"),
         };
         let client = self.client.clone();
-        let call: Box<RouteFn> = Box::new(move |context, metadata, input| {
+        let call: Box<RouteFn> = Box::new(move |context, metadata, input, body| {
             let client = client.clone();
             async move {
                 let params: P = serde_json::from_value(input)
                     .map_err(|error| ProviderError::InvalidInput(error.to_string()))?;
-                match client
-                    .call_with_metadata(Envelope::with_metadata(context, metadata, params))
-                    .await
-                {
-                    Ok(response) => Ok(serde_json::to_value(response.output)
-                        .expect("operation output must serialize")),
+                let mut envelope = Envelope::with_metadata(context, metadata, params);
+                if let Some(body) = body {
+                    envelope = envelope.with_body(body);
+                }
+                match client.call_with_metadata(envelope).await {
+                    Ok(response) => Ok(match operation.output_encoding {
+                        Encoding::Json => Body::Json(
+                            serde_json::to_value(response.output)
+                                .expect("operation output must serialize"),
+                        ),
+                        // A byte output is declared by naming `ByteBody` as the method's
+                        // output; the stream is moved on, never encoded.
+                        Encoding::Bytes { .. } => Body::Bytes(
+                            *(Box::new(response.output) as Box<dyn std::any::Any>)
+                                .downcast::<ByteBody>()
+                                .expect("a method with a byte output answers a `ByteBody`"),
+                        ),
+                        Encoding::Descriptors => unreachable!("a descriptor body is input-only"),
+                    }),
                     // The operation's own error travels in the standard XRPC domain envelope,
                     // as it does when the same operation is served over HTTP.
                     Err(ClientError::Method(error)) => Err(ProviderError::Failed {
@@ -118,7 +142,7 @@ where
             operation.nsid,
             Route {
                 kind,
-                privileged: operation.privileged,
+                method: operation,
                 call,
             },
         );
@@ -132,7 +156,7 @@ where
 
 impl ServiceProvider {
     /// Serves every unary operation of `Proto` through `client`. Subscriptions are not routed:
-    /// dispatch exchanges one JSON value each way. An NSID served twice is a programming error.
+    /// dispatch exchanges one body each way. An NSID served twice is a programming error.
     pub fn serve<Proto>(mut self, client: &Client<Proto>) -> Self
     where
         Proto: Protocol + Send + Sync + 'static,
@@ -149,7 +173,9 @@ impl ServiceProvider {
     /// [`method_lexicon::builtin_methods`], or one that does not compile, is a programming error
     /// and panics: a built-in that dispatch could not check would be served unchecked.
     pub fn register(self, router: &Router, provider_id: &str) {
-        let lexicons: BTreeMap<_, _> = method_lexicon::builtin_methods().collect();
+        let lexicons: BTreeMap<_, _> = method_lexicon::builtin_methods()
+            .map(|(nsid, _, assemble)| (nsid, assemble))
+            .collect();
         let operations: Vec<_> = self
             .routes
             .iter()
@@ -162,7 +188,12 @@ impl ServiceProvider {
                     (*nsid).to_owned(),
                     Operation {
                         kind: Some(route.kind),
-                        privileged: route.privileged,
+                        privileged: route.method.privileged,
+                        input: route.method.input_encoding,
+                        output: route.method.output_encoding,
+                        input_mime: None,
+                        output_mime: None,
+                        local_only: route.method.local_only,
                         lexicon: Some(LexiconSource {
                             file,
                             carried: Vec::new(),
@@ -190,7 +221,8 @@ impl Provider for ServiceProvider {
         request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-    ) -> Result<Value, ProviderError> {
+        body: Option<Body>,
+    ) -> Result<Body, ProviderError> {
         let route = self
             .routes
             .get(operation)
@@ -204,7 +236,8 @@ impl Provider for ServiceProvider {
         let metadata = HttpMetadata {
             authorization: Some(caller.authorization.header_value()),
             idempotency_key: context.idempotency_key.clone(),
+            range: context.range,
         };
-        (route.call)(service_request, metadata, input).await
+        (route.call)(service_request, metadata, input, body).await
     }
 }

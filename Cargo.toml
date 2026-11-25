@@ -50,6 +50,7 @@ members = [
   "./src/wflow_sdk",
   "./src/wflow_tokio/",
   "./src/xtask",
+  "./src/wire_surfaces",
   "./src/clay_surface",
   "./src/clay_host",
   "./src/clay_docs",
@@ -102,6 +103,7 @@ license = ""
 repository = ""
 
 [workspace.dependencies]
+rustix = { version = "1.1.6", features = ["fs", "net"] }
 getrandom = { version = "0.4" }
 getrandom03 = { package = "getrandom", version = "0.3" }
 #
@@ -289,14 +291,14 @@ automerge = "0.11.0"
 autosurgeon = "0.13.0"
 # automerge-test = "0.9"
 
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "082f51f4eaac7d0fd166fd419110fea9a5140262" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "082f51f4eaac7d0fd166fd419110fea9a5140262" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "082f51f4eaac7d0fd166fd419110fea9a5140262" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "082f51f4eaac7d0fd166fd419110fea9a5140262" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "082f51f4eaac7d0fd166fd419110fea9a5140262" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "082f51f4eaac7d0fd166fd419110fea9a5140262" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "082f51f4eaac7d0fd166fd419110fea9a5140262" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "082f51f4eaac7d0fd166fd419110fea9a5140262" }
 
 keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "a84137d1f2bdd81cc6c883253a534cc3f0380b5e" }
 keyhive_core = { version = "0.6.0", git = "https://github.com/dman-os/keyhive", rev = "a84137d1f2bdd81cc6c883253a534cc3f0380b5e" }
@@ -359,6 +361,9 @@ web-sys = "0.3.104"
 # cli
 clap = "4.5"
 clap_complete = "4.5"
+clap_mangen = "0.3"
+clap-markdown = "0.1"
+shadow-rs = { version = "2", default-features = false }
 
 # 
 # networks
@@ -407,6 +412,36 @@ blitz-traits = { git = "https://github.com/dman-os/blitz", rev = "ffaf2bd0518a2c
 
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
+
+# The service crates build at opt-level 1 in dev so LLVM reuses a stack slot once its value is
+# dead. At opt-level 0 every awaited temporary and every match arm of an async fn's poll frame
+# gets its own slot, so in-process service hops (dispatch → drawers → docs → authority) piled
+# up frames of hundreds of KB: creating a drawer at boot peaked at 1.18 MB of a 2 MiB thread,
+# and 0.33 MB at opt-level 1.
+[profile.dev.package.service_utils_rs]
+opt-level = 1
+[profile.dev.package.service_client_core_rs]
+opt-level = 1
+[profile.dev.package.service_client_native_rs]
+opt-level = 1
+[profile.dev.package.big_blobs]
+opt-level = 1
+[profile.dev.package.big_cabinet]
+opt-level = 1
+[profile.dev.package.big_cartridges]
+opt-level = 1
+[profile.dev.package.big_dispatch]
+opt-level = 1
+[profile.dev.package.big_node]
+opt-level = 1
+[profile.dev.package.big_nodule]
+opt-level = 1
+[profile.dev.package.big_repo]
+opt-level = 1
+[profile.dev.package.big_sync]
+opt-level = 1
+[profile.dev.package.day_cli]
+opt-level = 1
 
 # Keep the application debuggable while optimizing the native UI hot path in dev.
 # These overrides apply to desktop/native builds only; the app and shared UI remain

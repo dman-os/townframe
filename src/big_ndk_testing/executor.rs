@@ -19,14 +19,17 @@ use big_cartridges_core::Revision;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchProtocol;
 use big_dispatch_core::InvocationContext;
 use big_ndk::HttpHandle;
 use big_ndk::Nodule;
 use big_nodule::egress;
+use big_nodule::egress::WorkloadCaller;
 use big_nodule::executor::HandlerSpec;
 use big_nodule::executor::Hosted;
 use big_nodule::executor::NoduleExecutor;
+use big_nodule::executor::RoutineCapabilities;
 use big_nodule::wire::delivery_headers;
 use big_nodule::wire::gateway_error;
 use big_nodule::wire::provider_result;
@@ -36,6 +39,7 @@ use http::StatusCode;
 use serde_json::Value;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
+use service_client_core_rs::xrpc::XrpcBody;
 use service_client_core_rs::xrpc::XrpcRequest;
 use service_client_core_rs::xrpc::XrpcResponse;
 use service_client_native_rs::Client;
@@ -93,7 +97,7 @@ impl<N: Nodule + Clone + Send + 'static> Registered for Hosting<N> {
                                 &Method::POST,
                                 &job.path,
                                 &job.headers,
-                                &job.body,
+                                job.body,
                             )
                             .await;
                             // The caller's deadline or cancellation drops its end of the reply
@@ -116,8 +120,8 @@ impl<N: Nodule + Clone + Send + 'static> Registered for Hosting<N> {
 struct Job {
     path: String,
     headers: HeaderMap,
-    body: Vec<u8>,
-    reply: oneshot::Sender<(StatusCode, Vec<u8>)>,
+    body: XrpcBody,
+    reply: oneshot::Sender<(StatusCode, XrpcBody)>,
 }
 
 pub(crate) struct Started {
@@ -131,32 +135,59 @@ pub(crate) struct Started {
 #[derive(Clone)]
 pub(crate) struct Egress {
     dispatch: Client<DispatchProtocol>,
-    signer: CapId,
+    caller: WorkloadCaller,
 }
 
 impl HttpTransport for Egress {
     async fn send(&self, request: XrpcRequest) -> Result<XrpcResponse, HttpTransportError> {
-        let (status, body) = egress::call(
-            &self.dispatch,
-            Some(self.signer),
-            &request.method,
-            &format!("/{}", request.path),
-            &request.headers,
-            &request.body,
-        )
-        .await;
+        let XrpcRequest {
+            method,
+            path,
+            headers,
+            body,
+        } = request;
+        let (status, body) = if path.starts_with("http://") || path.starts_with("https://") {
+            // The check is the host's own; this harness has no HTTP client of its own to
+            // perform an allowed request with, so one that passes is answered as unimplemented.
+            match egress::authorize_net(
+                Some(&self.caller),
+                &method,
+                &path.parse().expect("a test fixture sends a valid URL"),
+                &headers,
+            ) {
+                Ok(()) => (
+                    StatusCode::NOT_IMPLEMENTED,
+                    XrpcBody::json(
+                        br#"{"error":"NotImplemented","message":"the native harness performs no network requests"}"#
+                            .to_vec(),
+                    ),
+                ),
+                Err(refusal) => refusal,
+            }
+        } else {
+            egress::call(
+                &self.dispatch,
+                Some(&self.caller),
+                &method,
+                &format!("/{path}"),
+                &headers,
+                body,
+            )
+            .await
+        };
         Ok(XrpcResponse {
             status,
             headers: HeaderMap::new(),
-            body: serde_json::to_vec(&body).expect("a JSON value serializes"),
+            body,
         })
     }
 }
 
 struct NativeProvider {
     jobs: mpsc::UnboundedSender<Job>,
-    /// The nodule's own dispatch capability, replaced in place when its grants change.
-    capability: Mutex<Option<CapId>>,
+    routine_keys: BTreeMap<String, String>,
+    routine_capabilities: Mutex<BTreeMap<String, RoutineCapabilities>>,
+    config_doc: Mutex<big_cabinet_core::dmeta::DocId>,
 }
 
 #[async_trait]
@@ -168,17 +199,39 @@ impl Provider for NativeProvider {
         request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-    ) -> Result<Value, ProviderError> {
+        body: Option<Body>,
+    ) -> Result<Body, ProviderError> {
+        let body = match body {
+            None => XrpcBody::json(serde_json::to_vec(&input).expect("a JSON value serializes")),
+            Some(Body::Bytes(body)) => XrpcBody::Bytes(body),
+            Some(Body::Json(body)) => {
+                XrpcBody::json(serde_json::to_vec(&body).expect("a JSON value serializes"))
+            }
+            #[cfg(unix)]
+            Some(Body::Descriptors(_)) => return Err(big_nodule::wire::descriptor_body_refused()),
+        };
         let (reply, answer) = oneshot::channel();
+        let routine_key = self
+            .routine_keys
+            .get(operation)
+            .expect("dispatch routed an operation without an admitted routine");
+        let capabilities = self
+            .routine_capabilities
+            .lock()
+            .expect("routine capabilities lock")
+            .get(routine_key)
+            .expect("a ready routine has capabilities")
+            .clone();
         let job = Job {
             path: format!("/xrpc/{operation}"),
             headers: delivery_headers(
                 caller,
                 request,
                 context,
-                *self.capability.lock().expect("capability lock"),
+                &self.config_doc.lock().expect("config doc lock").clone(),
+                &capabilities,
             ),
-            body: serde_json::to_vec(&input).expect("a JSON value serializes"),
+            body,
             reply,
         };
         // A call that raced the nodule's retirement reaches a stopped thread. Like the wasm
@@ -189,13 +242,18 @@ impl Provider for NativeProvider {
         let (status, body) = answer
             .await
             .map_err(|_| gateway_error("the nodule stopped before it answered"))?;
-        provider_result(status, &body)
+        match body {
+            XrpcBody::Json(body) => provider_result(status, &body).map(Body::Json),
+            XrpcBody::Bytes(body) if status.is_success() => Ok(Body::Bytes(body)),
+            XrpcBody::Bytes(_) => Err(gateway_error("a failed byte response is not an XRPC error")),
+        }
     }
 }
 
 struct Running {
     revision: Revision,
-    handler: Digest,
+    actor: CapId,
+    components: BTreeMap<String, Digest>,
     provider: Arc<NativeProvider>,
     stop: oneshot::Sender<()>,
     thread: JoinHandle<()>,
@@ -221,7 +279,32 @@ pub(crate) struct NativeExecutor {
     hosted: Mutex<BTreeMap<CartridgeId, Running>>,
 }
 
+/// What the node minted for a cartridge's hosted nodule: the durable actor its calls are signed
+/// with, and each routine's service handles by routine key (the same ones a wasm routine is
+/// delivered).
+#[derive(Clone)]
+pub struct CartridgeHandles {
+    pub actor: CapId,
+    pub routines: BTreeMap<String, RoutineCapabilities>,
+}
+
 impl NativeExecutor {
+    /// The handles of the nodule hosted for `cartridge_id`, as of its last `ensure`; `None` while
+    /// it is not hosted (not enabled yet, or retired).
+    pub(crate) fn handles(&self, cartridge_id: &CartridgeId) -> Option<CartridgeHandles> {
+        let hosted = self.hosted.lock().expect("hosted lock");
+        let running = hosted.get(cartridge_id)?;
+        Some(CartridgeHandles {
+            actor: running.actor,
+            routines: running
+                .provider
+                .routine_capabilities
+                .lock()
+                .expect("routine capabilities lock")
+                .clone(),
+        })
+    }
+
     pub(crate) fn new(
         nodules: BTreeMap<CartridgeId, Box<dyn Registered>>,
         dispatch: Client<DispatchProtocol>,
@@ -250,16 +333,31 @@ impl NoduleExecutor for NativeExecutor {
     }
 
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted {
+        let components = spec
+            .components
+            .iter()
+            .map(|(key, component)| {
+                let big_cartridges_core::Component::Wasm(wasm) = component else {
+                    unreachable!("admission accepts wasm components only")
+                };
+                (key.clone(), wasm.digest)
+            })
+            .collect::<BTreeMap<_, _>>();
         let stale = {
             let mut hosted = self.hosted.lock().expect("hosted lock");
             match hosted.get(&spec.cartridge_id) {
                 Some(running)
-                    if running.revision == spec.revision
-                        && running.handler == spec.handler.digest =>
+                    if running.revision == spec.revision && running.components == components =>
                 {
                     // The grants may have changed since the last ensure: the nodule is told
                     // the capability that is live now, on its next request.
-                    *running.provider.capability.lock().expect("capability lock") = spec.capability;
+                    *running
+                        .provider
+                        .routine_capabilities
+                        .lock()
+                        .expect("routine capabilities lock") = spec.routine_capabilities.clone();
+                    *running.provider.config_doc.lock().expect("config doc lock") =
+                        spec.config_doc.clone();
                     return Hosted::Ready(Arc::clone(&running.provider) as Arc<dyn Provider>);
                 }
                 Some(_) => hosted.remove(&spec.cartridge_id),
@@ -281,18 +379,28 @@ impl NoduleExecutor for NativeExecutor {
             format!("nodule/{}", spec.cartridge_id),
             Egress {
                 dispatch: self.dispatch.clone(),
-                signer: spec.actor.capability,
+                caller: WorkloadCaller {
+                    signer: spec.actor.capability,
+                    missing_authority: spec.missing_authority.clone(),
+                },
             },
         );
         let provider = Arc::new(NativeProvider {
             jobs: started.jobs,
-            capability: Mutex::new(spec.capability),
+            routine_keys: spec
+                .routines
+                .iter()
+                .map(|(operation, routine)| (operation.clone(), routine.routine_key.clone()))
+                .collect(),
+            routine_capabilities: Mutex::new(spec.routine_capabilities.clone()),
+            config_doc: Mutex::new(spec.config_doc.clone()),
         });
         self.hosted.lock().expect("hosted lock").insert(
             spec.cartridge_id.clone(),
             Running {
                 revision: spec.revision,
-                handler: spec.handler.digest,
+                actor: spec.actor.capability,
+                components: components.clone(),
                 provider: Arc::clone(&provider),
                 stop: started.stop,
                 thread: started.thread,

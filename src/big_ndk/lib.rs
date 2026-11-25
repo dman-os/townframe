@@ -30,6 +30,14 @@
 //! headers, parsed once. Outgoing calls go to `http://dispatch.local` over `wasi:http/client`
 //! ([`WasiHttp`]) with the nodule's own capability.
 //!
+//! A call the routine's `uses` declare but no grant covers yet fails with
+//! [`method_core::ContextError::MissingAuthority`] `{ cartridge, permbind, request }`, which a
+//! method error that wraps `ContextError` (as every one does) carries to the routine: it can
+//! match it, read the pending `request` (a UUID's text) if one was filed, and decide for itself
+//! whether to file one or go on without. A call its `uses` never declared stays `Denied`. A
+//! service handler returns the same error to hand a caller its cartridge's missing authority
+//! unchanged.
+//!
 //! The kit serves unary procedures only: methods with a query-string input and subscriptions
 //! are refused at compile time by [`export_nodule!`].
 
@@ -44,6 +52,7 @@ pub use serve::Nodule;
 pub use serve::Reply;
 pub use serve::invoke;
 pub use serve::serve;
+pub use service_client_core_rs::xrpc::XrpcBody;
 pub use wasi::WasiHttp;
 pub use wasi::serve_wasi;
 
@@ -88,13 +97,18 @@ macro_rules! export_nodule {
                 &self,
                 nsid: &str,
                 cx: &$crate::Cx,
-                body: &[u8],
+                body: $crate::XrpcBody,
             ) -> impl ::core::future::Future<Output = ::core::option::Option<$crate::Reply>> {
+                // Each arm boxes its own handler's future: an `async` block that awaited the
+                // matched arm in place would hold a stack slot for every arm, so its poll frame
+                // would be the sum of all the nodule's handler futures. On a wasm guest's small
+                // stack that is the overflow the route macros were fixed for (service_utils_rs
+                // `bind_service_protocol!`); one allocation per request is the price.
                 async move {
                     $(
-                        if nsid == <$method as $crate::method_core::Method>::XRPC.nsid {
+                        if nsid.split('?').next().unwrap_or(nsid) == <$method as $crate::method_core::Method>::XRPC.nsid {
                             return ::core::option::Option::Some(
-                                $crate::invoke::<Self, $method>(self, cx, body).await,
+                                ::std::boxed::Box::pin($crate::invoke::<Self, $method>(self, cx, body)).await,
                             );
                         }
                     )*

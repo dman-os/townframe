@@ -198,6 +198,9 @@ pub struct AddDoc {
 #[serde(rename_all = "camelCase")]
 pub struct CreateMetaDoc {
     pub capability: CapId,
+    /// Deduplicates retries of this create on this node only; the ledger is not replicated, so
+    /// another node given the same id runs its own create. What makes creators on different
+    /// nodes converge is `name`, not this id.
     pub command: CommandId,
     pub drawer_id: DrawerId,
     pub kind: String,
@@ -367,6 +370,12 @@ pub struct GrantDrawer {
     pub drawer_id: DrawerId,
     pub subject_id: Uuid7,
     pub access: Access,
+    /// Whether the grant outlives `capability`. A grant that is not durable is a temporary
+    /// delegation: it holds only while `capability` does and dies with it, and with a restart.
+    /// A durable one is stored as a standing grant, as the owner's is, and stays until a
+    /// [`RevokeDrawer`] takes it back. Either way the granter needs Admin over the drawer and
+    /// `DELEGATE` on `capability`: durability widens how long the grant lasts, not who may make it.
+    pub durable: bool,
 }
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -59,11 +59,17 @@ To add an operation, drive it through the service clients like a user would, the
 ```bash
 S=<scratchpad>
 TASK_CENSUS_FILE=$S/census.tsv \
-RUST_LOG_TEST="info,big_cabinet=debug,subduction_core=warn,keyhive_core=warn" \
+RUST_LOG_TEST="info,instr=debug,subduction_core=warn,keyhive_core=warn" \
 ./x/agent-build.ts -- cargo nextest run --release -p big_node -j 6 --no-capture \
   -E 'test(/costs::a_note_costs/)' > $S/run.log 2>&1
 deno run --allow-read x/instr-summary.ts $S/run.log --skip 5
 ```
+
+INSTR lines log under the `instr` tracing target. `setup_tracing` and the test setup always prepend
+`instr=off` to the filter, even when `RUST_LOG`/`RUST_LOG_TEST` replaces the default, so a plain
+`info` or `debug` stays quiet. Turn the probes on by naming the target in the env filter:
+`instr=info` for the info/warn probes, `instr=debug` to include the debug-level timing lines (a
+`big_cabinet=debug` directive does not reach them, the target is `instr`, not the crate).
 
 `x/instr-summary.ts` reads two kinds of `INSTR` line:
 - per-sample lines (`INSTR create note 12: wall … cpu … allocations …`), reported as p50, first-tenth
@@ -85,12 +91,13 @@ let instr_start = std::time::Instant::now(); // INSTR
 /* phase a */
 let instr_a = instr_start.elapsed(); // INSTR
 /* phase b */
-tracing::info!(?instr_a, total = ?instr_start.elapsed(), "INSTR <name> timing"); // INSTR
+tracing::info!(target: "instr", ?instr_a, total = ?instr_start.elapsed(), "INSTR <name> timing"); // INSTR
 ```
 
-- Name the line `INSTR <name> timing` so `x/instr-summary.ts` picks it up.
-- Log at a level your `RUST_LOG_TEST` admits.
-- Bracket each sample with `tracing::info!(ordinal, "INSTR <op> begin")` so one sample's lines can be
+- Give every INSTR event `target: "instr"` (the setup prepends `instr=off`; the line is invisible
+  unless the filter opts in) and name it `INSTR <name> timing` so `x/instr-summary.ts` picks it up.
+- Log at a level your `RUST_LOG_TEST` admits for the `instr` target (`instr=info` or `instr=debug`).
+- Bracket each sample with `tracing::info!(target: "instr", ordinal, "INSTR <op> begin")` so one sample's lines can be
   cut out with `awk '/begin ordinal=20$/,/INSTR <op> 20:/'`.
 - Check that the phases sum to the sample's wall time. If they don't, a phase is missing.
 

@@ -1,15 +1,18 @@
 //! The Wasm executor for nodule handlers: the [`NoduleExecutor`] of kind `"wasm"`.
 //!
-//! One wash-runtime [`Host`] runs every nodule handler as a workload of its own: one
-//! `wasi:http/handler@0.3.0` component per (cartridge, revision). A call enters the workload through
-//! [`Ingress::dispatch_request`], the in-process entry point of our wash-runtime fork, so
+//! One wash-runtime [`Host`] runs each declared nodule component as its own workload: one
+//! `wasi:http/handler@0.3.0` component per (cartridge, revision, component key). A call enters
+//! the selected workload through [`Ingress::dispatch_request`], the in-process entry point of our
+//! wash-runtime fork, so
 //! nothing here is reachable over the network:
 //!
 //! - the ingress still binds a loopback listener (the host requires one) but its [`Router`]
 //!   refuses every incoming request and declines every local-egress match;
-//! - the only egress a workload has is `dispatch.local` (a nodule calling an operation through
-//!   dispatch), served by [`Egress`]; [`Sealed::allow_outgoing_request`] refuses every other
-//!   authority, because nodule network facilities are not granted.
+//! - a workload's egress is `dispatch.local` (a nodule calling an operation through dispatch),
+//!   served by [`Egress`], and any `http(s)` URL its routine holds a `#net` permbind and grant
+//!   for (ADR 049 §2): [`Egress`] puts it through [`egress::authorize_net`] and performs an
+//!   allowed one with wash's pooled client, per workload. gRPC never goes out (wash would route
+//!   it around [`Egress`]).
 //!
 //! A nodule learns its own dispatch capability from the `x-nodule-capability` header of every
 //! request it serves and presents it as `authorization: Bearer <id>` on its outgoing calls. Identity is not
@@ -24,22 +27,31 @@
 // for `ensure` deeper than the default limit (rust-lang/rust#159228).
 #![recursion_limit = "256"]
 
+mod net;
+
 use async_trait::async_trait;
 use big_blobs::BlobService;
 use big_blobs_core::BlobId;
-use big_cabinet_core::authority::CapId;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Component as ManifestComponent;
+use big_cartridges_core::Digest;
+use big_cartridges_core::Revision;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchProtocol;
+use big_dispatch_core::HttpForm;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Readiness;
+use big_nodule::XrpcBody;
 use big_nodule::egress;
+use big_nodule::egress::WorkloadCaller;
 use big_nodule::executor::HandlerSpec;
 use big_nodule::executor::Hosted;
 use big_nodule::executor::NoduleExecutor;
 use big_nodule::executor::Reensure;
+use big_nodule::executor::RoutineCapabilities;
 use big_nodule::wire::delivery_headers;
 use big_nodule::wire::gateway_error;
 use big_nodule::wire::provider_result;
@@ -47,9 +59,14 @@ use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
 use bytes::Bytes;
+use futures::StreamExt;
+use http_body::Frame;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use http_body_util::Limited;
+use http_body_util::StreamBody;
+use method_core::ByteBody;
+
 use serde_json::Value;
 use serde_json::json;
 use service_client_native_rs::Client;
@@ -73,13 +90,51 @@ use wash_runtime::host::http::RequestIoFuture;
 use wash_runtime::host::http::RouteError;
 use wash_runtime::host::http::Router;
 use wash_runtime::host::http::SendFuture;
+use wash_runtime::host::http::SendResult;
 use wash_runtime::types::Component;
 use wash_runtime::types::Workload;
 use wash_runtime::types::WorkloadStartRequest;
 use wash_runtime::types::WorkloadStopRequest;
 use wash_runtime::wit::WitInterface;
+use wasmtime_wasi_http::Error as WasiHttpError;
 use wasmtime_wasi_http::RequestOptions;
 use wasmtime_wasi_http::WasiBody;
+
+fn wasi_body(body: XrpcBody) -> (WasiBody, Option<String>, Option<u64>) {
+    match body {
+        XrpcBody::Json(body) => {
+            let length = body.len() as u64;
+            let body = Full::new(Bytes::from(body))
+                .map_err(|never| match never {})
+                .boxed_unsync();
+            (body, Some("application/json".to_owned()), Some(length))
+        }
+        XrpcBody::Bytes(body) => {
+            let mime = body.mime.clone();
+            let length = body.length;
+            let body = StreamBody::new(
+                body.map(|chunk| chunk.map(Frame::data).map_err(WasiHttpError::Connect)),
+            )
+            .boxed_unsync();
+            (body, mime, length)
+        }
+    }
+}
+
+fn byte_body(body: WasiBody, mime: Option<String>, length: Option<u64>) -> ByteBody {
+    let body = ByteBody::new(
+        body.into_data_stream()
+            .map(|chunk| chunk.map_err(|error| std::io::Error::other(format!("{error:?}")))),
+    );
+    let mut body = body;
+    if let Some(mime) = mime {
+        body = body.with_mime(mime);
+    }
+    if let Some(length) = length {
+        body = body.with_length(length);
+    }
+    body
+}
 
 /// The provider type tag dispatch records for nodules this executor hosts.
 const KIND: &str = "wasm";
@@ -93,6 +148,13 @@ const AUTHORITY: &str = "nodule.local";
 /// while it compiles, and a handler is a nodule's logic, not its data (blobs carry data), so a
 /// generous 64 MiB bounds a hostile or mistaken envelope without constraining real handlers.
 const MAX_HANDLER_OCTETS: u64 = 64 * 1024 * 1024;
+
+fn component_digest(component: &ManifestComponent) -> Digest {
+    let ManifestComponent::Wasm(component) = component else {
+        panic!("a nodule component is not wasm")
+    };
+    component.digest
+}
 
 /// Message bodies larger than this fail the call, in both directions: a handler's response and a
 /// guest's outgoing request into dispatch. Either is a JSON value held in memory (several times
@@ -118,9 +180,14 @@ pub struct WasmExecutor {
     arrivals: Arc<Mutex<BTreeMap<BlobId, BTreeMap<CartridgeId, Reensure>>>>,
 }
 
-struct Running {
+struct RunningComponent {
     workload_id: String,
-    handler: BlobId,
+    artifact: BlobId,
+}
+
+struct Running {
+    revision: Revision,
+    components: BTreeMap<String, RunningComponent>,
     provider: Arc<WasmProvider>,
 }
 
@@ -128,9 +195,14 @@ struct Running {
 /// to `dispatch.local` are made through `dispatch`. The returned token stops the feed and then
 /// the host, and must be stopped after the nodule service that calls the executor and before
 /// the dispatch service (and the authority behind it), which in-flight guest calls still use.
+///
+/// `allow_host_loopback` is the node's switch for the machine's own loopback: only when it is
+/// on does `NetTarget::HOST_LOOPBACK`, for the ports a cartridge holds a `grant/net` for,
+/// reach `127.0.0.1`. A guest's own `127.0.0.1` and `localhost` never do.
 pub async fn boot(
     blobs: Arc<BlobService>,
     dispatch: Client<DispatchProtocol>,
+    allow_host_loopback: bool,
 ) -> Res<(Arc<WasmExecutor>, StopToken)> {
     let signers = Signers::default();
     let ingress = Arc::new(
@@ -138,6 +210,7 @@ pub async fn boot(
             .outgoing_handler(Egress {
                 dispatch,
                 signers: Arc::clone(&signers),
+                net: Arc::new(net::NetClients::new(allow_host_loopback)),
             })
             .build()
             .await
@@ -215,10 +288,37 @@ pub async fn boot(
 }
 
 impl WasmExecutor {
+    /// The workload each admitted operation is served by: that of the component its routine
+    /// names, which routines sharing a component share.
+    fn route_table(
+        spec: &HandlerSpec,
+        components: &BTreeMap<String, RunningComponent>,
+    ) -> BTreeMap<String, RoutineTarget> {
+        spec.routines
+            .iter()
+            .map(|(operation, routine)| {
+                let component = components
+                    .get(&routine.component)
+                    .expect("admission resolved every routine component");
+                (
+                    operation.clone(),
+                    RoutineTarget {
+                        routine_key: routine.routine_key.clone(),
+                        workload_id: component.workload_id.clone(),
+                        // The current nodule guest exposes one `wasi:http/handler#handle` entry
+                        // point; every fixture routine names that export. Keep the declared export
+                        // beside the route so a future component ABI can call it directly.
+                        export: routine.export.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// The signer is forgotten only once the workload is stopped, so its in-flight requests keep
     /// their identity while it drains; [`Egress`] answers any call that still outlives it as a
     /// gone upstream.
-    async fn stop_workload(&self, running: &Running) {
+    async fn stop_workload(&self, running: &RunningComponent) {
         self.host
             .workload_stop(WorkloadStopRequest {
                 workload_id: running.workload_id.clone(),
@@ -239,112 +339,147 @@ impl NoduleExecutor for WasmExecutor {
     }
 
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted {
-        let workload_id = format!("nodule/{}/{}", spec.cartridge_id, spec.revision);
-        let handler = BlobId::new(spec.handler.digest.0);
         let stale = {
             let mut hosted = self.hosted.lock().expect("hosted lock");
             match hosted.get(&spec.cartridge_id) {
                 Some(running)
-                    if running.workload_id == workload_id && running.handler == handler =>
+                    if running.revision == spec.revision
+                        && running.components.len() == spec.components.len()
+                        && running.components.iter().all(|(key, running)| {
+                            spec.components.get(key).is_some_and(|artifact| {
+                                running.artifact == BlobId::new(component_digest(artifact).0)
+                            })
+                        }) =>
                 {
-                    // The grants may have changed since the last ensure: the handler is told
-                    // the capability that is live now, on its next request.
-                    running.provider.set_capability(spec.capability);
+                    // Grants may change without recompiling a component: every routine provider
+                    // sees the capability that is live now on its next request.
+                    running
+                        .provider
+                        .set_capabilities(spec.routine_capabilities.clone());
+                    running.provider.set_config(spec.config_doc.clone());
                     return Hosted::Ready(Arc::clone(&running.provider) as Arc<dyn Provider>);
                 }
-                // Another revision (or handler) of the cartridge: the reconciler retires first, but
-                // an executor does not rely on that to keep one workload per cartridge.
                 Some(_) => hosted.remove(&spec.cartridge_id),
                 None => None,
             }
         };
         if let Some(stale) = stale {
-            self.stop_workload(&stale).await;
+            for component in stale.components.values() {
+                self.stop_workload(component).await;
+            }
         }
 
-        // Register for the arrival before looking, so a blob announced in between wakes us.
-        self.arrivals
-            .lock()
-            .expect("arrivals lock")
-            .entry(handler)
-            .or_default()
-            .insert(spec.cartridge_id.clone(), spec.reensure.clone());
-        let Some(info) = self.blobs.stat(&handler).await.expect("blob store stat") else {
-            return Hosted::NotReady(Readiness::ArtifactsUnavailable);
-        };
-        if info.length_octets > MAX_HANDLER_OCTETS {
-            tracing::warn!(cartridge = %spec.cartridge_id, octets = info.length_octets, "handler artifact over the size cap");
-            return Hosted::NotReady(Readiness::ExecutorUnavailable);
-        }
-        let Some(bytes) = self
-            .blobs
-            .read_all(&handler, MAX_HANDLER_OCTETS)
-            .await
-            .expect("blob store read")
-        else {
-            // The blob was complete a moment ago and is not now: retention released it.
-            return Hosted::NotReady(Readiness::ArtifactsUnavailable);
-        };
-        assert_eq!(
-            blake3::hash(&bytes).as_bytes(),
-            &handler.to_bytes32(),
-            "the blob store returned bytes that do not hash to their id"
-        );
-
-        // `pool_size: 0` is wash's `Ephemeral` instance policy: a fresh store and instance per
-        // request, no warm pool, which is the one-instance-per-dispatch rule. The default
-        // `LocalResources` allow no outgoing hosts.
-        // Registered before the workload can make a call: [`Egress`] finds its signer by id.
-        self.signers
-            .lock()
-            .expect("signers lock")
-            .insert(workload_id.clone(), spec.actor.capability);
-        let started = self
-            .host
-            .workload_start(WorkloadStartRequest {
-                workload_id: workload_id.clone(),
-                workload: Workload {
-                    namespace: spec.cartridge_id.to_string(),
-                    name: spec.revision.to_string(),
-                    annotations: Default::default(),
-                    service: None,
-                    components: vec![Component {
-                        name: "handler".into(),
-                        bytes: bytes.into(),
-                        pool_size: 0,
-                        ..Default::default()
-                    }],
-                    host_interfaces: vec![WitInterface::from("wasi:http/handler@0.3.0")],
-                    volumes: vec![],
-                },
-            })
-            .await;
-        if let Err(error) = started {
-            // The bytes are what the envelope declared but are not a component this host can
-            // run (not a component, or imports it does not provide): a property of the
-            // artifact, reported as readiness rather than crashing the node.
-            self.signers
+        // Register every component before looking for its bytes, so an announcement racing this
+        // check wakes the reconcile rather than leaving one routine permanently unavailable.
+        let mut bytes = BTreeMap::new();
+        for (key, artifact) in &spec.components {
+            let blob = BlobId::new(component_digest(artifact).0);
+            self.arrivals
                 .lock()
-                .expect("signers lock")
-                .remove(&workload_id);
-            tracing::warn!(cartridge = %spec.cartridge_id, revision = %spec.revision, "handler workload failed to start: {error:#}");
-            return Hosted::NotReady(Readiness::ExecutorUnavailable);
+                .expect("arrivals lock")
+                .entry(blob)
+                .or_default()
+                .insert(spec.cartridge_id.clone(), spec.reensure.clone());
+            let Some(info) = self.blobs.stat(&blob).await.expect("blob store stat") else {
+                return Hosted::NotReady(Readiness::ArtifactsUnavailable);
+            };
+            if info.length_octets > MAX_HANDLER_OCTETS {
+                tracing::warn!(
+                    cartridge = %spec.cartridge_id,
+                    component = key,
+                    octets = info.length_octets,
+                    "nodule component over the size cap"
+                );
+                return Hosted::NotReady(Readiness::ExecutorUnavailable);
+            }
+            let Some(component_bytes) = self
+                .blobs
+                .read_all(&blob, MAX_HANDLER_OCTETS)
+                .await
+                .expect("blob store read")
+            else {
+                return Hosted::NotReady(Readiness::ArtifactsUnavailable);
+            };
+            assert_eq!(
+                blake3::hash(&component_bytes).as_bytes(),
+                &blob.to_bytes32(),
+                "the blob store returned bytes that do not hash to their id"
+            );
+            bytes.insert(key.clone(), (blob, component_bytes));
         }
-        self.arrivals
-            .lock()
-            .expect("arrivals lock")
-            .get_mut(&handler)
-            .map(|waiting| waiting.remove(&spec.cartridge_id));
+
+        let mut components = BTreeMap::new();
+        for (key, (artifact, component_bytes)) in bytes {
+            let workload_id = format!("nodule/{}/{}/{}", spec.cartridge_id, spec.revision, key);
+            self.signers.lock().expect("signers lock").insert(
+                workload_id.clone(),
+                WorkloadCaller {
+                    signer: spec.actor.capability,
+                    missing_authority: spec.missing_authority.clone(),
+                },
+            );
+            let started = self
+                .host
+                .workload_start(WorkloadStartRequest {
+                    workload_id: workload_id.clone(),
+                    workload: Workload {
+                        namespace: spec.cartridge_id.to_string(),
+                        name: format!("{}-{key}", spec.revision),
+                        annotations: Default::default(),
+                        service: None,
+                        components: vec![Component {
+                            name: key.clone(),
+                            bytes: component_bytes.into(),
+                            pool_size: 0,
+                            ..Default::default()
+                        }],
+                        host_interfaces: vec![WitInterface::from("wasi:http/handler@0.3.0")],
+                        volumes: vec![],
+                    },
+                })
+                .await;
+            if let Err(error) = started {
+                self.signers
+                    .lock()
+                    .expect("signers lock")
+                    .remove(&workload_id);
+                for component in components.values() {
+                    self.stop_workload(component).await;
+                }
+                tracing::warn!(
+                    cartridge = %spec.cartridge_id,
+                    revision = %spec.revision,
+                    component = key,
+                    "nodule component workload failed to start: {error:#}"
+                );
+                return Hosted::NotReady(Readiness::ExecutorUnavailable);
+            }
+            self.arrivals
+                .lock()
+                .expect("arrivals lock")
+                .get_mut(&artifact)
+                .map(|waiting| waiting.remove(&spec.cartridge_id));
+            components.insert(
+                key,
+                RunningComponent {
+                    workload_id,
+                    artifact,
+                },
+            );
+        }
+
+        let routines = Self::route_table(spec, &components);
         let provider = Arc::new(WasmProvider {
             ingress: Arc::clone(&self.ingress),
-            workload_id: workload_id.clone(),
-            capability: Mutex::new(spec.capability),
+            routines,
+            routine_capabilities: Mutex::new(spec.routine_capabilities.clone()),
+            config: Mutex::new(spec.config_doc.clone()),
         });
         self.hosted.lock().expect("hosted lock").insert(
             spec.cartridge_id.clone(),
             Running {
-                workload_id,
-                handler,
+                revision: spec.revision,
+                components,
                 provider: Arc::clone(&provider),
             },
         );
@@ -365,7 +500,9 @@ impl NoduleExecutor for WasmExecutor {
             .expect("hosted lock")
             .remove(cartridge_id);
         if let Some(running) = running {
-            self.stop_workload(&running).await;
+            for component in running.components.values() {
+                self.stop_workload(component).await;
+            }
         }
         let mut arrivals = self.arrivals.lock().expect("arrivals lock");
         arrivals.retain(|_, waiting| {
@@ -375,18 +512,33 @@ impl NoduleExecutor for WasmExecutor {
     }
 }
 
-/// Calls one running handler workload over in-process `wasi:http`.
+/// Routes an operation to the workload for its routine's component. The current guest ABI exposes
+/// one HTTP entry point (`wasi:http/handler#handle`) for all routines; the declared export remains
+/// attached to each route so a component-specific ABI can use it without changing dispatch.
+struct RoutineTarget {
+    workload_id: String,
+    routine_key: String,
+    export: String,
+}
+
+/// Calls one running routine component workload over in-process `wasi:http`.
 struct WasmProvider {
     ingress: Arc<Ingress<Sealed, Egress>>,
-    workload_id: String,
-    /// The nodule's own dispatch capability, delivered in [`NODULE_CAPABILITY_HEADER`]. Replaced in
-    /// place when the nodule's grants change.
-    capability: Mutex<Option<CapId>>,
+    routines: BTreeMap<String, RoutineTarget>,
+    routine_capabilities: Mutex<BTreeMap<String, RoutineCapabilities>>,
+    config: Mutex<big_cabinet_core::dmeta::DocId>,
 }
 
 impl WasmProvider {
-    fn set_capability(&self, capability: Option<CapId>) {
-        *self.capability.lock().expect("capability lock") = capability;
+    fn set_capabilities(&self, capabilities: BTreeMap<String, RoutineCapabilities>) {
+        *self
+            .routine_capabilities
+            .lock()
+            .expect("routine capabilities lock") = capabilities;
+    }
+
+    fn set_config(&self, doc_id: big_cabinet_core::dmeta::DocId) {
+        *self.config.lock().expect("config lock") = doc_id;
     }
 }
 
@@ -399,40 +551,94 @@ impl Provider for WasmProvider {
         request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-    ) -> Result<Value, ProviderError> {
+        body: Option<Body>,
+    ) -> Result<Body, ProviderError> {
+        // Byte bodies reach a guest as wasi:http body streams, which this provider does not
+        let body = match body {
+            None => XrpcBody::json(serde_json::to_vec(&input).expect("a JSON value serializes")),
+            Some(Body::Bytes(body)) => XrpcBody::Bytes(body),
+            Some(Body::Json(body)) => {
+                XrpcBody::json(serde_json::to_vec(&body).expect("a JSON value serializes"))
+            }
+            #[cfg(unix)]
+            Some(Body::Descriptors(_)) => return Err(big_nodule::wire::descriptor_body_refused()),
+        };
+
         // The guest sees the contract every XRPC hop speaks, built by the shared `wire`.
+        let config_doc = self.config.lock().expect("config lock").clone();
+        let routine = self
+            .routines
+            .get(operation)
+            .expect("dispatch routed an operation without an admitted routine");
+        let workload_id = &routine.workload_id;
+        assert_eq!(
+            routine.export, "handle",
+            "the nodule HTTP ABI uses the shared handle export"
+        );
         let headers = delivery_headers(
             caller,
             request,
             context,
-            *self.capability.lock().expect("capability lock"),
+            &config_doc,
+            self.routine_capabilities
+                .lock()
+                .expect("routine capabilities lock")
+                .get(&routine.routine_key)
+                .expect("a ready routine has capabilities"),
         );
-        let mut http_request = hyper::Request::post(format!("http://{AUTHORITY}/xrpc/{operation}"))
-            .header(hyper::header::CONTENT_TYPE, "application/json");
+        let (body, mime, length) = wasi_body(body);
+        let path = match &context.http {
+            Some(HttpForm::Post { query }) if !query.is_empty() => {
+                format!("/xrpc/{operation}?{query}")
+            }
+            _ => format!("/xrpc/{operation}"),
+        };
+        let mut http_request = hyper::Request::post(format!("http://{AUTHORITY}{path}"));
+        if let Some(mime) = mime {
+            http_request = http_request.header(hyper::header::CONTENT_TYPE, mime);
+        }
+        if let Some(length) = length {
+            http_request = http_request.header(hyper::header::CONTENT_LENGTH, length);
+        }
         http_request
             .headers_mut()
             .expect("a fresh request builder has headers")
             .extend(headers);
-        let body = Full::new(Bytes::from(
-            serde_json::to_vec(&input).expect("a JSON value serializes"),
-        ))
-        .map_err(|never| match never {})
-        .boxed_unsync();
         // The operation is an NSID the router resolved, so the URI and headers are valid.
         let request = http_request.body(body).expect("a well-formed request");
 
         let response = self
             .ingress
-            .dispatch_request(&self.workload_id, request)
+            .dispatch_request(workload_id, request)
             .await
             .map_err(gateway_error)?;
-        let status = response.status();
-        let body = Limited::new(response.into_body(), MAX_MESSAGE_OCTETS)
-            .collect()
-            .await
-            .map_err(gateway_error)?
-            .to_bytes();
-        provider_result(status, &body)
+        let (parts, body) = response.into_parts();
+        let status = parts.status;
+        let mime = parts
+            .headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let length = parts
+            .headers
+            .get(hyper::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok());
+        let is_json = mime
+            .as_deref()
+            .is_some_and(method_core::is_json_content_type);
+        if is_json {
+            let body = Limited::new(body, MAX_MESSAGE_OCTETS)
+                .collect()
+                .await
+                .map_err(gateway_error)?
+                .to_bytes();
+            provider_result(status, &body).map(Body::Json)
+        } else if status.is_success() {
+            Ok(Body::Bytes(byte_body(body, mime, length)))
+        } else {
+            Err(gateway_error("a failed byte response is not an XRPC error"))
+        }
     }
 }
 
@@ -457,8 +663,10 @@ impl Router for Sealed {
         Ok(())
     }
 
-    /// Only `dispatch.local` is allowed, and [`Egress`] answers it without any connection.
-    /// Nothing else ever is, because nodule network facilities are not granted.
+    /// Everything but gRPC is let through to [`Egress`], which is where a request is authorized:
+    /// a refusal here is an opaque transport error, and a routine needs the `Denied` or
+    /// `MissingAuthority` answer. gRPC is refused because wash sends it around [`Egress`] (it
+    /// needs HTTP/2), so its destination would never be checked.
     fn allow_outgoing_request(
         &self,
         _workload_id: &str,
@@ -470,11 +678,16 @@ impl Router for Sealed {
             .uri()
             .authority()
             .map(|authority| authority.as_str())
-            == Some(DISPATCH_AUTHORITY)
+            != Some(DISPATCH_AUTHORITY)
+            && request
+                .headers()
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("application/grpc"))
         {
-            return Ok(());
+            wash_runtime::wasmtime::anyhow::bail!("nodule handlers may not send gRPC requests")
         }
-        wash_runtime::wasmtime::anyhow::bail!("nodule handlers may only call {DISPATCH_AUTHORITY}")
+        Ok(())
     }
 
     fn route_incoming_request(
@@ -488,7 +701,7 @@ impl Router for Sealed {
 /// The signer (the nodule actor's own capability) of each running workload's outgoing calls,
 /// by workload id. The id is chosen by the host and is not guest-controllable, which is what
 /// makes it the caller identity of a nested call.
-type Signers = Arc<Mutex<BTreeMap<String, CapId>>>;
+type Signers = Arc<Mutex<BTreeMap<String, WorkloadCaller>>>;
 
 /// The `dispatch.local` egress of the wash host: adapts a workload's outgoing `wasi:http`
 /// request to [`big_nodule::egress::call`], which authorizes it for every executor alike. What
@@ -498,6 +711,25 @@ type Signers = Arc<Mutex<BTreeMap<String, CapId>>>;
 struct Egress {
     dispatch: Client<DispatchProtocol>,
     signers: Signers,
+    /// Performs the requests [`egress::authorize_net`] allowed, refusing the addresses they
+    /// resolve to that no `#net` grant could open.
+    net: Arc<net::NetClients>,
+}
+
+fn answer((status, body): (hyper::StatusCode, XrpcBody)) -> SendResult {
+    let (body, mime, length) = wasi_body(body);
+    let mut builder = hyper::Response::builder().status(status);
+    if let Some(mime) = mime {
+        builder = builder.header(hyper::header::CONTENT_TYPE, mime);
+    }
+    if let Some(length) = length {
+        builder = builder.header(hyper::header::CONTENT_LENGTH, length);
+    }
+    let response = builder.body(body).expect("a well-formed response");
+
+    // Nothing is uploaded out of band: the request body was read in full above.
+    let io: RequestIoFuture = Box::new(async { Ok(()) });
+    Ok((response, io))
 }
 
 impl Egress {
@@ -505,30 +737,57 @@ impl Egress {
         &self,
         workload_id: &str,
         request: hyper::Request<WasiBody>,
-    ) -> (hyper::StatusCode, Value) {
+    ) -> (hyper::StatusCode, XrpcBody) {
         let (parts, body) = request.into_parts();
-        let Ok(body) = Limited::new(body, MAX_MESSAGE_OCTETS).collect().await else {
-            return (
-                hyper::StatusCode::PAYLOAD_TOO_LARGE,
-                json!({ "error": "InvalidRequest", "message": "the request body failed or is too large" }),
-            );
+        let is_json = parts.method == hyper::Method::GET
+            || parts
+                .headers
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(method_core::is_json_content_type);
+        let body = if is_json {
+            let Ok(body) = Limited::new(body, MAX_MESSAGE_OCTETS).collect().await else {
+                return (
+                    hyper::StatusCode::PAYLOAD_TOO_LARGE,
+                    XrpcBody::json(
+                        serde_json::to_vec(&json!({
+                            "error": "InvalidRequest",
+                            "message": "the request body failed or is too large"
+                        }))
+                        .expect("a JSON error serializes"),
+                    ),
+                );
+            };
+            XrpcBody::Json(body.to_bytes().to_vec())
+        } else {
+            let mime = parts
+                .headers
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let length = parts
+                .headers
+                .get(hyper::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse().ok());
+            XrpcBody::Bytes(byte_body(body, mime, length))
         };
-        let signer = self
+        let caller = self
             .signers
             .lock()
             .expect("signers lock")
             .get(workload_id)
-            .copied();
+            .cloned();
         egress::call(
             &self.dispatch,
-            signer,
+            caller.as_ref(),
             &parts.method,
             parts
                 .uri
                 .path_and_query()
                 .map_or(parts.uri.path(), |target| target.as_str()),
             &parts.headers,
-            &body.to_bytes(),
+            body,
         )
         .await
     }
@@ -538,27 +797,50 @@ impl OutgoingHandler for Egress {
     fn send_request(
         &self,
         workload_id: &str,
-        request: hyper::Request<WasiBody>,
-        _options: Option<RequestOptions>,
+        mut request: hyper::Request<WasiBody>,
+        options: Option<RequestOptions>,
         _fut: RequestIoFuture,
     ) -> SendFuture {
+        if request
+            .uri()
+            .authority()
+            .map(|authority| authority.as_str())
+            != Some(DISPATCH_AUTHORITY)
+        {
+            let caller = self
+                .signers
+                .lock()
+                .expect("signers lock")
+                .get(workload_id)
+                .cloned();
+            if let Err(refusal) = egress::authorize_net(
+                caller.as_ref(),
+                request.method(),
+                request.uri(),
+                request.headers(),
+            ) {
+                return Box::new(async move { answer(refusal) });
+            }
+            egress::strip_node_headers(request.headers_mut());
+            let net = Arc::clone(&self.net);
+            let workload_id = workload_id.to_owned();
+            return Box::new(async move {
+                match net.send(&workload_id, request, options).await {
+                    Ok(sent) => sent,
+                    // A destination in a refused range is answered as an undeclared host is.
+                    Err(refused) => {
+                        tracing::warn!(%workload_id, %refused, "refused a network destination");
+                        answer(egress::net_refused())
+                    }
+                }
+            });
+        }
         let egress = self.clone();
         let workload_id = workload_id.to_owned();
-        Box::new(async move {
-            let (status, body) = egress.call(&workload_id, request).await;
-            let body = Full::new(Bytes::from(
-                serde_json::to_vec(&body).expect("a JSON value serializes"),
-            ))
-            .map_err(|never| match never {})
-            .boxed_unsync();
-            let response = hyper::Response::builder()
-                .status(status)
-                .header(hyper::header::CONTENT_TYPE, "application/json")
-                .body(body)
-                .expect("a well-formed response");
-            // Nothing is uploaded out of band: the request body was read in full above.
-            let io: RequestIoFuture = Box::new(async { Ok(()) });
-            Ok((response, io))
-        })
+        Box::new(async move { answer(egress.call(&workload_id, request).await) })
+    }
+
+    fn on_workload_unbind(&self, workload_id: &str) {
+        self.net.forget(workload_id);
     }
 }

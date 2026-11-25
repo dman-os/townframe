@@ -14,7 +14,7 @@ pub enum MetadataRootStatus {
 impl MetadataRootStatus {
     fn from_read_error(error: DrawersError) -> Result<Self, DrawersError> {
         Ok(match error {
-            DrawersError::Docs(DocsError::DocNotFound) => Self::Missing,
+            DrawersError::Docs(DocsError::DocNotFound { .. }) => Self::Missing,
             DrawersError::Denied | DrawersError::Docs(DocsError::Denied | DocsError::Access(_)) => {
                 Self::Denied
             }
@@ -244,6 +244,7 @@ mod tests {
     #[test]
     fn metadata_root_unavailable_reads_are_pending_and_unexpected_errors_propagate() {
         let unknown = DrawersError::Docs(DocsError::UnknownHeads {
+            doc_id: DocId::new([1; 32]),
             heads: vec![automerge::ChangeHash([9; 32])],
         });
         for (error, reason) in [
@@ -276,7 +277,9 @@ mod tests {
         }
         for (error, status) in [
             (
-                DrawersError::Docs(DocsError::DocNotFound),
+                DrawersError::Docs(DocsError::DocNotFound {
+                    doc_id: DocId::new([1; 32]),
+                }),
                 MetadataRootStatus::Missing,
             ),
             (DrawersError::Denied, MetadataRootStatus::Denied),

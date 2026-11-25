@@ -1,11 +1,12 @@
 //! The dispatch wire contract (ADR 027 §3, §6; ADR 033 §4): the node's XRPC reverse proxy, seen
 //! from its callers.
 //!
-//! A caller names an operation by NSID and hands dispatch JSON; dispatch admits the caller's
+//! A caller names an operation by NSID and hands dispatch a [`Body`] (JSON, or a byte stream for a
+//! method that declares a byte encoding, ADR 042); dispatch admits the caller's
 //! [`Authorization`], resolves the provider for the NSID and forwards. Like every service
 //! operation, the caller's `Authorization` is not in the request body: it is the request's
 //! `Authorization: Bearer` credential (the envelope's HTTP metadata). It is the operator's
-//! identity capability, or a handle minted through [`MintDispatchCapability`] that carries a
+//! root capability, or a handle minted through [`MintDispatchCapability`] that carries a
 //! [`DispatchScope`]. Nothing here serves a provider; routing, readiness and the providers
 //! themselves are the host's.
 
@@ -13,6 +14,8 @@ use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Uuid7;
+
+use method_core::ByteRange;
 use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
@@ -152,7 +155,47 @@ impl Readiness {
     }
 }
 
-/// What travels with one call beside its input; providers receive it. The call's deadline,
+/// The state in a person's words (`ready`, `needs configuration`), not the wire's camelCase.
+impl std::fmt::Display for Readiness {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Ready => "ready",
+            Self::Refused => "refused",
+            Self::Disabled => "disabled",
+            Self::NeedsConfiguration => "needs configuration",
+            Self::ProviderMissing => "provider missing",
+            Self::ArtifactsUnavailable => "artifacts unavailable",
+            Self::ExecutorUnavailable => "executor unavailable",
+            Self::Initializing => "initializing",
+            Self::InitFailed => "init failed",
+        })
+    }
+}
+
+/// Where a call came from, as the edge transport that accepted it knows (ADR 042 §3). Only an edge
+/// transport sets it, and it is never inherited: a nodule's egress call, made while serving a
+/// local caller, has the nodule as its origin, which is [`Self::Remote`]. It does not travel on
+/// the wire (`InvocationContext` skips it), so a serialized `Invoke` can never claim to be local.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// Anything that is not provably the node's own machine: a TCP peer, a remote peer, a
+    /// nodule guest (also when it makes the call while serving a local one). The default, so a
+    /// call that no edge vouched for is never local.
+    #[default]
+    Remote,
+    /// A peer on one of the node's Unix sockets, whose uid the listener read with `SO_PEERCRED`.
+    UnixPeer { uid: u32 },
+    /// A native client embedded in the node's own process, such as `day` running the node itself.
+    Embedded,
+}
+
+impl Origin {
+    pub fn is_local(self) -> bool {
+        !matches!(self, Self::Remote)
+    }
+}
+
+/// What travels with one call beside its body; providers receive it. The call's deadline,
 /// request id and trace are not here: they are the [`service_core_rs::RequestContext`] the call
 /// arrives with, and a hop re-derives the remaining budget from it (the `x-timeout-ms` header).
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -162,40 +205,74 @@ pub struct InvocationContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
     /// How the call arrived when it came over HTTP; `None` for a call that did not (a direct
-    /// client call, a nodule's egress), whose `input` is already the method's JSON.
+    /// client call, a nodule's egress), whose `body` is already the method's JSON.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<HttpForm>,
+    /// The part of a byte output the caller asks for (HTTP's `Range`). A method that serves
+    /// ranges answers with a body whose span says what it is; any other answers the whole body,
+    /// which HTTP allows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub range: Option<ByteRange>,
+    /// Where the call came from; set by the edge transport that accepted it, never by the caller.
+    #[serde(skip)]
+    pub origin: Origin,
 }
 
 /// The HTTP form of a call through the `/xrpc/<nsid>` surface. Dispatch holds it to the method's
-/// kind (a query is a GET, a procedure a POST, as in atproto) and, for a GET, builds the input
-/// from the query string by the method's Lexicon parameters, after admitting the caller, so what
-/// a method declares is not revealed to a caller dispatch would refuse.
+/// kind (a query is a GET, a procedure a POST, as in atproto) and builds the method's input from
+/// it after admitting the caller, so what a method declares is not revealed to a caller dispatch
+/// would refuse: a GET's query string is its parameters, typed by the method's Lexicon, and a
+/// POST's body is the raw request body, which dispatch reads as JSON or passes on as bytes
+/// according to the method's declared input encoding.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "camelCase")]
 pub enum HttpForm {
-    /// The JSON body is the call's `input`.
-    Post,
-    /// The call's `input` is ignored: the query string, still percent-encoded, is the request.
+    /// The request body is the call's `body`, as bytes the edge did not interpret; the query
+    /// string, still percent-encoded, carries the parameters of a method whose body is bytes.
+    Post { query: String },
+    /// The call's `body` is ignored: the query string, still percent-encoded, is the request.
     Get { query: String },
 }
 
+pub use service_core_rs::Body;
+
+/// Any JSON value, spelled in place as `serde_json::Value` is: the other cases have no schema, as
+/// they have no serialized form.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Invoke {
     pub operation: String,
-    pub input: Value,
+    /// The Lexicon `parameters` of a method whose body is bytes, which the body cannot carry;
+    /// `Null` for every other method, whose JSON `body` is its query's parameters or its
+    /// procedure's input. A byte body has no serialized form, so a serialized call never has
+    /// these: they travel only with an in-process call.
+    #[serde(skip)]
+    pub parameters: Value,
+    pub body: Body,
     #[serde(default)]
     pub context: InvocationContext,
 }
 
+impl Invoke {
+    /// A call whose body is the JSON `input` (the query's parameters or the procedure's input).
+    pub fn json(operation: impl Into<String>, input: Value, context: InvocationContext) -> Self {
+        Self {
+            operation: operation.into(),
+            parameters: Value::Null,
+            body: Body::Json(input),
+            context,
+        }
+    }
+}
+
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvokeOutput {
-    pub output: Value,
+    pub body: Body,
 }
 
 /// Why an operation that is routed cannot be served right now. Provider readiness is the
@@ -248,6 +325,17 @@ pub enum DispatchError {
     NotReady { reason: NotReadyReason },
     #[error("the input is refused: {0}")]
     InvalidInput(String),
+    /// The call's body is the other case than the method declares: bytes for a JSON method (or a
+    /// JSON body that is not application/json), JSON for a byte method.
+    #[error("the method takes a {expected} body, not {found}")]
+    BodyMismatch { expected: String, found: String },
+    /// The method is local-only (ADR 042 §3) and the call did not come from the node's own
+    /// machine through an edge transport.
+    #[error("the operation is served only to local callers")]
+    LocalOnly,
+    /// A JSON body, which dispatch gathers whole, is over its limit.
+    #[error("the body is over the {limit_octets} octet limit")]
+    TooLarge { limit_octets: u64 },
     /// The provider answered with a body its method's Lexicon does not describe: a provider bug,
     /// as atproto's `InternalServerError`.
     #[error("the provider's answer is not what its method declares: {0}")]

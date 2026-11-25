@@ -35,10 +35,10 @@ macro_rules! instr_pcs_state {
             Ok(cgka) => {
                 let ops = cgka.ops_count();
                 let root = cgka.try_pcs_key_hash();
-                tracing::info!(sed_id = ?$sed_id, label = $label, ops, ?root, ?owner_in_tree, "INSTR pcs state");
+                tracing::info!(target: "instr", sed_id = ?$sed_id, label = $label, ops, ?root, ?owner_in_tree, "INSTR pcs state");
             }
             Err(error) => {
-                tracing::info!(sed_id = ?$sed_id, label = $label, ?error, "INSTR pcs state: no cgka");
+                tracing::info!(target: "instr", sed_id = ?$sed_id, label = $label, ?error, "INSTR pcs state: no cgka");
             }
         }
     }};
@@ -1632,8 +1632,8 @@ where
 /// Start the keyhive-changes RPC subscription for `peer_id` and emit
 /// [`Runtime2Evt::KeyhiveChangeNotif`] events to the hub on every remote
 /// change. Cancelled via `cancel` (connection end) or when a newer connection
-/// for the same peer supersedes it. Best-effort: subscription failures are
-/// logged, never fatal to the connection.
+/// for the same peer supersedes it. Open and stream failures are retried with
+/// backoff until cancelled, never fatal to the connection.
 #[tracing::instrument(level = "debug", skip_all, fields(peer_id = %peer_id))]
 async fn spawn_keyhive_change_subscription(
     wiring: KeyhiveNotifWiring,
@@ -1652,56 +1652,87 @@ async fn spawn_keyhive_change_subscription(
 
     let subscription = async move {
         let client = crate::rpc::IrohBigRepoRpcClient::new(endpoint, endpoint_addr);
-        let mut changes = match client.subscribe_keyhive_changes(64).await {
-            Ok(changes) => changes,
-            Err(error) => {
-                tracing::warn!(%peer_id, ?error, "keyhive RPC subscription failed");
-                return;
-            }
-        };
-        // The first event confirms subscription readiness. Connection
-        // establishment independently initiates the catch-up Keyhive sync; the
-        // notification stream is responsible only for subsequent dirty hints.
-        match tokio::time::timeout(std::time::Duration::from_secs(5), changes.recv()).await {
-            Ok(Ok(Some(event))) if event.initial => {}
-            Ok(Ok(Some(_))) => {
-                tracing::debug!(%peer_id, "keyhive RPC stream sent a non-initial event first");
-            }
-            Ok(Ok(None)) => {
-                tracing::warn!(%peer_id, "keyhive RPC stream closed before readiness");
-                return;
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(%peer_id, ?error, "keyhive RPC stream failed before readiness");
-                return;
-            }
-            Err(_) => {
-                tracing::warn!(%peer_id, "timed out waiting for keyhive RPC subscription readiness");
-                return;
-            }
-        }
-
+        // This is a network edge: the open can time out (slow or flapping links) and the
+        // stream can end under a live connection. Giving up would leave the connection
+        // without push for its whole life, since nothing else re-arms the subscription, so
+        // retry with backoff until the connection ends (`cancel`).
+        let mut backoff_ms = 125_u64;
+        let mut resubscribed = false;
         loop {
-            tokio::select! {
+            let opened = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => break,
-                event = changes.recv() => {
-                    match event {
-                        Ok(Some(_)) => {
-                            wiring
-                                .evt_tx
-                                .send(crate::runtime2::Runtime2Evt::KeyhiveChangeNotif { peer_id: peer_id.clone() })
-                                .await
-                                .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                                .ok();
+                _ = cancel.cancelled() => return,
+                opened = open_keyhive_change_stream(&client) => opened,
+            };
+            match opened {
+                Ok(mut changes) => {
+                    backoff_ms = 125;
+                    if resubscribed {
+                        // Changes admitted while no stream was open were never signalled, and
+                        // the connect-time catch-up predates them: pull once to cover the gap.
+                        notify_keyhive_change(&wiring, &peer_id).await;
+                    }
+                    resubscribed = true;
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => return,
+                            event = changes.recv() => match event {
+                                Ok(Some(_)) => notify_keyhive_change(&wiring, &peer_id).await,
+                                Ok(None) => {
+                                    tracing::warn!(%peer_id, "keyhive RPC stream closed; resubscribing");
+                                    break;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%peer_id, ?error, "keyhive RPC stream failed; resubscribing");
+                                    break;
+                                }
+                            }
                         }
-                        Ok(None) | Err(_) => break,
                     }
                 }
+                Err(error) => {
+                    tracing::warn!(%peer_id, ?error, backoff_ms, "keyhive RPC subscription failed; retrying");
+                }
+            }
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                next = utils_rs::backoff(backoff_ms, 10_000) => backoff_ms = next,
             }
         }
     };
     drop(tasks.spawn(subscription.instrument(tracing::Span::current())));
+}
+
+/// Open the keyhive-changes stream and wait for its readiness event. The first event
+/// confirms subscription readiness; connection establishment independently initiates the
+/// catch-up Keyhive sync, so the stream is responsible only for subsequent dirty hints.
+async fn open_keyhive_change_stream(
+    client: &crate::rpc::IrohBigRepoRpcClient,
+) -> Res<irpc::channel::mpsc::Receiver<crate::rpc::KeyhiveChangedRpcEvent>> {
+    let mut changes = client.subscribe_keyhive_changes(64).await?;
+    match tokio::time::timeout(std::time::Duration::from_secs(5), changes.recv()).await {
+        Ok(Ok(Some(event))) if event.initial => Ok(changes),
+        Ok(Ok(Some(_))) => Err(ferr!("keyhive RPC stream sent a non-initial event first")),
+        Ok(Ok(None)) => Err(ferr!("keyhive RPC stream closed before readiness")),
+        Ok(Err(error)) => Err(ferr!("keyhive RPC stream failed before readiness: {error}")),
+        Err(_) => Err(ferr!(
+            "timed out waiting for keyhive RPC subscription readiness"
+        )),
+    }
+}
+
+/// Tell the hub a peer's keyhive changed. The hub is constructed before and shut down after
+/// every connection subscription, so a closed channel here is a lifecycle bug, not a race.
+async fn notify_keyhive_change(wiring: &KeyhiveNotifWiring, peer_id: &PeerKey) {
+    wiring
+        .evt_tx
+        .send(crate::runtime2::Runtime2Evt::KeyhiveChangeNotif {
+            peer_id: peer_id.clone(),
+        })
+        .await
+        .expect("runtime2 hub outlives its keyhive change subscriptions");
 }
 
 impl<S> crate::runtime2::TransportConnect<Sendable> for IrohTransportConnect<S>

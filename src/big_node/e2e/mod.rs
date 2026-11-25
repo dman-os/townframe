@@ -94,6 +94,8 @@ fn config(secrets: Arc<SecretStore>, sql: Database, storage: big_repo::Storage) 
         listeners: Default::default(),
         peers: None,
         allow_slot_takeover: false,
+        allow_host_loopback: false,
+        upload_hold_grace: None,
     }
 }
 
@@ -143,7 +145,7 @@ async fn read(node: &BigNode, document: &DocId) -> DatumsRead {
     let capability = capability(
         node,
         DocScope {
-            read: BTreeSet::from([document.clone()]),
+            read: DocScope::read_all([document.clone()]),
             ..DocScope::default()
         },
     )

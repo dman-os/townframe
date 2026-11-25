@@ -51,6 +51,8 @@ use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
 const NOTE: &str = "org.example.note";
+/// A second datum kind, for the tests that narrow a drawer reach to one kind.
+const SECRET: &str = "org.example.secret";
 
 fn note(text: &str) -> (DatumKey, Value) {
     (
@@ -70,6 +72,13 @@ fn note_linking(text: &str, target_doc: &DocId) -> (DatumKey, Value) {
     )
 }
 
+fn secret(text: &str) -> (DatumKey, Value) {
+    (
+        format!("{SECRET}/main").parse().unwrap(),
+        json!({"$type": SECRET, "value": text}),
+    )
+}
+
 fn schemas() -> Arc<SchemaRepo> {
     let lexicon = json!({
         "lexicon": 1,
@@ -83,10 +92,22 @@ fn schemas() -> Arc<SchemaRepo> {
             }
         }}}
     });
+    let secret_lexicon = json!({
+        "lexicon": 1,
+        "id": SECRET,
+        "defs": {"main": {"type": "record", "key": "tid", "record": {
+            "type": "object",
+            "required": ["value"],
+            "properties": {"value": {"type": "string"}}
+        }}}
+    });
     Arc::new(
         SchemaRepo::open([crate::schema::SchemaRegistrationGroup::new(
             None,
-            [crate::schema::SchemaRegistration::new(NOTE, lexicon)],
+            [
+                crate::schema::SchemaRegistration::new(NOTE, lexicon),
+                crate::schema::SchemaRegistration::new(SECRET, secret_lexicon),
+            ],
             Vec::new(),
         )])
         .unwrap(),
@@ -212,7 +233,6 @@ impl Node {
             self.authority.client.clone(),
             self.drawers_actor.capability,
             self.drawers_namespace,
-            self.authority.service.operator_uuid(),
             self.sql.clone(),
             Arc::clone(&self.datum_set),
         )
@@ -367,7 +387,11 @@ impl Node {
         for drawer in drawers {
             let (access, _) = self
                 .core()
-                .effective(&RequestContext::root(), actor.actor.actor_id, drawer)
+                .effective(
+                    &RequestContext::root(),
+                    Holder::Actor(actor.actor.actor_id),
+                    drawer,
+                )
                 .await?
                 .ok_or(DrawersError::Denied)?;
             scope.drawers.insert((*drawer).clone(), access);
@@ -489,7 +513,7 @@ impl Node {
                         .mint_doc(
                             actor,
                             DocScope {
-                                read: [doc.clone()].into(),
+                                read: DocScope::read_all([doc.clone()]),
                                 ..Default::default()
                             },
                         )
@@ -549,7 +573,10 @@ impl Node {
                         .mint_doc(
                             actor,
                             DocScope {
-                                write: [doc.clone()].into(),
+                                write: std::collections::BTreeMap::from([(
+                                    doc.clone(),
+                                    big_cabinet_core::doc::DatumKinds::All,
+                                )]),
                                 ..Default::default()
                             },
                         )
@@ -578,7 +605,7 @@ impl Node {
                         .mint_doc(
                             &self.drawers_actor,
                             DocScope {
-                                read: [drawer.clone()].into(),
+                                read: DocScope::read_all([drawer.clone()]),
                                 ..Default::default()
                             },
                         )
@@ -637,7 +664,11 @@ impl Node {
         for root in roots.keys() {
             if let Some((access, _)) = self
                 .core()
-                .effective(&RequestContext::root(), actor.actor.actor_id, root)
+                .effective(
+                    &RequestContext::root(),
+                    Holder::Actor(actor.actor.actor_id),
+                    root,
+                )
                 .await?
             {
                 scope.drawers.insert(root.clone(), access);
@@ -723,6 +754,7 @@ impl Node {
                     drawer_id: drawer.clone(),
                     subject_id: subject.actor.actor_id,
                     access,
+                    durable: false,
                 },
             )
             .await

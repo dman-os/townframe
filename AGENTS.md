@@ -80,7 +80,7 @@
 > Red herring on record: waves of `big sync object task failed; rescheduling` with a local-policy rejection (e.g. `no document definition`, `Policy(DocumentNotFound)`) are NOT a bug in the task lifecycle. Rescheduling is the intentional mechanism by which big_sync races keyhive membership: a doc task may be scheduled before the local keyhive has pulled membership, and the retry succeeds once the pull lands. Do not "fix" this by parking, cancelling, or gating the retries.
 
 If a doc cannot be pulled because the local keyhive rejects it, one of these failed instead:
-- The keyhive pull from the peer the sync task was scheduled for never completed (check the `INSTR sync response`/`resp ingested` warns: `sending=0`/`received=[]`/`our_pending=0` on a peer that should have new events means the serving side's pending/event state diverged from its own admissions).
+- The keyhive pull from the peer the sync task was scheduled for never completed (check the `INSTR sync response`/`resp ingested` warns, which log under the `instr` target and are off even under a plain `RUST_LOG=info`/`RUST_LOG_TEST=debug`: add `instr=info` to `RUST_LOG`/`RUST_LOG_TEST`, e.g. `RUST_LOG_TEST=info,instr=info`; `sending=0`/`received=[]`/`our_pending=0` on a peer that should have new events means the serving side's pending/event state diverged from its own admissions).
 - Keyhive filtering/destination classification on the serving side failed, or its keyhive storage errored (`keyhive protocol error: storage error` on dispatch).
 
 Diagnose the keyhive pull pipeline first; the worker-side retry storm is only the symptom.
@@ -103,6 +103,7 @@ Diagnose the keyhive pull pipeline first; the worker-side retry storm is only th
 - Dayframe UI work has its own playbooks in `.agents/skills/`: `dayframe-design-language` (tokens, components, layout contract), `dayframe-signal-idioms` (runtime-borrow-proof state idioms, `dioxus_storm` event storms), `dayframe-native-dev-loop` (native build, screenshots, AT-SPI inspection), `blitz-dioxus-native-limits` (pinned Blitz capability bounds).
 - Cabinet datum/Lexicon work has its own playbook in `.agents/skills/`: `lexicon-authoring` (open unions, string vocabularies, empty-member convention, unknown-member carrying, admission/codec test chain).
 - Browser automation has `.agents/skills/playwright` (flake-pinned browser farm, per-package `@playwright/test` pins, the `dayframe_web` e2e).
+- Every lane runs its work as one stack of small draft PRs: `.agents/skills/pr-stacks` (naming, bases, docs layers, CI on the tip only, backups; restacking optional, the operator merges with their own tooling).
 ## VCS
 
 > [!INFO]

@@ -16,12 +16,9 @@ impl DocsService {
         params: ReadDatums,
     ) -> Result<DatumsRead, DocsError> {
         let caller = self.invocation(context, params.capability).await?;
-        self.authorize(
-            context,
-            &caller.authority,
-            AccessRequest::Read(&params.doc_id),
-        )
-        .await?;
+        let kinds = self
+            .authorize_read(context, &caller.authority, &params.doc_id)
+            .await?;
         if let Some(key) = params
             .datums
             .iter()
@@ -36,10 +33,18 @@ impl DocsService {
         document
             .with_document(|doc| -> Result<DatumsRead, DocsError> {
                 context.validate()?;
-                let heads = resolve(doc, &params.at)?;
+                let heads = resolve(&params.doc_id, doc, &params.at)?;
                 let keys = match &params.datums {
-                    Some(keys) => keys.clone(),
-                    None => present_keys(doc, &heads)?,
+                    Some(keys) => {
+                        if keys.iter().any(|key| !kinds.allows(key)) {
+                            return Err(DocsError::Denied);
+                        }
+                        keys.clone()
+                    }
+                    None => present_keys(doc, &heads)?
+                        .into_iter()
+                        .filter(|key| kinds.allows(key))
+                        .collect(),
                 };
                 let verdicts: Vec<_> = {
                     let gate = Gate::new(doc, &heads);

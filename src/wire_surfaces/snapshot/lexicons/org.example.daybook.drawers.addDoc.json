@@ -1,0 +1,155 @@
+{
+  "defs": {
+    "AddDoc": {
+      "properties": {
+        "access": {
+          "enum": [
+            "Relay",
+            "Read",
+            "Write",
+            "Admin"
+          ],
+          "type": "string"
+        },
+        "capability": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "docId": {
+          "type": "string"
+        },
+        "drawerId": {
+          "type": "string"
+        },
+        "reach": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "reach",
+        "command",
+        "drawerId",
+        "docId",
+        "access"
+      ],
+      "type": "object"
+    },
+    "WriteReceipt": {
+      "properties": {
+        "docId": {
+          "type": "string"
+        },
+        "heads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "docId",
+        "heads"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "description": "Enters `doc_id` in `drawer_id`'s roster at `access`. Two authorities are checked, because\ntwo different things are given away: `capability` must hold Write on the drawer (Admin to\nconfer Admin), and `reach` must reach the document at `access` or above, since entering it\ndelegates that access to the drawer's members. They are separate so a service can enter a\ndocument into a drawer it owns using a handle its caller lent it for the document alone; a\ncaller holding both passes the same handle twice.",
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "SelfChild"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Docs"
+        },
+        {
+          "name": "DocsUnavailable"
+        },
+        {
+          "description": "Keyhive storage or the engine failed; nothing the caller named is at fault.",
+          "name": "Keyhive"
+        },
+        {
+          "description": "A named group or doc id that is not a 32-byte Ed25519 point.",
+          "name": "InvalidKey"
+        },
+        {
+          "description": "A Keyhive group this node does not hold, perhaps not yet synced.",
+          "name": "UnknownGroup"
+        },
+        {
+          "description": "A principal group the caller named that this node does not hold.",
+          "name": "UnknownPrincipal"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "UnknownDrawer"
+        },
+        {
+          "description": "A peer this node has not met: its keyhive identity arrives with a live connection.",
+          "name": "UnknownPeer"
+        },
+        {
+          "name": "SelfDoc"
+        },
+        {
+          "name": "AlreadyDrawer"
+        },
+        {
+          "name": "NotAnEntry"
+        },
+        {
+          "name": "ForeignLayout"
+        },
+        {
+          "name": "CommandInFlight"
+        },
+        {
+          "name": "CommandReused"
+        },
+        {
+          "name": "RosterUnreadable"
+        },
+        {
+          "name": "InvalidMetaDocSlot"
+        },
+        {
+          "name": "SuccessorCycle"
+        },
+        {
+          "name": "SuccessorSelf"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#AddDoc",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#WriteReceipt",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.drawers.addDoc",
+  "lexicon": 1
+}

@@ -262,6 +262,26 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
 
+    fn nullable_datum_reference_schema(
+        _generator: &mut schemars::SchemaGenerator,
+    ) -> schemars::Schema {
+        schemars::json_schema!({
+            "anyOf": [
+                {"x-lexicon-ref": "org.example.daybook.defs#datumRef"},
+                {"type": "null"}
+            ]
+        })
+    }
+
+    fn nullable_location_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "anyOf": [
+                {"x-lexicon-ref": "org.example.daybook.defs#datumLocation"},
+                {"type": "null"}
+            ]
+        })
+    }
+
     #[macros::datum(authority = "org.example")]
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(rename_all = "camelCase")]
@@ -275,8 +295,10 @@ mod tests {
         #[serde(rename = "odd/key~")]
         odd: DatumReference,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(schema_with = "nullable_datum_reference_schema")]
         maybe: Option<DatumReference>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(schema_with = "nullable_location_schema")]
         at: Option<Location>,
         #[serde(flatten)]
         extra: crate::datum::Extra,

@@ -75,7 +75,7 @@ impl Polls {
             Arc::new(move |scope| {
                 let document = scope
                     .read
-                    .iter()
+                    .keys()
                     .next()
                     .expect("metadata poll names one document")
                     .clone();
@@ -144,11 +144,11 @@ impl Polls {
 
 fn metadata_scope(document: DocId, write: bool) -> DocScope {
     DocScope {
-        read: BTreeSet::from([document.clone()]),
+        read: DocScope::read_all([document.clone()]),
         write: if write {
-            BTreeSet::from([document])
+            std::collections::BTreeMap::from([(document, big_cabinet_core::doc::DatumKinds::All)])
         } else {
-            BTreeSet::new()
+            std::collections::BTreeMap::new()
         },
         ..Default::default()
     }
@@ -409,7 +409,9 @@ async fn uncertain_document_polls_retry_without_advancing_or_losing_work() -> Re
     let mut call = polls.next().await;
     for error in [
         DocsError::Denied,
-        DocsError::DocNotFound,
+        DocsError::DocNotFound {
+            doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+        },
         DocsError::Pending {
             reason: "awaiting signatures".into(),
         },
@@ -647,10 +649,10 @@ async fn a_member_parked_before_its_content_arrives_is_read_again_when_it_materi
     )
     .await?;
     let (blobs, blobs_stop) = crate::boot(crate::Config {
+        upload_hold_grace: None,
         storage: crate::Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
-        operator: big_cabinet_core::dmeta::Uuid7::new(),
         namespace: big_cabinet_core::authority::Namespace {
             namespace_id: big_cabinet_core::dmeta::Uuid7::new(),
             capability: CapId::from_bytes([127; 16]),

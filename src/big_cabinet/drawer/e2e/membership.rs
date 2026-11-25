@@ -68,6 +68,34 @@ async fn a_doc_created_in_a_drawer_belongs_to_it_and_to_the_local_drawers() {
 
     node.grant(&alice, &drawer, &bob, Access::Write).await;
     node.write_note(&bob, &doc, "edited").await.unwrap();
+    let drawer_capability = node
+        .mint_doc(
+            &bob,
+            DocScope {
+                drawers: BTreeMap::from([(
+                    drawer.clone(),
+                    big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+                )]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let (key, value) = note("drawer capability");
+    node.docs()
+        .call(
+            RequestContext::root(),
+            WriteDatums {
+                capability: drawer_capability,
+                command: None,
+                doc_id: doc.clone(),
+                mode: WriteMode::AtCurrent,
+                set: BTreeMap::from([(key, value)]),
+                remove: BTreeSet::new(),
+            },
+        )
+        .await
+        .unwrap();
 
     node.drawers()
         .call(
@@ -97,6 +125,7 @@ async fn a_doc_created_in_a_drawer_belongs_to_it_and_to_the_local_drawers() {
                 drawer_id: drawer.clone(),
                 subject_id: bob.actor.actor_id,
                 access: Access::Read,
+                durable: false,
             },
         )
         .await
@@ -624,7 +653,10 @@ async fn a_self_doc_drawer_is_the_doc_itself() {
                     .mint_doc(
                         &alice,
                         DocScope {
-                            write: [doc.clone()].into(),
+                            write: std::collections::BTreeMap::from([(
+                                doc.clone(),
+                                big_cabinet_core::doc::DatumKinds::All,
+                            )]),
                             ..Default::default()
                         },
                     )
@@ -985,7 +1017,10 @@ async fn an_entry_with_an_unknown_access_level_is_carried_without_granting_or_br
                     .mint_doc(
                         &alice,
                         DocScope {
-                            write: [shared.clone()].into(),
+                            write: std::collections::BTreeMap::from([(
+                                shared.clone(),
+                                big_cabinet_core::doc::DatumKinds::All,
+                            )]),
                             ..Default::default()
                         },
                     )
@@ -1359,7 +1394,10 @@ async fn metadata_protocol_respects_root_and_child_audiences() {
             .mint_doc(
                 &alice,
                 DocScope {
-                    drawers: BTreeMap::from([(drawers[0].clone(), held)]),
+                    drawers: BTreeMap::from([(
+                        drawers[0].clone(),
+                        big_cabinet_core::doc::DrawerReach::all_kinds(held),
+                    )]),
                     ..Default::default()
                 },
             )
@@ -1396,7 +1434,11 @@ async fn metadata_protocol_respects_root_and_child_audiences() {
             );
             assert_eq!(
                 node.core()
-                    .reach(&RequestContext::root(), actor.actor.actor_id, doc)
+                    .reach(
+                        &RequestContext::root(),
+                        Holder::Actor(actor.actor.actor_id),
+                        doc
+                    )
                     .await
                     .unwrap()
                     .map(|(access, _)| access),
@@ -1406,7 +1448,7 @@ async fn metadata_protocol_respects_root_and_child_audiences() {
                 .mint_doc(
                     &actor,
                     DocScope {
-                        read: BTreeSet::from([doc.clone()]),
+                        read: DocScope::read_all([doc.clone()]),
                         ..Default::default()
                     },
                 )
@@ -1467,7 +1509,10 @@ async fn metadata_protocol_respects_root_and_child_audiences() {
                 .mint_doc(
                     &actor,
                     DocScope {
-                        write: BTreeSet::from([doc.clone()]),
+                        write: std::collections::BTreeMap::from([(
+                            doc.clone(),
+                            big_cabinet_core::doc::DatumKinds::All,
+                        )]),
                         ..Default::default()
                     },
                 )
@@ -1524,7 +1569,7 @@ async fn metadata_only_capability_does_not_grant_drawer_or_content() {
                 .metadata(),
                 MintDocCapability {
                     scope: DocScope {
-                        read: BTreeSet::from([created.doc_id.clone()]),
+                        read: DocScope::read_all([created.doc_id.clone()]),
                         ..Default::default()
                     },
                     rights: Rights::USE | Rights::NARROW,
@@ -1604,15 +1649,18 @@ async fn metadata_only_capability_does_not_grant_drawer_or_content() {
         }
         for scope in [
             DocScope {
-                drawers: BTreeMap::from([(home.clone(), Access::Read)]),
+                drawers: BTreeMap::from([(
+                    home.clone(),
+                    big_cabinet_core::doc::DrawerReach::all_kinds(Access::Read),
+                )]),
                 ..Default::default()
             },
             DocScope {
-                read: BTreeSet::from([home.clone()]),
+                read: DocScope::read_all([home.clone()]),
                 ..Default::default()
             },
             DocScope {
-                read: BTreeSet::from([content.clone()]),
+                read: DocScope::read_all([content.clone()]),
                 ..Default::default()
             },
         ] {

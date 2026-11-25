@@ -19,12 +19,17 @@ impl DocsService {
             .signing_invocation(context, metadata, params.capability)
             .await?;
         let actor = &caller.signer;
-        self.authorize(
-            context,
-            &caller.authority,
-            AccessRequest::Write(&params.doc_id),
-        )
-        .await?;
+        let kinds = self
+            .authorize_write(context, &caller.authority, &params.doc_id)
+            .await?;
+        if params
+            .set
+            .keys()
+            .chain(params.remove.iter())
+            .any(|key| !kinds.allows(key))
+        {
+            return Err(DocsError::Denied);
+        }
         let request_digest = digest(&(
             "write",
             actor.actor_id,
@@ -72,7 +77,7 @@ impl DocsService {
                 params.command.as_ref(),
             )
             .await;
-        tracing::debug!(?instr_authorized, total = ?instr_start.elapsed(), "INSTR write timing"); // INSTR
+        tracing::debug!(target: "instr", ?instr_authorized, total = ?instr_start.elapsed(), "INSTR write timing"); // INSTR
         match (&params.command, result) {
             (Some(command), Ok(heads)) => {
                 self.commands.advance(command, State::Done, &heads).await?;
@@ -107,7 +112,7 @@ impl DocsService {
         let staged = document
             .with_document(|doc| -> Result<_, DocsError> {
                 let instr_inner = std::time::Instant::now(); // INSTR
-                let base = Self::condition(doc, mode)?;
+                let base = Self::condition(plan.document, doc, mode)?;
                 let gate = Gate::new(doc, &base);
                 for key in plan.keys() {
                     unaccepted(gate.verify(key)).map_err(|verdict| DocsError::BaseNotAccepted {
@@ -132,7 +137,7 @@ impl DocsService {
                 let tx = Self::begin(doc, &base);
                 let (tx, claims) = self.stage(tx, plan, None)?;
                 tx.rollback();
-                tracing::debug!(changes = doc.get_changes(&[]).len(), ?instr_verified, staged = ?instr_inner.elapsed(), "INSTR commit_write stage split"); // INSTR
+                tracing::debug!(target: "instr", changes = doc.get_changes(&[]).len(), ?instr_verified, staged = ?instr_inner.elapsed(), "INSTR commit_write stage split"); // INSTR
                 Ok((base, claims))
             })
             .await
@@ -143,7 +148,7 @@ impl DocsService {
         let instr_signed = instr_start.elapsed(); // INSTR
         let committed = document
             .with_document(|doc| -> Result<_, DocsError> {
-                Self::condition(doc, mode)?;
+                Self::condition(plan.document, doc, mode)?;
                 doc.set_actor(doc_actor(&self.node_issuer, plan.document));
                 let tx = Self::begin(doc, &base);
                 let (tx, _) = self.stage(tx, plan, Some((&claims, &signatures)))?;
@@ -159,7 +164,7 @@ impl DocsService {
                 Some(denied) => Failure::Refused(denied),
                 None => Failure::Ambiguous(repository(error)),
             })?;
-        tracing::debug!(?instr_handle, ?instr_staged, ?instr_signed, committed = ?instr_start.elapsed(), "INSTR commit_write timing"); // INSTR
+        tracing::debug!(target: "instr", ?instr_handle, ?instr_staged, ?instr_signed, committed = ?instr_start.elapsed(), "INSTR commit_write timing"); // INSTR
         Ok(committed?)
     }
 }

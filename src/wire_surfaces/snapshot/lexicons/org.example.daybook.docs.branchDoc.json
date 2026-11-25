@@ -1,0 +1,170 @@
+{
+  "defs": {
+    "At": {
+      "properties": {
+        "at": {
+          "enum": [
+            "current",
+            "heads"
+          ],
+          "type": "string"
+        },
+        "heads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "at"
+      ],
+      "type": "object"
+    },
+    "BranchDoc": {
+      "properties": {
+        "at": {
+          "ref": "#At",
+          "type": "ref"
+        },
+        "capability": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "docId": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "placement": {
+          "type": "string"
+        },
+        "stealth": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "capability",
+        "command",
+        "docId",
+        "at",
+        "path",
+        "placement"
+      ],
+      "type": "object"
+    },
+    "WriteReceipt": {
+      "properties": {
+        "docId": {
+          "type": "string"
+        },
+        "heads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "docId",
+        "heads"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "InvalidCommand"
+        },
+        {
+          "name": "UnrelatedHistory"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Access"
+        },
+        {
+          "name": "Repository"
+        },
+        {
+          "name": "DocNotFound"
+        },
+        {
+          "name": "UnknownHeads"
+        },
+        {
+          "description": "A document id arrived in a request that is not the 32 bytes every document id is. Ids are\nvariable-width keys on the wire (ADR 012), but a document's id is its ed25519 key, so\nonly a 32-byte one can name a document; refusing here keeps the width from ever reaching\nthe repository, where it is an invariant.",
+          "name": "InvalidDocId"
+        },
+        {
+          "name": "CommandInFlight"
+        },
+        {
+          "name": "CommandReused"
+        },
+        {
+          "name": "UnknownSchema"
+        },
+        {
+          "name": "SystemDatum"
+        },
+        {
+          "name": "SetAndRemoved"
+        },
+        {
+          "name": "InvalidValue"
+        },
+        {
+          "name": "ValueTooLarge"
+        },
+        {
+          "name": "Conflict"
+        },
+        {
+          "name": "BaseNotAccepted"
+        },
+        {
+          "name": "Pending"
+        },
+        {
+          "name": "ResourceRefused"
+        },
+        {
+          "name": "Unsupported"
+        },
+        {
+          "name": "MalformedEvidence"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#BranchDoc",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#WriteReceipt",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.docs.branchDoc",
+  "lexicon": 1
+}

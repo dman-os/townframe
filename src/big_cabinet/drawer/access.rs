@@ -8,6 +8,7 @@ use super::authority_error;
 use super::ledger::Ledger;
 use super::parse_placement;
 use super::state::State;
+use crate::authority::Holder;
 use crate::doc::AccessError;
 use crate::doc::AccessFuture;
 use crate::doc::AccessRequest;
@@ -188,7 +189,7 @@ impl Projection {
     pub(crate) async fn effective(
         &self,
         context: &RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         drawer: &DrawerId,
     ) -> Result<Option<(Access, Vec<CapId>)>, DrawersError> {
         let mut bounds = self
@@ -204,13 +205,13 @@ impl Projection {
                 .await?;
         }
         bounds.insert(drawer.clone(), super::state::Reach::ordinary(Access::Admin));
-        self.granted(context, actor, bounds).await
+        self.granted(context, holder, bounds).await
     }
 
     pub(crate) async fn reach(
         &self,
         context: &RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         doc: &DocId,
     ) -> Result<Option<(Access, Vec<CapId>)>, DrawersError> {
         let mut bounds = self
@@ -225,7 +226,7 @@ impl Projection {
                 .ancestors(super::state::ScopeTarget::Doc(doc))
                 .await?;
         }
-        self.granted(context, actor, bounds).await
+        self.granted(context, holder, bounds).await
     }
 }
 
@@ -304,14 +305,12 @@ impl DrawerAccess {
     /// `issuer` is DrawerService's own actor capability, carrying `use` and `delegate`. `sql` is
     /// the projection and ledger store; DocsRepo may share the same `Database`. `datum_set` is
     /// where drawer docs that arrived by sync are discovered: a doc carrying the drawer datum is
-    /// a drawer this node can project without anyone having remembered it. `operator` is the
-    /// authority's root identity: it reaches every drawer without a standing grant.
+    /// a drawer this node can project without anyone having remembered it.
     pub async fn open(
         big_repo: SharedBigRepo,
         authority: Client<AuthorityProtocol>,
         issuer: CapId,
         namespace: Namespace,
-        operator: Uuid7,
         sql: Database,
         datum_set: Arc<crate::index::DatumSetStore>,
     ) -> Result<(Arc<Self>, DrawerProvider, StopToken), DrawersError> {
@@ -347,7 +346,6 @@ impl DrawerAccess {
             issuer,
             namespace,
             actor,
-            operator,
             state,
             datum_set,
             ledger,
@@ -377,23 +375,25 @@ impl DocAccess for DrawerAccess {
     fn prove<'a>(
         &'a self,
         context: &'a RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         scope: &'a big_cabinet_core::doc::DocScope,
     ) -> AccessFuture<'a, Vec<CapId>> {
         Box::pin(async move {
-            if actor == self.core.actor().actor_id {
+            if holder == Holder::Actor(self.core.actor().actor_id) {
                 return Ok(vec![self.core.namespace.capability]);
             }
             let mut dependencies = Vec::new();
+            let write_docs: BTreeSet<_> = scope.write.keys().cloned().collect();
             for (doc, needed) in scope
                 .read
-                .difference(&scope.write)
+                .keys()
+                .filter(|doc| !write_docs.contains(*doc))
                 .map(|doc| (doc, Access::Read))
-                .chain(scope.write.iter().map(|doc| (doc, Access::Write)))
+                .chain(scope.write.keys().map(|doc| (doc, Access::Write)))
             {
                 let (held, proof) = self
                     .core
-                    .reach(context, actor, doc)
+                    .reach(context, holder, doc)
                     .await
                     .map_err(access_error)?
                     .ok_or_else(|| AccessError::Refused("document is not reachable".into()))?;
@@ -407,7 +407,7 @@ impl DocAccess for DrawerAccess {
                     .ok_or_else(|| AccessError::Refused("invalid drawer placement".into()))?;
                 let (held, proof) = self
                     .core
-                    .effective(context, actor, &drawer)
+                    .effective(context, holder, &drawer)
                     .await
                     .map_err(access_error)?
                     .ok_or_else(|| AccessError::Refused("placement is not reachable".into()))?;
@@ -416,14 +416,15 @@ impl DocAccess for DrawerAccess {
                 }
                 dependencies.extend(proof);
             }
+            // The kinds a drawer reach names are not the drawer policy's: it proves the access.
             for (drawer, needed) in &scope.drawers {
                 let (held, proof) = self
                     .core
-                    .effective(context, actor, drawer)
+                    .effective(context, holder, drawer)
                     .await
                     .map_err(access_error)?
                     .ok_or_else(|| AccessError::Refused("drawer is not reachable".into()))?;
-                if held < *needed {
+                if held < needed.access {
                     return Err(AccessError::Refused("insufficient drawer access".into()));
                 }
                 dependencies.extend(proof);
@@ -437,29 +438,29 @@ impl DocAccess for DrawerAccess {
     fn check<'a>(
         &'a self,
         context: &'a RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         request: AccessRequest<'a>,
     ) -> AccessFuture<'a, bool> {
         Box::pin(async move {
             // The service's own roster writes and metadata doc creations: it checked the caller.
-            if actor == self.core.actor().actor_id {
+            if holder == Holder::Actor(self.core.actor().actor_id) {
                 return Ok(true);
             }
             let verdict = match request {
                 AccessRequest::Read(doc) => self
                     .core
-                    .reach(context, actor, doc)
+                    .reach(context, holder, doc)
                     .await
                     .map(|reached| reached.is_some_and(|(held, _)| held >= Access::Read)),
                 AccessRequest::Write(doc) => self
                     .core
-                    .reach(context, actor, doc)
+                    .reach(context, holder, doc)
                     .await
                     .map(|reached| reached.is_some_and(|(held, _)| held >= Access::Write)),
                 AccessRequest::Create { placement } => match parse_placement(placement) {
                     Some(drawer) => self
                         .core
-                        .effective(context, actor, &drawer)
+                        .effective(context, holder, &drawer)
                         .await
                         .map(|reached| reached.is_some_and(|(held, _)| held >= Access::Write)),
                     None => Ok(false),
@@ -497,15 +498,15 @@ impl DocAccess for DrawerAccess {
     fn readable_in_drawer<'a>(
         &'a self,
         context: &'a RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         drawer_id: &'a DocId,
     ) -> AccessFuture<'a, Option<BTreeSet<DocId>>> {
         Box::pin(async move {
-            let level = if actor == self.core.actor().actor_id {
+            let level = if holder == Holder::Actor(self.core.actor().actor_id) {
                 Some(Access::Admin)
             } else {
                 self.core
-                    .effective(context, actor, drawer_id)
+                    .effective(context, holder, drawer_id)
                     .await
                     .map_err(access_error)?
                     .map(|(access, _)| access)

@@ -1,0 +1,17 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "provider": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.dispatch.route",
+  "lexicon": 1
+}

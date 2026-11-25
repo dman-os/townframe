@@ -64,6 +64,12 @@ pub enum GuardrailsCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Check or bless the wire-surface snapshot (every published Lexicon and sidecar) and judge
+    /// how each Lexicon evolved against the checked-in copy.
+    Wire {
+        #[arg(long)]
+        bless: bool,
+    },
     /// Record a source-bound validation receipt around a command execution.
     Record {
         #[arg(long)]
@@ -169,6 +175,7 @@ pub fn dispatch(root: &Path, cmd: GuardrailsCmd) -> Res<()> {
             check: _,
             json,
         } => contracts::api(&root, package.as_deref(), all, bless, json)?,
+        GuardrailsCmd::Wire { bless } => contracts::wire(&root, bless)?,
         GuardrailsCmd::Record { output, command } => validation::record(&root, &output, &command)?,
         GuardrailsCmd::Verify { receipt } => validation::verify(&root, &receipt)?,
         GuardrailsCmd::Doctor { json } => validation::doctor(&root, json)?,
@@ -262,6 +269,33 @@ mod tests {
         assert!(codes.contains("ERROR_SEND_DISCARDED"));
         assert!(codes.contains("ERROR_IGNORED_TEST"));
         assert!(codes.contains("ERROR_FIXED_TEST_PORT"));
+    }
+
+    #[test]
+    fn inline_sql_is_flagged_outside_queries_directories() {
+        let src = r##"
+            fn run() {
+                let _a = "SELECT 1";
+                let _b = r#"
+                    INSERT INTO t VALUES (1)
+                "#;
+                let _c = "Select a file";
+                let _d = "UPDATE";
+            }
+        "##;
+        let (_, findings) = analysis::scan("src/foo/lib.rs", src);
+        let sql: Vec<_> = findings
+            .iter()
+            .filter(|finding| finding.code == "ERROR_INLINE_SQL")
+            .collect();
+        assert_eq!(sql.len(), 1);
+        assert_eq!(sql[0].actual, 2);
+        let (_, queries) = analysis::scan("src/foo/queries/mod.rs", src);
+        assert!(
+            queries
+                .iter()
+                .all(|finding| finding.code != "ERROR_INLINE_SQL")
+        );
     }
 
     #[test]

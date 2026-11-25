@@ -1,10 +1,13 @@
 use super::*;
+use crate::authority::Holder;
 use crate::test_poll::Poller;
 use big_cabinet_core::authority::AttenuateCapability;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::MintCapability;
 use big_cabinet_core::authority::RetractCapability;
+use big_cabinet_core::doc::DatumKinds;
+use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
 
@@ -57,7 +60,10 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
         .await
         .unwrap();
     let scope = DocScope {
-        write: BTreeSet::from([created.doc_id.clone()]),
+        write: std::collections::BTreeMap::from([(
+            created.doc_id.clone(),
+            big_cabinet_core::doc::DatumKinds::All,
+        )]),
         ..DocScope::default()
     };
     // The authorization's `authority` decides the new handle's scope and rights and its subject
@@ -78,7 +84,7 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
     assert_ne!(bound.issuer_id, owner.actor.actor_id);
     assert_ne!(bound.issuer_id, node.docs_actor.actor.actor_id);
     let object: Value =
-        serde_json::from_str(bound.object.strip_prefix("DocsRepo/scope/v2/").unwrap()).unwrap();
+        serde_json::from_str(bound.object.strip_prefix("DocsRepo/scope/v3/").unwrap()).unwrap();
     assert_eq!(
         object,
         json!({
@@ -184,7 +190,7 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
             .access
             .check(
                 &RequestContext::root(),
-                signer.actor.actor_id,
+                Holder::Actor(signer.actor.actor_id),
                 AccessRequest::Write(&created.doc_id),
             )
             .await
@@ -219,7 +225,7 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
                     .metadata(),
                     MintDocCapability {
                         scope: DocScope {
-                            read: BTreeSet::from([other.doc_id.clone()]),
+                            read: DocScope::read_all([other.doc_id.clone()]),
                             ..DocScope::default()
                         },
                         rights: Rights::USE,
@@ -237,7 +243,7 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
             signer: owner.capability,
         },
         DocScope {
-            read: BTreeSet::from([created.doc_id.clone()]),
+            read: DocScope::read_all([created.doc_id.clone()]),
             ..DocScope::default()
         },
         Rights::USE,
@@ -256,6 +262,240 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
                     set: BTreeMap::from([(key("main"), note("not authorized"))]),
                     remove: BTreeSet::new(),
                 }
+            )
+            .await),
+        Err(DocsError::Denied)
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn a_document_capability_limits_set_and_remove_to_its_datum_kinds() {
+    let node = Node::boot().await;
+    let owner = node.writer("owner").await;
+    let created = node
+        .create(&owner, "create", [(key("main"), note("before"))])
+        .await
+        .unwrap();
+    let capability = node
+        .capability(
+            &owner,
+            DocScope {
+                write: BTreeMap::from([(
+                    created.doc_id.clone(),
+                    DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+                )]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        op(node
+            .client()
+            .call(
+                RequestContext::root(),
+                WriteDatums {
+                    capability,
+                    command: None,
+                    doc_id: created.doc_id.clone(),
+                    mode: WriteMode::AtCurrent,
+                    set: BTreeMap::from([(key("main"), note("after"))]),
+                    remove: BTreeSet::new(),
+                },
+            )
+            .await)
+        .is_ok()
+    );
+    let other_key: DatumKey = format!("{TEXT_NOTE}/main").parse().unwrap();
+    assert_eq!(
+        op(node
+            .client()
+            .call(
+                RequestContext::root(),
+                WriteDatums {
+                    capability,
+                    command: None,
+                    doc_id: created.doc_id.clone(),
+                    mode: WriteMode::AtCurrent,
+                    set: BTreeMap::from([(other_key.clone(), note("denied"))]),
+                    remove: BTreeSet::new(),
+                },
+            )
+            .await),
+        Err(DocsError::Denied)
+    );
+    assert_eq!(
+        op(node
+            .client()
+            .call(
+                RequestContext::root(),
+                WriteDatums {
+                    capability,
+                    command: None,
+                    doc_id: created.doc_id,
+                    mode: WriteMode::AtCurrent,
+                    set: BTreeMap::new(),
+                    remove: BTreeSet::from([other_key]),
+                },
+            )
+            .await),
+        Err(DocsError::Denied)
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn a_document_capability_filters_reads_to_its_datum_kinds() {
+    let node = Node::boot().await;
+    let owner = node.writer("owner").await;
+    let other_key: DatumKey = format!("{TEXT_NOTE}/main").parse().unwrap();
+    let created = node
+        .create(
+            &owner,
+            "create",
+            [
+                (key("main"), note("public")),
+                (
+                    other_key.clone(),
+                    json!({"$type": TEXT_NOTE, "text": "sensitive"}),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    let capability = node
+        .capability(
+            &owner,
+            DocScope {
+                read: BTreeMap::from([(
+                    created.doc_id.clone(),
+                    DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+                )]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let listing = node
+        .client()
+        .call(
+            RequestContext::root(),
+            ListDatums {
+                capability,
+                doc_id: created.doc_id.clone(),
+                at: At::Current,
+                with_authors: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        listing.datums.keys().collect::<Vec<_>>(),
+        vec![&key("main")]
+    );
+
+    let read = node
+        .client()
+        .call(
+            RequestContext::root(),
+            ReadDatums {
+                capability,
+                doc_id: created.doc_id.clone(),
+                at: At::Current,
+                datums: None,
+                optimistic: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(read.datums.contains_key(&key("main")));
+    assert!(!read.datums.contains_key(&other_key));
+
+    assert_eq!(
+        op(node
+            .client()
+            .call(
+                RequestContext::root(),
+                ReadDatums {
+                    capability,
+                    doc_id: created.doc_id,
+                    at: At::Current,
+                    datums: Some(BTreeSet::from([other_key])),
+                    optimistic: false,
+                },
+            )
+            .await),
+        Err(DocsError::Denied)
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn datum_kind_capabilities_can_only_be_narrowed() {
+    let node = Node::boot().await;
+    let owner = node.writer("owner").await;
+    let created = node
+        .create(&owner, "create", [(key("main"), note("before"))])
+        .await
+        .unwrap();
+    let limited = mint(
+        &node,
+        Authorization::identity(owner.capability),
+        DocScope {
+            read: BTreeMap::from([(
+                created.doc_id.clone(),
+                DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+            )]),
+            write: BTreeMap::from([(
+                created.doc_id.clone(),
+                DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+            )]),
+            ..DocScope::default()
+        },
+        Rights::USE | Rights::NARROW,
+    )
+    .await;
+    let narrowed = mint(
+        &node,
+        Authorization {
+            authority: limited.capability_id,
+            signer: owner.capability,
+        },
+        DocScope {
+            read: BTreeMap::from([(
+                created.doc_id.clone(),
+                DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+            )]),
+            write: BTreeMap::from([(
+                created.doc_id.clone(),
+                DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+            )]),
+            ..DocScope::default()
+        },
+        Rights::USE,
+    )
+    .await;
+    assert_ne!(narrowed.capability_id, limited.capability_id);
+    assert_eq!(
+        op(node
+            .client()
+            .call_with(
+                RequestContext::root(),
+                Authorization {
+                    authority: limited.capability_id,
+                    signer: owner.capability,
+                }
+                .metadata(),
+                MintDocCapability {
+                    scope: DocScope {
+                        write: BTreeMap::from([(created.doc_id, DatumKinds::All,)]),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE,
+                    subject: None,
+                },
             )
             .await),
         Err(DocsError::Denied)
@@ -301,7 +541,10 @@ async fn a_delegate_handle_cannot_be_rebound_to_another_actor_nor_sign_as_one() 
         .await
         .unwrap();
     let scope = DocScope {
-        write: BTreeSet::from([created.doc_id.clone()]),
+        write: std::collections::BTreeMap::from([(
+            created.doc_id.clone(),
+            big_cabinet_core::doc::DatumKinds::All,
+        )]),
         ..DocScope::default()
     };
     let delegate = mint(
@@ -444,7 +687,10 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
         &node,
         Authorization::identity(owner.capability),
         DocScope {
-            write: BTreeSet::from([created.doc_id.clone()]),
+            write: std::collections::BTreeMap::from([(
+                created.doc_id.clone(),
+                big_cabinet_core::doc::DatumKinds::All,
+            )]),
             create: BTreeSet::from([PLACEMENT.into()]),
             ..DocScope::default()
         },
@@ -485,9 +731,12 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                 parent: None,
                 dependencies: Vec::new(),
                 object: format!(
-                    "DocsRepo/scope/v2/{}",
+                    "DocsRepo/scope/v3/{}",
                     serde_json::to_string(&DocScope {
-                        write: BTreeSet::from([created.doc_id.clone()]),
+                        write: std::collections::BTreeMap::from([(
+                            created.doc_id.clone(),
+                            big_cabinet_core::doc::DatumKinds::All
+                        )]),
                         create: BTreeSet::from([PLACEMENT.into()]),
                         ..DocScope::default()
                     })
@@ -697,19 +946,19 @@ impl DocAccess for InterruptedPlacement {
     fn prove<'a>(
         &'a self,
         context: &'a RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         scope: &'a DocScope,
     ) -> AccessFuture<'a, Vec<CapId>> {
-        self.ledger.prove(context, actor, scope)
+        self.ledger.prove(context, holder, scope)
     }
 
     fn check<'a>(
         &'a self,
         context: &'a RequestContext,
-        actor: Uuid7,
+        holder: Holder,
         request: AccessRequest<'a>,
     ) -> AccessFuture<'a, bool> {
-        self.ledger.check(context, actor, request)
+        self.ledger.check(context, holder, request)
     }
 
     fn place<'a>(
@@ -742,7 +991,11 @@ async fn assert_doc_access(
             for &(subject, expected) in subjects {
                 assert_eq!(
                     access
-                        .check(&RequestContext::root(), subject.actor.actor_id, request)
+                        .check(
+                            &RequestContext::root(),
+                            Holder::Actor(subject.actor.actor_id),
+                            request
+                        )
                         .await
                         .unwrap(),
                     expected
@@ -801,7 +1054,10 @@ async fn bound_creation_requests(
         datums: BTreeMap::from([(key("main"), note("content"))]),
     };
     let branch_scope = DocScope {
-        write: BTreeSet::from([origin.doc_id.clone()]),
+        write: std::collections::BTreeMap::from([(
+            origin.doc_id.clone(),
+            big_cabinet_core::doc::DatumKinds::All,
+        )]),
         ..create_scope.clone()
     };
     let branch_cap = mint(
@@ -1074,7 +1330,7 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
 
     struct Policy {
         sql: Database,
-        drawers: BTreeMap<DocId, DrawerAccess>,
+        drawers: BTreeMap<DocId, big_cabinet_core::doc::DrawerReach>,
         selector: DocId,
         denied: DocId,
         origins: BTreeSet<DocId>,
@@ -1085,7 +1341,7 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
         fn prove<'a>(
             &'a self,
             _context: &'a RequestContext,
-            _actor: Uuid7,
+            _holder: Holder,
             scope: &'a DocScope,
         ) -> AccessFuture<'a, Vec<CapId>> {
             assert_eq!(scope.drawers, self.drawers);
@@ -1095,7 +1351,7 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
         fn check<'a>(
             &'a self,
             _context: &'a RequestContext,
-            _actor: Uuid7,
+            _holder: Holder,
             _request: AccessRequest<'a>,
         ) -> AccessFuture<'a, bool> {
             panic!("reference queries must not check identity grants")
@@ -1118,7 +1374,14 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
             documents: Option<&'a BTreeSet<DocId>>,
         ) -> AccessFuture<'a, BTreeMap<DocId, DrawerAccess>> {
             Box::pin(async move {
-                assert_eq!(drawers, &self.drawers);
+                assert_eq!(
+                    drawers,
+                    &self
+                        .drawers
+                        .iter()
+                        .map(|(drawer, reach)| (drawer.clone(), reach.access))
+                        .collect::<BTreeMap<_, _>>()
+                );
                 let documents = documents.expect("reference authorization must be bounded");
                 self.calls.lock().unwrap().push(documents.clone());
                 if documents == &BTreeSet::from([self.denied.clone()]) {
@@ -1172,7 +1435,10 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
     let datum_ref = Arc::new(DatumRefStore::new(index_sql.clone()).await.unwrap());
     let policy = Arc::new(Policy {
         sql: index_sql.clone(),
-        drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Read)]),
+        drawers: BTreeMap::from([(
+            drawer.clone(),
+            big_cabinet_core::doc::DrawerReach::all_kinds(DrawerAccess::Read),
+        )]),
         selector: selector.clone(),
         denied: denied.clone(),
         origins: BTreeSet::from([first_origin.clone(), second_origin]),
@@ -1276,24 +1542,24 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
 async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_dependency() {
     struct Policy {
         ledger: Arc<LedgerAccess>,
-        proofs: std::sync::Mutex<Vec<(Uuid7, DocScope)>>,
+        proofs: std::sync::Mutex<Vec<(Holder, DocScope)>>,
     }
 
     impl DocAccess for Policy {
         fn prove<'a>(
             &'a self,
             context: &'a RequestContext,
-            actor: Uuid7,
+            holder: Holder,
             scope: &'a DocScope,
         ) -> AccessFuture<'a, Vec<CapId>> {
-            self.proofs.lock().unwrap().push((actor, scope.clone()));
-            self.ledger.prove(context, actor, scope)
+            self.proofs.lock().unwrap().push((holder, scope.clone()));
+            self.ledger.prove(context, holder, scope)
         }
 
         fn check<'a>(
             &'a self,
             _context: &'a RequestContext,
-            _actor: Uuid7,
+            _holder: Holder,
             _request: AccessRequest<'a>,
         ) -> AccessFuture<'a, bool> {
             panic!("mint and scoped invocation must not perform identity checks")
@@ -1316,8 +1582,11 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
     let read_doc = DocId::new([71; 32]);
     let write_doc = DocId::new([72; 32]);
     let scope = DocScope {
-        read: BTreeSet::from([read_doc.clone()]),
-        write: BTreeSet::from([write_doc.clone()]),
+        read: DocScope::read_all([read_doc.clone()]),
+        write: std::collections::BTreeMap::from([(
+            write_doc.clone(),
+            big_cabinet_core::doc::DatumKinds::All,
+        )]),
         create: BTreeSet::from([PLACEMENT.into()]),
         ..DocScope::default()
     };
@@ -1348,16 +1617,16 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
     assert_eq!(dependencies.len(), objects.len());
     assert_eq!(
         node.access
-            .prove(&context, owner.actor.actor_id, &scope)
+            .prove(&context, Holder::Actor(owner.actor.actor_id), &scope)
             .await
             .unwrap(),
         dependencies
     );
     let mut overlapping = scope.clone();
-    overlapping.read.insert(write_doc.clone());
+    overlapping.read.insert(write_doc.clone(), DatumKinds::All);
     assert_eq!(
         node.access
-            .prove(&context, owner.actor.actor_id, &overlapping)
+            .prove(&context, Holder::Actor(owner.actor.actor_id), &overlapping)
             .await
             .unwrap(),
         dependencies
@@ -1388,7 +1657,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
                 signer: owner.capability,
             },
             DocScope {
-                read: BTreeSet::from([write_doc.clone()]),
+                read: DocScope::read_all([write_doc.clone()]),
                 ..DocScope::default()
             },
             Rights::USE,
@@ -1444,14 +1713,15 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
     let mut unsupported = scope.clone();
     unsupported.drawers.insert(
         DocId::new([73; 32]),
-        big_cabinet_core::drawer::DrawerAccess::Read,
+        big_cabinet_core::doc::DrawerReach::all_kinds(big_cabinet_core::drawer::DrawerAccess::Read),
     );
     assert_eq!(
         node.capability(&owner, unsupported.clone()).await,
         Err(DocsError::Denied)
     );
-    let mut expected = vec![(owner.actor.actor_id, scope); objects.len() * 3];
-    expected.push((owner.actor.actor_id, unsupported));
+    let holder = Holder::Actor(owner.actor.actor_id);
+    let mut expected = vec![(holder, scope); objects.len() * 3];
+    expected.push((holder, unsupported));
     assert_eq!(*policy.proofs.lock().unwrap(), expected);
     node.stop().await;
 }
@@ -1466,7 +1736,7 @@ async fn a_scoped_handle_presented_by_an_actor_it_is_not_bound_to_cannot_mint() 
         .await
         .unwrap();
     let scope = DocScope {
-        read: BTreeSet::from([created.doc_id.clone()]),
+        read: DocScope::read_all([created.doc_id.clone()]),
         ..DocScope::default()
     };
     let held = mint(
@@ -1510,7 +1780,7 @@ async fn mint_requires_narrow_bounded_rights_and_current_source_entitlements() {
         .await
         .unwrap();
     let scope = DocScope {
-        read: BTreeSet::from([created.doc_id.clone()]),
+        read: DocScope::read_all([created.doc_id.clone()]),
         ..DocScope::default()
     };
     let use_only = actor(&node, "use-only", Rights::USE).await;
@@ -1595,7 +1865,10 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
         .await
         .unwrap();
     let scope = DocScope {
-        write: BTreeSet::from([created.doc_id.clone()]),
+        write: std::collections::BTreeMap::from([(
+            created.doc_id.clone(),
+            big_cabinet_core::doc::DatumKinds::All,
+        )]),
         create: BTreeSet::from([PLACEMENT.into()]),
         ..DocScope::default()
     };
@@ -1629,7 +1902,7 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
     let namespace = node.docs_namespace;
     let access = Arc::clone(&node.access);
     let gates = access
-        .prove(&context, owner.actor.actor_id, &scope)
+        .prove(&context, Holder::Actor(owner.actor.actor_id), &scope)
         .await
         .unwrap();
     assert_eq!(gates.len(), 3);
@@ -1774,13 +2047,15 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
     node.start().await.unwrap();
     let fresh_gates = node
         .access
-        .prove(&context, owner.actor.actor_id, &scope)
+        .prove(&context, Holder::Actor(owner.actor.actor_id), &scope)
         .await
         .unwrap();
     assert_eq!(fresh_gates.len(), gates.len());
     assert!(fresh_gates.iter().all(|gate| !gates.contains(gate)));
     assert!(matches!(
-        access.prove(&context, owner.actor.actor_id, &scope).await,
+        access
+            .prove(&context, Holder::Actor(owner.actor.actor_id), &scope)
+            .await,
         Err(AccessError::Refused(_))
     ));
     let fresh = node.capability(&owner, scope).await.unwrap();
@@ -1918,7 +2193,7 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
             None
         };
         let scope = DocScope {
-            read: BTreeSet::from([created.doc_id.clone()]),
+            read: DocScope::read_all([created.doc_id.clone()]),
             ..DocScope::default()
         };
         let capability = mint(
@@ -2013,7 +2288,7 @@ async fn a_held_document_poll_acquires_interest_in_an_absent_document() {
         .capability(
             &reader,
             DocScope {
-                read: BTreeSet::from([absent.clone()]),
+                read: DocScope::read_all([absent.clone()]),
                 ..DocScope::default()
             },
         )
@@ -2041,4 +2316,82 @@ async fn a_held_document_poll_acquires_interest_in_an_absent_document() {
     .expect("the held poll never put the document in the sync demand set");
     drop(page);
     node.stop().await;
+}
+
+/// A client-chosen document id of any width other than 32 bytes used to reach the repository
+/// and kill its hub, and with it the node. It is refused as a typed error where the request
+/// names it, on every path that names one, and the node keeps serving.
+#[tokio::test]
+async fn a_document_id_that_is_not_32_bytes_is_refused_and_the_node_keeps_serving() {
+    let node = Node::boot().await;
+    let owner = node.writer("owner").await;
+    let created = node
+        .create(&owner, "create", [(key("main"), note("kept"))])
+        .await
+        .unwrap();
+    let malformed = [
+        DocId::new(Vec::<u8>::new()),
+        DocId::new(b"z"),
+        DocId::new([5; 31]),
+        DocId::new([5; 33]),
+    ];
+    for bad in &malformed {
+        let refused = DocsError::InvalidDocId {
+            doc_id: bad.clone(),
+        };
+        // Minting a scope that names the id, as a document it reads or writes or as a drawer.
+        for scope in [
+            DocScope {
+                read: DocScope::read_all([bad.clone()]),
+                ..DocScope::default()
+            },
+            DocScope {
+                write: std::collections::BTreeMap::from([(
+                    bad.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
+                ..DocScope::default()
+            },
+            DocScope {
+                drawers: BTreeMap::from([(
+                    bad.clone(),
+                    big_cabinet_core::doc::DrawerReach::all_kinds(DrawerAccess::Read),
+                )]),
+                ..DocScope::default()
+            },
+        ] {
+            assert_eq!(node.capability(&owner, scope).await.unwrap_err(), refused);
+        }
+        // Naming it in a request made with a valid handle.
+        let handle = node
+            .capability(
+                &owner,
+                DocScope {
+                    read: DocScope::read_all([created.doc_id.clone()]),
+                    ..DocScope::default()
+                },
+            )
+            .await
+            .unwrap();
+        let read = node
+            .client()
+            .call(
+                RequestContext::root(),
+                ReadDatums {
+                    capability: handle,
+                    doc_id: bad.clone(),
+                    at: At::Current,
+                    datums: None,
+                    optimistic: false,
+                },
+            )
+            .await;
+        assert_eq!(op(read).unwrap_err(), refused);
+    }
+    // The hub that would have crashed is still serving.
+    let read = node
+        .read(&owner, &created.doc_id, At::Current, false)
+        .await
+        .unwrap();
+    assert_eq!(accepted(&read.datums[&key("main")]).0, &note("kept"));
 }

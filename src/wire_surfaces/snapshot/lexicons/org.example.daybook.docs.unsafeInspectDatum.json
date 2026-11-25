@@ -1,0 +1,320 @@
+{
+  "defs": {
+    "Cid": {
+      "items": {
+        "maximum": 255,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "DatumClaim": {
+      "nullable": [
+        "valueCid"
+      ],
+      "properties": {
+        "actorUuid": {
+          "type": "string"
+        },
+        "chosenUuid": {
+          "type": "string"
+        },
+        "datumKey": {
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "Set",
+            "Remove"
+          ],
+          "type": "string"
+        },
+        "originDocument": {
+          "type": "string"
+        },
+        "predecessors": {
+          "items": {
+            "ref": "#Cid",
+            "type": "ref"
+          },
+          "type": "array"
+        },
+        "valueCid": {
+          "ref": "#Cid",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "originDocument",
+        "datumKey",
+        "chosenUuid",
+        "actorUuid",
+        "operation"
+      ],
+      "type": "object"
+    },
+    "DatumClaimEvidence": {
+      "properties": {
+        "marker": {
+          "type": "string"
+        },
+        "result": {
+          "ref": "#SignatureEvidence",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "marker",
+        "result"
+      ],
+      "type": "object"
+    },
+    "DatumClaimsInspection": {
+      "properties": {
+        "datumKey": {
+          "type": "string"
+        },
+        "docId": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "ref": "#DatumClaimEvidence",
+            "type": "ref"
+          },
+          "type": "array"
+        },
+        "heads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "enum": [
+            "unsafeUnattributedSignatureEvidence"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "docId",
+        "datumKey",
+        "heads",
+        "scope",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "SignatureEvidence": {
+      "properties": {
+        "evidence": {
+          "ref": "#VerifiedSignatureEvidence",
+          "type": "ref"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "verifiedSignature",
+            "pending",
+            "resourceRefused",
+            "unsupported",
+            "provenForgery"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "UnsafeDatumInspection": {
+      "nullable": [
+        "nativeValue"
+      ],
+      "properties": {
+        "claims": {
+          "ref": "#DatumClaimsInspection",
+          "type": "ref"
+        },
+        "nativeValue": {
+          "type": "bytes"
+        },
+        "schemaKnown": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schemaKnown",
+        "claims"
+      ],
+      "type": "object"
+    },
+    "UnsafeInspectDatum": {
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "datumKey": {
+          "type": "string"
+        },
+        "docId": {
+          "type": "string"
+        },
+        "heads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "capability",
+        "docId",
+        "datumKey",
+        "heads"
+      ],
+      "type": "object"
+    },
+    "VerifiedSignatureEvidence": {
+      "properties": {
+        "actorPublicKey": {
+          "type": "string"
+        },
+        "automergeActor": {
+          "type": "bytes"
+        },
+        "claim": {
+          "ref": "#DatumClaim",
+          "type": "ref"
+        },
+        "introductionHash": {
+          "type": "string"
+        },
+        "introductionMarker": {
+          "type": "string"
+        },
+        "parents": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "resultingHeads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "signature": {
+          "type": "bytes"
+        }
+      },
+      "required": [
+        "signature",
+        "actorPublicKey",
+        "claim",
+        "introductionMarker",
+        "introductionHash",
+        "parents",
+        "resultingHeads",
+        "automergeActor"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "InvalidCommand"
+        },
+        {
+          "name": "UnrelatedHistory"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Access"
+        },
+        {
+          "name": "Repository"
+        },
+        {
+          "name": "DocNotFound"
+        },
+        {
+          "name": "UnknownHeads"
+        },
+        {
+          "description": "A document id arrived in a request that is not the 32 bytes every document id is. Ids are\nvariable-width keys on the wire (ADR 012), but a document's id is its ed25519 key, so\nonly a 32-byte one can name a document; refusing here keeps the width from ever reaching\nthe repository, where it is an invariant.",
+          "name": "InvalidDocId"
+        },
+        {
+          "name": "CommandInFlight"
+        },
+        {
+          "name": "CommandReused"
+        },
+        {
+          "name": "UnknownSchema"
+        },
+        {
+          "name": "SystemDatum"
+        },
+        {
+          "name": "SetAndRemoved"
+        },
+        {
+          "name": "InvalidValue"
+        },
+        {
+          "name": "ValueTooLarge"
+        },
+        {
+          "name": "Conflict"
+        },
+        {
+          "name": "BaseNotAccepted"
+        },
+        {
+          "name": "Pending"
+        },
+        {
+          "name": "ResourceRefused"
+        },
+        {
+          "name": "Unsupported"
+        },
+        {
+          "name": "MalformedEvidence"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#UnsafeInspectDatum",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#UnsafeDatumInspection",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.docs.unsafeInspectDatum",
+  "lexicon": 1
+}

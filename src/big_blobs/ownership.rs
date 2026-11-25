@@ -20,6 +20,16 @@ use utils_rs::prelude::eyre;
 
 type Operation = Box<dyn for<'a> FnOnce(&'a mut State) -> BoxFuture<'a, ()> + Send>;
 
+/// Unix seconds now.
+pub(crate) fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_secs()
+        .try_into()
+        .expect("unix seconds fit an i64")
+}
+
 #[derive(Clone)]
 pub(crate) struct ByteOwnership {
     sender: mpsc::Sender<Operation>,
@@ -215,10 +225,28 @@ impl ByteOwnership {
                     tx.sql(),
                     owner.clone(),
                     imported.info.blob_id.to_string(),
+                    unix_now(),
                 )
                 .await?;
 
                 tx.claim(&owner, &[imported.info.blob_id]).await
+            })
+        })
+        .await
+    }
+
+    /// Releases every upload hold taken before `before` (unix seconds) that no document claim
+    /// has superseded, so bytes nothing references are no longer kept for it: the retention pass
+    /// calls this with the grace period behind now. A hold a document claim superseded is
+    /// already released and is not touched. Returns how many holds were released.
+    pub(crate) async fn expire_uploads(&self, before: i64) -> Res<usize> {
+        self.transaction(move |tx| {
+            Box::pin(async move {
+                let expired = sqlite::queries::expired_upload_owners(tx.sql(), before).await?;
+                for owner in &expired {
+                    tx.release_staging(owner).await?;
+                }
+                Ok(expired.len())
             })
         })
         .await
@@ -505,7 +533,8 @@ impl OwnershipTransaction {
             // A standalone upload hold exists only to keep the bytes until something references
             // them. Once a document retains the digest, the document claim carries the bytes, so
             // every upload hold for that digest is released in this same transaction (the bytes
-            // are never unowned). An upload nothing ever references keeps its hold.
+            // are never unowned). An upload nothing ever references keeps its hold until it
+            // expires (`expire_uploads`).
             if owner.starts_with("document:retention:") {
                 let released =
                     sqlite::queries::release_uploads_by_digest(&self.tx, id.to_string()).await?;

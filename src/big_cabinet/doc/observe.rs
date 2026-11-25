@@ -65,12 +65,8 @@ impl Handler<PollDatums> for DocsService {
         for anchor in &anchors {
             match anchor {
                 Anchor::Doc { doc_id } => {
-                    self.authorize(
-                        &request.context,
-                        &caller.authority,
-                        AccessRequest::Read(doc_id),
-                    )
-                    .await?;
+                    self.authorize_read(&request.context, &caller.authority, doc_id)
+                        .await?;
                 }
                 Anchor::Drawer {
                     drawer_id,
@@ -104,7 +100,9 @@ impl Handler<PollDatums> for DocsService {
                 );
             }
         }
-        let page = self.poll_datums(params, store).await?;
+        let page = self
+            .poll_datums(params, store, &request.context, &caller.authority)
+            .await?;
         drop(interests);
         Ok(page.into())
     }
@@ -121,18 +119,22 @@ impl DocsService {
         drawer_id: &DocId,
         at_least: big_cabinet_core::drawer::DrawerAccess,
     ) -> Result<(), DocsError> {
+        DocsError::ensure_doc_id(drawer_id)?;
         match authority {
             DomainAuthority::Scoped(scope) => scope
                 .drawers
                 .get(drawer_id)
-                .copied()
-                .filter(|held| *held >= at_least)
+                .filter(|held| held.access >= at_least)
                 .map(|_| ())
                 .ok_or(DocsError::Denied),
-            DomainAuthority::Identity(actor) => {
+            DomainAuthority::Operator | DomainAuthority::Identity(_) => {
                 let readable = self
                     .access
-                    .readable_in_drawer(context, *actor, drawer_id)
+                    .readable_in_drawer(
+                        context,
+                        authority.holder().expect("not a scoped authority"),
+                        drawer_id,
+                    )
                     .await
                     .map_err(access_error)?;
                 if readable.is_none() {
@@ -153,6 +155,8 @@ impl DocsService {
         &self,
         params: PollDatums,
         store: &DatumSetStore,
+        context: &RequestContext,
+        authority: &DomainAuthority<DocScope>,
     ) -> Result<DatumPage, DocsError> {
         let limit = NonZeroUsize::new(
             usize::try_from(if params.limit == 0 {
@@ -204,15 +208,10 @@ impl DocsService {
                 }
                 RevisionRead::Entries { revision, entries } => {
                     through = through.max(revision);
-                    self.page_events(
-                        store,
-                        &params.predicate,
-                        selection,
-                        revision,
-                        entries,
-                        &mut events,
-                    )
-                    .await?;
+                    events.extend(
+                        self.page_events(store, &params, revision, entries, context, authority)
+                            .await?,
+                    );
                     if events.len() >= limit.get() {
                         break;
                     }
@@ -231,15 +230,10 @@ impl DocsService {
                 match read {
                     RevisionRead::Entries { revision, entries } => {
                         through = through.max(revision);
-                        self.page_events(
-                            store,
-                            &params.predicate,
-                            selection,
-                            revision,
-                            entries,
-                            &mut events,
-                        )
-                        .await?;
+                        events.extend(
+                            self.page_events(store, &params, revision, entries, context, authority)
+                                .await?,
+                        );
                         if !events.is_empty() {
                             break;
                         }
@@ -272,14 +266,17 @@ impl DocsService {
     async fn page_events(
         &self,
         store: &DatumSetStore,
-        predicate: &Predicate,
-        selection: &DatumSelection,
+        params: &PollDatums,
         revision: u64,
         entries: Vec<FrontierEntry<DatumRoute, DatumMembership>>,
-        events: &mut Vec<DatumEvent>,
-    ) -> Result<(), DocsError> {
+        context: &RequestContext,
+        authority: &DomainAuthority<DocScope>,
+    ) -> Result<Vec<DatumEvent>, DocsError> {
+        let predicate = &params.predicate;
+        let selection = &params.datums;
+        let mut events = Vec::new();
         if entries.is_empty() {
-            return Ok(());
+            return Ok(events);
         }
         let drawers = predicate_drawers(predicate);
         let predicate_tags = predicate.tags();
@@ -328,6 +325,21 @@ impl DocsService {
             .await
             .map_err(repository)?;
         let move_ins: BTreeSet<DocId> = moved.intersection(&matching).cloned().collect();
+        // The kinds the caller reaches each matching document at; an unreached one delivers
+        // nothing.
+        let kinds = match authority {
+            DomainAuthority::Operator | DomainAuthority::Identity(_) => None,
+            DomainAuthority::Scoped(_) => Some(
+                Self::reach(
+                    self.access.as_ref(),
+                    context,
+                    authority,
+                    &matching,
+                    big_cabinet_core::drawer::DrawerAccess::Read,
+                )
+                .await?,
+            ),
+        };
         // One batched read of the move-in documents' current selected rows.
         let mut current = Self::selected_datums(store, &move_ins, selection).await?;
         for doc_id in &candidates {
@@ -349,6 +361,13 @@ impl DocsService {
                 datums.extend(current.remove(doc_id).unwrap_or_default());
             }
             for (datum_key, datum) in datums {
+                if kinds.as_ref().is_some_and(|kinds| {
+                    !kinds
+                        .get(doc_id)
+                        .is_some_and(|reached| reached.allows(&datum_key))
+                }) {
+                    continue;
+                }
                 events.push(DatumEvent::Datum {
                     revision,
                     doc_id: doc_id.clone(),
@@ -357,7 +376,7 @@ impl DocsService {
                 });
             }
         }
-        Ok(())
+        Ok(events)
     }
 
     /// The documents a roster entry can change membership for.

@@ -7,4 +7,11 @@ characters, elided here) and the absolute path. Nothing is booted.
 $ day node init
 initialized node [..] at [..]/node
 
+$ day node init --json
+{
+  "created": false,
+  "nodeId": "[..]",
+  "path": "[..]/node"
+}
+
 ```

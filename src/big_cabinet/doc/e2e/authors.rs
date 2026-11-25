@@ -42,7 +42,7 @@ async fn listed(
                     .capability(
                         actor,
                         DocScope {
-                            read: BTreeSet::from([document.clone()]),
+                            read: DocScope::read_all([document.clone()]),
                             ..DocScope::default()
                         },
                     )
@@ -179,7 +179,10 @@ async fn a_datum_written_by_a_descendant_carries_the_descendants_id_and_url() {
         .await
         .unwrap();
     let scope = DocScope {
-        write: BTreeSet::from([created.doc_id.clone()]),
+        write: std::collections::BTreeMap::from([(
+            created.doc_id.clone(),
+            big_cabinet_core::doc::DatumKinds::All,
+        )]),
         ..DocScope::default()
     };
     let delegate = node

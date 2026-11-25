@@ -1,0 +1,127 @@
+{
+  "defs": {
+    "BlobsScope": {
+      "properties": {
+        "drawers": {
+          "type": "unknown"
+        },
+        "put": {
+          "default": false,
+          "type": "boolean"
+        },
+        "read": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Capability": {
+      "nullable": [
+        "subject"
+      ],
+      "properties": {
+        "capabilityId": {
+          "type": "string"
+        },
+        "issuerId": {
+          "type": "string"
+        },
+        "object": {
+          "type": "string"
+        },
+        "rights": {
+          "ref": "#Rights",
+          "type": "ref"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capabilityId",
+        "object",
+        "rights",
+        "issuerId"
+      ],
+      "type": "object"
+    },
+    "MintBlobsCapability": {
+      "nullable": [
+        "subject"
+      ],
+      "properties": {
+        "rights": {
+          "ref": "#Rights",
+          "type": "ref"
+        },
+        "scope": {
+          "ref": "#BlobsScope",
+          "type": "ref"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "rights"
+      ],
+      "type": "object"
+    },
+    "Rights": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "main": {
+      "description": "Mints a blobs handle for `scope` and `rights`, authorized by the request's `Authorization`\ncredential rather than a body field: the node operator's root capability may mint any scope, and a\nblobs handle may mint only a subset of its own scope and rights.",
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "NotFound"
+        },
+        {
+          "description": "The item is over the node's size limit for one put (ADR 042 §6). For a batch import this is\nthe refusal of that item alone.",
+          "name": "TooLarge"
+        },
+        {
+          "description": "The body of a put failed while the node read it: the upload was cut off.",
+          "name": "Unreadable"
+        },
+        {
+          "description": "A read asked for a range that selects no octet of the blob.",
+          "name": "RangeNotSatisfiable"
+        },
+        {
+          "name": "InvalidInput"
+        },
+        {
+          "name": "Storage"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#MintBlobsCapability",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#Capability",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.blobs.mintCapability",
+  "lexicon": 1
+}

@@ -8,6 +8,7 @@ use big_cabinet_core::drawer::DrawerAccess as Access;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use service_client_native_rs::Client;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 #[expect(
     clippy::too_many_arguments,
@@ -44,16 +45,28 @@ pub(super) async fn boot(
             MintDocCapability {
                 scope: DocScope {
                     drawers: BTreeMap::from([
-                        (local.present_id.clone(), Access::Read),
-                        (local.originated_id.clone(), Access::Write),
+                        (
+                            local.present_id.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Read),
+                        ),
+                        (
+                            local.originated_id.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+                        ),
                         // The config drawer is a self-doc drawer: the nodule service keeps its
                         // handler artifacts as `Blob` datums in the drawer's own document, so
                         // the workers retain them and write their cipherBlob/jwk representation
                         // there like in any other document they maintain.
-                        (local.config_id.clone(), Access::Write),
+                        (
+                            local.config_id.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+                        ),
                         // The cartridge registry's grouped drawer: its documents carry the `Blob`
                         // datums for cartridge artifacts.
-                        (registry_drawer.clone(), Access::Write),
+                        (
+                            registry_drawer.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+                        ),
                     ]),
                     ..Default::default()
                 },
@@ -112,7 +125,14 @@ async fn ensure_registry_drawer(
         sql,
     })
     .await?;
-    grant_drawer_admin(drawers, drawers_actor, cartridges_actor, &drawer).await?;
+    grant_drawer(
+        drawers,
+        drawers_actor,
+        cartridges_actor,
+        &drawer,
+        Access::Admin,
+    )
+    .await?;
     Ok(drawer)
 }
 
@@ -131,7 +151,9 @@ pub(super) fn metadata_capability(
             {
                 return Err(service_utils_rs::ClientError::Method(DocsError::Denied));
             }
-            for document in scope.read.union(&scope.write) {
+            let write_docs: BTreeSet<_> = scope.write.keys().cloned().collect();
+            let read_docs: BTreeSet<_> = scope.read.keys().cloned().collect();
+            for document in read_docs.union(&write_docs) {
                 let known = sql.query(
                     "SELECT EXISTS (
                          SELECT 1 FROM big_cabinet_drawers

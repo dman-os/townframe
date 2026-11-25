@@ -11,12 +11,15 @@ use async_trait::async_trait;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::dmeta::Uuid7;
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
 use big_dispatch_core::Route;
+
+use method_core::Encoding;
 use method_lexicon::MethodContract;
 use serde_json::Value;
 use service_utils_rs::RequestContext;
@@ -41,18 +44,25 @@ pub struct Caller {
     pub authorization: Authorization,
     /// The actor that signed the call.
     pub actor: Uuid7,
-    /// The scope of the minted handle presented, `None` for the operator's identity.
+    /// The scope of the minted handle presented, `None` for the operator's root capability.
     pub scope: Option<DispatchScope>,
 }
 
-/// A native service registered as the provider of operations. Its input and output are the
-/// JSON dispatch exchanges with its caller: the edge a dynamic by-NSID call pays anyway.
+/// A native service registered as the provider of operations. Its input and output are what
+/// dispatch exchanges with its caller: JSON, the edge a dynamic by-NSID call pays anyway, or a
+/// byte stream for a method that declares a byte encoding.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Runs `operation`. One provider serves all of a nodule's operations, so the NSID arrives
     /// per call (a Wasm provider builds `/xrpc/<operation>` from it). `request` is the
     /// caller's request context: its remaining budget, request id and trace travel on to
     /// whatever the provider calls.
+    ///
+    /// `input` is the JSON the method's typed request is built from: the query's parameters, a
+    /// JSON procedure's body, or the parameters of a method whose body is bytes. `body` is that
+    /// byte body, present exactly when the method's input encoding is bytes (dispatch has
+    /// checked), and the stream the provider reads. The answer is a [`Body`] of the case the
+    /// method's output encoding declares, which dispatch checks.
     async fn call(
         &self,
         caller: &Caller,
@@ -60,7 +70,8 @@ pub trait Provider: Send + Sync {
         request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-    ) -> Result<Value, ProviderError>;
+        body: Option<Body>,
+    ) -> Result<Body, ProviderError>;
 }
 
 /// How a ready provider is reached. A kind is only constructible once its provider can be
@@ -153,15 +164,45 @@ pub struct Operation {
     /// The method's declaration says it is privileged (`XrpcMethod::privileged`): a scope
     /// without `DispatchScope::privileged` cannot invoke it. Only a built-in declares one.
     pub privileged: bool,
+    /// The method's declared body encodings, which dispatch holds every call and answer to.
+    pub input: Encoding,
+    pub output: Encoding,
+    /// The media type a Lexicon-declared byte side names (a nodule's, which is owned data), which
+    /// wins over the static one in `input`/`output`'s `Encoding::Bytes`.
+    pub input_mime: Option<Arc<str>>,
+    pub output_mime: Option<Arc<str>>,
+    /// The method's declaration says it is local-only (`XrpcMethod::local_only`): dispatch
+    /// refuses a call whose origin is not local.
+    pub local_only: bool,
 }
 
 impl Operation {
-    /// An operation of `kind` with no Lexicon to check calls against.
+    /// An operation of `kind` with no Lexicon to check calls against, taking and answering JSON.
     pub fn unchecked(kind: Option<OperationKind>) -> Self {
         Self {
             kind,
             lexicon: None,
             privileged: false,
+            input: Encoding::Json,
+            output: Encoding::Json,
+            input_mime: None,
+            output_mime: None,
+            local_only: false,
+        }
+    }
+
+    /// An operation of `kind` checked against the Lexicon `lexicon`, whose `input` and `output`
+    /// encodings are the body encodings the operation takes and answers (`*/*` is bytes), so a
+    /// provider with no compiled-in method, such as a nodule, declares byte bodies in its file.
+    pub fn declared(kind: Option<OperationKind>, lexicon: LexiconSource) -> Self {
+        let (input, output) = method_lexicon::body_encodings(&lexicon.file);
+        Self {
+            input: input.encoding,
+            output: output.encoding,
+            input_mime: input.mime.map(Into::into),
+            output_mime: output.mime.map(Into::into),
+            lexicon: Some(lexicon),
+            ..Self::unchecked(kind)
         }
     }
 }
@@ -208,6 +249,11 @@ pub struct ProviderEntry {
     pub provider_id: String,
     pub operation_kind: Option<OperationKind>,
     pub privileged: bool,
+    pub input: Encoding,
+    pub output: Encoding,
+    pub input_mime: Option<Arc<str>>,
+    pub output_mime: Option<Arc<str>>,
+    pub local_only: bool,
     pub state: ProviderState,
     pub contract: Option<Arc<Contract>>,
 }
@@ -394,6 +440,11 @@ impl Router {
                         provider_id: provider_id.to_owned(),
                         operation_kind: operation.kind,
                         privileged: operation.privileged,
+                        input: operation.input,
+                        output: operation.output,
+                        input_mime: operation.input_mime.clone(),
+                        output_mime: operation.output_mime.clone(),
+                        local_only: operation.local_only,
                         state: state.clone(),
                         contract: contracts.remove(nsid),
                     }),
@@ -429,6 +480,11 @@ impl Router {
                         operations.get(nsid).is_some_and(|operation| {
                             operation.kind == held.operation_kind
                                 && operation.privileged == held.privileged
+                                && operation.input == held.input
+                                && operation.output == held.output
+                                && operation.input_mime == held.input_mime
+                                && operation.output_mime == held.output_mime
+                                && operation.local_only == held.local_only
                                 && *state == held.state
                                 // Lexicons only matter to a provider that is called.
                                 && (!matches!(state, ProviderState::Ready(_))
@@ -462,8 +518,9 @@ mod tests {
             _: &RequestContext,
             _: &InvocationContext,
             input: Value,
-        ) -> Result<Value, ProviderError> {
-            Ok(input)
+            _: Option<Body>,
+        ) -> Result<Body, ProviderError> {
+            Ok(Body::Json(input))
         }
     }
 

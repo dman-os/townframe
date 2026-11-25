@@ -1,9 +1,9 @@
 //! End-to-end tests for the `day` CLI, in two layers.
 //!
 //! - **Library layer** (`mod library`): the polymorphic [`NodeClient`] against real nodes, with
-//!   the daemon served inside the test process by [`crate::cmds::daemon::serve`]. It proves that
+//!   the server served inside the test process by [`crate::cmds::serve::serve`]. It proves that
 //!   one call gives one answer whichever way the node is reached, and covers the lock and the
-//!   stale socket. Readiness is the daemon's own `ready` callback and shutdown is its `shutdown`
+//!   stale socket. Readiness is the server's own `ready` callback and shutdown is its `shutdown`
 //!   future, so nothing sleeps or polls. The keyring is the in-process mock that `secrets_rs`
 //!   selects under its `test-support` feature.
 //! - **Blackbox layer** (`mod blackbox`): the real `day` binary in a sandbox directory, asserting
@@ -11,7 +11,7 @@
 //!   invocations). Cases are literate trycmd `.md` files: one file is one sandbox, and every
 //!   ```console fence in it runs in order in the same directory. A case needs a sibling
 //!   `*.out/` directory (with at least a `.keep`) to opt into the sandbox. This layer uses the
-//!   platform keyring, since the daemon and the commands are separate processes: each case runs
+//!   platform keyring, since the server and the commands are separate processes: each case runs
 //!   with its node and its runtime directory in a sandbox of the test's own, and the node's
 //!   keyring entries are deleted when the case ends, whether it passed or not.
 //!
@@ -29,6 +29,8 @@ mod library {
     use crate::context::NodeDir;
     use crate::context::SocketState;
     use crate::interlude::*;
+    use big_blobs_core::protocol::BlobsScope;
+    use big_blobs_core::protocol::MintBlobsCapability;
     use big_node::peers::Peers;
     use big_nodule_core::protocol::ListNodules;
     use method_core::Method;
@@ -49,10 +51,10 @@ mod library {
 
     /// An initialized node whose socket directory is `<sandbox>/run`, so no test touches the
     /// real runtime directory.
-    fn new_node() -> (tempfile::TempDir, NodeDir) {
+    async fn new_node() -> (tempfile::TempDir, NodeDir) {
         let tmp = short_tempdir();
         let dir = NodeDir::with_socket_dir(tmp.path().join("node"), tmp.path().join("run"));
-        dir.init().unwrap();
+        dir.init().await.unwrap();
         (tmp, dir)
     }
 
@@ -79,22 +81,22 @@ mod library {
         }
     }
 
-    /// A daemon served from inside the test process, stopped by [`TestDaemon::stop`].
-    struct TestDaemon {
+    /// A server served from inside the test process, stopped by [`TestServer::stop`].
+    struct TestServer {
         shutdown: oneshot::Sender<()>,
         task: tokio::task::JoinHandle<Res<()>>,
-        /// The daemon's peers service, when its `node.json` configures one.
+        /// The server's peers service, when its `node.json` configures one.
         peers: Option<Peers>,
     }
 
-    impl TestDaemon {
+    impl TestServer {
         /// Starts serving and returns once the socket accepts connections.
         async fn start(dir: &NodeDir) -> Self {
             let (ready_tx, ready_rx) = oneshot::channel();
             let (shutdown, shutdown_rx) = oneshot::channel::<()>();
             let dir = dir.clone();
             let task = tokio::spawn(async move {
-                crate::cmds::daemon::serve(
+                crate::cmds::serve::serve(
                     &dir,
                     |booted| {
                         ready_tx
@@ -104,14 +106,14 @@ mod library {
                     async {
                         shutdown_rx
                             .await
-                            .expect("the test stops the daemon by sending")
+                            .expect("the test stops the server by sending")
                     },
                 )
                 .await
             });
             let peers = match ready_rx.await {
                 Ok(peers) => peers,
-                Err(_) => panic!("the daemon failed before it was serving: {:?}", task.await),
+                Err(_) => panic!("the server failed before it was serving: {:?}", task.await),
             };
             Self {
                 shutdown,
@@ -121,7 +123,7 @@ mod library {
         }
 
         async fn stop(self) {
-            self.shutdown.send(()).expect("the daemon is serving");
+            self.shutdown.send(()).expect("the server is serving");
             self.task.await.unwrap().unwrap();
         }
     }
@@ -132,9 +134,12 @@ mod library {
         verb: method_core::HttpMethod,
         input: serde_json::Value,
     ) -> Reply {
-        client.call(nsid, verb, &input).await.unwrap()
+        client.call_untyped(nsid, verb, &input).await.unwrap()
     }
 
+    /// Untyped, because the wire is what these tests compare: an unclaimed NSID and input that is
+    /// not the method's are refused by the router, which no typed call can send.
+    ///
     /// Calls whose answers must not depend on how the node was reached: a query that succeeds, an
     /// operation nothing claims, and a real operation given input it must refuse.
     fn calls() -> Vec<(&'static str, method_core::HttpMethod, serde_json::Value)> {
@@ -152,19 +157,18 @@ mod library {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn init_then_status_in_process() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         let client = connect(&dir).await.unwrap();
         assert_eq!(client.mode(), Mode::InProcess);
         assert_eq!(client.socket_state(), SocketState::Absent);
-        let reply = call(
-            &client,
-            ListNodules::XRPC.nsid,
-            ListNodules::XRPC.method,
-            json!({}),
-        )
-        .await;
-        assert_eq!(reply.status, 200, "{reply:?}");
-        assert_eq!(reply.body, json!({"nodules": []}));
+        assert!(
+            client
+                .call(ListNodules {})
+                .await
+                .unwrap()
+                .nodules
+                .is_empty()
+        );
         client.stop().await.unwrap();
         // Stopping released the node: it can be booted again by the next command.
         connect(&dir).await.unwrap().stop().await.unwrap();
@@ -172,7 +176,7 @@ mod library {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_node_id_is_the_repos_peer_id() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         let lock = dir.try_lock(LockRole::Command).unwrap().unwrap();
         let booted = Booted::boot(&dir, lock, LockRole::Command).await.unwrap();
         let peer = booted.node.repo.local_peer_id().to_bytes32().unwrap();
@@ -184,8 +188,8 @@ mod library {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_same_calls_answer_the_same_in_process_and_over_the_daemon() {
-        let (_tmp, dir) = new_node();
+    async fn the_same_calls_answer_the_same_in_process_and_over_the_server() {
+        let (_tmp, dir) = new_node().await;
         let in_process = connect(&dir).await.unwrap();
         assert_eq!(in_process.mode(), Mode::InProcess);
         let mut local = Vec::new();
@@ -194,16 +198,16 @@ mod library {
         }
         in_process.stop().await.unwrap();
 
-        let daemon = TestDaemon::start(&dir).await;
+        let server = TestServer::start(&dir).await;
         let over_socket = connect(&dir).await.unwrap();
-        assert_eq!(over_socket.mode(), Mode::Daemon);
+        assert_eq!(over_socket.mode(), Mode::Serving);
         assert_eq!(over_socket.socket_state(), SocketState::Live);
         let mut remote = Vec::new();
         for (nsid, verb, input) in calls() {
             remote.push(call(&over_socket, nsid, verb, input).await);
         }
         over_socket.stop().await.unwrap();
-        daemon.stop().await;
+        server.stop().await;
 
         assert_eq!(local, remote);
         assert_eq!(local[0].status, 200);
@@ -212,9 +216,115 @@ mod library {
         assert_eq!(dir.probe_socket().await.unwrap(), SocketState::Absent);
     }
 
+    /// A file put and read back, whole and by `Range`, is the same bytes whichever way the node
+    /// is reached: streamed from and to files (ADR 042), never as JSON, so the in-process router
+    /// and the server's socket carry the raw bodies alike.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_stale_socket_is_detected_then_replaced_by_the_next_daemon() {
-        let (_tmp, dir) = new_node();
+    async fn a_file_round_trips_as_raw_bytes_in_process_and_over_the_server() {
+        use crate::client::Raw;
+        use method_core::HttpMethod::Get;
+        use method_core::HttpMethod::Post;
+        const PUT: &str = "org.example.daybook.blobs.put";
+        const READ: &str = "org.example.daybook.blobs.read";
+        let (tmp, dir) = new_node().await;
+        let upload = tmp.path().join("upload.bin");
+        // Over the 64 KiB chunks a read yields, so it is several chunks long.
+        let content: Vec<u8> = (0..300_000u32).map(|at| (at % 251) as u8).collect();
+        std::fs::write(&upload, &content).unwrap();
+        let round_trip = async |client: &NodeClient, name: &str| {
+            let mint = async |scope: BlobsScope| {
+                let minted = client
+                    .call(MintBlobsCapability {
+                        scope,
+                        rights: big_cabinet_core::authority::Rights::USE,
+                        subject: None,
+                    })
+                    .await
+                    .unwrap();
+                serde_json::to_value(minted.capability_id).unwrap()
+            };
+            let put = mint(BlobsScope {
+                put: true,
+                ..Default::default()
+            })
+            .await;
+            let stored = client
+                .call_untyped_bytes(
+                    PUT,
+                    Post,
+                    &json!({ "capability": put }),
+                    Raw {
+                        upload: Some(&upload),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(stored.status, 200, "{stored:?}");
+            assert_eq!(stored.body["lengthOctets"], content.len());
+            let blob_id: big_blobs_core::BlobId =
+                serde_json::from_value(stored.body["blobId"].clone()).unwrap();
+            let read = mint(BlobsScope {
+                read: [blob_id].into(),
+                ..Default::default()
+            })
+            .await;
+            let params = json!({ "capability": read, "blobId": blob_id });
+            let whole = tmp.path().join(format!("{name}-whole.bin"));
+            let reply = client
+                .call_untyped_bytes(
+                    READ,
+                    Get,
+                    &params,
+                    Raw {
+                        download: Some(&whole),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(reply.status, 200, "{reply:?}");
+            assert_eq!(reply.body["octets"], content.len());
+            assert!(std::fs::read(&whole).unwrap() == content);
+            let part = tmp.path().join(format!("{name}-part.bin"));
+            let reply = client
+                .call_untyped_bytes(
+                    READ,
+                    Get,
+                    &params,
+                    Raw {
+                        range: Some("bytes=70000-70099"),
+                        download: Some(&part),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(reply.status, 206, "{reply:?}");
+            assert_eq!(
+                reply.body["contentRange"],
+                format!("bytes 70000-70099/{}", content.len())
+            );
+            assert_eq!(std::fs::read(&part).unwrap(), &content[70_000..70_100]);
+            stored.body
+        };
+        let in_process = connect(&dir).await.unwrap();
+        let local = round_trip(&in_process, "in-process").await;
+        in_process.stop().await.unwrap();
+
+        let server = TestServer::start(&dir).await;
+        let over_socket = connect(&dir).await.unwrap();
+        assert_eq!(over_socket.mode(), Mode::Serving);
+        let remote = round_trip(&over_socket, "socket").await;
+        over_socket.stop().await.unwrap();
+        server.stop().await;
+        // The node's answer is the content's own id, however the bytes arrived.
+        assert_eq!(local, remote);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_socket_is_detected_then_replaced_by_the_next_server() {
+        let (_tmp, dir) = new_node().await;
         dir.ensure_run_dir().unwrap();
         // A socket file nothing listens on: bind, then close without unlinking.
         drop(std::os::unix::net::UnixListener::bind(dir.socket_path().unwrap()).unwrap());
@@ -226,16 +336,16 @@ mod library {
         assert_eq!(client.socket_state(), SocketState::Stale);
         client.stop().await.unwrap();
 
-        // A daemon takes the path over.
-        let daemon = TestDaemon::start(&dir).await;
+        // A server takes the path over.
+        let server = TestServer::start(&dir).await;
         assert_eq!(dir.probe_socket().await.unwrap(), SocketState::Live);
-        daemon.stop().await;
+        server.stop().await;
         assert_eq!(dir.probe_socket().await.unwrap(), SocketState::Absent);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn something_that_is_not_a_socket_at_the_socket_path_is_an_error() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         dir.ensure_run_dir().unwrap();
         std::fs::write(dir.socket_path().unwrap(), b"not a socket").unwrap();
         let error = dir.probe_socket().await.unwrap_err();
@@ -247,19 +357,19 @@ mod library {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn one_process_at_a_time_boots_a_node() {
-        let (_tmp, dir) = new_node();
-        let daemon = TestDaemon::start(&dir).await;
+        let (_tmp, dir) = new_node().await;
+        let server = TestServer::start(&dir).await;
         let held = dir.try_lock(LockRole::Command).unwrap().unwrap_err();
         assert_eq!(held.pid, Some(std::process::id()));
-        // A second daemon is refused before it touches the node's storage.
-        let error = crate::cmds::daemon::serve(&dir, |_| Ok(()), async {})
+        // A second server is refused before it touches the node's storage.
+        let error = crate::cmds::serve::serve(&dir, |_| Ok(()), async {})
             .await
             .unwrap_err();
         assert!(
             format!("{error:#}").contains("already has the node"),
             "{error:#}"
         );
-        daemon.stop().await;
+        server.stop().await;
 
         // A node booting elsewhere that never gets its socket up is waited for until the
         // deadline, not opened a second time.
@@ -280,7 +390,7 @@ mod library {
     /// client instead of fighting for the lock, and both are answered.
     #[tokio::test(flavor = "multi_thread")]
     async fn two_concurrent_commands_boot_the_node_once() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         let (first, second) = tokio::join!(connect(&dir), connect(&dir));
         let (first, second) = (first.unwrap(), second.unwrap());
         // The holder found no socket; the client found the holder's.
@@ -288,14 +398,14 @@ mod library {
         states.sort_by_key(|state| matches!(state, SocketState::Live));
         assert_eq!(states, [SocketState::Absent, SocketState::Live]);
         for client in [&first, &second] {
-            let reply = call(
-                client,
-                ListNodules::XRPC.nsid,
-                ListNodules::XRPC.method,
-                json!({}),
-            )
-            .await;
-            assert_eq!(reply.body, json!({"nodules": []}));
+            assert!(
+                client
+                    .call(ListNodules {})
+                    .await
+                    .unwrap()
+                    .nodules
+                    .is_empty()
+            );
         }
         let (holder, client) = if first.socket_state() == SocketState::Live {
             (second, first)
@@ -310,14 +420,14 @@ mod library {
             tokio::task::yield_now().await;
         }
         assert!(!holder_stopped.is_finished());
-        let reply = call(
-            &client,
-            ListNodules::XRPC.nsid,
-            ListNodules::XRPC.method,
-            json!({}),
-        )
-        .await;
-        assert_eq!(reply.body, json!({"nodules": []}));
+        assert!(
+            client
+                .call(ListNodules {})
+                .await
+                .unwrap()
+                .nodules
+                .is_empty()
+        );
         client.stop().await.unwrap();
         holder_stopped.await.unwrap().unwrap();
         assert_eq!(dir.probe_socket().await.unwrap(), SocketState::Absent);
@@ -325,24 +435,24 @@ mod library {
         connect(&dir).await.unwrap().stop().await.unwrap();
     }
 
-    /// `node run` against a node a command has open waits for the command, instead of refusing.
+    /// `node start` against a node a command has open waits for the command, instead of refusing.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_daemon_waits_for_a_command_that_has_the_node_open() {
-        let (_tmp, dir) = new_node();
+    async fn a_server_waits_for_a_command_that_has_the_node_open() {
+        let (_tmp, dir) = new_node().await;
         let holder = connect(&dir).await.unwrap();
         let (ready, serving) = oneshot::channel();
         let (stop, stopped) = oneshot::channel::<()>();
-        let daemon = tokio::spawn({
+        let server = tokio::spawn({
             let dir = dir.clone();
             async move {
-                crate::cmds::daemon::serve(
+                crate::cmds::serve::serve(
                     &dir,
                     |_| {
                         ready.send(()).expect("the test waits for readiness");
                         Ok(())
                     },
                     async {
-                        stopped.await.expect("the test stops the daemon by sending");
+                        stopped.await.expect("the test stops the server by sending");
                     },
                 )
                 .await
@@ -351,16 +461,16 @@ mod library {
         holder.stop().await.unwrap();
         serving
             .await
-            .expect("the daemon booted once the command finished");
+            .expect("the server booted once the command finished");
         stop.send(()).unwrap();
-        daemon.await.unwrap().unwrap();
+        server.await.unwrap().unwrap();
     }
 
     /// A command that arrives while the holder is still booting waits for the socket, and is
     /// answered once it is up.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_client_arriving_during_boot_waits_for_the_socket() {
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_node().await;
         let booting = dir.try_lock(LockRole::Command).unwrap().unwrap();
         let arriving = tokio::spawn({
             let dir = dir.clone();
@@ -372,29 +482,29 @@ mod library {
             .unwrap();
         let client = arriving.await.unwrap().unwrap();
         assert_eq!(client.socket_state(), SocketState::Live);
-        let reply = call(
-            &client,
-            ListNodules::XRPC.nsid,
-            ListNodules::XRPC.method,
-            json!({}),
-        )
-        .await;
-        assert_eq!(reply.body, json!({"nodules": []}));
+        assert!(
+            client
+                .call(ListNodules {})
+                .await
+                .unwrap()
+                .nodules
+                .is_empty()
+        );
         client.stop().await.unwrap();
         holder.stop().await.unwrap();
     }
 
-    #[test]
-    fn init_refuses_an_existing_node_and_leaves_it_alone() {
-        let (_tmp, dir) = new_node();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn init_refuses_an_existing_node_and_leaves_it_alone() {
+        let (_tmp, dir) = new_node().await;
         let before = dir.settings().unwrap().node_id();
-        assert!(dir.init().is_err());
+        assert!(dir.init().await.is_err());
         assert_eq!(dir.settings().unwrap().node_id(), before);
     }
 
-    #[test]
-    fn a_socket_path_too_long_for_sun_path_is_refused() {
-        let (tmp, _) = new_node();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_socket_path_too_long_for_sun_path_is_refused() {
+        let (tmp, _) = new_node().await;
         let long = NodeDir::with_socket_dir(
             tmp.path().join("node"),
             std::path::PathBuf::from("/tmp").join("x".repeat(120)),
@@ -403,9 +513,9 @@ mod library {
         assert!(format!("{error:#}").contains("longer than a Unix socket path"));
     }
 
-    #[test]
-    fn the_socket_is_named_by_the_node_id_in_the_runtime_directory() {
-        let (tmp, dir) = new_node();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_socket_is_named_by_the_node_id_in_the_runtime_directory() {
+        let (tmp, dir) = new_node().await;
         assert_eq!(
             dir.socket_path().unwrap(),
             tmp.path()
@@ -415,7 +525,7 @@ mod library {
         // The node directory is not where the socket goes, so a long node path is fine.
         let far =
             NodeDir::with_socket_dir(tmp.path().join("x".repeat(200)), tmp.path().join("run"));
-        far.init().unwrap();
+        far.init().await.unwrap();
         far.socket_path().unwrap();
     }
 
@@ -434,10 +544,10 @@ mod library {
 
     /// A directory that is not the user's own is refused as a socket directory, whoever made
     /// it: here, one other users can enter.
-    #[test]
-    fn a_socket_directory_other_users_can_enter_is_refused() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_socket_directory_other_users_can_enter_is_refused() {
         use std::os::unix::fs::PermissionsExt;
-        let (tmp, dir) = new_node();
+        let (tmp, dir) = new_node().await;
         let run = tmp.path().join("run");
         std::fs::create_dir(&run).unwrap();
         std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -449,49 +559,47 @@ mod library {
     }
 
     /// Two nodes on one machine (one keyring, one runtime directory) get entries and sockets of
-    /// their own: each daemon is live at its own path, and deleting one node's keyring entries
+    /// their own: each server is live at its own path, and deleting one node's keyring entries
     /// removes exactly one entry and leaves the other node's.
     #[tokio::test(flavor = "multi_thread")]
     async fn two_nodes_on_one_machine_have_distinct_sockets_and_keyring_entries() {
         let tmp = short_tempdir();
-        let node = |name: &str| {
-            let dir = NodeDir::with_socket_dir(tmp.path().join(name), tmp.path().join("run"));
-            dir.init().unwrap();
-            dir
-        };
-        let (first, second) = (node("first"), node("second"));
+        let first = NodeDir::with_socket_dir(tmp.path().join("first"), tmp.path().join("run"));
+        let second = NodeDir::with_socket_dir(tmp.path().join("second"), tmp.path().join("run"));
+        first.init().await.unwrap();
+        second.init().await.unwrap();
         assert_ne!(first.socket_path().unwrap(), second.socket_path().unwrap());
         assert_eq!(
             first.socket_path().unwrap().parent(),
             second.socket_path().unwrap().parent()
         );
 
-        let (first_daemon, second_daemon) = (
-            TestDaemon::start(&first).await,
-            TestDaemon::start(&second).await,
+        let (first_server, second_server) = (
+            TestServer::start(&first).await,
+            TestServer::start(&second).await,
         );
         assert_eq!(first.probe_socket().await.unwrap(), SocketState::Live);
         assert_eq!(second.probe_socket().await.unwrap(), SocketState::Live);
-        first_daemon.stop().await;
-        second_daemon.stop().await;
+        first_server.stop().await;
+        second_server.stop().await;
 
         // The mock keyring is process-wide, as the platform keyring is machine-wide.
         let secrets = secrets_rs::SecretStore::boot().await.unwrap();
         for dir in [&first, &second] {
-            let seed = dir.settings().unwrap().seed();
-            assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 1);
+            let seed = dir.settings().unwrap().seed(&secrets).await.unwrap();
+            assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 2);
             assert_eq!(big_node::delete_secrets(&secrets, &seed).await.unwrap(), 0);
         }
         secrets.stop().await.unwrap();
     }
 
-    /// A daemon whose `node.json` lists a bootstrap peer dials it at start, with no command
+    /// A server whose `node.json` lists a bootstrap peer dials it at start, with no command
     /// issued. Everything is learned through the node's own operations over the sockets: the
     /// dialed node's address from its `getNodeInfo`, and both ends then report each other as
     /// connected. Waiting is on the peers service's events.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_daemon_dials_its_bootstrap_peer_and_both_report_the_connection() {
-        let loopback = |dir: &NodeDir| {
+    async fn a_server_dials_its_bootstrap_peer_and_both_report_the_connection() {
+        let loopback = async |dir: &NodeDir| {
             dir.update_settings(|settings| {
                 settings.peers = Some(crate::context::PeerSettings {
                     loopback_only: true,
@@ -499,13 +607,14 @@ mod library {
                 });
                 Ok(())
             })
+            .await
             .unwrap();
         };
-        let (_dialed_tmp, dialed_dir) = new_node();
-        loopback(&dialed_dir);
-        let dialed = TestDaemon::start(&dialed_dir).await;
+        let (_dialed_tmp, dialed_dir) = new_node().await;
+        loopback(&dialed_dir).await;
+        let dialed = TestServer::start(&dialed_dir).await;
         let dialed_client = connect(&dialed_dir).await.unwrap();
-        assert_eq!(dialed_client.mode(), Mode::Daemon);
+        assert_eq!(dialed_client.mode(), Mode::Serving);
         let dialed_info = crate::cmds::status::node_info(&dialed_client)
             .await
             .unwrap();
@@ -515,8 +624,8 @@ mod library {
         );
         assert!(dialed_info.peers.as_ref().unwrap().connected.is_empty());
 
-        let (_dialer_tmp, dialer_dir) = new_node();
-        loopback(&dialer_dir);
+        let (_dialer_tmp, dialer_dir) = new_node().await;
+        loopback(&dialer_dir).await;
         let address = dialed_info.peers.unwrap().address;
         assert!(
             dialer_dir
@@ -525,6 +634,7 @@ mod library {
                     .as_mut()
                     .unwrap()
                     .add_bootstrap(&address))
+                .await
                 .unwrap()
         );
         // The same endpoint again replaces its entry instead of adding a second.
@@ -535,13 +645,14 @@ mod library {
                     .as_mut()
                     .unwrap()
                     .add_bootstrap(&address))
+                .await
                 .unwrap()
         );
         assert_eq!(
             dialer_dir.settings().unwrap().peers.unwrap().bootstrap,
             [address]
         );
-        let dialer = TestDaemon::start(&dialer_dir).await;
+        let dialer = TestServer::start(&dialer_dir).await;
         let dialer_id = dialer_dir.settings().unwrap().node_id();
         connected_to(dialer.peers.as_ref().unwrap(), &dialed_info.node_id).await;
         connected_to(dialed.peers.as_ref().unwrap(), &dialer_id).await;
@@ -562,16 +673,19 @@ mod library {
         dialed.stop().await;
         let secrets = secrets_rs::SecretStore::boot().await.unwrap();
         for dir in [&dialer_dir, &dialed_dir] {
-            big_node::delete_secrets(&secrets, &dir.settings().unwrap().seed())
-                .await
-                .unwrap();
+            big_node::delete_secrets(
+                &secrets,
+                &dir.settings().unwrap().seed(&secrets).await.unwrap(),
+            )
+            .await
+            .unwrap();
         }
         secrets.stop().await.unwrap();
     }
 
-    #[test]
-    fn an_invalid_bootstrap_ticket_is_refused_and_writes_nothing() {
-        let (_tmp, dir) = new_node();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_invalid_bootstrap_ticket_is_refused_and_writes_nothing() {
+        let (_tmp, dir) = new_node().await;
         let error = dir
             .update_settings(|settings| {
                 settings
@@ -579,6 +693,7 @@ mod library {
                     .get_or_insert_with(default)
                     .add_bootstrap("not a ticket")
             })
+            .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("not an endpoint ticket"));
         assert!(
@@ -638,7 +753,7 @@ mod blackbox {
     }
 
     /// One case's private world: its node (`<sandbox>/node`) and its runtime directory
-    /// (`<sandbox>/run`, where the daemon puts its socket, as `XDG_RUNTIME_DIR` would). The node
+    /// (`<sandbox>/run`, where the server puts its socket, as `XDG_RUNTIME_DIR` would). The node
     /// is booted by the real binary, so it leaves entries in the platform keyring; they are
     /// deleted when the sandbox is dropped, whether the case passed or panicked.
     struct Sandbox {
@@ -719,7 +834,7 @@ mod blackbox {
                 .unwrap()
                 .block_on(async {
                     let secrets = secrets_rs::SecretStore::boot_platform().await?;
-                    big_node::delete_secrets(&secrets, &settings.seed()).await?;
+                    big_node::delete_secrets(&secrets, &settings.seed(&secrets).await?).await?;
                     secrets.stop().await
                 });
             match cleaned {
@@ -757,7 +872,7 @@ mod blackbox {
         run_cases("node");
     }
 
-    /// `node status` and `exec` with no daemon: the command boots the node itself.
+    /// `node status` and `exec` with no server: the command boots the node itself.
     #[test]
     fn in_process_cases() {
         run_cases("in_process");
@@ -765,8 +880,8 @@ mod blackbox {
 
     /// `node start | status | stop` and the commands reaching the node over its socket.
     #[test]
-    fn daemon_cases() {
-        run_cases("daemon");
+    fn serve_cases() {
+        run_cases("serve");
     }
 
     /// Parallel commands against one node (as a capture hook firing several times at once does)
@@ -807,10 +922,112 @@ mod blackbox {
         );
     }
 
-    /// A daemon killed without cleaning up leaves a socket and no lock: every command still
+    /// Output whose reader has gone away (`day exec ... | head`) ends the command with status 0
+    /// and nothing on stderr: the broken pipe is not a failure and not a panic. The pipe's read
+    /// end is closed before the command starts, so its first write fails with `EPIPE` however
+    /// little it writes.
+    #[test]
+    fn a_closed_stdout_ends_the_command_quietly() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        for args in [
+            &["completions", "bash"][..],
+            &["exec", "--get", "org.example.daybook.nodules.listNodules"],
+        ] {
+            let (reader, writer) = std::io::pipe().unwrap();
+            drop(reader);
+            let output = Command::new(day_bin())
+                .env("RUST_LOG", "error")
+                .env("NO_COLOR", "1")
+                .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+                .arg("--node")
+                .arg(sandbox.node())
+                .args(args)
+                .stdout(writer)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(0), "{args:?}: {stderr}");
+            assert_eq!(stderr, "", "{args:?}");
+        }
+    }
+
+    /// Tracing is the server's log: a command other than `node start` narrates nothing at the
+    /// default level, and an explicit `RUST_LOG` brings the narration back.
+    #[test]
+    fn commands_log_only_warnings_unless_rust_log_says_otherwise() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        let status = |rust_log: Option<&str>| {
+            let mut command = Command::new(day_bin());
+            command
+                .env("NO_COLOR", "1")
+                .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+                .arg("--node")
+                .arg(sandbox.node())
+                .args(["node", "status", "--json"]);
+            match rust_log {
+                Some(filter) => command.env("RUST_LOG", filter),
+                None => command.env_remove("RUST_LOG"),
+            };
+            command.output().unwrap()
+        };
+        let quiet = status(None);
+        assert_eq!(
+            String::from_utf8_lossy(&quiet.stderr),
+            "",
+            "the default level shows nothing for a command that works"
+        );
+        let loud = status(Some("debug"));
+        assert!(
+            !loud.stderr.is_empty(),
+            "RUST_LOG=debug is honoured over the command's default"
+        );
+    }
+
+    /// Colour is for terminals: tracing written to a pipe carries no ANSI escapes even when
+    /// `NO_COLOR` is not set (the formatter colours unconditionally unless it is told not to).
+    #[test]
+    fn tracing_to_a_pipe_carries_no_colour() {
+        let sandbox = Sandbox::new();
+        assert!(sandbox.day(&["node", "init"]).status.success());
+        let output = Command::new(day_bin())
+            .env("RUST_LOG", "debug")
+            .env_remove("NO_COLOR")
+            .env_remove("CLICOLOR_FORCE")
+            .env("XDG_RUNTIME_DIR", sandbox.runtime_dir())
+            .arg("--node")
+            .arg(sandbox.node())
+            .args(["node", "status", "--json"])
+            .output()
+            .unwrap();
+        assert!(!output.stderr.is_empty(), "debug tracing reaches stderr");
+        assert!(
+            !output.stderr.contains(&0x1b),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// `--version` reports the build: the package version, then the commit it was built from
+    /// (shadow-rs), while `-V` stays the one-line version.
+    #[test]
+    fn the_long_version_names_the_commit_and_the_build() {
+        let sandbox = Sandbox::new();
+        let long = sandbox.day(&["--version"]);
+        let long = String::from_utf8_lossy(&long.stdout);
+        assert!(long.starts_with("day "), "{long}");
+        for field in ["branch:", "commit_hash:", "build_time:", "build_env:"] {
+            assert!(long.contains(field), "no {field} in {long}");
+        }
+        let short = sandbox.day(&["-V"]);
+        assert_eq!(String::from_utf8_lossy(&short.stdout).lines().count(), 1);
+    }
+
+    /// A server killed without cleaning up leaves a socket and no lock: every command still
     /// works, and `node stop` and `node start` clean up after it.
     #[test]
-    fn a_killed_daemon_leaves_a_stale_socket_that_commands_survive() {
+    fn a_killed_server_leaves_a_stale_socket_that_commands_survive() {
         let sandbox = Sandbox::new();
         let node = sandbox.node();
         let day = |args: &[&str]| sandbox.day(args);
@@ -819,7 +1036,7 @@ mod blackbox {
                 + &String::from_utf8_lossy(&output.stderr)
         };
         assert!(day(&["node", "init"]).status.success());
-        let started = day(&["node", "start"]);
+        let started = day(&["node", "start", "--bg"]);
         assert!(started.status.success(), "{}", text(&started));
         // The lock records the holder's pid on its first line.
         let pid: u32 = std::fs::read_to_string(node.join("node.lock"))
@@ -869,8 +1086,8 @@ mod blackbox {
         );
         assert!(!socket.exists());
 
-        // And a daemon can start over a stale socket too.
-        assert!(day(&["node", "start"]).status.success());
+        // And a server can start over a stale socket too.
+        assert!(day(&["node", "start", "--bg"]).status.success());
         let lock_again = std::fs::read_to_string(node.join("node.lock")).unwrap();
         assert_ne!(
             lock_again.lines().next().unwrap().parse::<u32>().unwrap(),

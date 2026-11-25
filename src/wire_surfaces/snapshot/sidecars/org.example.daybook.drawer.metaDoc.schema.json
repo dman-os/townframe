@@ -1,0 +1,22 @@
+{
+  "$defs": {
+    "DrawerMetaDoc": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.drawer.metaDoc/<kind>/<name>`: a named slot on one metadata root\nnaming a metadata-class doc that belongs to the drawer — an inventory, a keys document, a\nfuture shard. `kind` is an open string vocabulary and `name` picks one slot inside it, both\ncarried in the key slot; concurrent creators of one `(kind, name)` write the same key, so\nAutomerge's last-writer-wins leaves exactly one doc named\n([ADR 019](../../../docs/adrs/019-cabinet-drawers-and-selective-mirroring.md),\n[ADR 026](../../../docs/adrs/026-drawer-native-blobs.md)).",
+      "properties": {
+        "docId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "docId"
+      ],
+      "title": "DrawerMetaDoc",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.drawer.metaDoc"
+    }
+  },
+  "$ref": "#/$defs/DrawerMetaDoc",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

@@ -104,7 +104,7 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
             .mint_doc(
                 &carol,
                 DocScope {
-                    read: [doc.clone()].into(),
+                    read: DocScope::read_all([doc.clone()]),
                     ..Default::default()
                 },
             )
@@ -116,7 +116,7 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
         .mint_doc(
             &bob,
             DocScope {
-                read: [doc.clone()].into(),
+                read: DocScope::read_all([doc.clone()]),
                 ..Default::default()
             },
         )
@@ -157,6 +157,55 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
         );
     }
     assert_eq!(reader.read_note(&bob, &doc).await.unwrap(), expected);
+
+    // The operator holds no grant on the synced drawer, here or anywhere: its root capability is
+    // the whole of its standing. It still lends a handle on the drawer and a handle on the doc
+    // through it, and the handles work.
+    let operator = Authorization::identity(reader.authority.root);
+    let lent = reader
+        .drawers()
+        .call_with(
+            RequestContext::root(),
+            operator.metadata(),
+            MintDrawerCapability {
+                scope: DrawerScope {
+                    drawers: BTreeMap::from([(drawer.clone(), Access::Read)]),
+                    create: false,
+                },
+                rights: Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    let lent_view = reader
+        .drawers()
+        .call(
+            RequestContext::root(),
+            GetDrawer {
+                capability: lent,
+                drawer_id: drawer.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(lent_view.access, Access::Read);
+    assert_eq!(
+        lent_view.docs,
+        BTreeMap::from([(doc.clone(), Access::Admin)])
+    );
+    assert_eq!(
+        reader
+            .list_doc_drawers(operator, &doc)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.drawer_id)
+            .filter(|id| *id == drawer)
+            .count(),
+        1
+    );
 
     drop(observations);
     drop(mirror);

@@ -42,18 +42,22 @@ impl DocsStub {
             Arc::new(move |scope: DocScope| {
                 let document = scope
                     .read
-                    .first()
+                    .keys()
+                    .next()
                     .expect("metadata scope reads one document")
                     .clone();
-                let write = scope.write.contains(&document);
+                let write = scope.write.contains_key(&document);
                 assert_eq!(
                     scope,
                     DocScope {
-                        read: BTreeSet::from([document.clone()]),
+                        read: DocScope::read_all([document.clone()]),
                         write: if write {
-                            BTreeSet::from([document.clone()])
+                            std::collections::BTreeMap::from([(
+                                document.clone(),
+                                big_cabinet_core::doc::DatumKinds::All,
+                            )])
                         } else {
-                            BTreeSet::new()
+                            std::collections::BTreeMap::new()
                         },
                         ..Default::default()
                     }
@@ -128,11 +132,14 @@ impl DocsStub {
         if let Some(error) = state.read_errors.get(&request.doc_id) {
             return Err(error.clone());
         }
-        let mut read = state
-            .documents
-            .get(&request.doc_id)
-            .cloned()
-            .ok_or(DocsError::DocNotFound)?;
+        let mut read =
+            state
+                .documents
+                .get(&request.doc_id)
+                .cloned()
+                .ok_or(DocsError::DocNotFound {
+                    doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+                })?;
         if let Some(keys) = request.datums {
             read.datums.retain(|key, _| keys.contains(key));
             for key in keys {
@@ -154,7 +161,9 @@ impl DocsStub {
         let document = state
             .documents
             .get_mut(&request.doc_id)
-            .ok_or(DocsError::DocNotFound)?;
+            .ok_or(DocsError::DocNotFound {
+                doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+            })?;
         let WriteMode::IfDocUnchanged { heads } = request.mode else {
             panic!("writer pins require CAS");
         };
@@ -266,10 +275,10 @@ impl Harness {
         )
         .await?;
         let (blobs, stop) = crate::boot(crate::Config {
+            upload_hold_grace: None,
             storage: crate::Storage::memory().unwrap(),
             sql: sql.clone(),
             authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
-            operator: Uuid7::new(),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: capability(),
@@ -1122,7 +1131,9 @@ async fn missing_pending_denied_and_unadmitted_references_preserve_previous_clai
     h.docs.datum(&sensitive, reference("node"), original);
     for error in [
         DocsError::Denied,
-        DocsError::DocNotFound,
+        DocsError::DocNotFound {
+            doc_id: big_cabinet_core::dmeta::DocId::new([0; 32]),
+        },
         DocsError::AuthorityUnavailable("offline".into()),
     ] {
         h.docs

@@ -1,8 +1,12 @@
 pub mod carts;
-pub mod daemon;
+#[cfg(feature = "docs")]
+pub mod docs;
 pub mod drawers;
+pub mod dump;
 pub mod exec;
+pub mod grants;
 pub mod init;
 pub mod node;
 pub mod peers;
+pub mod serve;
 pub mod status;

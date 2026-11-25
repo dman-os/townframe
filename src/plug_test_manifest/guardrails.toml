@@ -40,3 +40,30 @@ ceiling = 5
 class = "LEGACY_DEBT"
 reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
 reference = "docs/scratch/nodule-runtime-ledger.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/plug_test_manifest/e2e/capability_regression_wflow.rs"
+symbol = "module::fetch_capability_report"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/plug_test_manifest/e2e/capability_regression_wflow.rs"
+symbol = "module::fetch_capability_report_v2"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_SQL"
+path = "src/plug_test_manifest/e2e/plugin_local_index_wflow.rs"
+symbol = "module::test_embedding_processor_indexes_into_plugin_local_sqlite_state"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "inline SQL predates the queries/ rule: move the statement to a queries/*.sql file"
+reference = "docs/scratch/agent-guardrails-open-items.md"

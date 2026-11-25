@@ -6,33 +6,46 @@
 //! `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p test_nodule_guest --target wasm32-wasip3 --release`.
 
 use super::*;
-use big_blobs_core::PutBlob;
-use big_cabinet_core::datum::DatumMember;
-use big_cartridges_core::Artifact;
+use big_cabinet_core::DatumPin;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
-use big_cartridges_core::Contribution;
-use big_cartridges_core::Digest;
-use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::ComponentExport;
+use big_cartridges_core::Nodule;
+use big_cartridges_core::Permbind;
+use big_cartridges_core::PermbindDatum;
+use big_cartridges_core::PermbindMethod;
+use big_cartridges_core::Routine;
+use big_cartridges_core::RoutineImpl;
+use big_cartridges_core::RoutineUse;
+use big_cartridges_core::config::Component;
+use big_cartridges_core::config::GrantBody;
+use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::config::NetTarget;
 use big_cartridges_core::example_cartridge;
-use big_cartridges_core::request::Necessity;
-use big_cartridges_core::request::Request;
+use big_cartridges_core::protocol::ClearCartridgeConfig;
+use big_cartridges_core::protocol::GetCartridge;
+use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
+use big_cartridges_core::protocol::SetCartridgeGrant;
+use big_cartridges_core::registry::version_pin;
+use big_cartridges_core::test_support::FixtureCartridge;
+
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchError;
+use big_dispatch_core::HttpForm;
+
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
 use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
-use big_nodule_core::Handler;
-use big_nodule_core::Nodule;
-use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
-use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleMethodGrants;
+use method_core::ByteBody;
 use method_core::Method;
 use service_utils_rs::ClientError;
 use service_utils_rs::TraceContext;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// One nodule running the test guest: the guest serves `echo` and `relay` under whatever
@@ -47,8 +60,35 @@ impl Spec {
         format!("{}.echo", self.authority)
     }
 
+    pub(super) fn config(&self) -> String {
+        format!("{}.config", self.authority)
+    }
+
     fn relay(&self) -> String {
         format!("{}.relay", self.authority)
+    }
+
+    pub(super) fn put(&self) -> String {
+        format!("{}.put", self.authority)
+    }
+
+    pub(super) fn read(&self) -> String {
+        format!("{}.read", self.authority)
+    }
+
+    /// Served by the guest: sends the request `{ url, method?, headers? }` it is given to the URL.
+    fn fetch(&self) -> String {
+        format!("{}.fetch", self.authority)
+    }
+
+    /// Served by the guest: consumes a byte body and reports the chunks it saw.
+    fn ingest(&self) -> String {
+        format!("{}.ingest", self.authority)
+    }
+
+    /// Served by the guest: answers a multi-chunk byte body.
+    fn emit(&self) -> String {
+        format!("{}.emit", self.authority)
     }
 
     /// Implemented by the nodule but not served by the guest, which answers 404 for it.
@@ -103,90 +143,257 @@ fn procedure(nsid: &str) -> Value {
         }}
     })
 }
+/// A procedure with a byte (`*/*`) input and the given output encoding. As in atproto, a byte
+/// encoding has no `schema`; the guest's blob capability and blob id ride in `parameters`.
+fn bytes_procedure(nsid: &str, output: &str, parameters: &[&str]) -> Value {
+    let output = if output == "application/json" {
+        json!({
+            "encoding": output,
+            "schema": { "type": "object", "properties": {} }
+        })
+    } else {
+        json!({ "encoding": output })
+    };
+    let mut main = json!({
+        "type": "procedure",
+        "input": { "encoding": "*/*" },
+        "output": output,
+    });
+    if !parameters.is_empty() {
+        main["parameters"] = json!({
+            "type": "params",
+            "required": parameters,
+            "properties": parameters
+                .iter()
+                .map(|name| ((*name).to_owned(), json!({"type": "string"})))
+                .collect::<serde_json::Map<_, _>>(),
+        });
+    }
+    json!({ "lexicon": 1, "id": nsid, "defs": { "main": main } })
+}
+fn setting(nsid: &str) -> Value {
+    json!({
+        "lexicon": 1,
+        "id": nsid,
+        "defs": {
+            "main": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    })
+}
 
 /// The cartridge whose nodule declares `spec.authority`'s three operations, implements them through
-/// the handler artifact `bytes`, and requests each of `calls` (operations of another nodule it
+/// the component `bytes`, and requests each of `calls` (operations of another nodule it
 /// relays to). The requests are optional: the nodule runs before its grant, and the tests
 /// exercise what the grant then permits.
-pub(super) fn cartridge(spec: &Spec, bytes: &[u8], calls: &[String]) -> Cartridge {
+pub(super) fn cartridge(spec: &Spec, bytes: &[u8], calls: &[String]) -> FixtureCartridge {
     cartridge_requiring(
         spec,
         bytes,
         calls
             .iter()
-            .map(|nsid| {
-                let mut request = Request::new(nsid, nsid);
-                request.necessity = Necessity::Optional;
-                request
+            .map(|nsid| FixtureRequest {
+                nsid: nsid.clone(),
+                necessity: big_cartridges_core::Necessity::Optional,
             })
             .collect(),
     )
 }
 
-/// [`cartridge`] with the nodule's `requires` given as they are, so a test can make a request
+struct FixtureRequest {
+    nsid: String,
+    necessity: big_cartridges_core::Necessity,
+}
+
+/// [`cartridge`] with the nodule's method bindings given as they are, so a test can make a request
 /// required.
-fn cartridge_requiring(spec: &Spec, bytes: &[u8], requires: Vec<Request>) -> Cartridge {
-    let mut nodule = Nodule {
-        requires,
-        ..Default::default()
-    };
-    let operations = [spec.echo(), spec.relay(), spec.absent()];
+fn cartridge_requiring(
+    spec: &Spec,
+    bytes: &[u8],
+    requires: Vec<FixtureRequest>,
+) -> FixtureCartridge {
+    let operations = [
+        spec.echo(),
+        spec.relay(),
+        spec.absent(),
+        spec.config(),
+        spec.put(),
+        spec.read(),
+        spec.ingest(),
+        spec.emit(),
+        spec.fetch(),
+    ];
+    let settings = format!("{}.settings", spec.authority);
+    // Each routine holds its own capability, built from what it uses: the settings kind it
+    // reads and writes, and the methods it relays to.
+    let uses: BTreeMap<String, RoutineUse> = std::iter::once((
+        settings.clone(),
+        RoutineUse {
+            read: true,
+            write: true,
+            ..Default::default()
+        },
+    ))
+    .chain(
+        requires
+            .iter()
+            .map(|request| (request.nsid.clone(), RoutineUse::default())),
+    )
+    .collect();
+    let mut nodule = Nodule::default();
+    let mut lexicons = Vec::new();
     for nsid in &operations {
-        nodule
-            .lexicons
-            .push(serde_json::from_value(procedure(nsid)).unwrap());
+        let output = if nsid == &spec.put() {
+            bytes_procedure(nsid, "application/json", &[])
+        } else if nsid == &spec.read() {
+            bytes_procedure(nsid, "*/*", &["capability", "blobId"])
+        } else if nsid == &spec.ingest() {
+            bytes_procedure(nsid, "application/json", &[])
+        } else if nsid == &spec.emit() {
+            bytes_procedure(nsid, "*/*", &[])
+        } else {
+            procedure(nsid)
+        };
+        lexicons.push(serde_json::from_value(output).unwrap());
+        nodule.routines.insert(
+            nsid.clone(),
+            Routine {
+                r#impl: RoutineImpl::ComponentExport(ComponentExport {
+                    component: "handler".into(),
+                    export: "handle".into(),
+                    extra: Default::default(),
+                }),
+                implements: nsid.parse().unwrap(),
+                uses: uses.clone(),
+                extra: Default::default(),
+            },
+        );
     }
-    nodule.handler = Some(Handler {
-        artifact: "handler".into(),
-        extra: Default::default(),
-    });
-    nodule.implements = operations.into();
-    let mut cartridge = Cartridge::new(spec.cartridge.clone(), "1.0.0".parse().unwrap());
+    lexicons.push(serde_json::from_value(setting(&settings)).unwrap());
+    let mut cartridge = FixtureCartridge::new(Cartridge::new(
+        spec.cartridge.clone(),
+        "1.0.0".parse().unwrap(),
+    ));
     cartridge.authority = Some(spec.authority.to_owned());
-    cartridge.artifacts.push(Artifact {
-        key: "handler".into(),
-        digest: Digest::of(bytes),
-        size: Some(bytes.len() as u64),
-        media_type: Some("application/wasm".into()),
-        extra: Default::default(),
-    });
-    cartridge
-        .contributions
-        .push(Contribution::Nodule(NoduleContribution {
-            schema: Nodule::ID.into(),
-            description: serde_json::from_value(serde_json::to_value(nodule).unwrap()).unwrap(),
+    cartridge.nodule = Some(nodule);
+    cartridge.settings.insert(settings.parse().unwrap());
+    for file in lexicons {
+        cartridge.with_lexicon(file);
+    }
+    cartridge.with_wasm("handler", bytes);
+    cartridge.permbinds = requires
+        .into_iter()
+        .map(|request| {
+            (
+                request.nsid.clone(),
+                Permbind::Method(PermbindMethod {
+                    nsid: request.nsid.parse().unwrap(),
+                    description: request.nsid,
+                    necessity: request.necessity,
+                    min_revision: None,
+                    extra: Default::default(),
+                }),
+            )
+        })
+        .collect();
+    cartridge.permbinds.insert(
+        settings.clone(),
+        Permbind::Datum(PermbindDatum {
+            nsid: settings.parse().unwrap(),
+            description: settings,
+            read: Some(big_cartridges_core::Necessity::Required),
+            write: Some(big_cartridges_core::Necessity::Required),
+            create: None,
+            delete: None,
             extra: Default::default(),
-        }));
+        }),
+    );
     cartridge
 }
 
 pub(super) async fn put(node: &BigNode, bytes: &[u8]) {
     node.blobs
-        .client
-        .call(
+        .put(
             RequestContext::root(),
-            PutBlob {
-                capability: blobs::put_cap(node).await,
-                bytes: bytes.to_vec().into(),
-            },
+            blobs::put_cap(node).await,
+            ByteBody::from_bytes(bytes.to_vec()),
         )
         .await
         .unwrap();
 }
 
-pub(super) async fn admit(node: &BigNode, cartridge: Cartridge) -> NoduleRecord {
+/// Publishes `cartridge` through the registry (signed as the example namespace; its component
+/// bytes are put in the blob store) and installs the pin of the version just published.
+pub(super) async fn admit(node: &BigNode, cartridge: FixtureCartridge) -> NoduleRecord {
+    let pin = node.publish_fixture(&cartridge).await;
+    install(node, pin, &cartridge.id).await
+}
+
+/// Installs the version of `id` the registry serves, which was published here or imported.
+pub(super) async fn install_version(
+    node: &BigNode,
+    id: &CartridgeId,
+    version: &big_cartridges_core::Version,
+) -> NoduleRecord {
+    let operator = super::cartridges::operator(node);
+    let doc_id = node
+        .cartridges
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator.metadata(),
+            GetCartridge { id: id.clone() },
+        )
+        .await
+        .unwrap()
+        .doc_id;
+    let heads = blobs::all_datums(node, &doc_id).await.heads;
+    install(node, version_pin(doc_id, version, heads), id).await
+}
+
+async fn install(node: &BigNode, pin: DatumPin, id: &CartridgeId) -> NoduleRecord {
     node.nodules
         .client
         .call_with(
             RequestContext::root(),
-            Authorization::identity(node.authority.root).metadata(),
-            AdmitNodule {
-                cartridge,
-                drawers: None,
-            },
+            super::cartridges::operator(node).metadata(),
+            InstallCartridge { cartridge: pin },
         )
         .await
-        .unwrap()
+        .unwrap();
+    record_of(node, id).await
+}
+
+/// Installs `fixture` whose component bytes are not in the blob store yet. The registry service
+/// refuses to stage a version whose components it cannot find, so this writes the registry
+/// document itself, as the operator and in the order staging does (the payload datums, the typed
+/// components pinning the blob datums, then the envelope pinning both), and installs the pin of
+/// the version: the nodule then waits for its bytes (`ArtifactsUnavailable`) instead of being
+/// refused.
+pub(super) async fn admit_before_its_bytes(
+    node: &BigNode,
+    fixture: FixtureCartridge,
+) -> NoduleRecord {
+    let operator = Authorization::identity(node.authority.root);
+    let present = node.drawers.local().present_id;
+    // Authored in the local drawer and imported, which is the registry's own way of taking a
+    // document it did not stage: once the import returns, the registry serves the version.
+    let (doc, _) = super::cartridges::write_registry_doc(
+        node,
+        format!("drawer {present}"),
+        "version before its bytes",
+        &fixture.id.to_string(),
+        std::slice::from_ref(&fixture),
+        |_, envelope| big_cartridges_core::test_support::sign_as_example(envelope),
+    )
+    .await;
+    super::cartridges::import_document(node, operator, &present, &doc)
+        .await
+        .unwrap();
+    let heads = blobs::all_datums(node, &doc).await.heads;
+    install(node, version_pin(doc, &fixture.version, heads), &fixture.id).await
 }
 
 pub(super) async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> NoduleRecord {
@@ -195,38 +402,72 @@ pub(super) async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> N
         .call_with(
             RequestContext::root(),
             Authorization::identity(node.authority.root).metadata(),
-            SetNoduleEnabled {
+            SetCartridgeEnabled {
                 cartridge_id: spec.cartridge.clone(),
+                component: Component::Nodule,
                 enabled,
             },
         )
         .await
-        .unwrap()
+        .unwrap();
+    record(node, spec).await
 }
 
-async fn set_operations(node: &BigNode, spec: &Spec, methods: DispatchScope) -> NoduleRecord {
+/// Makes `methods` the whole of the nodule's method grants: the cartridge's config is cleared
+/// (these nodules have no settings), then each operation and authority is granted as a datum of
+/// its own.
+pub(super) async fn set_operations(
+    node: &BigNode,
+    spec: &Spec,
+    methods: DispatchScope,
+) -> NoduleRecord {
+    let operator = Authorization::identity(node.authority.root);
     node.nodules
         .client
         .call_with(
             RequestContext::root(),
-            Authorization::identity(node.authority.root).metadata(),
-            SetNoduleMethodGrants {
+            operator.metadata(),
+            ClearCartridgeConfig {
                 cartridge_id: spec.cartridge.clone(),
-                methods,
             },
         )
         .await
-        .unwrap()
+        .unwrap();
+    let grants = methods
+        .operations
+        .into_iter()
+        .map(GrantKey::Method)
+        .chain(methods.authorities.into_iter().map(GrantKey::Authority));
+    for grant in grants {
+        node.nodules
+            .client
+            .call_with(
+                RequestContext::root(),
+                operator.metadata(),
+                SetCartridgeGrant {
+                    cartridge_id: spec.cartridge.clone(),
+                    grant,
+                    value: Some(GrantBody::present()),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    record(node, spec).await
 }
 
 async fn record(node: &BigNode, spec: &Spec) -> NoduleRecord {
+    record_of(node, &spec.cartridge).await
+}
+
+async fn record_of(node: &BigNode, cartridge_id: &CartridgeId) -> NoduleRecord {
     node.nodules
         .client
         .call_with(
             RequestContext::root(),
             Authorization::identity(node.authority.root).metadata(),
             GetNodule {
-                cartridge_id: spec.cartridge.clone(),
+                cartridge_id: cartridge_id.clone(),
             },
         )
         .await
@@ -242,6 +483,34 @@ pub(super) async fn invoke(
     invoke_within(node, operation, input, context, RequestContext::root()).await
 }
 
+pub(super) async fn invoke_bytes(
+    node: &BigNode,
+    operation: &str,
+    parameters: Value,
+    query: String,
+    body: ByteBody,
+    mut context: InvocationContext,
+) -> Result<big_dispatch_core::InvokeOutput, DispatchError> {
+    context.http = Some(HttpForm::Post { query });
+    node.dispatch
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
+            Invoke {
+                operation: operation.to_owned(),
+                parameters,
+                body: Body::Bytes(body),
+                context,
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            ClientError::Method(error) => error,
+            ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
+        })
+}
+
 /// [`invoke`] under the caller's own request context: its budget, request id and trace.
 pub(super) async fn invoke_within(
     node: &BigNode,
@@ -255,14 +524,10 @@ pub(super) async fn invoke_within(
         .call_with(
             request,
             Authorization::identity(node.authority.root).metadata(),
-            Invoke {
-                operation: operation.to_owned(),
-                input,
-                context,
-            },
+            Invoke::json(operation, input, context),
         )
         .await
-        .map(|output| output.output)
+        .map(|output| output.body.into_json())
         .map_err(|error| match error {
             ClientError::Method(error) => error,
             ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
@@ -270,15 +535,23 @@ pub(super) async fn invoke_within(
 }
 
 pub(super) async fn boot_node(secrets: &Arc<SecretStore>) -> (BigNode, StopToken) {
+    boot_node_allowing(secrets, false).await
+}
+
+/// [`boot_node`] on a node whose `net.allow_host_loopback` is `allow_host_loopback`.
+async fn boot_node_allowing(
+    secrets: &Arc<SecretStore>,
+    allow_host_loopback: bool,
+) -> (BigNode, StopToken) {
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
-    BigNode::boot(config(
+    let mut config = config(
         Arc::clone(secrets),
         sql,
         big_repo::Storage::memory(&runtime).unwrap(),
-    ))
-    .await
-    .unwrap()
+    );
+    config.allow_host_loopback = allow_host_loopback;
+    BigNode::boot(config).await.unwrap()
 }
 
 const OUTER_TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
@@ -294,6 +567,98 @@ fn assert_continues_trace(traceparent: &str) {
 }
 
 #[tokio::test]
+async fn a_guest_can_write_only_its_declared_settings() {
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let spec = caller();
+    put(&node, &bytes).await;
+    admit(&node, cartridge(&spec, &bytes, &[])).await;
+    set_enabled(&node, &spec, true).await;
+
+    let initial = invoke(
+        &node,
+        &spec.config(),
+        json!({"action": "read"}),
+        Default::default(),
+    )
+    .await
+    .expect("the config document is readable before writing");
+    assert!(initial.get("org.example.test.settings/main").is_none());
+
+    let setting = json!({"enabled": true});
+    invoke(
+        &node,
+        &spec.config(),
+        json!({
+            "action": "write",
+            "tag": "org.example.test.settings",
+            "slot": "main",
+            "value": setting,
+        }),
+        Default::default(),
+    )
+    .await
+    .expect("the declared setting is writable");
+    let read = invoke(
+        &node,
+        &spec.config(),
+        json!({"action": "read"}),
+        Default::default(),
+    )
+    .await
+    .expect("the config document is readable");
+    assert!(read.get("org.example.test.settings/main").is_some());
+
+    fn assert_config_denied(result: Result<Value, DispatchError>) {
+        match result {
+            Err(DispatchError::Provider { status: 400, body }) => {
+                assert_eq!(body["error"], "Config");
+                let message = body["message"].as_str().unwrap_or_default();
+                assert!(
+                    message.contains("Denied")
+                        && message
+                            .contains("the presented capability does not permit this operation"),
+                    "unexpected config denial: {body}"
+                );
+            }
+            other => panic!("expected the docs Denied error through the guest, got {other:?}"),
+        }
+    }
+
+    assert_config_denied(
+        invoke(
+            &node,
+            &spec.config(),
+            json!({
+                "action": "write",
+                "tag": <big_cartridges_core::config::MethodGrant as big_cabinet_core::datum::DatumMember>::ID,
+                "slot": "org.example.other.ping",
+                "value": {"empty": true},
+            }),
+            Default::default(),
+        )
+        .await,
+    );
+    assert_config_denied(
+        invoke(
+            &node,
+            &spec.config(),
+            json!({
+                "action": "write",
+                "tag": "org.example.test.other",
+                "slot": "main",
+                "value": {"enabled": false},
+            }),
+            Default::default(),
+        )
+        .await,
+    );
+
+    shutdown(node, stop).await;
+}
+
+#[tokio::test]
 async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     let bytes = guest_bytes();
     let secrets = secrets().await;
@@ -306,9 +671,19 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     assert_eq!(enabled.readiness, Readiness::Ready);
     assert!(node.executor.hosts(&spec.cartridge));
 
+    let old_config = invoke(
+        &node,
+        &spec.config(),
+        json!({"action": "capability"}),
+        Default::default(),
+    )
+    .await
+    .expect("the initial settings capability is delivered");
+    let old_doc_id = old_config["docId"].as_str().unwrap().to_owned();
+    let old_capability = old_config["capability"].as_str().unwrap().to_owned();
     // The echo returns the input, and the headers the host built for the guest: the operator's
     // capability as a bare `Bearer` token (no signer), the idempotency key, the request id and
-    // no budget. No operations are granted, so the nodule is told no capability of its own.
+    // no budget. The declared settings also grant docs operations, so a nodule capability is present.
     let operator_cap = serde_json::to_value(node.authority.root).unwrap();
     let context = InvocationContext {
         idempotency_key: Some("key-1".into()),
@@ -331,7 +706,7 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     assert_ne!(echoed["requestId"], outer.request_id.to_string());
     assert_eq!(echoed["requestId"].as_str().unwrap().len(), 36, "a uuid");
     assert_continues_trace(echoed["traceparent"].as_str().unwrap());
-    assert_eq!(echoed["noduleCapability"], Value::Null);
+    assert!(echoed["noduleCapability"].is_string());
 
     // A budget travels as the relative `x-timeout-ms`, re-derived from what is left.
     let budgeted = RequestContext::root().with_time_budget(std::time::Duration::from_secs(60));
@@ -370,8 +745,55 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
         Err(DispatchError::UnknownOperation)
     );
     assert!(!node.executor.hosts(&spec.cartridge));
+    let revoked = invoke(
+        &node,
+        "org.example.daybook.docs.writeDatums",
+        json!({
+            "capability": old_capability,
+            "docId": old_doc_id,
+            "mode": {"mode": "atCurrent"},
+            "set": {"org.example.test.settings/main": {"enabled": false}},
+            "remove": [],
+        }),
+        Default::default(),
+    )
+    .await;
+    match revoked {
+        Err(DispatchError::Provider { status: 400, body }) => {
+            assert_eq!(body["error"], "Denied");
+            assert!(
+                body["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("presented capability")),
+                "unexpected revoked-capability response: {body}"
+            );
+        }
+        other => panic!("expected the retracted settings capability to be denied, got {other:?}"),
+    }
     set_enabled(&node, &spec, true).await;
     assert!(node.executor.hosts(&spec.cartridge));
+    let new_config = invoke(
+        &node,
+        &spec.config(),
+        json!({"action": "capability"}),
+        Default::default(),
+    )
+    .await
+    .expect("re-enabling mints settings capability");
+    assert_ne!(new_config["capability"].as_str().unwrap(), old_capability);
+    invoke(
+        &node,
+        &spec.config(),
+        json!({
+            "action": "write",
+            "tag": "org.example.test.settings",
+            "slot": "main",
+            "value": {"enabled": true},
+        }),
+        Default::default(),
+    )
+    .await
+    .expect("the re-enabled settings capability is usable");
     assert_eq!(
         invoke(&node, &echo, json!({ "n": 2 }), Default::default())
             .await
@@ -381,11 +803,187 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     shutdown(node, stop).await;
 }
 
-/// The capability id a nodule is told in `x-nodule-capability`, as the guest echoes it.
+#[tokio::test]
+async fn a_wasm_guest_streams_blob_put_and_read_bodies() {
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let spec = caller();
+    let calls = vec![
+        "org.example.daybook.blobs.put".to_owned(),
+        "org.example.daybook.blobs.read".to_owned(),
+    ];
+    put(&node, &bytes).await;
+    let record = admit(&node, cartridge(&spec, &bytes, &calls)).await;
+    // The blobs handles are minted for the nodule's own actor: a handle is bound to its subject,
+    // and the guest's calls reach the blobs service as that actor.
+    let actor = record
+        .actor
+        .expect("an installed nodule has an actor")
+        .actor_id;
+    set_operations(
+        &node,
+        &spec,
+        DispatchScope {
+            operations: calls.iter().cloned().collect(),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        set_enabled(&node, &spec, true).await.readiness,
+        Readiness::Ready
+    );
+
+    // The put presents the blobs handle the routine was minted for its `blobs.put` permbind
+    // (ADR 049 §6.2); nothing is minted for it here.
+    let payload: Vec<u8> = (0..150_000).map(|index| (index % 251) as u8).collect();
+    let put_output = invoke_bytes(
+        &node,
+        &spec.put(),
+        json!({}),
+        String::new(),
+        ByteBody::from_bytes(payload.clone()),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let info: big_blobs_core::BlobInfo =
+        serde_json::from_value(put_output.body.into_json()).unwrap();
+
+    let read_capability = blobs::read_cap_for(&node, &info.blob_id, Some(actor)).await;
+    let read_capability_text = serde_json::to_value(read_capability)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let read_output = invoke_bytes(
+        &node,
+        &spec.read(),
+        json!({
+            "capability": read_capability,
+            "blobId": info.blob_id,
+        }),
+        format!("capability={read_capability_text}&blobId={}", info.blob_id),
+        ByteBody::from_bytes(Vec::new()),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let body = match read_output.body {
+        Body::Bytes(body) => body.collect(u64::MAX).await.unwrap(),
+        Body::Json(_) => panic!("blob read returned JSON"),
+        #[cfg(unix)]
+        Body::Descriptors(_) => panic!("blob read returned descriptors"),
+    };
+    assert_eq!(body, payload);
+    shutdown(node, stop).await;
+}
+
+/// A guest that serves byte-bodied methods, called through dispatch from the host: the request
+/// body reaches it chunk by chunk, and its answer leaves the same way with its MIME.
+#[tokio::test]
+async fn a_wasm_guest_serves_byte_bodied_methods_as_streams() {
+    use futures::StreamExt;
+
+    // What the guest's `emit` produces (`test_nodule_handlers::EMIT_CHUNKS` and
+    // `EMIT_CHUNK_OCTETS`, which this crate does not depend on).
+    const EMIT_CHUNKS: usize = 4;
+    const EMIT_CHUNK_OCTETS: usize = 64 * 1024;
+
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let spec = caller();
+    put(&node, &bytes).await;
+    admit(&node, cartridge(&spec, &bytes, &[])).await;
+    assert_eq!(
+        set_enabled(&node, &spec, true).await.readiness,
+        Readiness::Ready
+    );
+
+    // The host sends the payload as many small chunks; the guest sees it in 64 KiB chunks, so
+    // more than one chunk arriving is the stream and not one collected buffer.
+    const GUEST_CHUNK_OCTETS: usize = 64 * 1024;
+    let payload: Vec<u8> = (0..GUEST_CHUNK_OCTETS * 3 + 1234)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let sent = payload
+        .chunks(10_000)
+        .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+        .collect::<Vec<std::io::Result<bytes::Bytes>>>();
+    let output = invoke_bytes(
+        &node,
+        &spec.ingest(),
+        json!({}),
+        String::new(),
+        ByteBody::new(futures::stream::iter(sent))
+            .with_mime("application/x-ingest")
+            .with_length(payload.len() as u64),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let report = output.body.into_json();
+    assert_eq!(report["octets"], payload.len() as u64);
+    assert_eq!(report["mime"], "application/x-ingest");
+    assert_eq!(
+        report["sum"],
+        payload.iter().map(|octet| u64::from(*octet)).sum::<u64>()
+    );
+    assert_eq!(
+        report["chunks"],
+        payload.len().div_ceil(GUEST_CHUNK_OCTETS) as u64,
+        "the guest should have read the body as a stream of 64 KiB chunks"
+    );
+    assert!(report["chunks"].as_u64().unwrap() > 1);
+
+    let output = invoke_bytes(
+        &node,
+        &spec.emit(),
+        json!({}),
+        String::new(),
+        ByteBody::from_bytes(Vec::new()),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let Body::Bytes(mut body) = output.body else {
+        panic!("the guest's byte answer arrived as JSON");
+    };
+    assert_eq!(body.mime.as_deref(), Some("application/x-emit"));
+    assert_eq!(body.length, Some((EMIT_CHUNKS * EMIT_CHUNK_OCTETS) as u64));
+    let (mut chunks, mut octets, mut sum) = (0, 0usize, 0u64);
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.unwrap();
+        chunks += 1;
+        octets += chunk.len();
+        sum += chunk.iter().map(|octet| u64::from(*octet)).sum::<u64>();
+    }
+    assert_eq!(octets, EMIT_CHUNKS * EMIT_CHUNK_OCTETS);
+    assert_eq!(
+        sum,
+        (0..EMIT_CHUNKS as u64).sum::<u64>() * EMIT_CHUNK_OCTETS as u64
+    );
+    assert!(
+        chunks > 1,
+        "the guest's answer was collected into one chunk"
+    );
+    shutdown(node, stop).await;
+}
+
+/// The capability id the nodule's `relay` routine is told in `x-nodule-capability` (each routine
+/// holds its own), as the relay reports having presented it on a call to an operation nothing
+/// serves.
 async fn own_capability(node: &BigNode, spec: &Spec) -> Option<String> {
-    invoke(node, &spec.echo(), json!({}), Default::default())
-        .await
-        .unwrap()["noduleCapability"]
+    relay(
+        node,
+        spec,
+        "org.example.nowhere.ping",
+        None,
+        Default::default(),
+    )
+    .await["authority"]
         .as_str()
         .map(str::to_owned)
 }
@@ -393,7 +991,7 @@ async fn own_capability(node: &BigNode, spec: &Spec) -> Option<String> {
 /// What the caller's `relay` reports having received from calling `operation` through
 /// `dispatch.local`: the upstream status and body. `authority` overrides the capability the
 /// guest presents, which is otherwise the one it was told.
-async fn relay(
+pub(super) async fn relay(
     node: &BigNode,
     from: &Spec,
     operation: &str,
@@ -470,8 +1068,9 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
         json!(format!("Bearer {granted}"))
     );
     assert_eq!(relayed["body"]["idempotencyKey"], "nested-key");
-    // B has no grants of its own, so it was handed no capability to confuse with A's.
-    assert_eq!(relayed["body"]["noduleCapability"], Value::Null);
+    // B has its own settings grant, but it was not handed A's dispatch capability.
+    assert!(relayed["body"]["noduleCapability"].is_string());
+    assert_ne!(relayed["body"]["noduleCapability"], json!(granted));
 
     // The nested call is a hop of its own: a new request id (the id is the admission key and
     // the outer call is still in flight), the outer trace under a new span, and a budget
@@ -520,11 +1119,11 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     let own = relay(&node, &b, &a.echo(), None, context.clone()).await;
     assert_eq!(own["status"], 200, "{own}");
 
-    // Revoking by a config change takes effect: the handler is told no capability, and the one
-    // it remembered is dead.
+    // Revoking the dispatch grant takes effect while the separate settings capability remains;
+    // the capability A remembered for dispatch is dead.
     let revoked = set_operations(&node, &a, DispatchScope::default()).await;
     assert!(revoked.methods.is_none());
-    assert_eq!(own_capability(&node, &a).await, None);
+    assert!(own_capability(&node, &a).await.is_some());
     let stale = relay(&node, &a, &target, Some(&granted), context.clone()).await;
     assert_eq!(stale["status"], 403, "{stale}");
 
@@ -552,6 +1151,249 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     shutdown(node, stop).await;
 }
 
+/// A one-thread HTTP/1.1 server on a loopback port: answers every request `hello from outside`
+/// and keeps the head (request line and headers, lower-cased) of each it served.
+struct Outside {
+    port: u16,
+    heads: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Outside {
+    fn start() -> Self {
+        use std::io::Read;
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let heads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = Arc::clone(&heads);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut head = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buf).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&buf[..read]);
+                }
+                kept.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&head).to_lowercase());
+                let body = "hello from outside";
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        Self { port, heads }
+    }
+
+    fn heads(&self) -> Vec<String> {
+        self.heads.lock().unwrap().clone()
+    }
+}
+
+/// A guest reaches the network only as a `#net` permbind and the cartridge's `grant/net` say
+/// (ADR 049 §2): declared but ungranted is its `MissingAuthority`, granting lets the request out
+/// without a restart and its body comes back, and nothing off the exact host, port or verb goes
+/// out. The routine's capability never reaches the server.
+#[tokio::test]
+async fn a_wasm_guest_reaches_only_the_network_hosts_it_declares_and_is_granted() {
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node_allowing(&secrets, true).await;
+    let spec = caller();
+    let outside = Outside::start();
+    let elsewhere = Outside::start();
+    put(&node, &bytes).await;
+    let mut fixture = cartridge(&spec, &bytes, &[]);
+    // The test server is on the machine's loopback, which a guest reaches only as the sentinel.
+    fixture.permbinds.insert(
+        "net".into(),
+        Permbind::Net(big_cartridges_core::PermbindNet {
+            host: NetTarget::HOST_LOOPBACK.into(),
+            port: Some(outside.port),
+            methods: Some(["GET".to_owned()].into()),
+            description: "the test server".into(),
+            extra: Default::default(),
+        }),
+    );
+    for routine in fixture.nodule.as_mut().unwrap().routines.values_mut() {
+        routine.uses.insert("net".into(), RoutineUse::default());
+    }
+    admit(&node, fixture).await;
+    assert_eq!(
+        set_enabled(&node, &spec, true).await.readiness,
+        Readiness::Ready
+    );
+    let operation = spec.fetch();
+    let fetch = |url: String, method: &str| {
+        invoke(
+            &node,
+            &operation,
+            json!({ "url": url, "method": method, "headers": { "x-from-guest": "yes" } }),
+            InvocationContext::default(),
+        )
+    };
+    let url = format!(
+        "http://{}:{}/thing?q=1",
+        NetTarget::HOST_LOOPBACK,
+        outside.port
+    );
+
+    // Declared but ungranted.
+    let refused = fetch(url.clone(), "GET").await.unwrap();
+    assert_eq!(refused["status"], 403, "{refused}");
+    assert_eq!(refused["body"]["error"], "MissingAuthority", "{refused}");
+    assert_eq!(
+        refused["body"]["operationError"]["Context"]["MissingAuthority"]["permbind"],
+        "net"
+    );
+    assert!(outside.heads().is_empty());
+
+    // Granted, the same request goes out and its body comes back, with no restart.
+    let grant = GrantKey::Net(
+        format!("{}:{}", NetTarget::HOST_LOOPBACK, outside.port)
+            .parse()
+            .unwrap(),
+    );
+    node.nodules
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
+            SetCartridgeGrant {
+                cartridge_id: spec.cartridge.clone(),
+                grant,
+                value: Some(GrantBody::present()),
+            },
+        )
+        .await
+        .unwrap();
+    let allowed = fetch(url.clone(), "GET").await.unwrap();
+    assert_eq!(allowed["status"], 200, "{allowed}");
+    assert_eq!(allowed["body"], "hello from outside");
+    let heads = outside.heads();
+    assert_eq!(heads.len(), 1);
+    assert!(
+        heads[0].starts_with("get /thing?q=1 http/1.1"),
+        "{}",
+        heads[0]
+    );
+    assert!(
+        heads[0].contains("x-from-guest: yes"),
+        "the guest's own headers are sent: {}",
+        heads[0]
+    );
+    assert!(
+        !heads[0].contains("x-nodule-capability"),
+        "the node's capability is never forwarded: {}",
+        heads[0]
+    );
+
+    // Everything else is refused as undeclared and never reaches a server.
+    for (url, method, why) in [
+        (url.clone(), "POST", "a verb the permbind does not list"),
+        (
+            format!("http://{}:{}/", NetTarget::HOST_LOOPBACK, elsewhere.port),
+            "GET",
+            "another port",
+        ),
+        (
+            format!("http://localhost:{}/", outside.port),
+            "GET",
+            "another host",
+        ),
+    ] {
+        let refused = fetch(url, method).await.unwrap();
+        assert_eq!(refused["status"], 403, "{why}: {refused}");
+        assert_eq!(refused["body"]["error"], "Denied", "{why}: {refused}");
+    }
+    assert_eq!(outside.heads().len(), 1);
+    assert!(elsewhere.heads().is_empty());
+
+    // A guest's own `127.0.0.1` is not the machine: no permbind can name it (admission refuses
+    // one), so it is undeclared and `Denied`, the same as any other host.
+    let refused = fetch(format!("http://127.0.0.1:{}/", outside.port), "GET")
+        .await
+        .unwrap();
+    assert_eq!(refused["status"], 403, "{refused}");
+    assert_eq!(refused["body"]["error"], "Denied", "{refused}");
+    assert_eq!(outside.heads().len(), 1, "127.0.0.1 reached the machine");
+    shutdown(node, stop).await;
+}
+
+/// The machine's loopback is reached through the sentinel only when the node's switch is on,
+/// whatever the cartridge was granted. (Addresses in the refused ranges cannot be declared at
+/// all, and the egress's own unit tests cover what a name resolves to.)
+#[tokio::test]
+async fn a_wasm_guest_cannot_reach_the_machine_or_the_lan_without_the_node_switch() {
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let spec = caller();
+    let outside = Outside::start();
+    put(&node, &bytes).await;
+    let mut fixture = cartridge(&spec, &bytes, &[]);
+    let targets = [NetTarget::HOST_LOOPBACK];
+    for (index, host) in targets.iter().enumerate() {
+        let binding = format!("net{index}");
+        fixture.permbinds.insert(
+            binding.clone(),
+            Permbind::Net(big_cartridges_core::PermbindNet {
+                host: (*host).into(),
+                port: Some(outside.port),
+                methods: None,
+                description: "a refused destination".into(),
+                extra: Default::default(),
+            }),
+        );
+        for routine in fixture.nodule.as_mut().unwrap().routines.values_mut() {
+            routine.uses.insert(binding.clone(), RoutineUse::default());
+        }
+    }
+    admit(&node, fixture).await;
+    assert_eq!(
+        set_enabled(&node, &spec, true).await.readiness,
+        Readiness::Ready
+    );
+    for host in targets {
+        node.nodules
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(node.authority.root).metadata(),
+                SetCartridgeGrant {
+                    cartridge_id: spec.cartridge.clone(),
+                    grant: GrantKey::Net(format!("{host}:{}", outside.port).parse().unwrap()),
+                    value: Some(GrantBody::present()),
+                },
+            )
+            .await
+            .unwrap();
+        let refused = invoke(
+            &node,
+            &spec.fetch(),
+            json!({ "url": format!("http://{host}:{}/", outside.port) }),
+            InvocationContext::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused["status"], 403, "{host}: {refused}");
+        assert_eq!(refused["body"]["error"], "Denied", "{host}: {refused}");
+    }
+    assert!(
+        outside.heads().is_empty(),
+        "a refused destination was dialed"
+    );
+    shutdown(node, stop).await;
+}
+
 #[tokio::test]
 async fn a_handler_whose_bytes_arrive_late_becomes_ready_when_they_do() {
     let bytes = guest_bytes();
@@ -559,7 +1401,7 @@ async fn a_handler_whose_bytes_arrive_late_becomes_ready_when_they_do() {
     let (node, stop) = boot_node(&secrets).await;
     let spec = caller();
     let echo = spec.echo();
-    admit(&node, cartridge(&spec, &bytes, &[])).await;
+    admit_before_its_bytes(&node, cartridge(&spec, &bytes, &[])).await;
     let waiting = set_enabled(&node, &spec, true).await;
     assert_eq!(waiting.readiness, Readiness::ArtifactsUnavailable);
     assert!(!node.executor.hosts(&spec.cartridge));
@@ -602,12 +1444,10 @@ async fn install_a_cartridge_published_on_another_node(
 ) {
     use super::cartridges::import_document;
     use super::cartridges::operator;
-    use super::cartridges::publish;
     use super::harness::Cluster;
     use super::harness::Topology;
     use big_cartridges_core::protocol::GetCartridge;
     use big_cartridges_core::protocol::GetCartridgeVersion;
-    use big_cartridges_core::test_support::sign_as_example;
 
     let bytes = guest_bytes();
     let spec = caller();
@@ -617,10 +1457,23 @@ async fn install_a_cartridge_published_on_another_node(
 
     let publisher = cluster.node(alice);
     put(publisher, &bytes).await;
-    let envelope = sign_as_example(cartridge(&spec, &bytes, &[]));
-    publish(publisher, operator(publisher), envelope.clone())
+    publisher
+        .publish_fixture(&cartridge(&spec, &bytes, &[]))
+        .await;
+    let envelope = publisher
+        .cartridges
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(publisher).metadata(),
+            GetCartridgeVersion {
+                id: spec.cartridge.clone(),
+                version: "1.0.0".parse().unwrap(),
+            },
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .envelope;
     let document = publisher
         .cartridges
         .client
@@ -663,7 +1516,7 @@ async fn install_a_cartridge_published_on_another_node(
         .envelope;
     assert_eq!(served, envelope);
 
-    admit(node, served).await;
+    install_version(node, &spec.cartridge, &served.version).await;
     set_enabled(node, &spec, true).await;
     // There is no signal for "reconciled" to subscribe to (see the late-bytes test above): the
     // record is looked at until the synced handler bytes have made the nodule ready.
@@ -729,7 +1582,10 @@ async fn a_nodule_requiring_built_in_methods_is_ready_after_a_restart() {
             &bytes,
             required
                 .iter()
-                .map(|nsid| Request::new(*nsid, *nsid))
+                .map(|nsid| FixtureRequest {
+                    nsid: (*nsid).to_owned(),
+                    necessity: big_cartridges_core::Necessity::Required,
+                })
                 .collect(),
         ),
     )

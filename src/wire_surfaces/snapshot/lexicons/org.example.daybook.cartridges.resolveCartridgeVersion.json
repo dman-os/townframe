@@ -1,0 +1,335 @@
+{
+  "defs": {
+    "Cartridge": {
+      "nullable": [
+        "authority",
+        "description",
+        "micro",
+        "name",
+        "nodule",
+        "shortName",
+        "signature",
+        "themeColor"
+      ],
+      "properties": {
+        "authority": {
+          "type": "string"
+        },
+        "categories": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "components": {
+          "type": "unknown"
+        },
+        "dependencies": {
+          "type": "unknown"
+        },
+        "description": {
+          "type": "string"
+        },
+        "icons": {
+          "items": {
+            "ref": "#ImageResource",
+            "type": "ref"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "lexicons": {
+          "type": "unknown"
+        },
+        "micro": {
+          "ref": "#MicroContribution",
+          "type": "ref"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nodule": {
+          "ref": "#Nodule",
+          "type": "ref"
+        },
+        "permbinds": {
+          "type": "unknown"
+        },
+        "screenshots": {
+          "items": {
+            "ref": "#ImageResource",
+            "type": "ref"
+          },
+          "type": "array"
+        },
+        "settings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "shortName": {
+          "type": "string"
+        },
+        "sidecars": {
+          "type": "unknown"
+        },
+        "signature": {
+          "ref": "#CartridgeSignature",
+          "type": "ref"
+        },
+        "themeColor": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ],
+      "type": "object"
+    },
+    "CartridgeSignature": {
+      "properties": {
+        "alg": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "alg",
+        "value"
+      ],
+      "type": "object"
+    },
+    "ImageResource": {
+      "nullable": [
+        "label",
+        "purpose",
+        "sizes"
+      ],
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "sizes": {
+          "type": "string"
+        },
+        "src": {
+          "ref": "org.example.daybook.defs#datumPin",
+          "type": "ref"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "src",
+        "type"
+      ],
+      "type": "object"
+    },
+    "Initializer": {
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "mode": {
+          "knownValues": [
+            "once",
+            "everyStart"
+          ],
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "target",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "MicroContribution": {
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "description": {
+          "type": "unknown"
+        },
+        "schema": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "schema",
+        "description"
+      ],
+      "type": "object"
+    },
+    "Nodule": {
+      "properties": {
+        "bindings": {
+          "type": "unknown"
+        },
+        "initialization": {
+          "items": {
+            "ref": "#Initializer",
+            "type": "ref"
+          },
+          "type": "array"
+        },
+        "localState": {
+          "type": "unknown"
+        },
+        "revisionedStores": {
+          "type": "unknown"
+        },
+        "routines": {
+          "type": "unknown"
+        }
+      },
+      "type": "object"
+    },
+    "ResolvedCartridge": {
+      "properties": {
+        "cartridge": {
+          "ref": "#Cartridge",
+          "type": "ref"
+        },
+        "components": {
+          "type": "unknown"
+        },
+        "lexicons": {
+          "type": "unknown"
+        },
+        "sidecars": {
+          "type": "unknown"
+        }
+      },
+      "required": [
+        "cartridge",
+        "lexicons",
+        "sidecars",
+        "components"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "description": "Resolve a published version's pinned payloads for an installer.",
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "Rejected"
+        },
+        {
+          "description": "Staging refuses a version once its envelope has been published.",
+          "name": "AlreadyPublished"
+        },
+        {
+          "description": "A pinned datum is unavailable at its recorded frontier; this is recoverable when sync catches up.",
+          "name": "PinnedDatumUnreadable"
+        },
+        {
+          "description": "A pin must resolve inside the registry document that carries its envelope.",
+          "name": "PinnedDocumentMismatch"
+        },
+        {
+          "description": "A pinned datum was readable but did not decode as its declared manifest type.",
+          "name": "PinnedDatumInvalid"
+        },
+        {
+          "description": "The envelope a [`ResolveCartridgePin`] pin selects is not available at its heads yet;\nthis is recoverable when sync catches up.",
+          "name": "PinnedEnvelopeUnreadable"
+        },
+        {
+          "description": "The envelope a [`ResolveCartridgePin`] pin selects is not the revision the registry\nserves under its label.",
+          "name": "PinnedRevisionMismatch"
+        },
+        {
+          "description": "A published version never changes content: the label is taken by another envelope.",
+          "name": "VersionExists"
+        },
+        {
+          "description": "The envelope's signature is missing or does not verify against its namespace DID, or the\nDID's method cannot be verified without resolution (fail closed).",
+          "name": "Signature"
+        },
+        {
+          "description": "An unsigned envelope can be signed by the node only for the node's own DID.",
+          "name": "UnsignedForeignNamespace"
+        },
+        {
+          "description": "A new label must order after every label the cartridge has or had, so a validly signed older\nversion cannot be published as new (a downgrade attack). Taking an older version is an\nexplicit runtime action, not a registry one.",
+          "name": "Downgrade"
+        },
+        {
+          "description": "The handle's namespace scope does not include the cartridge's namespace.",
+          "name": "NamespaceNotPermitted"
+        },
+        {
+          "description": "The version exists in the drawer but its signature did not verify, so it is not served.",
+          "name": "Unverified"
+        },
+        {
+          "description": "An artifact's bytes are not in the local blob store, so the registry would pin bytes it\ncannot serve.",
+          "name": "ArtifactUnavailable"
+        },
+        {
+          "name": "UnknownCartridge"
+        },
+        {
+          "name": "UnknownVersion"
+        }
+      ],
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#ResolvedCartridge",
+          "type": "ref"
+        }
+      },
+      "parameters": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "version"
+        ],
+        "type": "params"
+      },
+      "type": "query"
+    }
+  },
+  "id": "org.example.daybook.cartridges.resolveCartridgeVersion",
+  "lexicon": 1
+}

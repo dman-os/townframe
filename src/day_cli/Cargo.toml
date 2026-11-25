@@ -6,6 +6,11 @@ edition.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The hidden `day docs` command that renders the man pages and the Markdown reference from the clap
+# definitions (`cargo x cli`). Off by default so that ordinary builds do not pay for it.
+docs = ["dep:clap_mangen", "dep:clap-markdown"]
+
 [[bin]]
 name = "day"
 path = "main.rs"
@@ -20,15 +25,21 @@ secrets_rs.workspace = true
 service_utils_rs.workspace = true
 big_node.workspace = true
 big_dispatch.workspace = true
+big_dispatch_core.workspace = true
 big_nodule_core.workspace = true
 big_repo.workspace = true
 big_cabinet.workspace = true
+big_cartridges_core.workspace = true
 big_cabinet_core = { workspace = true, features = ["manifest"] }
 
 #
 # cli
 clap = { workspace = true, features = ["derive", "env", "string"] }
 clap_complete.workspace = true
+clap_mangen = { workspace = true, optional = true }
+clap-markdown = { workspace = true, optional = true }
+# build info for `day --version`: the commit, the branch and when it was built
+shadow-rs = { workspace = true, features = ["build"] }
 
 #
 # async
@@ -39,12 +50,15 @@ tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync",
 axum = { workspace = true }
 http.workspace = true
 reqwest.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
+futures.workspace = true
 serde_urlencoded = "0.7"
 tower = { workspace = true, features = ["util"] }
 
 #
 # error
 tracing.workspace = true
+thiserror.workspace = true
 
 #
 # encoding
@@ -61,10 +75,14 @@ rand.workspace = true
 directories.workspace = true
 libc = "0.2"
 
+[build-dependencies]
+shadow-rs = { workspace = true, features = ["build"] }
+
 [dev-dependencies]
 #
 # internal
 secrets_rs = { workspace = true, features = ["test-support"] }
+big_blobs_core.workspace = true
 
 #
 # misc

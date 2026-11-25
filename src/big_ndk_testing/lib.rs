@@ -3,13 +3,13 @@
 //!
 //! [`node`] starts a builder; each registered nodule is a cartridge manifest and the Rust value that
 //! serves it. [`TestNodeBuilder::boot`] boots a real in-memory `BigNode`, hosting the nodules
-//! with an executor that serves them in-process in place of the wasm component, and admits their
+//! with an executor that serves them in-process in place of the wasm component, and installs their
 //! cartridges. Everything else is the production path: enabling, grants, dispatch authorization and
 //! the nodule's own outgoing calls (see [`executor`]). It is for tests only (cartridge authoring
 //! principle 6): no node outside a test is built with it.
 //!
 //! ```ignore
-//! let cartridge = my_cartridge_manifest(); // declares a nodule with a `handler` artifact
+//! let cartridge = my_cartridge_fixture(); // routines served by a `handler` component
 //! let node = big_ndk_testing::node()
 //!     .with_nodule(cartridge.clone(), MyNodule::default())
 //!     .boot()
@@ -19,8 +19,12 @@
 //! node.stop().await;
 //! ```
 //!
-//! The cartridge needs a `handler` artifact entry for the node to host the nodule, but the harness
-//! never reads its bytes, so a placeholder digest is fine.
+//! The cartridge is a [`FixtureCartridge`]: its routines name a component the node must be able to
+//! host, but the harness never reads the component's bytes, so placeholder bytes are fine. They are
+//! put in the node's blob store because the registry service stages a version's components from
+//! there; the harness then publishes the fixture through the registry (signing it as the example
+//! namespace when it is unsigned, `example_cartridge!` ids) and installs the pin of that version,
+//! which the nodule service resolves through the registry as in production.
 
 #![recursion_limit = "256"]
 
@@ -31,8 +35,14 @@ mod smoke;
 
 use big_cabinet::SchemaRepo;
 use big_cabinet_core::authority::Authorization;
-use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::config::Component;
+use big_cartridges_core::config::GrantBody;
+use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
+use big_cartridges_core::protocol::SetCartridgeGrant;
+use big_cartridges_core::test_support::FixtureCartridge;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
@@ -41,17 +51,22 @@ use big_node::BigNode;
 use big_node::Config;
 use big_node::StopToken;
 use big_nodule::executor::NoduleExecutor;
-use big_nodule_core::protocol::AdmitNodule;
+use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesProtocol;
-use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleMethodGrants;
+pub use executor::CartridgeHandles;
 use executor::Hosting;
 use executor::NativeExecutor;
 use executor::Registered;
 use method_core::Unary;
 use secrets_rs::SecretStore;
 use serde_json::Value;
+use service_client_core_rs::xrpc::HttpTransport;
+use service_client_core_rs::xrpc::HttpTransportError;
+use service_client_core_rs::xrpc::Xrpc;
+use service_client_core_rs::xrpc::XrpcBody;
+use service_client_core_rs::xrpc::XrpcRequest;
+use service_client_core_rs::xrpc::XrpcResponse;
 use service_core_rs::xrpc::DOMAIN_ERROR_FIELD;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
@@ -61,6 +76,8 @@ use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
+use tower::ServiceExt;
 
 /// Starts a [`TestNodeBuilder`].
 pub fn node() -> TestNodeBuilder {
@@ -70,7 +87,7 @@ pub fn node() -> TestNodeBuilder {
 }
 
 pub struct TestNodeBuilder {
-    nodules: Vec<(Cartridge, Box<dyn Registered>)>,
+    nodules: Vec<(FixtureCartridge, Box<dyn Registered>)>,
 }
 
 impl TestNodeBuilder {
@@ -78,7 +95,7 @@ impl TestNodeBuilder {
     /// a handler, and `nodule` is what serves it. Every request is served by a clone of
     /// `nodule`, as the wasm component serves each from a fresh value, so state does not
     /// carry from one call to the next.
-    pub fn with_nodule<N>(mut self, cartridge: Cartridge, nodule: N) -> Self
+    pub fn with_nodule<N>(mut self, cartridge: FixtureCartridge, nodule: N) -> Self
     where
         N: big_ndk::Nodule + Clone + Send + 'static,
     {
@@ -87,8 +104,8 @@ impl TestNodeBuilder {
         self
     }
 
-    /// Boots the node and admits every registered cartridge. The nodules are not enabled: grants are
-    /// set and [`TestNode::enable`] called by the test, in whatever order it is exercising.
+    /// Boots the node and installs every registered cartridge. The nodules are not enabled: grants
+    /// are set and [`TestNode::enable`] called by the test, in whatever order it is exercising.
     pub async fn boot(self) -> TestNode {
         let Self { nodules } = self;
         let mut cartridges = Vec::new();
@@ -105,36 +122,44 @@ impl TestNodeBuilder {
             sql,
             big_repo::Storage::memory(&runtime).expect("in-memory repo storage"),
         );
-        let (node, stop) = BigNode::boot_with(config, move |deps| async move {
-            let executor = NativeExecutor::new(registered, deps.dispatch);
-            let (stop, spawner) = service_utils_rs::StopToken::new();
-            // The executor stops what a test left enabled when the node is stopped, after the
-            // nodule service that calls it and before the services it calls.
-            let stopping = Arc::clone(&executor);
-            spawner
-                .spawn({
-                    let spawner = spawner.clone();
-                    async move {
-                        spawner.cancelled().await;
-                        stopping.stop_all().await;
-                    }
-                })
-                .expect("a fresh stop token accepts tasks");
-            Ok((executor as Arc<dyn NoduleExecutor>, stop))
+        let hosting = Arc::new(OnceLock::new());
+        let (node, stop) = BigNode::boot_with(config, {
+            let hosting = Arc::clone(&hosting);
+            move |deps| async move {
+                let executor = NativeExecutor::new(registered, deps.dispatch);
+                hosting
+                    .set(Arc::clone(&executor))
+                    .unwrap_or_else(|_| unreachable!("the node boots once"));
+                let (stop, spawner) = service_utils_rs::StopToken::new();
+                // The executor stops what a test left enabled when the node is stopped, after the
+                // nodule service that calls it and before the services it calls.
+                let stopping = Arc::clone(&executor);
+                spawner
+                    .spawn({
+                        let spawner = spawner.clone();
+                        async move {
+                            spawner.cancelled().await;
+                            stopping.stop_all().await;
+                        }
+                    })
+                    .expect("a fresh stop token accepts tasks");
+                Ok((executor as Arc<dyn NoduleExecutor>, stop))
+            }
         })
         .await
         .expect("booting the test node");
         let node = TestNode {
             node,
             stop,
+            executor: hosting
+                .get()
+                .cloned()
+                .expect("the node booted its executor"),
             _runtime: runtime,
         };
         for cartridge in cartridges {
-            node.nodules(AdmitNodule {
-                cartridge,
-                drawers: None,
-            })
-            .await;
+            let pin = node.node.publish_fixture(&cartridge).await;
+            node.nodules(InstallCartridge { cartridge: pin }).await;
         }
         node
     }
@@ -150,11 +175,61 @@ pub enum CallError<E> {
     Dispatch(DispatchError),
 }
 
+/// The node's XRPC router served without a socket, from [`TestNode::caller`].
+#[derive(Clone)]
+pub struct NodeCaller(axum::Router);
+
+impl NodeCaller {
+    /// Calls `M` as the operator, which the router admits when no credential is presented.
+    pub async fn call<M: Unary>(&self, input: M) -> Result<M::Output, ClientError<M::Error>> {
+        service_client_core_rs::Client::new(Xrpc(self.clone()))
+            .call(RequestContext::root(), input)
+            .await
+    }
+
+    /// Calls `M` presenting `authorization` as its credential: a cartridge's
+    /// [`CartridgeHandles::actor`] signing for one of its routines' `dispatch` capability.
+    pub async fn call_as<M: Unary>(
+        &self,
+        authorization: Authorization,
+        input: M,
+    ) -> Result<M::Output, ClientError<M::Error>> {
+        service_client_core_rs::Client::new(Xrpc(self.clone()))
+            .call_with(RequestContext::root(), authorization.metadata(), input)
+            .await
+    }
+}
+
+impl HttpTransport for NodeCaller {
+    async fn send(&self, request: XrpcRequest) -> Result<XrpcResponse, HttpTransportError> {
+        let XrpcBody::Json(body) = request.body else {
+            panic!("the node's methods carry JSON bodies only");
+        };
+        let mut builder = http::Request::builder()
+            .method(request.method)
+            .uri(format!("/{}", request.path));
+        *builder.headers_mut().unwrap() = request.headers;
+        let response = self
+            .0
+            .clone()
+            .oneshot(builder.body(axum::body::Body::from(body)).unwrap())
+            .await
+            .unwrap_or_else(|never| match never {});
+        let (parts, body) = response.into_parts();
+        Ok(XrpcResponse {
+            status: parts.status,
+            headers: parts.headers,
+            body: XrpcBody::json(axum::body::to_bytes(body, usize::MAX).await.unwrap()),
+        })
+    }
+}
+
 /// A real in-memory node hosting the registered nodules natively. Stop it with
 /// [`TestNode::stop`].
 pub struct TestNode {
     node: BigNode,
     stop: StopToken,
+    executor: Arc<NativeExecutor>,
     _runtime: Arc<SqliteRuntime>,
 }
 
@@ -162,6 +237,28 @@ impl TestNode {
     /// The booted node, for what the wrappers here do not cover.
     pub fn big_node(&self) -> &BigNode {
         &self.node
+    }
+
+    /// A caller over the node's own XRPC router, in process: it acts as the operator (the root
+    /// capability) the way `day`'s embedded connection does, and [`NodeCaller::call_as`] acts as
+    /// any other holder. It is also the [`HttpTransport`] a typed client of the node takes.
+    pub fn caller(&self) -> NodeCaller {
+        NodeCaller(
+            big_dispatch::xrpc_router(
+                self.node.dispatch.client.clone(),
+                big_dispatch::Anonymous::Acts(Authorization::identity(self.node.authority.root)),
+                big_dispatch::Edge::Embedded,
+            )
+            .into_router(),
+        )
+    }
+
+    /// What the node minted for the nodule of `cartridge_id` (its actor and each routine's
+    /// capabilities), as of its last reconcile: a test calls as the cartridge with them instead
+    /// of as the operator. `None` until the nodule is enabled. A grant change re-mints them, so ask again after
+    /// changing one.
+    pub fn handles(&self, cartridge_id: &CartridgeId) -> Option<CartridgeHandles> {
+        self.executor.handles(cartridge_id)
     }
 
     /// Calls method `M` through dispatch as the operator, with no budget. The handler's own
@@ -207,14 +304,10 @@ impl TestNode {
             .call_with(
                 request,
                 Authorization::identity(self.node.authority.root).metadata(),
-                Invoke {
-                    operation: operation.to_owned(),
-                    input,
-                    context,
-                },
+                Invoke::json(operation, input, context),
             )
             .await
-            .map(|output| output.output)
+            .map(|output| output.body.into_json())
             .map_err(|error| match error {
                 ClientError::Method(error) => error,
                 ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
@@ -227,20 +320,59 @@ impl TestNode {
     }
 
     pub async fn set_enabled(&self, cartridge_id: &CartridgeId, enabled: bool) -> NoduleRecord {
-        self.nodules(SetNoduleEnabled {
+        self.nodules(SetCartridgeEnabled {
             cartridge_id: cartridge_id.clone(),
+            component: Component::Nodule,
             enabled,
         })
-        .await
+        .await;
+        self.record(cartridge_id).await
     }
 
-    /// Sets the methods the nodule of `cartridge_id` may invoke, which it holds as a dispatch
-    /// capability minted from them. The grant is bounded by what the nodule's cartridge requested and
-    /// by the nodule service's own dispatch authority, and the record says whether it was applied.
+    /// Grants the cartridge `cartridge_id` the methods in `methods`, each as a grant datum of its
+    /// own in the cartridge's config document, so its nodule holds them as a dispatch capability
+    /// minted from them. A grant states no privilege, so `methods.privileged` is not carried. Grants already made stay. The grant is bounded by what the nodule's cartridge
+    /// requested and by the nodule service's own dispatch authority, and the record says whether
+    /// it was applied.
     pub async fn grant(&self, cartridge_id: &CartridgeId, methods: DispatchScope) -> NoduleRecord {
-        self.nodules(SetNoduleMethodGrants {
+        let grants = methods
+            .operations
+            .into_iter()
+            .map(GrantKey::Method)
+            .chain(methods.authorities.into_iter().map(GrantKey::Authority));
+        for grant in grants {
+            self.nodules(SetCartridgeGrant {
+                cartridge_id: cartridge_id.clone(),
+                grant,
+                value: Some(GrantBody::present()),
+            })
+            .await;
+        }
+        self.record(cartridge_id).await
+    }
+
+    /// Clears the grant datums for `methods` from the config document of `cartridge_id`, which
+    /// revokes them: the nodule is re-minted a capability without them.
+    pub async fn revoke(&self, cartridge_id: &CartridgeId, methods: DispatchScope) -> NoduleRecord {
+        let grants = methods
+            .operations
+            .into_iter()
+            .map(GrantKey::Method)
+            .chain(methods.authorities.into_iter().map(GrantKey::Authority));
+        for grant in grants {
+            self.nodules(SetCartridgeGrant {
+                cartridge_id: cartridge_id.clone(),
+                grant,
+                value: None,
+            })
+            .await;
+        }
+        self.record(cartridge_id).await
+    }
+
+    async fn record(&self, cartridge_id: &CartridgeId) -> NoduleRecord {
+        self.nodules(GetNodule {
             cartridge_id: cartridge_id.clone(),
-            methods,
         })
         .await
     }

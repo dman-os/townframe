@@ -1,0 +1,23 @@
+{
+  "$defs": {
+    "AuthorityGrant": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.cartridges.grant.authority/<prefix>`: the cartridge may invoke every\noperation under an NSID authority prefix, or `*`. A separate datum from [`MethodGrant`]\nbecause an NSID-shaped name such as `org.example.tags` is both a valid operation and a valid\nauthority, and the two grant different things (a prefix never stretches to a dev build's\nadditions, ADR 028 §3).",
+      "properties": {
+        "empty": {
+          "description": "A member with nothing to say states `true` (the empty-member convention).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "AuthorityGrant",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridges.grant.authority"
+    }
+  },
+  "$ref": "#/$defs/AuthorityGrant",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

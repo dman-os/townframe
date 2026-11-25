@@ -1,0 +1,51 @@
+{
+  "$defs": {
+    "Blob": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "inline": {
+          "items": {
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-automerge": "list"
+        },
+        "lengthOctets": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mime": {
+          "type": "string"
+        },
+        "urls": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mime",
+        "lengthOctets",
+        "digest"
+      ],
+      "title": "Blob",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.blob"
+    }
+  },
+  "$ref": "#/$defs/Blob",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

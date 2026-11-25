@@ -30,7 +30,10 @@ async fn a_replayed_command_returns_its_receipt_without_acting_again() {
         .capability(
             &alice,
             DocScope {
-                write: BTreeSet::from([created.doc_id.clone()]),
+                write: std::collections::BTreeMap::from([(
+                    created.doc_id.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..DocScope::default()
             },
         )
@@ -85,7 +88,10 @@ async fn a_refused_write_releases_its_command() {
         .capability(
             &alice,
             DocScope {
-                write: BTreeSet::from([created.doc_id.clone()]),
+                write: std::collections::BTreeMap::from([(
+                    created.doc_id.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..DocScope::default()
             },
         )

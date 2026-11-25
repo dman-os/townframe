@@ -212,7 +212,7 @@ impl schemars::JsonSchema for DatumReference {
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({ "type": "string", "format": "uri", LEXICON_REF: DATUM_REF })
+        schemars::json_schema!({ LEXICON_REF: DATUM_REF })
     }
 }
 
@@ -567,7 +567,7 @@ impl schemars::JsonSchema for Location {
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({ "type": "string", "format": "uri", LEXICON_REF: DATUM_LOCATION })
+        schemars::json_schema!({ LEXICON_REF: DATUM_LOCATION })
     }
 }
 
@@ -681,15 +681,7 @@ impl schemars::JsonSchema for DatumPin {
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "object",
-            "properties": {
-                "ref": { "type": "string", "format": "uri", LEXICON_REF: DATUM_LOCATION },
-                "heads": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
-            },
-            "required": ["ref"],
-            LEXICON_REF: DATUM_PIN,
-        })
+        schemars::json_schema!({ LEXICON_REF: DATUM_PIN })
     }
 }
 

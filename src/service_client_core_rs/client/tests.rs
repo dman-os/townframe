@@ -2,6 +2,7 @@ use super::*;
 use crate::xrpc::HttpTransport;
 use crate::xrpc::HttpTransportError;
 use crate::xrpc::Xrpc;
+use crate::xrpc::XrpcBody;
 use crate::xrpc::XrpcRequest;
 use crate::xrpc::XrpcResponse;
 use http::HeaderMap;
@@ -138,7 +139,7 @@ impl HttpTransport for &Recorded {
         Ok(XrpcResponse {
             status: self.status,
             headers: HeaderMap::new(),
-            body: self.body.as_bytes().to_vec(),
+            body: XrpcBody::json(self.body.as_bytes().to_vec()),
         })
     }
 }
@@ -154,6 +155,7 @@ async fn xrpc_transport_encodes_the_envelope_and_decodes_the_response() {
     let metadata = HttpMetadata {
         authorization: Some("Bearer token".into()),
         idempotency_key: Some("key-1".into()),
+        range: None,
     };
     assert_eq!(
         client
@@ -178,12 +180,12 @@ async fn xrpc_transport_encodes_the_envelope_and_decodes_the_response() {
     let requests = http.requests.lock().unwrap();
     assert_eq!(requests[0].method, Method::GET);
     assert_eq!(requests[0].path, "xrpc/org.example.client.echo?value=a+b");
-    assert!(requests[0].body.is_empty());
+    assert!(matches!(&requests[0].body, XrpcBody::Json(body) if body.is_empty()));
     assert_eq!(requests[0].headers["authorization"], "Bearer token");
     assert_eq!(requests[0].headers["idempotency-key"], "key-1");
     assert_eq!(requests[1].method, Method::POST);
     assert_eq!(requests[1].path, "xrpc/org.example.client.record");
-    assert_eq!(requests[1].body, br#"{"value":"x"}"#);
+    assert!(matches!(&requests[1].body, XrpcBody::Json(body) if body == br#"{"value":"x"}"#));
     assert_eq!(requests[1].headers["content-type"], "application/json");
 }
 

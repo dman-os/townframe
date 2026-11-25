@@ -9,6 +9,8 @@
 
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+mod systemd_credentials;
 use chacha20poly1305::ChaCha20Poly1305;
 use chacha20poly1305::Key;
 use chacha20poly1305::KeyInit;
@@ -108,14 +110,33 @@ impl SecretStore {
     #[cfg(target_os = "linux")]
     fn platform_store() -> Res<Arc<keyring_core::CredentialStore>> {
         match zbus_secret_service_keyring_store::Store::new() {
-            Ok(sec) => Ok(sec as Arc<keyring_core::CredentialStore>),
-            Err(_) => {
-                tracing::warn!(
-                    "secret-service keyring unavailable, falling back to kernel keyring"
+            Ok(store) => {
+                tracing::info!("using freedesktop Secret Service keyring store");
+                Ok(store as Arc<keyring_core::CredentialStore>)
+            }
+            Err(secret_service_error) => {
+                tracing::debug!(
+                    ?secret_service_error,
+                    "freedesktop Secret Service keyring unavailable"
                 );
-                linux_keyutils_keyring_store::Store::new()
-                    .map(|sec| sec as Arc<keyring_core::CredentialStore>)
-                    .map_err(|err| eyre::eyre!(err).wrap_err("kernel keyring unavailable"))
+                match systemd_credentials::default_root().and_then(systemd_credentials::Store::new)
+                {
+                    Ok(store) => {
+                        tracing::info!("using systemd credentials keyring store");
+                        Ok(store as Arc<keyring_core::CredentialStore>)
+                    }
+                    Err(systemd_error) => {
+                        tracing::warn!(
+                            ?systemd_error,
+                            "systemd credentials unavailable, using kernel keyring store; secrets will not survive a reboot"
+                        );
+                        linux_keyutils_keyring_store::Store::new()
+                            .map(|store| store as Arc<keyring_core::CredentialStore>)
+                            .map_err(|error| {
+                                eyre::eyre!(error).wrap_err("kernel keyring unavailable")
+                            })
+                    }
+                }
             }
         }
     }

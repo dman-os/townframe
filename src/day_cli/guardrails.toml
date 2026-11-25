@@ -1,10 +1,13 @@
 version = 1
 role = "application"
-dependency_reason = "The CLI reaches a node either through its daemon's socket or by booting big_node in process, and serves the node's dispatch router to itself in the second case."
+dependency_reason = "The CLI reaches a node either through its server's socket or by booting big_node in process, and serves the node's dispatch router to itself in the second case."
 allowed_dependencies = [
+    "big_blobs_core",
     "big_cabinet",
     "big_cabinet_core",
+    "big_cartridges_core",
     "big_dispatch",
+    "big_dispatch_core",
     "big_node",
     "big_nodule_core",
     "big_repo",
@@ -17,3 +20,4 @@ allowed_dependencies = [
 allow_external_api_types = false
 
 [builds.native]
+features = ["docs"]

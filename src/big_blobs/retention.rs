@@ -100,6 +100,7 @@ impl Retention {
                 })
             })
             .await?;
+        retention.expire_uploads().await?;
         Ok(retention)
     }
 
@@ -179,7 +180,7 @@ impl Retention {
             Ok(read) => Ok(Some(read)),
             Err(ClientError::Method(
                 DocsError::Denied
-                | DocsError::DocNotFound
+                | DocsError::DocNotFound { .. }
                 | DocsError::Pending { .. }
                 | DocsError::UnknownHeads { .. }
                 | DocsError::AuthorityUnavailable(_)
@@ -626,7 +627,7 @@ impl Retention {
             Err(ClientError::Method(
                 DocsError::Conflict { .. }
                 | DocsError::Denied
-                | DocsError::DocNotFound
+                | DocsError::DocNotFound { .. }
                 | DocsError::Pending { .. }
                 | DocsError::UnknownHeads { .. }
                 | DocsError::AuthorityUnavailable(_)
@@ -684,7 +685,20 @@ impl Retention {
         Ok(changed)
     }
 
+    /// Releases the upload holds that outlived their grace period without a document claiming
+    /// them (ADR 042 §6). It rides on the retention pass rather than a timer of its own: the pass
+    /// runs at boot and whenever retention changes, which is when a hold's expiry matters.
+    async fn expire_uploads(&self) -> Res<()> {
+        let grace = i64::try_from(self.service.upload_hold_grace.as_secs()).map_err(|error| {
+            eyre::eyre!("the upload hold grace does not fit unix seconds: {error}")
+        })?;
+        let before = crate::ownership::unix_now() - grace;
+        self.service.ownership.expire_uploads(before).await?;
+        Ok(())
+    }
+
     pub async fn flush(&mut self) -> Res<BTreeSet<DocId>> {
+        self.expire_uploads().await?;
         let changed = self.flush_writers().await?;
         let effects = sqlite::queries::retention_effect_digests(&self.sql).await?;
         for digest in effects {

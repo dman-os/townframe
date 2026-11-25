@@ -1,0 +1,43 @@
+{
+  "$defs": {
+    "Nsid": {
+      "type": "string"
+    },
+    "PermbindMethod": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "minRevision": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "necessity": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": "string"
+        },
+        "nsid": {
+          "$ref": "#/$defs/Nsid"
+        }
+      },
+      "required": [
+        "nsid",
+        "description"
+      ],
+      "title": "PermbindMethod",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridge.method"
+    }
+  },
+  "$ref": "#/$defs/PermbindMethod",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

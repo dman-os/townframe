@@ -21,8 +21,6 @@ use crate::peers::PolicyChoice;
 use big_blobs::InventorySelection;
 use big_blobs_core::Blob;
 use big_blobs_core::BlobId;
-use big_blobs_core::PutBlob;
-use big_blobs_core::ReadBlob;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::BranchDoc;
 use big_cabinet_core::doc::MergeDoc;
@@ -34,6 +32,7 @@ use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::drawer::protocol::RememberDrawer;
 use big_sync_core::PeerKey;
+use method_core::ByteBody;
 use service_utils_rs::ClientError;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -125,6 +124,20 @@ impl Note {
             DatumRead::Absent { .. } => None,
             other => panic!("datum {field} is not settled: {other:?}"),
         }
+    }
+
+    /// The accepted values of the datums tagged `tag`, by key.
+    pub(super) fn accepted(&self, tag: &str) -> BTreeMap<DatumKey, serde_json::Value> {
+        self.0
+            .datums
+            .iter()
+            .filter(|(key, _)| key.tag().as_str() == tag)
+            .filter_map(|(key, read)| match read {
+                DatumRead::Accepted { value, .. } => Some((key.clone(), value.clone())),
+                DatumRead::Absent { .. } => None,
+                other => panic!("datum {key} is not settled: {other:?}"),
+            })
+            .collect()
     }
 }
 
@@ -257,9 +270,9 @@ impl Cluster {
     pub(super) async fn connect(&mut self, topology: Topology) {
         for (from, to) in topology.edges(self.members.len()) {
             self.edges.push((from, to));
-            tracing::info!(from, to, "INSTR connect link start"); // INSTR
+            tracing::info!(target: "instr", from, to, "INSTR connect link start"); // INSTR
             self.link(from, to).await;
-            tracing::info!(from, to, "INSTR connect link done"); // INSTR
+            tracing::info!(target: "instr", from, to, "INSTR connect link done"); // INSTR
         }
     }
 
@@ -351,7 +364,7 @@ impl Cluster {
             self.remember(*member, &id).await;
         }
         self.sync_keyhive().await;
-        tracing::info!(%id, %inventory, "INSTR share_drawer done"); // INSTR
+        tracing::info!(target: "instr", %id, %inventory, "INSTR share_drawer done"); // INSTR
         SharedDrawer { id, inventory }
     }
 
@@ -473,7 +486,7 @@ impl Cluster {
         let capability = capability(
             node,
             DocScope {
-                read: BTreeSet::from([doc.clone()]),
+                read: DocScope::read_all([doc.clone()]),
                 ..DocScope::default()
             },
         )
@@ -495,7 +508,7 @@ impl Cluster {
         {
             Ok(read) => Some(Note(read)),
             Err(ClientError::Method(
-                big_cabinet_core::doc::DocsError::DocNotFound
+                big_cabinet_core::doc::DocsError::DocNotFound { .. }
                 | big_cabinet_core::doc::DocsError::Pending { .. },
             )) => None,
             Err(error) => panic!(
@@ -532,7 +545,10 @@ impl Cluster {
         let capability = capability(
             node,
             DocScope {
-                write: BTreeSet::from([doc.clone()]),
+                write: std::collections::BTreeMap::from([(
+                    doc.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..DocScope::default()
             },
         )
@@ -570,9 +586,12 @@ impl Cluster {
         let capability = capability(
             node,
             DocScope {
-                read: BTreeSet::from([doc.clone()]),
+                read: DocScope::read_all([doc.clone()]),
                 // A branch is announced on its origin, so it takes write access there too.
-                write: BTreeSet::from([doc.clone()]),
+                write: std::collections::BTreeMap::from([(
+                    doc.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 create: BTreeSet::from([placement.clone()]),
                 ..DocScope::default()
             },
@@ -603,8 +622,11 @@ impl Cluster {
         let capability = capability(
             node,
             DocScope {
-                read: BTreeSet::from([source.clone()]),
-                write: BTreeSet::from([target.clone()]),
+                read: DocScope::read_all([source.clone()]),
+                write: std::collections::BTreeMap::from([(
+                    target.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..DocScope::default()
             },
         )
@@ -632,23 +654,21 @@ impl Cluster {
         index: usize,
         drawer: &SharedDrawer,
         bytes: &[u8],
-    ) -> BlobId {
+    ) -> (DocId, BlobId) {
         let node = self.node(index);
         let put = put_cap(node).await;
         let info = node
             .blobs
-            .client
-            .call(
+            .put(
                 RequestContext::root(),
-                PutBlob {
-                    capability: put,
-                    bytes: bytes.to_vec().into(),
-                },
+                put,
+                ByteBody::from_bytes(bytes.to_vec()),
             )
             .await
             .unwrap();
         let placement = format!("drawer {}", drawer.id);
-        node.docs
+        let receipt = node
+            .docs
             .client
             .call(
                 RequestContext::root(),
@@ -676,7 +696,7 @@ impl Cluster {
             .await
             .unwrap();
         self.wait_blob_published(index, drawer, info.blob_id).await;
-        info.blob_id
+        (receipt.doc_id, info.blob_id)
     }
 
     /// Waits until node `index` holds `blob`'s inventory part, which is when the bytes are
@@ -690,7 +710,7 @@ impl Cluster {
             .await
             .unwrap()
             .unwrap();
-        tracing::info!(node = self.members[index].nickname, drawer = %drawer.id, inventory = %drawer.inventory, %blob, "INSTR wait_blob_published start"); // INSTR
+        tracing::info!(target: "instr", node = self.members[index].nickname, drawer = %drawer.id, inventory = %drawer.inventory, %blob, "INSTR wait_blob_published start"); // INSTR
         while !node
             .blob_workers
             .parts
@@ -705,19 +725,19 @@ impl Cluster {
                 .obj_parts(blob.into())
                 .await
                 .unwrap(); // INSTR
-            tracing::info!(node = self.members[index].nickname, %blob, parts = parts.len(), "INSTR wait_blob_published not yet"); // INSTR
+            tracing::info!(target: "instr", node = self.members[index].nickname, %blob, parts = parts.len(), "INSTR wait_blob_published not yet"); // INSTR
             loop {
                 // INSTR
                 tokio::select! { // INSTR
                     next = changes.next(RevisionReadLimits::default()) => { next.unwrap(); break; } // INSTR
                     () = tokio::time::sleep(std::time::Duration::from_secs(15)) => { // INSTR
                         let parts = node.blob_workers.parts.obj_parts(blob.into()).await.unwrap(); // INSTR
-                        tracing::info!(node = self.members[index].nickname, %blob, parts = ?parts, peers = ?node.peers.as_ref().unwrap().connected().await.unwrap(), "INSTR wait_blob_published still waiting"); // INSTR
+                        tracing::info!(target: "instr", node = self.members[index].nickname, %blob, parts = ?parts, peers = ?node.peers.as_ref().unwrap().connected().await.unwrap(), "INSTR wait_blob_published still waiting"); // INSTR
                     } // INSTR
                 } // INSTR
             } // INSTR
         }
-        tracing::info!(node = self.members[index].nickname, %blob, "INSTR wait_blob_published done"); // INSTR
+        tracing::info!(target: "instr", node = self.members[index].nickname, %blob, "INSTR wait_blob_published done"); // INSTR
     }
 
     /// Node `index` takes part in the drawer's blob inventory: it asks to mirror it.
@@ -757,21 +777,12 @@ impl Cluster {
             Err(ClientError::Method(big_blobs_core::BlobsError::NotFound)) => return None,
             Err(error) => panic!("stat {blob} on {}: {error:?}", self.members[index].nickname),
         };
-        let range = node
+        let body = node
             .blobs
-            .client
-            .call(
-                RequestContext::root(),
-                ReadBlob {
-                    capability: read,
-                    blob_id: blob,
-                    offset: 0,
-                    length: u32::try_from(length).unwrap(),
-                },
-            )
+            .read(RequestContext::root(), read, blob, None)
             .await
             .unwrap();
-        Some(range.bytes.as_slice().to_vec())
+        Some(body.collect(length).await.unwrap().to_vec())
     }
 
     /// Waits until `condition` holds, re-checking it whenever a node reports a peers event or
@@ -845,12 +856,12 @@ impl Cluster {
             if coverage.is_complete() {
                 break;
             }
-            tracing::info!(node = self.members[index].nickname, gaps = ?coverage.gaps, "INSTR blob_arrives coverage gaps"); // INSTR
+            tracing::info!(target: "instr", node = self.members[index].nickname, gaps = ?coverage.gaps, "INSTR blob_arrives coverage gaps"); // INSTR
             loop {
                 // INSTR
                 tokio::select! { // INSTR
-                    changed = changes.changed() => { changed.unwrap(); tracing::info!(node = self.members[index].nickname, "INSTR blob_arrives coverage woke"); break; } // INSTR
-                    () = tokio::time::sleep(std::time::Duration::from_secs(15)) => tracing::info!(node = self.members[index].nickname, "INSTR blob_arrives still waiting for coverage change"), // INSTR
+                    changed = changes.changed() => { changed.unwrap(); tracing::info!(target: "instr", node = self.members[index].nickname, "INSTR blob_arrives coverage woke"); break; } // INSTR
+                    () = tokio::time::sleep(std::time::Duration::from_secs(15)) => tracing::info!(target: "instr", node = self.members[index].nickname, "INSTR blob_arrives still waiting for coverage change"), // INSTR
                 } // INSTR
             } // INSTR
         }

@@ -1,0 +1,44 @@
+{
+  "$defs": {
+    "PermbindNet": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`#net { host, port?, methods? }`: a host a routine may use the network to reach (ADR 049 §2).\nIt gates the routine's outgoing `wasi:http` requests to URLs that are not the node's own\n`dispatch.local`, and is the permbind raw `wasi:sockets` will use. A routine that takes it\nreaches the host only once the cartridge also holds the matching `grant/net` datum.\n\nThe syntax is Deno's `--allow-net` (see [`NetTarget`]): `host` is the one host with no `port`\n(any port), `host` with a `port` that port only, with no scheme, and an IPv6 literal bracketed\n(`[::1]`). Matching is exact (no wildcards): the host case-insensitively, the port as stated,\nand `methods` (HTTP verbs, upper case) when present.",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "methods": {
+          "description": "The HTTP verbs the routine may use; every verb when absent.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "host",
+        "description"
+      ],
+      "title": "PermbindNet",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridge.net"
+    }
+  },
+  "$ref": "#/$defs/PermbindNet",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

@@ -12,8 +12,6 @@ use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::Rights;
-use big_cabinet_core::dmeta::Bytes as BytesObject;
-use big_cabinet_core::dmeta::Uuid7;
 use big_sync::keyed_frontier::SqliteFrontierCodec;
 use big_sync::keyed_frontier::SqliteFrontierSelector;
 use big_sync::keyed_frontier::SqliteKeyedFrontier;
@@ -23,11 +21,21 @@ use big_sync_core::revisioned_store::KeyedFrontierRevisionReader;
 use bytes::Bytes;
 use fs4::fs_std::FileExt;
 use futures::Stream;
+use futures::StreamExt;
+use futures::stream;
 use iroh_blobs::Hash;
 use iroh_blobs::api::Store;
+use iroh_blobs::api::TempTag;
 use iroh_blobs::api::proto::BlobStatus;
+use method_core::ByteBody;
+use method_core::ByteSpan;
+#[cfg(unix)]
+use rustix::fs::FileType;
+#[cfg(unix)]
+use rustix::fs::fstat;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
+use service_utils_rs::Body;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
@@ -133,13 +141,21 @@ impl Storage {
     }
 }
 
+/// How long an upload nothing references keeps its bytes by default (ADR 042 §6): a client that
+/// goes offline between putting and recording what it put (a laptop closed mid-capture) still
+/// finds its uploads the next working day, and one that needs longer puts again, which is cheap
+/// because a put is idempotent. A node overrides it with `blobs.upload_hold_grace_secs` in
+/// `node.json`.
+pub const DEFAULT_UPLOAD_HOLD_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(24 * 60 * 60);
+
 pub struct Config {
+    /// How long an unreferenced upload keeps its bytes; `None` is [`DEFAULT_UPLOAD_HOLD_GRACE`].
+    pub upload_hold_grace: Option<std::time::Duration>,
     pub storage: Storage,
     pub sql: Database,
     pub authority: Client<AuthorityProtocol>,
     pub namespace: Namespace,
-    /// The node operator: the one identity that may mint a blobs handle of any scope.
-    pub operator: Uuid7,
 }
 
 /// The prefix of every capability object this domain mints; the scope follows it as JSON.
@@ -178,8 +194,9 @@ pub struct BlobService {
     pub roots: PairRoots,
     pub(crate) ownership: ByteOwnership,
     capabilities: DomainCapabilities,
-    operator: Uuid7,
+    sql: Database,
     availability: SqliteKeyedFrontier<AvailabilityCodec>,
+    pub(crate) upload_hold_grace: std::time::Duration,
     _owner: Option<std::fs::File>,
 }
 
@@ -188,6 +205,7 @@ service_utils_rs::bind_service_protocol! {
         unary {
             MintBlobsCapability(MintBlobsCapability),
             PutBlob(PutBlob),
+            ImportFile(ImportFile),
             ReadBlob(ReadBlob),
             StatBlob(StatBlob)
         }
@@ -199,6 +217,67 @@ pub struct Blobs {
     pub service: Arc<BlobService>,
     pub host: Arc<Host<Arc<BlobService>>>,
     pub client: Client<BlobsProtocol>,
+}
+
+impl Blobs {
+    /// [`PutBlob`] through the in-process client, whose envelope carries the byte `body`.
+    pub async fn put(
+        &self,
+        context: RequestContext,
+        capability: CapId,
+        body: ByteBody,
+    ) -> Result<BlobInfo, ClientError<BlobsError>> {
+        self.client
+            .call_with_metadata(
+                Envelope::new(context, PutBlob { capability }).with_body(Body::Bytes(body)),
+            )
+            .await
+            .map(|response| response.output)
+    }
+
+    /// Imports descriptors through the in-process descriptor body. The native fd socket uses the
+    /// same method contract and dispatch path, but constructs this body at the edge.
+    #[cfg(unix)]
+    pub async fn import_file(
+        &self,
+        context: RequestContext,
+        capability: CapId,
+        descriptors: Vec<std::os::fd::OwnedFd>,
+    ) -> Result<Vec<ImportFileResult>, ClientError<BlobsError>> {
+        self.client
+            .call_with_metadata(Envelope::new(context, ImportFile { capability }).with_body(
+                Body::Descriptors(service_utils_rs::descriptor::DescriptorBody::from_fds(
+                    descriptors,
+                )),
+            ))
+            .await
+            .map(|response| response.output.results)
+    }
+
+    /// [`ReadBlob`] through the in-process client: the blob's bytes as a stream, or the part of
+    /// them `range` selects.
+    pub async fn read(
+        &self,
+        context: RequestContext,
+        capability: CapId,
+        blob_id: BlobId,
+        range: Option<method_core::ByteRange>,
+    ) -> Result<ByteBody, ClientError<BlobsError>> {
+        self.client
+            .call_with_metadata(Envelope::with_metadata(
+                context,
+                service_utils_rs::HttpMetadata {
+                    range,
+                    ..Default::default()
+                },
+                ReadBlob {
+                    capability,
+                    blob_id,
+                },
+            ))
+            .await
+            .map(|response| response.output)
+    }
 }
 
 pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
@@ -218,7 +297,7 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
         )
         .await?;
         let (ownership, ownership_stop) =
-            ByteOwnership::boot(config.sql, store.clone(), Arc::clone(&provider)).await?;
+            ByteOwnership::boot(config.sql.clone(), store.clone(), Arc::clone(&provider)).await?;
         Ok::<_, utils_rs::prelude::eyre::Report>((roots, ownership, availability, ownership_stop))
     }
     .await;
@@ -235,8 +314,11 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
         roots,
         ownership,
         capabilities: DomainCapabilities::new(config.authority, config.namespace, SCOPE_PREFIX),
-        operator: config.operator,
+        sql: config.sql,
         availability,
+        upload_hold_grace: config
+            .upload_hold_grace
+            .unwrap_or(DEFAULT_UPLOAD_HOLD_GRACE),
         _owner: owner,
     });
     let (store_stop, tasks) = StopToken::new();
@@ -270,14 +352,14 @@ impl BlobService {
     }
 
     /// Resolves `capability` to the scope its handle was minted with and requires `permits` to
-    /// hold of it. Only a handle this domain minted resolves: an identity, or a capability from
-    /// any other namespace, is `Denied`.
+    /// hold of it, answering that scope. Only a handle this domain minted resolves: an identity,
+    /// or a capability from any other namespace, is `Denied`.
     async fn authorize(
         &self,
         context: &RequestContext,
         capability: CapId,
         permits: impl FnOnce(&BlobsScope) -> bool,
-    ) -> Result<(), BlobsError> {
+    ) -> Result<BlobsScope, BlobsError> {
         let invocation = self
             .capabilities
             .resolve::<BlobsScope>(context, capability)
@@ -287,10 +369,35 @@ impl BlobService {
             unreachable!("resolving a bare handle yields its scope, never an identity")
         };
         if permits(&scope) {
-            Ok(())
+            Ok(scope)
         } else {
             Err(BlobsError::Denied)
         }
+    }
+
+    /// Requires that `scope` reaches `blob_id` for reading: it is named in `scope.read`, or it
+    /// is pinned in a blob inventory of a drawer `scope` reaches at `Read` or more. The drawer
+    /// check is exact: the digest must be pinned in a meta doc of kind `blobInventory` on that
+    /// drawer's public or sensitive root, whatever the inventory is named (a drawer holds
+    /// several), so a handle never reads a blob some other drawer, or no drawer, holds.
+    async fn authorize_read(&self, scope: &BlobsScope, blob_id: &BlobId) -> Result<(), BlobsError> {
+        if scope.read.contains(blob_id) {
+            return Ok(());
+        }
+        for drawer in scope.reading_drawers() {
+            let held = crate::admission::sqlite::queries::drawer_holds_blob(
+                &self.sql,
+                drawer.to_string(),
+                crate::workers::INVENTORY_KIND.to_owned(),
+                blob_id.to_string(),
+            )
+            .await
+            .map_err(storage_error)?;
+            if !held.is_empty() {
+                return Ok(());
+            }
+        }
+        Err(BlobsError::Denied)
     }
 
     pub async fn stat(&self, blob_id: &BlobId) -> Res<Option<BlobInfo>> {
@@ -321,9 +428,9 @@ impl BlobService {
     }
 
     /// The whole of a complete local blob, or `None` while it is not (or not readable) here.
-    /// In-process only, for hosts that need the bytes themselves: the `ReadBlob` wire operation
-    /// is range-capped. A blob longer than `max_octets` is an error rather than a truncation, so
-    /// a caller never holds a partial blob and the allocation is bounded by the caller's cap.
+    /// In-process only, for hosts that need the bytes themselves in one buffer: `ReadBlob`
+    /// streams them. A blob longer than `max_octets` is an error rather than a truncation, so a
+    /// caller never holds a partial blob and the allocation is bounded by the caller's cap.
     pub async fn read_all(&self, blob_id: &BlobId, max_octets: u64) -> Res<Option<Vec<u8>>> {
         let Some(info) = self.stat(blob_id).await? else {
             return Ok(None);
@@ -377,6 +484,11 @@ impl BlobService {
         S: Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
     {
         let (tag, hash) = crate::encrypt::ensure_stored(&self.store, stream).await?;
+        self.stage_stored(tag, hash).await
+    }
+
+    /// Takes the upload hold on bytes `ensure_stored` just stored, and announces them.
+    async fn stage_stored(&self, tag: TempTag, hash: Hash) -> Res<ImportedBlob> {
         let blob_id = BlobId::new(*hash.as_bytes());
         let imported = ImportedBlob::new(
             self.stat(&blob_id)
@@ -386,6 +498,106 @@ impl BlobService {
         self.ownership.stage(imported.clone(), tag).await?;
         self.announce(blob_id).await?;
         Ok(imported)
+    }
+
+    #[cfg(unix)]
+    async fn import_descriptor(
+        &self,
+        descriptor: std::os::fd::OwnedFd,
+    ) -> Result<BlobInfo, BlobsError> {
+        let stat = fstat(&descriptor).map_err(|error| BlobsError::Unreadable {
+            reason: error.to_string(),
+        })?;
+        if !FileType::from_raw_mode(stat.st_mode).is_file() {
+            return Err(BlobsError::InvalidInput {
+                reason: "descriptor is not a regular file".to_owned(),
+            });
+        }
+        let length = u64::try_from(stat.st_size).map_err(|_| BlobsError::Unreadable {
+            reason: "descriptor has a negative length".to_owned(),
+        })?;
+        if length > MAX_PUT_OCTETS {
+            return Err(BlobsError::TooLarge {
+                limit_octets: MAX_PUT_OCTETS,
+            });
+        }
+        let body = ByteBody::new(stream::unfold(
+            Some((descriptor, 0_u64)),
+            |state| async move {
+                let (descriptor, offset) = state?;
+
+                let read = tokio::task::spawn_blocking(move || {
+                    let mut buffer = vec![0_u8; 64 * 1024];
+                    let count = rustix::io::pread(&descriptor, &mut buffer, offset)?;
+                    buffer.truncate(count);
+                    Ok::<_, std::io::Error>((descriptor, offset + count as u64, buffer))
+                })
+                .await
+                .expect("descriptor reader task panicked");
+                match read {
+                    Ok((_descriptor, _offset, buffer)) if buffer.is_empty() => None,
+                    Ok((descriptor, offset, buffer)) => {
+                        Some((Ok(Bytes::from(buffer)), Some((descriptor, offset))))
+                    }
+                    Err(error) => Some((Err(error), None)),
+                }
+            },
+        ));
+        // The stat size is only an early bound. The file may change before or during the
+        // positional reads, so leave the body length unknown and let `put` count the bytes
+        // actually streamed; a stale declared length must not affect the stored result.
+        self.put(body, MAX_PUT_OCTETS).await
+    }
+
+    /// Reads `body` into the store, whatever it is, and returns what the store now holds: the id
+    /// is the one this hashes, never one the caller says, and putting what the store already
+    /// holds is a cheap no-op that returns the same [`BlobInfo`] and adds an upload hold (the
+    /// previous ones, if any, expire on their own). An item over `limit` octets is
+    /// [`BlobsError::TooLarge`], counted as it streams in so a body of unknown length is refused
+    /// as soon as it is seen to be too long.
+    async fn put(&self, body: ByteBody, limit: u64) -> Result<BlobInfo, BlobsError> {
+        let too_large = BlobsError::TooLarge {
+            limit_octets: limit,
+        };
+        if body.length.is_some_and(|length| length > limit) {
+            return Err(too_large);
+        }
+        // What stopped the body, if it stopped early. The store's importer never finishes when
+        // its source yields an error (it keeps waiting for the end of a stream that has already
+        // failed), so a body that fails or runs over the limit ends the stream instead, and what
+        // was stored of it is dropped here without ever being held or announced.
+        let stopped = Arc::new(std::sync::Mutex::new(None));
+        let counted = body.scan((0u64, Arc::clone(&stopped)), move |(seen, cause), chunk| {
+            std::future::ready(match chunk {
+                Ok(chunk) => {
+                    *seen += chunk.len() as u64;
+                    if *seen > limit {
+                        *cause.lock().expect("cause lock") = Some(too_large.clone());
+                        None
+                    } else {
+                        Some(Ok(chunk))
+                    }
+                }
+                Err(error) => {
+                    *cause.lock().expect("cause lock") = Some(BlobsError::Unreadable {
+                        reason: error.to_string(),
+                    });
+                    None
+                }
+            })
+        });
+        let (tag, hash) = crate::encrypt::ensure_stored(&self.store, counted)
+            .await
+            .map_err(storage_error)?;
+        if let Some(cause) = stopped.lock().expect("cause lock").take() {
+            drop(tag);
+            return Err(cause);
+        }
+        Ok(self
+            .stage_stored(tag, hash)
+            .await
+            .map_err(storage_error)?
+            .info)
     }
 
     pub async fn adopt_import(
@@ -437,11 +649,11 @@ impl Handler<MintBlobsCapability> for BlobService {
         if !caller.rights.contains(Rights::USE) {
             return Err(BlobsError::Denied);
         }
-        // The operator's identity mints any scope; a scoped handle only a subset of its own. Any
-        // other identity is nobody this service knows. The rights subset and `NARROW` checks
+        // The operator's root capability mints any scope; a scoped handle only a subset of its
+        // own. Any other identity is nobody this service knows. The rights subset and `NARROW` checks
         // are `DomainCapabilities::mint`'s.
         match &caller.authority {
-            DomainAuthority::Identity(actor) if *actor == self.operator => {}
+            DomainAuthority::Operator => {}
             DomainAuthority::Identity(_) => return Err(BlobsError::Denied),
             DomainAuthority::Scoped(scope) if !scope.covers(&params.scope) => {
                 return Err(BlobsError::Denied);
@@ -467,69 +679,117 @@ impl Handler<MintBlobsCapability> for BlobService {
 impl Handler<PutBlob> for BlobService {
     async fn call(
         &self,
-        request: Envelope<PutBlob>,
+        mut request: Envelope<PutBlob>,
     ) -> Result<ResponseEnvelope<BlobInfo>, BlobsError> {
         self.authorize(&request.context, request.params.capability, |scope| {
             scope.put
         })
         .await?;
-        let bytes = request.params.bytes.as_slice();
-        if bytes.len() > MAX_PUT_BYTES {
-            return Err(BlobsError::InvalidInput {
-                reason: format!(
-                    "put exceeds {MAX_PUT_BYTES} bytes; use the native streaming import for large content"
-                ),
-            });
-        }
-        let stream = futures::stream::iter([Ok(Bytes::copy_from_slice(bytes))]);
-        Ok(self
-            .import_stream(stream)
-            .await
-            .map_err(storage_error)?
-            .info
-            .into())
+        let body = request
+            .take_body()
+            .and_then(|body| match body {
+                Body::Bytes(body) => Some(body),
+                _ => None,
+            })
+            .expect("a bytes-input method is called with its byte body");
+        Ok(self.put(body, MAX_PUT_OCTETS).await?.into())
     }
 }
+
+#[cfg(unix)]
+impl Handler<ImportFile> for BlobService {
+    async fn call(
+        &self,
+        mut request: Envelope<ImportFile>,
+    ) -> Result<ResponseEnvelope<ImportFileOutput>, BlobsError> {
+        self.authorize(&request.context, request.params.capability, |scope| {
+            scope.put
+        })
+        .await?;
+        let body = request
+            .take_body()
+            .and_then(|body| match body {
+                Body::Descriptors(body) => Some(body),
+                _ => None,
+            })
+            .expect("a descriptor-input method is called with its descriptor body");
+        let mut results = Vec::with_capacity(body.len());
+        for descriptor in body.into_fds() {
+            results.push(match self.import_descriptor(descriptor).await {
+                Ok(info) => ImportFileResult::Imported { info },
+                Err(error) => ImportFileResult::Refused {
+                    error: error.into(),
+                },
+            });
+        }
+        Ok(ImportFileOutput { results }.into())
+    }
+}
+
+/// How many octets a read pulls from the store at a time, which is the chunk a reader sees.
+const READ_CHUNK_OCTETS: usize = 64 * 1024;
 
 impl Handler<ReadBlob> for BlobService {
     async fn call(
         &self,
         request: Envelope<ReadBlob>,
-    ) -> Result<ResponseEnvelope<BlobRange>, BlobsError> {
+    ) -> Result<ResponseEnvelope<ByteBody>, BlobsError> {
         let params = request.params;
-        self.authorize(&request.context, params.capability, |scope| {
-            scope.read.contains(&params.blob_id)
-        })
-        .await?;
-        if params.length > MAX_READ_BYTES {
-            return Err(BlobsError::InvalidInput {
-                reason: format!("read exceeds {MAX_READ_BYTES} bytes"),
-            });
-        }
+        let scope = self
+            .authorize(&request.context, params.capability, |_| true)
+            .await?;
+        self.authorize_read(&scope, &params.blob_id).await?;
         let info = self
             .stat(&params.blob_id)
             .await
             .map_err(storage_error)?
             .ok_or(BlobsError::NotFound)?;
-        if params.offset > info.length_octets {
-            return Err(BlobsError::InvalidInput {
-                reason: "offset exceeds blob length".into(),
-            });
-        }
-        let length = u64::from(params.length).min(info.length_octets - params.offset) as usize;
-        let mut bytes = vec![0; length];
+        // Any byte range of a local blob, which the store's reader seeks to (ADR 042 §2). A
+        // range reaching past the end is cut at it, and one that selects nothing is refused.
+        let (start, length, span) = match request.metadata.range {
+            None => (0, info.length_octets, None),
+            Some(range) => {
+                let (start, length) =
+                    range
+                        .resolve(info.length_octets)
+                        .ok_or(BlobsError::RangeNotSatisfiable {
+                            total_octets: info.length_octets,
+                        })?;
+                (
+                    start,
+                    length,
+                    Some(ByteSpan {
+                        start,
+                        total: info.length_octets,
+                    }),
+                )
+            }
+        };
         let mut reader = self
             .store
             .blobs()
             .reader(Hash::from(params.blob_id.to_bytes32()));
         reader
-            .seek(std::io::SeekFrom::Start(params.offset))
+            .seek(std::io::SeekFrom::Start(start))
             .await
             .map_err(storage_error)?;
-        reader.read_exact(&mut bytes).await.map_err(storage_error)?;
-        Ok(BlobRange {
-            bytes: BytesObject::from(bytes),
-            length_octets: info.length_octets,
+        // Pulled chunk by chunk as the consumer reads, never the blob in one buffer. A blob
+        // that ends before the length `stat` promised is an error mid-stream, which a transport
+        // reports as a broken response, not a short success.
+        let chunks =
+            futures::stream::try_unfold((reader, length), |(mut reader, remaining)| async move {
+                if remaining == 0 {
+                    return Ok::<_, std::io::Error>(None);
+                }
+                let mut chunk = vec![0; remaining.min(READ_CHUNK_OCTETS as u64) as usize];
+                reader.read_exact(&mut chunk).await?;
+                let read = chunk.len() as u64;
+                Ok(Some((Bytes::from(chunk), (reader, remaining - read))))
+            });
+        let body = ByteBody::new(chunks).with_length(length);
+        Ok(match span {
+            Some(span) => body.with_span(span),
+            None => body,
         }
         .into())
     }
@@ -540,10 +800,10 @@ impl Handler<StatBlob> for BlobService {
         &self,
         request: Envelope<StatBlob>,
     ) -> Result<ResponseEnvelope<BlobStat>, BlobsError> {
-        self.authorize(&request.context, request.params.capability, |scope| {
-            scope.read.contains(&request.params.blob_id)
-        })
-        .await?;
+        let scope = self
+            .authorize(&request.context, request.params.capability, |_| true)
+            .await?;
+        self.authorize_read(&scope, &request.params.blob_id).await?;
         Ok(BlobStat {
             info: self
                 .stat(&request.params.blob_id)

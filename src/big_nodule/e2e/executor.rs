@@ -12,6 +12,8 @@ use crate::executor::HandlerSpec;
 use crate::executor::Hosted;
 use crate::executor::NoduleExecutor;
 use crate::executor::Reensure;
+use crate::executor::RoutineCapabilities;
+use crate::requests::MissingAuthorityLookup;
 use async_trait::async_trait;
 use big_blobs_core::Blob;
 use big_cabinet_core::DatumKey;
@@ -28,8 +30,11 @@ use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Component as ManifestComponent;
 use big_cartridges_core::Digest;
 use big_cartridges_core::example_cartridge;
+use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::UninstallCartridge;
 use big_dispatch::Provider;
 use big_dispatch::ProviderKind;
 use big_dispatch::ProviderState;
@@ -38,7 +43,6 @@ use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
 use big_nodule_core::config::artifact_key;
 use big_nodule_core::inventory::ArtifactState;
-use big_nodule_core::protocol::UninstallNodule;
 use serde_json::json;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
@@ -46,7 +50,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::sync::watch;
+
+mod routines;
 
 const OWN: &str = "org.example.photos.list";
 const PHOTOS: &str = example_cartridge!("photos");
@@ -56,18 +63,71 @@ const PHOTOS: &str = example_cartridge!("photos");
 /// for a revision it already hosts as a lookup, since the reconciler calls it on every
 /// reconcile (a config mutation reconciles once itself and once more on the watch event).
 pub(super) struct FakeExecutor {
-    state: Mutex<FakeState>,
+    state: Arc<Mutex<FakeState>>,
     provider: Arc<dyn Provider>,
     /// How many times `ensure` has answered ready, for a test to wait on without polling.
     ready_answers: watch::Sender<usize>,
 }
 
+#[derive(Clone, Default)]
+pub(super) struct EnsureHold {
+    pub(super) entered: Arc<Notify>,
+    pub(super) release: Arc<Notify>,
+}
+
+/// Delivers a call the way the wasm provider does: the capabilities of the routine the called
+/// operation belongs to, read at the call.
+struct Delivering {
+    inner: Arc<dyn Provider>,
+    state: Arc<Mutex<FakeState>>,
+}
+
+#[async_trait]
+impl Provider for Delivering {
+    async fn call(
+        &self,
+        caller: &big_dispatch::Caller,
+        operation: &str,
+        request: &RequestContext,
+        context: &big_dispatch_core::InvocationContext,
+        input: serde_json::Value,
+        body: Option<big_dispatch_core::Body>,
+    ) -> Result<big_dispatch_core::Body, big_dispatch::ProviderError> {
+        {
+            // Every cartridge's operations reach this one provider, but only the last
+            // `ensure`d cartridge's routines are known here.
+            let mut state = self.state.lock().unwrap();
+            if let Some(routine) = state.routine_of.get(operation) {
+                let capabilities = state
+                    .routine_capabilities
+                    .get(routine)
+                    .expect("a ready routine has capabilities")
+                    .clone();
+                state.delivered.push((operation.to_owned(), capabilities));
+            }
+        }
+        self.inner
+            .call(caller, operation, request, context, input, body)
+            .await
+    }
+}
+
 #[derive(Default)]
 struct FakeState {
     ready: bool,
-    hosted: BTreeMap<CartridgeId, Digest>,
+    hosted: BTreeMap<CartridgeId, BTreeMap<String, ManifestComponent>>,
     /// Every `ensure` call, which the reconciler makes once per reconcile of a hosted nodule.
     ensures: usize,
+    /// The routine capabilities of the last `ensure`, and which routine serves each operation.
+    routine_capabilities: BTreeMap<String, RoutineCapabilities>,
+    routine_of: BTreeMap<String, String>,
+    /// The refusal attribution of the last `ensure`d cartridge.
+    missing_authority: Option<MissingAuthorityLookup>,
+    /// What each served call was delivered with, as the wasm provider selects it: the
+    /// capabilities of the routine that implements the called operation, at the call.
+    delivered: Vec<(String, RoutineCapabilities)>,
+    /// A gate the next `ensure` waits at, for a test to look at the node mid-reconcile.
+    hold: Option<EnsureHold>,
     log: Vec<String>,
     reensure: BTreeMap<CartridgeId, Reensure>,
     /// How long `ensure` takes, as a wasm workload compiling and instantiating does.
@@ -82,12 +142,16 @@ impl FakeExecutor {
     /// An executor whose hosted handlers are `provider`, answering `ensure` ready from the
     /// start when `ready` (otherwise once [`Self::arrive`] says the bytes did).
     pub(super) fn hosting(provider: Arc<dyn Provider>, ready: bool) -> Arc<Self> {
+        let state = Arc::new(Mutex::new(FakeState {
+            ready,
+            ..FakeState::default()
+        }));
         Arc::new(Self {
-            state: Mutex::new(FakeState {
-                ready,
-                ..FakeState::default()
+            provider: Arc::new(Delivering {
+                inner: provider,
+                state: Arc::clone(&state),
             }),
-            provider,
+            state,
             ready_answers: watch::channel(0).0,
         })
     }
@@ -98,6 +162,36 @@ impl FakeExecutor {
 
     pub(super) fn log(&self) -> Vec<String> {
         self.state.lock().unwrap().log.clone()
+    }
+
+    /// The routine capabilities the last `ensure` was handed, by routine key.
+    pub(super) fn routine_capabilities(&self) -> BTreeMap<String, RoutineCapabilities> {
+        self.state.lock().unwrap().routine_capabilities.clone()
+    }
+
+    /// The refusal attribution the last `ensure` was handed, which the host's egress refines a
+    /// routine's refused calls with.
+    pub(super) fn missing_authority(&self) -> MissingAuthorityLookup {
+        self.state
+            .lock()
+            .unwrap()
+            .missing_authority
+            .clone()
+            .expect("a cartridge was ensured")
+    }
+
+    /// What each served call was delivered with, in order: the operation and the capabilities
+    /// of the routine that implements it.
+    pub(super) fn delivered(&self) -> Vec<(String, RoutineCapabilities)> {
+        self.state.lock().unwrap().delivered.clone()
+    }
+
+    /// The next `ensure` signals `entered` and waits for `release`, which is the window a
+    /// reconcile has between applying capabilities and serving.
+    pub(super) fn hold_next_ensure(&self) -> EnsureHold {
+        let hold = EnsureHold::default();
+        self.state.lock().unwrap().hold = Some(hold.clone());
+        hold
     }
 
     fn provider(&self) -> Arc<dyn Provider> {
@@ -126,19 +220,42 @@ impl NoduleExecutor for FakeExecutor {
     }
 
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted {
-        let takes = self.state.lock().unwrap().ensure_takes;
+        let (takes, hold) = {
+            let mut state = self.state.lock().unwrap();
+            (state.ensure_takes, state.hold.take())
+        };
         tokio::time::sleep(takes).await;
+        if let Some(hold) = hold {
+            hold.entered.notify_one();
+            hold.release.notified().await;
+        }
         let mut state = self.state.lock().unwrap();
         state.ensures += 1;
-        if state.hosted.get(&spec.cartridge_id) != Some(&spec.handler.digest) {
+        state.routine_capabilities = spec.routine_capabilities.clone();
+        state.missing_authority = Some(spec.missing_authority.clone());
+        state.routine_of = spec
+            .routines
+            .iter()
+            .map(|(operation, routine)| (operation.clone(), routine.routine_key.clone()))
+            .collect();
+        let components = spec.components.clone();
+        if state.hosted.get(&spec.cartridge_id) != Some(&components) {
+            let digest = components
+                .values()
+                .map(|component| {
+                    let ManifestComponent::Wasm(component) = component else {
+                        panic!("a fixture component is not wasm")
+                    };
+                    component.digest
+                })
+                .next()
+                .expect("a hosted fixture has a component");
+            state.hosted.insert(spec.cartridge_id.clone(), components);
             state
-                .hosted
-                .insert(spec.cartridge_id.clone(), spec.handler.digest);
-            state.log.push(format!(
-                "host {} {}",
-                spec.cartridge_id, spec.handler.digest
-            ));
+                .log
+                .push(format!("host {} {}", spec.cartridge_id, digest));
         }
+
         state
             .reensure
             .insert(spec.cartridge_id.clone(), spec.reensure.clone());
@@ -244,7 +361,7 @@ async fn a_hosted_handler_is_registered_not_ready_until_the_executor_signals_and
 
     node.call(
         operator,
-        UninstallNodule {
+        UninstallCartridge {
             cartridge_id: photos,
         },
     )
@@ -299,9 +416,14 @@ async fn an_operation_stays_registered_not_ready_while_an_upgrade_starts_the_new
     node.set_enabled(PHOTOS, true).await;
     assert!(node.invoke(operator, OWN, json!({})).await.is_ok());
 
+    // The version is in the registry before the upgrade starts, so the window under test is the
+    // new revision's start alone.
+    let pin = node
+        .publish(serving_cartridge_of(PHOTOS, "1.1.0", OWN, "two"))
+        .await;
     executor.slow_ensure(Duration::from_millis(100));
     let (upgraded, during) = tokio::join!(
-        node.admit(operator, serving_cartridge_of(PHOTOS, "1.1.0", OWN, "two")),
+        node.call(operator, InstallCartridge { cartridge: pin }),
         async {
             let mut answers = Vec::new();
             for _ in 0..20 {
@@ -311,7 +433,11 @@ async fn an_operation_stays_registered_not_ready_while_an_upgrade_starts_the_new
             answers
         }
     );
-    assert_eq!(upgraded.unwrap().readiness, Readiness::Ready);
+    upgraded.unwrap();
+    assert_eq!(
+        node.get(operator, PHOTOS).await.unwrap().readiness,
+        Readiness::Ready
+    );
     let not_ready = Err(not_ready(NotReadyReason::Provider(Readiness::Initializing)));
     assert!(
         during.contains(&not_ready),
@@ -362,7 +488,10 @@ async fn a_config_change_reconciles_once_and_a_change_from_elsewhere_reconciles_
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    write: BTreeSet::from([config_doc.clone()]),
+                    write: std::collections::BTreeMap::from([(
+                        config_doc.clone(),
+                        big_cabinet_core::doc::DatumKinds::All,
+                    )]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
@@ -419,7 +548,7 @@ async fn config_blobs(node: &Node) -> BTreeMap<DatumKey, DatumRead> {
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    read: BTreeSet::from([config_doc.clone()]),
+                    read: DocScope::read_all([config_doc.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
@@ -472,7 +601,10 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    write: BTreeSet::from([config_doc.clone()]),
+                    write: std::collections::BTreeMap::from([(
+                        config_doc.clone(),
+                        big_cabinet_core::doc::DatumKinds::All,
+                    )]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
@@ -544,7 +676,7 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
     // Uninstalling removes the reference and nothing else.
     node.call(
         operator,
-        UninstallNodule {
+        UninstallCartridge {
             cartridge_id: id(PHOTOS),
         },
     )

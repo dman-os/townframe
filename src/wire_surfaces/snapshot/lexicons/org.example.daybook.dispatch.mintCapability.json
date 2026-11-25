@@ -1,0 +1,143 @@
+{
+  "defs": {
+    "Capability": {
+      "nullable": [
+        "subject"
+      ],
+      "properties": {
+        "capabilityId": {
+          "type": "string"
+        },
+        "issuerId": {
+          "type": "string"
+        },
+        "object": {
+          "type": "string"
+        },
+        "rights": {
+          "ref": "#Rights",
+          "type": "ref"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capabilityId",
+        "object",
+        "rights",
+        "issuerId"
+      ],
+      "type": "object"
+    },
+    "DispatchScope": {
+      "properties": {
+        "authorities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "operations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "privileged": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "MintDispatchCapability": {
+      "nullable": [
+        "subject"
+      ],
+      "properties": {
+        "rights": {
+          "ref": "#Rights",
+          "type": "ref"
+        },
+        "scope": {
+          "ref": "#DispatchScope",
+          "type": "ref"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "rights"
+      ],
+      "type": "object"
+    },
+    "Rights": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "UnknownOperation"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "description": "Retryable: the provider exists but is not serving yet.",
+          "name": "NotReady"
+        },
+        {
+          "name": "InvalidInput"
+        },
+        {
+          "description": "The call's body is the other case than the method declares: bytes for a JSON method (or a\nJSON body that is not application/json), JSON for a byte method.",
+          "name": "BodyMismatch"
+        },
+        {
+          "description": "The method is local-only (ADR 042 §3) and the call did not come from the node's own\nmachine through an edge transport.",
+          "name": "LocalOnly"
+        },
+        {
+          "description": "A JSON body, which dispatch gathers whole, is over its limit.",
+          "name": "TooLarge"
+        },
+        {
+          "description": "The provider answered with a body its method's Lexicon does not describe: a provider bug,\nas atproto's `InternalServerError`.",
+          "name": "InvalidOutput"
+        },
+        {
+          "description": "The provider's own XRPC error, passed through untouched.",
+          "name": "Provider"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#MintDispatchCapability",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#Capability",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.dispatch.mintCapability",
+  "lexicon": 1
+}

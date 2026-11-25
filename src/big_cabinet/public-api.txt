@@ -19,7 +19,8 @@ pub big_cabinet::doc::async fn boot (config : DocsConfig) -> Result < (DocsRepo 
 pub big_cabinet::doc::async fn prepare (config : DocsConfig) -> Result < (DocsRepo , StopToken) , DocsError >
 pub big_cabinet::drawer::async fn boot (config : DrawerConfig < '_ >) -> Result < (Drawers , StopToken) , DrawersError >
 pub enum big_cabinet::authority::AuthorityError { # [error ("capability is unknown, retracted, or descends from a retracted capability")] InvalidCapability, # [error ("capability lacks the right this operation needs")] Unauthorized, # [error ("the request asks for more than the presented capability holds")] Escalation, # [error ("AuthorityActors did not associate this capability with an actor")] UnrecognizedActor, # [error ("actor path is not its parent's path plus one segment")] InvalidActorPath, # [error ("actor is not registered")] ActorNotFound, # [error ("persisted authority state is corrupt: {0}")] StateCorrupt (String), # [error ("authority storage failed: {0}")] Storage (# [from] sqlite_rs :: SqlError), # [error ("secret store failed: {0}")] Secrets (# [from] SecretsError), # [error ("datum claim is invalid: {0}")] Claim (# [from] DmetaError), # [error ("attribution certificate is invalid: {0}")] Attribution (# [from] AttributionError) }
-pub enum big_cabinet::authority::DomainAuthority< S > { Identity (Uuid7), Scoped (S) }
+pub enum big_cabinet::authority::DomainAuthority< S > { # [doc = " The operator's root capability, the one the authority created at init"] # [doc = " ([`OPERATOR_OBJECT`]). Domains derive it from what the presented capability says, not from"] # [doc = " any identity they were configured with, so holding that capability is the only way to be"] # [doc = " the operator."] Operator, Identity (Uuid7), Scoped (S) }
+pub enum big_cabinet::authority::Holder { Operator, Actor (Uuid7) }
 pub enum big_cabinet::doc::access::AccessError { # [error ("access policy is unavailable: {0}")] Unavailable (String), # [error ("access policy refused: {0}")] Refused (String) }
 pub enum big_cabinet::doc::access::AccessRequest< 'a > { Read (& 'a DocId), Write (& 'a DocId), Create { placement : & 'a str } }
 pub enum big_cabinet::grants::GrantError { # [error ("grant storage failed: {0}")] Storage (# [from] SqlError), # [error ("grant capability failed: {0}")] Authority (# [from] ClientError < AuthorityServiceError >) }
@@ -34,6 +35,7 @@ pub impl big_cabinet::authority::AuthorityService::fn node_public_key (& self) -
 pub impl big_cabinet::authority::AuthorityService::fn operator_uuid (& self) -> Uuid7
 pub impl big_cabinet::authority::AuthorityService::fn root_cap (& self) -> CapId
 pub impl big_cabinet::authority::AuthorityService::fn sign_as_node (& self , domain : & [u8] , payload : & [u8]) -> [u8 ; 64]
+pub impl big_cabinet::authority::DomainAuthority < S >::fn holder (& self) -> Option < Holder >
 pub impl big_cabinet::capability::DomainCapabilities::async fn mint < S : Serialize > (& self , context : & RequestContext , caller : & Invocation < S > , subject : Option < Uuid7 > , scope : S , rights : Rights , dependencies : Vec < CapId > ,) -> Result < Capability , Error >
 pub impl big_cabinet::capability::DomainCapabilities::async fn resolve < S : DeserializeOwned > (& self , context : & RequestContext , capability : CapId ,) -> Result < Invocation < S > , Error >
 pub impl big_cabinet::capability::DomainCapabilities::async fn resolve_signed < S : DeserializeOwned > (& self , context : & RequestContext , capability : CapId , signer : CapId ,) -> Result < Invocation < S > , Error >
@@ -52,7 +54,7 @@ pub impl big_cabinet::doc::access::LedgerAccess::async fn open (sql : Database ,
 pub impl big_cabinet::doc::access::LedgerAccess::fn object (request : AccessRequest < '_ >) -> String
 pub impl big_cabinet::drawer::Drawers::async fn mint_drawer_capability (& self , context : & RequestContext , authorization : Authorization , drawer_id : & DrawerId , access : Access , rights : Rights ,) -> Result < Capability , DrawersError >
 pub impl big_cabinet::drawer::Drawers::fn local (& self) -> LocalDrawers
-pub impl big_cabinet::drawer::access::DrawerAccess::async fn open (big_repo : SharedBigRepo , authority : Client < AuthorityProtocol > , issuer : CapId , namespace : Namespace , operator : Uuid7 , sql : Database , datum_set : Arc < crate :: index :: DatumSetStore > ,) -> Result < (Arc < Self > , DrawerProvider , StopToken) , DrawersError >
+pub impl big_cabinet::drawer::access::DrawerAccess::async fn open (big_repo : SharedBigRepo , authority : Client < AuthorityProtocol > , issuer : CapId , namespace : Namespace , sql : Database , datum_set : Arc < crate :: index :: DatumSetStore > ,) -> Result < (Arc < Self > , DrawerProvider , StopToken) , DrawersError >
 pub impl big_cabinet::drawer::access::DrawerAccess::fn grants (& self) -> & Arc < crate :: grants :: Grants >
 pub impl big_cabinet::drawer::access::DrawerAccess::fn object (access : Access , drawer : & DrawerId) -> String
 pub impl big_cabinet::drawer::access::DrawerProvider::fn start (self , docs : Client < DocsProtocol >) -> (DrawerWorker , StopToken)
@@ -81,6 +83,7 @@ pub impl big_cabinet::schema::SchemaHandle::fn compiled (& self) -> & CompiledSc
 pub impl big_cabinet::schema::SchemaHandle::fn datum_tag (& self) -> & str
 pub impl big_cabinet::schema::SchemaHandle::fn lexicon (& self) -> & Value
 pub impl big_cabinet::schema::SchemaHandle::fn sidecar (& self) -> Option < Bundle < '_ > >
+pub impl big_cabinet::schema::SchemaHandle::fn sidecar_document (& self) -> Option < Value >
 pub impl big_cabinet::schema::SchemaRegistration::fn new (datum_tag : impl Into < String > , lexicon : Value) -> Self
 pub impl big_cabinet::schema::SchemaRegistration::fn with_supplement (mut self , supplement : Value) -> Self
 pub impl big_cabinet::schema::SchemaRegistrationGroup < 'a >::fn new (sidecar : Option < Bundle < 'a > > , registrations : impl IntoIterator < Item = SchemaRegistration > , carried_lexicons : Vec < Value > ,) -> Self
@@ -91,6 +94,7 @@ pub impl big_cabinet::schema::SchemaRepo::fn register (& self , owner : & str , 
 pub impl big_cabinet::schema::SchemaRepo::fn require_for_write (& self , datum_tag : & str) -> Result < SchemaHandle , SchemaRepoError >
 pub impl big_cabinet::schema::SchemaRepo::fn resolve_for_read (& self , datum_tag : & str) -> Option < SchemaHandle >
 pub impl big_cabinet::schema::SchemaRepo::fn retire (& self , owner : & str)
+pub impl big_cabinet::schema::SchemaRepo::fn schemas (& self) -> Vec < SchemaHandle >
 pub impl big_cabinet::schema::SchemaRepo::fn with_groups < 'a > (& self , groups : impl IntoIterator < Item = SchemaRegistrationGroup < 'a > > ,) -> Result < Self , SchemaRepoError >
 pub mod big_cabinet::authority
 pub mod big_cabinet::capability
@@ -132,7 +136,7 @@ pub struct big_cabinet::schema::SchemaHandle  {  }
 pub struct big_cabinet::schema::SchemaRegistration  { datum_tag: String, lexicon: Value, supplement: Option < Value > }
 pub struct big_cabinet::schema::SchemaRegistrationGroup< 'a >  { sidecar: Option < Bundle < 'a > >, registrations: Vec < SchemaRegistration >, carried_lexicons: Vec < Value > }
 pub struct big_cabinet::schema::SchemaRepo  {  }
-pub trait big_cabinet::doc::access::DocAccess { fn prove < 'a > (& 'a self , context : & 'a RequestContext , actor : Uuid7 , scope : & 'a DocScope ,) -> AccessFuture < 'a , Vec < CapId > >; fn check < 'a > (& 'a self , context : & 'a RequestContext , actor : Uuid7 , request : AccessRequest < 'a > ,) -> AccessFuture < 'a , bool >; fn place < 'a > (& 'a self , context : & 'a RequestContext , actor : Option < Uuid7 > , document : & 'a DocId , placement : & 'a str ,) -> AccessFuture < 'a , () >; fn readable_in_drawer < 'a > (& 'a self , _context : & 'a RequestContext , _actor : Uuid7 , _drawer_id : & 'a DocId ,) -> AccessFuture < 'a , Option < BTreeSet < DocId > > >; fn scoped_docs < 'a > (& 'a self , _context : & 'a RequestContext , _drawers : & 'a BTreeMap < DocId , big_cabinet_core :: drawer :: DrawerAccess > , _documents : Option < & 'a BTreeSet < DocId > > ,) -> AccessFuture < 'a , BTreeMap < DocId , big_cabinet_core :: drawer :: DrawerAccess > >; fn subscribe_changes (& self) -> Option < tokio :: sync :: watch :: Receiver < u64 > > }
+pub trait big_cabinet::doc::access::DocAccess { fn prove < 'a > (& 'a self , context : & 'a RequestContext , holder : Holder , scope : & 'a DocScope ,) -> AccessFuture < 'a , Vec < CapId > >; fn check < 'a > (& 'a self , context : & 'a RequestContext , holder : Holder , request : AccessRequest < 'a > ,) -> AccessFuture < 'a , bool >; fn place < 'a > (& 'a self , context : & 'a RequestContext , actor : Option < Uuid7 > , document : & 'a DocId , placement : & 'a str ,) -> AccessFuture < 'a , () >; fn readable_in_drawer < 'a > (& 'a self , _context : & 'a RequestContext , _holder : Holder , _drawer_id : & 'a DocId ,) -> AccessFuture < 'a , Option < BTreeSet < DocId > > >; fn scoped_docs < 'a > (& 'a self , _context : & 'a RequestContext , _drawers : & 'a BTreeMap < DocId , big_cabinet_core :: drawer :: DrawerAccess > , _documents : Option < & 'a BTreeSet < DocId > > ,) -> AccessFuture < 'a , BTreeMap < DocId , big_cabinet_core :: drawer :: DrawerAccess > >; fn subscribe_changes (& self) -> Option < tokio :: sync :: watch :: Receiver < u64 > > }
 pub type big_cabinet::authority::ActorPublicKey = [u8 ; 32]
 pub type big_cabinet::authority::AuthorityHandler = Arc < AuthorityService >
 pub type big_cabinet::doc::DocsHandler = Arc < DocsService >

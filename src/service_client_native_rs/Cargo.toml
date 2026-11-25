@@ -11,7 +11,7 @@ path = "lib.rs"
 
 [features]
 default = []
-iroh-http = ["dep:iroh", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
+iroh-http = ["dep:iroh", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:http-body"]
 
 [dependencies]
 #
@@ -37,6 +37,8 @@ iroh = { workspace = true, optional = true }
 hyper = { version = "1", features = ["http1", "client"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
+http-body = { version = "1", optional = true }
+thiserror.workspace = true
 
 [dev-dependencies]
 tracing.workspace = true

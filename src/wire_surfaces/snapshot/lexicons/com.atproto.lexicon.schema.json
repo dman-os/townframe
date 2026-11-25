@@ -1,0 +1,10 @@
+{
+  "defs": {
+    "main": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  "id": "com.atproto.lexicon.schema",
+  "lexicon": 1
+}

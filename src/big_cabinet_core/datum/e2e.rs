@@ -574,3 +574,39 @@ fn a_non_internal_union_is_refused_by_both_gates() {
         "{err}"
     );
 }
+
+/// A datum that states its stability the way an author does: a `schemars` extension on the field,
+/// the one mechanism `x-automerge` already uses. The sidecar carries the keywords and the Lexicon
+/// carries only `revision`.
+#[macros::datum(authority = "org.example.daybook")]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct Grown {
+    name: String,
+    #[schemars(extend("x-since" = 2))]
+    nick: Option<String>,
+    #[schemars(extend("x-since" = 1, "x-deprecated" = {"since": 3, "note": "use `nick`"}))]
+    alias: Option<String>,
+    #[schemars(extend("x-unstable" = "drafts"))]
+    draft: Option<String>,
+    #[serde(flatten)]
+    extra: Extra,
+}
+
+#[test]
+fn a_field_declares_its_stability_and_the_lexicon_carries_the_highest_revision() {
+    let universe = Universe::collect(vec![Declaration::of::<Grown>().unwrap()]);
+    let bundle = Bundle::new(&universe, Vec::new());
+    let document = serde_json::to_value(bundle.document("Grown").unwrap()).unwrap();
+    let properties = &document["$defs"]["Grown"]["properties"];
+    assert_eq!(properties["nick"]["x-since"], json!(2));
+    assert_eq!(properties["alias"]["x-deprecated"]["since"], json!(3));
+    assert_eq!(properties["draft"]["x-unstable"], json!("drafts"));
+
+    let file = &bundle.lexicons().unwrap()[0].file;
+    assert_eq!(file["revision"], json!(3));
+    // Nothing of the keywords reaches the projected shape.
+    assert_eq!(
+        file["defs"]["main"]["properties"]["nick"],
+        json!({"type": "string"})
+    );
+}

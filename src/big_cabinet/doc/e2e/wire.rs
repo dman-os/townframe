@@ -376,14 +376,26 @@ fn docs_error_wire() {
             "error_repository",
             DocsError::Repository("disk full".into()),
         ),
-        ("error_doc_not_found", DocsError::DocNotFound),
+        (
+            "error_doc_not_found",
+            DocsError::DocNotFound {
+                doc_id: DocId::new([1; 32]),
+            },
+        ),
         (
             "error_unknown_heads",
             DocsError::UnknownHeads {
+                doc_id: DocId::new([1; 32]),
                 heads: vec![hash(9)],
             },
         ),
         ("error_invalid_command", DocsError::InvalidCommand),
+        (
+            "error_invalid_doc_id",
+            DocsError::InvalidDocId {
+                doc_id: DocId::new([2; 5]),
+            },
+        ),
         (
             "error_command_in_flight",
             DocsError::CommandInFlight {

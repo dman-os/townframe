@@ -12,6 +12,7 @@ use automerge::transaction::Transactable;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::ReferenceDocId;
 use big_cabinet_core::dmeta::BranchPath;
+use big_cabinet_core::doc::DatumKinds;
 use big_cabinet_core::reference::head_text;
 
 fn command(text: &str) -> CommandId {
@@ -54,11 +55,14 @@ impl Node {
                         .capability(
                             actor,
                             DocScope {
-                                read: BTreeSet::from([origin.clone()]),
+                                read: DocScope::read_all([origin.clone()]),
                                 write: if stealth {
-                                    BTreeSet::new()
+                                    std::collections::BTreeMap::new()
                                 } else {
-                                    BTreeSet::from([origin.clone()])
+                                    std::collections::BTreeMap::from([(
+                                        origin.clone(),
+                                        big_cabinet_core::doc::DatumKinds::All,
+                                    )])
                                 },
                                 create: BTreeSet::from([PLACEMENT.into()]),
                                 ..DocScope::default()
@@ -82,6 +86,19 @@ impl Node {
         source: &DocId,
         target: &DocId,
     ) -> Result<WriteReceipt, DocsError> {
+        self.merge_as(actor, source, target, DatumKinds::All, DatumKinds::All)
+            .await
+    }
+
+    /// A merge by an actor holding only `read` kinds on the source and `write` kinds on the target.
+    async fn merge_as(
+        &self,
+        actor: &OpenedActor,
+        source: &DocId,
+        target: &DocId,
+        read: DatumKinds,
+        write: DatumKinds,
+    ) -> Result<WriteReceipt, DocsError> {
         op(self
             .client()
             .call(
@@ -91,8 +108,8 @@ impl Node {
                         .capability(
                             actor,
                             DocScope {
-                                read: BTreeSet::from([source.clone()]),
-                                write: BTreeSet::from([target.clone()]),
+                                read: BTreeMap::from([(source.clone(), read)]),
+                                write: BTreeMap::from([(target.clone(), write)]),
                                 ..DocScope::default()
                             },
                         )
@@ -262,7 +279,10 @@ async fn a_historical_branch_pins_its_concrete_parent_and_preserves_inherited_br
                     .capability(
                         &alice,
                         DocScope {
-                            write: BTreeSet::from([origin.doc_id.clone()]),
+                            write: std::collections::BTreeMap::from([(
+                                origin.doc_id.clone(),
+                                big_cabinet_core::doc::DatumKinds::All,
+                            )]),
                             create: BTreeSet::from([PLACEMENT.into()]),
                             ..DocScope::default()
                         },
@@ -322,6 +342,50 @@ async fn a_historical_branch_pins_its_concrete_parent_and_preserves_inherited_br
         &DatumReference::parse(&origin_reference(&origin.doc_id))
             .unwrap()
             .pinned(origin.heads.clone())
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn branching_from_a_datum_kind_limited_source_is_refused() {
+    let node = Node::boot().await;
+    let alice = node.writer("alice").await;
+    let origin = node
+        .create(&alice, "create", [(key("main"), note("origin"))])
+        .await
+        .unwrap();
+    let capability = node
+        .capability(
+            &alice,
+            DocScope {
+                read: DocScope::read_all([origin.doc_id.clone()]),
+                write: BTreeMap::from([(
+                    origin.doc_id.clone(),
+                    DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+                )]),
+                create: BTreeSet::from([PLACEMENT.into()]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        op(node
+            .client()
+            .call(
+                RequestContext::root(),
+                BranchDoc {
+                    capability,
+                    command: "limited-source".to_owned().try_into().unwrap(),
+                    doc_id: origin.doc_id,
+                    at: At::Current,
+                    path: "/limited".into(),
+                    stealth: false,
+                    placement: PLACEMENT.into(),
+                },
+            )
+            .await),
+        Err(DocsError::Denied)
     );
     node.stop().await;
 }
@@ -673,5 +737,115 @@ async fn the_boot_pass_settles_a_merge_by_whether_the_target_holds_the_source_he
     let settled = ledger.get(&command("merged")).await.unwrap().unwrap();
     assert_eq!((settled.state, settled.heads), (State::Done, origin.heads));
     assert!(ledger.get(&command("lost")).await.unwrap().is_none());
+    node.stop().await;
+}
+
+fn kinds(tags: Option<&[&str]>) -> DatumKinds {
+    tags.map_or(DatumKinds::All, |tags| {
+        DatumKinds::Only(
+            tags.iter()
+                .map(|tag| {
+                    format!("{tag}/x")
+                        .parse::<DatumKey>()
+                        .unwrap()
+                        .tag()
+                        .clone()
+                })
+                .collect(),
+        )
+    })
+}
+
+utils_rs::table_tests! {
+    merges_are_held_to_what_they_change tokio,
+    (read, write, branch_changes, expect),
+    {
+        let node = Node::boot().await;
+        let alice = node.writer("alice").await;
+        let text_key: DatumKey = format!("{TEXT_NOTE}/main").parse().unwrap();
+        let text = json!({"$type": TEXT_NOTE, "text": "x"});
+        let origin = node
+            .create(
+                &alice,
+                "create",
+                [(key("main"), note("x")), (text_key.clone(), text.clone())],
+            )
+            .await
+            .unwrap();
+        let branch = node
+            .branch(&alice, "branch", &origin.doc_id, "/draft", true)
+            .await
+            .unwrap();
+        for &tag in branch_changes {
+            let (datum, value) = match tag {
+                NOTE => (key("main"), note("changed")),
+                TEXT_NOTE => (text_key.clone(), json!({"$type": TEXT_NOTE, "text": "changed"})),
+                other => panic!("unknown tag {other}"),
+            };
+            node.write(&alice, &branch.doc_id, WriteMode::AtCurrent, [(datum, value)], [])
+                .await
+                .unwrap();
+        }
+        let merged = node
+            .merge_as(&alice, &branch.doc_id, &origin.doc_id, kinds(read), kinds(write))
+            .await;
+        match expect {
+            Ok(()) => {
+                let merged = merged.unwrap();
+                let read = node.read(&alice, &origin.doc_id, At::Current, false).await.unwrap();
+                assert_eq!(read.heads, merged.heads);
+                for &tag in branch_changes {
+                    let datum = if tag == NOTE { key("main") } else { text_key.clone() };
+                    assert!(accepted(&read.datums[&datum]).0.to_string().contains("changed"));
+                }
+            }
+            Err(error) => {
+                assert_eq!(merged, Err(error));
+                assert_eq!(
+                    node.read(&alice, &origin.doc_id, At::Current, false).await.unwrap().heads,
+                    origin.heads,
+                    "a refused merge changes nothing"
+                );
+            }
+        }
+        node.stop().await;
+    },
+}
+
+// A merge is held to the datums it changes; the branch datum it brings is the repository's own.
+merges_are_held_to_what_they_change! {
+    a_target_writable_at_the_changed_kinds_takes_the_merge: (None, Some(&[NOTE][..]), &[NOTE][..], Ok(())),
+    a_target_not_writable_at_a_changed_kind_refuses_the_merge: (None, Some(&[NOTE][..]), &[NOTE, TEXT_NOTE][..], Err(DocsError::Denied)),
+    // The branch's own `branch/<id>` datum comes along by design (ADR 034); it is the
+    // repository's record, so it needs no kind of the merging actor's.
+    the_branch_datum_a_merge_brings_needs_no_kind: (Some(&[NOTE][..]), Some(&[NOTE][..]), &[NOTE][..], Ok(())),
+    a_source_readable_at_the_changed_kinds_gives_the_merge: (Some(&[NOTE][..]), None, &[NOTE][..], Ok(())),
+    a_source_not_readable_at_a_changed_kind_refuses_the_merge: (Some(&[NOTE][..]), None, &[NOTE, TEXT_NOTE][..], Err(DocsError::Denied)),
+}
+
+#[tokio::test]
+async fn a_merge_that_brings_nothing_needs_no_kind() {
+    let node = Node::boot().await;
+    let alice = node.writer("alice").await;
+    let origin = node
+        .create(&alice, "create", [(key("main"), note("x"))])
+        .await
+        .unwrap();
+    let branch = node
+        .branch(&alice, "branch", &origin.doc_id, "/draft", true)
+        .await
+        .unwrap();
+    // The branch holds all of the origin's history, so merging the origin into it changes nothing.
+    let merged = node
+        .merge_as(
+            &alice,
+            &origin.doc_id,
+            &branch.doc_id,
+            kinds(Some(&[TEXT_NOTE])),
+            kinds(Some(&[TEXT_NOTE])),
+        )
+        .await
+        .unwrap();
+    assert_eq!(merged.heads, branch.heads);
     node.stop().await;
 }

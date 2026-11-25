@@ -1,0 +1,70 @@
+{
+  "defs": {
+    "Representation": {
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "lengthOctets": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "digest",
+        "lengthOctets"
+      ],
+      "type": "object"
+    },
+    "Rfc8188EncodingParameters": {
+      "properties": {
+        "padding": {
+          "type": "string"
+        },
+        "recordSize": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "recordSize",
+        "padding"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "properties": {
+        "contentEncoding": {
+          "type": "string"
+        },
+        "encodingParameters": {
+          "ref": "#Rfc8188EncodingParameters",
+          "type": "ref"
+        },
+        "keyRef": {
+          "type": "string"
+        },
+        "keyRefHeads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "representation": {
+          "ref": "#Representation",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "representation",
+        "contentEncoding",
+        "keyRef",
+        "keyRefHeads",
+        "encodingParameters"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.cipherBlob",
+  "lexicon": 1
+}

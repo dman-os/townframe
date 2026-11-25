@@ -1,0 +1,175 @@
+{
+  "defs": {
+    "CartridgeRecord": {
+      "properties": {
+        "docId": {
+          "type": "string"
+        },
+        "duplicateDocs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "unreadable": {
+          "type": "unknown"
+        },
+        "versions": {
+          "items": {
+            "ref": "#CartridgeVersionSummary",
+            "type": "ref"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "docId",
+        "versions"
+      ],
+      "type": "object"
+    },
+    "CartridgeVersionSummary": {
+      "nullable": [
+        "conflict",
+        "unverified"
+      ],
+      "properties": {
+        "conflict": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "unverified": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "ImportCartridgeDocument": {
+      "properties": {
+        "docId": {
+          "type": "string"
+        },
+        "reach": {
+          "type": "string"
+        },
+        "read": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "docId",
+        "read",
+        "reach"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "description": "Installs a cartridge from an existing document, one an author wrote and signed elsewhere, by\nentering it in the registry drawer, so the registry follows it as the author publishes more.\nThe document can be in any drawer the caller can read, including one that synced in from a\npeer. The registry holds no standing access to anything but its own drawer: the caller lends\nit two handles for this one call.\n- `read` is a docs-domain handle that reads `doc_id`. The registry reads the cartridge identity\n  through it before anything is entered.\n- `reach` is a drawers-domain handle that reaches `doc_id` at Read or above. Entering the\n  document gives the registry drawer's members Read on it, which the caller must itself hold.\n\nThe document is entered at Read: the registry serves an author's document and never writes\nit, so publishing to or removing versions of a cartridge whose document was installed this way is\nrefused (`Denied`) rather than written into the author's document.\nThe document must carry a cartridge identity datum. Nothing is checked here beyond that: each\nversion in it is verified as it is folded in, exactly as for a document that synced into the\ndrawer, so an unsigned or badly signed version is listed as unverified and never served, and\nno downgrade rule applies (arrival order is not version order).",
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "Rejected"
+        },
+        {
+          "description": "Staging refuses a version once its envelope has been published.",
+          "name": "AlreadyPublished"
+        },
+        {
+          "description": "A pinned datum is unavailable at its recorded frontier; this is recoverable when sync catches up.",
+          "name": "PinnedDatumUnreadable"
+        },
+        {
+          "description": "A pin must resolve inside the registry document that carries its envelope.",
+          "name": "PinnedDocumentMismatch"
+        },
+        {
+          "description": "A pinned datum was readable but did not decode as its declared manifest type.",
+          "name": "PinnedDatumInvalid"
+        },
+        {
+          "description": "The envelope a [`ResolveCartridgePin`] pin selects is not available at its heads yet;\nthis is recoverable when sync catches up.",
+          "name": "PinnedEnvelopeUnreadable"
+        },
+        {
+          "description": "The envelope a [`ResolveCartridgePin`] pin selects is not the revision the registry\nserves under its label.",
+          "name": "PinnedRevisionMismatch"
+        },
+        {
+          "description": "A published version never changes content: the label is taken by another envelope.",
+          "name": "VersionExists"
+        },
+        {
+          "description": "The envelope's signature is missing or does not verify against its namespace DID, or the\nDID's method cannot be verified without resolution (fail closed).",
+          "name": "Signature"
+        },
+        {
+          "description": "An unsigned envelope can be signed by the node only for the node's own DID.",
+          "name": "UnsignedForeignNamespace"
+        },
+        {
+          "description": "A new label must order after every label the cartridge has or had, so a validly signed older\nversion cannot be published as new (a downgrade attack). Taking an older version is an\nexplicit runtime action, not a registry one.",
+          "name": "Downgrade"
+        },
+        {
+          "description": "The handle's namespace scope does not include the cartridge's namespace.",
+          "name": "NamespaceNotPermitted"
+        },
+        {
+          "description": "The version exists in the drawer but its signature did not verify, so it is not served.",
+          "name": "Unverified"
+        },
+        {
+          "description": "An artifact's bytes are not in the local blob store, so the registry would pin bytes it\ncannot serve.",
+          "name": "ArtifactUnavailable"
+        },
+        {
+          "name": "UnknownCartridge"
+        },
+        {
+          "name": "UnknownVersion"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#ImportCartridgeDocument",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#CartridgeRecord",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.cartridges.importCartridgeDocument",
+  "lexicon": 1
+}

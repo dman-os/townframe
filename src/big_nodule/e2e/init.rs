@@ -3,47 +3,47 @@
 //! executor with gated providers (no Wasm, no sleeps).
 
 use super::Node;
+use super::add_method;
+use super::add_routine;
 use super::dispatch::not_ready;
 use super::executor::FakeExecutor;
 use super::id;
 use super::lexicon;
+use super::nodule_mut;
 use async_trait::async_trait;
-use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::dmeta::Uuid7;
-use big_cartridges_core::Artifact;
 use big_cartridges_core::Cartridge;
-use big_cartridges_core::Contribution;
-use big_cartridges_core::Digest;
-use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::Initializer;
+use big_cartridges_core::Permbind;
+use big_cartridges_core::PermbindDatum;
+use big_cartridges_core::RunMode;
+use big_cartridges_core::config::Component;
+use big_cartridges_core::config::GrantKey;
 use big_cartridges_core::example_cartridge;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
 use big_cartridges_core::request::Necessity;
-use big_cartridges_core::request::Request;
+use big_cartridges_core::test_support::FixtureCartridge;
 use big_dispatch::Caller;
 use big_dispatch::Operation;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
 use big_dispatch::ProviderKind;
 use big_dispatch::ProviderState;
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
-use big_nodule_core::Handler;
-use big_nodule_core::Initializer;
-use big_nodule_core::Nodule;
-use big_nodule_core::RunMode;
+use indexmap::IndexMap;
+
 use big_nodule_core::protocol::ListNodules;
 use big_nodule_core::protocol::NoduleInitStatus;
 use big_nodule_core::protocol::NoduleRecord;
-use big_nodule_core::protocol::SetNoduleDrawerGrants;
-use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleMethodGrants;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::RequestContext;
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -73,6 +73,9 @@ pub(super) struct Probe {
     /// Gates for the next calls, consumed in order: a call that finds one waits for its permit.
     holds: Mutex<VecDeque<Arc<Notify>>>,
     failing: Mutex<BTreeSet<String>>,
+    /// Operations that answer with this provider failure, as a handler's own XRPC error is
+    /// passed through dispatch.
+    refusing: Mutex<std::collections::BTreeMap<String, (u16, Value)>>,
 }
 
 impl Probe {
@@ -82,6 +85,7 @@ impl Probe {
             entered: watch::channel(0).0,
             holds: Mutex::default(),
             failing: Mutex::default(),
+            refusing: Mutex::default(),
         })
     }
 
@@ -101,11 +105,19 @@ impl Probe {
         }
     }
 
+    /// Calls of `operation` fail with the provider error `status` and `body`.
+    pub(super) fn refuse_with(&self, operation: &str, status: u16, body: Value) {
+        self.refusing
+            .lock()
+            .unwrap()
+            .insert(operation.to_owned(), (status, body));
+    }
+
     fn calls(&self) -> Vec<Call> {
         self.calls.lock().unwrap().clone()
     }
 
-    fn operations(&self) -> Vec<String> {
+    pub(super) fn operations(&self) -> Vec<String> {
         self.calls()
             .into_iter()
             .map(|call| call.operation)
@@ -130,7 +142,8 @@ impl Provider for Probe {
         _request: &RequestContext,
         context: &InvocationContext,
         _input: Value,
-    ) -> Result<Value, ProviderError> {
+        _body: Option<Body>,
+    ) -> Result<Body, ProviderError> {
         self.calls.lock().unwrap().push(Call {
             operation: operation.to_owned(),
             idempotency_key: context.idempotency_key.clone(),
@@ -141,13 +154,16 @@ impl Provider for Probe {
         if let Some(gate) = hold {
             gate.notified().await;
         }
+        if let Some((status, body)) = self.refusing.lock().unwrap().get(operation).cloned() {
+            return Err(ProviderError::Failed { status, body });
+        }
         if self.failing.lock().unwrap().contains(operation) {
             return Err(ProviderError::Failed {
                 status: 500,
                 body: json!({ "error": "boom" }),
             });
         }
-        Ok(json!({}))
+        Ok(Body::Json(json!({})))
     }
 }
 
@@ -178,56 +194,42 @@ pub(super) fn init_cartridge(
     serves: &[&str],
     requires: &[&str],
     inits: &[(&str, &str, RunMode)],
-) -> Cartridge {
-    let mut nodule = Nodule::default();
+) -> FixtureCartridge {
+    let mut cartridge = FixtureCartridge::new(Cartridge::new(
+        big_cartridges_core::test_support::cartridge_id(name),
+        version.parse().unwrap(),
+    ));
+    cartridge.authority = Some(format!("org.example.{name}"));
+    cartridge.nodule = Some(Default::default());
+
     for nsid in serves {
-        nodule.lexicons.push(lexicon(Value::Object(query(nsid))));
+        cartridge.with_lexicon(lexicon(Value::Object(query(nsid))));
+        add_routine(
+            &mut cartridge,
+            nsid,
+            nsid,
+            "handler",
+            "handle",
+            Default::default(),
+        );
     }
-    nodule.handler = Some(Handler {
-        artifact: "handler".into(),
-        extra: Default::default(),
-    });
-    nodule.implements = serves.iter().map(|nsid| (*nsid).to_owned()).collect();
+    let bytes = format!("{name}-{version}");
+    cartridge.with_wasm("handler", bytes.as_bytes());
+
     // Optional, so the nodule stays runnable before its grant: these tests exercise how an
     // initializer waits on and calls a provider, including the dispatch refusal without a grant.
     // A required request holds the nodule at `NeedsConfiguration` instead (see `requests`).
-    nodule.requires = requires
-        .iter()
-        .map(|nsid| {
-            let mut request = Request::new(*nsid, *nsid);
-            request.necessity = Necessity::Optional;
-            request
-        })
-        .collect();
-    nodule.initialization = inits
-        .iter()
-        .map(|(key, target, mode)| Initializer {
+    for request in requires {
+        add_method(&mut cartridge, request, request, Necessity::Optional, None);
+    }
+    for (key, target, mode) in inits {
+        nodule_mut(&mut cartridge).initialization.push(Initializer {
             key: (*key).to_owned(),
-            target: (*target).to_owned(),
+            target: (*target).parse().unwrap(),
             mode: mode.clone(),
             extra: Default::default(),
-        })
-        .collect();
-    let bytes = format!("{name}-{version}");
-    let mut cartridge = Cartridge::new(
-        big_cartridges_core::test_support::cartridge_id(name),
-        version.parse().unwrap(),
-    );
-    cartridge.authority = Some(format!("org.example.{name}"));
-    cartridge.artifacts.push(Artifact {
-        key: "handler".into(),
-        digest: Digest::of(bytes.as_bytes()),
-        size: Some(bytes.len() as u64),
-        media_type: Some("application/wasm".into()),
-        extra: Default::default(),
-    });
-    cartridge
-        .contributions
-        .push(Contribution::Nodule(NoduleContribution {
-            schema: Nodule::ID.into(),
-            description: lexicon(serde_json::to_value(nodule).unwrap()),
-            extra: Default::default(),
-        }));
+        });
+    }
     cartridge
 }
 
@@ -266,7 +268,7 @@ impl Node {
     /// Reads `cartridge_id` until `readiness` shows. Every read is a round trip through the state
     /// actor, which handles an initializer's result as a message of its own, so this ends once
     /// the awaited result has been applied; it waits on no clock.
-    async fn until(&self, cartridge_id: &str, readiness: Readiness) -> NoduleRecord {
+    pub(super) async fn until(&self, cartridge_id: &str, readiness: Readiness) -> NoduleRecord {
         loop {
             let record = self.get(self.operator(), cartridge_id).await.unwrap();
             if record.readiness == readiness {
@@ -278,28 +280,32 @@ impl Node {
 
     /// A config change that touches nothing: every config mutation reconciles once, which is
     /// what retries a failed initializer.
-    async fn touch(&self, cartridge_id: &str) -> NoduleRecord {
-        self.call(
+    pub(super) async fn touch(&self, cartridge_id: &str) -> NoduleRecord {
+        // Revoking a grant that was never made changes nothing in the document, and still
+        // reconciles.
+        self.set_grant(
             self.operator(),
-            SetNoduleDrawerGrants {
-                cartridge_id: id(cartridge_id),
-                drawers: BTreeMap::new(),
-            },
+            cartridge_id,
+            GrantKey::Method("org.example.never.granted".to_owned()),
+            None,
         )
         .await
-        .unwrap()
+        .unwrap();
+        self.get(self.operator(), cartridge_id).await.unwrap()
     }
 
     pub(super) async fn set_enabled_record(&self, cartridge_id: &str) -> NoduleRecord {
         self.call(
             self.operator(),
-            SetNoduleEnabled {
+            SetCartridgeEnabled {
                 cartridge_id: id(cartridge_id),
+                component: Component::Nodule,
                 enabled: true,
             },
         )
         .await
-        .unwrap()
+        .unwrap();
+        self.get(self.operator(), cartridge_id).await.unwrap()
     }
 
     async fn list_records(&self) -> Vec<NoduleRecord> {
@@ -314,18 +320,14 @@ impl Node {
         cartridge_id: &str,
         authorities: &[&str],
     ) -> NoduleRecord {
-        self.call(
-            self.operator(),
-            SetNoduleMethodGrants {
-                cartridge_id: id(cartridge_id),
-                methods: DispatchScope {
-                    authorities: authorities.iter().map(|a| (*a).to_owned()).collect(),
-                    ..Default::default()
-                },
+        self.set_methods(
+            cartridge_id,
+            DispatchScope {
+                authorities: authorities.iter().map(|a| (*a).to_owned()).collect(),
+                ..Default::default()
             },
         )
         .await
-        .unwrap()
     }
 }
 
@@ -350,7 +352,6 @@ async fn calls_are_not_ready_while_an_initializer_runs_and_served_once_it_succee
         Some(NoduleInitStatus {
             attempts: 1,
             error: None,
-            waiting_on: None,
         })
     );
     assert_eq!(
@@ -371,6 +372,29 @@ async fn calls_are_not_ready_while_an_initializer_runs_and_served_once_it_succee
     ));
     node.invoke(operator, PING, json!({})).await.unwrap();
     assert_eq!(probe.operations(), [SETUP, PING]);
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn initializer_declaration_order_survives_registry_round_trip() {
+    let probe = Probe::new();
+    let node = node_hosting(&probe).await;
+    let operator = node.operator();
+    let inits = [
+        ("z-first", SETUP, RunMode::Once),
+        ("a-second", WARM, RunMode::Once),
+    ];
+
+    node.admit(
+        operator,
+        init_cartridge("alpha", "1.0.0", &[PING, SETUP, WARM], &[], &inits),
+    )
+    .await
+    .unwrap();
+    node.set_enabled(ALPHA, true).await;
+    node.until(ALPHA, Readiness::Ready).await;
+
+    assert_eq!(probe.operations(), [SETUP, WARM]);
     node.shutdown().await;
 }
 
@@ -481,82 +505,27 @@ async fn the_idempotency_key_names_the_cartridge_revision_and_initializer() {
 }
 
 #[tokio::test]
-async fn a_foreign_initializer_goes_through_dispatch_under_the_nodules_operations_grant() {
+async fn an_initializer_targeting_another_cartridges_operation_is_refused_at_admission() {
     let probe = Probe::new();
-    let remote = Probe::new();
     let node = node_hosting(&probe).await;
-    let operator = node.operator();
-    node.admit(
-        operator,
-        init_cartridge(
-            "alpha",
-            "1.0.0",
-            &[PING],
-            &[REMOTE],
-            &[("sync", REMOTE, RunMode::Once)],
-        ),
-    )
-    .await
-    .unwrap();
-
-    // Nobody provides the operation yet: the nodule waits, which is not an attempt.
-    let record = node.set_enabled_record(ALPHA).await;
-    assert_eq!(record.readiness, Readiness::Initializing);
-    assert_eq!(
-        record.init,
-        Some(NoduleInitStatus {
-            attempts: 0,
-            error: None,
-            waiting_on: Some(REMOTE.to_owned()),
-        })
-    );
-    let nodule_actor = record.actor.unwrap().actor_id;
-    let revision = record.revision.unwrap();
-
-    node.dispatch
-        .router
-        .register(
-            "remote",
-            [(
-                REMOTE.to_owned(),
-                Operation::unchecked(Some(OperationKind::Query)),
-            )],
-            ProviderState::Ready(ProviderKind::BuiltIn(
-                Arc::clone(&remote) as Arc<dyn Provider>
-            )),
+    let error = node
+        .admit(
+            node.operator(),
+            init_cartridge(
+                "alpha",
+                "1.0.0",
+                &[PING],
+                &[REMOTE],
+                &[("sync", REMOTE, RunMode::Once)],
+            ),
         )
-        .unwrap();
-    // Without a grant dispatch refuses the nodule's actor, and the provider is never entered.
-    node.touch(ALPHA).await;
-    let record = node.until(ALPHA, Readiness::InitFailed).await;
-    let init = record.init.unwrap();
-    assert_eq!(init.attempts, 1);
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(
-        init.error.as_deref().unwrap().contains("does not permit"),
-        "{init:?}"
+        error.contains("not implemented by a routine of this cartridge"),
+        "{error}"
     );
-    assert!(remote.calls().is_empty());
-
-    // A grant that does not cover the operation is as good as none.
-    node.grant_operations(ALPHA, &["org.example.other"]).await;
-    let record = node.until(ALPHA, Readiness::InitFailed).await;
-    assert_eq!(record.init.unwrap().attempts, 2);
-    assert!(remote.calls().is_empty());
-
-    let record = node.grant_operations(ALPHA, &["org.example.remote"]).await;
-    assert!(record.methods.unwrap().granted);
-    node.until(ALPHA, Readiness::Ready).await;
-    assert_eq!(
-        remote.calls(),
-        [Call {
-            operation: REMOTE.to_owned(),
-            idempotency_key: Some(format!("nodule/{ALPHA}/{revision}/sync")),
-            // The call is the nodule actor's own, not the operator's or the service's.
-            actor: nodule_actor,
-        }]
-    );
-    // The foreign target is not the nodule's handler.
-    assert!(probe.calls().is_empty());
     node.shutdown().await;
 }
 
@@ -609,108 +578,74 @@ async fn a_result_from_a_superseded_revision_is_dropped() {
     node.shutdown().await;
 }
 
-#[tokio::test]
-async fn initializers_that_wait_on_each_other_are_reported_as_a_dependency_cycle() {
-    let probe = Probe::new();
-    let node = node_hosting(&probe).await;
-    let operator = node.operator();
-    let alpha_ping = "org.example.alpha.ping";
-    let beta_ping = "org.example.beta.ping";
-    node.admit(
-        operator,
-        init_cartridge(
-            "alpha",
-            "1.0.0",
-            &[alpha_ping],
-            &[beta_ping],
-            &[("needs-beta", beta_ping, RunMode::Once)],
-        ),
-    )
-    .await
-    .unwrap();
-    node.admit(
-        operator,
-        init_cartridge(
-            "beta",
-            "1.0.0",
-            &[beta_ping],
-            &[alpha_ping],
-            &[("needs-alpha", alpha_ping, RunMode::Once)],
-        ),
-    )
-    .await
-    .unwrap();
-    node.set_enabled(ALPHA, true).await;
-    node.set_enabled(example_cartridge!("beta"), true).await;
+/// `cartridge` with its nodule's method bindings replaced by `requests`, for tests of what a
+/// request does (`init_cartridge` states its requests as optional).
+#[derive(Clone, Copy)]
+pub(super) enum FixtureRequestKind {
+    Method,
+    DatumRead,
+}
+pub(super) struct FixtureRequest {
+    pub(super) nsid: String,
+    pub(super) necessity: Necessity,
+    pub(super) kind: FixtureRequestKind,
+    pub(super) min_revision: Option<u32>,
+}
 
-    // Each saw the other unregistered or not blocked yet; the next reconcile sees both waiting
-    // on each other, and each reports it.
-    node.touch(ALPHA).await;
-    for record in node.list_records().await {
-        assert_eq!(record.readiness, Readiness::InitFailed, "{record:?}");
-        let error = record.init.unwrap().error.unwrap();
-        assert!(error.contains("dependency cycle"), "{error}");
+pub(super) fn with_requests(
+    mut cartridge: FixtureCartridge,
+    requests: Vec<FixtureRequest>,
+) -> FixtureCartridge {
+    cartridge.permbinds.clear();
+    for request in requests {
+        match request.kind {
+            FixtureRequestKind::Method => add_method(
+                &mut cartridge,
+                &request.nsid,
+                &request.nsid,
+                request.necessity,
+                request.min_revision,
+            ),
+            FixtureRequestKind::DatumRead => {
+                cartridge.permbinds.insert(
+                    request.nsid.clone(),
+                    Permbind::Datum(PermbindDatum {
+                        nsid: request.nsid.parse().unwrap(),
+                        description: request.nsid.clone(),
+                        read: Some(request.necessity),
+                        write: None,
+                        create: None,
+                        delete: None,
+                        extra: request
+                            .min_revision
+                            .map(|revision| {
+                                IndexMap::from([("minRevision".into(), json!(revision))])
+                            })
+                            .unwrap_or_default(),
+                    }),
+                );
+            }
+        }
     }
-    // Waiting is not invoking.
-    assert!(probe.calls().is_empty());
-    node.shutdown().await;
-}
-
-#[tokio::test]
-async fn a_waiting_initializer_proceeds_when_its_provider_becomes_ready_by_any_path() {
-    let probe = Probe::new();
-    let node = node_hosting(&probe).await;
-    let operator = node.operator();
-    let beta_ping = "org.example.beta.ping";
-    node.admit(
-        operator,
-        init_cartridge(
-            "alpha",
-            "1.0.0",
-            &[PING],
-            &[beta_ping],
-            &[("needs-beta", beta_ping, RunMode::Once)],
-        ),
-    )
-    .await
-    .unwrap();
-    // Beta is installed after alpha but stays disabled, so nobody provides its operation.
-    node.admit(
-        operator,
-        init_cartridge("beta", "1.0.0", &[beta_ping], &[], &[]),
-    )
-    .await
-    .unwrap();
-    node.grant_operations(ALPHA, &["org.example.beta"]).await;
-    let record = node.set_enabled_record(ALPHA).await;
-    assert_eq!(record.readiness, Readiness::Initializing);
-    assert_eq!(record.init.unwrap().waiting_on.as_deref(), Some(beta_ping));
-
-    // Enabling beta is the only change: its transition to ready wakes alpha, whose
-    // initializer then runs through dispatch (alpha sorts before beta, so a plain reconcile
-    // would have looked at beta too early).
-    node.set_enabled(example_cartridge!("beta"), true).await;
-    node.until(ALPHA, Readiness::Ready).await;
-    assert_eq!(probe.operations(), [beta_ping]);
-    node.shutdown().await;
-}
-
-/// `cartridge` with its nodule's requests replaced by `requests`, for tests of what a request does
-/// to the nodule (`init_cartridge` states its requests as optional).
-pub(super) fn with_requests(mut cartridge: Cartridge, requests: Vec<Request>) -> Cartridge {
-    let Some(Contribution::Nodule(nodule)) = cartridge.contributions.first_mut() else {
-        panic!("init cartridges carry a nodule");
-    };
-    nodule
-        .description
-        .insert("requires".into(), serde_json::to_value(requests).unwrap());
     cartridge
 }
 
-pub(super) fn necessity(nsid: &str, necessity: Necessity) -> Request {
-    let mut request = Request::new(nsid, nsid);
-    request.necessity = necessity;
-    request
+pub(super) fn necessity(nsid: &str, necessity: Necessity) -> FixtureRequest {
+    FixtureRequest {
+        nsid: nsid.into(),
+        necessity,
+        kind: FixtureRequestKind::Method,
+        min_revision: None,
+    }
+}
+
+pub(super) fn datum_read(nsid: &str, min_revision: Option<u32>) -> FixtureRequest {
+    FixtureRequest {
+        nsid: nsid.into(),
+        necessity: Necessity::Required,
+        kind: FixtureRequestKind::DatumRead,
+        min_revision,
+    }
 }
 
 #[tokio::test]
@@ -733,23 +668,19 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
     // Granted: the requested operation (under a covering prefix), a prefix that covers nothing
     // requested, and an operation nobody requested.
     let record = node
-        .call(
-            operator,
-            SetNoduleMethodGrants {
-                cartridge_id: id(ALPHA),
-                methods: DispatchScope {
-                    operations: ["org.example.mail.send".to_owned()].into(),
-                    authorities: [
-                        "org.example.remote".to_owned(),
-                        "org.example.other".to_owned(),
-                    ]
-                    .into(),
-                    ..Default::default()
-                },
+        .set_methods(
+            ALPHA,
+            DispatchScope {
+                operations: ["org.example.mail.send".to_owned()].into(),
+                authorities: [
+                    "org.example.remote".to_owned(),
+                    "org.example.other".to_owned(),
+                ]
+                .into(),
+                ..Default::default()
             },
         )
-        .await
-        .unwrap();
+        .await;
     let operations = record.methods.unwrap();
     assert!(operations.granted);
     // The prefix is applied as the one requested operation it covers, not as the prefix.
@@ -786,54 +717,6 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
     assert!(operations.desired.is_empty());
     assert_eq!(operations.unrequested.operations.len(), 1);
     assert_eq!(operations.unrequested.authorities.len(), 2);
-    node.shutdown().await;
-}
-
-/// The nodule service holds every authority but no privilege, so a grant of every authority is
-/// applied while one that asks for privileged methods is refused at the mint and reported on the
-/// record, whatever it names.
-#[tokio::test]
-async fn a_privileged_grant_is_not_applied_though_every_authority_is() {
-    let probe = Probe::new();
-    let node = node_hosting(&probe).await;
-    let operator = node.operator();
-    node.admit(
-        operator,
-        with_requests(
-            init_cartridge("alpha", "1.0.0", &[PING], &[], &[]),
-            vec![necessity(REMOTE, Necessity::Optional)],
-        ),
-    )
-    .await
-    .unwrap();
-    node.set_enabled(ALPHA, true).await;
-    let grant = |privileged| {
-        node.call(
-            operator,
-            SetNoduleMethodGrants {
-                cartridge_id: id(ALPHA),
-                methods: DispatchScope {
-                    authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
-                    privileged,
-                    ..Default::default()
-                },
-            },
-        )
-    };
-    let status = grant(false).await.unwrap().methods.unwrap();
-    assert!(status.granted, "{status:?}");
-    assert!(!status.desired.privileged);
-
-    let status = grant(true).await.unwrap().methods.unwrap();
-    assert!(!status.granted, "{status:?}");
-    assert!(
-        status
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("exceeds the dispatch authority"),
-        "{status:?}"
-    );
     node.shutdown().await;
 }
 

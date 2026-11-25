@@ -492,7 +492,7 @@ async fn run_task(
                 return Ok(TaskOutput::OutOfScope);
             }
             runtime.ensure_causal_coverage(doc_id).await?;
-            tracing::warn!(wall = ?instr_start.elapsed(), "INSTR causal task timing kind=ensure_coverage"); // INSTR
+            tracing::warn!(target: "instr", wall = ?instr_start.elapsed(), "INSTR causal task timing kind=ensure_coverage"); // INSTR
             Ok(TaskOutput::Covered)
         }
         Task::ReconcileReaders { entry, .. } => {
@@ -521,7 +521,7 @@ async fn run_task(
                     continue;
                 }
                 instr_seated += 1; // INSTR
-                tracing::debug!(%doc_id, %entry, added = added.len(), "INSTR reader reconcile seated readers");
+                tracing::debug!(target: "instr", %doc_id, %entry, added = added.len(), "INSTR reader reconcile seated readers");
                 // Persisting publishes the adds to the peers and admits them locally. The
                 // task is keyed by its admission row and never replaced, so issued adds are
                 // not dropped before they are persisted.
@@ -538,7 +538,7 @@ async fn run_task(
                 // for them now rather than when the adds' own admission rows come round.
                 runtime.ensure_causal_coverage(doc_id).await?;
             }
-            tracing::warn!(docs = instr_n, seated = instr_seated, docs_for_agent = ?instr_docs_wall, wall = ?instr_start.elapsed(), "INSTR causal task timing kind=reconcile_readers"); // INSTR
+            tracing::warn!(target: "instr", docs = instr_n, seated = instr_seated, docs_for_agent = ?instr_docs_wall, wall = ?instr_start.elapsed(), "INSTR causal task timing kind=reconcile_readers"); // INSTR
             Ok(TaskOutput::Reconciled)
         }
     }

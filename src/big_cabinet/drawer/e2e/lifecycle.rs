@@ -1291,10 +1291,10 @@ async fn successor_absence_after_removal_is_not_an_unavailable_target() {
         .drawer_capability(&alice, &[&old, &missing])
         .await
         .unwrap();
-    assert_eq!(
+    assert!(matches!(
         node.resolve_successor(authorized, &old).await.unwrap_err(),
-        DrawersError::Docs(DocsError::DocNotFound),
-    );
+        DrawersError::Docs(DocsError::DocNotFound { .. }),
+    ));
     node.core()
         .write_roster(
             &RequestContext::root(),
@@ -1382,7 +1382,7 @@ async fn a_pending_successor_is_not_absence_or_a_terminal_answer() {
                     .mint_doc(
                         &node.drawers_actor,
                         DocScope {
-                            read: [middle.clone()].into(),
+                            read: DocScope::read_all([middle.clone()]),
                             ..Default::default()
                         },
                     )

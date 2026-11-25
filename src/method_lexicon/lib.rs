@@ -199,21 +199,40 @@ type Assemble = fn() -> Result<Value, MethodLexiconError>;
 /// Every built-in method with the function that assembles its Lexicon. One list, so a method
 /// added to a service is one line here; a router that registers a built-in operation missing from
 /// it refuses to start (`big_dispatch::ServiceProvider::register`), so a new method cannot go
-/// unlisted unnoticed.
-pub fn builtin_methods() -> impl Iterator<Item = (&'static str, Assemble)> {
+/// unlisted unnoticed. Each is `(nsid, owning crate, assemble)`: the owner is the crate that
+/// defines the method type, which is how the wire-surface snapshot attributes a Lexicon.
+pub fn builtin_methods() -> impl Iterator<Item = (&'static str, &'static str, Assemble)> {
     builtin_list()
         .iter()
-        .map(|(nsid, assemble, _)| (*nsid, *assemble))
+        .map(|(method, owner, assemble, _)| (method.nsid, *owner, *assemble))
 }
 
-type Builtin = (&'static str, Assemble, fn() -> MethodSchemas);
+/// The built-in method `nsid` names, as its service declares it: what a runtime reads the
+/// operation's [`method_core::HandleNeed`] from (ADR 049 §6.2).
+pub fn builtin_method(nsid: &str) -> Option<method_core::XrpcMethod> {
+    builtin_list()
+        .iter()
+        .find(|(method, _, _, _)| method.nsid == nsid)
+        .map(|(method, _, _, _)| *method)
+}
+
+type Builtin = (
+    method_core::XrpcMethod,
+    &'static str,
+    Assemble,
+    fn() -> MethodSchemas,
+);
 
 /// [`builtin_methods`] with each method's schemas too, which the tests read the error enums from.
 fn builtin_list() -> &'static [Builtin] {
     static LIST: std::sync::LazyLock<Vec<Builtin>> = std::sync::LazyLock::new(|| {
         macro_rules! group {
                 ($($method:path),* $(,)?) => { vec![$((
-                    <$method as Method>::XRPC.nsid,
+                    <$method as Method>::XRPC,
+                    std::any::type_name::<$method>()
+                        .split("::")
+                        .next()
+                        .expect("a type name starts with its crate"),
                     lexicon::<$method> as Assemble,
                     <$method as MethodSchema>::schemas as fn() -> MethodSchemas,
                 )),*] };
@@ -272,23 +291,19 @@ fn builtin_list() -> &'static [Builtin] {
             dispatch::Invoke,
             dispatch::MintDispatchCapability,
             nodules::MintNoduleCapability,
-            nodules::AdmitNodule,
-            nodules::ConfigureNodule,
-            nodules::SetNoduleEnabled,
-            nodules::SetNoduleDrawerGrants,
-            nodules::SetNoduleMethodGrants,
             nodules::ConfirmNoduleResolution,
             nodules::SetNoduleDevTakeover,
             nodules::SetMethodRoute,
-            nodules::UninstallNodule,
             nodules::GetNodule,
             nodules::ListNodules,
             blobs::MintBlobsCapability,
             blobs::PutBlob,
+            blobs::ImportFile,
             blobs::ReadBlob,
             blobs::StatBlob,
             cartridges::MintCartridgesCapability,
             cartridges::PublishCartridgeVersion,
+            cartridges::StageCartridgeVersion,
             cartridges::RemoveCartridgeVersion,
             cartridges::RemoveCartridge,
             cartridges::ImportCartridgeDocument,
@@ -296,7 +311,22 @@ fn builtin_list() -> &'static [Builtin] {
             cartridges::ListCartridges,
             cartridges::GetCartridge,
             cartridges::GetCartridgeVersion,
+            cartridges::ResolveCartridgeVersion,
+            cartridges::ResolveCartridgePin,
             cartridges::WatchCartridges,
+            cartridges::InstallCartridge,
+            cartridges::SetCartridgeEnabled,
+            cartridges::UninstallCartridge,
+            cartridges::SetCartridgeGrant,
+            cartridges::ClearCartridgeConfig,
+            cartridges::ListCartridgeInstalls,
+            cartridges::RequestCartridgeGrant,
+            cartridges::AwaitCartridgeGrantRequest,
+            cartridges::ListCartridgeGrantRequests,
+            cartridges::AnswerCartridgeGrantRequest,
+            cartridges::ListCartridgeGrants,
+            cartridges::AwaitCartridgeGrants,
+            cartridges::ObserveCartridgeInstalls,
         ]
     });
     &LIST
@@ -320,6 +350,43 @@ fn check(validator: Option<&PositionValidator>, value: &Value) -> Result<(), Vec
     }
 }
 
+/// One side of a method Lexicon's body, as the Lexicon declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredBody {
+    pub encoding: method_core::Encoding,
+    /// The media type the Lexicon names when it is neither `*/*` nor JSON. A compiled-in method
+    /// states its media type as a `&'static str` in its `Encoding`; a Lexicon's is data a
+    /// cartridge supplied, so it is owned here and `encoding` is `Bytes { mime: None }`.
+    pub mime: Option<String>,
+}
+
+/// The body encodings a method Lexicon `file` declares, as `(input, output)`: `application/json`
+/// or no body is JSON, `*/*` is bytes of any media type, `application/x-descriptors` is file
+/// descriptors, and any other media type is bytes of that type. This is how a method with no
+/// compiled-in [`method_core::XrpcMethod`], such as a nodule's, tells dispatch its encodings.
+pub fn body_encodings(file: &Value) -> (DeclaredBody, DeclaredBody) {
+    let side = |body: &Value| match body["encoding"].as_str() {
+        None | Some("application/json") => DeclaredBody {
+            encoding: method_core::Encoding::Json,
+            mime: None,
+        },
+        Some("application/x-descriptors") => DeclaredBody {
+            encoding: method_core::Encoding::Descriptors,
+            mime: None,
+        },
+        Some("*/*") => DeclaredBody {
+            encoding: method_core::Encoding::Bytes { mime: None },
+            mime: None,
+        },
+        Some(mime) => DeclaredBody {
+            encoding: method_core::Encoding::Bytes { mime: None },
+            mime: Some(mime.to_owned()),
+        },
+    };
+    let main = &file["defs"]["main"];
+    (side(&main["input"]), side(&main["output"]))
+}
+
 impl MethodContract {
     /// Compiles method `file` (a query, procedure or subscription Lexicon) with the files it may
     /// reference in `carried`.
@@ -331,9 +398,14 @@ impl MethodContract {
             Some("subscription") => OperationKind::Subscription,
             other => unreachable!("a method Lexicon's main is an operation, not {other:?}"),
         };
+        // A procedure whose body is bytes states only the body's encoding, so what dispatch checks
+        // of its request is the parameters, as for a query.
+        let json_body = main["input"]["encoding"].as_str() == Some("application/json");
         let request = match kind {
-            OperationKind::Procedure => Position::Input,
-            OperationKind::Query | OperationKind::Subscription => Position::Parameters,
+            OperationKind::Procedure if json_body => Position::Input,
+            OperationKind::Procedure | OperationKind::Query | OperationKind::Subscription => {
+                Position::Parameters
+            }
         };
         Ok(Self {
             kind,
@@ -418,21 +490,39 @@ pub fn lexicon<M: MethodSchema>() -> Result<Value, MethodLexiconError> {
     if let Some(description) = request_object.get("description") {
         main.insert("description".to_owned(), description.clone());
     }
-    match kind {
-        OperationKind::Procedure => {
-            let schema = project(nsid, "request", &request, &definitions, &mut carried)?;
-            main.insert(
-                "input".to_owned(),
-                json!({ "encoding": "application/json", "schema": schema }),
-            );
+    // A byte body (ADR 042 §1) is stated by its encoding alone, `*/*` for any media type, and
+    // its method keeps JSON-shaped parameters, which are the request type's fields.
+    let encoding = |encoding: method_core::Encoding| match encoding {
+        method_core::Encoding::Json => None,
+        method_core::Encoding::Bytes { mime } => Some(json!({ "encoding": mime.unwrap_or("*/*") })),
+        method_core::Encoding::Descriptors => {
+            Some(json!({ "encoding": "application/x-descriptors" }))
         }
+    };
+    match kind {
+        OperationKind::Procedure => match encoding(M::XRPC.input_encoding) {
+            None => {
+                let schema = project(nsid, "request", &request, &definitions, &mut carried)?;
+                main.insert(
+                    "input".to_owned(),
+                    json!({ "encoding": "application/json", "schema": schema }),
+                );
+            }
+            Some(input) => {
+                let parameters = parameters(nsid, request_object, &definitions)?;
+                main.insert("parameters".to_owned(), parameters);
+                main.insert("input".to_owned(), input);
+            }
+        },
         OperationKind::Query | OperationKind::Subscription => {
             let parameters = parameters(nsid, request_object, &definitions)?;
             main.insert("parameters".to_owned(), parameters);
         }
     }
     let body = resolve(&output, &definitions);
-    if body.get("type") != Some(&json!("null")) {
+    if let Some(output) = encoding(M::XRPC.output_encoding) {
+        main.insert("output".to_owned(), output);
+    } else if body.get("type") != Some(&json!("null")) {
         if body.get("type") != Some(&json!("object")) && body.get("oneOf").is_none() {
             return Err(MethodLexiconError::NotAnObject {
                 nsid,
@@ -457,8 +547,21 @@ pub fn lexicon<M: MethodSchema>() -> Result<Value, MethodLexiconError> {
     let mut defs = Map::new();
     defs.insert("main".to_owned(), Value::Object(main));
     defs.extend(carried);
-    let file = json!({ "lexicon": 1, "id": nsid, "defs": Value::Object(defs) });
+    let mut file = json!({ "lexicon": 1, "id": nsid, "defs": Value::Object(defs) });
     admit(nsid, kind, &file)?;
+    // The method's own stability (ADR 021): the file's `revision` is the highest revision the
+    // method names, and an unstable or deprecated method says so beside it, which is where the
+    // wire-surface check reads it from (a method has no sidecar to carry the keywords).
+    let stability = M::XRPC.stability;
+    if let Some(revision) = stability.revision() {
+        file["revision"] = json!(revision);
+    }
+    if let Some(feature) = stability.unstable {
+        file["x-unstable"] = json!(feature);
+    }
+    if let Some(deprecated) = stability.deprecated {
+        file["x-deprecated"] = json!({ "since": deprecated.since, "note": deprecated.note });
+    }
     Ok(file)
 }
 
@@ -631,6 +734,23 @@ fn flatten_tagged(object: &Map<String, Value>) -> Option<Value> {
         .iter()
         .find(|(_, property)| property.get("const").is_some_and(Value::is_string))
         .map(|(name, _)| name.clone())?;
+    let nullable = |property: &Value| {
+        property["type"]
+            .as_array()
+            .is_some_and(|types| types.contains(&json!("null")))
+    };
+    // The property with `null` dropped from its type list: `["array", "null"]` is `"array"`.
+    let non_null = |property: &Value| {
+        let mut property = property.clone();
+        if let Some(types) = property["type"].as_array() {
+            let rest: Vec<Value> = types.iter().filter(|t| *t != "null").cloned().collect();
+            property["type"] = match <[Value; 1]>::try_from(rest) {
+                Ok([only]) => only,
+                Err(rest) => Value::Array(rest),
+            };
+        }
+        property
+    };
     let mut variants = Vec::new();
     let mut properties = Map::new();
     for branch in branches {
@@ -640,15 +760,22 @@ fn flatten_tagged(object: &Map<String, Value>) -> Option<Value> {
             if *name == tag {
                 continue;
             }
-            match properties.get(name) {
+            let merged = match properties.get(name) {
+                None => property.clone(),
+                Some(existing) if existing == property => continue,
+                // `T` in one variant and `Option<T>` in another (schemars' `"type": [T, "null"]`)
+                // agree on `T`; the nullable spelling admits both, and every flattened field is
+                // optional already.
+                Some(existing) if non_null(existing) == non_null(property) => {
+                    if nullable(existing) {
+                        continue;
+                    }
+                    property.clone()
+                }
                 // Variants that disagree about a field's type leave it any object.
-                Some(existing) if existing != property => {
-                    properties.insert(name.clone(), unknown());
-                }
-                _ => {
-                    properties.insert(name.clone(), property.clone());
-                }
-            }
+                Some(_) => unknown(),
+            };
+            properties.insert(name.clone(), merged);
         }
     }
     properties.insert(tag.clone(), json!({ "type": "string", "enum": variants }));

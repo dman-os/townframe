@@ -8,7 +8,11 @@ impl std :: fmt :: Debug for service_client_native_rs::xrpc::iroh::IrohXrpcClien
 impl tokio :: io :: AsyncRead for service_client_native_rs::xrpc::iroh::IrohHttpStream
 impl tokio :: io :: AsyncWrite for service_client_native_rs::xrpc::iroh::IrohHttpStream
 pub const service_client_native_rs::xrpc::iroh::IROH_XRPC_HTTP_ALPN: & [u8]
+pub enum service_client_native_rs::fd::DescriptorClientError { # [error ("descriptor socket IO failed: {0}")] Io (# [from] std :: io :: Error), # [error ("descriptor socket response was invalid: {0}")] Protocol (String), # [error ("descriptor call was refused: {0}")] Refused (Value), # [error ("descriptor result was invalid: {0}")] Result (String) }
 pub enum service_client_native_rs::xrpc::ws::WsMessage { Text (String), Close }
+pub impl service_client_native_rs::fd::DescriptorClient::async fn call < T : DeserializeOwned > (& self , operation : & str , parameters : & Value , descriptors : Vec < OwnedFd > ,) -> Result < Vec < T > , DescriptorClientError >
+pub impl service_client_native_rs::fd::DescriptorClient::async fn call_files < T : DeserializeOwned > (& self , operation : & str , parameters : & Value , paths : & [PathBuf] ,) -> Result < Vec < T > , DescriptorClientError >
+pub impl service_client_native_rs::fd::DescriptorClient::fn unix (path : impl Into < PathBuf >) -> Self
 pub impl service_client_native_rs::xrpc::iroh::IrohHttpStream::fn new (send : iroh :: endpoint :: SendStream , recv : iroh :: endpoint :: RecvStream) -> Self
 pub impl service_client_native_rs::xrpc::iroh::IrohXrpcClient::async fn active_connection (& self) -> Option < iroh :: endpoint :: Connection >
 pub impl service_client_native_rs::xrpc::iroh::IrohXrpcClient::async fn execute < P , O , E > (& self , operation : XrpcMethod , context : RequestContext , metadata : & HttpMetadata , params : & P ,) -> Result < O , XrpcClientError < E > > where P : Serialize , O : DeserializeOwned , E : DeserializeOwned ,
@@ -18,13 +22,17 @@ pub impl service_client_native_rs::xrpc::ws::WsIo < S >::async fn read_message (
 pub impl service_client_native_rs::xrpc::ws::WsIo < S >::async fn write_close (& mut self) -> io :: Result < () >
 pub impl service_client_native_rs::xrpc::ws::WsIo < S >::async fn write_text (& mut self , text : & str) -> io :: Result < () >
 pub impl service_client_native_rs::xrpc::ws::WsIo < S >::fn new (stream : S , client : bool) -> Self
+pub mod service_client_native_rs::fd
 pub mod service_client_native_rs::xrpc
 pub mod service_client_native_rs::xrpc::iroh
 pub mod service_client_native_rs::xrpc::ws
 pub service_client_native_rs::xrpc::ws::fn accept_key (key : & str) -> String
+pub struct service_client_native_rs::fd::DescriptorClient  {  }
 pub struct service_client_native_rs::xrpc::iroh::IrohHttpStream  {  }
 pub struct service_client_native_rs::xrpc::iroh::IrohXrpcClient  {  }
 pub struct service_client_native_rs::xrpc::ws::WsIo< S >  {  }
+pub use service_client_native_rs::fd :: DescriptorClient
+pub use service_client_native_rs::fd :: DescriptorClientError
 pub use service_client_native_rs::transport :: Client
 pub use service_client_native_rs::transport :: InlineRoute
 pub use service_client_native_rs::transport :: Transport

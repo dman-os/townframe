@@ -81,32 +81,13 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Artifact;
-    use crate::Contribution;
-    use crate::Digest;
-    use crate::NoduleContribution;
-    use indexmap::IndexMap;
-    use serde_json::json;
-
+    use crate::Nodule;
     fn cartridge(version: &str) -> Cartridge {
         let mut cartridge = Cartridge::new(
             crate::example_cartridge!("photos").parse().unwrap(),
             version.parse().unwrap(),
         );
-        cartridge.artifacts.push(Artifact {
-            key: "routines".into(),
-            digest: Digest::of(b"wasm"),
-            size: Some(4),
-            media_type: None,
-            extra: Default::default(),
-        });
-        cartridge
-            .contributions
-            .push(Contribution::Nodule(NoduleContribution {
-                schema: "org.example.daybook.nodule".into(),
-                description: IndexMap::from([("id".to_owned(), json!("org.example.photos"))]),
-                extra: Default::default(),
-            }));
+        cartridge.nodule = Some(Nodule::default());
         cartridge
     }
 
@@ -128,9 +109,9 @@ mod tests {
         assert_eq!(catalog.cartridge(&revision), Some(&envelope));
 
         let mut invalid = cartridge("0.1.0");
-        invalid.artifacts[0].key.clear();
+        invalid.authority = Some("bad".into());
         let error = catalog.import(invalid).unwrap_err().to_string();
-        assert!(error.contains("artifact key is not empty"), "{error}");
+        assert!(error.contains("not an NSID authority"), "{error}");
         assert_eq!(catalog.cartridge(&Revision([0; 32])), None);
     }
 
@@ -138,7 +119,7 @@ mod tests {
     fn one_version_names_one_revision() {
         let mut catalog = catalog(&["1.2.3"]);
         let mut republished = cartridge("1.2.3");
-        republished.title = Some("Photos, republished".into());
+        republished.name = Some("Photos, republished".into());
         let error = catalog.import(republished).unwrap_err().to_string();
         assert!(
             error.contains(crate::example_cartridge!("photos")),

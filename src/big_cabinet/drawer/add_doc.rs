@@ -51,7 +51,7 @@ impl Core {
                 context,
                 self.issuer,
                 DocScope {
-                    read: [drawer.clone()].into(),
+                    read: DocScope::read_all([drawer.clone()]),
                     ..Default::default()
                 },
                 |Authorization {
@@ -178,7 +178,7 @@ impl Core {
         }))
         .await?;
         narrowed.extend(published);
-        tracing::debug!(?instr_issued, ?instr_reconciled, published = ?instr_start.elapsed(), drawers = drawers.len(), "INSTR enter timing"); // INSTR
+        tracing::debug!(target: "instr", ?instr_issued, ?instr_reconciled, published = ?instr_start.elapsed(), drawers = drawers.len(), "INSTR enter timing"); // INSTR
         futures::future::try_join_all(drawers.iter().enumerate().map(|(index, drawer)| {
             let written = narrowed.remove(&index).flatten();
             async move {

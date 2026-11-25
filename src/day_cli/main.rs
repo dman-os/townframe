@@ -18,11 +18,11 @@ mod interlude {
     pub use utils_rs::prelude::WrapErr;
     pub use utils_rs::prelude::debug;
     pub use utils_rs::prelude::default;
-    pub use utils_rs::prelude::error;
     pub use utils_rs::prelude::eyre;
     pub use utils_rs::prelude::json;
     pub use utils_rs::prelude::warn;
 
+    pub use std::io::Write;
     pub use std::process::ExitCode;
 
     pub(crate) use crate::lazy;
@@ -39,16 +39,50 @@ mod config;
 mod context;
 mod e2e;
 mod lazy;
+mod out;
 
-fn main() -> Res<ExitCode> {
+shadow_rs::shadow!(build);
+
+/// Report an escaped error ourselves instead of returning it from `main`. The standard library
+/// prints a returned error as `Error: {err:?}`, and color-eyre's `Debug` begins every chain entry
+/// with a newline (it expects its own header line above it), so the message would land on the
+/// second line under a bare `Error:`. The alternate `Display` puts the message and its causes on
+/// the first line.
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(err) if out::is_stdout_closed(&err) => ExitCode::SUCCESS,
+        Err(err) => {
+            // A closed stderr leaves nowhere to report to, so the failed write is dropped and the
+            // exit status carries the failure.
+            writeln!(std::io::stderr(), "Error: {err:#}").ok();
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Res<ExitCode> {
     // dotenv_flow::dotenv_flow().ok();
-    utils_rs::setup_tracing()?;
+    let parsed = Cli::try_parse();
+    // Tracing is the server's log: only the foreground server, which `node start --bg` runs and
+    // whose stderr is its log file, narrates at `info`. Every other command prints its results
+    // through `out` and shows only warnings on stderr; an explicit `RUST_LOG` overrides both.
+    let serves = matches!(
+        &parsed,
+        Ok(Cli {
+            command: StaticCommands::Node {
+                command: cmds::node::NodeCommands::Start { bg: false }
+            },
+            ..
+        })
+    );
+    utils_rs::tracing::setup_tracing_at(if serves { "info" } else { "warn" })?;
 
     // the static cli is for commands that
     // can be executed without having to
     // build up the dynamic sections of
     // the CLI into clap reprs
-    let static_res = match try_static_cli() {
+    let static_res = match try_static_cli(parsed) {
         Ok(StaticCliResult::Exit(code)) => {
             let shutdown_res = lazy::rt().block_on(lazy::shutdown());
             if code == ExitCode::SUCCESS {
@@ -98,8 +132,8 @@ fn main() -> Res<ExitCode> {
     }
 }
 
-fn try_static_cli() -> Res<StaticCliResult> {
-    let cli = match Cli::try_parse() {
+fn try_static_cli(parsed: Result<Cli, clap::Error>) -> Res<StaticCliResult> {
+    let cli = match parsed {
         Err(err) => {
             let kind = err.kind();
             use clap::error::ErrorKind;
@@ -129,12 +163,12 @@ fn try_static_cli() -> Res<StaticCliResult> {
     }
 
     lazy::set_node_flag(cli.node.clone());
-    // The foreground daemon shuts its node down on SIGINT itself; racing it against Ctrl-C here
+    // The foreground server shuts its node down on SIGINT itself; racing it against Ctrl-C here
     // would drop the serving future with the node still booted.
     let owns_signals = matches!(
         cli.command,
         StaticCommands::Node {
-            command: cmds::node::NodeCommands::Run
+            command: cmds::node::NodeCommands::Start { bg: false }
         }
     );
     lazy::rt()
@@ -154,28 +188,43 @@ fn try_static_cli() -> Res<StaticCliResult> {
 
 async fn static_cli(cli: Cli) -> Res<ExitCode> {
     if let StaticCommands::Node {
-        command: cmds::node::NodeCommands::Init { dir, relay },
+        command: cmds::node::NodeCommands::Init { dir, relay, json },
     } = &cli.command
     {
-        return cmds::init::run(dir.clone(), *relay).await;
+        return cmds::init::run(dir.clone(), *relay, *json).await;
+    }
+
+    #[cfg(feature = "docs")]
+    if let StaticCommands::Docs { command } = cli.command {
+        return cmds::docs::run(command);
     }
 
     let conf = lazy::config().await?;
     if !conf.node_dir.is_initialized() {
-        error!(
-            path = ?conf.cli_config.node_path,
-            "node not initialized at resolved path; run `day node init`",
+        eyre::bail!(
+            "node not initialized at {}; run `day node init`",
+            conf.cli_config.node_path.display()
         );
-        return Ok(ExitCode::FAILURE);
     }
 
     match cli.command {
         StaticCommands::Completions { .. } => unreachable!(),
+        #[cfg(feature = "docs")]
+        StaticCommands::Docs { .. } => unreachable!("handled before the node is looked up"),
         StaticCommands::Node { command } => cmds::node::run(command).await,
         StaticCommands::Carts { command } => cmds::carts::run(command).await,
         StaticCommands::Peers { command } => cmds::peers::run(command).await,
         StaticCommands::Drawers { command } => cmds::drawers::run(command).await,
-        StaticCommands::Exec { nsid, input, get } => cmds::exec::run(nsid, input, get).await,
+        StaticCommands::Grants { command } => cmds::grants::run(command).await,
+        StaticCommands::Dump { command } => cmds::dump::run(command).await,
+        StaticCommands::Exec {
+            nsid,
+            input,
+            get,
+            body,
+            range,
+            output,
+        } => cmds::exec::run(nsid, input, get, body, range, output).await,
     }
 }
 
@@ -185,7 +234,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
 /// `root_cmd` here, after the node is known to be initialized, as daybook's `exec` did for plugs.
 async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
     let mut root_cmd = Cli::command();
-    Ok(static_res.exit(Some(&mut root_cmd)))
+    static_res.exit(Some(&mut root_cmd))
 }
 
 const CLAP_STYLE: clap::builder::Styles = clap::builder::Styles::styled()
@@ -194,11 +243,25 @@ const CLAP_STYLE: clap::builder::Styles = clap::builder::Styles::styled()
     .literal(AnsiColor::Green.on_default())
     .placeholder(AnsiColor::Green.on_default());
 
+/// What a `day` command exits with. Every command follows it; the table is in `--help`.
+const EXIT_CODES: &str = "\
+Exit codes:
+- 0: success
+- 1: failure, the command could not do what was asked (the error is on stderr)
+- 2: usage error, the arguments were not understood
+- 3: no server running (`day node status`, which still reports what it found)
+
+Output goes to stdout and diagnostics to stderr. Only `day node start` logs as it serves;
+the other commands show warnings, and RUST_LOG overrides the level. Colour is used on a
+terminal unless NO_COLOR is set.";
+
 #[derive(Debug, clap::Parser)]
 #[clap(
     name = "day",
     version,
+    long_version = build::CLAP_LONG_VERSION,
     about,
+    after_long_help = EXIT_CODES,
     styles = CLAP_STYLE
 )]
 struct Cli {
@@ -222,7 +285,7 @@ enum StaticCommands {
         #[clap(subcommand)]
         command: cmds::carts::CartsCommands,
     },
-    /// Manage the peers the node's daemon dials at start
+    /// Manage the peers the node's server dials at start
     #[clap(visible_alias = "peer")]
     Peers {
         #[clap(subcommand)]
@@ -233,6 +296,17 @@ enum StaticCommands {
     Drawers {
         #[clap(subcommand)]
         command: cmds::drawers::DrawersCommands,
+    },
+    /// What cartridges may reach, and the requests they make for more
+    #[clap(visible_alias = "grant")]
+    Grants {
+        #[clap(subcommand)]
+        command: cmds::grants::GrantsCommands,
+    },
+    /// Raw debug view of what the node holds, as JSON
+    Dump {
+        #[clap(subcommand)]
+        command: cmds::dump::DumpCommands,
     },
     /// Execute an operation through the node's dispatch router and print the JSON answer
     #[clap(visible_alias = "x")]
@@ -245,6 +319,23 @@ enum StaticCommands {
         /// instead of the JSON body of a POST
         #[arg(long)]
         get: bool,
+        /// Stream this file as the raw request body of an operation whose input is bytes, such
+        /// as org.example.daybook.blobs.put; the input is then its parameters, as a query string
+        #[arg(long, value_name = "FILE")]
+        body: Option<std::path::PathBuf>,
+        /// An HTTP Range, such as bytes=0-99, for an operation that answers part of its bytes
+        #[arg(long, value_name = "RANGE")]
+        range: Option<String>,
+        /// Write an answer that is bytes, such as org.example.daybook.blobs.read, to this file
+        #[arg(long, value_name = "FILE")]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Render the man pages and the Markdown reference (build tooling: `cargo x cli`)
+    #[cfg(feature = "docs")]
+    #[clap(hide = true)]
+    Docs {
+        #[clap(subcommand)]
+        command: cmds::docs::DocsCommands,
     },
     /// Generate shell completions
     Completions {
@@ -261,20 +352,23 @@ enum StaticCliResult {
 
 impl StaticCliResult {
     /// Used for deferred exit after we've built the full cli
-    fn exit(self, cmd: Option<&mut clap::Command>) -> ExitCode {
+    fn exit(self, cmd: Option<&mut clap::Command>) -> Res<ExitCode> {
         use clap::CommandFactory;
         use clap_complete::aot::generate;
         match self {
             StaticCliResult::ClapErr(err) => err.exit(),
             StaticCliResult::Completions(shell) => {
-                let mut stdout = std::io::stdout();
+                // `generate` panics when its writer fails, so it fills a buffer that `out` then
+                // writes, where a closed stdout is an error like any other.
+                let mut script = Vec::new();
                 generate(
                     shell,
                     cmd.unwrap_or(&mut Cli::command()),
                     "day".to_string(),
-                    &mut stdout,
+                    &mut script,
                 );
-                ExitCode::SUCCESS
+                out::out().write_all(&script)?;
+                Ok(ExitCode::SUCCESS)
             }
             StaticCliResult::Exit(_) => unreachable!("can't happen"),
         }

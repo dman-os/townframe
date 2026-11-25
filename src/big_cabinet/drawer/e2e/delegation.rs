@@ -359,7 +359,7 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
         );
     }
     let doc_scope = DocScope {
-        read: [doc.clone()].into(),
+        read: DocScope::read_all([doc.clone()]),
         ..Default::default()
     };
     let mut drawer_caps = Vec::new();
@@ -369,7 +369,11 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
         drawer_caps.push(node.drawer_capability(actor, &[&drawer]).await.unwrap());
         doc_caps.push(node.mint_doc(actor, doc_scope.clone()).await.unwrap());
         let (_, dependencies) = old_core
-            .effective(&RequestContext::root(), actor.actor.actor_id, &drawer)
+            .effective(
+                &RequestContext::root(),
+                Holder::Actor(actor.actor.actor_id),
+                &drawer,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -716,6 +720,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
                     drawer_id: drawer.clone(),
                     subject_id: cartridge.actor.actor_id,
                     access: Access::Write,
+                    durable: false,
                 }
             )
             .await
@@ -892,6 +897,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
                         drawer_id: drawer.clone(),
                         subject_id: bob.actor.actor_id,
                         access: Access::Write,
+                        durable: false,
                     }
                 )
                 .await
@@ -907,6 +913,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
                 drawer_id: drawer.clone(),
                 subject_id: bob.actor.actor_id,
                 access: Access::Write,
+                durable: false,
             },
         )
         .await
@@ -923,11 +930,14 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
         .unwrap();
     let scopes = [
         DocScope {
-            read: [doc.clone()].into(),
+            read: DocScope::read_all([doc.clone()]),
             ..Default::default()
         },
         DocScope {
-            write: [doc.clone()].into(),
+            write: std::collections::BTreeMap::from([(
+                doc.clone(),
+                big_cabinet_core::doc::DatumKinds::All,
+            )]),
             ..Default::default()
         },
         DocScope {
@@ -935,7 +945,11 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
             ..Default::default()
         },
         DocScope {
-            drawers: [(drawer.clone(), Access::Write)].into(),
+            drawers: [(
+                drawer.clone(),
+                big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+            )]
+            .into(),
             ..Default::default()
         },
     ];
@@ -1016,6 +1030,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
                 drawer_id: drawer.clone(),
                 subject_id: bob.actor.actor_id,
                 access: Access::Read,
+                durable: false,
             },
         )
         .await
@@ -1079,6 +1094,106 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
 }
 
 #[tokio::test]
+async fn a_durable_drawer_grant_outlives_its_capability_and_a_restart_until_revoked() {
+    use big_cabinet_core::authority::AttenuateCapability;
+    use big_cabinet_core::authority::RetractCapability;
+
+    let mut node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let bob = node.actor("bob").await;
+    let drawer = node.collection(&alice, "workspace").await;
+    let scope = DrawerScope {
+        drawers: [(drawer.clone(), Access::Admin)].into(),
+        create: false,
+    };
+    // Durability does not widen who may make the grant: Admin over the drawer and DELEGATE on
+    // the capability are still required.
+    let admin = node.mint_drawer(&alice, scope.clone()).await.unwrap();
+    let no_delegate = node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            AttenuateCapability {
+                capability: admin,
+                rights: Rights::USE | Rights::NARROW,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    for capability in [alice.capability, no_delegate] {
+        assert_eq!(
+            op(node
+                .drawers()
+                .call(
+                    RequestContext::root(),
+                    GrantDrawer {
+                        capability,
+                        drawer_id: drawer.clone(),
+                        subject_id: bob.actor.actor_id,
+                        access: Access::Write,
+                        durable: true,
+                    }
+                )
+                .await
+                .unwrap_err()),
+            DrawersError::Denied
+        );
+    }
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            GrantDrawer {
+                capability: admin,
+                drawer_id: drawer.clone(),
+                subject_id: bob.actor.actor_id,
+                access: Access::Write,
+                durable: true,
+            },
+        )
+        .await
+        .unwrap();
+    node.authority
+        .client
+        .call(
+            RequestContext::root(),
+            RetractCapability {
+                via: admin,
+                capability: admin,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        node.view(&bob, &drawer).await.unwrap().access,
+        Access::Write
+    );
+    node.restart().await.unwrap();
+    assert_eq!(
+        node.view(&bob, &drawer).await.unwrap().access,
+        Access::Write
+    );
+    let admin = node.mint_drawer(&alice, scope).await.unwrap();
+    node.drawers()
+        .call(
+            RequestContext::root(),
+            RevokeDrawer {
+                capability: admin,
+                drawer_id: drawer.clone(),
+                subject_id: bob.actor.actor_id,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        node.view(&bob, &drawer).await.unwrap_err(),
+        DrawersError::Denied
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
 async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support() {
     use big_cabinet_core::authority::InspectCapability;
 
@@ -1116,7 +1231,7 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     let context = RequestContext::root();
     assert_eq!(
         node.core()
-            .effective(&context, bob.actor.actor_id, &alternative)
+            .effective(&context, Holder::Actor(bob.actor.actor_id), &alternative)
             .await
             .unwrap()
             .unwrap()
@@ -1125,7 +1240,7 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     );
     let selected_proof = node
         .core()
-        .effective(&context, bob.actor.actor_id, &selected)
+        .effective(&context, Holder::Actor(bob.actor.actor_id), &selected)
         .await
         .unwrap()
         .unwrap();
@@ -1133,14 +1248,14 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     assert!(!selected_proof.1.is_empty());
     assert_eq!(
         node.core()
-            .effective(&context, bob.actor.actor_id, &drawer)
+            .effective(&context, Holder::Actor(bob.actor.actor_id), &drawer)
             .await
             .unwrap(),
         Some(selected_proof.clone())
     );
     assert_eq!(
         node.core()
-            .reach(&context, bob.actor.actor_id, &doc)
+            .reach(&context, Holder::Actor(bob.actor.actor_id), &doc)
             .await
             .unwrap(),
         Some(selected_proof)
@@ -1150,7 +1265,7 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
         ..Default::default()
     };
     let doc_scope = DocScope {
-        read: [doc.clone()].into(),
+        read: DocScope::read_all([doc.clone()]),
         ..Default::default()
     };
     let drawer_cap = node.mint_drawer(&bob, drawer_scope.clone()).await.unwrap();
@@ -1206,7 +1321,7 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     revoke(&alternative).await.unwrap();
     assert_eq!(
         node.core()
-            .effective(&context, bob.actor.actor_id, &alternative)
+            .effective(&context, Holder::Actor(bob.actor.actor_id), &alternative)
             .await
             .unwrap(),
         None
@@ -1606,7 +1721,10 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
             &context,
             caller.via,
             DocScope {
-                write: [doc.clone()].into(),
+                write: std::collections::BTreeMap::from([(
+                    doc.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..Default::default()
             },
             |authorization| {

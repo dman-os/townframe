@@ -157,6 +157,11 @@ pub async fn get_op(db: &impl crate::sqlite_rs_alias::QueryExecutor, command_id:
     set.optional()
 }
 
+pub const PURGE_DONE_OPS_SQL: &str = include_str!("queries/purge_done_ops.sql");
+pub async fn purge_done_ops(db: &impl crate::sqlite_rs_alias::Executor, cutoff: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(PURGE_DONE_OPS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cutoff)]).await
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadLocalRow {
     pub role: String,

@@ -55,8 +55,8 @@ The nodule reads its settings with ordinary datum reads. At admission it gets **
 ### 4. One datum per grant
 
 Grants are datums in the cartridge config document, one per grant, with the grant as the slot:
-- `nodule.grant/drawer:<drawerId>`: `{ access }`, where access is `relay|read|write|admin`;
-- `nodule.grant/method:<nsid or authority>`: `{ privileged? }`. The privilege bit is refused at mint for nodules, as today.
+- `cartridges.grant.drawer/<drawerId>`: `{ access }`, where access is `relay|read|write|admin`; `cartridges.grant.cartridge/<cartridgeId>`: `{ access }`; `cartridges.grant.net/<host[:port]>`: `{ empty: true }` (the `#net` permbind, ADR 049 §4.1);
+- `cartridges.grant.method/<nsid>` and `cartridges.grant.authority/<prefix or *>`: `{ empty: true }`. A grant states no privilege bit (ADR 049 §4.1 amends ADR 047 §5: grants are per cartridge and feed the nodule and the micro alike, so the `nodule.grant`/`micro.grant` split is gone).
 
 The slot is the grant's identity. So the same grant made on two devices converges to one datum, and two different grants never touch the same datum. Every grant datum carries its own signature, so its author is recorded. Revoking a grant deletes its datum.
 
@@ -88,7 +88,7 @@ A cartridge can contribute a nodule, a micro, or both (`docs/scratch/clay-on-the
 - **One install per cartridge, not one per component.** The nodule and micro ship in one envelope and must run the same revision, so there is one pin. The install datum replaces `nodule.install` (§2):
   `org.example.daybook.cartridges.install/<cartridgeId>`: `{ cartridge: #datumPin, configDoc: docUrl, nodule?: { enabled }, micro?: { enabled } }`.
   A component's member is present exactly when the pinned envelope contributes it, and each is enabled independently (the shell can disable a micro while its nodule runs). The nodule service reconciles the `nodule` part and the micro host reconciles the `micro` part, both from the same datum.
-- **Grants name their subsystem**, because the two run as different actors: `nodule.grant/<grant>` and `micro.grant/<grant>`, each with the §4 grant keys (`drawer:<drawerId>` → `{ access }`, `method:<nsid or authority>` → `{ privileged? }`, the bit refused at mint for both).
+- **Grants are per cartridge** (ADR 049 §4.1, amending this section's earlier per-subsystem split): one set of `cartridges.grant.<kind>/<thing>` datums feeds the nodule and the micro, and each one's `uses` decides what of it that runtime reaches. The grant datums are written only by the cartridges service (`setCartridgeGrant`), never by a cartridge.
 - **Settings are the cartridge's**, shared by its nodule and its micro, and both may write them (§6/§7). The Clay manifest's settings sections declare the same settings NSIDs.
 - **Not in these documents:** per-device UI state stays in Clay's device-local documents, and manifest-declared collections (ADR 031) live in user drawers reached through drawer grants.
 
@@ -101,6 +101,24 @@ A cartridge can contribute a nodule, a micro, or both (`docs/scratch/clay-on-the
 - `cartridges.listInstalls` and `cartridges.observeInstalls`, a subscription with the same rows, so the shell reacts live to enable and disable.
 
 These replace the nodule service's `admitNodule`/`setNoduleEnabled`/`setNoduleDrawerGrants`/`setNoduleMethodGrants`/`uninstallNodule`. The nodule service keeps reconciling, resolution and its records (`listNodules`/`getNodule`, `confirmNoduleResolution`, `setNoduleDevTakeover`, `setMethodRoute`).
+
+### 9. Following a cartridge's grants: `awaitCartridgeGrants` (D54, 2026-11-18)
+
+A micro host has to apply a cartridge's grants as they change, and the grants live in this document, so the registry serves them as a long poll: `awaitCartridgeGrants { cartridgeId, since?, holdMs } -> { grants, revision }`.
+- `grants` is the same `CartridgeGrantRecord` list `listCartridgeGrants` returns, not a `ResolvedGrants`; the host applies `ResolvedGrants::from_grants` itself. The call is operator-only, as the list is.
+- `revision` is `<boot uuid>.<feed seq>`. A call whose `since` equals the current revision holds for up to `holdMs` (capped at 15 s, the registry watch's cap in ADR 023 rule 3) and answers when it changes. The boot uuid makes a revision from before a restart never match, so a host that survived the restart is answered at once with the full list instead of waiting on a sequence that restarted from zero.
+- The revision is published at the end of every reconcile (§5), which every grant change runs, so a waiter never observes a half-applied grant set.
+
+## Implementation notes (2026-11-12)
+
+What building §1-§8 settled where the text left it open:
+
+- **Method names.** `cartridges.install` would be the NSID of the install datum too (`org.example.daybook.cartridges.install`), so the methods follow the registry service's own naming: `installCartridge`, `setCartridgeEnabled`, `uninstallCartridge`, `setCartridgeGrant`, `clearCartridgeConfig`, `listCartridgeInstalls`, `observeCartridgeInstalls`. They are declared in `big_cartridges_core::protocol` and fail with `CartridgesError`, but the nodule service hosts them: the node and cartridge documents they change are the ones its reconciler reads.
+- **Install takes a pin, not an id.** `installCartridge { cartridge: #datumPin }` names the version datum in the registry document, pinned at heads. The nodule service reads it at those heads (it holds Read on the registry drawer), checks the envelope and its signature as the registry would, and refuses an install whose heads are absent or unreadable. A pin whose heads have not synced yet is refused on the record and read again on the next reconcile.
+- **Grant slots.** `method:<nsid>` is one operation and `authority:<prefix>` (or `authority:*`) an NSID prefix. A name such as `org.example.tags` is both a valid NSID and a valid authority, and the two grant different things (a prefix never stretches to a dev build's additions, ADR 028 §3), so the kind is in the slot.
+- **The cartridge config document names its cartridge** with `org.example.daybook.cartridges.config/main`, which is how an install (here, or on a sister) finds the document an earlier install left, by scanning the shared config drawer.
+- **`NoduleSettings.values` and its schema go.** A nodule's manifest lists its settings NSIDs (`Nodule.settings`), each a datum it declares under its own authority. The old `config` schema and `configureNodule` are removed with it.
+- **Access to the cartridge config document.** A docs capability scopes to whole documents, never to datum tags or keys, so "the nodule reads and writes its settings datums but not its grant datums" (§6) cannot be minted today. See the report that came with this change for what was built in its place.
 
 ## Consequences
 

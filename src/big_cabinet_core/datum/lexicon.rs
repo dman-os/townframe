@@ -15,6 +15,8 @@
 //! an error naming the position; it is never quietly turned into an `unknown` that admits more than
 //! the author declared.
 
+pub mod stability;
+
 use super::codec::KEYWORD;
 use super::codec::keyed_map;
 use serde_json::Map;
@@ -51,12 +53,25 @@ pub fn project_datum(id: &str, document: &Value) -> Result<Value, String> {
                 .to_owned(),
         );
     }
+    // The file's `revision` is the highest revision any item it carries names. The datum's own
+    // position and the definitions it carries are the items; `$defs` as a whole is not, because
+    // it holds every definition in scope and this datum reaches only some.
+    let mut revision = stability::object_revision(
+        document.as_object().expect("a datum's schema is an object"),
+        &["$defs"],
+    )?;
+    for name in carried.keys() {
+        revision = revision.max(stability::revision(&definitions[name])?);
+    }
     let mut defs = Map::new();
     defs.insert("main".to_owned(), main);
     for (name, definition) in carried {
         defs.insert(name, definition);
     }
-    let file = json!({ "lexicon": 1, "id": id, "defs": Value::Object(defs) });
+    let mut file = json!({ "lexicon": 1, "id": id, "defs": Value::Object(defs) });
+    if let Some(revision) = revision {
+        file["revision"] = json!(revision);
+    }
     validate(&file).map_err(|reason| format!("the projection is not a Lexicon file: {reason}"))?;
     Ok(file)
 }

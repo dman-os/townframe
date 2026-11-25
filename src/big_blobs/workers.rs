@@ -96,11 +96,14 @@ impl MetadataCapabilities {
             *capability
         } else {
             let capability = (self.mint)(big_cabinet_core::doc::DocScope {
-                read: BTreeSet::from([document.clone()]),
+                read: big_cabinet_core::doc::DocScope::read_all([document.clone()]),
                 write: if write {
-                    BTreeSet::from([document.clone()])
+                    std::collections::BTreeMap::from([(
+                        document.clone(),
+                        big_cabinet_core::doc::DatumKinds::All,
+                    )])
                 } else {
-                    BTreeSet::new()
+                    std::collections::BTreeMap::new()
                 },
                 ..Default::default()
             })
@@ -341,7 +344,7 @@ fn spawn_worker(
                 if cancel.is_cancelled() { return Ok::<_, utils_rs::prelude::eyre::Report>(()); }
                 for inventory in retention.flush().await? { queue.enqueue(&inventory).await?; }
                 if let Some((document, generation)) = queue.next().await? {
-                    tracing::info!(%document, generation, "INSTR blob worker next"); // INSTR
+                    tracing::info!(target: "instr", %document, generation, "INSTR blob worker next"); // INSTR
                     if let Some(waiting) = enqueue_root_members(config, &queue, &document).await? {
                         poll_writer_documents(&inventory_tasks, config, &queue, &mut polled, Some(&document)).await?;
                         queue.finish(&document, generation, waiting).await?;
@@ -381,7 +384,7 @@ fn spawn_worker(
                             } else {
                                 let report = adapter.reconcile(&context, &document).await?;
 
-                                if !report.deferred.is_empty() { tracing::info!(%document, deferred = ?report.deferred.iter().map(|deferred| format!("{:?}", deferred.reason)).collect::<Vec<_>>(), retained = report.retained.len(), "INSTR blob worker deferred"); } // INSTR
+                                if !report.deferred.is_empty() { tracing::info!(target: "instr", %document, deferred = ?report.deferred.iter().map(|deferred| format!("{:?}", deferred.reason)).collect::<Vec<_>>(), retained = report.retained.len(), "INSTR blob worker deferred"); } // INSTR
                                 let denied = report.deferred.iter().any(|deferred| matches!(deferred.reason, DeferralReason::Document { error: DocsError::Denied, .. }));
                                 // A doc we cannot currently read must not shrink
                                 // retention (ADR 026 §5): park it and keep every row
@@ -390,15 +393,15 @@ fn spawn_worker(
                                 else { (report.retained, pins, pending || !report.deferred.is_empty()) }
                             }
                         }
-                        Err(ClientError::Method(error @ (DocsError::Denied | DocsError::Access(_)))) => { tracing::info!(%document, ?error, inventory_doc, "INSTR blob worker read denied; parking"); /* INSTR */ (Vec::new(), BTreeMap::new(), true) }
-                        Err(ClientError::Method(error @ (DocsError::DocNotFound | DocsError::Pending { .. } | DocsError::UnknownHeads { .. } | DocsError::AuthorityUnavailable(_)))) => {
-                            tracing::info!(%document, ?error, inventory_doc, "INSTR blob worker read not ready; parking"); // INSTR
+                        Err(ClientError::Method(error @ (DocsError::Denied | DocsError::Access(_)))) => { tracing::info!(target: "instr", %document, ?error, inventory_doc, "INSTR blob worker read denied; parking"); /* INSTR */ (Vec::new(), BTreeMap::new(), true) }
+                        Err(ClientError::Method(error @ (DocsError::DocNotFound { .. } | DocsError::Pending { .. } | DocsError::UnknownHeads { .. } | DocsError::AuthorityUnavailable(_)))) => {
+                            tracing::info!(target: "instr", %document, ?error, inventory_doc, "INSTR blob worker read not ready; parking"); // INSTR
                             queue.finish(&document, generation, true).await?;
                             continue;
                         }
                         Err(error) => return Err(error.into()),
                     };
-                    tracing::info!(%document, inventory_doc, waiting, cap = ?config.capability, pins = pins.len(), retained = pairs.len(), "INSTR blob worker processed"); // INSTR
+                    tracing::info!(target: "instr", %document, inventory_doc, waiting, cap = ?config.capability, pins = pins.len(), retained = pairs.len(), "INSTR blob worker processed"); // INSTR
                     retention.replace(&document, &pairs, pins.clone(), waiting).await?;
                     poll_writer_documents(&inventory_tasks, config, &queue, &mut polled, Some(&document)).await?;
                     for inventory in retention.flush().await? { queue.enqueue(&inventory).await?; }
@@ -442,7 +445,7 @@ fn spawn_worker(
                     }
                     changed = policy.changed() => {
                         changed.expect("drawer policy outlives blob workers");
-                        tracing::info!("INSTR blob worker policy changed: rearm all"); // INSTR
+                        tracing::info!(target: "instr", "INSTR blob worker policy changed: rearm all"); // INSTR
                          queue.rearm().await?;
                          projection.rearm();
                          config.mirrors.refresh_policy().await?;
@@ -550,7 +553,7 @@ async fn poll_drawer(
             }
             big_cabinet_core::doc::DatumEvent::Leave { .. } => false,
         });
-        tracing::info!(%drawer, events = page.events.len(), documents = documents.len(), rearm, after, through = page.through, "INSTR blob poll_drawer page"); // INSTR
+        tracing::info!(target: "instr", %drawer, events = page.events.len(), documents = documents.len(), rearm, after, through = page.through, "INSTR blob poll_drawer page"); // INSTR
         queue
             .ingest(&source, page.through, documents, rearm)
             .await?;
@@ -590,7 +593,7 @@ async fn poll_document(
             Ok(page) => page,
             Err(ClientError::Method(
                 DocsError::Denied
-                | DocsError::DocNotFound
+                | DocsError::DocNotFound { .. }
                 | DocsError::Pending { .. }
                 | DocsError::UnknownHeads { .. }
                 | DocsError::AuthorityUnavailable(_)
@@ -605,7 +608,7 @@ async fn poll_document(
             Err(error) => return Err(error.into()),
         };
         let documents = affected_documents(&document, &page.events);
-        tracing::info!(%document, events = page.events.len(), tags = ?page.events.iter().filter_map(|event| match event { big_cabinet_core::doc::DatumEvent::Datum { datum_key, .. } => Some(datum_key.tag().as_str().to_owned()), _ => None }).collect::<BTreeSet<_>>(), enqueued = documents.len(), polled_itself = documents.contains(&document), "INSTR blob poll_document page"); // INSTR
+        tracing::info!(target: "instr", %document, events = page.events.len(), tags = ?page.events.iter().filter_map(|event| match event { big_cabinet_core::doc::DatumEvent::Datum { datum_key, .. } => Some(datum_key.tag().as_str().to_owned()), _ => None }).collect::<BTreeSet<_>>(), enqueued = documents.len(), polled_itself = documents.contains(&document), "INSTR blob poll_document page"); // INSTR
         queue
             .ingest(&source, page.through, documents, false)
             .await?;
@@ -725,7 +728,7 @@ async fn enqueue_root_members(
                 | DrawersError::Docs(
                     DocsError::Denied
                     | DocsError::Access(_)
-                    | DocsError::DocNotFound
+                    | DocsError::DocNotFound { .. }
                     | DocsError::Pending { .. }
                     | DocsError::UnknownHeads { .. }
                     | DocsError::AuthorityUnavailable(_),
@@ -739,7 +742,7 @@ async fn enqueue_root_members(
             Err(error) => return Err(error.into()),
         }
         let members = sqlite::queries::drawer_members(sql, drawer.clone()).await?;
-        tracing::info!(%document, %drawer, members = members.len(), "INSTR blob worker enqueue_root_members"); // INSTR
+        tracing::info!(target: "instr", %document, %drawer, members = members.len(), "INSTR blob worker enqueue_root_members"); // INSTR
 
         for member in members {
             queue.enqueue(&member.parse()?).await?;
