@@ -64,11 +64,9 @@ impl<D: PartDb> PeerCursors for SqlitePeerCursors<D> {
         Ok(parts.iter().map(|part| found.get(part).copied()).collect())
     }
 
-    /// Last write wins: the upsert replaces the row whatever its rev or generation, and the
-    /// batch's entries are applied in order, so the last entry for a part is the one stored.
-    /// SQLite applies the rows of one `INSERT ... VALUES` in order, but a statement is capped
-    /// in size, so a long batch is several statements in order, in one transaction (one atomic
-    /// write).
+    /// Last write wins: the upsert replaces the row whatever its rev or generation. A statement
+    /// applies its `VALUES` rows in order, and a long batch is several statements in order in
+    /// one transaction, so the last entry for a part is the one stored and the write is atomic.
     async fn write(
         &self,
         peer: &PeerKey,
