@@ -46,6 +46,8 @@
     --color-destructive: var(--ct-color-danger);
     --color-destructive-foreground: var(--ct-color-on-danger);
     --color-ring: var(--ct-color-focus);
+    --shadow-float: var(--ct-elevation-float);
+    --shadow-anchored: var(--ct-elevation-anchored);
   }
 }
 @layer base {
@@ -707,26 +709,6 @@
   .opacity-80 {
     opacity: 80%;
   }
-  .shadow {
-    --tw-shadow: 0 1px 3px 0 var(--tw-shadow-color, rgb(0 0 0 / 0.1)), 0 1px 2px -1px var(--tw-shadow-color, rgb(0 0 0 / 0.1));
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
-  }
-  .shadow-md {
-    --tw-shadow: var(--ct-shadow-md);
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
-  }
-  .shadow-none {
-    --tw-shadow: 0 0 #0000;
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
-  }
-  .shadow-raised {
-    --tw-shadow: var(--ct-shadow-raised);
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
-  }
-  .shadow-sm {
-    --tw-shadow: var(--ct-shadow-sm);
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
-  }
   .ring {
     --tw-ring-shadow: var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
@@ -842,17 +824,12 @@
     --ct-dimension-font-size-sm: 0.875rem;
     --ct-dimension-font-size-md: 1rem;
     --ct-dimension-font-size-lg: 1.125rem;
-    --ct-color-neutral-1000: #000000;
     --ct-font-family-sans: system-ui, sans-serif;
     --ct-font-family-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     --ct-font-weight-regular: 400;
     --ct-font-weight-medium: 500;
     --ct-font-weight-semibold: 600;
     --ct-font-weight-bold: 700;
-    --ct-shadow-none: none;
-    --ct-shadow-sm: 0px 1px 2px 0px #000000;
-    --ct-shadow-md: 0px 4px 12px 0px #000000;
-    --ct-shadow-raised: 0px 8px 24px 0px #000000;
     --ct-motion-duration-short: 150ms;
     --ct-motion-duration-medium: 250ms;
     --ct-motion-easing-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
@@ -870,10 +847,6 @@
     --ct-border-width-thin: 1px;
     --ct-dimension-border-width-thick: 2px;
     --ct-border-width-thick: 2px;
-    --ct-elevation-none: none;
-    --ct-elevation-sm: 0px 1px 2px 0px #000000;
-    --ct-elevation-md: 0px 4px 12px 0px #000000;
-    --ct-elevation-raised: 0px 8px 24px 0px #000000;
     --ct-layer-content: 0;
     --ct-layer-raised: 10;
     --ct-layer-app-bar: 20;
@@ -1012,6 +985,35 @@
     --ct-color-info-container: var(--ct-palette-info-3);
     --ct-color-on-info-container: var(--ct-palette-info-11);
     --ct-color-scrim: rgb(0 0 0 / 32%);
+    --ct-shadow-ink: light-dark(var(--ct-palette-neutral-12), #000);
+    --ct-shadow-ring: light-dark(
+      var(--ct-shadow-ink),
+      rgb(255 255 255 / 0.07)
+    );
+    @supports (color: color-mix(in lab, red, red)) {
+      --ct-shadow-ring: light-dark(
+      color-mix(in oklab, var(--ct-shadow-ink) 8%, transparent),
+      rgb(255 255 255 / 0.07)
+    );
+    }
+    --ct-elevation-float: 0 0 0 1px var(--ct-shadow-ring),
+      0 1px 2px var(--ct-shadow-ink),
+      0 4px 12px -2px var(--ct-shadow-ink);
+    @supports (color: color-mix(in lab, red, red)) {
+      --ct-elevation-float: 0 0 0 1px var(--ct-shadow-ring),
+      0 1px 2px color-mix(in oklab, var(--ct-shadow-ink) 6%, transparent),
+      0 4px 12px -2px color-mix(in oklab, var(--ct-shadow-ink) 10%, transparent);
+    }
+    --ct-elevation-anchored: 0 0 0 1px var(--ct-shadow-ring),
+      0 0 2px var(--ct-shadow-ink),
+      0 0 24px var(--ct-shadow-ink),
+      0 0 64px var(--ct-shadow-ink);
+    @supports (color: color-mix(in lab, red, red)) {
+      --ct-elevation-anchored: 0 0 0 1px var(--ct-shadow-ring),
+      0 0 2px color-mix(in oklab, var(--ct-shadow-ink) 6%, transparent),
+      0 0 24px color-mix(in oklab, var(--ct-shadow-ink) 10%, transparent),
+      0 0 64px color-mix(in oklab, var(--ct-shadow-ink) 8%, transparent);
+    }
   }
   :root[data-contrast="more"] {
     --ct-color-text-muted: var(--ct-palette-neutral-12);
@@ -1042,9 +1044,9 @@
     --ct-card-border: none;
     --ct-alert-border: none;
     --ct-chip-border: none;
-    --ct-sheet-shadow: var(--ct-elevation-raised);
-    --ct-drawer-shadow: var(--ct-elevation-raised);
-    --ct-scrub-bubble-shadow: var(--ct-elevation-md);
+    --ct-sheet-shadow: var(--ct-elevation-anchored);
+    --ct-drawer-shadow: var(--ct-elevation-anchored);
+    --ct-scrub-bubble-shadow: var(--ct-elevation-float);
     --ct-card-fill: var(--ct-color-surface);
     background-color: var(--ct-color-canvas);
   }
