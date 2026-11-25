@@ -11,6 +11,8 @@
 
 use crate::Cartridge;
 use crate::CartridgeId;
+use crate::Component;
+use crate::ResolvedCartridge;
 use crate::Revision;
 use crate::Version;
 use crate::signature::SignatureError;
@@ -18,11 +20,14 @@ use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::datum::Nsid;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
+use indexmap::IndexMap;
 use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
 use service_core_rs::declare_service_protocol;
 use service_core_rs::service_method;
 use std::collections::BTreeMap;
@@ -70,6 +75,11 @@ impl CartridgesScope {
 pub struct MintCartridgesCapability {
     pub scope: CartridgesScope,
     pub rights: Rights,
+    /// The actor the new handle is bound to; `None` binds it to the presented handle's own
+    /// subject. Naming another actor is an introduction: the presented handle needs
+    /// `Rights::DELEGATE`, and the actor must be live and a strict descendant of the presented
+    /// handle's subject in the actor tree (anyone else is `Escalation`).
+    pub subject: Option<Uuid7>,
 }
 
 /// Publish one version. Every artifact of the envelope must already be in the local blob store.
@@ -85,6 +95,20 @@ pub struct PublishCartridgeVersion {
     pub envelope: Cartridge,
 }
 
+/// Stage one cartridge version's payload datums and return the unsigned envelope template.
+///
+/// Staged payloads are inert until [`PublishCartridgeVersion`] writes the envelope datum; there is
+/// deliberately no garbage collection for abandoned stages yet.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageCartridgeVersion {
+    pub id: CartridgeId,
+    pub version: Version,
+    pub lexicons: BTreeMap<Nsid, IndexMap<String, Value>>,
+    pub sidecars: BTreeMap<Nsid, IndexMap<String, Value>>,
+    pub components: BTreeMap<String, Component>,
+}
 /// The DID this node publishes under: the `did:key` of the node's Ed25519 signing key. Cartridge ids
 /// built under it can be published unsigned and are signed by the node.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -134,6 +158,15 @@ pub struct GetCartridge {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetCartridgeVersion {
+    pub id: CartridgeId,
+    pub version: Version,
+}
+
+/// Resolve a published version's pinned payloads for an installer.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveCartridgeVersion {
     pub id: CartridgeId,
     pub version: Version,
 }
@@ -287,6 +320,39 @@ pub enum CartridgesError {
     Storage(String),
     #[error("the envelope was refused: {0}")]
     Rejected(String),
+    /// Staging refuses a version once its envelope has been published.
+    #[error("cartridge `{id}` {version} is already published")]
+    AlreadyPublished {
+        id: CartridgeId,
+        version: Box<Version>,
+    },
+    /// A pinned datum is unavailable at its recorded frontier; this is recoverable when sync catches up.
+    #[error("cartridge `{id}` {version} pinned datum `{key}` is not yet readable: {reason}")]
+    PinnedDatumUnreadable {
+        id: CartridgeId,
+        version: Box<Version>,
+        key: String,
+        reason: String,
+    },
+    /// A pin must resolve inside the registry document that carries its envelope.
+    #[error(
+        "cartridge `{id}` {version} pin `{key}` names document `{actual}`, expected `{expected}`"
+    )]
+    PinnedDocumentMismatch {
+        id: CartridgeId,
+        version: Box<Version>,
+        key: String,
+        actual: DocId,
+        expected: DocId,
+    },
+    /// A pinned datum was readable but did not decode as its declared manifest type.
+    #[error("cartridge `{id}` {version} pinned datum `{key}` is invalid: {reason}")]
+    PinnedDatumInvalid {
+        id: CartridgeId,
+        version: Box<Version>,
+        key: String,
+        reason: String,
+    },
     /// A published version never changes content: the label is taken by another envelope.
     #[error(
         "cartridge `{id}` {version} is already published at revision {existing}; this envelope is \
@@ -344,6 +410,7 @@ pub enum CartridgesError {
 
 service_method!(MintCartridgesCapability => Capability, CartridgesError, procedure("org.example.daybook.cartridges.mintCartridgesCapability"));
 service_method!(PublishCartridgeVersion => PublishedCartridgeVersion, CartridgesError, procedure("org.example.daybook.cartridges.publishCartridgeVersion"));
+service_method!(StageCartridgeVersion => Cartridge, CartridgesError, procedure("org.example.daybook.cartridges.stageCartridgeVersion"));
 service_method!(RemoveCartridgeVersion => (), CartridgesError, procedure("org.example.daybook.cartridges.removeCartridgeVersion"));
 service_method!(RemoveCartridge => (), CartridgesError, procedure("org.example.daybook.cartridges.removeCartridge"));
 service_method!(ImportCartridgeDocument => CartridgeRecord, CartridgesError, procedure("org.example.daybook.cartridges.importCartridgeDocument"));
@@ -367,12 +434,14 @@ service_method!(GetPublisher => CartridgePublisher, CartridgesError, query("org.
 service_method!(ListCartridges => CartridgeList, CartridgesError, query("org.example.daybook.cartridges.listCartridges"));
 service_method!(GetCartridge => CartridgeRecord, CartridgesError, query("org.example.daybook.cartridges.getCartridge"));
 service_method!(GetCartridgeVersion => CartridgeVersionRecord, CartridgesError, query("org.example.daybook.cartridges.getCartridgeVersion"));
+service_method!(ResolveCartridgeVersion => ResolvedCartridge, CartridgesError, query("org.example.daybook.cartridges.resolveCartridgeVersion"));
 service_method!(WatchCartridges => CartridgeChanges, CartridgesError, procedure("org.example.daybook.cartridges.watchCartridges"));
 
 declare_service_protocol! {
     pub enum CartridgesProtocol => CartridgesMessage {
         unary {
             MintCartridgesCapability(MintCartridgesCapability),
+            StageCartridgeVersion(StageCartridgeVersion),
             PublishCartridgeVersion(PublishCartridgeVersion),
             RemoveCartridgeVersion(RemoveCartridgeVersion),
             RemoveCartridge(RemoveCartridge),
@@ -381,6 +450,7 @@ declare_service_protocol! {
             ListCartridges(ListCartridges),
             GetCartridge(GetCartridge),
             GetCartridgeVersion(GetCartridgeVersion),
+            ResolveCartridgeVersion(ResolveCartridgeVersion),
             WatchCartridges(WatchCartridges)
         }
         stream {}
