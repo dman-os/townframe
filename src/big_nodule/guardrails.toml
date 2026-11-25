@@ -13,6 +13,7 @@ allowed_dependencies = [
     "big_cartridges_core",
     "big_repo",
     "method_core",
+    "method_lexicon",
     "secrets_rs",
     "service_client_core_rs",
     "service_client_native_rs",

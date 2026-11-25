@@ -87,6 +87,19 @@ pub fn is_json_content_type(mime: &str) -> bool {
     content_type_essence(mime).eq_ignore_ascii_case("application/json")
 }
 
+/// The part of a service's own handle an operation needs beyond being allowed to call it (ADR 049
+/// §6.2). Dispatch admits the operation; the service then checks its own handle, whose
+/// operation-level flags only repeat that admission. Stating them here, once per operation, lets
+/// a runtime mint them for a routine whose `#method` permbind names the operation, so a cartridge
+/// declares the operation and never the service's capability domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct HandleNeed {
+    /// The service's mint operation, which names its capability domain.
+    pub mint: &'static str,
+    /// The operation-level flags of that domain's scope the operation needs, each `true`.
+    pub flags: &'static [&'static str],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XrpcMethod {
     pub nsid: &'static str,
@@ -108,6 +121,9 @@ pub struct XrpcMethod {
     /// from the node's own machine (ADR 042 §3). An exposure rule, not authority: a local caller
     /// still needs a capability.
     pub local_only: bool,
+    /// The service handle the operation needs beyond dispatch's admission, if any.
+    #[serde(skip_deserializing)]
+    pub handle: Option<HandleNeed>,
 }
 
 impl XrpcMethod {
@@ -123,6 +139,7 @@ impl XrpcMethod {
             input_encoding: Encoding::Json,
             output_encoding: Encoding::Json,
             local_only: false,
+            handle: None,
         }
     }
 
@@ -138,6 +155,7 @@ impl XrpcMethod {
             input_encoding: Encoding::Json,
             output_encoding: Encoding::Json,
             local_only: false,
+            handle: None,
         }
     }
 
@@ -153,6 +171,7 @@ impl XrpcMethod {
             input_encoding: Encoding::Json,
             output_encoding: Encoding::Json,
             local_only: false,
+            handle: None,
         }
     }
 
@@ -172,6 +191,12 @@ impl XrpcMethod {
     /// Marks the method as privileged: see [`Self::privileged`].
     pub const fn privileged(mut self) -> Self {
         self.privileged = true;
+        self
+    }
+
+    /// Declares the service handle the method needs: see [`HandleNeed`].
+    pub const fn needs_handle(mut self, mint: &'static str, flags: &'static [&'static str]) -> Self {
+        self.handle = Some(HandleNeed { mint, flags });
         self
     }
 
