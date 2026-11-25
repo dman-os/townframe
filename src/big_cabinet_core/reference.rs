@@ -21,6 +21,7 @@ use unicode_properties::UnicodeGeneralCategory;
 pub const REFERENCE_SCHEME: &str = "dtxt";
 const DATUM_KIND: &str = "datum";
 const ACTOR_KIND: &str = "actor";
+const DOC_KIND: &str = "doc";
 /// The only query key defined (ADR 035): the document heads a reference was made at.
 const HEADS_KEY: &str = "heads";
 pub const SELF_DOC: &str = "self";
@@ -300,6 +301,18 @@ pub struct DatumReference {
 pub struct Location {
     reference: DatumReference,
     fragment: Option<String>,
+}
+
+/// `dtxt:doc:<doc id>[?heads=<head>|<head>…]`: a whole document, optionally pinned (ADR 035 §3).
+/// The document is always a concrete id (`self` names a datum's container, and a reference to a
+/// whole document that is already the container has no use); there is no fragment. It is a text
+/// form only: positions that declare datum references refuse it, and a stored pin would be a
+/// sibling `heads` field (§2.8), which no position needs yet.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DocReference {
+    document: DocId,
+    /// Sorted and deduplicated; empty follows the document's current frontier.
+    heads: Vec<ChangeHash>,
 }
 
 /// `dtxt:actor:<node key>[/<path>]`: an actor's identity inside signed attribution
@@ -682,6 +695,76 @@ impl schemars::JsonSchema for DatumPin {
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({ LEXICON_REF: DATUM_PIN })
+    }
+}
+
+impl DocReference {
+    pub fn new(document: DocId) -> Self {
+        Self {
+            document,
+            heads: Vec::new(),
+        }
+    }
+
+    /// The same document pinned to `heads`.
+    #[must_use]
+    pub fn pinned(mut self, heads: impl IntoIterator<Item = ChangeHash>) -> Self {
+        self.heads = heads.into_iter().collect();
+        self.heads.sort();
+        self.heads.dedup();
+        self
+    }
+
+    pub fn document(&self) -> &DocId {
+        &self.document
+    }
+
+    pub fn heads(&self) -> &[ChangeHash] {
+        &self.heads
+    }
+
+    /// Parse the text form. Non-canonical input (unsorted heads, a scheme in capitals) is
+    /// accepted and canonicalized; a fragment is refused.
+    pub fn parse(value: &str) -> Result<Self, ReferenceError> {
+        let rest = strip_scheme_and_kind(value, DOC_KIND)?;
+        if rest.contains('#') {
+            return Err(ReferenceError::QueryOrFragmentNotAllowed);
+        }
+        let (document, query) = match rest.split_once('?') {
+            Some((document, query)) => (document, Some(query)),
+            None => (rest, None),
+        };
+        // The id parser is given only non-empty ASCII, as for an actor's node key.
+        let document = Some(document)
+            .filter(|document| !document.is_empty() && document.is_ascii())
+            .ok_or(ReferenceError::MissingDoc)?;
+        let document = DocId::from_str(document)
+            .map_err(|_| ReferenceError::InvalidDocId(document.to_owned()))?;
+        let heads = query
+            .map(parse_heads_query)
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Self::new(document).pinned(heads))
+    }
+}
+
+impl fmt::Display for DocReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{REFERENCE_SCHEME}:{DOC_KIND}:{}", self.document)?;
+        if !self.heads.is_empty() {
+            // Hash-byte order, the canonical order, as for `DatumReference`.
+            let heads = self.heads.iter().map(head_text).collect::<Vec<_>>();
+            write!(formatter, "?{HEADS_KEY}={}", heads.join("|"))?;
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for DocReference {
+    type Err = ReferenceError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
     }
 }
 

@@ -606,7 +606,7 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
         assert!(shown.contains("b and c"), "{shown}");
         assert!(
             shown.contains(&format!(
-                "link: dtxt:datum:{drawer}/org.example.intxt/main\n"
+                "link: dtxt:doc:{drawer}\n"
             )),
             "{shown}"
         );
@@ -674,7 +674,7 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
             String::from_utf8(out).unwrap()
         };
         let held_line =
-            format!("{short}  \"Two files\"  link: dtxt:datum:{drawer}/org.example.intxt/main\n");
+            format!("{short}  \"Two files\"  link: dtxt:doc:{drawer}\n");
         assert_eq!(which(&tip).await, held_line);
         assert_eq!(which("feat/x~1").await, held_line);
         // A unique prefix names the commit as well.

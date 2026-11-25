@@ -2,6 +2,8 @@
 
 **Status:** Proposed.
 
+**Changed 2026-11-17 (operator):** §3 adds the `doc` kind, `dtxt:doc:<doc id>`, which names a whole document rather than a datum. An intxt is named by its descriptor document (ADR 036), so `Intxt::reference` is now a `doc` URL and no longer a `datum` URL to the intxt marker.
+
 **Supersedes:** the `db+datum:` grammar of ADR 007 ("Datum addresses have no URI authority") and ADR 021 §2, the hex encoding of the sibling `refHeads` pin (ADR 007 plug manifests, ADR 021), the `db+actor://` form of ADR 020/022, and the `db+blob:` form of ADR 001 ("Blob Identity and URIs"). **Keeps:** the semantics those records already gave references (§2 gathers them in one place). **Related:** ADR 020 (datum identity, signed claims), ADR 022 (authorization), ADR 025 (reference predicates), ADR 026 (blobs), ADRs 036, 040 and 041 (the first heavy users). Discussion and evidence: `docs/scratch/intxt-ledger.md` N3–N6, A1, D24, D25.
 
 ## 1. Context
@@ -77,6 +79,19 @@ We diverge from automerge-repo in one place: heads go in the query, not the frag
 
 Code has two types. A **datum reference** has no fragment and is what every API taking a datum accepts (branch origins, write targets, reference positions in datum values). A **location** may carry a fragment and is what annotation targets and other selectors accept. Both carry the optional heads. A location without a fragment is the whole datum.
 
+### `doc`
+
+```
+dtxt:doc:<doc id>[?heads=<head>|<head>…]
+dtxt:doc:zDoc?heads=zAb…|zCd…
+```
+
+- **Path** names a whole document: `<doc id>` is a document id in its text form (multibase base58btc). It is always a concrete id: `self` is relative to the datum a reference sits in (§2.5), and a whole-document reference has no containing datum to be relative to. Nothing follows the id in the path.
+- **Query** pins a version, exactly as for `datum`: `heads=` lists the document heads, each in multibase base58btc, sorted, `|`-joined, never empty. No other query key is defined. A `via=` locator hint is proposed separately (`docs/scratch/intxt-review-micro.md`, open item 1) and is not part of this kind.
+- **Fragment** is not defined. There is no position inside a whole document, so an API that takes a document rejects a fragment (§2.3).
+
+A document reference does not say what the document holds, and (§2.1) does not assert it exists. Whoever resolves it checks the document is what they expect: a reader that expects an intxt treats a document with no intxt descriptor as not found, like a datum reference whose target has an unexpected tag (§5). The code type is `DocReference`, a text form only. A position that declares `dtxt:datum:` references (a datum reference or a location) rejects a `doc` URL as an unexpected kind, and a `doc` position rejects a `datum` URL; there is no stored form yet, because no reference position in a datum value holds a whole document. When one does, it takes a sibling `heads` field as in §2.8.
+
 ### `actor`
 
 ```
@@ -107,6 +122,6 @@ Content identity only, with no query hints. In ADR 026 a blob is reached through
 
 ## 5. Target constraints
 
-A reference position can only say "a `dtxt:datum:`". A schema does not constrain the target's tag, and Cabinet does not enforce one. Cabinet could only check at write time, and a reference is weak (§2.1): its target may not exist yet, may be unreadable to the writer, or may change tag meaning later, so a write-time check would reject legitimate references and still not keep them valid. Readers check instead: a reference whose target has an unexpected tag is rendered as unresolved, like any other reference that doesn't resolve (operator, 2026-11-10). A schema may document the expected tags for tools and renderers; that note is not enforced.
+A datum reference position can only say "a `dtxt:datum:`". A schema does not constrain the target's tag, and Cabinet does not enforce one. Cabinet could only check at write time, and a reference is weak (§2.1): its target may not exist yet, may be unreadable to the writer, or may change tag meaning later, so a write-time check would reject legitimate references and still not keep them valid. Readers check instead: a reference whose target has an unexpected tag is rendered as unresolved, like any other reference that doesn't resolve (operator, 2026-11-10). A schema may document the expected tags for tools and renderers; that note is not enforced.
 
 Settled by the operator on 2026-11-10: cursors keep Automerge's hex spelling; slots keep raw `/`; UUID aliases and locators are query keys if ever needed, not path parts; query keys are not formalized beyond `heads=`; stored references keep the pin in a sibling field; target tags are reader-checked, not enforced.

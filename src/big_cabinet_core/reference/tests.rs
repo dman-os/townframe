@@ -454,6 +454,69 @@ fn dropped_schemes_and_other_kinds_are_refused() {
 }
 
 #[test]
+fn doc_references_round_trip_with_and_without_heads() {
+    let whole = DocReference::new(doc());
+    assert_eq!(whole.to_string(), format!("dtxt:doc:{DOC}"));
+    assert_eq!(DocReference::parse(&whole.to_string()).unwrap(), whole);
+    assert!(whole.heads().is_empty());
+    assert_eq!(whole.document(), &doc());
+
+    let pinned = DocReference::new(doc()).pinned([head(2), head(1), head(2)]);
+    let text = format!(
+        "dtxt:doc:{DOC}?heads={}|{}",
+        head_text(&head(1)),
+        head_text(&head(2))
+    );
+    assert_eq!(pinned.to_string(), text);
+    assert_eq!(DocReference::parse(&text).unwrap(), pinned);
+    assert_eq!(pinned.heads(), [head(1), head(2)]);
+
+    // Non-canonical input is canonicalized.
+    let shuffled = format!(
+        "DTXT:doc:{DOC}?heads={}|{}",
+        head_text(&head(2)),
+        head_text(&head(1))
+    );
+    assert_eq!(DocReference::parse(&shuffled).unwrap().to_string(), text);
+}
+
+#[test]
+fn malformed_doc_references_and_kind_mismatches_are_refused() {
+    for value in [
+        "dtxt:doc:",
+        "dtxt:doc:?heads=zAb",
+        "dtxt:doc:self",
+        "dtxt:doc:nope",
+        "dtxt:doc:z11111111111111111111111111111111#frag",
+        "dtxt:doc:z11111111111111111111111111111111?heads=",
+        "dtxt:doc:z11111111111111111111111111111111?other=1",
+        "dtxt:doc:z11111111111111111111111111111111?heads=nothead",
+        "dtxt:doc:z11111111111111111111111111111111/org.example.note/main",
+        "dtxt:datum:z11111111111111111111111111111111/org.example.note/main",
+        "dtxt:actor:z11111111111111111111111111111111",
+        "db+doc:z11111111111111111111111111111111",
+    ] {
+        assert!(DocReference::parse(value).is_err(), "{value}");
+    }
+    // Positions that accept only a datum refuse the doc kind (ADR 035 §3).
+    let text = DocReference::new(doc()).to_string();
+    assert!(matches!(
+        DatumReference::parse(&text),
+        Err(ReferenceError::UnexpectedKind { .. })
+    ));
+    assert!(matches!(
+        DatumReference::parse_stored(&text),
+        Err(ReferenceError::UnexpectedKind { .. })
+    ));
+    assert!(matches!(
+        Location::parse(&text),
+        Err(ReferenceError::UnexpectedKind { .. })
+    ));
+    assert!(ActorUrl::parse(&text).is_err());
+    assert!(serde_json::from_value::<DatumPin>(json!({"ref": text})).is_err());
+}
+
+#[test]
 fn actor_urls_round_trip_with_and_without_a_path() {
     let operator = ActorUrl::new(node_key(), "").unwrap();
     assert_eq!(operator.to_string(), format!("dtxt:actor:{}", node_key()));

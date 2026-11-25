@@ -8,7 +8,7 @@ Scope: What the review micro shows, what it calls, and which pieces of infrastru
 ## The flow
 
 1. Open a PR in the review micro (from the PRs the node holds, or by URL).
-2. The micro reads the PR's description and finds the intxts it links to: any ADR 035 URL to an intxt's marker, `dtxt:datum:<drawer>/org.example.intxt/main`. The drawer id is the intxt's descriptor document id, global, so the URL is all a PR needs. There is no line grammar to learn: an `intxt:` prefix is decoration, and `Intxt::named_in` finds the URLs anywhere in the text (golden vectors in #146).
+2. The micro reads the PR's description and finds the intxts it links to: any ADR 035 `doc` URL naming an intxt's descriptor document, `dtxt:doc:<drawer>`. The drawer id is the intxt's descriptor document id, global, so the URL is all a PR needs. There is no line grammar to learn: an `intxt:` prefix is decoration, and `Intxt::named_in` finds the URLs anywhere in the text (golden vectors in #146).
 3. The micro shows a row per linked intxt (title, description, link) and opens one on tap: its guide, its threads, and the diff of each entry, rendered by CodeView with intxt's threads in its annotation slots.
 
 The other direction is a datum: `day x intxt github pull` writes a `githubPullEntry/<owner>/<repo>/<n>` into every intxt the PR links to (#150), so an intxt lists its PRs.
@@ -51,7 +51,7 @@ PRs that link to no intxt show none. Finding intxts by commit is deferred to a c
 1. **Where the intxt can be found: a `via=` query key (ADR 035 extension).** A reader of the PR needs to know which nodes hold the intxt, and ADR 035 deliberately puts no locator in identity (§2.2: any node holding a document can serve it). Its settled points (2026-11-10) say "locators are query keys if ever needed", and the old `db+blob` URL had `?via=`. Proposed: `via=<node key>|<node key>` (the multibase node keys of `dtxt:actor`, sorted, `|`-joined like `heads=`), on any `dtxt:` kind:
 
    ```
-   dtxt:datum:z5Kd…/org.example.intxt/main?via=zNodeA…|zRelay…
+   dtxt:doc:z5Kd…?via=zNodeA…|zRelay…
    ```
 
    It is a hint, never authority: it grants nothing, a reader may try other nodes, and the reference's identity (and equality) ignores it. `Intxt::reference` takes the nodes to name (this node, plus the relays it syncs with); `named_in` keeps the hint for the caller. Open: whether a hint names a node or a relay ticket, and whether stored references (datums) may carry it or only shared text.
