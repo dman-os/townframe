@@ -139,11 +139,10 @@ where
         std::mem::replace(&mut self.stream_buf, default())
     }
 
+    /// Whether the stream holds no slot that has not passed. A stream never seen, or retired,
+    /// owes nothing.
     pub fn is_settled(&self, sid: &StreamId) -> bool {
-        self.streams
-            .get(sid)
-            .map(|ss| ss.slots.is_empty())
-            .unwrap_or_default()
+        self.streams.get(sid).is_none_or(|ss| ss.slots.is_empty())
     }
 
     /// The job's work at `cursor` is done on every stream it waits on there. A cursor the job
