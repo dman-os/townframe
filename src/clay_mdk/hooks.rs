@@ -24,7 +24,7 @@ pub struct PresentationSlotProps {
     pub reference: Capability,
     /// Chrome the slot's owner wants whenever there is no presentation to show (still loading, or
     /// unavailable): it is rendered above the placeholder. A mounted presentation brings its own
-    /// chrome, so a position that must always offer a way out (the shell's sidebar/back button)
+    /// chrome, so a position that must always offer a way out (the shell's navigation rack)
     /// has nothing to offer in the one state where the micro that would place it is absent.
     #[props(default)]
     pub placeholder_chrome: Option<Element>,

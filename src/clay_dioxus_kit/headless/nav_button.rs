@@ -1,9 +1,12 @@
-//! The sidebar/back button (`ct-nav-button`, FDR 006): one control with two meanings.
+//! The navigation rack's controls (`ct-nav-button`, `ct-nav-rack`; ADR 058): [`NavButton`] is one
+//! control for one thing, never a button that changes meaning, and [`NavRack`] groups the ones a
+//! host places together.
 //!
-//! Parts: `icon` (decorative, `aria-hidden`), which holds the `glyph` of the back mode or the
-//! three `bar`s of the sidebar mode. State: `data-state` (`back`|`sidebar`), the mode. The glyphs
-//! are drawn by the stylesheet from boxes in `currentColor`; the accessible name is the mode's
-//! label, so the icon adds none.
+//! `NavButton` parts: `icon` (decorative, `aria-hidden`), which holds the `glyph` of back and
+//! forward or the three `bar`s of the sidebar toggle. State: `data-kind` (`sidebar`|`back`|
+//! `forward`) and `data-disabled`. The glyphs are drawn by the stylesheet from boxes in
+//! `currentColor`; the accessible name is the kind's label, so the icon adds none. `NavRack` is a
+//! `role="group"` named "Navigation" and holds whatever buttons its caller gives it.
 //!
 //! # Renderer limits
 //!
@@ -12,57 +15,81 @@
 //!   that has focus makes it keyboard-activatable with no change here.
 use dioxus::prelude::*;
 
-/// What the button does, which decides its accessible name.
+/// What a button does, which decides its accessible name and its glyph.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum NavButtonMode {
-    /// There is somewhere to go back to in the current context.
-    Back,
-    /// There is nothing to go back to: the button opens the sidebar.
+pub enum NavButtonKind {
+    /// Shows or hides the sidebar.
     Sidebar,
+    /// Steps back through where the user has been.
+    Back,
+    /// Steps forward over what back left.
+    Forward,
 }
 
-impl NavButtonMode {
-    /// The accessible name. Fixed per mode so every micro that mounts the button reads the same
-    /// to assistive technology and to tests (`KIT-050`).
+impl NavButtonKind {
+    /// The accessible name. Fixed per kind so every mount of the control reads the same to
+    /// assistive technology and to tests (`KIT-050`).
     pub fn label(self) -> &'static str {
         match self {
-            Self::Back => "Back",
             Self::Sidebar => "Open sidebar",
+            Self::Back => "Back",
+            Self::Forward => "Forward",
         }
     }
 
-    fn state(self) -> &'static str {
+    fn data_kind(self) -> &'static str {
         match self {
-            Self::Back => "back",
             Self::Sidebar => "sidebar",
+            Self::Back => "back",
+            Self::Forward => "forward",
         }
     }
 }
 
 /// A native `<button>`: focusable and activatable by keyboard wherever the renderer has focus,
-/// and clickable everywhere (`KIT-052`; Blitz has no keyboard focus today).
+/// and clickable everywhere (`KIT-052`; Blitz has no keyboard focus today). A disabled one stays
+/// in the rack, so the rack keeps its shape, and ignores its click whatever the renderer does.
 #[component]
-pub fn NavButton(mode: NavButtonMode, onclick: EventHandler<()>) -> Element {
+pub fn NavButton(
+    kind: NavButtonKind,
+    #[props(default)] disabled: bool,
+    onclick: EventHandler<()>,
+) -> Element {
     rsx! {
         button {
             class: "ct-nav-button",
             r#type: "button",
-            "aria-label": mode.label(),
-            "data-state": mode.state(),
-            onclick: move |_| onclick.call(()),
+            "aria-label": kind.label(),
+            "data-kind": kind.data_kind(),
+            "data-disabled": if disabled { Some("") } else { None },
+            disabled,
+            onclick: move |_| {
+                if !disabled {
+                    onclick.call(());
+                }
+            },
             span { "data-part": "icon", "aria-hidden": "true",
-                match mode {
-                    NavButtonMode::Back => rsx! {
-                        span { "data-part": "glyph" }
-                    },
-                    NavButtonMode::Sidebar => rsx! {
+                match kind {
+                    NavButtonKind::Sidebar => rsx! {
                         for index in 0..3 {
                             span { key: "{index}", "data-part": "bar" }
                         }
                     },
+                    NavButtonKind::Back | NavButtonKind::Forward => rsx! {
+                        span { "data-part": "glyph" }
+                    },
                 }
             }
         }
+    }
+}
+
+/// The group a host places its [`NavButton`]s in (the navigation rack, ADR 058). It lays them out
+/// in a row and takes no position of its own: where the rack sits is the caller's business.
+#[component]
+pub fn NavRack(children: Element) -> Element {
+    rsx! {
+        div { class: "ct-nav-rack", role: "group", "aria-label": "Navigation", {children} }
     }
 }
 
@@ -76,7 +103,8 @@ mod tests {
 
     #[derive(Clone)]
     struct Probe {
-        mode: NavButtonMode,
+        kind: NavButtonKind,
+        disabled: bool,
         clicks: Rc<RefCell<u32>>,
     }
 
@@ -84,40 +112,48 @@ mod tests {
         let clicks = probe.clicks;
         rsx! {
             NavButton {
-                mode: probe.mode,
+                kind: probe.kind,
+                disabled: probe.disabled,
                 onclick: move |()| *clicks.borrow_mut() += 1,
             }
         }
     }
 
-    fn render(mode: NavButtonMode) -> (Page, Rc<RefCell<u32>>) {
+    fn render(kind: NavButtonKind, disabled: bool) -> (Page, Rc<RefCell<u32>>) {
         let clicks = Rc::new(RefCell::new(0));
         let probe = Probe {
-            mode,
+            kind,
+            disabled,
             clicks: Rc::clone(&clicks),
         };
         (Page::with_props(app, probe), clicks)
     }
 
     #[test]
-    fn each_mode_is_named_for_what_it_does() {
-        let (page, _) = render(NavButtonMode::Back);
-        assert!(page.has_role("button", "Back"));
-        assert!(!page.has_role("button", "Open sidebar"));
-        let (page, _) = render(NavButtonMode::Sidebar);
-        assert!(page.has_role("button", "Open sidebar"));
+    fn each_kind_is_named_for_what_it_does() {
+        for kind in [
+            NavButtonKind::Sidebar,
+            NavButtonKind::Back,
+            NavButtonKind::Forward,
+        ] {
+            let (page, _) = render(kind, false);
+            assert!(page.has_role("button", kind.label()));
+        }
+        assert_eq!(NavButtonKind::Sidebar.label(), "Open sidebar");
     }
 
     #[test]
     fn the_button_names_its_vocabulary_and_draws_its_glyph_from_parts() {
-        for (mode, state, glyph) in [
-            (NavButtonMode::Back, "back", vec!["glyph"]),
-            (NavButtonMode::Sidebar, "sidebar", vec!["bar", "bar", "bar"]),
+        for (kind, data_kind, glyph) in [
+            (NavButtonKind::Sidebar, "sidebar", vec!["bar", "bar", "bar"]),
+            (NavButtonKind::Back, "back", vec!["glyph"]),
+            (NavButtonKind::Forward, "forward", vec!["glyph"]),
         ] {
-            let (page, _) = render(mode);
+            let (page, _) = render(kind, false);
             let button = page.by_class("ct-nav-button");
             assert_eq!(page.attr(button, "type").as_deref(), Some("button"));
-            assert_eq!(page.attr(button, "data-state").as_deref(), Some(state));
+            assert_eq!(page.attr(button, "data-kind").as_deref(), Some(data_kind));
+            assert_eq!(page.attr(button, "data-disabled"), None);
             assert_eq!(page.parts(button), ["icon"]);
             let icon = page.children(button)[0];
             assert_eq!(page.attr(icon, "aria-hidden").as_deref(), Some("true"));
@@ -129,22 +165,51 @@ mod tests {
 
     #[test]
     fn click_reports_once_per_press() {
-        let (mut page, clicks) = render(NavButtonMode::Sidebar);
+        let (mut page, clicks) = render(NavButtonKind::Sidebar, false);
         let button = page.by_role("button", "Open sidebar");
         page.click(button);
         page.click(button);
         assert_eq!(*clicks.borrow(), 2);
     }
 
+    #[test]
+    fn a_disabled_button_stays_named_and_ignores_its_click() {
+        let (mut page, clicks) = render(NavButtonKind::Forward, true);
+        let button = page.by_role("button", "Forward");
+        assert_eq!(page.attr(button, "data-disabled").as_deref(), Some(""));
+        page.click(button);
+        assert_eq!(*clicks.borrow(), 0);
+    }
+
+    fn rack(_: ()) -> Element {
+        rsx! {
+            NavRack {
+                NavButton { kind: NavButtonKind::Sidebar, onclick: |_| {} }
+                NavButton { kind: NavButtonKind::Back, onclick: |_| {} }
+            }
+        }
+    }
+
+    #[test]
+    fn the_rack_is_a_named_group_of_its_buttons() {
+        let page = Page::with_props(rack, ());
+        let group = page.by_role("group", "Navigation");
+        assert_eq!(page.children(group).len(), 2);
+        for label in ["Open sidebar", "Back"] {
+            assert_eq!(page.parent(page.by_role("button", label)), group);
+        }
+    }
+
     fn owner() -> Element {
-        let mut mode = use_signal(|| NavButtonMode::Sidebar);
+        let mut kind = use_signal(|| NavButtonKind::Sidebar);
         rsx! {
             NavButton {
-                mode: mode(),
+                kind: kind(),
                 onclick: move |()| {
-                    mode.set(match mode() {
-                        NavButtonMode::Back => NavButtonMode::Sidebar,
-                        NavButtonMode::Sidebar => NavButtonMode::Back,
+                    kind.set(match kind() {
+                        NavButtonKind::Sidebar => NavButtonKind::Back,
+                        NavButtonKind::Back => NavButtonKind::Forward,
+                        NavButtonKind::Forward => NavButtonKind::Sidebar,
                     });
                 },
             }

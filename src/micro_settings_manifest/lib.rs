@@ -11,7 +11,7 @@
 //! Settings is a **list panel** of the shell (ADR 032 §8): it contributes one `shell.panels` row
 //! whose content is the list of its sections and whose details presentation shows the section
 //! the shell has open. It arranges nothing itself; the shell owns the stack, the layout and the
-//! back button, which Settings requires from it ([`SHELL_OPENED`], [`SHELL_NAV_BUTTON`]). Opening
+//! back button, which Settings requires from it ([`SHELL_OPENED`], [`SHELL_NAVIGATION_RACK`]). Opening
 //! a row is the list scaffold's `ListRow`, which reaches the shell's navigation through the
 //! scaffold, so Settings never calls `navigate` itself.
 use clay_mdk::CollectionCapability;
@@ -53,7 +53,7 @@ pub const PANELS_BINDING: &str = "panels";
 /// local names: the catalog resolves each requirement by the contract it names to the micro
 /// serving it.
 pub const SHELL_OPENED: &str = micro_shell_manifest::OPENED;
-pub const SHELL_NAV_BUTTON: &str = micro_shell_manifest::NAV_BUTTON;
+pub const SHELL_NAVIGATION_RACK: &str = micro_shell_manifest::NAVIGATION_RACK;
 /// Schema NSIDs of [`SECTIONS`] keys (the contributing micro's id, text) and values
 /// ([`Section`]), and of its selector (the whole collection).
 pub const SECTION_KEY_SCHEMA: &str = "org.example.dayframe.settings.sectionKey";
@@ -150,8 +150,8 @@ pub fn manifest() -> MicroManifest {
             Necessity::Required,
         )
         .requires(
-            SHELL_NAV_BUTTON,
-            micro_shell_manifest::NAV_BUTTON_CONTRACT,
+            SHELL_NAVIGATION_RACK,
+            micro_shell_manifest::NAVIGATION_RACK_CONTRACT,
             Necessity::Required,
         )
         .config::<SettingsPreferences>()

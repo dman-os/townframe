@@ -26,9 +26,9 @@ endpoints:
     nsid: org.example.dayframe.shell.getTheme
   home:
     $type: "org.example.clay.micro.manifest#viewEndpoint"
-  nav-button:
+  navigation-rack:
     $type: "org.example.clay.micro.manifest#viewEndpoint"
-    implements: org.example.dayframe.shell.navButton
+    implements: org.example.dayframe.shell.navigationRack
   navigate:
     $type: "org.example.clay.micro.manifest#methodEndpoint"
     nsid: org.example.dayframe.shell.navigate

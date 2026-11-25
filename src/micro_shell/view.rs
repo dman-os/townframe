@@ -1,5 +1,5 @@
 //! The shell's presentations: the frame that arranges the panels, the home panel and the
-//! sidebar/back button. The frame is the whole app: sidebar, list and details edge to edge, with
+//! navigation rack (ADR 058). The frame is the whole app: sidebar, list and details edge to edge, with
 //! sheets and (on a compact host) the sidebar drawer over them.
 use crate::HostInputs;
 use crate::Shell;
@@ -12,7 +12,8 @@ use clay_dioxus_kit::ButtonVariant;
 use clay_dioxus_kit::Drawer;
 use clay_dioxus_kit::ListDetails;
 use clay_dioxus_kit::NavButton;
-use clay_dioxus_kit::NavButtonMode;
+use clay_dioxus_kit::NavButtonKind;
+use clay_dioxus_kit::NavRack;
 use clay_dioxus_kit::PanelPage;
 use clay_dioxus_kit::Renderer;
 use clay_dioxus_kit::SectionPane;
@@ -63,10 +64,10 @@ const DETAILS_RULE: SizeRule = SizeRule {
 /// parts.
 const STYLES: &str = include_str!("styles.css");
 
-/// Where in the arrangement a mounted panel sits. The sidebar/back button reads it: a details
-/// panel beside its list has no use for a second back button, but one over a compact list is the
-/// only way back that is not covered.
-#[derive(Clone, Copy, PartialEq)]
+/// Where in the arrangement a mounted panel sits. The navigation rack reads it: a details panel
+/// beside its list has no use for a second rack, but one over a compact list is the only way
+/// back that is not covered.
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Placement {
     Main,
     Details,
@@ -76,9 +77,9 @@ enum Placement {
 /// puts the button in. It takes the reference, not children: a component that only forwards an
 /// `Element` prop does not re-render when the element inside it changes.
 ///
-/// The panel's own app bar carries the sidebar/back button, so while the panel has no
-/// presentation (its micro is disabled or still starting) the shell supplies a bar with the
-/// panel's title and the button; otherwise a compact window would show a placeholder with no way
+/// The panel's own tree carries the navigation rack, so while the panel has no presentation
+/// (its micro is disabled or still starting) the shell supplies a bar with the panel's title and
+/// the rack; otherwise a compact window would show a placeholder with no way
 /// out of it.
 #[component]
 fn PlacedSlot(
@@ -89,7 +90,7 @@ fn PlacedSlot(
 ) -> Element {
     use_context_provider(|| placement);
     let placeholder_chrome = rsx! {
-        AppBar { title, leading: rsx! { NavigationButton { shell } } }
+        AppBar { title, leading: rsx! { Rack { shell } } }
     };
     rsx! { PresentationSlot { reference, placeholder_chrome } }
 }
@@ -121,8 +122,8 @@ pub(crate) fn home(shell: Shell) -> Element {
     rsx! { Home { shell } }
 }
 
-pub(crate) fn navigation_button(shell: Shell) -> Element {
-    rsx! { NavigationButton { shell } }
+pub(crate) fn navigation_rack(shell: Shell) -> Element {
+    rsx! { Rack { shell } }
 }
 
 /// The shell's device-local state at this render; the calling component re-renders whenever it
@@ -454,7 +455,7 @@ fn Frame(shell: Shell) -> Element {
         move |weights: Vec<f64>| shell.write_config(with_outer_weights(config, &weights))
     };
     // Dragging the sidebar shut and reopening it from the edge strip set the same state as the
-    // "Hide sidebar" button and the sidebar/back button; the weights stay, so it reopens at the
+    // "Hide sidebar" button and the navigation rack's toggle; the weights stay, so it reopens at the
     // width it had.
     let on_collapse_outer = {
         let shell = shell.clone();
@@ -600,7 +601,7 @@ fn Home(shell: Shell) -> Element {
             app_bar: rsx! {
                 AppBar {
                     title: "Home",
-                    leading: rsx! { NavigationButton { shell: shell.clone() } },
+                    leading: rsx! { Rack { shell: shell.clone() } },
                 }
             },
         div { "data-part": "home",
@@ -627,51 +628,150 @@ fn Home(shell: Shell) -> Element {
     }
 }
 
-/// The sidebar/back button (ADR 032 §5). **Back** while the current context can go back,
-/// **open the sidebar** otherwise. On a host wide enough to keep the sidebar beside the content
-/// there is nothing to open until the user hides it, so the button is absent rather than
-/// offering a no-op, and a details panel beside its list leaves the button to the list.
+/// What the rack is drawn from: the width class, the position it is mounted in, whether the
+/// sidebar is shown and what the stack can do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Situation {
+    wide: bool,
+    placement: Placement,
+    /// The sidebar is docked (wide, not folded) or open as the drawer (compact): its header
+    /// holds the controls, so no mounted rack draws any.
+    sidebar_shown: bool,
+    can_back: bool,
+    can_forward: bool,
+}
+
+/// The rack's buttons for one [`Situation`], the table of ADR 058 §2.1. A button's `Some` says
+/// whether it is enabled.
+#[derive(Debug, PartialEq)]
+struct Buttons {
+    toggle: bool,
+    back: Option<bool>,
+    forward: Option<bool>,
+}
+
+impl Buttons {
+    /// `None` when the rack draws nothing here.
+    fn of(situation: Situation) -> Option<Self> {
+        let Situation {
+            wide,
+            placement,
+            sidebar_shown,
+            can_back,
+            can_forward,
+        } = situation;
+        match (wide, placement) {
+            _ if sidebar_shown => None,
+            // The rack is the window's top-left corner, which is the main position's: a details
+            // pane beside its list has no use for a second one.
+            (true, Placement::Details) => None,
+            // Back and forward stay, disabled, when there is nowhere to go, so the rack keeps
+            // its shape.
+            (true, Placement::Main) => Some(Self {
+                toggle: true,
+                back: Some(can_back),
+                forward: Some(can_forward),
+            }),
+            // Forward is the sidebar's footer's on a compact host (ADR 058 §2.3).
+            (false, Placement::Main) => Some(Self {
+                toggle: true,
+                back: can_back.then_some(true),
+                forward: None,
+            }),
+            // A details page does not offer the sidebar: back leaves it for its list first.
+            (false, Placement::Details) => Some(Self {
+                toggle: false,
+                back: Some(true),
+                forward: None,
+            }),
+        }
+    }
+}
+
+/// The rack's presentation: [`Buttons`] for `situation`, reporting presses.
 #[component]
-fn NavigationButton(shell: Shell) -> Element {
+fn RackButtons(
+    situation: Situation,
+    on_toggle: EventHandler<()>,
+    on_back: EventHandler<()>,
+    on_forward: EventHandler<()>,
+) -> Element {
+    let Some(buttons) = Buttons::of(situation) else {
+        return rsx! {};
+    };
+    rsx! {
+        NavRack {
+            if buttons.toggle {
+                NavButton { kind: NavButtonKind::Sidebar, onclick: on_toggle }
+            }
+            if let Some(enabled) = buttons.back {
+                NavButton {
+                    kind: NavButtonKind::Back,
+                    disabled: !enabled,
+                    onclick: on_back,
+                }
+            }
+            if let Some(enabled) = buttons.forward {
+                NavButton {
+                    kind: NavButtonKind::Forward,
+                    disabled: !enabled,
+                    onclick: on_forward,
+                }
+            }
+        }
+    }
+}
+
+/// The navigation rack (ADR 058): separate buttons for the sidebar, back and forward, which ones
+/// depending on the width class and the position it is mounted in (see [`Buttons::of`]), acting
+/// on the shell's state.
+#[component]
+fn Rack(shell: Shell) -> Element {
     let host = use_context::<HostInputs>();
     let state = use_state(&shell);
     let wide = WidthClass::from_px(*host.width.read()).fits_side_by_side();
-    // Outside a frame's mount (a button mounted somewhere the shell did not place) the button
-    // belongs to the main position.
+    // Outside a frame's mount (a rack mounted somewhere the shell did not place) it belongs to
+    // the main position.
     let placement = try_use_context::<Placement>().unwrap_or(Placement::Main);
-    if placement == Placement::Details && wide {
-        return rsx! {};
-    }
-    // On a wide host the main position is never covered, so back there only has a use while
-    // details are open beside it; otherwise the button stays the way to bring a hidden sidebar
-    // back (the platform gesture still goes back).
-    let has_details = state.navigation.frame().details.is_some();
-    let mode =
-        if state.navigation.can_back() && !(wide && placement == Placement::Main && !has_details) {
-            NavButtonMode::Back
+    let situation = Situation {
+        wide,
+        placement,
+        sidebar_shown: if wide {
+            !state.sidebar_hidden
         } else {
-            NavButtonMode::Sidebar
-        };
-    if mode == NavButtonMode::Sidebar && wide && !state.sidebar_hidden {
-        return rsx! {};
-    }
+            matches!(state.navigation.frame().overlay, Some(Overlay::Sidebar))
+        },
+        can_back: state.navigation.can_back(),
+        can_forward: state.navigation.can_forward(),
+    };
     rsx! {
-        NavButton {
-            mode,
-            onclick: move |()| {
-                shell.edit(|state| match mode {
-                    NavButtonMode::Back => state.navigation.back(),
+        RackButtons {
+            situation,
+            on_toggle: {
+                let shell = shell.clone();
+                let width = host.width;
+                move |()| {
                     // The host's width is read when pressed, not captured: the window may have
                     // been resized since this rendered.
-                    NavButtonMode::Sidebar if wide => {
-                        state.sidebar_hidden = false;
+                    let wide = WidthClass::from_px(*width.peek()).fits_side_by_side();
+                    shell.edit(|state| {
+                        if wide {
+                            state.sidebar_hidden = false;
+                        } else {
+                            state.navigation.push(Entry::Sidebar);
+                        }
                         true
-                    }
-                    NavButtonMode::Sidebar => {
-                        state.navigation.push(Entry::Sidebar);
-                        true
-                    }
-                });
+                    });
+                }
+            },
+            on_back: {
+                let shell = shell.clone();
+                move |()| {
+                    shell.back();
+                }
+            },
+            on_forward: move |()| {
+                shell.forward();
             },
         }
     }
@@ -680,6 +780,138 @@ fn NavigationButton(shell: Shell) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SIDEBAR: &str = "Open sidebar";
+    const BACK: &str = "Back";
+    const FORWARD: &str = "Forward";
+
+    /// The rack's buttons as the page renders them, in order: each button's accessible name,
+    /// with a `!` after it when it is disabled. `None` when no rack is drawn at all.
+    fn rack(situation: Situation) -> Option<Vec<String>> {
+        fn app(situation: Situation) -> Element {
+            rsx! {
+                RackButtons {
+                    situation,
+                    on_toggle: |()| {},
+                    on_back: |()| {},
+                    on_forward: |()| {},
+                }
+            }
+        }
+        let mut dom = VirtualDom::new_with_props(app, situation);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        if !html.contains("ct-nav-rack") {
+            assert_eq!(html, "", "no rack means nothing at all");
+            return None;
+        }
+        let mut names = vec![];
+        for button in html.split("<button").skip(1) {
+            let tag = &button[..button.find('>').unwrap()];
+            let name = tag
+                .split("aria-label=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap();
+            let disabled = tag.contains("data-disabled");
+            names.push(format!("{name}{}", if disabled { "!" } else { "" }));
+        }
+        Some(names)
+    }
+
+    fn situation(
+        wide: bool,
+        placement: Placement,
+        sidebar_shown: bool,
+        can_back: bool,
+        can_forward: bool,
+    ) -> Situation {
+        Situation {
+            wide,
+            placement,
+            sidebar_shown,
+            can_back,
+            can_forward,
+        }
+    }
+
+    #[test]
+    fn a_wide_rack_with_the_sidebar_hidden_holds_the_toggle_back_and_forward() {
+        assert_eq!(
+            rack(situation(true, Placement::Main, false, true, true)),
+            Some(vec![SIDEBAR.into(), BACK.into(), FORWARD.into()])
+        );
+    }
+
+    #[test]
+    fn a_wide_rack_disables_back_and_forward_instead_of_hiding_them() {
+        assert_eq!(
+            rack(situation(true, Placement::Main, false, false, false)),
+            Some(vec![SIDEBAR.into(), "Back!".into(), "Forward!".into()])
+        );
+        assert_eq!(
+            rack(situation(true, Placement::Main, false, true, false)),
+            Some(vec![SIDEBAR.into(), BACK.into(), "Forward!".into()])
+        );
+        assert_eq!(
+            rack(situation(true, Placement::Main, false, false, true)),
+            Some(vec![SIDEBAR.into(), "Back!".into(), FORWARD.into()])
+        );
+    }
+
+    #[test]
+    fn a_wide_details_position_has_no_rack_of_its_own() {
+        // The window's top-left corner is the main position's.
+        assert_eq!(
+            rack(situation(true, Placement::Details, false, true, true)),
+            None
+        );
+    }
+
+    #[test]
+    fn every_rack_hides_while_the_sidebar_is_shown() {
+        for wide in [true, false] {
+            for placement in [Placement::Main, Placement::Details] {
+                for (can_back, can_forward) in
+                    [(false, false), (true, false), (false, true), (true, true)]
+                {
+                    assert_eq!(
+                        rack(situation(wide, placement, true, can_back, can_forward)),
+                        None,
+                        "{wide} {placement:?} {can_back} {can_forward}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_compact_main_rack_holds_the_toggle_and_back_when_there_is_somewhere_to_go_back_to() {
+        assert_eq!(
+            rack(situation(false, Placement::Main, false, false, false)),
+            Some(vec![SIDEBAR.into()])
+        );
+        assert_eq!(
+            rack(situation(false, Placement::Main, false, true, false)),
+            Some(vec![SIDEBAR.into(), BACK.into()])
+        );
+    }
+
+    #[test]
+    fn a_compact_rack_never_holds_forward() {
+        for placement in [Placement::Main, Placement::Details] {
+            let names = rack(situation(false, placement, false, true, true)).unwrap();
+            assert!(!names.iter().any(|name| name.starts_with(FORWARD)));
+        }
+    }
+
+    #[test]
+    fn a_compact_details_rack_is_back_only() {
+        assert_eq!(
+            rack(situation(false, Placement::Details, false, true, false)),
+            Some(vec![BACK.into()])
+        );
+    }
 
     #[test]
     fn dragging_the_sidebar_handle_keeps_the_list_to_details_ratio() {

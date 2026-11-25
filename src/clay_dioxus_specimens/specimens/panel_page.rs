@@ -4,7 +4,7 @@ use crate::specimens::COMPACT_PX;
 use crate::specimens::EXPANDED_PX;
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::NavButton;
-use clay_dioxus_kit::NavButtonMode;
+use clay_dioxus_kit::NavButtonKind;
 use clay_dioxus_kit::PanelPage;
 use dioxus::prelude::*;
 
@@ -23,7 +23,7 @@ pub fn PanelPageSpecimens() -> Element {
                             app_bar: rsx! {
                                 AppBar {
                                     title: "Activity".to_string(),
-                                    leading: rsx! { NavButton { mode: NavButtonMode::Back, onclick: |_| {} } },
+                                    leading: rsx! { NavButton { kind: NavButtonKind::Back, onclick: |_| {} } },
                                 }
                             },
                             ul { class: "m-0 list-none p-4",

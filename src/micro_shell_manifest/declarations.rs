@@ -31,12 +31,12 @@ impl ComponentDecl for ShellHome {
     const NAME: &'static str = HOME;
 }
 
-/// The sidebar/back button, published as [`NAV_BUTTON`].
-pub struct ShellNavButton;
+/// The navigation rack, published as [`NAVIGATION_RACK`].
+pub struct ShellNavigationRack;
 
-impl ComponentDecl for ShellNavButton {
-    const NAME: &'static str = NAV_BUTTON;
-    const IMPLEMENTS: Option<&'static str> = Some(NAV_BUTTON_CONTRACT);
+impl ComponentDecl for ShellNavigationRack {
+    const NAME: &'static str = NAVIGATION_RACK;
+    const IMPLEMENTS: Option<&'static str> = Some(NAVIGATION_RACK_CONTRACT);
 }
 
 /// The arrangement weights facet.

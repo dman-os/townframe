@@ -1,5 +1,5 @@
 //! The shell (ADR 032): a native micro that owns the frame, the navigation stack and the
-//! sidebar/back button, and arranges the panels other micros contribute. It is native because it
+//! navigation rack, and arranges the panels other micros contribute. It is native because it
 //! is on every startup path and owns the frame, not because it needs a platform API; its
 //! contract ([`micro_shell_manifest`]) is backend-free so any micro can contribute to it and an
 //! alternative shell can implement it.
@@ -200,7 +200,7 @@ impl Shell {
     }
 
     /// Fold the sidebar of a wide host away (the "Hide sidebar" button, dragging it shut) or
-    /// bring it back (the sidebar/back button, its edge strip).
+    /// bring it back (the navigation rack, its edge strip).
     fn set_sidebar_hidden(&self, hidden: bool) {
         self.edit(|state| {
             state.sidebar_hidden = hidden;
@@ -357,9 +357,9 @@ pub async fn activate(context: Context) -> Result<(), Error> {
         let shell = shell.clone();
         move || view::home(shell.clone())
     })?;
-    context.publish::<contract::ShellNavButton>({
+    context.publish::<contract::ShellNavigationRack>({
         let shell = shell.clone();
-        move || view::navigation_button(shell.clone())
+        move || view::navigation_rack(shell.clone())
     })?;
 
     context.publish_call(contract::NAVIGATE, {

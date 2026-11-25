@@ -1,8 +1,15 @@
 /*
- * ct-nav-button (headless/nav_button.rs). Parts: icon, and in it the glyph (back) or three bars
- * (sidebar). State: data-state (back|sidebar), the mode that decides the glyph. The glyph is drawn
- * from boxes in currentColor, which are plain elements in every renderer.
+ * ct-nav-button and ct-nav-rack (headless/nav_button.rs). Button parts: icon, and in it the glyph
+ * (back, forward) or three bars (sidebar). State: data-kind (sidebar|back|forward), which decides
+ * the glyph, and data-disabled. The glyph is drawn from boxes in currentColor, which are plain
+ * elements in every renderer. The rack is a row of buttons and takes no position of its own.
  */
+.ct-nav-rack {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+}
+
 .ct-nav-button {
   box-sizing: border-box;
   display: inline-flex;
@@ -19,7 +26,7 @@
   cursor: pointer;
 }
 
-.ct-nav-button:hover {
+.ct-nav-button:hover:not(:disabled) {
   background: var(--ct-color-surface-sunken);
 }
 
@@ -35,20 +42,33 @@
   height: 1.5rem;
 }
 
-.ct-nav-button[data-state="back"] [data-part="glyph"] {
+.ct-nav-button[data-disabled] {
+  color: var(--ct-color-text-muted);
+  cursor: default;
+}
+
+.ct-nav-button[data-kind="back"] [data-part="glyph"],
+.ct-nav-button[data-kind="forward"] [data-part="glyph"] {
   width: 0.75rem;
   height: 0.75rem;
   border-bottom: var(--ct-dimension-border-width-thick) solid currentColor;
   border-left: var(--ct-dimension-border-width-thick) solid currentColor;
+}
+
+.ct-nav-button[data-kind="back"] [data-part="glyph"] {
   rotate: 45deg;
 }
 
-.ct-nav-button[data-state="sidebar"] [data-part="icon"] {
+.ct-nav-button[data-kind="forward"] [data-part="glyph"] {
+  rotate: -135deg;
+}
+
+.ct-nav-button[data-kind="sidebar"] [data-part="icon"] {
   flex-direction: column;
   gap: var(--ct-dimension-spacing-1);
 }
 
-.ct-nav-button[data-state="sidebar"] [data-part="bar"] {
+.ct-nav-button[data-kind="sidebar"] [data-part="bar"] {
   width: 1.25rem;
   height: 0.125rem;
   background: currentColor;

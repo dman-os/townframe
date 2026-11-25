@@ -20,3 +20,6 @@ micro_shell_manifest = { workspace = true }
 # misc
 dioxus.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+dioxus-ssr = { workspace = true }
