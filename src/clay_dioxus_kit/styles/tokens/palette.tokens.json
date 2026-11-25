@@ -1,0 +1,383 @@
+{
+  "$description": "claytxt palette (ADR 055). Twelve steps per ramp with Radix's jobs: 1-2 backgrounds, 3-5 element backgrounds, 6-8 borders, 9-10 solid fills, 11-12 text. Every value is written for both schemes and emitted as light-dark(light, dark). `contrast` is the text colour readable on step 9. This is the shipped palette: Material's scheme values for the primary, accent (secondary) and danger (error) ramps and the surface ladder, today's green and amber for success and warning, so the roles derived from it match the look Material gave. x/design-tokens.ts checks the pairs at WCAG AA for each scheme and contrast level.",
+  "ramps": {
+    "neutral": {
+      "1": {
+        "light": "#FBF8FF",
+        "dark": "#131318"
+      },
+      "2": {
+        "light": "#F5F2FA",
+        "dark": "#1B1B21"
+      },
+      "3": {
+        "light": "#EFEDF4",
+        "dark": "#1F1F25"
+      },
+      "4": {
+        "light": "#E9E7EF",
+        "dark": "#29292F"
+      },
+      "5": {
+        "light": "#E4E1E9",
+        "dark": "#34343A"
+      },
+      "6": {
+        "light": "#C7C5D0",
+        "dark": "#46464F"
+      },
+      "7": {
+        "light": "#817F8A",
+        "dark": "#767680"
+      },
+      "8": {
+        "light": "#767680",
+        "dark": "#90909A"
+      },
+      "9": {
+        "light": "#66666F",
+        "dark": "#A2A1AC"
+      },
+      "10": {
+        "light": "#56565F",
+        "dark": "#B4B3BE"
+      },
+      "11": {
+        "light": "#46464F",
+        "dark": "#C7C5D0"
+      },
+      "12": {
+        "light": "#1B1B21",
+        "dark": "#E4E1E9"
+      },
+      "contrast": {
+        "light": "#FFFFFF",
+        "dark": "#131318"
+      }
+    },
+    "primary": {
+      "1": {
+        "light": "#F0F1FA",
+        "dark": "#131623"
+      },
+      "2": {
+        "light": "#EAEBFA",
+        "dark": "#1F2339"
+      },
+      "3": {
+        "light": "#DEE0FF",
+        "dark": "#3A4379"
+      },
+      "4": {
+        "light": "#C5C8EC",
+        "dark": "#4E578E"
+      },
+      "5": {
+        "light": "#ADB1DA",
+        "dark": "#626BA4"
+      },
+      "6": {
+        "light": "#969BC8",
+        "dark": "#7781BA"
+      },
+      "7": {
+        "light": "#7E85B6",
+        "dark": "#8D96D1"
+      },
+      "8": {
+        "light": "#686FA4",
+        "dark": "#A4ACE8"
+      },
+      "9": {
+        "light": "#525A92",
+        "dark": "#BBC3FF"
+      },
+      "10": {
+        "light": "#424980",
+        "dark": "#CED6FF"
+      },
+      "11": {
+        "light": "#3A4379",
+        "dark": "#DEE0FF"
+      },
+      "12": {
+        "light": "#212744",
+        "dark": "#EDEEFF"
+      },
+      "contrast": {
+        "light": "#FFFFFF",
+        "dark": "#232C61"
+      }
+    },
+    "accent": {
+      "1": {
+        "light": "#F1F1F9",
+        "dark": "#14151A"
+      },
+      "2": {
+        "light": "#ECECF7",
+        "dark": "#22232B"
+      },
+      "3": {
+        "light": "#E0E1F9",
+        "dark": "#434559"
+      },
+      "4": {
+        "light": "#C8CAE1",
+        "dark": "#57596D"
+      },
+      "5": {
+        "light": "#B1B3CA",
+        "dark": "#6B6D83"
+      },
+      "6": {
+        "light": "#9B9CB3",
+        "dark": "#808298"
+      },
+      "7": {
+        "light": "#85879D",
+        "dark": "#9698AF"
+      },
+      "8": {
+        "light": "#707187",
+        "dark": "#ACAEC6"
+      },
+      "9": {
+        "light": "#5B5D72",
+        "dark": "#C3C5DD"
+      },
+      "10": {
+        "light": "#4B4C61",
+        "dark": "#D6D8F1"
+      },
+      "11": {
+        "light": "#434559",
+        "dark": "#E0E1F9"
+      },
+      "12": {
+        "light": "#262732",
+        "dark": "#EEEFFE"
+      },
+      "contrast": {
+        "light": "#FFFFFF",
+        "dark": "#2D2F42"
+      }
+    },
+    "danger": {
+      "1": {
+        "light": "#FBF0EF",
+        "dark": "#2E0F0C"
+      },
+      "2": {
+        "light": "#FAE9E7",
+        "dark": "#471512"
+      },
+      "3": {
+        "light": "#FFDAD6",
+        "dark": "#93000A"
+      },
+      "4": {
+        "light": "#F7BDB7",
+        "dark": "#A62F29"
+      },
+      "5": {
+        "light": "#EDA199",
+        "dark": "#B94C43"
+      },
+      "6": {
+        "light": "#E2847B",
+        "dark": "#CB665D"
+      },
+      "7": {
+        "light": "#D6665D",
+        "dark": "#DD8076"
+      },
+      "8": {
+        "light": "#C9463E",
+        "dark": "#EE9A90"
+      },
+      "9": {
+        "light": "#BA1A1A",
+        "dark": "#FFB4AB"
+      },
+      "10": {
+        "light": "#A50000",
+        "dark": "#FFC7BE"
+      },
+      "11": {
+        "light": "#93000A",
+        "dark": "#FFDAD6"
+      },
+      "12": {
+        "light": "#550F0D",
+        "dark": "#FFEBE9"
+      },
+      "contrast": {
+        "light": "#FFFFFF",
+        "dark": "#690005"
+      }
+    },
+    "success": {
+      "1": {
+        "light": "#F0F8F2",
+        "dark": "#051108"
+      },
+      "2": {
+        "light": "#E8F4EB",
+        "dark": "#0C2012"
+      },
+      "3": {
+        "light": "#D3EFDB",
+        "dark": "#0F4A27"
+      },
+      "4": {
+        "light": "#B6DBC0",
+        "dark": "#175B32"
+      },
+      "5": {
+        "light": "#99C7A5",
+        "dark": "#206C3D"
+      },
+      "6": {
+        "light": "#7CB48B",
+        "dark": "#297D48"
+      },
+      "7": {
+        "light": "#60A071",
+        "dark": "#329053"
+      },
+      "8": {
+        "light": "#428D57",
+        "dark": "#3BA25F"
+      },
+      "9": {
+        "light": "#1F7A3D",
+        "dark": "#45B56B"
+      },
+      "10": {
+        "light": "#00682C",
+        "dark": "#5AC87D"
+      },
+      "11": {
+        "light": "#0C3A1B",
+        "dark": "#C6F1D3"
+      },
+      "12": {
+        "light": "#031908",
+        "dark": "#E0F9E7"
+      },
+      "contrast": {
+        "light": "#FFFFFF",
+        "dark": "#1F1F29"
+      }
+    },
+    "warning": {
+      "1": {
+        "light": "#FFF8EC",
+        "dark": "#170F05"
+      },
+      "2": {
+        "light": "#FEF3E0",
+        "dark": "#281C0A"
+      },
+      "3": {
+        "light": "#FFE7BD",
+        "dark": "#5A3A00"
+      },
+      "4": {
+        "light": "#FDDDA8",
+        "dark": "#724B03"
+      },
+      "5": {
+        "light": "#FBD392",
+        "dark": "#8A5C08"
+      },
+      "6": {
+        "light": "#F9C87C",
+        "dark": "#A46E0F"
+      },
+      "7": {
+        "light": "#F8BD64",
+        "dark": "#BE8016"
+      },
+      "8": {
+        "light": "#F6B249",
+        "dark": "#D9931D"
+      },
+      "9": {
+        "light": "#F5A624",
+        "dark": "#F5A624"
+      },
+      "10": {
+        "light": "#E19300",
+        "dark": "#FFB941"
+      },
+      "11": {
+        "light": "#4D3000",
+        "dark": "#FFE2A8"
+      },
+      "12": {
+        "light": "#261602",
+        "dark": "#FFF1CF"
+      },
+      "contrast": {
+        "light": "#1F1F29",
+        "dark": "#1F1F29"
+      }
+    },
+    "info": {
+      "1": {
+        "light": "#F1F1F9",
+        "dark": "#14151A"
+      },
+      "2": {
+        "light": "#ECECF7",
+        "dark": "#22232B"
+      },
+      "3": {
+        "light": "#E0E1F9",
+        "dark": "#434559"
+      },
+      "4": {
+        "light": "#C8CAE1",
+        "dark": "#57596D"
+      },
+      "5": {
+        "light": "#B1B3CA",
+        "dark": "#6B6D83"
+      },
+      "6": {
+        "light": "#9B9CB3",
+        "dark": "#808298"
+      },
+      "7": {
+        "light": "#85879D",
+        "dark": "#9698AF"
+      },
+      "8": {
+        "light": "#707187",
+        "dark": "#ACAEC6"
+      },
+      "9": {
+        "light": "#5B5D72",
+        "dark": "#C3C5DD"
+      },
+      "10": {
+        "light": "#4B4C61",
+        "dark": "#D6D8F1"
+      },
+      "11": {
+        "light": "#434559",
+        "dark": "#E0E1F9"
+      },
+      "12": {
+        "light": "#262732",
+        "dark": "#EEEFFE"
+      },
+      "contrast": {
+        "light": "#FFFFFF",
+        "dark": "#2D2F42"
+      }
+    }
+  }
+}

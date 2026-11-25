@@ -5,6 +5,11 @@
  *
  * The generated file is intentionally separate from tokens.css until the
  * runtime migration is complete. The JSON files are the authored source.
+ *
+ * The colour system (ADR 055) is a second authored source, `palette.tokens.json`: twelve-step
+ * ramps written once for light and dark. It generates `palette.generated.css` (the ramps as
+ * `light-dark()` custom properties and the roles derived from them) and every derived pair is
+ * checked at WCAG AA for each scheme and contrast level: a failing pair fails the build.
  */
 
 type JsonObject = Record<string, unknown>;
@@ -534,6 +539,308 @@ const generated = [
   "",
 ].join("\n");
 
+// ---------------------------------------------------------------------------------------------
+// The palette (ADR 055): ramps, derived roles, and the contrast check.
+// ---------------------------------------------------------------------------------------------
+
+const paletteSource = "palette.tokens.json";
+const paletteOutputUrl = new URL(
+  "src/clay_dioxus_kit/styles/palette.generated.css",
+  root,
+);
+const rampNames = [
+  "neutral",
+  "primary",
+  "accent",
+  "danger",
+  "success",
+  "warning",
+  "info",
+] as const;
+type RampName = typeof rampNames[number];
+const schemes = ["light", "dark"] as const;
+type Scheme = typeof schemes[number];
+type ContrastLevel = "standard" | "more";
+type Step = number | "contrast";
+type Pair = Record<Scheme, string>;
+type Palette = Record<RampName, Record<string, Pair>>;
+/** `scrim` is the neutral's step 12 at this alpha: the former overlay token's 32%. */
+const scrimPercent = 32;
+
+/** A role takes one step of one ramp; `more` is what `data-contrast="more"` takes instead. */
+type RoleRef = { ramp: RampName; step: Step };
+type Role = { name: string; standard: RoleRef; more?: RoleRef };
+
+/**
+ * The role derivation (ADR 055 §3.2, §4.2). Every colour family is a Material quartet (X, on-X,
+ * X-container, on-X-container) over its ramp; the surfaces are a ladder over the neutral. The
+ * `more` variant moves muted text to step 12, the border to the strong border and X to step 10.
+ */
+const statusFamilies = [
+  "primary",
+  "accent",
+  "danger",
+  "success",
+  "warning",
+  "info",
+] as const;
+const roles: Role[] = [
+  { name: "canvas", standard: { ramp: "neutral", step: 1 } },
+  { name: "surface-sunken", standard: { ramp: "neutral", step: 2 } },
+  { name: "surface", standard: { ramp: "neutral", step: 3 } },
+  { name: "surface-raised", standard: { ramp: "neutral", step: 4 } },
+  { name: "text", standard: { ramp: "neutral", step: 12 } },
+  {
+    name: "text-muted",
+    standard: { ramp: "neutral", step: 11 },
+    more: { ramp: "neutral", step: 12 },
+  },
+  {
+    name: "text-subtle",
+    standard: { ramp: "neutral", step: 11 },
+    more: { ramp: "neutral", step: 12 },
+  },
+  {
+    name: "border",
+    standard: { ramp: "neutral", step: 6 },
+    more: { ramp: "neutral", step: 7 },
+  },
+  { name: "border-strong", standard: { ramp: "neutral", step: 7 } },
+  { name: "focus", standard: { ramp: "primary", step: 8 } },
+  ...statusFamilies.flatMap((family): Role[] => [
+    {
+      name: family,
+      standard: { ramp: family, step: 9 },
+      more: { ramp: family, step: 10 },
+    },
+    { name: `on-${family}`, standard: { ramp: family, step: "contrast" } },
+    { name: `${family}-container`, standard: { ramp: family, step: 3 } },
+    { name: `on-${family}-container`, standard: { ramp: family, step: 11 } },
+  ]),
+];
+
+/** Foreground role, background role and the least ratio: 4.5 for text, 3 for non-text UI. */
+const surfaceRoles = [
+  "canvas",
+  "surface-sunken",
+  "surface",
+  "surface-raised",
+];
+const requiredPairs: [string, string, number][] = [
+  ...["text", "text-muted", "text-subtle"].flatMap((text) =>
+    surfaceRoles.map((surface): [string, string, number] => [
+      text,
+      surface,
+      4.5,
+    ])
+  ),
+  ...statusFamilies.flatMap((family): [string, string, number][] => [
+    [`on-${family}`, family, 4.5],
+    [`on-${family}-container`, `${family}-container`, 4.5],
+  ]),
+  ...["focus", "border-strong"].flatMap((line) =>
+    surfaceRoles.map((surface): [string, string, number] => [
+      line,
+      surface,
+      3,
+    ])
+  ),
+];
+/** Under `more` the plain border is the strong one, so it carries the same 3:1. */
+const requiredPairsMore: [string, string, number][] = [
+  ...requiredPairs,
+  ...surfaceRoles.map((surface): [string, string, number] => [
+    "border",
+    surface,
+    3,
+  ]),
+];
+
+function hexChannels(hex: string, path: string): [number, number, number] {
+  const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!match) fail(`${path} must be a #rrggbb colour, got ${hex}`);
+  return [1, 2, 3].map((index) => parseInt(match[index], 16)) as [
+    number,
+    number,
+    number,
+  ];
+}
+
+/** WCAG 2.x relative luminance of an sRGB colour. */
+function luminance(hex: string): number {
+  const [r, g, b] = hexChannels(hex, "luminance").map((channel) => {
+    const value = channel / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrastRatio(a: string, b: string): number {
+  const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (light + 0.05) / (dark + 0.05);
+}
+
+function parsePalette(source: unknown): Palette {
+  if (!isObject(source) || !isObject(source.ramps)) {
+    fail(`${paletteSource} needs a ramps object`);
+  }
+  const ramps = source.ramps;
+  const unknown = Object.keys(ramps).filter((name) =>
+    !(rampNames as readonly string[]).includes(name)
+  );
+  if (unknown.length) fail(`${paletteSource} has unknown ramps ${unknown}`);
+  const keys = [
+    ...Array.from({ length: 12 }, (_, index) => String(index + 1)),
+    "contrast",
+  ];
+  const palette = {} as Palette;
+  for (const name of rampNames) {
+    const ramp = ramps[name];
+    if (!isObject(ramp)) fail(`${paletteSource} lacks the ${name} ramp`);
+    const extra = Object.keys(ramp).filter((key) => !keys.includes(key));
+    if (extra.length) fail(`ramp ${name} has unknown steps ${extra}`);
+    palette[name] = {};
+    for (const key of keys) {
+      const pair = ramp[key];
+      if (!isObject(pair)) fail(`ramp ${name} lacks step ${key}`);
+      const entry = {} as Pair;
+      for (const scheme of schemes) {
+        const value = pair[scheme];
+        if (typeof value !== "string") {
+          fail(`ramp ${name} step ${key} lacks a ${scheme} value`);
+        }
+        hexChannels(value, `${name}.${key}.${scheme}`);
+        entry[scheme] = value.toLowerCase();
+      }
+      palette[name][key] = entry;
+    }
+  }
+  return palette;
+}
+
+function stepValue(
+  palette: Palette,
+  ref: RoleRef,
+  scheme: Scheme,
+): string {
+  return palette[ref.ramp][String(ref.step)][scheme];
+}
+
+/**
+ * Every required pair, for each scheme and contrast level, against its least ratio. A failing
+ * pair is reported with the colours, so the palette can be fixed from the message alone.
+ */
+function contrastFailures(
+  palette: Palette,
+  tightest?: { margin: number; label: string; checked: number },
+): string[] {
+  const failures: string[] = [];
+  for (const level of ["standard", "more"] as const) {
+    const resolved = (name: string, scheme: Scheme) => {
+      const role = roles.find((candidate) => candidate.name === name);
+      if (!role) fail(`required pair names the unknown role ${name}`);
+      const ref = level === "more" && role.more ? role.more : role.standard;
+      return stepValue(palette, ref, scheme);
+    };
+    for (const scheme of schemes) {
+      for (
+        const [foreground, background, least] of level === "more"
+          ? requiredPairsMore
+          : requiredPairs
+      ) {
+        const fg = resolved(foreground, scheme);
+        const bg = resolved(background, scheme);
+        const ratio = contrastRatio(fg, bg);
+        if (tightest) {
+          tightest.checked++;
+          if (ratio - least < tightest.margin) {
+            tightest.margin = ratio - least;
+            tightest.label =
+              `${scheme}/${level}: ${foreground} on ${background} ${
+                ratio.toFixed(2)
+              }:1 (needs ${least}:1)`;
+          }
+        }
+        if (ratio < least) {
+          failures.push(
+            `${scheme}/${level}: ${foreground} ${fg} on ${background} ${bg} is ${
+              ratio.toFixed(2)
+            }:1, needs ${least}:1`,
+          );
+        }
+      }
+    }
+  }
+  return failures;
+}
+
+function checkContrast(palette: Palette): void {
+  const tightest = { margin: Infinity, label: "", checked: 0 };
+  const failures = contrastFailures(palette, tightest);
+  if (failures.length) {
+    fail(
+      `the palette fails WCAG AA for ${failures.length} pair(s):\n  ${
+        failures.join("\n  ")
+      }`,
+    );
+  }
+  console.log(
+    `palette contrast: ${tightest.checked} pairs pass WCAG AA; tightest ${tightest.label}`,
+  );
+}
+
+function paletteName(ramp: RampName, step: Step): string {
+  return `--ct-palette-${ramp}-${step}`;
+}
+
+function generatePaletteCss(palette: Palette): string {
+  const ramps = rampNames.flatMap((ramp) =>
+    [...Array.from({ length: 12 }, (_, index) => index + 1), "contrast"]
+      .map((step) => {
+        const pair = palette[ramp][String(step)];
+        return `    ${
+          paletteName(ramp, step as Step)
+        }: light-dark(${pair.light}, ${pair.dark});`;
+      })
+  );
+  const reference = (ref: RoleRef) => `var(${paletteName(ref.ramp, ref.step)})`;
+  const derived = roles.map((role) =>
+    `    --ct-color-${role.name}: ${reference(role.standard)};`
+  );
+  const more = roles.filter((role) => role.more).map((role) =>
+    `    --ct-color-${role.name}: ${reference(role.more!)};`
+  );
+  return [
+    "/* @generated by x/design-tokens.ts from tokens/palette.tokens.json; edit the JSON instead. */",
+    "",
+    "/*",
+    " * The palette's ramps are `light-dark()` values: a custom property holding one resolves where it",
+    " * is used, against the `color-scheme` of the element using it, so any subtree that sets its own",
+    " * `color-scheme` shows the other scheme. The roles are derived from the ramps (ADR 055 §3.2).",
+    " */",
+    "@layer tokens {",
+    "  :root {",
+    ...ramps,
+    "",
+    ...derived,
+    `    --ct-color-scrim: color-mix(in srgb, var(${
+      paletteName("neutral", 12)
+    }) ${scrimPercent}%, transparent);`,
+    "  }",
+    "",
+    '  /* The more-contrast variant: the host sets data-contrast="more" on the root (ADR 055 §4.2). */',
+    '  :root[data-contrast="more"] {',
+    ...more,
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+}
+
+const palette = parsePalette(parseFile(paletteSource));
+checkContrast(palette);
+const paletteCss = generatePaletteCss(palette);
+
 const mode = Deno.args[0];
 
 function expectFailure(name: string, callback: () => void): void {
@@ -683,6 +990,31 @@ function selfTest(): void {
   if (!generated.includes("--ct-font-family-mono:")) {
     fail("self-test generated monospace font family is missing");
   }
+  if (contrastRatio("#000000", "#ffffff").toFixed(2) !== "21.00") {
+    fail("self-test black on white must be 21:1");
+  }
+  if (contrastRatio("#767676", "#ffffff").toFixed(2) !== "4.54") {
+    fail("self-test #767676 on white must be 4.54:1");
+  }
+  expectFailure(
+    "non-hex palette colour",
+    () => hexChannels("red", "self-test"),
+  );
+  const failing = structuredClone(palette);
+  failing.neutral["12"].light = failing.neutral["1"].light;
+  expectFailure("unreadable text", () => checkContrast(failing));
+  const missing = structuredClone(palette) as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  delete missing.primary["9"];
+  expectFailure(
+    "missing step",
+    () => parsePalette({ ramps: missing }),
+  );
+  if (!paletteCss.includes("--ct-palette-neutral-1: light-dark(")) {
+    fail("self-test generated palette ramps are missing");
+  }
   console.log("design token self-tests passed");
 }
 
@@ -690,18 +1022,26 @@ if (mode === "--self-test") {
   selfTest();
 } else if (mode === "--write") {
   await Deno.writeTextFile(outputUrl, generated);
-  console.log(`wrote ${new URL(outputUrl).pathname}`);
+  await Deno.writeTextFile(paletteOutputUrl, paletteCss);
+  console.log(`wrote ${outputUrl.pathname} and ${paletteOutputUrl.pathname}`);
 } else if (mode === "--check") {
-  let existing: string;
-  try {
-    existing = await Deno.readTextFile(outputUrl);
-  } catch {
-    fail(`generated output is missing; run with --write`);
+  for (
+    const [url, expected] of [[outputUrl, generated], [
+      paletteOutputUrl,
+      paletteCss,
+    ]] as const
+  ) {
+    let existing: string;
+    try {
+      existing = await Deno.readTextFile(url);
+    } catch {
+      fail(`generated output ${url.pathname} is missing; run with --write`);
+    }
+    if (existing !== expected) {
+      fail(`generated output ${url.pathname} is stale; run with --write`);
+    }
+    console.log(`checked ${url.pathname}`);
   }
-  if (existing !== generated) {
-    fail(`generated output is stale; run with --write`);
-  }
-  console.log(`checked ${new URL(outputUrl).pathname}`);
 } else if (mode !== "--self-test") {
   fail(
     "usage: deno run --allow-read --allow-write x/design-tokens.ts --write|--check|--self-test",
