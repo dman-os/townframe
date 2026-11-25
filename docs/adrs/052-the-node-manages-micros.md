@@ -78,8 +78,11 @@ nodule that signs as `nodules/<core>`. For each enabled micro of each installed 
    node knows (today: the document capability under `docCap`, which the GUI splices in
    `claytxt: clay_node/lib.rs` `install_one`). The nodule writes it nowhere: the collection store is Clay's (§9), so the
    host writes the datum the nodule returned.
-4. **Mirrors drawers.** A drawer granted to a micro must also be remembered in the known-drawers registry or the micro's
-   reads stay empty (`claytxt: clay_node/lib.rs` `mirror_drawers`). That step moves into the nodule unchanged.
+4. ~~**Mirrors drawers.**~~ **Dropped (operator, 2026-11-25, relayed by claytxt): a grant does not change mirroring
+   policy.** The nodule does not remember granted drawers in the known-drawers registry, and Clay removes its interim
+   `clay_node::mirror_drawers` too, so no path mirrors a drawer because it was granted. A micro reads a drawer's
+   mirroring policy through `docs.drawers` and asks for the drawer to be present with `setDrawerPolicy { mirror: true }`
+   (ADR 054, claytxt's stack). A granted drawer the node doesn't mirror reads empty until someone asks for it.
 
 Re-minting when grants move is lazy, not a follower: see §3, `awaitHandles`. A nodule is a request handler, so there is no
 background task to hold a feed open.
