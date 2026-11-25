@@ -753,6 +753,13 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   - Datum-reference edges keep showing unreachable targets: every field an edge carries is already in the readable origin's reference.
   - The manifest-contents snapshot (D51 item 3) waits until the repo ships real built-in cartridges.
   - Next: item 4 (grants per cartridge, amending ADR 047 §5), then item 5 (runtime requests, `MissingAuthority`, `day grants`).
+- **D53. Overnight decisions** (operator, 2026-11-18):
+  - **iroh public relays (n0) stay off by default.** We will run our own relays later; an opt-in `node.json` setting may name our own relay servers, never n0's.
+  - **The dayframe-web E2E CI builds the app in its own step** before Playwright starts, so a cold build (cache-service outage) cannot hit Playwright's 20-minute `webServer` limit. Already on main with #80 (`fab8a5d6`, the "Build dayframe web" step); the stack's E2E timeouts were from branching before it, and the stack picks it up at its rebase onto main.
+  - **Drawer/docs calls keep `Denied`** rather than `MissingAuthority` until a micro needs it; doing it right means the services return it with the permbind carried in the handle's scope.
+  - **5a is the operator's to review** (always-on grant-request handle, Allow never narrows, answered requests kept for the boot).
+  - **`#origin` is renamed `#net`**, after Deno's `--allow-net`: `#net { host, port?, methods? }`, grant `grant/net/<host[:port]>`, worded to a person as "may X use the network to reach Y". It gates outgoing `wasi:http` first and is the permbind raw `wasi:sockets` will use later. Matching is exact (no wildcards), per ADR 049's explicit-origins rule. Pre-release, so a straight rename of the #182 `grant/origin` datum.
+  - **Phone sync finding:** a plain node syncs only drawers it remembers with `mirror: true` (default peer policy); a relay mirrors every drawer it is made a member of. `day drawers remember|forget` (node-49) and claytxt's e749b49f cover it. Open: a grant made mid-connection does not reach the reader until reconnect (keyhive change push; lane reproducing).
 - [todo] An "any" datum: an untyped, opaque JSON key/value datum for prototyping, frozen into schemas once a shape settles. Separate from the sidecar tag.
 - [todo] `big_ndk`'s `export_nodule!` routes with an if-chain of awaits in one async block, the frame shape #143 removed from the route macros; it matters most on a wasm guest's small stack. `big_node`'s boot block is also a 226 KB debug frame.
 - [todo] Typed initializer input record (trigger: install/upgrade/start; previous and current revision) for ADR 047 initializers (D47). Initializers receive `{}` until then.
