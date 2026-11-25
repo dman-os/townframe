@@ -18,10 +18,10 @@ impl StreamMethod for service_core_rs::protocol::P
 impl UnaryMethod for service_core_rs::protocol::P
 impl fmt :: Debug for service_core_rs::cancellation::CancellationSignal
 impl schemars :: JsonSchema for service_core_rs::operation::Body
+impl serde :: Deserialize < 'de > for service_core_rs::xrpc::XrpcErrorEnvelope
 impl std :: fmt :: Debug for service_core_rs::descriptor::DescriptorFrame
 pub const service_core_rs::descriptor::MAX_DESCRIPTORS: usize
 pub const service_core_rs::descriptor::MAX_HEADER_OCTETS: usize
-impl serde :: Deserialize < 'de > for service_core_rs::xrpc::XrpcErrorEnvelope
 pub const service_core_rs::xrpc::AUTHORIZATION_HEADER: & str
 pub const service_core_rs::xrpc::DOMAIN_ERROR_FIELD: & str
 pub const service_core_rs::xrpc::DOMAIN_ERROR_STATUS: StatusCode

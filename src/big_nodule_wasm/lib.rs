@@ -38,8 +38,10 @@ use big_dispatch::Provider;
 use big_dispatch::ProviderError;
 use big_dispatch_core::Body;
 use big_dispatch_core::DispatchProtocol;
+use big_dispatch_core::HttpForm;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Readiness;
+use big_nodule::XrpcBody;
 use big_nodule::egress;
 use big_nodule::executor::HandlerSpec;
 use big_nodule::executor::Hosted;
@@ -52,9 +54,13 @@ use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
 use bytes::Bytes;
+use futures::StreamExt;
+use http_body::Frame;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use http_body_util::Limited;
+use http_body_util::StreamBody;
+use method_core::ByteBody;
 
 use serde_json::Value;
 use serde_json::json;
@@ -84,8 +90,45 @@ use wash_runtime::types::Workload;
 use wash_runtime::types::WorkloadStartRequest;
 use wash_runtime::types::WorkloadStopRequest;
 use wash_runtime::wit::WitInterface;
+use wasmtime_wasi_http::Error as WasiHttpError;
 use wasmtime_wasi_http::RequestOptions;
 use wasmtime_wasi_http::WasiBody;
+
+fn wasi_body(body: XrpcBody) -> (WasiBody, Option<String>, Option<u64>) {
+    match body {
+        XrpcBody::Json(body) => {
+            let length = body.len() as u64;
+            let body = Full::new(Bytes::from(body))
+                .map_err(|never| match never {})
+                .boxed_unsync();
+            (body, Some("application/json".to_owned()), Some(length))
+        }
+        XrpcBody::Bytes(body) => {
+            let mime = body.mime.clone();
+            let length = body.length;
+            let body = StreamBody::new(
+                body.map(|chunk| chunk.map(Frame::data).map_err(WasiHttpError::Connect)),
+            )
+            .boxed_unsync();
+            (body, mime, length)
+        }
+    }
+}
+
+fn byte_body(body: WasiBody, mime: Option<String>, length: Option<u64>) -> ByteBody {
+    let body = ByteBody::new(
+        body.into_data_stream()
+            .map(|chunk| chunk.map_err(|error| std::io::Error::other(format!("{error:?}")))),
+    );
+    let mut body = body;
+    if let Some(mime) = mime {
+        body = body.with_mime(mime);
+    }
+    if let Some(length) = length {
+        body = body.with_length(length);
+    }
+    body
+}
 
 /// The provider type tag dispatch records for nodules this executor hosts.
 const KIND: &str = "wasm";
@@ -493,10 +536,16 @@ impl Provider for WasmProvider {
         body: Option<Body>,
     ) -> Result<Body, ProviderError> {
         // Byte bodies reach a guest as wasi:http body streams, which this provider does not
-        // bridge yet (ADR 042 §2); until then a guest's methods are JSON.
-        if body.is_some() {
-            return Err(big_nodule::wire::byte_body_refused());
-        }
+        let body = match body {
+            None => XrpcBody::json(serde_json::to_vec(&input).expect("a JSON value serializes")),
+            Some(Body::Bytes(body)) => XrpcBody::Bytes(body),
+            Some(Body::Json(body)) => {
+                XrpcBody::json(serde_json::to_vec(&body).expect("a JSON value serializes"))
+            }
+            #[cfg(unix)]
+            Some(Body::Descriptors(_)) => return Err(big_nodule::wire::descriptor_body_refused()),
+        };
+
         // The guest sees the contract every XRPC hop speaks, built by the shared `wire`.
         let (config_doc, config_capability) = self.config.lock().expect("config lock").clone();
         let routine = self
@@ -516,17 +565,24 @@ impl Provider for WasmProvider {
             config_capability,
             *self.capability.lock().expect("capability lock"),
         );
-        let mut http_request = hyper::Request::post(format!("http://{AUTHORITY}/xrpc/{operation}"))
-            .header(hyper::header::CONTENT_TYPE, "application/json");
+        let (body, mime, length) = wasi_body(body);
+        let path = match &context.http {
+            Some(HttpForm::Post { query }) if !query.is_empty() => {
+                format!("/xrpc/{operation}?{query}")
+            }
+            _ => format!("/xrpc/{operation}"),
+        };
+        let mut http_request = hyper::Request::post(format!("http://{AUTHORITY}{path}"));
+        if let Some(mime) = mime {
+            http_request = http_request.header(hyper::header::CONTENT_TYPE, mime);
+        }
+        if let Some(length) = length {
+            http_request = http_request.header(hyper::header::CONTENT_LENGTH, length);
+        }
         http_request
             .headers_mut()
             .expect("a fresh request builder has headers")
             .extend(headers);
-        let body = Full::new(Bytes::from(
-            serde_json::to_vec(&input).expect("a JSON value serializes"),
-        ))
-        .map_err(|never| match never {})
-        .boxed_unsync();
         // The operation is an NSID the router resolved, so the URI and headers are valid.
         let request = http_request.body(body).expect("a well-formed request");
 
@@ -535,13 +591,33 @@ impl Provider for WasmProvider {
             .dispatch_request(workload_id, request)
             .await
             .map_err(gateway_error)?;
-        let status = response.status();
-        let body = Limited::new(response.into_body(), MAX_MESSAGE_OCTETS)
-            .collect()
-            .await
-            .map_err(gateway_error)?
-            .to_bytes();
-        provider_result(status, &body).map(Body::Json)
+        let (parts, body) = response.into_parts();
+        let status = parts.status;
+        let mime = parts
+            .headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let length = parts
+            .headers
+            .get(hyper::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok());
+        let is_json = mime
+            .as_deref()
+            .is_some_and(method_core::is_json_content_type);
+        if is_json {
+            let body = Limited::new(body, MAX_MESSAGE_OCTETS)
+                .collect()
+                .await
+                .map_err(gateway_error)?
+                .to_bytes();
+            provider_result(status, &body).map(Body::Json)
+        } else if status.is_success() {
+            Ok(Body::Bytes(byte_body(body, mime, length)))
+        } else {
+            Err(gateway_error("a failed byte response is not an XRPC error"))
+        }
     }
 }
 
@@ -614,13 +690,40 @@ impl Egress {
         &self,
         workload_id: &str,
         request: hyper::Request<WasiBody>,
-    ) -> (hyper::StatusCode, Value) {
+    ) -> (hyper::StatusCode, XrpcBody) {
         let (parts, body) = request.into_parts();
-        let Ok(body) = Limited::new(body, MAX_MESSAGE_OCTETS).collect().await else {
-            return (
-                hyper::StatusCode::PAYLOAD_TOO_LARGE,
-                json!({ "error": "InvalidRequest", "message": "the request body failed or is too large" }),
-            );
+        let is_json = parts.method == hyper::Method::GET
+            || parts
+                .headers
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(method_core::is_json_content_type);
+        let body = if is_json {
+            let Ok(body) = Limited::new(body, MAX_MESSAGE_OCTETS).collect().await else {
+                return (
+                    hyper::StatusCode::PAYLOAD_TOO_LARGE,
+                    XrpcBody::json(
+                        serde_json::to_vec(&json!({
+                            "error": "InvalidRequest",
+                            "message": "the request body failed or is too large"
+                        }))
+                        .expect("a JSON error serializes"),
+                    ),
+                );
+            };
+            XrpcBody::Json(body.to_bytes().to_vec())
+        } else {
+            let mime = parts
+                .headers
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let length = parts
+                .headers
+                .get(hyper::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse().ok());
+            XrpcBody::Bytes(byte_body(body, mime, length))
         };
         let signer = self
             .signers
@@ -637,7 +740,7 @@ impl Egress {
                 .path_and_query()
                 .map_or(parts.uri.path(), |target| target.as_str()),
             &parts.headers,
-            &body.to_bytes(),
+            body,
         )
         .await
     }
@@ -655,16 +758,16 @@ impl OutgoingHandler for Egress {
         let workload_id = workload_id.to_owned();
         Box::new(async move {
             let (status, body) = egress.call(&workload_id, request).await;
-            let body = Full::new(Bytes::from(
-                serde_json::to_vec(&body).expect("a JSON value serializes"),
-            ))
-            .map_err(|never| match never {})
-            .boxed_unsync();
-            let response = hyper::Response::builder()
-                .status(status)
-                .header(hyper::header::CONTENT_TYPE, "application/json")
-                .body(body)
-                .expect("a well-formed response");
+            let (body, mime, length) = wasi_body(body);
+            let mut builder = hyper::Response::builder().status(status);
+            if let Some(mime) = mime {
+                builder = builder.header(hyper::header::CONTENT_TYPE, mime);
+            }
+            if let Some(length) = length {
+                builder = builder.header(hyper::header::CONTENT_LENGTH, length);
+            }
+            let response = builder.body(body).expect("a well-formed response");
+
             // Nothing is uploaded out of band: the request body was read in full above.
             let io: RequestIoFuture = Box::new(async { Ok(()) });
             Ok((response, io))
