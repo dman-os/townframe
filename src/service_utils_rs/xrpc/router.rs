@@ -621,10 +621,7 @@ async fn dispatch(
             &message,
         );
     }
-    let Some(_admission) = router
-        .admission_pool(operation.long_poll)
-        .try_acquire_arc()
-    else {
+    let Some(_admission) = router.admission_pool(operation.long_poll).try_acquire_arc() else {
         return error_response(
             StatusCode::TOO_MANY_REQUESTS,
             request_id,

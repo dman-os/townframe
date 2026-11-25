@@ -73,7 +73,10 @@ async fn serve_iroh_stream(
             .header_read_timeout(None)
             // Hyper stamps `Date` from std's `SystemTime::now`, which panics on
             // wasm32-unknown-unknown. The only client of this wire is `IrohHttp`, which
-            // reads no `Date`, so no target sends one.
+            // reads no `Date`, so no target sends one. This alone does not make hyper's
+            // server run in a browser: its dispatcher refreshes the cached date on every
+            // connection whether or not the header is on (`Http1Transaction::update_date`),
+            // so a browser needs a hyper that skips that refresh when the header is off.
             .auto_date_header(false)
             .serve_connection(io, hyper_util::service::TowerToHyperService::new(router)).with_upgrades() => result,
         _ = stopped => Ok(()),

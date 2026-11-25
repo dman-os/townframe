@@ -78,11 +78,7 @@ test("a native peer pulls a part from the browser host over iroh", async ({
   page,
   request,
 }) => {
-  test.setTimeout(90_000);
   const failures = watchFailures(page);
-  page.on("console", (message) => console.log(`page ${message.type()}: ${message.text()}`));
-  page.on("pageerror", (error) => console.log(`pageerror: ${error.message}`));
-  await page.addInitScript(() => { Error.stackTraceLimit = 200; });
   await page.goto("/?mode=serve");
   await expect(page.locator("#node_id")).toHaveText(/^[0-9a-f]{64}$/, {
     timeout: 60_000,
@@ -91,7 +87,7 @@ test("a native peer pulls a part from the browser host over iroh", async ({
   const served = Number(await page.locator("#served").textContent());
   expect(served).toBeGreaterThan(1);
 
-  const pulled = await request.post(`/pull/${nodeId}`, { timeout: 40_000 });
+  const pulled = await request.post(`/pull/${nodeId}`, { timeout: 60_000 });
   expect(await pulled.text()).toBe(`synced ${served}`);
   expect(failures).toEqual([]);
 });

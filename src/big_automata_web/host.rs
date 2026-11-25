@@ -164,10 +164,9 @@ async fn run_serve() {
     }
     // Every dialer acts as the principal the part is granted to: the page has no one to tell
     // peers apart, as the native fixture.
-    let principal_of =
-        |_: &RequestContext, _: &TransportContext| -> Result<PeerKey, ContextError> {
-            Ok(principal(0))
-        };
+    let principal_of = |_: &RequestContext,
+                        _: &TransportContext|
+     -> Result<PeerKey, ContextError> { Ok(principal(0)) };
     let (replay, stop) = boot(store, principal_of);
     let mut router = XrpcRouter::new(1 << 20);
     <ReplayBinding<_> as ServerBinding<ReplayProtocol>>::mount(
@@ -221,9 +220,11 @@ async fn run_accept() {
                 .expect("accepting an incoming connection")
                 .await
                 .expect("completing the handshake");
-            let (mut send, mut recv) =
-                connection.accept_bi().await.expect("the dialer's stream");
-            let request = recv.read_to_end(1 << 16).await.expect("reading the request");
+            let (mut send, mut recv) = connection.accept_bi().await.expect("the dialer's stream");
+            let request = recv
+                .read_to_end(1 << 16)
+                .await
+                .expect("reading the request");
             send.write_all(&request).await.expect("echoing");
             send.finish().expect("finishing the echo");
             let (echoed, closed) = counters.get();

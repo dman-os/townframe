@@ -146,8 +146,6 @@ async fn commit(store: &MemoryPartStore, writes: Vec<PartWrite>) {
 
 #[tokio::main]
 async fn main() {
-    // Logs go to stderr, which the page server passes through; stdout is the command protocol.
-    utils_rs::setup_tracing_once();
     let mut relay_config = ServerConfig::default();
     relay_config.relay = Some(RelayConfig::new((Ipv4Addr::LOCALHOST, 0)));
     let relay = Server::spawn(relay_config).await.unwrap();
@@ -170,9 +168,9 @@ async fn main() {
         commit(&store, vec![set(&[(obj, obj * 10)]), add(&part_member)]).await;
     }
 
-    let principal_of = |_: &RequestContext, _: &TransportContext| -> Result<PeerKey, ContextError> {
-        Ok(principal(0))
-    };
+    let principal_of = |_: &RequestContext,
+                        _: &TransportContext|
+     -> Result<PeerKey, ContextError> { Ok(principal(0)) };
     let (replay, stop) = boot(store, principal_of);
     let mut router = XrpcRouter::new(1 << 20);
     <ReplayBinding<_> as ServerBinding<ReplayProtocol>>::mount(
@@ -207,10 +205,7 @@ async fn main() {
         let (command, target) = line
             .split_once(' ')
             .unwrap_or_else(|| panic!("unknown fixture command {line:?}"));
-        let target: iroh::EndpointId = target
-            .trim()
-            .parse()
-            .expect("commands take an endpoint id");
+        let target: iroh::EndpointId = target.trim().parse().expect("commands take an endpoint id");
         match command {
             "dial" => match dial_echo(&node, &relay_url, target).await {
                 Ok(()) => println!("ok"),
