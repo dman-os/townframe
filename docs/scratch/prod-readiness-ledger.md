@@ -1056,3 +1056,25 @@ claytxt #344), on nodules' ping. Design and audit: `docs/scratch/service-macro-r
     when big_node is made to work on the web.
   - Re-audit UUID use once big_automata and big_sync are done. That builds on
     `docs/scratch/uuid-audit.md`, and the sim's random store generations were the latest instance.
+
+### Design thread: a key-value datum face for the cabinet (operator, 2026-11-25)
+
+Today's runtime optimises for live automerge objects behind workers and mutexes, but big_cabinet
+uses automerge as a key-value store. The direction to evaluate is that `big_repo::runtime`
+offers two faces:
+- **Document face:** the live automerge object, for whatever needs CRDT editing (text, lists,
+  conflict surfacing). It hydrates.
+- **Datum face:** shaped like a key-value store, for the cabinet.
+  - **Reads** come from a projection of datum values keyed by `(doc, heads)`. It is written in
+    the same SQL transaction as each commit, so a read at current heads never hydrates.
+  - **Writes** are a batch of key→value puts and deletes across N documents, in one transaction.
+
+Writing an automerge change needs `pred` (the op IDs it overwrites) and the deps (heads). If the
+projection also stores each key's current op IDs, a put could be encoded as a change without
+hydrating. Whether automerge's public Rust API allows that, or it needs internals or a fork, is
+the first feasibility question; it is in the big_repo port ledger. If writes must hydrate, the
+face still removes hydration from reads, and writes hydrate only the documents they touch,
+inside the transaction. This ties together:
+- hydration time;
+- the doc worker's live-object property, which is up for sacrifice (Decisions, 2026-11-17);
+- the transaction design.
