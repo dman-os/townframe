@@ -240,6 +240,8 @@ pub(crate) async fn run(agent: Vec<String>, thinking: bool) -> Res<ExitCode> {
     // Intxt never fails a session's start: without the node's directory there is no state to
     // record into, so the session runs unrecorded, as when the daemon is absent.
     let recorder = match lazy::config().await {
+        // Paused (`record pause`): the session runs unrecorded, without a word.
+        Ok(config) if capture::is_paused(config.node_dir.root())? => None,
         Ok(config) => {
             let recorder = Recorder::new(capture::sessions_dir(config.node_dir.root()));
             Some(if thinking {
