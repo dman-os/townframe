@@ -1,5 +1,5 @@
 {
-  "$description": "claytxt semantic foundation roles other than colour. These values alias primitives and are the intended authoring vocabulary for generated runtime aliases. Colour roles are derived from the palette (palette.tokens.json, ADR 055).",
+  "$description": "claytxt semantic foundation roles other than colour. These values alias primitives and are the intended authoring vocabulary for generated runtime aliases. Colour roles and the two elevation steps are derived from the palette (palette.tokens.json, ADR 055 and ADR 057 section 4).",
   "dimension": {
     "$type": "dimension",
     "spacing": { "$value": "{dimension.spacing.1}" },
@@ -15,13 +15,6 @@
     "border-width-hairline": { "$value": "{dimension.border.hairline}" },
     "border-width-thin": { "$value": "{dimension.border.thin}" },
     "border-width-thick": { "$value": "{dimension.border.thick}" }
-  },
-  "elevation": {
-    "$type": "shadow",
-    "none": { "$value": "{shadow.none}" },
-    "sm": { "$value": "{shadow.sm}" },
-    "md": { "$value": "{shadow.md}" },
-    "raised": { "$value": "{shadow.raised}" }
   },
   "layer": {
     "$type": "number",

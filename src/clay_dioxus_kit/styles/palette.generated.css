@@ -135,6 +135,21 @@
     --ct-color-info-container: var(--ct-palette-info-3);
     --ct-color-on-info-container: var(--ct-palette-info-11);
     --ct-color-scrim: rgb(0 0 0 / 32%);
+
+    --ct-shadow-ink: light-dark(var(--ct-palette-neutral-12), #000);
+    --ct-shadow-ring: light-dark(
+      color-mix(in oklab, var(--ct-shadow-ink) 8%, transparent),
+      rgb(255 255 255 / 0.07)
+    );
+    --ct-elevation-float:
+      0 0 0 1px var(--ct-shadow-ring),
+      0 1px 2px color-mix(in oklab, var(--ct-shadow-ink) 6%, transparent),
+      0 4px 12px -2px color-mix(in oklab, var(--ct-shadow-ink) 10%, transparent);
+    --ct-elevation-anchored:
+      0 0 0 1px var(--ct-shadow-ring),
+      0 0 2px color-mix(in oklab, var(--ct-shadow-ink) 6%, transparent),
+      0 0 24px color-mix(in oklab, var(--ct-shadow-ink) 10%, transparent),
+      0 0 64px color-mix(in oklab, var(--ct-shadow-ink) 8%, transparent);
   }
 
   /* The more-contrast variant: the host sets data-contrast="more" on the root (ADR 055 §4.2). */

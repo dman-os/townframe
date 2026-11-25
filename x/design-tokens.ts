@@ -415,10 +415,6 @@ const runtimeAliases: Record<string, string> = {
   "dimension.border-width-thick": "border-width-thick",
   "font.family.sans": "font-family-sans",
   "font.family.mono": "font-family-mono",
-  "elevation.none": "shadow-none",
-  "elevation.sm": "shadow-sm",
-  "elevation.md": "shadow-md",
-  "elevation.raised": "shadow-raised",
 };
 
 function cssName(path: string): string {
@@ -443,9 +439,6 @@ function tailwindName(path: string, type: TokenType): string | undefined {
     return `--border-width-${alias.slice("border-width-".length)}`;
   }
   if (type === "dimension" && alias === "spacing") return "--spacing";
-  if (type === "shadow" && alias.startsWith("shadow-")) {
-    return `--shadow-${alias.slice("shadow-".length)}`;
-  }
   return undefined;
 }
 
@@ -712,6 +705,32 @@ function paletteName(ramp: RampName, step: Step): string {
   return `--ct-palette-${ramp}-${step}`;
 }
 
+/**
+ * Elevation (ADR 057 section 4): only what floats casts, in two steps. The ink is the neutral
+ * ramp's darkest step in a light scheme (so shadows carry the palette's temperature) and black in
+ * a dark one; the ring is a hairline of it in light and of white in dark, where the surface
+ * ladder, not the shadow, reads as height. `float` is small and directional (popover, menu, scrub
+ * bubble); `anchored` is an even zero-offset ambient for an edge-anchored surface (sheet, drawer),
+ * whose offset would fall off-screen. They are written once with `light-dark()` so they follow
+ * the `color-scheme` of the element using them, like the palette (ADR 055 section 4.2).
+ */
+const elevationCss = [
+  "    --ct-shadow-ink: light-dark(var(--ct-palette-neutral-12), #000);",
+  "    --ct-shadow-ring: light-dark(",
+  "      color-mix(in oklab, var(--ct-shadow-ink) 8%, transparent),",
+  "      rgb(255 255 255 / 0.07)",
+  "    );",
+  "    --ct-elevation-float:",
+  "      0 0 0 1px var(--ct-shadow-ring),",
+  "      0 1px 2px color-mix(in oklab, var(--ct-shadow-ink) 6%, transparent),",
+  "      0 4px 12px -2px color-mix(in oklab, var(--ct-shadow-ink) 10%, transparent);",
+  "    --ct-elevation-anchored:",
+  "      0 0 0 1px var(--ct-shadow-ring),",
+  "      0 0 2px color-mix(in oklab, var(--ct-shadow-ink) 6%, transparent),",
+  "      0 0 24px color-mix(in oklab, var(--ct-shadow-ink) 10%, transparent),",
+  "      0 0 64px color-mix(in oklab, var(--ct-shadow-ink) 8%, transparent);",
+];
+
 function generatePaletteCss(palette: Palette): string {
   const ramps = rampNames.flatMap((ramp) =>
     rampKeys(ramp)
@@ -743,6 +762,8 @@ function generatePaletteCss(palette: Palette): string {
     "",
     ...derived,
     `    --ct-color-scrim: rgb(0 0 0 / ${scrimPercent}%);`,
+    "",
+    ...elevationCss,
     "  }",
     "",
     '  /* The more-contrast variant: the host sets data-contrast="more" on the root (ADR 055 §4.2). */',
@@ -831,6 +852,9 @@ const generated = [
   ...tailwindAliases,
   ...colourTailwindAliases(),
   ...compatibilityAliases,
+  "  --shadow-*: initial;",
+  "  --shadow-float: var(--ct-elevation-float);",
+  "  --shadow-anchored: var(--ct-elevation-anchored);",
   "  --font-sans: var(--ct-font-family-sans);",
   "  --font-mono: var(--ct-font-family-mono);",
   "}",
@@ -1010,6 +1034,14 @@ function selfTest(): void {
   );
   if (!paletteCss.includes("--ct-palette-neutral-1: light-dark(")) {
     fail("self-test generated palette ramps are missing");
+  }
+  for (const step of ["float", "anchored"]) {
+    if (!paletteCss.includes(`--ct-elevation-${step}:`)) {
+      fail(`self-test generated elevation step ${step} is missing`);
+    }
+  }
+  if (/--ct-(elevation|shadow)-(sm|md|raised)\b/.test(generated + paletteCss)) {
+    fail("self-test: a removed shadow step is still generated");
   }
   console.log("design token self-tests passed");
 }
