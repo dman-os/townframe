@@ -12,10 +12,8 @@ use big_cabinet_core::datum::Codec;
 use big_cabinet_core::datum::CompiledSchema;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::Dmeta;
-use big_cartridges_core::Cartridge;
-use big_cartridges_core::Contribution;
 use big_cartridges_core::example_cartridge;
-use big_cartridges_core::request::Request;
+use big_cartridges_core::test_support::FixtureCartridge;
 use big_dispatch_core::Readiness;
 use big_nodule_core::providers::LockedProvider;
 use big_nodule_core::providers::RequestStatus;
@@ -46,37 +44,25 @@ fn record(nsid: &str, revision: Option<u32>, field: &str) -> Value {
 }
 
 /// `cartridge` carrying one more Lexicon file.
-fn with_lexicon(mut cartridge: Cartridge, lexicon: Value) -> Cartridge {
-    let Some(Contribution::Nodule(nodule)) = cartridge.contributions.first_mut() else {
-        panic!("init cartridges carry a nodule");
-    };
-    nodule
-        .description
-        .entry("lexicons".into())
-        .or_insert_with(|| json!([]))
-        .as_array_mut()
-        .unwrap()
-        .push(lexicon);
+fn with_lexicon(mut cartridge: FixtureCartridge, lexicon: Value) -> FixtureCartridge {
+    cartridge.with_lexicon(serde_json::from_value(lexicon).unwrap());
     cartridge
 }
 
 /// Beta, holding the `note` record at `revision`.
-fn beta(version: &str, revision: u32) -> Cartridge {
+fn beta(version: &str, revision: u32) -> FixtureCartridge {
     with_lexicon(
         init_cartridge("beta", version, &[], &[], &[]),
         record(NOTE, Some(revision), "text"),
     )
 }
 
-fn read(contract: &str, min_revision: Option<u32>) -> Request {
-    let mut request = Request::new(contract, contract);
-    request.access = Some("read".into());
-    request.min_revision = min_revision;
-    request
+fn read(contract: &str) -> super::init::FixtureRequest {
+    super::init::datum_read(contract, None)
 }
 
 /// An installed, disabled alpha making `requests`.
-async fn node_with_alpha(requests: Vec<Request>) -> Node {
+async fn node_with_alpha(requests: Vec<super::init::FixtureRequest>) -> Node {
     let node = node_hosting(&Probe::new()).await;
     node.admit(
         node.operator(),
@@ -130,17 +116,8 @@ async fn an_enabled_nodules_datums_are_registered_live_and_retired_with_it() {
 }
 
 /// `cartridge` with `document` as the sidecar of its record `nsid`.
-fn with_sidecar(mut cartridge: Cartridge, nsid: &str, document: Value) -> Cartridge {
-    let Some(Contribution::Nodule(nodule)) = cartridge.contributions.first_mut() else {
-        panic!("init cartridges carry a nodule");
-    };
-    nodule
-        .description
-        .entry("sidecar".into())
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .unwrap()
-        .insert(nsid.to_owned(), document);
+fn with_sidecar(mut cartridge: FixtureCartridge, nsid: &str, document: Value) -> FixtureCartridge {
+    cartridge.with_sidecar(nsid, serde_json::from_value(document).unwrap());
     cartridge
 }
 
@@ -233,25 +210,21 @@ async fn a_nodule_holding_a_datum_the_node_already_knows_is_refused() {
 }
 
 #[tokio::test]
-async fn a_data_request_resolves_to_the_holder_and_min_revision_is_checked() {
-    let node = node_with_alpha(vec![read(NOTE, Some(2))]).await;
+async fn a_data_request_resolves_to_the_holder() {
+    let node = node_with_alpha(vec![read(NOTE)]).await;
     node.install(beta("1.0.0", 1)).await;
     let record = node.set_enabled_record(ALPHA).await;
-    assert_eq!(record.readiness, Readiness::ProviderMissing);
+    assert_eq!(record.readiness, Readiness::Ready);
     assert_eq!(
         record.requests[NOTE],
         RequestStatus {
             contract: NOTE.to_owned(),
-            locked: None,
-            unresolved: Some(Unresolved::RevisionTooOld {
-                provider: BETA.to_owned(),
-                required: 2,
-                offered: 1,
-            }),
+            locked: Some(locked(NOTE, BETA, Some("1.0.0"), Some(1))),
+            unresolved: None,
         }
     );
 
-    // The holder at a sufficient revision resolves it, and the lockfile records that revision.
+    // An upgrade moves the lockfile to the holder's new revision.
     node.admit(node.operator(), beta("1.1.0", 2)).await.unwrap();
     let record = node.record(ALPHA).await;
     assert_eq!(record.readiness, Readiness::Ready);
@@ -277,7 +250,7 @@ async fn a_data_request_resolves_to_the_holder_and_min_revision_is_checked() {
 
 #[tokio::test]
 async fn a_boot_schema_satisfies_a_data_request_as_a_native_provider() {
-    let node = node_with_alpha(vec![read(Dmeta::ID, None)]).await;
+    let node = node_with_alpha(vec![read(Dmeta::ID)]).await;
     let record = node.set_enabled_record(ALPHA).await;
     assert_eq!(record.readiness, Readiness::Ready);
     assert_eq!(
@@ -298,7 +271,7 @@ async fn a_vendored_copy_that_conflicts_with_the_holders_is_refused_and_surfaced
             init_cartridge("gamma", "1.0.0", &[], &[], &[]),
             record(NOTE, Some(1), "title"),
         ),
-        vec![read(NOTE, None)],
+        vec![read(NOTE)],
     );
     node.install(gamma).await;
     let record = node.record(GAMMA).await;

@@ -13,11 +13,11 @@ use super::init::init_cartridge;
 use super::init::necessity;
 use super::init::node_hosting;
 use super::init::with_requests;
-use big_cartridges_core::Cartridge;
-use big_cartridges_core::Contribution;
+use big_cartridges_core::test_support::FixtureCartridge;
+
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::request::Necessity;
-use big_cartridges_core::request::Request;
+
 use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
 use big_nodule_core::protocol::ConfirmNoduleResolution;
@@ -36,7 +36,7 @@ const BETA_PING: &str = "org.example.beta.ping";
 
 /// A node hosting every handler, with `requests` made by an installed but disabled alpha that
 /// may call anything under `org.example.beta`.
-async fn node_with_alpha(requests: Vec<Request>) -> Node {
+async fn node_with_alpha(requests: Vec<super::init::FixtureRequest>) -> Node {
     let node = node_hosting(&Probe::new()).await;
     node.admit(
         node.operator(),
@@ -51,18 +51,18 @@ async fn node_with_alpha(requests: Vec<Request>) -> Node {
     node
 }
 
-fn beta(version: &str) -> Cartridge {
+fn beta(version: &str) -> FixtureCartridge {
     init_cartridge("beta", version, &[BETA_PING], &[], &[])
 }
 
 /// `cartridge` whose Lexicon for `nsid` declares `revision`.
-fn with_revision(mut cartridge: Cartridge, nsid: &str, revision: u32) -> Cartridge {
-    let Some(Contribution::Nodule(nodule)) = cartridge.contributions.first_mut() else {
-        panic!("init cartridges carry a nodule");
-    };
-    let lexicons = nodule.description["lexicons"].as_array_mut().unwrap();
-    let file = lexicons.iter_mut().find(|file| file["id"] == nsid).unwrap();
-    file["revision"] = json!(revision);
+fn with_revision(mut cartridge: FixtureCartridge, nsid: &str, revision: u32) -> FixtureCartridge {
+    let file = cartridge
+        .resolved
+        .lexicons
+        .get_mut(&nsid.parse().unwrap())
+        .expect("fixture Lexicon");
+    file.insert("revision".into(), json!(revision));
     cartridge
 }
 
@@ -112,7 +112,7 @@ impl Node {
     }
 
     /// Admits `cartridge` and enables it.
-    pub(super) async fn install(&self, cartridge: Cartridge) {
+    pub(super) async fn install(&self, cartridge: FixtureCartridge) {
         let cartridge_id = cartridge.id.to_string();
         self.admit(self.operator(), cartridge).await.unwrap();
         self.set_enabled(&cartridge_id, true).await;

@@ -21,7 +21,8 @@
 //!   `http://dispatch.local/xrpc/<operation>` with `authorization: Bearer <authority>`, where
 //!   `authority` defaults to the capability id in `x-nodule-capability`. The operation is
 //!   dynamic, so the call goes through `Cx::transport` and `Cx::next_hop` rather than a typed
-//!   `Cx::call`; it forwards the incoming `idempotency-key` and answers 200 with
+//!   `Cx::call`; an empty `operation` is the `InvalidRequest` domain error. It forwards the
+//!   incoming `idempotency-key` and answers 200 with
 //!   `{ status, body }` (`body` is the upstream JSON, or a string when the upstream body is
 //!   not JSON), or the `UpstreamFailed` domain error when the outgoing request fails. With a
 //!   `query` it sends `GET /xrpc/<operation>?<query>` with no body instead, which is how a
@@ -183,6 +184,11 @@ impl Handler<Config> for Fixture {
 
 impl Handler<Relay> for Fixture {
     async fn call(&self, cx: &Cx, input: Relay) -> Result<Value, FixtureError> {
+        if input.operation.is_empty() {
+            return Err(FixtureError::InvalidRequest(
+                "no operation to relay".to_owned(),
+            ));
+        }
         let authority = input
             .authority
             .as_deref()
