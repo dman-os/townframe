@@ -1,0 +1,29 @@
+# A hand-written ACP trace after the protocol's examples (agentclientprotocol.com): `>` is a
+# line the client sent, `<` one the agent sent.
+> {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":true},"clientInfo":{"name":"zed","version":"0.1"}}}
+< {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"agentInfo":{"name":"example-agent","version":"1.0"},"authMethods":[]}}
+> {"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/work/repo","mcpServers":[],"additionalDirectories":["/work/lib"]}}
+< {"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess_abc123def456"}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}}
+> {"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"sess_abc123def456","prompt":[{"type":"text","text":"Fix the config loader"},{"type":"resource_link","name":"config.rs","uri":"file:///work/repo/src/config.rs"},{"type":"image","data":"aGk=","mimeType":"image/png"}]}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Fix the config loader"}}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"The loader probably "}}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"ignores errors."}}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I'll look at "}}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"the file."}}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"tool_call","toolCallId":"call_001","title":"Reading configuration file","kind":"read","status":"pending"}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_001","status":"in_progress","locations":[{"path":"/work/repo/src/config.rs","line":1}]}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_001","status":"completed","content":[{"type":"content","content":{"type":"text","text":"fn load() {}"}}]}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"plan","entries":[{"content":"Read the loader","priority":"high","status":"completed"},{"content":"Make it fail loudly","priority":"medium","status":"in_progress"}]}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Now the fix."}}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"tool_call","toolCallId":"call_002","title":"Editing config.rs","kind":"edit","status":"pending","locations":[{"path":"/work/repo/src/config.rs"}],"rawInput":{"path":"/work/repo/src/config.rs"}}}}
+< {"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{"sessionId":"sess_abc123def456","toolCall":{"toolCallId":"call_002"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}
+> {"jsonrpc":"2.0","id":0,"result":{"outcome":{"outcome":"selected","optionId":"allow"}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_002","status":"completed","content":[{"type":"diff","path":"/work/repo/src/config.rs","oldText":"fn load() {}\n","newText":"fn load() -> Result<()> {\n    Ok(())\n}\n"}],"rawOutput":"applied"}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"session_info_update","title":"Config loader"}}}
+< {"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}
+> {"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"sess_abc123def456","prompt":[{"type":"text","text":"Now add a test"}]}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"tool_call","toolCallId":"call_003","title":"cargo test","kind":"execute","status":"in_progress","rawOutput":{"exit":1}}}}
+> {"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess_abc123def456"}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_abc123def456","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_003","status":"failed"}}}
+< {"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}
