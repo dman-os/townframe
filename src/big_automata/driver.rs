@@ -38,6 +38,9 @@
 //!    table may be batched, but a part's writes land in the order issued and a cursor never
 //!    goes back, except by a restart of the part (`PartLifecycle` law 10). Losing the latest writes in a crash is safe: the part replays from an older
 //!    cursor, and backends are idempotent.
+//!    The loop waits for a write, but keeps polling its calls meanwhile: a call may hold what the
+//!    write needs (a backend sharing a SQLite file with the cursor table holds the file's
+//!    writer lease between statements), and only the loop polls calls.
 //! 6. **Connections.** Losing the connection disconnects the machine: every call in flight is
 //!    cancelled and, the machine being gone, nothing is reported (ObjectJobs law 10); nothing
 //!    survives but persisted cursors, and every part is `Unsynced`. A new connection is a

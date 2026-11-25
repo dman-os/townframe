@@ -316,7 +316,16 @@ where
         let mut calls = FuturesUnordered::new();
         let mut closes = FuturesUnordered::new();
         loop {
-            calls.extend(self.flush().await);
+            // Outcomes that arrive while a cursor write is awaited are fed at its end, and the
+            // machine is owed a flush after them (law 4), so flush until a flush persists nothing.
+            loop {
+                let (issued, persists) = self.flush();
+                calls.extend(issued);
+                if persists.is_empty() {
+                    break;
+                }
+                self.persist(persists, &mut calls).await;
+            }
             match self.next_event(&inputs, &mut calls, &mut closes).await {
                 Event::Input(Some(Input::Routes(update, applied))) => {
                     self.update_routes(update).await;
@@ -527,10 +536,20 @@ where
     }
 
     /// The flush the machine is owed after every input (law 4), and its commands. Returns the
-    /// futures of the calls it issued, for the loop to run.
-    async fn flush(&mut self) -> Vec<impl Future<Output = (CallId, Done)> + use<C, B, K, S>> {
+    /// futures of the calls it issued, for the loop to run, and the cursors to persist, for
+    /// [`Driver::persist`].
+    #[expect(
+        clippy::type_complexity,
+        reason = "the issued calls and the cursors to persist are this flush's two outputs"
+    )]
+    fn flush(
+        &mut self,
+    ) -> (
+        Vec<impl Future<Output = (CallId, Done)> + use<C, B, K, S>>,
+        Vec<(PartKey, PeerCursor)>,
+    ) {
         let Some(conn) = self.conn.as_mut() else {
-            return vec![];
+            return (vec![], vec![]);
         };
         let mut cmds = vec![];
         conn.sync.flush((self.clock)(), &mut cmds);
@@ -584,15 +603,56 @@ where
                 }
             }
         }
-        // Law 5: one write per flush, its entries in the order the machine issued them, and the
-        // loop waits for it: the next batch and a re-added part's read both see it.
-        if !persists.is_empty() {
-            self.cursors
-                .write(&self.config.peer, &self.config.backend, &persists)
-                .await
-                .expect("the peer-cursor table failed a write");
+        (issued, persists)
+    }
+
+    /// Law 5: one write per flush, its entries in the order the machine issued them, and the
+    /// loop waits for it: the next batch and a re-added part's read both see it.
+    ///
+    /// The loop keeps polling `calls` while it waits, and feeds their outcomes once the write is
+    /// done. A call is a future only this loop polls, and it may hold something the write needs:
+    /// a backend that shares a SQLite file with the cursor table is in a transaction, holding
+    /// the file's one writer lease, between two of its statements. Waiting for the write alone
+    /// would then wait on a call that is never polled to release it.
+    async fn persist<Call>(
+        &mut self,
+        persists: Vec<(PartKey, PeerCursor)>,
+        calls: &mut FuturesUnordered<Call>,
+    ) where
+        Call: Future<Output = (CallId, Done)>,
+    {
+        if persists.is_empty() {
+            return;
         }
-        issued
+        let mut finished = vec![];
+        {
+            let write = self
+                .cursors
+                .write(&self.config.peer, &self.config.backend, &persists)
+                .fuse();
+            futures::pin_mut!(write);
+            loop {
+                let call = async {
+                    if calls.is_empty() {
+                        std::future::pending().await
+                    } else {
+                        calls.next().await.expect("a non-empty set yields")
+                    }
+                }
+                .fuse();
+                futures::pin_mut!(call);
+                futures::select_biased! {
+                    written = write => {
+                        written.expect("the peer-cursor table failed a write");
+                        break;
+                    }
+                    done = call => finished.push(done),
+                }
+            }
+        }
+        for (call, done) in finished {
+            self.feed(call, done);
+        }
     }
 }
 
