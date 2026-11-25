@@ -492,6 +492,7 @@ impl PartLifecycle {
         self.parts.get(part).map(|p| p.cursor)
     }
 
+    #[cfg(test)]
     pub(crate) fn max_parts(&self) -> usize {
         self.max_parts
     }

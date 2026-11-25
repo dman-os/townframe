@@ -6,15 +6,14 @@ use std::collections::BTreeMap;
 use big_automata::BuckId;
 use big_automata::PartKey;
 use big_automata::PeerKey;
+use big_automata::driver::memory::LwwPayload;
 use big_automata::fingerprint::FingerprintSeed;
 use big_automata::part_store::laws::add;
 use big_automata::part_store::laws::grant;
 use big_automata::part_store::laws::obj;
 use big_automata::part_store::laws::part;
-use big_automata::part_store::laws::payload;
 use big_automata::part_store::laws::principal;
 use big_automata::part_store::laws::revoke;
-use big_automata::part_store::laws::set;
 use big_automata::part_store::laws::stage;
 use big_automata::part_store::memory::MemoryPartStore;
 use big_automata::part_store::oracle::PartWrite;
@@ -67,8 +66,8 @@ use crate::serve::ReplayBinding;
 use crate::serve::SyncRpcBinding;
 use crate::serve::boot;
 
-// Not `tests/service_load.rs`: a `tests/` directory beside `lib.rs` is Cargo's integration tests.
-#[path = "service_load_tests.rs"]
+// The crate's end-to-end tests are `e2e`, not `tests`: a `tests/` directory beside `lib.rs` is
+// Cargo's integration tests.
 mod service_load;
 
 /// The one principal every test client acts as, so the grants and revokes below are its own.
@@ -235,7 +234,7 @@ fn changed(rev: u64, index: u8, value: u8) -> PageEvent {
         rev,
         obj_key: obj(index),
         targets: vec![0],
-        payload: payload(value),
+        payload: LwwPayload::at(value),
     }
 }
 
@@ -244,10 +243,14 @@ fn changed(rev: u64, index: u8, value: u8) -> PageEvent {
 async fn seed(store: &MemoryPartStore) -> (u64, u64) {
     let first = commit(
         store,
-        vec![grant(&[(1, 0)]), set(&[(1, 10)]), add(&[(1, 1)])],
+        vec![
+            grant(&[(1, 0)]),
+            LwwPayload::set(&[(1, 10)]),
+            add(&[(1, 1)]),
+        ],
     )
     .await;
-    let second = commit(store, vec![set(&[(2, 20)]), add(&[(2, 1)])]).await;
+    let second = commit(store, vec![LwwPayload::set(&[(2, 20)]), add(&[(2, 1)])]).await;
     (first, second)
 }
 
@@ -270,7 +273,7 @@ async fn a_client_machine_pulls_a_part_from_the_hosted_service() {
     assert_eq!(puller.cursors[&part_route(1)], second);
 
     // A write after the pull is the next round's row, from the cursor the client kept.
-    let third = commit(&store, vec![set(&[(2, 21)])]).await;
+    let third = commit(&store, vec![LwwPayload::set(&[(2, 21)])]).await;
     puller.received.clear();
     puller.catch_up(&replay.client, 8).await;
     assert_eq!(puller.received, [changed(third, 2, 21)]);
@@ -588,7 +591,7 @@ async fn exercise_the_rpc_client(client: &impl BigSyncRpcClient, (first, second)
         fp: Some(BucketObjPageEntry::fingerprint(
             &seed,
             &obj(index),
-            big_automata::part_store::PayloadDigest::of(&payload(value)).unwrap(),
+            big_automata::part_store::PayloadDigest::of(&LwwPayload::at(value)).unwrap(),
         )),
     };
     assert_eq!(pages.len(), 2);
@@ -762,12 +765,12 @@ async fn a_driver_syncs_a_part_between_two_nodes_over_iroh() {
             .and_then(|state| state.content.as_ref())
             .map(|(payload, _)| payload.clone())
     };
-    assert_eq!(payload_of(1).await, Some(payload(10)));
-    assert_eq!(payload_of(2).await, Some(payload(20)));
+    assert_eq!(payload_of(1).await, Some(LwwPayload::at(10)));
+    assert_eq!(payload_of(2).await, Some(LwwPayload::at(20)));
 
     // a later write reaches the held round and the local store
-    commit(&store, vec![set(&[(2, 99)])]).await;
-    while payload_of(2).await != Some(payload(99)) {
+    commit(&store, vec![LwwPayload::set(&[(2, 99)])]).await;
+    while payload_of(2).await != Some(LwwPayload::at(99)) {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 

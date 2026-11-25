@@ -5,7 +5,7 @@
 //! watermark book, no incremental state.
 
 use super::*;
-use crate::ByteKey;
+use crate::ids::ByteKey;
 use proptest::prelude::*;
 
 const PARTS: u8 = 3;

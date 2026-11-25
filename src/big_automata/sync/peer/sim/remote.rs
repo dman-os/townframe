@@ -14,6 +14,7 @@ use crate::interlude::*;
 
 use crate::fingerprint::FingerprintSeed;
 use crate::part_store::Generation;
+use crate::part_store::LeafPage;
 use crate::part_store::ObjPayload;
 use crate::part_store::PartStoreServe;
 use crate::part_store::PartStoreWrite;
@@ -433,19 +434,18 @@ impl Remote {
             .iter()
             .map(|req| (req.buck_id, req.after.clone()))
             .collect();
-        let answers = block_on(
-            self.store
-                .bucket_leaves(&me(), part, &asks, since, page + 1),
-        )
-        .unwrap()?;
+        let answers =
+            block_on(
+                self.store
+                    .bucket_leaves(&me(), part, &asks, since, page, usize::MAX),
+            )
+            .unwrap()?;
         Some(
             requests
                 .iter()
                 .zip(answers)
-                .map(|(req, mut entries)| {
-                    let done = entries.len() <= page;
-                    entries.truncate(page);
-                    let next_after = (!done).then(|| entries[page - 1].obj.clone());
+                .map(|(req, LeafPage { entries, more })| {
+                    let next_after = more.then(|| entries[page - 1].obj.clone());
                     let entries = entries
                         .into_iter()
                         .map(|entry| BucketObjPageEntry {

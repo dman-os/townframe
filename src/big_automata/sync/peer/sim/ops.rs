@@ -123,13 +123,40 @@ impl Sim {
         self.input(|s| s.update(&parts, &[], &objs, &[]));
     }
 
+    /// Applies one op, dispatching to the group of operations it belongs to.
     pub(super) fn step(&mut self, op: Op) {
-        let Shape {
-            parts,
-            objs,
-            obj_routes,
-            ..
-        } = self.shape.clone();
+        match op {
+            Op::Write { .. } | Op::Batch { .. } | Op::Access(_) => self.peer_commit(op),
+            Op::Routes { .. } => self.change_routes(op),
+            Op::Deliver(_) | Op::Drop(_) | Op::Duplicate(_) | Op::Hostile { .. } => {
+                self.network(op)
+            }
+            Op::Advance(_) | Op::Tick | Op::Sweep => self.time(op),
+            Op::Restart
+            | Op::Crash { .. }
+            | Op::DataLoss
+            | Op::Snapshot
+            | Op::RestoreMinted
+            | Op::RestoreUnminted => self.fault(op),
+            Op::Backend(pick) => {
+                let calls: Vec<CallId> = self.local.calls.keys().copied().collect();
+                if !calls.is_empty() {
+                    self.progress_call(calls[pick as usize % calls.len()], false);
+                }
+            }
+            Op::Bias(on) => self.remote.walk_bias = on,
+            Op::Poison(mask) => {
+                self.local.poisoned = (0..self.shape.objs)
+                    .filter(|at| (mask >> at) & 1 == 1)
+                    .map(obj)
+                    .collect();
+            }
+        }
+    }
+
+    /// The peer commits: [`Op::Write`], [`Op::Batch`] and [`Op::Access`].
+    fn peer_commit(&mut self, op: Op) {
+        let Shape { parts, objs, .. } = self.shape.clone();
         match op {
             Op::Write {
                 kind,
@@ -178,38 +205,53 @@ impl Sim {
                 };
                 self.remote.commit(vec![write]);
             }
-            Op::Routes {
-                add_parts,
-                rem_parts,
-                add_objs,
-                rem_objs,
-            } => {
-                let picked =
-                    |mask: u8, count: u8| (0..count).filter(move |at| (mask >> at) & 1 == 1);
-                let removed_parts: Vec<PartKey> =
-                    picked(rem_parts, parts).map(laws::part).collect();
-                let added_parts: Vec<(PartKey, Option<PeerCursor>)> = picked(add_parts, parts)
-                    .map(|at| {
-                        let part = laws::part(at);
-                        let cursor = self.local.persisted.get(&part).copied();
-                        (part, cursor)
-                    })
-                    .collect();
-                let removed_objs: Vec<ObjKey> = picked(rem_objs, obj_routes).map(obj).collect();
-                let added_objs: Vec<ObjKey> = picked(add_objs, obj_routes).map(obj).collect();
-                for part in &removed_parts {
-                    self.wanted_parts.remove(part);
-                    self.walked.remove(part);
-                    self.rewound.remove(part);
-                }
-                self.wanted_parts
-                    .extend(added_parts.iter().map(|(part, _)| part.clone()));
-                for obj in &removed_objs {
-                    self.wanted_objs.remove(obj);
-                }
-                self.wanted_objs.extend(added_objs.iter().cloned());
-                self.input(|s| s.update(&added_parts, &removed_parts, &added_objs, &removed_objs));
-            }
+            _ => unreachable!("not a peer commit: {op:?}"),
+        }
+    }
+
+    /// The embedder changes its routes: [`Op::Routes`].
+    fn change_routes(&mut self, op: Op) {
+        let Shape {
+            parts, obj_routes, ..
+        } = self.shape.clone();
+        let Op::Routes {
+            add_parts,
+            rem_parts,
+            add_objs,
+            rem_objs,
+        } = op
+        else {
+            unreachable!("not a route change: {op:?}")
+        };
+        let picked = |mask: u8, count: u8| (0..count).filter(move |at| (mask >> at) & 1 == 1);
+        let removed_parts: Vec<PartKey> = picked(rem_parts, parts).map(laws::part).collect();
+        let added_parts: Vec<(PartKey, Option<PeerCursor>)> = picked(add_parts, parts)
+            .map(|at| {
+                let part = laws::part(at);
+                let cursor = self.local.persisted.get(&part).copied();
+                (part, cursor)
+            })
+            .collect();
+        let removed_objs: Vec<ObjKey> = picked(rem_objs, obj_routes).map(obj).collect();
+        let added_objs: Vec<ObjKey> = picked(add_objs, obj_routes).map(obj).collect();
+        for part in &removed_parts {
+            self.wanted_parts.remove(part);
+            self.walked.remove(part);
+            self.rewound.remove(part);
+        }
+        self.wanted_parts
+            .extend(added_parts.iter().map(|(part, _)| part.clone()));
+        for obj in &removed_objs {
+            self.wanted_objs.remove(obj);
+        }
+        self.wanted_objs.extend(added_objs.iter().cloned());
+        self.input(|s| s.update(&added_parts, &removed_parts, &added_objs, &removed_objs));
+    }
+
+    /// What the network does to the rounds in flight: [`Op::Deliver`], [`Op::Drop`],
+    /// [`Op::Duplicate`] and [`Op::Hostile`]. The first three do nothing on an empty network.
+    fn network(&mut self, op: Op) {
+        match op {
             Op::Deliver(at) if !self.net.is_empty() => {
                 let msg = self.net.remove(at as usize % self.net.len());
                 self.deliver_msg(msg);
@@ -224,12 +266,13 @@ impl Sim {
             }
             Op::Deliver(_) | Op::Drop(_) | Op::Duplicate(_) => {}
             Op::Hostile { kind, pick } => self.tamper(kind, pick),
-            Op::Backend(pick) => {
-                let calls: Vec<CallId> = self.local.calls.keys().copied().collect();
-                if !calls.is_empty() {
-                    self.progress_call(calls[pick as usize % calls.len()], false);
-                }
-            }
+            _ => unreachable!("not a network op: {op:?}"),
+        }
+    }
+
+    /// Time passes: [`Op::Advance`], [`Op::Tick`] and [`Op::Sweep`].
+    fn time(&mut self, op: Op) {
+        match op {
             Op::Advance(at) => {
                 const STEPS: [u64; 6] = [1, 2, 3, 5, 10, 30];
                 self.now += Duration::from_secs(STEPS[at as usize % STEPS.len()]);
@@ -251,12 +294,19 @@ impl Sim {
                 self.remote.sweep(self.now);
                 self.flush();
             }
+            _ => unreachable!("not a time op: {op:?}"),
+        }
+    }
+
+    /// A process or the peer's storage fails or is restored: [`Op::Restart`], [`Op::Crash`],
+    /// [`Op::DataLoss`], [`Op::Snapshot`], [`Op::RestoreMinted`] and [`Op::RestoreUnminted`].
+    fn fault(&mut self, op: Op) {
+        match op {
             Op::Restart => {
                 self.lose_all();
                 self.remote.forget_sessions();
             }
             Op::Crash { committed, close } => self.crash(committed, close),
-            Op::Bias(on) => self.remote.walk_bias = on,
             Op::DataLoss => {
                 self.lose_all();
                 self.remote.lose_data();
@@ -289,12 +339,7 @@ impl Sim {
                     self.quiesce();
                 }
             }
-            Op::Poison(mask) => {
-                self.local.poisoned = (0..objs)
-                    .filter(|at| (mask >> at) & 1 == 1)
-                    .map(obj)
-                    .collect();
-            }
+            _ => unreachable!("not a fault: {op:?}"),
         }
     }
 }

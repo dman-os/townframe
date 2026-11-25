@@ -163,10 +163,11 @@ impl PartStoreServe for CountingStore {
         bucks: &[(BuckId, Option<ObjKey>)],
         since: Rev,
         limit: usize,
-    ) -> impl Future<Output = Res<Option<Vec<Vec<LeafEntry>>>>> + Send {
+        byte_budget: usize,
+    ) -> impl Future<Output = Res<Option<Vec<LeafPage>>>> + Send {
         self.count(
             self.inner
-                .bucket_leaves(principal, part, bucks, since, limit),
+                .bucket_leaves(principal, part, bucks, since, limit, byte_budget),
         )
     }
 }

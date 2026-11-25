@@ -6,6 +6,7 @@ use std::ops::Bound;
 use super::State;
 use crate::interlude::*;
 use crate::part_store::LeafEntry;
+use crate::part_store::LeafPage;
 use crate::part_store::LogKey;
 use crate::part_store::bucket_summary::BucketMemberKind;
 use crate::part_store::bucket_summary::BucketSummary;
@@ -84,7 +85,8 @@ impl State {
         after: Option<&ObjKey>,
         since: Rev,
         limit: usize,
-    ) -> Vec<LeafEntry> {
+        byte_budget: usize,
+    ) -> LeafPage {
         if self
             .buckets
             .get(&(part.clone(), buck))
@@ -104,10 +106,10 @@ impl State {
                 Bound::Excluded((part.clone(), index, after.clone()))
             }
         };
-        self.members
+        let rows = self
+            .members
             .range((lower, Bound::Unbounded))
             .take_while(|(member_part, index, _)| member_part == part && u32::from(*index) < end)
-            .take(limit)
             .map(|(_, _, obj)| {
                 let key = LogKey::Member {
                     obj: obj.clone(),
@@ -120,7 +122,8 @@ impl State {
                         .is_some()
                         .then(|| self.objs.get(obj).expect(ERROR_IMPOSSIBLE).digest),
                 }
-            })
-            .collect()
+            });
+        // lazy: the rows past the page's end are never built
+        LeafPage::collect(rows, limit, byte_budget)
     }
 }

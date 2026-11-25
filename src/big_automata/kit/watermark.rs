@@ -93,16 +93,19 @@ where
         });
     }
 
+    #[cfg(test)]
     pub fn pending_jobs_len(&self) -> usize {
         self.jobs.values().map(|job| job.waiters.len()).sum()
     }
 
+    #[cfg(test)]
     pub fn watermark(&self, sid: &StreamId) -> Option<Cursor> {
         let stream_state = self.streams.get(sid)?;
         stream_state.last_emitted
     }
 
     /// Whether the job still has a waiter on `cursor`.
+    #[cfg(test)]
     pub fn owes(&self, key: &Key, cursor: &Cursor) -> bool {
         self.jobs
             .get(key)

@@ -1,5 +1,5 @@
 use super::*;
-use crate::ByteKey;
+use crate::ids::ByteKey;
 
 fn obj(seed: u8) -> ObjKey {
     ObjKey(ByteKey::new(&[seed; 32]))

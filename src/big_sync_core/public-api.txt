@@ -26,6 +26,8 @@ pub big_sync_core::part_store::contract::async fn assert_peer_cursor_roundtrip <
 pub big_sync_core::revisioned_store::contract::async fn assert_revisioned_store_contract < H > (harness : & H) where H : RevisionedStoreContractHarness ,
 pub const big_sync_core::rpc::BUCKET_DEAD_FP_SEED: FingerprintSeed
 pub const big_sync_core::rpc::BUCKET_LIVE_FP_SEED: FingerprintSeed
+pub enum big_sync_core::BigSyncMachineCommand { SetPartCursor { peer_id : PeerKey , part_id : PartKey , cursor : CursorIndex , } }
+pub enum big_sync_core::SyncCompletionDeets { AddedMember, RemovedMember, ChangedObject, Noop }
 pub enum big_sync_core::SyncMode { CursorOnly, # [default] Bucket }
 pub enum big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead< K , E > { Entries { revision : u64 , entries : Vec < ConcurrentDelta < K , E > > , }, ReplayComplete { through : u64 , } }
 pub enum big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalkerError< E > { # [error ("revision source failed: {0}")] Source (E), # [error ("delta walker state failed: {0}")] State (# [from] DeltaWalkerStateError) }
@@ -201,6 +203,8 @@ pub mod big_sync_core::scheduler
 pub mod big_sync_core::serial_delta_walker
 pub mod big_sync_core::tokio_keyed_scheduler
 pub mod big_sync_core::watermark
+pub struct big_sync_core::SyncJobEvt  { obj_id: ObjKey, cursors: Set < CursorIndex >, deets: SyncCompletionDeets }
+pub struct big_sync_core::SyncTaskCompletion  { obj_id: ObjKey, deets: SyncCompletionDeets }
 pub struct big_sync_core::concurrent_delta_walker::ConcurrentDelta< K , E >  { key: K, cursor: u64, entry: E }
 pub struct big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker< 'a , S , R , K > where S : RevisionedStore < Revision = u64 > + 'a , R : DeltaWalkerStateRepo , K : Ord + Clone , {  }
 pub struct big_sync_core::delta_walker_state::DeltaWalkerProgress  { upstream_revision: u64 }

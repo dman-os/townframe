@@ -205,50 +205,16 @@ impl DecidePeerStrategyTask {
                 }
                 (None, Some(bucket), AllowedStrat::CursorAndBucket)
                 | (Some(_), Some(bucket), AllowedStrat::CursorAndBucket) => {
-                    let working_level =
-                        calc_working_level(bucket.member_count, bucket.deepest_bucket_level);
-                    let mut offset = BuckId::ROOT;
-                    loop {
-                        let buckets = peer_rpc
-                            .get_changed_buckets(GetChangedBucketsRequest {
-                                part_key: part_key.clone(),
-                                offset,
-                                to_level: working_level,
-                                limit_hint: BucketMachine::GET_BUCKET_LIMIT_HINT,
-                                since: last_peer_cursor,
-                            })
-                            .await??;
-                        let filtered = crate::sync::bucket::filter_buckets(
-                            part_key.clone(),
-                            working_level,
-                            buckets,
-                            &cx.part_store,
-                        )
-                        .await;
-                        let strat = match filtered {
-                            crate::sync::bucket::FilteredBuckets::Relist(buck_id) => {
-                                offset = buck_id;
-                                continue;
-                            }
-                            crate::sync::bucket::FilteredBuckets::Done => {
-                                PeerPartStratDecision::Cursor(CursorStrat {
-                                    latest_cursor: last_peer_cursor,
-                                    last_cursor: last_peer_cursor,
-                                })
-                            }
-                            crate::sync::bucket::FilteredBuckets::Handoff(buckets) => {
-                                PeerPartStratDecision::Bucket(BucketStrat {
-                                    latest_cursor: last_peer_cursor,
-                                    initial_filtered_buckets: buckets,
-                                    last_cursor: last_peer_cursor,
-                                    remote_depth: bucket.deepest_bucket_level,
-                                    remote_len: bucket.member_count,
-                                })
-                            }
-                        };
-                        part_strats.insert(part_key, strat);
-                        break;
-                    }
+                    let strat = Self::decide_by_buckets(
+                        peer_rpc,
+                        &cx.part_store,
+                        &part_key,
+                        bucket.member_count,
+                        bucket.deepest_bucket_level,
+                        last_peer_cursor,
+                    )
+                    .await?;
+                    part_strats.insert(part_key, strat);
                 }
             }
         }
@@ -272,5 +238,63 @@ impl DecidePeerStrategyTask {
             peer_key: self.peer_key,
             part_strats,
         }))
+    }
+
+    /// Walk the peer's changed buckets of `part_key` down to the working level its size calls
+    /// for, and decide: nothing differs (stay on the cursor), or hand the filtered buckets to
+    /// the bucket strategy. A relist restarts the walk from the bucket the filter names.
+    async fn decide_by_buckets<PStore, Rpc>(
+        peer_rpc: &Rpc,
+        part_store: &PStore,
+        part_key: &PartKey,
+        remote_len: u64,
+        remote_depth: BuckLevel,
+        last_peer_cursor: Rev,
+    ) -> Result<PeerPartStratDecision, DecidePeerStrategyErrorDeets>
+    where
+        PStore: PartStoreRead,
+        Rpc: BigSyncRpcClient,
+    {
+        let working_level = calc_working_level(remote_len, remote_depth);
+        let mut offset = BuckId::ROOT;
+        loop {
+            let buckets = peer_rpc
+                .get_changed_buckets(GetChangedBucketsRequest {
+                    part_key: part_key.clone(),
+                    offset,
+                    to_level: working_level,
+                    limit_hint: BucketMachine::GET_BUCKET_LIMIT_HINT,
+                    since: last_peer_cursor,
+                })
+                .await??;
+            let filtered = crate::sync::bucket::filter_buckets(
+                part_key.clone(),
+                working_level,
+                buckets,
+                part_store,
+            )
+            .await;
+            return Ok(match filtered {
+                crate::sync::bucket::FilteredBuckets::Relist(buck_id) => {
+                    offset = buck_id;
+                    continue;
+                }
+                crate::sync::bucket::FilteredBuckets::Done => {
+                    PeerPartStratDecision::Cursor(CursorStrat {
+                        latest_cursor: last_peer_cursor,
+                        last_cursor: last_peer_cursor,
+                    })
+                }
+                crate::sync::bucket::FilteredBuckets::Handoff(buckets) => {
+                    PeerPartStratDecision::Bucket(BucketStrat {
+                        latest_cursor: last_peer_cursor,
+                        initial_filtered_buckets: buckets,
+                        last_cursor: last_peer_cursor,
+                        remote_depth,
+                        remote_len,
+                    })
+                }
+            });
+        }
     }
 }

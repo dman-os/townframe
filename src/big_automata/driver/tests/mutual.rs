@@ -28,6 +28,7 @@ use crate::driver::PeerDriver;
 use crate::driver::RouteUpdate;
 use crate::driver::Settle;
 use crate::driver::SyncBackend;
+use crate::driver::memory::LwwPayload;
 use crate::driver::memory::MemoryBackend;
 use crate::driver::memory::MemoryPeerCursors;
 use crate::interlude::*;
@@ -35,7 +36,6 @@ use crate::part_store::PartStoreServe;
 use crate::part_store::laws::grant;
 use crate::part_store::laws::part;
 use crate::part_store::laws::principal;
-use crate::part_store::laws::set;
 use crate::part_store::memory::MemoryPartStore;
 use crate::rev::Rev;
 
@@ -187,7 +187,7 @@ impl Node {
 fn expected(entries: &[(u8, u8, u8)]) -> Content {
     entries
         .iter()
-        .map(|&(at, obj, value)| ((at, obj), serde_json::json!(value)))
+        .map(|&(at, obj, value)| ((at, obj), LwwPayload::at(value)))
         .collect()
 }
 
@@ -292,9 +292,9 @@ async fn a_write_costs_one_commit_on_each_node() {
     assert_quiet(&[&a, &b]).await;
     let before = heads(&[&a, &b]).await;
 
-    a.peer.commit(vec![set(&[(1, 11)])]).await;
+    a.peer.commit(vec![LwwPayload::set(&[(1, 11)])]).await;
     let mut written = union.clone();
-    written.insert((1, 1), serde_json::json!(11));
+    written.insert((1, 1), LwwPayload::at(11));
     converged(&[&a, &b], &written).await;
     assert_quiet(&[&a, &b]).await;
     let after = heads(&[&a, &b]).await;

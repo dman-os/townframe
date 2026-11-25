@@ -32,6 +32,7 @@
 //! | a transaction is atomic: nothing before commit, everything after, nothing on rollback | [`writes_are_atomic`] |
 //! | a write that changes nothing stamps nothing | [`unchanged_writes_stamp_nothing`] |
 //! | many keys sharing deep buckets: every level counts every member under it and its leaves list them in order, whole or paged | [`crowded_buckets_count_and_list_every_member`] |
+//! | a leaf page is the longest prefix of the bucket within the limit and the byte budget; its first entry is always in, and it stops rather than skips | [`leaf_pages_are_the_longest_prefix_within_the_byte_budget`], every check |
 //! | a bucket's summary does not depend on the order its members were written, pending first or live first | [`bucket_summaries_ignore_write_order`] |
 //! | removals and payload changes inside one deep bucket move its path only, and a change undone restores the fingerprints | [`bucket_summaries_follow_changes_inside_one_bucket`] |
 //! | a listing ends at the last bucket of a level: nothing past it at its level, then the next level's own start, and no repeat at the deepest level | [`a_listing_ends_at_the_last_bucket_of_a_level`] |
@@ -50,6 +51,7 @@ use crate::okv::oracle::Oracle;
 use crate::part_store::AccessLevel;
 use crate::part_store::AuthorizedPage;
 use crate::part_store::Generation;
+use crate::part_store::LeafEntry;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
@@ -74,6 +76,8 @@ use crate::rev::laws::WakeCount;
 use crate::rev::laws::any_limits;
 use crate::rev::laws::limits;
 
+mod budget;
+pub use budget::leaf_pages_are_the_longest_prefix_within_the_byte_budget;
 mod crowd;
 pub use crowd::bucket_summaries_follow_changes_inside_one_bucket;
 pub use crowd::bucket_summaries_ignore_write_order;
@@ -328,34 +332,7 @@ impl<B: Backend> Harness<B> {
                         ),
                         "bucket list of {part} for {principal} since {since}"
                     );
-                    // Every bucket the check knows, whole: the deep ones are where members
-                    // share a bucket and its (deepest bucket, key) order shows.
-                    let bucks = ids.iter().map(|id| (*id, None)).collect::<Vec<_>>();
-                    let expected = oracle.bucket_leaves(principal, part, &bucks, since, usize::MAX);
-                    assert_eq!(
-                        store
-                            .bucket_leaves(principal, part, &bucks, since, usize::MAX)
-                            .await?,
-                        expected,
-                        "leaves of {part} for {principal} since {since}"
-                    );
-                    // And resumed: each bucket after its first member, two at a time.
-                    if let Some(whole) = expected {
-                        let resumed = bucks
-                            .iter()
-                            .zip(&whole)
-                            .filter_map(|((id, _), members)| {
-                                Some((*id, Some(members.first()?.obj.clone())))
-                            })
-                            .collect::<Vec<_>>();
-                        assert_eq!(
-                            store
-                                .bucket_leaves(principal, part, &resumed, since, 2)
-                                .await?,
-                            oracle.bucket_leaves(principal, part, &resumed, since, 2),
-                            "resumed leaves of {part} for {principal} since {since}"
-                        );
-                    }
+                    self.check_leaves(principal, part, since, &ids).await?;
                 }
             }
             assert_eq!(
@@ -399,6 +376,55 @@ impl<B: Backend> Harness<B> {
                         .await?;
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// The store's leaves of `part` for `principal` against the oracle's: every bucket of `ids`
+    /// whole, the deep ones being where members share a bucket and its (deepest bucket, key)
+    /// order shows; then resumed after each bucket's first member; each under no byte budget and
+    /// under one that fits two of the universe's one-byte keys and a bit.
+    async fn check_leaves(
+        &self,
+        principal: &PeerKey,
+        part: &PartKey,
+        since: Rev,
+        ids: &[BuckId],
+    ) -> Res<()> {
+        let (store, oracle) = (&self.store, &self.oracle);
+        let narrow = 2 * LeafEntry::wire_bytes(1) + 1;
+        let bucks = ids.iter().map(|id| (*id, None)).collect::<Vec<_>>();
+        let mut whole = None;
+        for budget in [usize::MAX, narrow] {
+            let expected = oracle.bucket_leaves(principal, part, &bucks, since, usize::MAX, budget);
+            assert_eq!(
+                store
+                    .bucket_leaves(principal, part, &bucks, since, usize::MAX, budget)
+                    .await?,
+                expected,
+                "leaves of {part} for {principal} since {since}, budget {budget}"
+            );
+            whole = whole.or(expected);
+        }
+        // And resumed: each bucket after its first member, two at a time.
+        if let Some(whole) = whole {
+            let resumed = bucks
+                .iter()
+                .zip(&whole)
+                .filter_map(|((id, _), members)| {
+                    Some((*id, Some(members.entries.first()?.obj.clone())))
+                })
+                .collect::<Vec<_>>();
+            for (limit, budget) in [(2, usize::MAX), (3, narrow)] {
+                assert_eq!(
+                    store
+                        .bucket_leaves(principal, part, &resumed, since, limit, budget)
+                        .await?,
+                    oracle.bucket_leaves(principal, part, &resumed, since, limit, budget),
+                    "resumed leaves of {part} for {principal} since {since}, {limit} at a time \
+                     within {budget} bytes"
+                );
             }
         }
         Ok(())
@@ -701,10 +727,18 @@ pub async fn revocation_hides_the_parts_buckets<B: Backend>(backend: &B) -> Res<
     assert!(!listed.is_empty());
     let first = harness
         .store
-        .bucket_leaves(&principal(0), &part(0), &[(BuckId::ROOT, None)], 0, 1)
+        .bucket_leaves(
+            &principal(0),
+            &part(0),
+            &[(BuckId::ROOT, None)],
+            0,
+            1,
+            usize::MAX,
+        )
         .await?
         .expect("the part is readable")
         .remove(0)
+        .entries
         .remove(0);
 
     harness.commit(vec![revoke(&[(0, 0)])]).await?;
@@ -717,6 +751,7 @@ pub async fn revocation_hides_the_parts_buckets<B: Backend>(backend: &B) -> Res<
                 &part(0),
                 &[(BuckId::ROOT, Some(first.obj))],
                 0,
+                usize::MAX,
                 usize::MAX
             )
             .await?,

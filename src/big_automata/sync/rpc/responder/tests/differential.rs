@@ -223,31 +223,19 @@ async fn run(ops: Vec<Op>) {
                             .map(|(b, a)| (*b, a.clone()))
                             .collect::<Vec<_>>(),
                         u64::from(since),
-                        usize::MAX,
+                        limit,
+                        LEAF_BYTES,
                     )
                     .map(|all| {
                         asked
                             .iter()
                             .zip(all)
-                            .map(|((buck, after), entries)| {
-                                // The entries up to the limit, stopping before the one that
-                                // would carry the page past the budget; the first is always in.
-                                let mut bytes = 0;
-                                let mut page = Vec::new();
-                                for entry in entries.iter().take(limit) {
-                                    let cost =
-                                        BucketObjPageEntry::wire_bytes(entry.obj.as_bytes().len());
-                                    if !page.is_empty() && bytes + cost > LEAF_BYTES {
-                                        break;
-                                    }
-                                    bytes += cost;
-                                    page.push(entry.clone());
-                                }
-                                let next_after = (page.len() < entries.len())
-                                    .then(|| page.last().expect("a non-empty page").obj.clone());
+                            .map(|((buck, after), LeafPage { entries, more })| {
+                                let next_after = more
+                                    .then(|| entries.last().expect("a non-empty page").obj.clone());
                                 let page = LeafBucketPage {
                                     after: after.clone(),
-                                    entries: page
+                                    entries: entries
                                         .into_iter()
                                         .map(|entry| BucketObjPageEntry {
                                             fp: entry.live.map(|digest| {

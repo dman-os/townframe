@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::fingerprint::Fingerprint;
-use crate::sync::rpc::LEAF_PAGE_BYTE_BUDGET;
+use crate::part_store::LEAF_PAGE_BYTE_BUDGET;
 
 /// `count` distinct keys of `width` bytes, told apart by a leading counter from `from`.
 fn keys(from: u16, count: u16, width: usize) -> Vec<ObjKey> {
@@ -67,7 +67,7 @@ async fn walk(responder: &RpcResponder<CountingStore>, hint: u32) -> Vec<LeafBuc
 fn cost(page: &LeafBucketPage) -> usize {
     page.entries
         .iter()
-        .map(|entry| BucketObjPageEntry::wire_bytes(entry.obj_key.as_bytes().len()))
+        .map(|entry| LeafEntry::wire_bytes(entry.obj_key.as_bytes().len()))
         .sum()
 }
 
@@ -79,9 +79,9 @@ fn expected_pages(all: &[ObjKey], budget: usize, cap: usize) -> Vec<Vec<ObjKey>>
     let mut rest = all;
     while !rest.is_empty() {
         let mut len = 1;
-        let mut bytes = BucketObjPageEntry::wire_bytes(rest[0].as_bytes().len());
+        let mut bytes = LeafEntry::wire_bytes(rest[0].as_bytes().len());
         while len < cap.min(rest.len()) {
-            let next = BucketObjPageEntry::wire_bytes(rest[len].as_bytes().len());
+            let next = LeafEntry::wire_bytes(rest[len].as_bytes().len());
             if bytes + next > budget {
                 break;
             }
@@ -123,11 +123,7 @@ fn wire_bytes_is_the_widest_postcard_framing_of_an_entry() {
         (16_383, 16_396),
         (16_384, 16_398),
     ] {
-        assert_eq!(
-            BucketObjPageEntry::wire_bytes(key_len),
-            expected,
-            "{key_len}"
-        );
+        assert_eq!(LeafEntry::wire_bytes(key_len), expected, "{key_len}");
         let key = ObjKey::new(&vec![7; key_len]);
         let encoded = |fp| {
             postcard::to_allocvec(&BucketObjPageEntry {
@@ -154,11 +150,11 @@ fn wire_bytes_is_the_widest_postcard_framing_of_an_entry() {
         );
     }
     assert!(
-        LEAF_PAGE_BYTE_BUDGET / BucketObjPageEntry::wire_bytes(32) > MAX_LEAF_PAGE as usize,
+        LEAF_PAGE_BYTE_BUDGET / LeafEntry::wire_bytes(32) > MAX_LEAF_PAGE as usize,
         "the entry cap binds before the budget for ordinary keys"
     );
     assert!(
-        LEAF_PAGE_BYTE_BUDGET / BucketObjPageEntry::wire_bytes(4096) < MAX_LEAF_PAGE as usize,
+        LEAF_PAGE_BYTE_BUDGET / LeafEntry::wire_bytes(4096) < MAX_LEAF_PAGE as usize,
         "the budget binds first for wide keys"
     );
 }
@@ -168,7 +164,7 @@ fn law_5_a_page_stops_at_the_byte_budget_and_the_next_resumes_after_its_last_ent
     block_on(async {
         // 1013 bytes an entry: a budget of three and a bit entries, against a hint of 1024.
         let wide = keys(0, 20, 1000);
-        let budget = 3 * BucketObjPageEntry::wire_bytes(1000) + 1;
+        let budget = 3 * LeafEntry::wire_bytes(1000) + 1;
         let rig = holding(&wide).await;
         let responder = rig.responder().with_leaf_byte_budget(budget);
         let pages = walk(&responder, 1024).await;
@@ -236,7 +232,7 @@ fn law_5_a_page_stops_before_a_wide_entry_instead_of_skipping_it() {
         // a wide one beside them.
         let mut all = keys(0, 4, 10);
         all.extend(keys(100, 4, 2000));
-        let budget = 2 * BucketObjPageEntry::wire_bytes(10) + 1;
+        let budget = 2 * LeafEntry::wire_bytes(10) + 1;
         let rig = holding(&all).await;
         let order = in_order(&rig);
         let pages = walk(&rig.responder().with_leaf_byte_budget(budget), 1024).await;

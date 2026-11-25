@@ -128,6 +128,14 @@ use crate::sync::PeerCursor;
 /// The futures carry no `Send` bound, like [`BigSyncRpcClient`](crate::sync::rpc::BigSyncRpcClient)'s
 /// (ADR 039: no `FutureForm`): the embedder spawns the driver's loop, so the concrete types
 /// decide whether it is `Send`. See "Runtimes" in the module docs.
+///
+/// Applying a peer's payload must converge: two nodes that each hold a different payload for
+/// one object and exchange them both ways must end holding equal payloads, and exchanging again
+/// must change nothing. So `record` and `fetch` apply a peer's payload as a **merge** that is
+/// commutative and idempotent (an LWW register that keeps the greater of
+/// `(written_at, writer_id)`, a CRDT such as an automerge document, a content-addressed
+/// blob), and never as a blind overwrite: overwriting makes the two nodes swap their payloads
+/// on every exchange for ever, each fetch provoking the other side's.
 pub trait SyncBackend {
     /// Short and cancel-safe; never waits on bytes. `Done` lets the cursor pass the job,
     /// `Fetch` asks for [`fetch`](Self::fetch) first.

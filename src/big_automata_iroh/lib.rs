@@ -16,9 +16,9 @@
 //! adds no protocol semantics.
 
 mod client;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod e2e;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod serve;
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests;
 
 pub use client::PeerRpcClient;
