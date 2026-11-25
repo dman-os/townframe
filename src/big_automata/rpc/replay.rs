@@ -1,24 +1,25 @@
 use crate::interlude::*;
 
-use crate::store::ObjPayload;
+use crate::part_store::ObjPayload;
+use crate::rev::Rev;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ReplayTarget {
     Part {
         part_key: PartKey,
-        cursor: CursorIndex,
+        cursor: Rev,
     },
     Object {
         obj_key: ObjKey,
         /// Since only a single version of an object is kept, this just
         /// means that the object is not returned at part of the replay
         /// if there have been no updates to it since.
-        cursor: CursorIndex,
+        cursor: Rev,
     },
 }
 
 impl ReplayTarget {
-    pub fn cursor(&self) -> CursorIndex {
+    pub fn cursor(&self) -> Rev {
         match self {
             Self::Part { cursor, .. } | Self::Object { cursor, .. } => *cursor,
         }
@@ -76,7 +77,7 @@ pub struct PageReplaySessionRequest {
     subscription_id: ReplaySubscriptionId,
     request_id: ReplayRequestId,
     supersede: Option<ReplayRequestId>,
-    targets: Vec<(ReplayTargetId, CursorIndex)>,
+    targets: Vec<(ReplayTargetId, Rev)>,
     limit: u32,
     hold_ms: u32,
 }
@@ -87,7 +88,7 @@ strike! {
         /// The events this page carries, collapsed per object and ordered by position.
         pub events: Vec<pub enum AbbreviatedPartEvent {
             Changed(pub struct ObjChanged {
-                pub cursor: CursorIndex,
+                pub cursor: Rev,
                 pub part_keys: Vec<ReplayTargetId>,
                 pub obj_key: ObjKey,
                 // NOTE: IRPC uses postcard encoding
@@ -101,7 +102,7 @@ strike! {
                 pub payload: ObjPayload,
             }),
             Removed(pub struct ObjRemovedFromPart {
-                pub cursor: CursorIndex,
+                pub cursor: Rev,
                 pub part_key: ReplayTargetId,
                 pub obj_key: ObjKey,
             }),
@@ -115,7 +116,7 @@ strike! {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PageTargetVerdict {
-    Events { resume: CursorIndex, drained: bool },
+    Events { resume: Rev, drained: bool },
     UnknownPart,
 }
 

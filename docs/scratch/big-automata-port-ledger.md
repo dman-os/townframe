@@ -522,8 +522,12 @@ a separate key-only filter really drops entries. (2) accepted. (3) and (4) are c
   Whole-route loss is a verdict (`TargetVerdict::Unauthorized`), not an empty page.
 - **A hidden third value state:** a payload stripped to `null` means "exists, payload not
   advertised, fetch it". Consumers special-case it (`doc_revision_store` skips it; the cursor
-  machine treats it as "fetch"). The part store should model it explicitly (for example
-  `Payload | Withheld`), not as a magic `null`.
+  machine treats it as "fetch"). ~~The part store should model it explicitly (for example
+  `Payload | Withheld`), not as a magic `null`.~~ **Corrected (layer 09):** the null-payload
+  `Changed` is a bug, not a state (open items, "null payload"; ADR 012, "Membership removal is
+  not payload removal"): live membership implies a payload, and payload removal is explicit.
+  `Withheld` had no producer and was removed; an object's content is its payload plus its
+  stored digest.
 - **Example-scenario style only:** no generated grant/revoke/write sequences and no oracle.
   Revocation mid-stream is covered only as the `Unauthorized` verdict on later pages. The port
   should turn these into laws plus generated sequences checked against an oracle.
@@ -634,9 +638,9 @@ ordered-KV shape. One shared substrate (ordered KV + atomic batch) is noted, not
     construction*, and `part_dirty_count` becomes a count of log rows in a rev window.
 - **Plain KV tables** (a new non-revisioned table kind in `MemoryDb`: same lock and
   transaction, no rev, no rev index):
-  - `objs`: obj → `{ payload | Withheld, payload_digest, buck_index }`. An explicit `Withheld`
-    replaces the magic `null`; the digest is stored at write time for the bucket leaf
-    fingerprint.
+  - `objs`: obj → `{ payload, payload_digest, buck_index }`. The digest is stored at write
+    time for the bucket leaf fingerprint. (An explicit `Withheld` state was planned here and
+    later removed: see "A hidden third value state" above.)
   - `parts`: part → `{ latest_cursor }`.
   - `members_by_part`: (part, obj) → () — a derived index for `member_count`, part listing and
     bucket ranges. Membership's truth is the log; this index is maintained by the same single
@@ -680,7 +684,6 @@ ordered-KV shape. One shared substrate (ordered KV + atomic batch) is noted, not
   - pending → live on the payload's arrival, with exactly one event;
   - authorization filtering of the log equals the oracle's filter, pinned in both
     grant/revoke orders;
-  - `Withheld` is distinct from deleted;
   - the incremental bucket summary equals a recompute;
   - `part_dirty_count` equals a count over the oracle;
   - cursors only advance;
@@ -746,7 +749,7 @@ ordered-KV shape. One shared substrate (ordered KV + atomic batch) is noted, not
    SipHash isn't a stable cross-version or cross-platform encoding].
 5. The bucket live fingerprint now hashes the digest (`-v2`), but the leaf fingerprint still
    hashes the payload because of the wire type, so a locally `Withheld` object counts as
-   changed [**move the leaf fingerprint to `SipHash(seed, digest)`** as decided in the
+   changed (`Withheld` was later removed, but the leaf fingerprint still uses the digest) [**move the leaf fingerprint to `SipHash(seed, digest)`** as decided in the
    bucket review; a wire-type change in `rpc/bucket.rs`].
 6. With no object lane, object routes also replay membership tombstones; the old contract
    said they carry no membership [operator call].
@@ -797,6 +800,60 @@ is clean apart from dead code.
 - The combinators are named types (`RevMap`/`RevFilterMap`/`RevFilterKeys`); their scratch
   page is `Box<dyn Any + Send>`, so projected keys and values must be `Send` even under
   `Local`.
+
+### Authorized read and bucket harness (2026-11-18; layer 09)
+
+**Delivered:**
+- `PartStoreServe::read_authorized` takes the verdicts and the rows in one snapshot, and checks
+  every row against current access.
+- Laws: revocation hides every row of the part, including unread older rows and a revoke
+  between two pages; a grant returns the backlog; differential over random principals.
+- Bucket harness: `bucket/tests/harness.rs` (responder, driver, convergence proptest).
+
+**Machine bugs the harness found, and the operator's decisions:**
+- `calc_working_level` never returned level 1: the loop recomputed level 1's width twice.
+  Fix: stay at L while level L+1's width (`size / 16^(L+1)`) is above the target.
+- A pending membership survived a peer's removal, depending on walk order. Decision: a pending
+  membership is a real membership whose payload is pending, so a remote removal cancels it.
+  `filter_objects` must see pending memberships.
+
+**Other decisions:**
+- Bucket reads take the principal and answer in one snapshot, with a `since` on
+  `bucket_list`.
+- Drop `RevSource` as a supertrait of `PartStoreServe`.
+- Dead leaf entries carry `Option` fingerprints.
+- `rpc/bucket.rs` is free to improve; it was a partial port.
+- A denied object route carries nothing; the part route carries the removal.
+
+**Follow-up applied (6a226821, 138/138 tests):**
+- The working-level fix; it also fixed a `u16` overflow of `16^4`.
+- `ObjState { content: Option<..>, parts }` reports pending-only objects.
+- `PartStoreServe` is principal-scoped: `read_authorized`, `part_summaries`,
+  `readable_obj_states`, `bucket_list(.., since, ..)`, and a batched `bucket_leaves`.
+  `read_verdicts` and `readable_parts_of` are removed.
+- Leaf entries carry `fp: Option`; the wire leaf page has `next_after`.
+
+**Open:**
+- `part_summaries` has no `latest_cursor`. That cursor moves on other principals' access
+  rows, so exposing it leaks when their access changes.
+- A revoked principal's summary is `None`, so `access_changes` only ever reports grants.
+- `ShallowBucket` is never produced.
+
+**Part summary (fix on layer 09):**
+- `PartSummary { latest_cursor, member_count, deepest_bucket_level, dirty }`.
+- `latest_cursor` is the cursor strat's resume point and the bucket-to-cursor handover: the
+  bucket walk reads state no older than the summary, so replay from it repeats but never
+  skips. Access rows don't move it.
+- `ShallowBucket` is dropped (it was never produced).
+
+**Next cleanups:**
+- Done: `store.rs` folded into `part_store`: `CursorIndex` became `Rev`, `ObjPayload` moved
+  to `part_store`, and `store/bucket.rs` moved to `part_store/bucket_summary.rs`.
+- Done: `PayloadState::Withheld` removed (no producer); `ObjState.content` is
+  `Option<(ObjPayload, PayloadDigest)>` and `set_payloads` takes plain payloads.
+- The outbox in big_automata has no user until the machine is ported. Its users today are
+  big_repo runtime2 (`automerge_frontier_worker`, `group_part_worker`, via big_sync_core) and
+  daybook drawers (its own outbox).
 
 ## Cross-cutting items
 

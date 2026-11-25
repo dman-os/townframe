@@ -3,6 +3,7 @@ use crate::interlude::*;
 use crate::fingerprint::Fingerprint;
 use crate::fingerprint::FingerprintSeed;
 use crate::part_store::PayloadDigest;
+use crate::rev::Rev;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketSummary {
@@ -11,7 +12,7 @@ pub struct BucketSummary {
     pub live_count: u32,
     // live_fp, dead_fp
     pub fp: (BucketFingerprint, BucketFingerprint),
-    pub changed_at: CursorIndex,
+    pub changed_at: Rev,
 }
 
 /// We use the same seeds on all nodes for bucket fingerprints to nable
@@ -38,8 +39,8 @@ impl BucketFingerprint {
 }
 
 /// A member's place in its bucket: a live member counts by its payload digest (stored when the
-/// payload was written, so a summary never rereads payloads and a withheld payload still
-/// counts), a removed member by its key alone.
+/// payload was written, so a summary never rereads payloads), a removed member by its key
+/// alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BucketMemberKind {
     Absent,
@@ -49,7 +50,7 @@ pub enum BucketMemberKind {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BucketSummaryState {
-    changed_at: CursorIndex,
+    changed_at: Rev,
     live_count: u32,
     dead_count: u32,
     live_fp: BucketFingerprint,
@@ -61,7 +62,7 @@ impl BucketSummaryState {
         &mut self,
         buck_id: BuckId,
         obj_id: ObjKey,
-        cursor: CursorIndex,
+        cursor: Rev,
         old: BucketMemberKind,
         new: BucketMemberKind,
     ) {
@@ -88,7 +89,7 @@ impl BucketSummaryState {
         }
     }
 
-    pub const fn changed_at(&self) -> CursorIndex {
+    pub const fn changed_at(&self) -> Rev {
         self.changed_at
     }
 

@@ -1,6 +1,9 @@
 use crate::interlude::*;
 
 use crate::AllowedStrat;
+use crate::part_store::PartStoreRead;
+use crate::part_store::bucket_summary::BucketSummary;
+use crate::rev::Rev;
 use crate::rpc::BigSyncRpcClient;
 use crate::rpc::RpcError;
 use crate::rpc::bucket::GetChangedBucketsError;
@@ -9,8 +12,6 @@ use crate::rpc::summary::PeerPartStratSummary;
 use crate::rpc::summary::PeerPartSummary;
 use crate::rpc::summary::PeerPartsSummaryError;
 use crate::rpc::summary::PeerPartsSummaryRequest;
-use crate::store::PartStoreReadOnly;
-use crate::store::bucket::BucketSummary;
 use crate::tasks::TaskCtx;
 use crate::tasks::TaskResultDeets;
 
@@ -32,14 +33,14 @@ structstruck::strike! {
             StratAllowedMismatch(AllowedStrat),
             Cursor(struct CursorStrat {
                 #![derive(PartialEq, Eq)]
-                pub latest_cursor: CursorIndex,
+                pub latest_cursor: Rev,
                 /// THe cursor that was last procssed from the
                 /// peer
-                pub last_cursor: CursorIndex,
+                pub last_cursor: Rev,
             }),
             Bucket(struct BucketStrat {
-                pub latest_cursor: CursorIndex,
-                pub last_cursor: CursorIndex,
+                pub latest_cursor: Rev,
+                pub last_cursor: Rev,
                 pub remote_depth: BuckLevel,
                 pub remote_len: u64,
                 pub initial_filtered_buckets: Vec<BucketSummary>,
@@ -73,7 +74,7 @@ impl DecidePeerStrategyTask {
     ) -> Result<TaskResultDeets, DecidePeerStrategyTaskError>
     where
         K: FutureForm,
-        PStore: PartStoreReadOnly<K>,
+        PStore: PartStoreRead<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
@@ -88,7 +89,7 @@ impl DecidePeerStrategyTask {
     ) -> Result<TaskResultDeets, DecidePeerStrategyErrorDeets>
     where
         K: FutureForm,
-        PStore: PartStoreReadOnly<K>,
+        PStore: PartStoreRead<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {

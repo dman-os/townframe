@@ -1,7 +1,8 @@
 use crate::interlude::*;
 
+use crate::part_store::PartStoreRead;
+use crate::rev::Rev;
 use crate::rpc::BigSyncRpcClient;
-use crate::store::PartStore;
 use crate::tasks::TaskCtx;
 use crate::tasks::TaskResultDeets;
 
@@ -9,7 +10,7 @@ use crate::tasks::TaskResultDeets;
 pub struct SetPeerPartCursorTask {
     pub peer_key: PeerKey,
     pub part_key: PartKey,
-    pub cursor: CursorIndex,
+    pub cursor: Rev,
 }
 
 impl SetPeerPartCursorTask {
@@ -20,7 +21,7 @@ impl SetPeerPartCursorTask {
     ) -> TaskResultDeets
     where
         K: FutureForm,
-        PStore: PartStore<K>,
+        PStore: PartStoreRead<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
@@ -31,7 +32,7 @@ impl SetPeerPartCursorTask {
     async fn run_run<K, PStore, Rpc, Rng>(self, cx: &mut TaskCtx<K, PStore, Rpc, Rng>)
     where
         K: FutureForm,
-        PStore: PartStore<K>,
+        PStore: PartStoreRead<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {

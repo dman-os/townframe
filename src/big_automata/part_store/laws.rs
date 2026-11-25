@@ -4,8 +4,8 @@
 //! from a test of its own. The harness mirrors every committed transaction into the
 //! [`PartOracle`] and, after each, compares the store's whole observable state with it
 //! ([`Harness::check`]): object states, bucket summaries (incremental against a recompute), the
-//! bucket list and leaves, member counts, read verdicts and readable parts, dirt counts, peer
-//! cursors and the full log.
+//! member counts, and per principal the part summaries, bucket lists and leaves, readable object
+//! states, peer cursors and authorized reads of every route, and the full log.
 //!
 //! | Law | Where |
 //! | --- | --- |
@@ -13,14 +13,18 @@
 //! | collapse and tombstones (members and grants) | [`collapse_and_tombstones`], every check |
 //! | pending → live when the payload arrives, stamped exactly once | [`pending_goes_live_once`] |
 //! | authorization follows current access, both grant and revoke orders; unknown ≠ denied | [`authorization_follows_current_access`] |
-//! | `Withheld` is distinct from deleted | [`withheld_is_not_deleted`] |
+//! | after a revocation commits, no authorized read returns any row of the part, at any rev | [`revocation_hides_every_row_of_the_part`], [`revocation_mid_stream_hides_the_unread_rows`] |
+//! | after a grant, an authorized read from the old cursor returns the backlog | [`grant_returns_the_backlog`] |
+//! | an object route follows the object's readable parts and carries only their rows | [`object_routes_follow_the_readable_parts`] |
+//! | an authorized read equals the oracle's filter of current access | every check, every authorized read in [`differential`] |
 //! | a route skips a removal of a membership added after its cursor | [`removals_skip_routes_that_never_saw_the_member`], every route read in [`differential`] |
 //! | incremental bucket summaries equal a recompute | every check |
-//! | `part_dirty_count` equals a count over the oracle's log | every check, [`dirty_count_counts_log_rows`] |
+//! | part summaries (member count, dirt) equal a count over the oracle's log | every check, [`dirty_count_counts_log_rows`] |
+//! | bucket reads, summaries and object states follow current access, revocation mid-walk included | [`revocation_hides_the_parts_buckets`], every check |
 //! | peer cursors only advance | [`peer_cursors_only_advance`], every check |
 //! | a transaction is atomic: nothing before commit, everything after, nothing on rollback | [`writes_are_atomic`] |
 //! | a write that changes nothing stamps nothing | [`unchanged_writes_stamp_nothing`] |
-//! | all of the above over generated sequences | [`differential`] |
+//! | all of the above over generated sequences, authorized reads by random principals included | [`differential`] |
 //! | the rev stream laws over the log | [`LogStreams`] with [`crate::rev::laws`] |
 
 use std::pin::pin;
@@ -33,15 +37,16 @@ use crate::okv::Selector;
 use crate::okv::laws::Bytes;
 use crate::okv::oracle::Oracle;
 use crate::part_store::AccessLevel;
+use crate::part_store::AuthorizedPage;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
 use crate::part_store::LogSelector;
+use crate::part_store::ObjPayload;
 use crate::part_store::PartStoreRead;
 use crate::part_store::PartStoreServe;
 use crate::part_store::PartStoreWrite;
 use crate::part_store::PayloadDigest;
-use crate::part_store::PayloadState;
 use crate::part_store::ReadVerdict;
 use crate::part_store::oracle::PartOracle;
 use crate::part_store::oracle::PartWrite;
@@ -65,6 +70,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
     type Store: PartStoreWrite<Sendable, Tx: Send>
         + PartStoreRead<Sendable>
         + PartStoreServe<Sendable>
+        + RevSource<Sendable, Key = LogKey, Value = LogEntry, Selector = LogSelector>
         + Clone
         + Send
         + Sync
@@ -87,8 +93,8 @@ pub fn part(index: u8) -> PartKey {
 pub fn principal(index: u8) -> PeerKey {
     PeerKey::new(&[200 + index])
 }
-pub fn payload(value: u8) -> PayloadState {
-    PayloadState::Payload(serde_json::json!(value))
+pub fn payload(value: u8) -> ObjPayload {
+    serde_json::json!(value)
 }
 const OBJS: u8 = 4;
 const PARTS: u8 = 3;
@@ -189,22 +195,21 @@ impl<B: Backend> Harness<B> {
                 .collect::<Vec<_>>(),
             "object states"
         );
+        // Every bucket on the path of every object in the universe, all levels, plus every
+        // level-1 bucket: every non-empty bucket and some empty ones.
+        let ids = objs
+            .iter()
+            .flat_map(|obj| {
+                let deepest = BuckId::deepest_from_obj_key(obj);
+                (0..=BuckId::MAX_LEVEL).map(move |level| deepest.to_level(level))
+            })
+            .chain((0..BuckId::ARITY).map(|index| BuckId::new(1, index)))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         for part in &parts {
             assert_eq!(store.member_count(part).await?, oracle.member_count(part));
-            // Incremental summaries against a recompute, every non-empty bucket, all levels.
-            let listed = store
-                .bucket_list(part, BuckId::ROOT, BuckId::MAX_LEVEL, usize::MAX)
-                .await?;
-            assert_eq!(
-                listed,
-                oracle.bucket_list(part, BuckId::ROOT, BuckId::MAX_LEVEL, usize::MAX),
-                "bucket list of {part}"
-            );
-            let ids = objs
-                .iter()
-                .map(BuckId::deepest_from_obj_key)
-                .chain([BuckId::ROOT, BuckId::new(1, 3)])
-                .collect::<Vec<_>>();
+            // Incremental summaries against a recompute.
             assert_eq!(
                 store.bucket_summaries(part, &ids).await?,
                 ids.iter()
@@ -212,39 +217,60 @@ impl<B: Backend> Harness<B> {
                     .collect::<Vec<_>>(),
                 "bucket summaries of {part}"
             );
-            assert_eq!(
-                store
-                    .bucket_leaves(part, BuckId::ROOT, None, usize::MAX)
-                    .await?,
-                oracle.bucket_leaves(part, BuckId::ROOT, None, usize::MAX),
-                "leaves of {part}"
-            );
+        }
+        for principal in &principals {
             for since in [0, latest / 2, latest] {
-                for principal in principals.iter().map(Some).chain([None]) {
+                let asked = parts
+                    .iter()
+                    .map(|part| (part.clone(), since))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    store.part_summaries(principal, &asked).await?,
+                    parts
+                        .iter()
+                        .map(|part| oracle.part_summary(principal, part, since))
+                        .collect::<Vec<_>>(),
+                    "summaries for {principal} since {since}"
+                );
+                for part in &parts {
                     assert_eq!(
-                        store.part_dirty_count(part, principal, since).await?,
-                        oracle.part_dirty_count(part, principal, since),
-                        "dirt of {part} for {principal:?} since {since}"
+                        store
+                            .bucket_list(
+                                principal,
+                                part,
+                                BuckId::ROOT,
+                                BuckId::MAX_LEVEL,
+                                since,
+                                usize::MAX
+                            )
+                            .await?,
+                        oracle.bucket_list(
+                            principal,
+                            part,
+                            BuckId::ROOT,
+                            BuckId::MAX_LEVEL,
+                            since,
+                            usize::MAX
+                        ),
+                        "bucket list of {part} for {principal} since {since}"
+                    );
+                    let bucks = [(BuckId::ROOT, None), (BuckId::new(1, 3), None)];
+                    assert_eq!(
+                        store
+                            .bucket_leaves(principal, part, &bucks, since, usize::MAX)
+                            .await?,
+                        oracle.bucket_leaves(principal, part, &bucks, since, usize::MAX),
+                        "leaves of {part} for {principal} since {since}"
                     );
                 }
             }
-        }
-        for principal in &principals {
             assert_eq!(
-                store.read_verdicts(principal, &parts).await?,
-                parts
-                    .iter()
-                    .map(|part| oracle.read_verdict(principal, part))
+                store.readable_obj_states(principal, &objs).await?,
+                objs.iter()
+                    .map(|obj| oracle.readable_obj_state(principal, obj))
                     .collect::<Vec<_>>(),
-                "verdicts for {principal}"
+                "objects readable by {principal}"
             );
-            for obj in &objs {
-                assert_eq!(
-                    store.readable_parts_of(principal, obj).await?,
-                    oracle.readable_parts_of(principal, obj),
-                    "parts of {obj} readable by {principal}"
-                );
-            }
             assert_eq!(
                 store.peer_part_cursors(principal, &parts).await?,
                 parts
@@ -256,6 +282,38 @@ impl<B: Backend> Harness<B> {
         if latest > 0 {
             self.read(&LogSelector::All, 0, latest, limits(usize::MAX, None))
                 .await?;
+            // Every route at once, and the object routes alone: with part routes beside them,
+            // an object route's own verdict is masked by the part routes carrying its rows.
+            let every_object = objs
+                .iter()
+                .map(|obj| (obj.clone(), 0))
+                .collect::<BTreeMap<_, _>>();
+            let route_sets = [
+                LogRoutes {
+                    parts: parts.iter().map(|part| (part.clone(), 0)).collect(),
+                    objects: every_object.clone(),
+                },
+                LogRoutes {
+                    parts: default(),
+                    objects: every_object,
+                },
+            ];
+            for principal in &principals {
+                for routes in &route_sets {
+                    for after in [0, latest / 2] {
+                        if after < latest {
+                            self.read_authorized(
+                                principal,
+                                routes,
+                                after,
+                                latest,
+                                limits(usize::MAX, None),
+                            )
+                            .await?;
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -275,6 +333,39 @@ impl<B: Backend> Harness<B> {
         assert_eq!(page, self.oracle.read(selector, after, until, limits));
         Ok(page)
     }
+
+    /// One authorized read, compared exactly with the oracle's filter of current access.
+    pub async fn read_authorized(
+        &self,
+        principal: &PeerKey,
+        routes: &LogRoutes,
+        after: Rev,
+        until: Rev,
+        limits: Limits,
+    ) -> Res<AuthorizedPage> {
+        let mut page = AuthorizedPage::default();
+        self.store
+            .read_authorized(principal, routes, after, until, limits, &mut page)
+            .await?;
+        assert_eq!(
+            page,
+            self.oracle
+                .read_authorized(principal, routes, after, until, limits),
+            "authorized read by {principal} of {routes:?} in ({after}, {until}]"
+        );
+        Ok(page)
+    }
+}
+
+/// The parts of a page's member rows.
+fn row_parts(page: &Page<LogKey, LogEntry>) -> BTreeSet<PartKey> {
+    page.entries
+        .iter()
+        .map(|entry| match &entry.key {
+            LogKey::Member { part, .. } => part.clone(),
+            LogKey::Access { .. } => panic!("a route read returned an access row"),
+        })
+        .collect()
 }
 
 fn add(members: &[(u8, u8)]) -> PartWrite {
@@ -459,21 +550,39 @@ pub async fn authorization_follows_current_access<B: Backend>(backend: &B) -> Re
             harness.commit(write).await?;
             harness.commit(vec![grant(&[(0, 0)])]).await?;
         }
-        let store = &harness.store;
+        let routes = LogRoutes {
+            parts: [(part(0), 0), (part(1), 0)].into(),
+            objects: [(obj(0), 0)].into(),
+        };
+        let latest = harness.oracle.latest_rev();
+        let all = limits(usize::MAX, None);
+        let page = harness
+            .read_authorized(&principal(0), &routes, 0, latest, all)
+            .await?;
         assert_eq!(
-            store.readable_parts_of(&principal(0), &obj(0)).await?,
-            vec![part(0)]
+            (page.parts, page.objects),
+            (
+                vec![ReadVerdict::Permitted, ReadVerdict::UnknownPart],
+                vec![ReadVerdict::Permitted]
+            )
         );
+        let page = harness
+            .read_authorized(&principal(1), &routes, 0, latest, all)
+            .await?;
         assert_eq!(
-            store
-                .read_verdicts(&principal(0), &[part(0), part(1)])
-                .await?,
-            vec![ReadVerdict::Permitted, ReadVerdict::UnknownPart]
+            (page.parts, page.objects),
+            (
+                vec![ReadVerdict::Denied, ReadVerdict::UnknownPart],
+                vec![ReadVerdict::Denied]
+            )
         );
-        assert_eq!(
-            store.read_verdicts(&principal(1), &[part(0)]).await?,
-            vec![ReadVerdict::Denied]
-        );
+        let readable = harness
+            .store
+            .readable_obj_states(&principal(0), &[obj(0)])
+            .await?
+            .remove(0)
+            .expect("object 0 lives in a readable part");
+        assert_eq!(readable.parts, [part(0)].into());
 
         // Revocation, before or after a later write: no access either way.
         if grant_first {
@@ -483,46 +592,360 @@ pub async fn authorization_follows_current_access<B: Backend>(backend: &B) -> Re
             harness.commit(vec![set(&[(0, 2)])]).await?;
             harness.commit(vec![revoke(&[(0, 0)])]).await?;
         }
-        let store = &harness.store;
+        let latest = harness.oracle.latest_rev();
+        let page = harness
+            .read_authorized(&principal(0), &routes, 0, latest, all)
+            .await?;
         assert_eq!(
-            store.readable_parts_of(&principal(0), &obj(0)).await?,
-            vec![]
+            (page.parts, page.objects),
+            (
+                vec![ReadVerdict::Denied, ReadVerdict::UnknownPart],
+                vec![ReadVerdict::Denied]
+            )
         );
         assert_eq!(
-            store.read_verdicts(&principal(0), &[part(0)]).await?,
-            vec![ReadVerdict::Denied]
+            harness
+                .store
+                .readable_obj_states(&principal(0), &[obj(0)])
+                .await?,
+            vec![None]
         );
     }
     Ok(())
 }
 
-/// Withholding a payload keeps the object a live member (its rows re-stamped, live in its
-/// buckets, with the digest it was withheld with); removing it from a part is what kills the
-/// membership.
-pub async fn withheld_is_not_deleted<B: Backend>(backend: &B) -> Res<()> {
+/// The bucket reads, part summaries and object states a responder serves follow current access
+/// like the log does: once a revocation commits, every one of them answers `None` for the part,
+/// including the next page of a leaf walk that had started, and an object's state stops naming
+/// the part. A grant serves them again.
+pub async fn revocation_hides_the_parts_buckets<B: Backend>(backend: &B) -> Res<()> {
     let mut harness = Harness::open(backend).await?;
-    harness.commit(vec![set(&[(0, 1)]), add(&[(0, 0)])]).await?;
-    let digest = PayloadDigest::of(&serde_json::json!(1))?;
-    let withheld = PartWrite::SetPayloads(vec![(obj(0), PayloadState::Withheld(digest))]);
-    assert_eq!(harness.commit(vec![withheld]).await?, Some(2));
-    let state = harness.store.obj_states(&[obj(0)]).await?.remove(0);
-    let state = state.expect("a withheld object still has a state");
-    assert_eq!(
-        (state.payload, state.digest, state.parts),
-        (PayloadState::Withheld(digest), digest, [part(0)].into())
-    );
-    assert_eq!(harness.store.member_count(&part(0)).await?, 1);
+    harness
+        .commit(vec![
+            set(&[(0, 1), (1, 1), (2, 1)]),
+            add(&[(0, 0), (1, 0), (2, 0), (2, 1)]),
+            grant(&[(0, 0), (1, 0)]),
+        ])
+        .await?;
+    let list = |harness: &Harness<B>| {
+        let store = harness.store.clone();
+        async move {
+            store
+                .bucket_list(
+                    &principal(0),
+                    &part(0),
+                    BuckId::ROOT,
+                    BuckId::MAX_LEVEL,
+                    0,
+                    usize::MAX,
+                )
+                .await
+        }
+    };
+    let listed = list(&harness).await?.expect("the part is readable");
+    assert!(!listed.is_empty());
+    let first = harness
+        .store
+        .bucket_leaves(&principal(0), &part(0), &[(BuckId::ROOT, None)], 0, 1)
+        .await?
+        .expect("the part is readable")
+        .remove(0)
+        .remove(0);
+
+    harness.commit(vec![revoke(&[(0, 0)])]).await?;
+    assert_eq!(list(&harness).await?, None);
     assert_eq!(
         harness
             .store
-            .part_dirty_count(&part(0), None, 1)
-            .await?
-            .member_changes,
-        1,
-        "the withheld object's row was re-stamped, live"
+            .bucket_leaves(
+                &principal(0),
+                &part(0),
+                &[(BuckId::ROOT, Some(first.obj))],
+                0,
+                usize::MAX
+            )
+            .await?,
+        None,
+        "the walk's next leaf page"
     );
-    harness.commit(vec![remove(&[(0, 0)])]).await?;
-    assert_eq!(harness.store.member_count(&part(0)).await?, 0);
+    assert_eq!(
+        harness
+            .store
+            .part_summaries(&principal(0), &[(part(0), 0), (part(1), 0)])
+            .await?
+            .into_iter()
+            .map(|summary| summary.is_some())
+            .collect::<Vec<_>>(),
+        vec![false, true]
+    );
+    let states = harness
+        .store
+        .readable_obj_states(&principal(0), &[obj(0), obj(2)])
+        .await?;
+    assert_eq!(states[0], None, "object 0 lives only in the revoked part");
+    assert_eq!(
+        states[1].as_ref().map(|state| state.parts.clone()),
+        Some([part(1)].into()),
+        "object 2 is still readable through part 1, and no longer names part 0"
+    );
+
+    harness.commit(vec![grant(&[(0, 0)])]).await?;
+    assert_eq!(list(&harness).await?, Some(listed));
+    Ok(())
+}
+
+/// Once a revocation commits, no authorized read by that principal returns a row of the part:
+/// not from any cursor, and not the rows written before the revocation either. An access row
+/// records a change; it never grants the rows before it. The part route is `Denied`; an object
+/// route stays `Permitted` while the object lives in another readable part and then carries only
+/// that part's rows; an object only in the revoked part is `Denied`.
+pub async fn revocation_hides_every_row_of_the_part<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    // Rows of part 0 at revs 1 to 4, and of part 1 at revs 1 and 2 (object 1 lives in both).
+    harness
+        .commit(vec![
+            set(&[(0, 1), (1, 1), (2, 1)]),
+            add(&[(0, 0), (1, 0), (1, 1), (2, 1)]),
+            grant(&[(0, 0), (1, 0)]),
+        ])
+        .await?;
+    harness.commit(vec![set(&[(0, 2), (1, 2)])]).await?;
+    harness.commit(vec![remove(&[(1, 0)])]).await?;
+    harness
+        .commit(vec![set(&[(3, 1)]), add(&[(3, 0), (1, 0)])])
+        .await?;
+    let revoked_at = harness
+        .commit(vec![revoke(&[(0, 0)])])
+        .await?
+        .expect("the revocation stamps");
+    let routes = LogRoutes {
+        parts: [(part(0), 0), (part(1), 0)].into(),
+        objects: [(obj(0), 0), (obj(1), 0), (obj(3), 0)].into(),
+    };
+    let all = limits(usize::MAX, None);
+    let unauthorized = harness
+        .read(&LogSelector::Routes(routes.clone()), 0, revoked_at, all)
+        .await?;
+    assert!(
+        row_parts(&unauthorized).contains(&part(0)),
+        "the part has rows to hide"
+    );
+    for after in 0..revoked_at {
+        let page = harness
+            .read_authorized(&principal(0), &routes, after, revoked_at, all)
+            .await?;
+        assert_eq!(
+            page.parts,
+            vec![ReadVerdict::Denied, ReadVerdict::Permitted]
+        );
+        assert_eq!(
+            page.objects,
+            vec![
+                ReadVerdict::Denied,
+                ReadVerdict::Permitted,
+                ReadVerdict::Denied
+            ]
+        );
+        assert!(
+            !row_parts(&page.rows).contains(&part(0)),
+            "a revoked part's row was served from cursor {after}: {page:?}"
+        );
+    }
+    // From 0, part 1's rows still come through, so the read is not vacuously empty.
+    let page = harness
+        .read_authorized(&principal(0), &routes, 0, revoked_at, all)
+        .await?;
+    assert_eq!(row_parts(&page.rows), [part(1)].into());
+    Ok(())
+}
+
+/// A revocation that commits between two pages of an authorized read cuts the reader off at
+/// once: the next page carries none of the part's rows, though they were written before the
+/// revocation and sit past the reader's progress.
+pub async fn revocation_mid_stream_hides_the_unread_rows<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    // Each of revs 1 to 3 writes one row of part 0 and one of part 1, on distinct keys so the
+    // log keeps all six.
+    harness
+        .commit(vec![
+            set(&[(0, 1), (1, 1), (2, 1), (3, 1)]),
+            add(&[(0, 0), (1, 1)]),
+            grant(&[(0, 0), (1, 0)]),
+        ])
+        .await?;
+    harness.commit(vec![add(&[(2, 0), (3, 1)])]).await?;
+    harness.commit(vec![add(&[(1, 0), (0, 1)])]).await?;
+    let routes = LogRoutes {
+        parts: [(part(0), 0), (part(1), 0)].into(),
+        objects: default(),
+    };
+    let written = harness.oracle.latest_rev();
+    // One revision per page: the first page reads rev 1, both parts.
+    let page = harness
+        .read_authorized(&principal(0), &routes, 0, written, limits(1, None))
+        .await?;
+    assert_eq!(page.rows.through, 1);
+    assert_eq!(row_parts(&page.rows), [part(0), part(1)].into());
+
+    let revoked_at = harness
+        .commit(vec![revoke(&[(0, 0)])])
+        .await?
+        .expect("the revocation stamps");
+    let mut after = page.rows.through;
+    while after < written {
+        let page = harness
+            .read_authorized(&principal(0), &routes, after, revoked_at, limits(1, None))
+            .await?;
+        assert_eq!(
+            page.parts,
+            vec![ReadVerdict::Denied, ReadVerdict::Permitted]
+        );
+        assert_eq!(
+            row_parts(&page.rows),
+            [part(1)].into(),
+            "the page after the revocation, from {after}"
+        );
+        after = page.rows.through;
+    }
+    Ok(())
+}
+
+/// An object route is permitted while the object lives in a part the principal may read, and
+/// then carries only the object's rows in readable parts: a row names its part, so a row of an
+/// unreadable part would disclose that membership. Once the object leaves its last readable
+/// part the route is denied and carries nothing, not even that removal; the part's own route
+/// still carries it.
+pub async fn object_routes_follow_the_readable_parts<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    harness
+        .commit(vec![
+            set(&[(0, 1)]),
+            add(&[(0, 0), (0, 1)]),
+            grant(&[(0, 0)]),
+        ])
+        .await?;
+    let object_route = |bound| LogRoutes {
+        parts: default(),
+        objects: [(obj(0), bound)].into(),
+    };
+    let all = limits(usize::MAX, None);
+    let page = harness
+        .read_authorized(&principal(0), &object_route(0), 0, 1, all)
+        .await?;
+    assert_eq!(page.objects, vec![ReadVerdict::Permitted]);
+    assert_eq!(row_parts(&page.rows), [part(0)].into());
+
+    let removed_at = harness
+        .commit(vec![remove(&[(0, 0)])])
+        .await?
+        .expect("the removal stamps");
+    let page = harness
+        .read_authorized(&principal(0), &object_route(1), 1, removed_at, all)
+        .await?;
+    assert_eq!(page.objects, vec![ReadVerdict::Denied]);
+    assert!(page.rows.entries.is_empty(), "{page:?}");
+    let part_route = LogRoutes {
+        parts: [(part(0), 1)].into(),
+        objects: default(),
+    };
+    let page = harness
+        .read_authorized(&principal(0), &part_route, 1, removed_at, all)
+        .await?;
+    assert_eq!(page.parts, vec![ReadVerdict::Permitted]);
+    assert_eq!(
+        page.rows
+            .entries
+            .iter()
+            .map(|entry| (entry.key.clone(), entry.value.is_some()))
+            .collect::<Vec<_>>(),
+        vec![(
+            LogKey::Member {
+                obj: obj(0),
+                part: part(0)
+            },
+            false
+        )]
+    );
+    Ok(())
+}
+
+/// A denied route reads nothing, so its reader's cursor stays put; once access is granted,
+/// reading from that cursor returns the whole backlog past it: every row the unauthorized read
+/// of the same route returns, removals included, and nothing at or below the cursor.
+pub async fn grant_returns_the_backlog<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    harness
+        .commit(vec![set(&[(0, 1), (1, 1)]), add(&[(0, 0), (1, 0)])])
+        .await?;
+    // The reader's cursor: it saw both memberships go live, before it was denied.
+    let cursor = harness.oracle.latest_rev();
+    harness.commit(vec![set(&[(0, 2)])]).await?;
+    harness.commit(vec![remove(&[(1, 0)])]).await?;
+    harness.commit(vec![set(&[(2, 1)]), add(&[(2, 0)])]).await?;
+    let routes = LogRoutes {
+        parts: [(part(0), cursor)].into(),
+        objects: default(),
+    };
+    let all = limits(usize::MAX, None);
+    let latest = harness.oracle.latest_rev();
+    let denied = harness
+        .read_authorized(&principal(0), &routes, cursor, latest, all)
+        .await?;
+    assert_eq!(denied.parts, vec![ReadVerdict::Denied]);
+    assert!(denied.rows.entries.is_empty());
+
+    let granted_at = harness
+        .commit(vec![grant(&[(0, 0)])])
+        .await?
+        .expect("the grant stamps");
+    let backlog = harness
+        .read_authorized(&principal(0), &routes, cursor, granted_at, all)
+        .await?;
+    assert_eq!(backlog.parts, vec![ReadVerdict::Permitted]);
+    let expected = harness
+        .read(
+            &LogSelector::Routes(routes.clone()),
+            cursor,
+            granted_at,
+            all,
+        )
+        .await?;
+    assert_eq!(backlog.rows, expected);
+    assert_eq!(
+        backlog
+            .rows
+            .entries
+            .iter()
+            .map(|entry| (entry.key.clone(), entry.rev, entry.value.is_some()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                LogKey::Member {
+                    obj: obj(0),
+                    part: part(0)
+                },
+                2,
+                true
+            ),
+            (
+                LogKey::Member {
+                    obj: obj(1),
+                    part: part(0)
+                },
+                3,
+                false
+            ),
+            (
+                LogKey::Member {
+                    obj: obj(2),
+                    part: part(0)
+                },
+                4,
+                true
+            ),
+        ],
+        "the content change, the removal and the new member, all past the cursor"
+    );
     Ok(())
 }
 
@@ -536,13 +959,7 @@ pub async fn a_payload_with_no_canonical_form_is_refused<B: Backend>(backend: &B
     let mut tx = backend.begin(&harness.store).await?;
     let refused = harness
         .store
-        .set_payloads(
-            &mut tx,
-            vec![
-                (obj(1), payload(1)),
-                (obj(0), PayloadState::Payload(unsafe_int)),
-            ],
-        )
+        .set_payloads(&mut tx, vec![(obj(1), payload(1)), (obj(0), unsafe_int)])
         .await;
     assert!(
         refused.is_err(),
@@ -562,8 +979,10 @@ pub async fn a_payload_with_no_canonical_form_is_refused<B: Backend>(backend: &B
     Ok(())
 }
 
-/// `part_dirty_count` counts the part's log rows past the cursor: member rows live or removed,
-/// and the principal's own access row, granted or revoked.
+/// A part's summary counts its live members and its log rows past the cursor: member rows live
+/// or removed, and the asking principal's own access row. Its latest cursor is the latest
+/// member row's rev, which another principal's grant does not move. A principal that may not
+/// read the part gets no summary.
 pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
     let mut harness = Harness::open(backend).await?;
     harness
@@ -573,33 +992,32 @@ pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
     harness
         .commit(vec![remove(&[(1, 0)]), revoke(&[(0, 1)])])
         .await?;
-    let store = &harness.store;
-    let count = |member_changes, access_changes| crate::part_store::PartDirtyCount {
-        member_changes,
-        access_changes,
+    harness.commit(vec![grant(&[(0, 2)])]).await?;
+    let summaries = |principal_index| {
+        let store = harness.store.clone();
+        async move {
+            let asked = [0, 1, 3].map(|since| (part(0), since));
+            store
+                .part_summaries(&principal(principal_index), &asked)
+                .await
+        }
+    };
+    let summary = |member_changes, access_changes| {
+        Some(crate::part_store::PartSummary {
+            latest_cursor: 3,
+            member_count: 1,
+            deepest_bucket_level: BuckId::MAX_LEVEL,
+            dirty: crate::part_store::PartDirtyCount {
+                member_changes,
+                access_changes,
+            },
+        })
     };
     assert_eq!(
-        store
-            .part_dirty_count(&part(0), Some(&principal(0)), 0)
-            .await?,
-        count(2, 1)
+        summaries(0).await?,
+        vec![summary(2, 1), summary(1, 1), summary(0, 0)]
     );
-    assert_eq!(
-        store
-            .part_dirty_count(&part(0), Some(&principal(0)), 1)
-            .await?,
-        count(1, 1)
-    );
-    assert_eq!(
-        store
-            .part_dirty_count(&part(0), Some(&principal(1)), 2)
-            .await?,
-        count(1, 1)
-    );
-    assert_eq!(
-        store.part_dirty_count(&part(0), None, 3).await?,
-        count(0, 0)
-    );
+    assert_eq!(summaries(1).await?, vec![None, None, None], "revoked");
     Ok(())
 }
 
@@ -763,7 +1181,26 @@ strike! {
             until: u8,
             limits: Limits,
         },
+        /// An authorized read by `principal`, windowed like `Read`.
+        ReadAuthorized {
+            principal: PeerKey,
+            routes: LogRoutes,
+            after: u8,
+            until: u8,
+            limits: Limits,
+        },
     }
+}
+
+/// A read window `(after, until]` from two fractions (of 256) of the stamped revs, or `None`
+/// before anything is stamped.
+fn window(latest: Rev, after: u8, until: u8) -> Option<(Rev, Rev)> {
+    if latest == 0 {
+        return None;
+    }
+    let after = u64::from(after) * latest / 256;
+    let until = after + 1 + u64::from(until) * (latest - after) / 256;
+    Some((after, until))
 }
 
 /// Every law's check over an arbitrary run of commits, rollbacks, cursor moves and log reads.
@@ -782,13 +1219,22 @@ pub async fn differential<B: Backend>(backend: &B, ops: Vec<PartOp>) -> Res<()> 
                 until,
                 limits,
             } => {
-                let latest = harness.oracle.latest_rev();
-                if latest == 0 {
-                    continue;
+                if let Some((after, until)) = window(harness.oracle.latest_rev(), after, until) {
+                    harness.read(&selector, after, until, limits).await?;
                 }
-                let after = u64::from(after) * latest / 256;
-                let until = after + 1 + u64::from(until) * (latest - after) / 256;
-                harness.read(&selector, after, until, limits).await?;
+            }
+            PartOp::ReadAuthorized {
+                principal,
+                routes,
+                after,
+                until,
+                limits,
+            } => {
+                if let Some((after, until)) = window(harness.oracle.latest_rev(), after, until) {
+                    harness
+                        .read_authorized(&principal, &routes, after, until, limits)
+                        .await?;
+                }
             }
         }
     }
@@ -804,13 +1250,8 @@ fn any_part() -> impl Strategy<Value = PartKey> {
 fn any_principal() -> impl Strategy<Value = PeerKey> {
     (0..PRINCIPALS).prop_map(principal)
 }
-fn any_payload() -> impl Strategy<Value = PayloadState> {
-    prop_oneof![
-        3 => (0u8..3).prop_map(payload),
-        1 => (0u8..3).prop_map(|value| {
-            PayloadState::Withheld(PayloadDigest::of(&serde_json::json!(value)).expect(ERROR_IMPOSSIBLE))
-        }),
-    ]
+fn any_payload() -> impl Strategy<Value = ObjPayload> {
+    (0u8..3).prop_map(payload)
 }
 fn any_level() -> impl Strategy<Value = AccessLevel> {
     prop_oneof![
@@ -834,15 +1275,19 @@ pub fn part_writes() -> impl Strategy<Value = Vec<PartWrite>> {
     vec(write, 1..4)
 }
 
-fn any_selector() -> impl Strategy<Value = LogSelector> {
+fn any_routes() -> impl Strategy<Value = LogRoutes> {
     use proptest::collection::btree_map;
+    (
+        btree_map(any_part(), 0u64..6, 0..3),
+        btree_map(any_obj(), 0u64..6, 0..3),
+    )
+        .prop_map(|(parts, objects)| LogRoutes { parts, objects })
+}
+
+fn any_selector() -> impl Strategy<Value = LogSelector> {
     prop_oneof![
         Just(LogSelector::All),
-        (
-            btree_map(any_part(), 0u64..6, 0..3),
-            btree_map(any_obj(), 0u64..6, 0..3)
-        )
-            .prop_map(|(parts, objects)| LogSelector::Routes(LogRoutes { parts, objects })),
+        any_routes().prop_map(LogSelector::Routes),
     ]
 }
 
@@ -854,6 +1299,11 @@ pub fn part_ops() -> impl Strategy<Value = Vec<PartOp>> {
         1 => vec((any_principal(), any_part(), 0u64..8), 1..3).prop_map(PartOp::SetPeerCursors),
         2 => (any_selector(), any::<u8>(), any::<u8>(), any_limits()).prop_map(
             |(selector, after, until, limits)| PartOp::Read { selector, after, until, limits }
+        ),
+        2 => (any_principal(), any_routes(), any::<u8>(), any::<u8>(), any_limits()).prop_map(
+            |(principal, routes, after, until, limits)| PartOp::ReadAuthorized {
+                principal, routes, after, until, limits
+            }
         ),
     ];
     vec(op, 0..25)
@@ -900,7 +1350,7 @@ impl<B: Backend> LogStreams<B> {
                     let obj = ObjKey::new(&key);
                     writes.push(PartWrite::SetPayloads(vec![(
                         obj.clone(),
-                        PayloadState::Payload(serde_json::json!(value)),
+                        serde_json::json!(value),
                     )]));
                     writes.push(PartWrite::AddMembers(vec![(obj, part(STREAM_PART))]));
                 }
@@ -917,7 +1367,7 @@ impl<B: Backend> LogStreams<B> {
             let next = self.with_oracle(|oracle| oracle.latest_rev() + 1);
             writes.push(PartWrite::SetPayloads(vec![(
                 obj(FILLER_OBJ),
-                PayloadState::Payload(serde_json::json!(next)),
+                serde_json::json!(next),
             )]));
             writes.push(PartWrite::AddMembers(vec![(
                 obj(FILLER_OBJ),

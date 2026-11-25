@@ -2,12 +2,13 @@ use crate::tasks::MachineTaskDeets;
 use crate::tasks::decide_peer_strat::DecidePeerStrategyTask;
 
 use super::*;
+use crate::rev::Rev;
 
 structstruck::strike! {
     struct PeerState {
         sync_workers: Map<ObjKey, struct SyncWorkerState {
             task_id: TaskId,
-            cursors: Set<CursorIndex>,
+            cursors: Set<Rev>,
             part_hints: Set<PartKey>,
             remote_payload: Option<crate::part_store::ObjPayload>,
         }>,
@@ -22,7 +23,7 @@ structstruck::strike! {
         pending_removals: Map<ObjKey, struct PendingRemoval {
             remaining_hints: Set<PartKey>,
             re_added_parts: Set<PartKey>,
-            cursors: Set<CursorIndex>,
+            cursors: Set<Rev>,
             remote_payload: Option<crate::part_store::ObjPayload>,
         }>,
         /// One in-flight page request per replay route. Pages are discrete, so
@@ -80,13 +81,13 @@ structstruck::strike! {
             strat: enum PeerPartStrategy {
                 Pending(TaskId),
                 Bucket(struct BucketState {
-                    replay_cursor: CursorIndex,
+                    replay_cursor: Rev,
                     machine: Box<BucketMachine>,
                     active_list_tasks: Map<TaskId, ListBucketsTask>,
                     active_leaf_tasks: Map<TaskId, LeafBucketsTask>,
                 }),
                 Cursor(struct CursorState {
-                    replay_cursor: CursorIndex,
+                    replay_cursor: Rev,
                 }),
             }
         }>

@@ -849,3 +849,19 @@ of fix-in-place or fold into the `big_repo::runtime` design:
 ## Log
 
 - 2026-11-17: Ledger opened. W1.1 and W1.2 done in the working tree.
+
+## Hash scheme review (operator, 2026-11-18)
+
+Review every hash scheme across the repo at some point, for consistency and for what each one
+is relied on for. Known so far:
+- **`utils_rs::hash`:** `hash_obj` is SHA-256 over RFC 8785 JSON (`json_canon`), multihash,
+  base32. The blake3 helpers are multihash, base58.
+- **big_automata:** `PayloadDigest` is blake3 over RFC 8785 JSON with a domain tag. Bucket and
+  leaf fingerprints are seeded SipHash over the digest, with domain tags (`-v2`).
+- **`cheapstr`:** `DefaultHasher`, fine in process only.
+- **To find:** keyhive/subduction content addressing, sedimentree, `big_blobs`, cabinet datums,
+  and any `std::hash::Hash`-derived value that crosses a process or a peer (it isn't stable
+  across Rust versions).
+
+Questions: one canonicalization (JCS) everywhere? multihash prefix for stored digests? domain
+separation tags everywhere?

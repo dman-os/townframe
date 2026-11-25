@@ -1,10 +1,12 @@
 use crate::interlude::*;
 
+use crate::rev::Rev;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerPartsSummaryRequest {
     /// The parts that that are desired to be replayed from the peer
     /// and the cursor on which replay stopped last
-    pub parts: Map<PartKey, CursorIndex>,
+    pub parts: Map<PartKey, Rev>,
 }
 
 structstruck::strike! {
@@ -17,7 +19,7 @@ structstruck::strike! {
                 ReplayAvail(
                     Vec<pub enum PeerPartStratSummary {
                         CursorPartSummary(pub struct {
-                            pub latest_cursor: CursorIndex,
+                            pub latest_cursor: Rev,
                             /// New events visible to the part since the provided cursor.
                             /// A simple latest_cursor - cur_cursor won't do
                             /// since the cursor is global across parts

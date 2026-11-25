@@ -17,26 +17,27 @@ use tokio::sync::watch;
 use crate::interlude::*;
 use crate::okv::memory::OkvTable;
 use crate::part_store::AccessLevel;
+use crate::part_store::AuthorizedPage;
 use crate::part_store::LeafEntry;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
+use crate::part_store::LogRoutes;
 use crate::part_store::LogSelector;
+use crate::part_store::ObjPayload;
 use crate::part_store::ObjState;
-use crate::part_store::PartDirtyCount;
 use crate::part_store::PartStoreRead;
 use crate::part_store::PartStoreServe;
 use crate::part_store::PartStoreWrite;
+use crate::part_store::PartSummary;
 use crate::part_store::PayloadDigest;
-use crate::part_store::PayloadState;
-use crate::part_store::ReadVerdict;
+use crate::part_store::bucket_summary::BucketSummary;
+use crate::part_store::bucket_summary::BucketSummaryState;
 use crate::part_store::log_row_bytes;
 use crate::rev::Limits;
 use crate::rev::Page;
 use crate::rev::Rev;
 use crate::rev::RevSource;
 use crate::rev::RevWatch;
-use crate::store::bucket::BucketSummary;
-use crate::store::bucket::BucketSummaryState;
 
 mod access;
 mod buckets;
@@ -50,14 +51,15 @@ strike! {
         /// `Member` and `Access` rows, stamped with the global cursor.
         log: OkvTable<LogKey, LogEntry>,
         objs: BTreeMap<ObjKey, struct ObjRow {
-            payload: PayloadState,
+            payload: ObjPayload,
             /// Computed when the payload was written.
             digest: PayloadDigest,
         }>,
         parts: BTreeMap<PartKey,
             #[derive(Default)]
             struct PartRow {
-                /// The rev of the part's latest log row (member or access); 0 for none.
+                /// The rev of the part's latest member row; 0 for none. Access rows do not move
+                /// it (see `PartSummary::latest_cursor`).
                 latest_cursor: Rev,
             }
         >,
@@ -69,8 +71,7 @@ strike! {
             /// skip the removal for a reader that never saw the membership ([`LogSelector`]).
             first_added_at: Rev,
         }>,
-        /// Memberships added before the object had a payload state: no log row, no bucket
-        /// entry.
+        /// Memberships added before the object had a payload: no log row, no bucket entry.
         pending: BTreeSet<(ObjKey, PartKey)>,
         /// Each part's bucket summaries, every level, maintained per transition.
         buckets: BTreeMap<(PartKey, BuckId), BucketSummaryState>,
@@ -103,7 +104,7 @@ enum Staged {
     EnsureParts(Vec<PartKey>),
     /// Each payload with its digest, computed while staging so the hashing stays outside the
     /// lock and a payload with no canonical form is refused before anything is staged.
-    SetPayloads(Vec<(ObjKey, PayloadState, PayloadDigest)>),
+    SetPayloads(Vec<(ObjKey, ObjPayload, PayloadDigest)>),
     AddMembers(Vec<(ObjKey, PartKey)>),
     RemoveMembers(Vec<(ObjKey, PartKey)>),
     GrantAccess(Vec<(PartKey, PeerKey, AccessLevel)>),
@@ -185,18 +186,19 @@ impl State {
         }
     }
 
-    /// Write one log row at `rev` and move its part's cursor. The part row is created if the
-    /// part was not known.
+    /// Write one log row at `rev`. A member row moves its part's cursor; any row creates the
+    /// part row if the part was not known.
     fn stamp(&mut self, rev: Rev, key: LogKey, value: Option<LogEntry>) {
-        let part = match &key {
-            LogKey::Member { part, .. } | LogKey::Access { part, .. } => part,
+        let (part, is_member) = match &key {
+            LogKey::Member { part, .. } => (part, true),
+            LogKey::Access { part, .. } => (part, false),
         };
-        match self.parts.get_mut(part) {
-            Some(row) => row.latest_cursor = rev,
-            None => {
-                self.parts
-                    .insert(part.clone(), PartRow { latest_cursor: rev });
-            }
+        let row = match self.parts.get_mut(part) {
+            Some(row) => row,
+            None => self.parts.entry(part.clone()).or_default(),
+        };
+        if is_member {
+            row.latest_cursor = rev;
         }
         self.log.write(rev, key, value);
     }
@@ -237,12 +239,12 @@ impl<Async: FutureForm> PartStoreWrite<Async> for MemoryPartStore {
     fn set_payloads<'a>(
         &'a self,
         tx: &'a mut MemoryPartTx,
-        payloads: Vec<(ObjKey, PayloadState)>,
+        payloads: Vec<(ObjKey, ObjPayload)>,
     ) -> Async::Future<'a, Res<()>> {
         let digested = payloads
             .into_iter()
             .map(|(obj, payload)| {
-                let digest = payload.digest()?;
+                let digest = PayloadDigest::of(&payload)?;
                 Ok((obj, payload, digest))
             })
             .collect::<Res<Vec<_>>>();
@@ -359,6 +361,9 @@ impl<Async: FutureForm> RevSource<Async> for MemoryPartStore {
 
     /// Copies one bounded page of the log out under the lock, applying the route rule for
     /// removals with the `added_at` the members table keeps.
+    ///
+    /// Unauthorized: every selected row, whoever asks. For the store's local consumers; a
+    /// responder serves a peer through [`PartStoreServe::read_authorized`].
     fn read<'a>(
         &'a self,
         selector: &'a LogSelector,
@@ -392,61 +397,85 @@ impl<Async: FutureForm> RevSource<Async> for MemoryPartStore {
 
 #[future_form(Sendable, Local)]
 impl<Async: FutureForm> PartStoreServe<Async> for MemoryPartStore {
-    fn read_verdicts<'a>(
+    /// Decides every route and copies the rows out in one critical section, so a commit
+    /// (a revocation included) lands either wholly before the read or wholly after it.
+    fn read_authorized<'a>(
         &'a self,
         principal: &'a PeerKey,
-        parts: &'a [PartKey],
-    ) -> Async::Future<'a, Res<Vec<ReadVerdict>>> {
+        routes: &'a LogRoutes,
+        after: Rev,
+        until: Rev,
+        limits: Limits,
+        page: &'a mut AuthorizedPage,
+    ) -> Async::Future<'a, Res<()>> {
+        self.with_state(|state| {
+            state.read_authorized(principal, routes, after, until, limits, page);
+        });
+        Async::ready(Ok(()))
+    }
+
+    fn part_summaries<'a>(
+        &'a self,
+        principal: &'a PeerKey,
+        parts: &'a [(PartKey, Rev)],
+    ) -> Async::Future<'a, Res<Vec<Option<PartSummary>>>> {
         Async::ready(Ok(self.with_state(|state| {
             parts
                 .iter()
-                .map(|part| state.read_verdict(principal, part))
+                .map(|(part, since)| {
+                    state
+                        .permits(principal, part)
+                        .then(|| state.part_summary(principal, part, *since))
+                })
                 .collect()
         })))
     }
 
-    fn readable_parts_of<'a>(
+    fn readable_obj_states<'a>(
         &'a self,
         principal: &'a PeerKey,
-        obj: &'a ObjKey,
-    ) -> Async::Future<'a, Res<Vec<PartKey>>> {
-        Async::ready(Ok(
-            self.with_state(|state| state.readable_parts_of(principal, obj))
-        ))
-    }
-
-    fn part_dirty_count<'a>(
-        &'a self,
-        part: &'a PartKey,
-        principal: Option<&'a PeerKey>,
-        since: Rev,
-    ) -> Async::Future<'a, Res<PartDirtyCount>> {
-        Async::ready(Ok(
-            self.with_state(|state| state.part_dirty_count(part, principal, since))
-        ))
+        objs: &'a [ObjKey],
+    ) -> Async::Future<'a, Res<Vec<Option<ObjState>>>> {
+        Async::ready(Ok(self.with_state(|state| {
+            objs.iter()
+                .map(|obj| state.readable_obj_state(principal, obj))
+                .collect()
+        })))
     }
 
     fn bucket_list<'a>(
         &'a self,
+        principal: &'a PeerKey,
         part: &'a PartKey,
         from: BuckId,
         to_level: BuckLevel,
+        since: Rev,
         limit: usize,
-    ) -> Async::Future<'a, Res<Vec<BucketSummary>>> {
-        Async::ready(Ok(
-            self.with_state(|state| state.bucket_list(part, from, to_level, limit))
-        ))
+    ) -> Async::Future<'a, Res<Option<Vec<BucketSummary>>>> {
+        Async::ready(Ok(self.with_state(|state| {
+            state
+                .permits(principal, part)
+                .then(|| state.bucket_list(part, from, to_level, since, limit))
+        })))
     }
 
     fn bucket_leaves<'a>(
         &'a self,
+        principal: &'a PeerKey,
         part: &'a PartKey,
-        buck: BuckId,
-        after: Option<&'a ObjKey>,
+        bucks: &'a [(BuckId, Option<ObjKey>)],
+        since: Rev,
         limit: usize,
-    ) -> Async::Future<'a, Res<Vec<LeafEntry>>> {
-        Async::ready(Ok(
-            self.with_state(|state| state.bucket_leaves(part, buck, after, limit))
-        ))
+    ) -> Async::Future<'a, Res<Option<Vec<Vec<LeafEntry>>>>> {
+        Async::ready(Ok(self.with_state(|state| {
+            state.permits(principal, part).then(|| {
+                bucks
+                    .iter()
+                    .map(|(buck, after)| {
+                        state.bucket_leaves(part, *buck, after.as_ref(), since, limit)
+                    })
+                    .collect()
+            })
+        })))
     }
 }
