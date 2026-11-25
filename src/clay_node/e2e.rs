@@ -630,6 +630,22 @@ async fn call_method(egress: &Arc<dyn DispatchEgress>, nsid: &str, input: &Value
     (status, serde_json::from_slice(&body).unwrap())
 }
 
+/// Waits until `observe` answers, looking again each time the micro's handles are bound anew
+/// (`changes` is [`NodeComposition::handles_changed`]). A grant is one move of the cartridge's
+/// grants and the node may re-mint once per move or once for several, so a bound handle is not a
+/// sign that the last grant has reached it: the observation is.
+async fn once_bound<T>(
+    changes: &mut tokio::sync::watch::Receiver<u64>,
+    mut observe: impl AsyncFnMut() -> Option<T>,
+) -> T {
+    loop {
+        if let Some(observed) = observe().await {
+            return observed;
+        }
+        changes.changed().await.unwrap();
+    }
+}
+
 /// A node that boots with the test methods ([`ECHO`], [`REVEAL`]) registered in its dispatch.
 async fn boot_with_test_methods() -> (tempfile::TempDir, NodeComposition) {
     let dir = tempfile::tempdir().unwrap();
@@ -734,12 +750,12 @@ async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
     }
     // The node re-mints the micro's handles, the follower binds them, and the egress the micro
     // holds presents the new capability from its next call.
-    changes.changed().await.unwrap();
-    let (status, answer) = call_method(&egress, ECHO, &json!({"text": "ping"})).await;
-    assert_eq!(
-        (status, &answer),
-        (200, &json!({"operation": ECHO, "echo": "ping"}))
-    );
+    let answer = once_bound(&mut changes, async || {
+        let (status, answer) = call_method(&egress, ECHO, &json!({"text": "ping"})).await;
+        (status == 200).then_some(answer)
+    })
+    .await;
+    assert_eq!(answer, json!({"operation": ECHO, "echo": "ping"}));
     let (status, denied) = call_method(&egress, REVEAL, &json!({"text": "ping"})).await;
     assert_eq!(
         (status, denied["error"].as_str()),
@@ -750,12 +766,11 @@ async fn a_cartridge_micro_is_minted_from_its_uses_and_the_cartridges_grants() {
     operator
         .grant(&id, GrantKey::Method(ECHO.to_owned()), None)
         .await;
-    changes.changed().await.unwrap();
-    let (status, _) = call_method(&egress, ECHO, &json!({"text": "ping"})).await;
-    assert_eq!(
-        status, 403,
-        "a revoked grant is gone once the node mints again"
-    );
+    once_bound(&mut changes, async || {
+        let (status, _) = call_method(&egress, ECHO, &json!({"text": "ping"})).await;
+        (status == 403).then_some(())
+    })
+    .await;
 
     operator.set_micro_enabled(&id, false).await;
     assert!(
@@ -807,17 +822,13 @@ async fn a_cartridge_micro_mounts_while_the_handles_poll_is_held_and_is_followed
             Some(GrantBody::present()),
         )
         .await;
-    changes.changed().await.unwrap();
-    let (status, answer) = call_method(
-        &composition.egress(&second_micro).unwrap(),
-        ECHO,
-        &json!({"text": "ping"}),
-    )
+    let second_egress = composition.egress(&second_micro).unwrap();
+    let answer = once_bound(&mut changes, async || {
+        let (status, answer) = call_method(&second_egress, ECHO, &json!({"text": "ping"})).await;
+        (status == 200).then_some(answer)
+    })
     .await;
-    assert_eq!(
-        (status, &answer),
-        (200, &json!({"operation": ECHO, "echo": "ping"}))
-    );
+    assert_eq!(answer, json!({"operation": ECHO, "echo": "ping"}));
     let (status, _) = call_method(
         &composition.egress(&first_micro).unwrap(),
         ECHO,
@@ -908,13 +919,15 @@ async fn a_cartridge_micros_document_capability_follows_the_granted_drawers() {
             Some(GrantBody::present()),
         )
         .await;
-    changes.changed().await.unwrap();
-    let capability = composition
-        .doc_capability(&micro)
-        .expect("a granted drawer the micro uses mints it a document capability");
+    // The two grants are two moves of the cartridge's grants, so the node may re-mint after the
+    // first alone: the micro reads once both have reached its handles.
     let egress = composition.egress(&micro).unwrap();
-    let (status, read) = read_datums(&egress, capability, &granted_doc).await;
-    assert_eq!(status, 200, "{read}");
+    let (capability, read) = once_bound(&mut changes, async || {
+        let capability = composition.doc_capability(&micro)?;
+        let (status, read) = read_datums(&egress, capability, &granted_doc).await;
+        (status == 200).then_some((capability, read))
+    })
+    .await;
     assert!(
         serde_json::to_string(&read).unwrap().contains("visible"),
         "the granted drawer's note is read: {read}"
