@@ -212,6 +212,14 @@ The same mount renders to HTML with the same generated tag and a declarative sha
   constructor finds `this.shadowRoot` and adopts into it instead of calling `attachShadow` (which would throw), and
   replaces the `<style>` elements with the shared adopted sheets once defined. Without JavaScript the declarative root
   alone renders correctly, which is what a read-only viewer needs.
+- **A client island replaces the root's content; it does not hydrate.** intxt's viewer will need this for very large
+  pull requests: the server-rendered `<ct-...>` element with its declarative root is the first paint, and on the client a
+  live mount takes the same element over and replaces the root's content with its own render (no Dioxus hydration
+  markers, no attempt to reuse the server's nodes). `CtMount`'s adopt-an-existing-root path is built for this: it adopts
+  the root once, keeps the adopted sheets across the swap, and exposes one operation that replaces the root's children
+  (everything but the sheet elements it already replaced with adopted sheets), so a later live mount calls that
+  operation and never re-attaches or re-adopts. Slotted light children (inline comments use the slots of §2.4, such as
+  CodeView's annotation slots) belong to the host element and survive the replacement.
 - **No hydration in this ADR.** Decided: static declarative output first; hydration only if intxt asks. Making the Dioxus
   web renderer hydrate into an existing shadow root is a separate piece of work.
 - **Engine support.** Declarative shadow DOM parses in current Chromium, Firefox and Safari (Chrome 111, Safari 16.4,
