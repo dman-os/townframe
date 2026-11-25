@@ -128,21 +128,31 @@ async fn run_accept() {
     // The home relay is connected: a dialer that knows only our id and this relay reaches us.
     endpoint.online().await;
     show("node_id", &endpoint.id().to_string());
-    let mut echoed = 0u32;
+    let counters = std::rc::Rc::new(std::cell::Cell::new((0u32, 0u32)));
     while let Some(incoming) = endpoint.accept().await {
-        let connection = incoming
-            .accept()
-            .expect("accepting an incoming connection")
-            .await
-            .expect("completing the handshake");
-        let (mut send, mut recv) = connection.accept_bi().await.expect("the dialer's stream");
-        let request = recv.read_to_end(1 << 16).await.expect("reading the request");
-        send.write_all(&request).await.expect("echoing");
-        send.finish().expect("finishing the echo");
-        // Hold the connection until the dialer has read the echo and closed.
-        connection.closed().await;
-        echoed += 1;
-        show("echoed", &echoed.to_string());
+        let counters = counters.clone();
+        // One task per connection: the loop must keep accepting while a dialer lingers.
+        wasm_bindgen_futures::spawn_local(async move {
+            let connection = incoming
+                .accept()
+                .expect("accepting an incoming connection")
+                .await
+                .expect("completing the handshake");
+            let (mut send, mut recv) =
+                connection.accept_bi().await.expect("the dialer's stream");
+            let request = recv.read_to_end(1 << 16).await.expect("reading the request");
+            send.write_all(&request).await.expect("echoing");
+            send.finish().expect("finishing the echo");
+            let (echoed, closed) = counters.get();
+            counters.set((echoed + 1, closed));
+            show("echoed", &(echoed + 1).to_string());
+            // The dialer closes once it has the echo; observing that is the other half of the
+            // connection's life cycle working.
+            connection.closed().await;
+            let (echoed, closed) = counters.get();
+            counters.set((echoed, closed + 1));
+            show("closed", &(closed + 1).to_string());
+        });
     }
 }
 

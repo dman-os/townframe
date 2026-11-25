@@ -65,6 +65,7 @@ test("a browser endpoint accepts dials from native and from another browser", as
     timeout: 60_000,
   });
   await expect(acceptor.locator("#echoed")).toHaveText("2");
+  await expect(acceptor.locator("#closed")).toHaveText("2", { timeout: 30_000 });
 
   expect(acceptorFailures).toEqual([]);
   expect(dialerFailures).toEqual([]);
