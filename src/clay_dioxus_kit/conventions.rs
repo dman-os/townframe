@@ -500,6 +500,58 @@ fn contract_skins_are_stylesheets_in_the_kit_layer() {
     assert_no_violations(violations);
 }
 
+/// `KIT-206`: the identity sheet is imported into the `identity` layer, declared between `kit` and
+/// `user`, and every component token a skin reads (`--ct-<component>-radius|border|shadow|fill`)
+/// is listed in `styles/tokens.css`, so the theme surface cannot grow unrecorded.
+#[test]
+fn component_tokens_are_listed_and_the_identity_layer_sits_between_kit_and_user() {
+    let entry = read(&crate_root().join("tailwind.css"));
+    let bundle = read(&crate_root().join("assets/tailwind.css"));
+    let mut violations = Vec::new();
+    for (what, text) in [
+        ("tailwind.css", &entry.text),
+        ("assets/tailwind.css", &bundle.text),
+    ] {
+        if !text.contains("@layer reset, tokens, kit, identity, user;") {
+            violations.push(format!(
+                "KIT-206: {what} does not declare `@layer reset, tokens, kit, identity, user;`"
+            ));
+        }
+    }
+    if !entry
+        .text
+        .contains("@import \"./styles/identity/daytxt.css\" layer(identity);")
+    {
+        violations.push(
+            "KIT-206: tailwind.css does not import the identity sheet into `layer(identity)`"
+                .into(),
+        );
+    }
+    let listed = read(&crate_root().join("styles/tokens.css")).text;
+    for entry in std::fs::read_dir(crate_root().join("styles/kit")).expect("the skins directory") {
+        let path = entry.expect("a directory entry").path();
+        let css = read(&path);
+        for (at, _) in css.text.match_indices("var(--ct-") {
+            let name: String = css.text[at + 4..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            let kind = name.rsplit('-').next().unwrap_or_default();
+            let is_component_token = ["radius", "border", "shadow", "fill"].contains(&kind)
+                && !name.starts_with("--ct-dimension-")
+                && !name.starts_with("--ct-color-")
+                && !name.starts_with("--ct-elevation-");
+            if is_component_token && !listed.contains(&name) {
+                violations.push(format!(
+                    "KIT-206: {} reads `{name}`, which styles/tokens.css does not list",
+                    css.path
+                ));
+            }
+        }
+    }
+    assert_no_violations(violations);
+}
+
 /// `KIT-102`: one z-order scale. A skin never writes a number as a `z-index`: it names a layer
 /// token (`var(--ct-layer-sheet)`), and every such token exists in `semantic.tokens.json`, whose
 /// scale runs content, raised, app bar, drawer, sheet, toast, gesture, lowest first. (A sheet

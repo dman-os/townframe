@@ -1,12 +1,13 @@
 /*
  * ct-button (headless/button.rs). Parts: label. Axes: data-variant, data-size.
  * States: data-state (on|off, toggles only), data-current (the open entry of a run), data-disabled.
+ * Tokens: --ct-button-radius, and --ct-button-border for the outline variant only (ADR 057).
  * Imported into the `kit` layer (../../tailwind.css); a theme overrides these rules from `user`.
  */
 .ct-button {
   --ct-button-bg: var(--ct-color-primary);
   --ct-button-fg: var(--ct-color-on-primary);
-  --ct-button-border: transparent;
+  --ct-button-edge: transparent;
   box-sizing: border-box;
   display: inline-flex;
   align-items: center;
@@ -14,8 +15,8 @@
   gap: var(--ct-dimension-spacing-2);
   min-height: 2.5rem;
   padding-inline: var(--ct-dimension-spacing-4);
-  border: var(--ct-dimension-border-width-thin) solid var(--ct-button-border);
-  border-radius: var(--ct-dimension-radius-md);
+  border: var(--ct-dimension-border-width-thin) solid var(--ct-button-edge);
+  border-radius: var(--ct-button-radius);
   background: var(--ct-button-bg);
   color: var(--ct-button-fg);
   font-family: var(--ct-font-family);
@@ -57,7 +58,8 @@
 .ct-button[data-variant="outline"] {
   --ct-button-bg: transparent;
   --ct-button-fg: var(--ct-color-text);
-  --ct-button-border: var(--ct-color-border);
+  --ct-button-edge: var(--ct-color-border);
+  border: var(--ct-button-border, var(--ct-dimension-border-width-thin) solid var(--ct-button-edge));
 }
 
 .ct-button[data-variant="ghost"] {
@@ -90,7 +92,7 @@
 .ct-button[data-current] {
   --ct-button-bg: var(--ct-color-accent-container);
   --ct-button-fg: var(--ct-color-on-accent-container);
-  --ct-button-border: var(--ct-color-primary);
+  --ct-button-edge: var(--ct-color-primary);
 }
 
 .ct-button:focus-visible {
@@ -107,7 +109,7 @@
 .ct-button[data-disabled] {
   --ct-button-bg: var(--ct-color-surface-sunken);
   --ct-button-fg: var(--ct-color-text-muted);
-  --ct-button-border: var(--ct-color-border);
+  --ct-button-edge: var(--ct-color-border);
   cursor: not-allowed;
 }
 
@@ -117,7 +119,7 @@
 }
 
 .ct-button[data-disabled][data-variant="ghost"] {
-  --ct-button-border: transparent;
+  --ct-button-edge: transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,7 +1,8 @@
 /*
  * ct-alert (headless/alert.rs). Parts: icon, content, title, body, dismiss. Axis: data-status
  * (info|success|warning|danger). The tint is the status colour mixed into the surface, so a theme
- * that recolours --ct-color-<status> recolours every alert and chip.
+ * that recolours --ct-color-<status> recolours every alert and chip. Tokens:
+ * --ct-alert-radius|border|fill (ADR 057).
  */
 .ct-alert {
   --ct-alert-tone: var(--ct-color-info);
@@ -12,12 +13,11 @@
   align-items: start;
   gap: var(--ct-dimension-spacing-3);
   padding: var(--ct-dimension-spacing-3) var(--ct-dimension-spacing-4);
-  border: var(--ct-dimension-border-width-thin) solid var(--ct-alert-tone);
-  border-radius: var(--ct-dimension-radius-md);
-  background: color-mix(
-    in srgb,
-    var(--ct-alert-tone) 14%,
-    var(--ct-color-surface)
+  border: var(--ct-alert-border);
+  border-radius: var(--ct-alert-radius);
+  background: var(
+    --ct-alert-fill,
+    color-mix(in srgb, var(--ct-alert-tone) 14%, var(--ct-color-surface))
   );
   color: var(--ct-color-text);
   font-family: var(--ct-font-family);

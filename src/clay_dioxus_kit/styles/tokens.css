@@ -15,6 +15,40 @@
   }
 
   /*
+   * Component tokens (ADR 057 section 2.3): the kit's quiet defaults for what two reasonable themes
+   * would choose differently. Each skin reads its own (`--ct-<component>-<kind>`, the component's
+   * class name without `ct-`); the identity sheet (`styles/identity/daytxt.css`) or a user theme
+   * sets them, on `:root` or on any subtree, and no component's rules need restating. A token is
+   * added only for a stable themeable contract of a component (FOUND-011), never for one screen.
+   *
+   * Two tokens have no default here because theirs depends on the element, so the skin carries it
+   * as the `var()` fallback: `--ct-alert-fill` (unset: the status's container role) and
+   * `--ct-button-border`, which only the outline variant reads (unset: the hairline in the border
+   * role, its defining edge).
+   */
+  :root {
+    --ct-card-radius: var(--ct-dimension-radius-lg);
+    --ct-alert-radius: var(--ct-dimension-radius-md);
+    --ct-button-radius: var(--ct-dimension-radius-md);
+    --ct-chip-radius: var(--ct-dimension-radius-pill);
+    --ct-sheet-radius: var(--ct-dimension-radius-xl);
+    --ct-drawer-radius: 0;
+    --ct-list-row-radius: var(--ct-dimension-radius-md);
+    --ct-tabs-radius: var(--ct-dimension-radius-md);
+    --ct-scrub-bubble-radius: var(--ct-dimension-radius-md);
+
+    --ct-card-border: none;
+    --ct-alert-border: none;
+    --ct-chip-border: none;
+
+    --ct-sheet-shadow: var(--ct-elevation-raised);
+    --ct-drawer-shadow: var(--ct-elevation-raised);
+    --ct-scrub-bubble-shadow: var(--ct-elevation-md);
+
+    --ct-card-fill: var(--ct-color-surface);
+  }
+
+  /*
    * The document is the scroller of an app that lays out in the page, so what shows past its
    * content (the touchpad's overscroll, a not-yet-rendered gap) is the root element's canvas: it
    * takes the theme's page background and color scheme, not the browser's white. The palette's

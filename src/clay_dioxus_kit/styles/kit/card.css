@@ -2,15 +2,16 @@
  * ct-card (headless/card.rs). Parts: header, content, footer. Axis: data-variant
  * (outline|raised|plain) and data-status (info|success|warning|danger; absent is neutral). The
  * status tints the card with its colour role, so a theme that recolours --ct-color-<status>
- * recolours every status-carrying component.
+ * recolours every status-carrying component. Tokens: --ct-card-radius|border|fill (ADR 057).
  */
 .ct-card {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
   min-width: 0;
-  border-radius: var(--ct-dimension-radius-lg);
-  background: var(--ct-color-surface);
+  border: var(--ct-card-border);
+  border-radius: var(--ct-card-radius);
+  background: var(--ct-card-fill);
   color: var(--ct-color-text);
   font-family: var(--ct-font-family);
 }
@@ -35,7 +36,6 @@
     var(--ct-card-tone) 14%,
     var(--ct-color-surface)
   );
-  border: var(--ct-dimension-border-width-thin) solid var(--ct-card-tone);
 }
 
 .ct-card[data-status="success"] {

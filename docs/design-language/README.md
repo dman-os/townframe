@@ -16,7 +16,7 @@ Feature grammars, including tiles, columns, widgets, and screens, are not founda
 - `src/clay_dioxus_kit/styles/tokens/*.tokens.json` is the authored DTCG-compatible foundation source.
 - `x/design-tokens.ts` validates the supported subset, resolves aliases, and generates `src/clay_dioxus_kit/styles/tokens.generated.css`.
 - `src/clay_dioxus_kit/styles/tokens.generated.css` is generated; do not edit it directly.
-- `src/clay_dioxus_kit/styles/tokens.css` contains the runtime reset and the external Material theme-provider adapter. It may override theme-dependent color roles, but it is not an authoring source for foundation values.
+- `src/clay_dioxus_kit/styles/tokens.css` contains the runtime reset and the external Material theme-provider adapter. It may override theme-dependent color roles and lists the component-token defaults (ADR 057), but it is not an authoring source for foundation values.
 - `src/clay_dioxus_kit/tailwind.css` imports the generated token grammar before feature styles.
 - `src/clay_dioxus_kit/styles/material-theme.json` remains an external Material theme input and image-to-theme compatibility fixture. It is not the Dayframe semantic token source.
 - `src/claytxt_showcase/` is curated executable evidence, not the normative source and not an exhaustive token catalogue.

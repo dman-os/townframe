@@ -9,7 +9,7 @@ Design: [ADR 032 section 7](../../docs/adrs/032-shell-micro-and-component-kit.md
 copies what is already here, so the rules below are binding; a change to a rule is a change to
 this file.
 
-Every component is a headless part and a stylesheet, and follows `KIT-200` to `KIT-205`: the Rust
+Every component is a headless part and a stylesheet, and follows `KIT-200` to `KIT-206`: the Rust
 renders structure, ARIA and behaviour, and `styles/kit/<name>.css` is the whole of its look.
 
 | Component | Headless part | Skin | Specimen |
@@ -102,6 +102,13 @@ enforces them. They apply to every component.
   harness's `mount` backs an element that records `set_focus`). Invariant violations in props
   (`KIT-023`) live in a pure `validate` function so a test can see them panic: Dioxus catches a
   panic inside a component, so a bare `assert!` there is only logged.
+- **KIT-206** The kit is structure and a quiet default; the app's look is a sheet (ADR 057). A
+  skin carries layout, states, focus and legibility, and reads everything two reasonable themes
+  would choose differently (a radius, a border, a shadow, a fill) from a component token,
+  `--ct-<component>-radius|border|shadow|fill`, never from a literal. `styles/tokens.css` is the
+  token list with its defaults; `styles/identity/daytxt.css`, imported with `layer(identity)`
+  between `kit` and `user`, sets them. Checked:
+  `conventions::component_tokens_are_listed_and_the_identity_layer_sits_between_kit_and_user`.
 
 ### Controlled state and callbacks
 
@@ -314,6 +321,7 @@ KIT-070 are enforced by the harness itself (`src/testing.rs`).
 | KIT-201 | the component's own tests (`Page::by_class`, `Page::parts`); `contract_skins_are_stylesheets_in_the_kit_layer` (the sheet styles its root class) |
 | KIT-202, KIT-203 | `conventions::contract_skins_are_stylesheets_in_the_kit_layer` (layer import, bundle in sync, no `!important`/`@apply`/`url(`, reduced-motion guard) |
 | KIT-204 | `conventions::every_component_has_a_specimen` |
+| KIT-206 | `conventions::component_tokens_are_listed_and_the_identity_layer_sits_between_kit_and_user` |
 | KIT-090 | `conventions::a_module_that_mentions_blitz_documents_it_under_renderer_limits` |
 | every cited `KIT-nnn` | `conventions::cited_rules_exist_in_the_readme` |
 
