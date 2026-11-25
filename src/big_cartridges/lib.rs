@@ -28,6 +28,7 @@ use big_cabinet::SchemaRegistration;
 use big_cabinet::SchemaRegistrationGroup;
 use big_cabinet::authority::DomainAuthority;
 use big_cabinet::capability::DomainCapabilities;
+use big_cabinet::capability::GrantedMethods;
 use big_cabinet::capability::Invocation;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
@@ -75,6 +76,7 @@ use big_cartridges_core::protocol::PublishedCartridgeVersion;
 use big_cartridges_core::protocol::RemoveCartridge;
 use big_cartridges_core::protocol::RemoveCartridgeVersion;
 use big_cartridges_core::protocol::ResolveCartridgePin;
+use method_core::Method as _;
 use big_cartridges_core::protocol::ResolveCartridgeVersion;
 use big_cartridges_core::protocol::StageCartridgeVersion;
 use big_cartridges_core::protocol::WatchCartridges;
@@ -239,6 +241,7 @@ pub async fn ensure_registry_drawer(config: RegistryDrawerConfig<'_>) -> Res<Dra
             context.child(),
             identity.metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::new(),
                     create: true,
@@ -343,6 +346,7 @@ pub struct CartridgeService {
     node_key: NodeKey,
     /// Ends a held watch when the service stops, rather than at its hold's expiry.
     tasks: Spawner,
+    granted: GrantedMethods,
 }
 
 impl CartridgeService {
@@ -563,7 +567,22 @@ impl CartridgeService {
         authorization: Authorization,
         params: ResolveCartridgePin,
     ) -> Res<ResolvedCartridge> {
-        self.read_caller(context, authorization).await?;
+        // A nodule presents its dispatch handle, which this domain does not mint, so it is read
+        // as a presenter: the operator, a registry handle, or an actor whose cartridge holds a
+        // privileged grant of exactly this method (the node's grant to its core cartridge).
+        match self.read_caller(context, authorization).await {
+            Err(CartridgesError::Denied) => self
+                .capabilities
+                .admit_privileged(
+                    context,
+                    authorization,
+                    &self.granted,
+                    ResolveCartridgePin::XRPC.nsid,
+                )
+                .await
+                .map_err(authority_error)?,
+            other => other?,
+        }
         self.registry.resolved_at(&params.pin).await
     }
 
@@ -667,6 +686,10 @@ pub struct Cartridges {
     pub publisher: String,
     /// The drawer the registry's documents live in, which installs pin versions in.
     pub registry_drawer: DrawerId,
+    /// Bound by the nodule service when it boots, so the registry can tell which cartridges hold
+    /// a privileged grant for the one read a nodule makes of it
+    /// ([`CartridgeService::resolve_pin`]).
+    pub granted: GrantedMethods,
 }
 
 /// Boot the registry on `config.registry_drawer`: scan the drawer into the served state, wait for
@@ -680,6 +703,7 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
             RequestContext::root(),
             Authorization::identity(config.actor.capability).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     drawers: BTreeMap::from([(
                         config.registry_drawer.clone(),
@@ -731,12 +755,14 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
         .await
         .expect("the registry follower reports its first scan");
     let publisher = did_key(&config.node_key.public_key);
+    let granted = GrantedMethods::default();
     let service = Arc::new(CartridgeService {
         capabilities,
         registry,
         publisher: publisher.clone(),
         node_key: config.node_key,
         tasks,
+        granted: granted.clone(),
     });
     let (host, host_stop) = Host::new(Arc::clone(&service));
     let client = Client::new(Transport::direct(CartridgesBinding::new(Arc::clone(&host))));
@@ -746,6 +772,7 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
             client,
             publisher,
             registry_drawer: config.registry_drawer,
+            granted,
         },
         host_stop.then(follow_stop).then(domain_stop),
     ))

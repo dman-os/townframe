@@ -995,7 +995,7 @@ fn grants_never_exceed_requests() {
         authorities: ["org.example.tags", "org.example.search"]
             .map(String::from)
             .into(),
-        privileged: false,
+        privileged: Default::default(),
     };
     let (applied, unrequested) = nodule.bind_operations(&grants);
     // The `org.example.tags` prefix is applied as the two requested operations it covers, not as
@@ -1019,7 +1019,7 @@ fn grants_never_exceed_requests() {
     let only_apply = DispatchScope {
         operations: ["org.example.tags.apply".to_owned()].into(),
         authorities: Default::default(),
-        privileged: false,
+        privileged: Default::default(),
     };
     let unmet: Vec<_> = nodule
         .unmet_requests(&only_apply)
@@ -1287,6 +1287,7 @@ mod admission_tests {
                 .unwrap(),
             );
             cartridge.micro = Some(MicroContribution {
+                uses: Default::default(),
                 component: "micro".into(),
                 schema: "org.example.clay.micro".into(),
                 description: Default::default(),
@@ -1395,7 +1396,7 @@ mod admission_tests {
             DispatchScope {
                 operations: BTreeSet::from(["org.example.search.query".to_owned()]),
                 authorities: BTreeSet::from(["org.example.callee".to_owned()]),
-                privileged: false,
+                privileged: Default::default(),
             }
         );
         let patch = CartridgeConfig::diff(&CartridgeConfig::default(), &docs).unwrap();

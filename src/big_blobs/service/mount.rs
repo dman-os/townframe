@@ -17,6 +17,7 @@
 //! is how a hard-linked file already behaves when its name goes away.
 
 use super::*;
+use big_cabinet_core::authority::Authorization;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use big_sync_core::revisioned_store::RevisionedStoreReader as _;

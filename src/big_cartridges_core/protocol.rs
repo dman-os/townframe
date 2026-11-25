@@ -473,7 +473,7 @@ service_method!(ListCartridges => CartridgeList, CartridgesError, query("org.exa
 service_method!(GetCartridge => CartridgeRecord, CartridgesError, query("org.example.daybook.cartridges.getCartridge"));
 service_method!(GetCartridgeVersion => CartridgeVersionRecord, CartridgesError, query("org.example.daybook.cartridges.getCartridgeVersion"));
 service_method!(ResolveCartridgeVersion => ResolvedCartridge, CartridgesError, query("org.example.daybook.cartridges.resolveCartridgeVersion"));
-service_method!(ResolveCartridgePin => ResolvedCartridge, CartridgesError, procedure("org.example.daybook.cartridges.resolveCartridgePin"));
+service_method!(ResolveCartridgePin => ResolvedCartridge, CartridgesError, procedure("org.example.daybook.cartridges.resolveCartridgePin"), privileged);
 service_method!(WatchCartridges => CartridgeChanges, CartridgesError, procedure("org.example.daybook.cartridges.watchCartridges"));
 
 declare_service_protocol! {

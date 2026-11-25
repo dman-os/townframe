@@ -22,6 +22,8 @@ big_cabinet.workspace = true
 big_cabinet_core = { workspace = true, features = ["manifest"] }
 big_dispatch.workspace = true
 big_dispatch_core.workspace = true
+method_lexicon.workspace = true
+micros_nodule.workspace = true
 big_nodule.workspace = true
 big_nodule_wasm.workspace = true
 big_cartridges.workspace = true
@@ -55,7 +57,6 @@ tracing.workspace = true
 [dev-dependencies]
 #
 # internal
-method_lexicon.workspace = true
 big_cartridges_core = { workspace = true, features = ["test-support"] }
 tracing-subscriber.workspace = true
 

@@ -191,6 +191,7 @@ async fn a_datum_written_by_a_descendant_carries_the_descendants_id_and_url() {
             RequestContext::root(),
             Authorization::identity(owner.capability).metadata(),
             MintDocCapability {
+ capability: None,
                 scope: scope.clone(),
                 rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
                 subject: None,
@@ -204,6 +205,7 @@ async fn a_datum_written_by_a_descendant_carries_the_descendants_id_and_url() {
             RequestContext::root(),
             Authorization::identity(delegate.capability_id).metadata(),
             MintDocCapability {
+ capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: Some(agent.actor.actor_id),

@@ -721,6 +721,7 @@ async fn mint_missing_handles(
                     context.child(),
                     authorization.metadata(),
                     MintDocCapability {
+                        capability: None,
                         scope: scope.clone(),
                         rights: handle_rights(),
                         subject: Some(actor.actor.actor_id),
@@ -746,6 +747,7 @@ async fn mint_missing_handles(
                     context.child(),
                     Authorization::identity(delegators.signer).metadata(),
                     MintDrawerCapability {
+                        capability: None,
                         scope: scope.clone(),
                         rights: handle_rights(),
                         subject: Some(actor.actor.actor_id),
@@ -777,6 +779,7 @@ async fn mint_missing_handles(
                     }
                     .metadata(),
                     big_blobs_core::MintBlobsCapability {
+                        capability: None,
                         scope: scope.clone(),
                         rights: handle_rights(),
                         subject: Some(actor.actor.actor_id),
@@ -818,6 +821,53 @@ impl<'a> Granted<'a> {
     }
 }
 
+/// The scopes of the core nodule's delivered dispatch and blobs handles, which are the
+/// `micros` delegators' and not lowered from its own `uses`.
+fn widen_core_handles(state: &State, desired: &mut BTreeMap<String, RoutineScopes>) {
+    // The core nodule is the micros runtime, and a runtime's actor is the delegator of
+    // everything its children can be granted (ADR 049 section 6.1): `micros` is the micro
+    // runtime as `nodules` is the nodule runtime, whose service mints every nodule's handle
+    // from delegators of that full scope. The core nodule cannot narrow a handle to a
+    // micro's scope unless its own covers it, and `attenuateCapability` and the mints only
+    // narrow, so its delivered dispatch and blobs handles are the delegators' scopes and not
+    // lowered from its own `uses`. Its privilege is exactly the privileged methods the node
+    // grants it (node-91's rule: a privileged grant covers its method and no other), so it
+    // reaches `listCartridgeGrants` and the like and is refused `installCartridge` and
+    // `setCartridgeGrant`.
+    // The handles are never written down: they are minted for the boot, which is why the
+    // ids are not kept in the config document (it outlives a restart and syncs to sisters).
+    let privileged: BTreeSet<String> = state
+        .stores
+        .core_cartridge
+        .grants
+        .iter()
+        .filter(|(_, grant)| grant.privileged)
+        .filter_map(|(key, _)| match key {
+            // Only a method that is privileged for dispatch names a privilege: a grant may
+            // be privileged for the service's own check without dispatch holding the method
+            // so (`listCartridgeInstalls`), and the delegator's set, which a mint is covered
+            // by, is the privileged built-ins.
+            GrantKey::Method(nsid)
+                if method_lexicon::builtin_method(nsid).is_some_and(|m| m.privileged) =>
+            {
+                Some(nsid.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    for scopes in desired.values_mut() {
+        scopes.dispatch = Some(DispatchScope {
+            authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
+            privileged: privileged.clone(),
+            ..Default::default()
+        });
+        scopes.blobs = Some(big_blobs_core::protocol::BlobsScope {
+            put: true,
+            ..Default::default()
+        });
+    }
+}
+
 /// Brings each routine's handles to its desired scopes (ADR 047 §6): a handle whose scope did
 /// not change is kept, one that changed is retracted and then minted again, and one whose
 /// routine no longer wants it is retracted. Before anything is retracted dispatch is
@@ -846,13 +896,16 @@ async fn apply_nodule_capabilities(
         .await?;
     revoke_settings_for_cartridge(state, context, cartridge_id, None).await?;
 
-    let desired = if installed.enabled {
+    let mut desired = if installed.enabled {
         installed.routine_scopes(desired_grants, effective_operations, |nsid| {
             method_lexicon::builtin_method(nsid).and_then(|built_in| built_in.handle)
         })
     } else {
         BTreeMap::new()
     };
+    if *cartridge_id == state.stores.core_cartridge.id {
+        widen_core_handles(state, &mut desired);
+    }
     let previous = state
         .routine_capabilities
         .get(cartridge_id)
@@ -2954,7 +3007,10 @@ impl Stores {
                     path: format!(
                         "{}/{}",
                         self.parent_path,
-                        store::actor_segment(cartridge_id)
+                        big_nodule_core::actor_segment(
+                            &cartridge_id.name,
+                            &cartridge_id.to_string()
+                        )
                     ),
                     rights: Rights::USE,
                 },
@@ -3012,6 +3068,7 @@ impl Stores {
                 }
                 .metadata(),
                 MintDispatchCapability {
+                    capability: None,
                     scope: scope.clone(),
                     rights: handle_rights(),
                     subject: Some(actor.actor.actor_id),
@@ -3046,14 +3103,16 @@ impl Stores {
             .map_err(drawers_error)
     }
 
-    /// Grants `drawer_id` to the service's own actor at Admin, durably, with a capability minted
-    /// on `authorization`'s authority: the capability only proves the granter's right to delegate
-    /// and is retracted at once, as the grant is a standing one that does not depend on it.
-    async fn grant_to_service(
+    /// Grants `drawer_id` to `subject`, a subsystem actor of this node (the service's own, or
+    /// `micros`), at Admin, durably, with a capability minted on `authorization`'s authority: the
+    /// capability only proves the granter's right to delegate and is retracted at once, as the
+    /// grant is a standing one that does not depend on it.
+    async fn grant_to_actor(
         &self,
         context: &RequestContext,
         authorization: Authorization,
         drawer_id: &DrawerId,
+        subject: Uuid7,
     ) -> Res<()> {
         let capability = self
             .drawers
@@ -3061,6 +3120,7 @@ impl Stores {
                 context.child(),
                 authorization.metadata(),
                 MintDrawerCapability {
+                    capability: None,
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
                         create: false,
@@ -3077,7 +3137,7 @@ impl Stores {
                 context,
                 capability,
                 drawer_id,
-                self.parent.actor.actor_id,
+                subject,
                 DrawerAccess::Admin,
                 true,
             )
@@ -3086,15 +3146,22 @@ impl Stores {
         granted
     }
 
-    /// Withdraws the service's own actor's standing grant on `drawer_id`, which a
-    /// capability minted from the actor's own authority (it holds Admin there) is enough for.
-    async fn revoke_from_service(&self, context: &RequestContext, drawer_id: &DrawerId) -> Res<()> {
+    /// Withdraws `actor`'s standing grant on `drawer_id`, which a capability minted from the
+    /// actor's own authority (it holds Admin there) is enough for. `actor` is the service's own
+    /// actor or `micros`, with the identity capability `capability`.
+    async fn revoke_from_actor(
+        &self,
+        context: &RequestContext,
+        drawer_id: &DrawerId,
+        actor: &OpenedActor,
+    ) -> Res<()> {
         let capability = self
             .drawers
             .call_with(
                 context.child(),
-                Authorization::identity(self.parent.capability).metadata(),
+                Authorization::identity(actor.capability).metadata(),
                 MintDrawerCapability {
+                    capability: None,
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
                         create: false,
@@ -3113,7 +3180,7 @@ impl Stores {
                 RevokeDrawer {
                     capability,
                     drawer_id: drawer_id.clone(),
-                    subject_id: self.parent.actor.actor_id,
+                    subject_id: actor.actor.actor_id,
                 },
             )
             .await
@@ -3137,6 +3204,7 @@ impl Stores {
                 context.child(),
                 Authorization::identity(self.parent.capability).metadata(),
                 MintDrawerCapability {
+                    capability: None,
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
                         create: false,

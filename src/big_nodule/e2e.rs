@@ -279,9 +279,10 @@ async fn grant_nodule_dispatch(
             RequestContext::root(),
             Authorization::identity(authority.root).metadata(),
             MintDispatchCapability {
+ capability: None,
                 scope: DispatchScope {
                     authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
-                    privileged: true,
+                    privileged: method_lexicon::privileged_methods(),
                     ..Default::default()
                 },
                 rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
@@ -575,6 +576,7 @@ async fn grant_drawer(
             RequestContext::root(),
             Authorization::identity(grantor.capability).metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
                     create: false,
@@ -630,6 +632,7 @@ async fn boot_nodules(
             RequestContext::root(),
             Authorization::identity(authority.root).metadata(),
             MintBlobsCapability {
+                capability: None,
                 scope: BlobsScope {
                     put: true,
                     ..Default::default()
@@ -670,6 +673,7 @@ async fn boot_nodules(
                 RequestContext::root(),
                 Authorization::identity(authority.root).metadata(),
                 MintDocCapability {
+                    capability: None,
                     scope: DocScope {
                         drawers: BTreeMap::from([(
                             shared_config_drawer.clone(),
@@ -690,6 +694,7 @@ async fn boot_nodules(
                 RequestContext::root(),
                 Authorization::identity(authority.root).metadata(),
                 MintBlobsCapability {
+                    capability: None,
                     scope: BlobsScope {
                         put: true,
                         ..Default::default()
@@ -730,6 +735,7 @@ async fn boot_nodules(
             grants: core_grants,
         },
         sql: (**sql).clone(),
+        granted: cartridges.granted.clone(),
     })
     .await
 }
@@ -884,6 +890,7 @@ impl Node {
                 RequestContext::root(),
                 Authorization::identity(self.drawers_actor.capability).metadata(),
                 MintDocCapability {
+                    capability: None,
                     scope: DocScope {
                         write: std::collections::BTreeMap::from([(
                             config_doc.clone(),
@@ -928,6 +935,7 @@ impl Node {
                 RequestContext::root(),
                 self.operator().metadata(),
                 MintDocCapability {
+                    capability: None,
                     scope: DocScope {
                         write: std::collections::BTreeMap::from([(
                             doc_id.clone(),
@@ -1054,6 +1062,7 @@ impl Node {
                 RequestContext::root(),
                 self.operator().metadata(),
                 MintBlobsCapability {
+                    capability: None,
                     scope: BlobsScope {
                         put: true,
                         ..Default::default()
@@ -1180,6 +1189,7 @@ impl Node {
                 RequestContext::root(),
                 self.operator().metadata(),
                 MintDocCapability {
+                    capability: None,
                     scope: DocScope {
                         read: DocScope::read_all([doc_id.clone()]),
                         ..DocScope::default()
@@ -1301,8 +1311,8 @@ impl Node {
         self.get(self.operator(), cartridge_id).await.unwrap()
     }
 
-    /// The `micros` subsystem actor's id: opening a path that exists opens the same actor.
-    async fn micros_actor_id(&self) -> Uuid7 {
+    /// The `micros` subsystem actor: opening a path that exists opens the same actor.
+    async fn micros_actor(&self) -> OpenedActor {
         self.authority
             .client
             .call(
@@ -1315,8 +1325,10 @@ impl Node {
             )
             .await
             .expect("micros actor")
-            .actor
-            .actor_id
+    }
+
+    async fn micros_actor_id(&self) -> Uuid7 {
+        self.micros_actor().await.actor.actor_id
     }
 
     async fn get(
@@ -1388,7 +1400,10 @@ impl Node {
                     parent: self.nodules_actor.capability,
                     path: format!(
                         "{NODULES_PATH}/{}",
-                        crate::store::actor_segment(cartridge_id)
+                        big_nodule_core::actor_segment(
+                            &cartridge_id.name,
+                            &cartridge_id.to_string()
+                        )
                     ),
                     rights: Rights::USE | Rights::NARROW,
                 },
@@ -1801,6 +1816,97 @@ fn cartridge_with_undeclared_settings(id: &str, version: &str) -> FixtureCartrid
     cartridge
 }
 
+/// `micros` is the micro runtime as the service is the nodule runtime (ADR 049 section 6.1): the
+/// actor the delegators of everything a micro can be granted are bound to, which proves a
+/// reach over a drawer against its own standing. So a drawer granted to a cartridge that ships a
+/// micro is held by `micros` until the grant is revoked, and one granted to a cartridge with no
+/// micro is not.
+#[tokio::test]
+async fn micros_stands_on_a_drawer_granted_to_a_cartridge_with_a_micro_until_it_is_revoked() {
+    let node = node().await;
+    let operator = node.operator();
+    let present = node.drawers.local().present_id.clone();
+    let micros = node.micros_actor().await;
+    let reach = || DocScope {
+        drawers: BTreeMap::from([(
+            present.clone(),
+            big_cabinet_core::doc::DrawerReach::all_kinds(DrawerAccess::Read),
+        )]),
+        ..DocScope::default()
+    };
+    let micros_mints = async || {
+        node.docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(micros.capability).metadata(),
+                MintDocCapability {
+                    capability: None,
+                    scope: reach(),
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+            .map(|_| ())
+    };
+    node.admit(
+        operator,
+        cartridge_with_micro(example_cartridge!("photos"), "1.0.0"),
+    )
+    .await
+    .unwrap();
+    node.admit(
+        operator,
+        cartridge(example_cartridge!("schema"), "1.0.0", true),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        micros_mints().await,
+        Err(ClientError::Method(DocsError::Denied))
+    ));
+
+    // A cartridge with no micro gets the service its drawer and `micros` nothing.
+    node.set_grant(
+        operator,
+        example_cartridge!("schema"),
+        GrantKey::Drawer(present.clone()),
+        Some(GrantBody::access(DrawerAccess::Read.into())),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        micros_mints().await,
+        Err(ClientError::Method(DocsError::Denied))
+    ));
+
+    node.set_grant(
+        operator,
+        example_cartridge!("photos"),
+        GrantKey::Drawer(present.clone()),
+        Some(GrantBody::access(DrawerAccess::Read.into())),
+    )
+    .await
+    .unwrap();
+    micros_mints().await.expect("micros stands on the drawer");
+
+    // The standing ends with the last grant of the drawer to a cartridge that ships a micro.
+    node.set_grant(
+        operator,
+        example_cartridge!("photos"),
+        GrantKey::Drawer(present.clone()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        micros_mints().await,
+        Err(ClientError::Method(DocsError::Denied))
+    ));
+    node.shutdown().await;
+}
+
 #[tokio::test]
 async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
     let mut node = node().await;
@@ -1825,6 +1931,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
                 RequestContext::root(),
                 Authorization::identity(actor.capability).metadata(),
                 MintDocCapability {
+                    capability: None,
                     scope: DocScope {
                         create: BTreeSet::from([placement.clone()]),
                         ..DocScope::default()
@@ -1865,6 +1972,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
             RequestContext::root(),
             Authorization::identity(actor.capability).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     create: BTreeSet::from([placement.clone()]),
                     ..DocScope::default()
@@ -1934,6 +2042,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
             RequestContext::root(),
             Authorization::identity(actor.capability).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([receipt.doc_id.clone()]),
                     ..DocScope::default()
@@ -2109,6 +2218,7 @@ fn cartridge_with_micro(id: &str, version: &str) -> FixtureCartridge {
     let mut cartridge = cartridge(id, version, true);
     cartridge.with_wasm("micro", b"micro component");
     cartridge.micro = Some(MicroContribution {
+        uses: Default::default(),
         component: "micro".into(),
         schema: "org.example.clay.micro".into(),
         description: Default::default(),

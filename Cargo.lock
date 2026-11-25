@@ -1561,6 +1561,7 @@ dependencies = [
  "big_cartridges_core",
  "bytes",
  "futures",
+ "method_core",
  "serde",
  "serde_json",
  "service_client_native_rs",
@@ -1716,6 +1717,7 @@ dependencies = [
  "keyring-core",
  "method_core",
  "method_lexicon",
+ "micros_nodule",
  "rand 0.9.5",
  "rustix 1.1.6",
  "secrets_rs",
@@ -1749,7 +1751,6 @@ dependencies = [
  "big_dispatch_core",
  "big_nodule_core",
  "big_repo",
- "blake3",
  "bytes",
  "futures",
  "http",
@@ -1780,6 +1781,7 @@ dependencies = [
  "big_cabinet_core",
  "big_cartridges_core",
  "big_dispatch_core",
+ "blake3",
  "indexmap 2.14.2",
  "irpc",
  "macros",
@@ -9797,6 +9799,23 @@ dependencies = [
  "micro_shell_manifest",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "micros_nodule"
+version = "0.1.0"
+dependencies = [
+ "big_blobs_core",
+ "big_cabinet_core",
+ "big_cartridges_core",
+ "big_dispatch_core",
+ "big_ndk",
+ "big_nodule_core",
+ "futures",
+ "method_core",
+ "serde",
+ "serde_json",
+ "service_core_rs",
 ]
 
 [[package]]

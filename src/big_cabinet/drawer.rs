@@ -262,6 +262,7 @@ impl Drawers {
                 context.child(),
                 authorization.metadata(),
                 MintDrawerCapability {
+ capability: None,
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(drawer_id.clone(), access)]),
                         create: false,
@@ -286,11 +287,10 @@ impl Handler<MintDrawerCapability> for DrawerService {
         request: Envelope<MintDrawerCapability>,
     ) -> Result<ResponseEnvelope<Capability>, DrawersError> {
         let params = request.params;
-        let authorization = Authorization::from_metadata(&request.metadata)?;
         let caller = self
             .core
             .capabilities
-            .source::<DrawerScope>(&request.context, authorization)
+            .minter::<DrawerScope>(&request.context, &request.metadata, params.capability)
             .await
             .map_err(authority_error)?;
         if !caller.rights.contains(Rights::NARROW) || !params.rights.is_subset_of(caller.rights) {
@@ -483,6 +483,7 @@ impl Core {
                 context.child(),
                 Authorization::identity(self.issuer).metadata(),
                 MintDocCapability {
+ capability: None,
                     scope,
                     rights: Rights::USE,
                     subject: None,

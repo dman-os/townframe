@@ -168,6 +168,13 @@ impl ServiceProvider {
         self
     }
 
+    /// Leaves out the operation `nsid`, for a service of which dispatch serves all but one (the
+    /// dispatch service's own `invoke` is the entry to dispatch, not an operation behind it).
+    pub fn except(mut self, nsid: &str) -> Self {
+        self.routes.remove(nsid);
+        self
+    }
+
     /// Registers this provider in `router` as `provider_id`, ready, claiming every operation it
     /// serves with the Lexicon its method publishes. A served operation that has no Lexicon in
     /// [`method_lexicon::builtin_methods`], or one that does not compile, is a programming error

@@ -1813,7 +1813,17 @@ async fn a_wasm_guest_materializes_blobs_into_its_working_mount() {
     );
     cfg.blob_storage = big_blobs::Storage::filesystem(store.clone()).await.unwrap();
     let (node, stop) = BigNode::boot(cfg).await.unwrap();
-    assert_eq!(std::fs::read_dir(&mounts).unwrap().count(), 0);
+    // The mount left behind is gone, and what is there is the core nodule's own workload's: it
+    // runs for the node's life (ADR 052), so its mount is the baseline the test's is counted from.
+    assert!(!mounts.join("mount-left-behind").exists());
+    let listing = || {
+        std::fs::read_dir(&mounts)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>()
+    };
+    let core_mounts = listing();
+    assert_eq!(core_mounts.len(), 1, "{core_mounts:?}");
 
     let spec = caller();
     put(&node, &bytes).await;
@@ -1826,10 +1836,10 @@ async fn a_wasm_guest_materializes_blobs_into_its_working_mount() {
         set_enabled(&node, &spec, true).await.readiness,
         Readiness::Ready
     );
-    let mount = std::fs::read_dir(&mounts)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect::<Vec<_>>();
+    let mount: Vec<_> = listing()
+        .into_iter()
+        .filter(|path| !core_mounts.contains(path))
+        .collect();
     let [mount] = mount.as_slice() else {
         panic!("one workload has one working mount, found {mount:?}");
     };
@@ -1974,6 +1984,6 @@ async fn a_wasm_guest_materializes_blobs_into_its_working_mount() {
 
     // Stopping the workload removes its mount.
     set_enabled(&node, &spec, false).await;
-    assert_eq!(std::fs::read_dir(&mounts).unwrap().count(), 0);
+    assert_eq!(listing(), core_mounts);
     shutdown(node, stop).await;
 }

@@ -36,6 +36,7 @@ mod harness;
 mod ladder;
 mod listeners;
 mod many_nodes;
+mod micros;
 mod network;
 mod nodule_wasm;
 mod peers;
@@ -123,6 +124,7 @@ async fn mint_capability(node: &BigNode, minter: Authorization, scope: DocScope)
             RequestContext::root(),
             minter.metadata(),
             MintDocCapability {
+                capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: None,

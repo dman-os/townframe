@@ -31,7 +31,6 @@ method_core.workspace = true
 bytes.workspace = true
 #
 # identity
-blake3.workspace = true
 http.workspace = true
 
 #

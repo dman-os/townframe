@@ -572,6 +572,7 @@ async fn reaches(node: &Node, holder: CapId, drawer: &DrawerId) -> bool {
             RequestContext::root(),
             Authorization::identity(holder).metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
                     create: false,
@@ -641,6 +642,7 @@ async fn an_operator_made_drawer_granted_through_set_cartridge_grant_reaches_the
             RequestContext::root(),
             operator.metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::new(),
                     create: true,
@@ -1107,6 +1109,7 @@ async fn a_routine_reaches_granted_drawers_only_for_its_datum_kinds() {
             RequestContext::root(),
             Authorization::identity(actor.capability).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     create: BTreeSet::from([placement.clone()]),
                     ..DocScope::default()
@@ -2322,6 +2325,7 @@ mod core_like {
     use big_cartridges_core::protocol::CartridgesError;
     use big_cartridges_core::protocol::ListCartridgeGrants;
     use big_cartridges_core::protocol::ListCartridgeInstalls;
+    use big_cartridges_core::protocol::ResolveCartridgePin;
     use big_dispatch::ServiceProvider;
     use method_core::Method;
 
@@ -2347,6 +2351,10 @@ mod core_like {
 
     fn list_installs() -> &'static str {
         ListCartridgeInstalls::XRPC.nsid
+    }
+
+    fn resolve_pin() -> &'static str {
+        ResolveCartridgePin::XRPC.nsid
     }
 
     /// A cartridge whose one routine `routine` uses each of `methods`.
@@ -2387,6 +2395,9 @@ mod core_like {
         ServiceProvider::default()
             .serve(&node.nodules.client)
             .register(&node.dispatch.router, "builtin:nodules");
+        ServiceProvider::default()
+            .serve(&node.cartridges.client)
+            .register(&node.dispatch.router, "builtin:cartridges");
         let mut core = using(
             "core",
             crate::e2e::installs::CORE_VERSION,
@@ -2397,6 +2408,7 @@ mod core_like {
                 list_grants(),
                 await_grants(),
                 list_installs(),
+                resolve_pin(),
             ],
         );
         // The routine reads a settings kind of its own, which is what gives it a docs handle.
@@ -2448,6 +2460,7 @@ mod core_like {
     async fn shut_down(node: Node) {
         node.dispatch.router.unbind("builtin:authority");
         node.dispatch.router.unbind("builtin:nodules");
+        node.dispatch.router.unbind("builtin:cartridges");
         node.shutdown().await;
     }
 
@@ -2631,6 +2644,18 @@ mod core_like {
             .await
             .unwrap();
         assert!(awaited["revision"].is_string(), "{awaited}");
+        // Its privilege is exactly the methods the node granted it, so the methods that change
+        // an install or a grant stay out of its reach.
+        for nsid in [
+            "org.example.daybook.cartridges.installCartridge",
+            "org.example.daybook.cartridges.setCartridgeGrant",
+        ] {
+            assert_eq!(
+                node.invoke(core_auth, nsid, json!({})).await,
+                Err(DispatchError::Denied),
+                "{nsid}"
+            );
+        }
 
         // A plain nodule granted the very same methods is refused: the grant states no
         // privilege, so its handle does not reach a privileged method, and dispatch says so.
@@ -2661,6 +2686,59 @@ mod core_like {
         assert!(matches!(
             node.call(plain_auth, ListCartridgeInstalls {}).await,
             Err(CartridgesError::Denied)
+        ));
+        shut_down(node).await;
+    }
+
+    /// A micro's `uses` and the permbinds they name are declared in the envelope an install
+    /// pins, so the core nodule reads it through the registry's `resolveCartridgePin` on the node's
+    /// privileged grant of that method; a nodule granted the same method without the privilege is
+    /// refused by dispatch, and by the service itself when handed the handle directly.
+    #[tokio::test]
+    async fn a_nodule_reads_another_cartridges_envelope_at_its_install_pin_only_on_a_privileged_grant()
+     {
+        let (node, executor, core) = core_node().await;
+        let core_auth = as_routine(&core);
+        let plain = plain_nodule(&node, &executor, &[list_installs(), resolve_pin()]).await;
+        let plain_auth = as_routine(&plain);
+        let installs = node
+            .invoke(core_auth, list_installs(), json!({}))
+            .await
+            .unwrap();
+        let pin = installs["installs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|install| install["cartridgeId"] == json!(ALPHA))
+            .expect("alpha is installed")["install"]["cartridge"]
+            .clone();
+        let envelope = node
+            .invoke(core_auth, resolve_pin(), json!({ "pin": pin }))
+            .await
+            .unwrap();
+        assert_eq!(
+            envelope["cartridge"]["id"],
+            json!(ALPHA),
+            "the envelope at alpha's pin: {envelope}"
+        );
+        assert!(envelope["cartridge"]["permbinds"].is_object(), "{envelope}");
+
+        assert_eq!(
+            node.invoke(plain_auth, resolve_pin(), json!({ "pin": pin }))
+                .await,
+            Err(DispatchError::Denied)
+        );
+        let pin: big_cabinet_core::DatumPin = serde_json::from_value(pin).unwrap();
+        assert!(matches!(
+            node.cartridges
+                .client
+                .call_with(
+                    RequestContext::root(),
+                    plain_auth.metadata(),
+                    ResolveCartridgePin { pin },
+                )
+                .await,
+            Err(ClientError::Method(CartridgesError::Denied))
         ));
         shut_down(node).await;
     }

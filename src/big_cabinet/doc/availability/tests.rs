@@ -152,6 +152,7 @@ impl Node {
                 RequestContext::root(),
                 Authorization::identity(self.authority.root).metadata(),
                 MintDocCapability {
+ capability: None,
                     scope,
                     rights: Rights::USE,
                     subject: None,

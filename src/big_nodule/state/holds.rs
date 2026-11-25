@@ -20,8 +20,25 @@ impl State {
         drawer: &DrawerId,
     ) -> Res<()> {
         self.stores
-            .grant_to_service(context, authorization, drawer)
+            .grant_to_actor(
+                context,
+                authorization,
+                drawer,
+                self.stores.parent.actor.actor_id,
+            )
             .await?;
+        // `micros` is the micro runtime as the service is the nodule runtime: the actor the
+        // delegators of everything a micro can be granted are bound to (ADR 049 section 6.1).
+        // The core nodule mints a micro's handles over a granted drawer as that actor, which
+        // proves the reach against the actor's own standing, so a drawer granted to a
+        // cartridge that ships a micro is held by `micros` too, and by no other cartridge's
+        // grant.
+        if self.has_micro(cartridge_id) {
+            let micros = &self.stores.core_cartridge.actor;
+            self.stores
+                .grant_to_actor(context, authorization, drawer, micros.actor.actor_id)
+                .await?;
+        }
         store::upsert_service_drawer(
             &self.stores.sql,
             drawer,
@@ -86,12 +103,35 @@ impl State {
                 .keys()
                 .any(|(held, holder)| *held == drawer && *holder != cartridge_id);
             if !still_held {
-                self.stores.revoke_from_service(context, &drawer).await?;
+                self.stores
+                    .revoke_from_actor(context, &drawer, &self.stores.parent)
+                    .await?;
+            }
+            // `micros` stands on a drawer while a cartridge that ships a micro is granted it,
+            // and gives the standing back with the last such grant, as the service does.
+            let micros_still_needed =
+                self.service_drawers.iter().any(|((held, holder), origin)| {
+                    *held == drawer
+                        && *holder != cartridge_id
+                        && *origin == DrawerOrigin::Granted
+                        && self.has_micro(holder)
+                });
+            if self.has_micro(&cartridge_id) && !micros_still_needed {
+                self.stores
+                    .revoke_from_actor(context, &drawer, &self.stores.core_cartridge.actor)
+                    .await?;
             }
             store::delete_service_drawer(&self.stores.sql, &drawer, &cartridge_id).await?;
             self.service_drawers.remove(&(drawer, cartridge_id));
         }
         Ok(())
+    }
+
+    /// Whether the cartridge is installed with a micro member, which is what makes `micros`
+    /// stand where the cartridge is granted.
+    fn has_micro(&self, cartridge_id: &CartridgeId) -> bool {
+        self.install_record(cartridge_id)
+            .is_ok_and(|record| record.install.micro.is_some())
     }
 
     /// A routine of `cartridge_id` created `drawer` through its own call. The drawers service made

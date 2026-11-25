@@ -266,10 +266,20 @@ impl DispatchService {
     async fn mint(
         &self,
         context: &RequestContext,
-        authorization: Authorization,
+        metadata: &service_utils_rs::HttpMetadata,
         params: MintDispatchCapability,
     ) -> Res<Capability> {
-        let caller = self.caller(context, authorization).await?;
+        // The mint's parent is the body `capability` when the request names one, so a nodule,
+        // whose credential dispatch forwards as its own dispatch handle, mints from a handle it
+        // holds for the purpose.
+        let caller = self
+            .capabilities
+            .minter::<DispatchScope>(context, metadata, params.capability)
+            .await
+            .map_err(authority_error)?;
+        if !caller.rights.contains(Rights::USE) {
+            return Err(DispatchError::Denied);
+        }
         if let Some(scope) = self.scope_of(&caller)?
             && !scope.covers(&params.scope)
         {
@@ -463,7 +473,18 @@ macro_rules! handlers {
 }
 handlers! {
     Invoke => invoke: InvokeOutput;
-    MintDispatchCapability => mint: Capability;
+}
+
+impl Handler<MintDispatchCapability> for DispatchService {
+    async fn call(
+        &self,
+        request: Envelope<MintDispatchCapability>,
+    ) -> Res<ResponseEnvelope<Capability>> {
+        Ok(self
+            .mint(&request.context, &request.metadata, request.params)
+            .await?
+            .into())
+    }
 }
 
 service_utils_rs::bind_service_protocol! {

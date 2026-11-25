@@ -25,6 +25,7 @@ use big_cartridges_core::Component as ManifestComponent;
 use big_cartridges_core::Permbind;
 use big_cartridges_core::ResolvedCartridge;
 use big_cartridges_core::Revision;
+use big_cartridges_core::RoutineUse;
 use big_cartridges_core::Version;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::protocol::AwaitCartridgeGrantRequest;
@@ -160,153 +161,175 @@ impl InstalledNodule {
         effective_operations: &DispatchScope,
         builtin_handle_need: impl Fn(&str) -> Option<HandleNeed>,
     ) -> BTreeMap<String, RoutineScopes> {
-        let settings_kinds = self.resolved.settings_kinds();
         self.nodule
             .routines
             .iter()
             .map(|(routine_key, routine)| {
-                let mut operations = BTreeSet::new();
-                let mut read = BTreeSet::new();
-                let mut write = BTreeSet::new();
-                // Every `#datum` kind the routine's `uses` take, settings or not: the kinds its docs
-                // handle reaches inside the drawers it was granted.
-                let mut datum_read = BTreeSet::new();
-                let mut datum_write = BTreeSet::new();
-                let mut drawers = BTreeMap::new();
-                let mut create_drawer = false;
-                // The operation-level flags of the blobs handle the routine's operations need, stated
-                // beside each operation's definition (ADR 049 §6.2).
-                let mut blobs_flags = serde_json::Map::new();
-                for (binding, usage) in &routine.uses {
-                    let permbind = self
-                        .resolved
-                        .cartridge
-                        .permbinds
-                        .get(binding)
-                        .expect("admission refuses a routine use without its permbind");
-                    match permbind {
-                        // Listing a method permbind is the use: method access has no
-                        // read/write/create/delete to inspect.
-                        Permbind::Method(method) => {
-                            if effective_operations
-                                .operations
-                                .contains(method.nsid.as_str())
-                            {
-                                operations.insert(method.nsid.to_string());
-                                if let Some(need) = builtin_handle_need(method.nsid.as_str())
-                                {
-                                    assert_eq!(
-                                        need.mint, BLOBS_MINT,
-                                        "a built-in operation's handle need names a domain the nodule runtime mints"
-                                    );
-                                    blobs_flags.extend(
-                                        need.flags
-                                            .iter()
-                                            .map(|flag| ((*flag).to_owned(), serde_json::Value::Bool(true))),
-                                    );
-                                }
-                            }
-                        }
-                        Permbind::Datum(datum) => {
-                            let tag = DatumTag::new(datum.nsid.to_string())
-                                .expect("an admitted datum binding has a valid tag");
-                            if usage.read {
-                                datum_read.insert(tag.clone());
-                            }
-                            if usage.write || usage.create || usage.delete {
-                                datum_write.insert(tag.clone());
-                            }
-                            // What the cartridge-wide capabilities this replaces reached, and so
-                            // all a datum permbind reaches: the cartridge config document, whole
-                            // for reads and the declared settings kinds for writes. No code ever
-                            // turned a non-settings `#datum` permbind into a document scope, and
-                            // no document set is named for one yet, so such a permbind confers
-                            // nothing here rather than a document this change invented.
-                            if !settings_kinds
-                                .covers(&DatumKinds::Only(std::iter::once(tag.clone()).collect()))
-                            {
-                                continue;
-                            }
-                            if usage.read {
-                                read.insert(tag.clone());
-                            }
-                            if usage.write || usage.create || usage.delete {
-                                write.insert(tag);
-                            }
-                        }
-                        Permbind::Drawers(drawer) => {
-                            // What the routine uses on existing drawers, as far as the permbind
-                            // declares it and a drawer was granted that far. `create` is not
-                            // among them: it sets only the scope's create flag below, so a
-                            // create-only routine can make drawers without any access to the
-                            // ones that exist (grants never widen silently, ADR 028). Deleting
-                            // has no access level of its own, so it needs Write.
-                            let access = [
-                                (usage.read && drawer.read.is_some(), DrawerAccess::Read),
-                                (usage.write && drawer.write.is_some(), DrawerAccess::Write),
-                                (usage.delete && drawer.delete.is_some(), DrawerAccess::Write),
-                            ]
-                            .into_iter()
-                            .filter_map(|(used, access)| used.then_some(access))
-                            .max();
-                            if let Some(access) = access {
-                                drawers.extend(
-                                    desired_grants
-                                        .iter()
-                                        .filter(|(_, granted)| **granted >= access)
-                                        .map(|(id, _)| (id.clone(), access)),
-                                );
-                            }
-                            create_drawer |= usage.create && drawer.create.is_some();
-                        }
-                        // Network access is checked where the request leaves (`egress::authorize_net`),
-                        // not by a handle: there is no scope to mint.
-                        Permbind::Net(_) | Permbind::Unknown(_) => {}
-                    }
-                }
-                // A routine with something in its `uses` may always ask for it and wait for the
-                // answer: filing confers nothing, and the grant that would admit the call is the very
-                // thing the request is for, so it cannot be a precondition of it (ADR 049 §4.2).
-                if !routine.uses.is_empty() {
-                    operations.extend(
-                        [
-                            RequestCartridgeGrant::XRPC.nsid,
-                            AwaitCartridgeGrantRequest::XRPC.nsid,
-                        ]
-                        .map(str::to_owned),
-                    );
-                }
-                let docs = routine_docs_scope(
-                    self,
-                    &drawers,
-                    [read, write],
-                    [datum_read, datum_write],
-                    &mut operations,
-                );
-                let blobs = (!blobs_flags.is_empty()).then(|| {
-                    serde_json::from_value(serde_json::Value::Object(blobs_flags))
-                        .expect("a handle need's flags are fields of the blobs scope")
-                });
-                let drawers = (!drawers.is_empty() || create_drawer).then_some(DrawerScope {
-                    drawers,
-                    create: create_drawer,
-                });
-                let dispatch = (!operations.is_empty()).then(|| DispatchScope {
-                    operations,
-                    authorities: effective_operations.authorities.clone(),
-                    privileged: effective_operations.privileged,
-                });
                 (
                     routine_key.clone(),
-                    RoutineScopes {
-                        dispatch,
-                        docs,
-                        drawers,
-                        blobs,
-                    },
+                    RoutineScopes::lower(
+                        &self.resolved,
+                        &self.config_doc,
+                        &routine.uses,
+                        desired_grants,
+                        effective_operations,
+                        &builtin_handle_need,
+                    ),
                 )
             })
             .collect()
+    }
+}
+
+impl RoutineScopes {
+    /// The scopes of one `uses` map (a routine's, or a micro's) over `resolved`'s permbinds, which
+    /// is the whole lowering of [`InstalledNodule::routine_scopes`] for one routine, so the nodule
+    /// service and the micros nodule (which lowers a micro's `uses` with the same code, in a
+    /// guest) cannot disagree about what a `uses` entry confers.
+    pub fn lower(
+        resolved: &ResolvedCartridge,
+        config_doc: &DocId,
+        uses: &BTreeMap<String, RoutineUse>,
+        desired_grants: &BTreeMap<DrawerId, DrawerAccess>,
+        effective_operations: &DispatchScope,
+        builtin_handle_need: &impl Fn(&str) -> Option<HandleNeed>,
+    ) -> Self {
+        let settings_kinds = resolved.settings_kinds();
+        let mut operations = BTreeSet::new();
+        let mut read = BTreeSet::new();
+        let mut write = BTreeSet::new();
+        // Every `#datum` kind the routine's `uses` take, settings or not: the kinds its docs
+        // handle reaches inside the drawers it was granted.
+        let mut datum_read = BTreeSet::new();
+        let mut datum_write = BTreeSet::new();
+        let mut drawers = BTreeMap::new();
+        let mut create_drawer = false;
+        // The operation-level flags of the blobs handle the routine's operations need, stated
+        // beside each operation's definition (ADR 049 §6.2).
+        let mut blobs_flags = serde_json::Map::new();
+        for (binding, usage) in uses {
+            let permbind = resolved
+                .cartridge
+                .permbinds
+                .get(binding)
+                .expect("admission refuses a routine use without its permbind");
+            match permbind {
+                // Listing a method permbind is the use: method access has no
+                // read/write/create/delete to inspect.
+                Permbind::Method(method) => {
+                    if effective_operations
+                        .operations
+                        .contains(method.nsid.as_str())
+                    {
+                        operations.insert(method.nsid.to_string());
+                        if let Some(need) = builtin_handle_need(method.nsid.as_str()) {
+                            assert_eq!(
+                                need.mint, BLOBS_MINT,
+                                "a built-in operation's handle need names a domain the nodule runtime mints"
+                            );
+                            blobs_flags.extend(
+                                need.flags.iter().map(|flag| {
+                                    ((*flag).to_owned(), serde_json::Value::Bool(true))
+                                }),
+                            );
+                        }
+                    }
+                }
+                Permbind::Datum(datum) => {
+                    let tag = DatumTag::new(datum.nsid.to_string())
+                        .expect("an admitted datum binding has a valid tag");
+                    if usage.read {
+                        datum_read.insert(tag.clone());
+                    }
+                    if usage.write || usage.create || usage.delete {
+                        datum_write.insert(tag.clone());
+                    }
+                    // What the cartridge-wide capabilities this replaces reached, and so
+                    // all a datum permbind reaches: the cartridge config document, whole
+                    // for reads and the declared settings kinds for writes. No code ever
+                    // turned a non-settings `#datum` permbind into a document scope, and
+                    // no document set is named for one yet, so such a permbind confers
+                    // nothing here rather than a document this change invented.
+                    if !settings_kinds
+                        .covers(&DatumKinds::Only(std::iter::once(tag.clone()).collect()))
+                    {
+                        continue;
+                    }
+                    if usage.read {
+                        read.insert(tag.clone());
+                    }
+                    if usage.write || usage.create || usage.delete {
+                        write.insert(tag);
+                    }
+                }
+                Permbind::Drawers(drawer) => {
+                    // What the routine uses on existing drawers, as far as the permbind
+                    // declares it and a drawer was granted that far. `create` is not
+                    // among them: it sets only the scope's create flag below, so a
+                    // create-only routine can make drawers without any access to the
+                    // ones that exist (grants never widen silently, ADR 028). Deleting
+                    // has no access level of its own, so it needs Write.
+                    let access = [
+                        (usage.read && drawer.read.is_some(), DrawerAccess::Read),
+                        (usage.write && drawer.write.is_some(), DrawerAccess::Write),
+                        (usage.delete && drawer.delete.is_some(), DrawerAccess::Write),
+                    ]
+                    .into_iter()
+                    .filter_map(|(used, access)| used.then_some(access))
+                    .max();
+                    if let Some(access) = access {
+                        drawers.extend(
+                            desired_grants
+                                .iter()
+                                .filter(|(_, granted)| **granted >= access)
+                                .map(|(id, _)| (id.clone(), access)),
+                        );
+                    }
+                    create_drawer |= usage.create && drawer.create.is_some();
+                }
+                // Network access is checked where the request leaves (`egress::authorize_net`),
+                // not by a handle: there is no scope to mint.
+                Permbind::Net(_) | Permbind::Unknown(_) => {}
+            }
+        }
+        // A routine with something in its `uses` may always ask for it and wait for the
+        // answer: filing confers nothing, and the grant that would admit the call is the very
+        // thing the request is for, so it cannot be a precondition of it (ADR 049 §4.2).
+        if !uses.is_empty() {
+            operations.extend(
+                [
+                    RequestCartridgeGrant::XRPC.nsid,
+                    AwaitCartridgeGrantRequest::XRPC.nsid,
+                ]
+                .map(str::to_owned),
+            );
+        }
+        let docs = routine_docs_scope(
+            config_doc,
+            &drawers,
+            [read, write],
+            [datum_read, datum_write],
+            &mut operations,
+        );
+        let blobs = (!blobs_flags.is_empty()).then(|| {
+            serde_json::from_value(serde_json::Value::Object(blobs_flags))
+                .expect("a handle need's flags are fields of the blobs scope")
+        });
+        let drawers = (!drawers.is_empty() || create_drawer).then_some(DrawerScope {
+            drawers,
+            create: create_drawer,
+        });
+        let dispatch = (!operations.is_empty()).then(|| DispatchScope {
+            operations,
+            authorities: effective_operations.authorities.clone(),
+            privileged: effective_operations.privileged.clone(),
+        });
+        RoutineScopes {
+            dispatch,
+            docs,
+            drawers,
+            blobs,
+        }
     }
 }
 
@@ -439,7 +462,7 @@ pub struct RoutineScopes {
 /// (`drawers`), at the routine's `#datum` kinds (`datum`, as `[read, write]`). Adds the docs
 /// operations the handle is useless without to `operations`.
 fn routine_docs_scope(
-    installed: &InstalledNodule,
+    config_doc: &DocId,
     drawers: &BTreeMap<DrawerId, DrawerAccess>,
     [read, write]: [BTreeSet<DatumTag>; 2],
     [datum_read, datum_write]: [BTreeSet<DatumTag>; 2],
@@ -483,7 +506,7 @@ fn routine_docs_scope(
             if kinds.is_empty() {
                 BTreeMap::new()
             } else {
-                BTreeMap::from([(installed.config_doc.clone(), DatumKinds::Only(kinds))])
+                BTreeMap::from([(config_doc.clone(), DatumKinds::Only(kinds))])
             }
         };
         // The nodule reaches the docs service through dispatch, so the handle that

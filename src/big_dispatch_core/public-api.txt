@@ -19,9 +19,9 @@ pub impl big_dispatch_core::DispatchScope::fn route_target < 'a > (routes : & 'a
 pub impl big_dispatch_core::Invoke::fn json (operation : impl Into < String > , input : Value , context : InvocationContext) -> Self
 pub impl big_dispatch_core::Origin::fn is_local (self) -> bool
 pub impl big_dispatch_core::Readiness::fn is_ready (self) -> bool
-pub struct big_dispatch_core::DispatchScope  { operations: BTreeSet < String >, authorities: BTreeSet < String >, privileged: bool }
+pub struct big_dispatch_core::DispatchScope  { operations: BTreeSet < String >, authorities: BTreeSet < String >, privileged: BTreeSet < String > }
 pub struct big_dispatch_core::InvocationContext  { idempotency_key: Option < String >, http: Option < HttpForm >, range: Option < ByteRange >, origin: Origin }
 pub struct big_dispatch_core::Invoke  { operation: String, parameters: Value, body: Body, context: InvocationContext }
 pub struct big_dispatch_core::InvokeOutput  { body: Body }
-pub struct big_dispatch_core::MintDispatchCapability  { scope: DispatchScope, rights: Rights, subject: Option < Uuid7 > }
+pub struct big_dispatch_core::MintDispatchCapability  { capability: Option < CapId >, scope: DispatchScope, rights: Rights, subject: Option < Uuid7 > }
 pub use big_dispatch_core::service_core_rs :: Body

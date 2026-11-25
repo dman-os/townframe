@@ -31,6 +31,7 @@ pub(super) async fn narrowed(node: &BigNode, scope: DispatchScope) -> Authorizat
             RequestContext::root(),
             operator.metadata(),
             MintDispatchCapability {
+                capability: None,
                 scope,
                 rights: Rights::USE | Rights::NARROW,
                 subject: None,
@@ -152,6 +153,7 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
             ),
             (cartridge_methods::ListCartridgeGrants::XRPC.nsid, true),
             (cartridge_methods::AwaitCartridgeGrants::XRPC.nsid, true),
+            (cartridge_methods::ResolveCartridgePin::XRPC.nsid, true),
             (nodule_methods::SetNoduleDevTakeover::XRPC.nsid, true),
             (nodule_methods::ListNodules::XRPC.nsid, false),
             (nodule_methods::MintNoduleCapability::XRPC.nsid, false),
@@ -379,6 +381,7 @@ async fn second_caller(
             RequestContext::root(),
             operator.metadata(),
             MintDispatchCapability {
+                capability: None,
                 scope: self::operations(operations),
                 rights: Rights::USE,
                 subject: Some(opened.actor.actor_id),
@@ -551,6 +554,7 @@ async fn a_body_capability_presented_by_an_actor_it_is_not_bound_to_is_refused()
             RequestContext::root(),
             Authorization::identity(node.authority.root).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([stored.doc_id.clone()]),
                     ..DocScope::default()

@@ -617,6 +617,15 @@ fn register_built_ins(
             "builtin:cartridges",
             ServiceProvider::default().serve(&cartridges.client),
         ),
+        // Dispatch's own mint, so a nodule that holds a dispatch handle for the purpose (the
+        // core nodule's, minted at the `micros` delegator's scope) mints a narrower one for a
+        // micro's actor. Its `invoke` is how a call enters dispatch, not an operation behind it.
+        (
+            "builtin:dispatch",
+            ServiceProvider::default()
+                .serve(&dispatch.client)
+                .except(<big_dispatch_core::Invoke as method_core::Method>::XRPC.nsid),
+        ),
     ];
     let mut provider_ids = Vec::with_capacity(built_ins.len());
     for (provider_id, provider) in built_ins {
@@ -961,22 +970,8 @@ where
     // name (ADR 049 §6.2), so it holds, as their delegator, a handle for every operation-level
     // blobs flag. Only the operator's root capability mints a blobs handle unscoped by another, so the
     // operator introduces this one to the service's actor.
-    let blobs_delegator = blobs
-        .client
-        .call_with(
-            RequestContext::root(),
-            Authorization::identity(authority.root).metadata(),
-            big_blobs_core::MintBlobsCapability {
-                scope: big_blobs_core::protocol::BlobsScope {
-                    put: true,
-                    ..Default::default()
-                },
-                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
-                subject: Some(nodules_actor.actor.actor_id),
-            },
-        )
-        .await?
-        .capability_id;
+    let blobs_delegator =
+        mint_blobs_delegator(blobs, authority, nodules_actor.actor.actor_id).await?;
     // The core cartridge's nodule acts as `micros`, a sibling of `nodules`, and an introduction
     // may only name a descendant of the delegator's subject. So its routine handles are minted
     // from delegators the operator introduces to `micros`, as it introduces the nodule service's
@@ -985,28 +980,15 @@ where
     // shared config drawer, the most a routine's docs handle can name. (A drawers handle is
     // minted by the `micros` actor's identity capability, as the nodule service's are by its
     // own.)
-    let micros_blobs_delegator = blobs
-        .client
-        .call_with(
-            RequestContext::root(),
-            Authorization::identity(authority.root).metadata(),
-            big_blobs_core::MintBlobsCapability {
-                scope: big_blobs_core::protocol::BlobsScope {
-                    put: true,
-                    ..Default::default()
-                },
-                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
-                subject: Some(micros_actor.actor.actor_id),
-            },
-        )
-        .await?
-        .capability_id;
+    let micros_blobs_delegator =
+        mint_blobs_delegator(blobs, authority, micros_actor.actor.actor_id).await?;
     let micros_docs_delegator = docs
         .client
         .call_with(
             RequestContext::root(),
             Authorization::identity(authority.root).metadata(),
             big_cabinet_core::doc::MintDocCapability {
+                capability: None,
                 scope: big_cabinet_core::doc::DocScope {
                     drawers: std::collections::BTreeMap::from([(
                         shared_config_drawer.clone(),
@@ -1053,10 +1035,38 @@ where
             },
         ),
         sql,
+        granted: cartridges.granted.clone(),
     })
     .await?;
     stop.stages.push(Stage::Service(nodules_stop));
     Ok((executor, nodules))
+}
+
+/// The handle for every operation-level blobs flag (`put`) that the operator introduces to a
+/// subsystem actor, so it can mint each routine's blobs handle from it (ADR 049 section 6.2).
+/// Only the operator's root capability mints a blobs handle unscoped by another.
+async fn mint_blobs_delegator(
+    blobs: &big_blobs::Blobs,
+    authority: &Authority,
+    subject: Uuid7,
+) -> Res<CapId> {
+    Ok(blobs
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(authority.root).metadata(),
+            big_blobs_core::MintBlobsCapability {
+                capability: None,
+                scope: big_blobs_core::protocol::BlobsScope {
+                    put: true,
+                    ..Default::default()
+                },
+                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                subject: Some(subject),
+            },
+        )
+        .await?
+        .capability_id)
 }
 
 /// Boots dispatch first: the nodule service registers its providers in dispatch's router, so it
@@ -1098,16 +1108,18 @@ async fn boot_dispatch(
                 RequestContext::root(),
                 Authorization::identity(authority.root).metadata(),
                 MintDispatchCapability {
-                    // Every method: a nodule's method grants are narrowed from this scope. The
-                    // privilege bit is the most a handle minted from it can carry, and a handle
-                    // carries it only when its cartridge's grants say so
+                    capability: None,
+                    // Every method: a nodule's method grants are narrowed from this scope. Its
+                    // privilege names every privileged built-in method, the most a handle
+                    // minted from it can carry, and a handle carries a method of it only when
+                    // its cartridge's grants name that method as privileged
                     // (`GrantBody::privileged`), which only the node writes, for its core
                     // cartridge, for the boot. A person's grant, however it is configured, never
                     // reaches a method that manages nodules or mints authority
                     // (`XrpcMethod::privileged`).
                     scope: DispatchScope {
                         authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
-                        privileged: true,
+                        privileged: method_lexicon::privileged_methods(),
                         ..Default::default()
                     },
                     rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
@@ -1160,6 +1172,7 @@ async fn grant_drawer(
             RequestContext::root(),
             Authorization::identity(issuer.capability).metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer.clone(), EntryAccess::Admin)]),
                     create: false,

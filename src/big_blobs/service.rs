@@ -7,7 +7,6 @@ use big_cabinet::authority::DomainAuthority;
 use big_cabinet::capability::DomainCapabilities;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
-use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
@@ -673,10 +672,9 @@ impl Handler<MintBlobsCapability> for BlobService {
         request: Envelope<MintBlobsCapability>,
     ) -> Result<ResponseEnvelope<Capability>, BlobsError> {
         let params = request.params;
-        let authorization = Authorization::from_metadata(&request.metadata)?;
         let caller = self
             .capabilities
-            .source::<BlobsScope>(&request.context, authorization)
+            .minter::<BlobsScope>(&request.context, &request.metadata, params.capability)
             .await
             .map_err(authority_error)?;
         if !caller.rights.contains(Rights::USE) {

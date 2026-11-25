@@ -37,6 +37,7 @@ async fn mint(
             RequestContext::root(),
             authorization.metadata(),
             MintDocCapability {
+                capability: None,
                 scope,
                 rights,
                 subject: None,
@@ -225,6 +226,7 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
                     }
                     .metadata(),
                     MintDocCapability {
+                        capability: None,
                         scope: DocScope {
                             read: DocScope::read_all([other.doc_id.clone()]),
                             ..DocScope::default()
@@ -490,6 +492,7 @@ async fn datum_kind_capabilities_can_only_be_narrowed() {
                 }
                 .metadata(),
                 MintDocCapability {
+                    capability: None,
                     scope: DocScope {
                         write: BTreeMap::from([(created.doc_id, DatumKinds::All,)]),
                         ..DocScope::default()
@@ -572,6 +575,7 @@ async fn a_delegate_handle_cannot_be_rebound_to_another_actor_nor_sign_as_one() 
                         RequestContext::root(),
                         Authorization::identity(authority).metadata(),
                         MintDocCapability {
+                            capability: None,
                             scope: scope.clone(),
                             rights: Rights::USE,
                             subject: Some(named),
@@ -647,6 +651,7 @@ async fn a_delegate_handle_cannot_be_rebound_to_another_actor_nor_sign_as_one() 
             RequestContext::root(),
             Authorization::identity(delegate.capability_id).metadata(),
             MintDocCapability {
+                capability: None,
                 scope,
                 rights: Rights::USE,
                 subject: Some(agent.actor.actor_id),
@@ -1703,6 +1708,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
                         context.child(),
                         authorization.metadata(),
                         MintDocCapability {
+                            capability: None,
                             scope: scope.clone(),
                             rights: Rights::USE,
                             subject: None,
@@ -1762,6 +1768,7 @@ async fn a_scoped_handle_presented_by_an_actor_it_is_not_bound_to_cannot_mint() 
                 }
                 .metadata(),
                 MintDocCapability {
+                    capability: None,
                     scope: scope.clone(),
                     rights: Rights::USE,
                     subject: None,
@@ -1773,6 +1780,136 @@ async fn a_scoped_handle_presented_by_an_actor_it_is_not_bound_to_cannot_mint() 
     // refused.
     mint_as(owner.capability).await.unwrap();
     assert_eq!(mint_as(intruder.capability).await, Err(DocsError::Denied));
+}
+
+/// A nodule's route to a narrower handle: its own handle is named in the body (dispatch's
+/// credential is not a docs handle), so the holder narrows it onto a descendant actor, a wider
+/// scope is refused and a non-holder presenting the id gets nothing.
+#[tokio::test]
+async fn a_held_handle_named_in_the_body_narrows_onto_a_descendant_and_never_widens() {
+    let node = Node::boot().await;
+    let owner = actor(
+        &node,
+        "owner",
+        Rights::USE | Rights::NARROW | Rights::DELEGATE | Rights::MINT_CHILD,
+    )
+    .await;
+    node.grant(
+        &owner,
+        LedgerAccess::object(AccessRequest::Create {
+            placement: PLACEMENT,
+        }),
+    )
+    .await;
+    let agent = node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            OpenActor {
+                parent: owner.capability,
+                path: "owner/agent".into(),
+                rights: Rights::USE,
+            },
+        )
+        .await
+        .unwrap();
+    let intruder = actor(&node, "intruder", Rights::USE).await;
+    let first = node
+        .create(&owner, "first", [(key("main"), note("first"))])
+        .await
+        .unwrap();
+    let second = node
+        .create(&owner, "second", [(key("main"), note("second"))])
+        .await
+        .unwrap();
+    let both = mint(
+        &node,
+        Authorization::identity(owner.capability),
+        DocScope {
+            read: DocScope::read_all([first.doc_id.clone(), second.doc_id.clone()]),
+            ..DocScope::default()
+        },
+        Rights::USE | Rights::NARROW | Rights::DELEGATE,
+    )
+    .await;
+    let only_first = DocScope {
+        read: DocScope::read_all([first.doc_id.clone()]),
+        ..DocScope::default()
+    };
+    // The credential's authority is not the handle, as dispatch's never is: the signer is the
+    // presenter, and the handle is its own.
+    let from_body = async |from: CapId, signer: CapId, scope: DocScope, subject: Option<Uuid7>| {
+        op(node
+            .client()
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(signer).metadata(),
+                MintDocCapability {
+                    capability: Some(from),
+                    scope,
+                    rights: Rights::USE,
+                    subject,
+                },
+            )
+            .await)
+    };
+    let narrowed = from_body(
+        both.capability_id,
+        owner.capability,
+        only_first.clone(),
+        Some(agent.actor.actor_id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(narrowed.subject, Some(agent.actor.actor_id));
+    // The agent reads the first document and not the second.
+    let read = |capability: CapId, doc_id: DocId| ReadDatums {
+        capability,
+        doc_id,
+        at: At::Current,
+        datums: None,
+        optimistic: false,
+    };
+    node.client()
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(agent.capability).metadata(),
+            read(narrowed.capability_id, first.doc_id.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        op(node
+            .client()
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(agent.capability).metadata(),
+                read(narrowed.capability_id, second.doc_id.clone()),
+            )
+            .await),
+        Err(DocsError::Denied)
+    );
+    // A handle that reaches only the first document cannot mint one that reaches the second.
+    assert_eq!(
+        from_body(
+            narrowed.capability_id,
+            agent.capability,
+            DocScope {
+                read: DocScope::read_all([second.doc_id.clone()]),
+                ..DocScope::default()
+            },
+            None,
+        )
+        .await,
+        Err(DocsError::Denied)
+    );
+    // Another actor presenting the holder's handle id is refused.
+    assert_eq!(
+        from_body(both.capability_id, intruder.capability, only_first, None).await,
+        Err(DocsError::Denied)
+    );
+    node.stop().await;
 }
 
 #[tokio::test]
@@ -1801,6 +1938,7 @@ async fn mint_requires_narrow_bounded_rights_and_current_source_entitlements() {
                     RequestContext::root(),
                     Authorization::identity(source.capability).metadata(),
                     MintDocCapability {
+                        capability: None,
                         scope: scope.clone(),
                         rights,
                         subject: None,
@@ -2215,6 +2353,7 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
                 RequestContext::root(),
                 Authorization::identity(capability.capability_id).metadata(),
                 MintDocCapability {
+                    capability: None,
                     scope,
                     rights: Rights::USE | Rights::NARROW,
                     subject: Some(signer.actor.actor_id),

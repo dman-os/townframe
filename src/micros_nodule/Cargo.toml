@@ -1,0 +1,28 @@
+[package]
+name = "micros_nodule"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+#
+# internal
+big_blobs_core.workspace = true
+big_cabinet_core.workspace = true
+big_cartridges_core.workspace = true
+big_dispatch_core.workspace = true
+big_ndk.workspace = true
+big_nodule_core.workspace = true
+method_core.workspace = true
+service_core_rs.workspace = true
+
+#
+# misc
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true

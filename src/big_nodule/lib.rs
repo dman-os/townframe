@@ -39,17 +39,18 @@ use big_cabinet::SchemaRegistrationGroup;
 use big_cabinet::SchemaRepo;
 use big_cabinet::authority::DomainAuthority;
 use big_cabinet::capability::DomainCapabilities;
+use big_cabinet::capability::GrantedMethods;
 use big_cabinet::capability::Invocation;
+use big_cabinet::capability::Presenter;
+use big_cabinet::capability::PrivilegedGrants;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
-use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::OpenedActor;
-use big_cabinet_core::authority::ResolveAuthority;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::Bundle;
 use big_cabinet_core::datum::Universe;
@@ -193,6 +194,9 @@ pub struct NodulesConfig {
     /// install of any other version of it, and every change to its install, is refused.
     pub core_cartridge: CoreCartridge,
     pub sql: Database,
+    /// Bound to the nodule service once it is up, so the services that boot before it can ask
+    /// which cartridges hold a privileged grant ([`PrivilegedGrants`]).
+    pub granted: GrantedMethods,
 }
 
 /// The id of the node's core cartridge, the version the node's build carries (ADR 053), the
@@ -225,13 +229,23 @@ pub struct CoreDelegators {
     pub blobs: CapId,
 }
 
+impl PrivilegedGrants for NoduleService {
+    fn holds<'a>(&'a self, actor: Uuid7, method: &'a str) -> futures::future::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            match self.holds_privileged(actor, method).await {
+                Ok(held) => held,
+                // An actor that runs for no cartridge holds nothing.
+                Err(NodulesError::Denied) => false,
+                Err(error) => panic!("reading the privileged grants of an actor: {error}"),
+            }
+        })
+    }
+}
+
 /// The hosted surface: it settles who the caller is and what they may touch, then hands the
 /// work to the state task that owns the reconciled inventory.
 pub struct NoduleService {
     capabilities: DomainCapabilities,
-    /// The authority service, for the two methods a cartridge's own actor presents a dispatch
-    /// handle to (see [`Self::presenter`]).
-    authority: Client<AuthorityProtocol>,
     /// The core cartridge's id: its install is the node's, so the methods that change an install
     /// refuse it (ADR 053 §3 item 5).
     core: CartridgeId,
@@ -239,15 +253,6 @@ pub struct NoduleService {
 }
 
 type Res<T> = std::result::Result<T, NodulesError>;
-
-/// Who presents a call to one of the methods a cartridge makes on its own behalf.
-enum Presenter {
-    /// The operator, presenting its root capability.
-    Operator,
-    /// An actor holding a handle bound to it, which for a call through dispatch is a nodule's
-    /// actor presenting the handle dispatch minted for it.
-    Actor(Uuid7),
-}
 
 pub(crate) fn authority_error(error: ClientError<AuthorityServiceError>) -> NodulesError {
     match error {
@@ -326,38 +331,10 @@ impl NoduleService {
         context: &RequestContext,
         authorization: Authorization,
     ) -> Res<Presenter> {
-        let resolved = self
-            .authority
-            .call(
-                context.child(),
-                ResolveAuthority {
-                    capability: authorization.authority,
-                },
-            )
+        self.capabilities
+            .presenter(context, authorization)
             .await
-            .map_err(authority_error)?;
-        if resolved.is_operator_root() {
-            return Ok(Presenter::Operator);
-        }
-        let actor = resolved
-            .actor
-            .map(|actor| actor.actor_id)
-            .or(resolved.capability.subject)
-            .ok_or(NodulesError::Denied)?;
-        let signer = self
-            .authority
-            .call(
-                context.child(),
-                InspectCapability {
-                    capability: authorization.signer,
-                },
-            )
-            .await
-            .map_err(authority_error)?;
-        if !signer.rights.contains(Rights::USE) || signer.subject != Some(actor) {
-            return Err(NodulesError::Denied);
-        }
-        Ok(Presenter::Actor(actor))
+            .map_err(authority_error)
     }
 
     /// The cartridge a presenting actor runs for.
@@ -606,21 +583,26 @@ impl NoduleService {
         let Presenter::Actor(actor_id) = self.presenter(context, authorization).await? else {
             return Err(NodulesError::Denied);
         };
-        let cartridge_id = self.cartridge_of(actor_id).await?;
-        let grant = GrantKey::Method(method.to_owned());
-        // Only a boot grant counts: the runtime reads no privilege out of a config document.
-        let privileged = self
-            .state
-            .grants
-            .borrow()
-            .grants(&cartridge_id)
-            .iter()
-            .any(|record| record.this_boot && record.grant == grant && record.value.privileged);
+        let privileged = self.holds_privileged(actor_id, method).await?;
         if privileged {
             Ok(None)
         } else {
             Err(NodulesError::Denied)
         }
+    }
+
+    /// Whether the cartridge `actor_id` runs for holds a privileged grant of exactly `method`.
+    /// Only a boot grant counts: the runtime reads no privilege out of a config document.
+    async fn holds_privileged(&self, actor_id: Uuid7, method: &str) -> Res<bool> {
+        let cartridge_id = self.cartridge_of(actor_id).await?;
+        let grant = GrantKey::Method(method.to_owned());
+        Ok(self
+            .state
+            .grants
+            .borrow()
+            .grants(&cartridge_id)
+            .iter()
+            .any(|record| record.this_boot && record.grant == grant && record.value.privileged))
     }
 
     /// Refuses a change to the core cartridge's install, which only the node makes.
@@ -1049,6 +1031,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
             RequestContext::root(),
             Authorization::identity(config.actor.capability).metadata(),
             MintDocCapability {
+                capability: None,
                 scope: DocScope {
                     read: DocScope::read_all([config_doc.clone()]),
                     write: std::collections::BTreeMap::from([(
@@ -1084,7 +1067,6 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
     )
     .await
     .map_err(store_error)?;
-    let authority = config.authority.clone();
     let capabilities =
         DomainCapabilities::new(config.authority.clone(), config.namespace, SCOPE_PREFIX);
     let domain_stop = capabilities.stop_token();
@@ -1120,10 +1102,11 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
     };
     let service = Arc::new(NoduleService {
         capabilities,
-        authority,
         core: config.core_cartridge.id,
         state,
     });
+    let holder: Arc<dyn PrivilegedGrants> = Arc::clone(&service) as _;
+    config.granted.bind(Arc::downgrade(&holder));
     let (host, host_stop) = Host::new(Arc::clone(&service));
     let client = Client::new(Transport::direct(NodulesBinding::new(Arc::clone(&host))));
     Ok((
@@ -1192,6 +1175,7 @@ pub async fn ensure_shared_config_drawer(
             context.child(),
             Authorization::identity(config.actor.capability).metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     drawers: BTreeMap::new(),
                     create: true,

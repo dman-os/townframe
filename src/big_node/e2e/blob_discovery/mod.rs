@@ -31,6 +31,7 @@ pub(super) async fn collection(node: &BigNode, name: &str) -> DocId {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     create: true,
                     ..Default::default()
@@ -65,6 +66,7 @@ async fn child(node: &BigNode, parent: &DocId, child: &DocId) {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     create: false,
                     drawers: BTreeMap::from([
@@ -254,6 +256,7 @@ async fn self_doc(node: &BigNode, parent: &DocId, inventory: &DocId) -> BlobId {
             RequestContext::root(),
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
+                capability: None,
                 scope: DrawerScope {
                     create: true,
                     drawers: BTreeMap::from([(parent.clone(), Access::Admin)]),
