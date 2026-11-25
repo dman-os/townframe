@@ -1,5 +1,8 @@
 //! Listener attachments (ADR 033 §3, §5): serve the node's router over a Unix socket and/or TCP.
 //! A listener is an attachment, so the node boots and stops complete without any. Which
+//! The descriptor socket is a strictly one-request/one-response stream: SCM_RIGHTS must arrive
+//! with the first `recvmsg` that returns frame bytes; descriptors on a later read, ancillary
+//! truncation, or any new frame before the response closes the connection.
 //! operations exist is dispatch's business; a listener only decides who a connection is.
 //!
 //! - **Unix socket.** The kernel vouches for the peer's uid when it connects. Only the uid the
@@ -10,6 +13,15 @@
 //!   presents counts.
 
 use big_cabinet_core::authority::Authorization;
+use big_dispatch_core::Body;
+use big_dispatch_core::InvocationContext;
+use big_dispatch_core::Invoke;
+use big_dispatch_core::Origin;
+use service_utils_rs::ClientError;
+use service_utils_rs::HttpMetadata;
+use service_utils_rs::RequestContext;
+use service_utils_rs::descriptor;
+
 use big_dispatch::Anonymous;
 use big_dispatch::Edge;
 use big_dispatch_core::DispatchProtocol;
@@ -21,6 +33,7 @@ use service_utils_rs::xrpc::UnixConnectionAcceptor;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use utils_rs::prelude::Res;
@@ -37,6 +50,9 @@ pub struct Listeners {
     /// (and refuses an existing parent that other users can enter), removes a stale socket and
     /// removes the socket again on stop. Unix platforms only.
     pub unix_socket: Option<PathBuf>,
+    /// The descriptor socket paired with `unix_socket`, when the node serves local descriptor calls.
+    #[cfg(unix)]
+    pub fd_socket: Option<PathBuf>,
     pub tcp: Option<SocketAddr>,
 }
 
@@ -142,6 +158,122 @@ impl Listener {
         ))
     }
 
+    /// Serves descriptor frames for local-only calls.  The connection is strictly one request and
+    /// one response: a new frame arriving before the response is a protocol refusal.
+    #[cfg(unix)]
+    pub(crate) async fn fd(
+        path: &Path,
+        dispatch: Client<DispatchProtocol>,
+        operator: Authorization,
+    ) -> Res<(Self, FdClients)> {
+        use std::os::unix::fs::MetadataExt;
+
+        let listener = bind_owner_only(path).await?;
+        let owner_uid = std::fs::symlink_metadata(path)?.uid();
+        let (connections, open) = watch::channel(0);
+        let (drain, mut drain_requested) = watch::channel(false);
+        let (closed, listener_closed) = watch::channel(false);
+        let (shutdown, mut shutdown_requested) = oneshot::channel();
+        // Keep the drain channel alive until the listener task observes shutdown; callers may drop
+        // the node before stopping its staged listener.
+        let drain_liveness = drain.clone();
+        let socket = path.to_owned();
+        let task = tokio::spawn(async move {
+            let _drain_liveness = drain_liveness;
+            // `None` once the listening socket was closed on request ([`FdClients::close_listener`]):
+            // like the HTTP socket's, the task then keeps its open connections and accepts no more,
+            // and ends only when it is stopped.
+            let mut listener = Some(listener);
+            let mut tasks = tokio::task::JoinSet::new();
+            loop {
+                let accepted = tokio::select! {
+                    completed = tasks.join_next(), if !tasks.is_empty() => {
+                        completed
+                            .expect("descriptor socket connection task disappeared")
+                            .expect("descriptor socket connection task panicked");
+                        continue;
+                    }
+                    accepted = async {
+                        match &listener {
+                            Some(listener) => listener.accept().await.map(Some),
+                            None => std::future::pending().await,
+                        }
+                    } => accepted?,
+                    _ = &mut shutdown_requested => break,
+                    () = async {
+                        // Nobody left to ask for a drain (the node dropped its handle) or the
+                        // listener is already closed: it serves until it is stopped.
+                        if listener.is_none()
+                            || drain_requested.wait_for(|requested| *requested).await.is_err()
+                        {
+                            std::future::pending::<()>().await;
+                        }
+                    } => None,
+                };
+                let Some((stream, _)) = accepted else {
+                    // Dropping the listener closes the socket, so a later connect is refused
+                    // instead of being accepted and then aborted at stop.
+                    listener = None;
+                    match std::fs::remove_file(&socket) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    }
+                    closed.send_replace(true);
+                    continue;
+                };
+                let peer = match stream.peer_cred() {
+                    Ok(peer) => peer,
+                    Err(error) => {
+                        tracing::debug!(%error, "descriptor socket peer credential lookup failed");
+                        drop(stream);
+                        continue;
+                    }
+                };
+                if peer.uid() != owner_uid {
+                    drop(stream);
+                    continue;
+                }
+                let credentials = PeerCredentials {
+                    uid: peer.uid(),
+                    gid: peer.gid(),
+                    pid: peer.pid(),
+                };
+                let dispatch = dispatch.clone();
+                let operator = operator;
+                let connections = connections.clone();
+                tasks.spawn(async move {
+                    connections.send_modify(|open| *open += 1);
+                    let result = serve_fd_connection(stream, credentials, dispatch, operator).await;
+                    connections.send_modify(|open| *open -= 1);
+                    if let Err(error) = result {
+                        tracing::debug!(%error, "descriptor socket connection refused");
+                    }
+                });
+            }
+            // Stopped: the socket closes and its file goes (stop removes it too, if this did not),
+            // then the connections still open are let finish.
+            drop(listener);
+            closed.send_replace(true);
+            while let Some(result) = tasks.join_next().await {
+                result.expect("descriptor socket connection task panicked");
+            }
+            Ok(())
+        });
+        Ok((
+            Self {
+                shutdown,
+                task,
+                socket: Some(path.to_owned()),
+            },
+            FdClients {
+                open,
+                drain,
+                listener_closed,
+            },
+        ))
+    }
+
     #[cfg(not(unix))]
     pub(crate) async fn unix(
         _path: &Path,
@@ -150,6 +282,196 @@ impl Listener {
     ) -> Res<(Self, UnixClients)> {
         bail!("Unix socket listeners are only available on Unix platforms")
     }
+}
+
+/// The fd socket's lifecycle handle, parallel to [`UnixClients`] for the HTTP socket.
+#[cfg(unix)]
+pub struct FdClients {
+    open: watch::Receiver<usize>,
+    drain: watch::Sender<bool>,
+    listener_closed: watch::Receiver<bool>,
+}
+
+#[cfg(unix)]
+impl FdClients {
+    pub async fn close_listener(&self) -> Res<()> {
+        self.drain.send_replace(true);
+        self.listener_closed
+            .clone()
+            .wait_for(|closed| *closed)
+            .await
+            .wrap_err(ENDED)?;
+        Ok(())
+    }
+
+    pub async fn wait_until_idle(&self) -> Res<()> {
+        self.open
+            .clone()
+            .wait_for(|open| *open == 0)
+            .await
+            .wrap_err(ENDED)?;
+        Ok(())
+    }
+
+    pub async fn drain(&self) -> Res<()> {
+        self.close_listener().await?;
+        self.wait_until_idle().await
+    }
+}
+
+#[cfg(unix)]
+async fn serve_fd_connection(
+    mut stream: tokio::net::UnixStream,
+    peer: PeerCredentials,
+    dispatch: Client<DispatchProtocol>,
+    operator: Authorization,
+) -> std::io::Result<()> {
+    let frame = receive_fd_frame(&stream).await?;
+    let invocation = Invoke {
+        operation: frame.operation,
+        parameters: frame.parameters,
+        body: Body::Descriptors(frame.body),
+        context: InvocationContext {
+            origin: Origin::UnixPeer { uid: peer.uid },
+            ..Default::default()
+        },
+    };
+    let response = match dispatch
+        .call_with(
+            RequestContext::root(),
+            HttpMetadata {
+                authorization: Some(operator.header_value()),
+                ..Default::default()
+            },
+            invocation,
+        )
+        .await
+    {
+        Ok(output) => match output.body {
+            Body::Json(value) => {
+                let count = value
+                    .get("results")
+                    .and_then(serde_json::Value::as_array)
+                    .or_else(|| value.as_array())
+                    .map_or(0, Vec::len);
+                if count > 0 || value.get("results").is_some() || value.is_array() {
+                    descriptor::encode_response(0, count, &value)?
+                } else {
+                    descriptor::encode_response(1, 0, &value)?
+                }
+            }
+            body => descriptor::encode_response(
+                1,
+                0,
+                &serde_json::json!({
+                    "error": "InvalidOutput",
+                    "message": format!("descriptor call answered a {} body", body.case()),
+                }),
+            )?,
+        },
+        Err(ClientError::Method(error)) => descriptor::encode_response(
+            1,
+            0,
+            &serde_json::to_value(error).expect("dispatch errors serialize"),
+        )?,
+        Err(ClientError::Transport { message, .. }) => {
+            return Err(std::io::Error::other(message));
+        }
+    };
+    stream.write_all(&response).await
+}
+
+#[cfg(unix)]
+async fn receive_fd_frame(
+    stream: &tokio::net::UnixStream,
+) -> std::io::Result<descriptor::DescriptorFrame> {
+    use tokio::io::Interest;
+
+    let mut frame = Vec::new();
+    let mut descriptors = Vec::new();
+    let mut first_read = true;
+    let mut expected: Option<usize> = None;
+    loop {
+        let capacity = if first_read {
+            1
+        } else {
+            expected
+                .map(|length| length.saturating_sub(frame.len()))
+                .unwrap_or(descriptor::MAX_HEADER_OCTETS + 4 - frame.len())
+        };
+        let mut buffer = vec![0; capacity.max(1)];
+        let part = stream
+            .async_io(Interest::READABLE, || {
+                descriptor::recv_part(stream, &mut buffer)
+            })
+            .await?;
+        if part.ancillary_truncated || part.unexpected_ancillary {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "descriptor ancillary data was truncated or unexpected",
+            ));
+        }
+        if (!first_read && !part.descriptors.is_empty())
+            || (first_read && part.bytes.is_empty() && !part.descriptors.is_empty())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "descriptors did not arrive with the first bytes of the frame",
+            ));
+        }
+        if part.bytes.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "descriptor frame ended before its header",
+            ));
+        }
+        frame.extend_from_slice(&part.bytes);
+        if first_read {
+            descriptors.extend(part.descriptors);
+        }
+        if expected.is_none() && frame.len() >= 4 {
+            let header_len = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
+            if header_len > descriptor::MAX_HEADER_OCTETS {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "descriptor frame header is too long",
+                ));
+            }
+            expected = Some(header_len + 4);
+        }
+        if let Some(length) = expected {
+            if frame.len() > length {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "a second descriptor frame arrived before the response",
+                ));
+            }
+            if frame.len() == length {
+                break;
+            }
+        }
+        first_read = false;
+    }
+    let mut extra = [0; 1];
+    match stream.try_io(Interest::READABLE, || {
+        descriptor::recv_part(stream, &mut extra)
+    }) {
+        Ok(part) => {
+            if !part.bytes.is_empty()
+                || !part.descriptors.is_empty()
+                || part.ancillary_truncated
+                || part.unexpected_ancillary
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "additional descriptor frame arrived before the response",
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(error) => return Err(error),
+    }
+    descriptor::decode_request(&frame, descriptors)
 }
 
 /// What a node's Unix socket listener is serving, and how to wind it down without closing a

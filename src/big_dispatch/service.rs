@@ -55,7 +55,7 @@ type RouteFn = dyn Fn(
         RequestContext,
         HttpMetadata,
         Value,
-        Option<ByteBody>,
+        Option<Body>,
     ) -> BoxFuture<'static, Result<Body, ProviderError>>
     + Send
     + Sync;
@@ -121,6 +121,7 @@ where
                                 .downcast::<ByteBody>()
                                 .expect("a method with a byte output answers a `ByteBody`"),
                         ),
+                        Encoding::Descriptors => unreachable!("a descriptor body is input-only"),
                     }),
                     // The operation's own error travels in the standard XRPC domain envelope,
                     // as it does when the same operation is served over HTTP.
@@ -216,7 +217,7 @@ impl Provider for ServiceProvider {
         request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-        body: Option<ByteBody>,
+        body: Option<Body>,
     ) -> Result<Body, ProviderError> {
         let route = self
             .routes

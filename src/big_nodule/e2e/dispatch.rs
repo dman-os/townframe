@@ -54,7 +54,7 @@ impl Provider for Echo {
         _request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-        _body: Option<ByteBody>,
+        _body: Option<Body>,
     ) -> Result<Body, ProviderError> {
         if let Some(reason) = input.get("invalid") {
             return Err(ProviderError::InvalidInput(reason.to_string()));

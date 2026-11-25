@@ -6,9 +6,15 @@
 //! `Client::new(Transport::direct(host))`. The client core and the XRPC envelope codec live in
 //! `service_client_core_rs`, which also builds for wasm guests.
 
+#[cfg(unix)]
+pub mod fd;
 mod transport;
 pub mod xrpc;
 
+#[cfg(unix)]
+pub use fd::DescriptorClient;
+#[cfg(unix)]
+pub use fd::DescriptorClientError;
 pub use transport::Client;
 pub use transport::InlineRoute;
 pub use transport::Transport;

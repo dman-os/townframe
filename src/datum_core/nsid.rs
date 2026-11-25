@@ -85,6 +85,24 @@ impl From<Nsid> for String {
     }
 }
 
+impl crate::DatumShape for Nsid {
+    const SHAPE: crate::Shape = crate::Shape::Value;
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Nsid {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Nsid".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        "datum_core::Nsid".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type": "string"})
+    }
+}
 impl fmt::Display for Nsid {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)

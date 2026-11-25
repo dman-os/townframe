@@ -51,7 +51,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use http_body_util::Limited;
-use method_core::ByteBody;
+
 use serde_json::Value;
 use serde_json::json;
 use service_client_native_rs::Client;
@@ -401,7 +401,7 @@ impl Provider for WasmProvider {
         request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-        body: Option<ByteBody>,
+        body: Option<Body>,
     ) -> Result<Body, ProviderError> {
         // Byte bodies reach a guest as wasi:http body streams, which this provider does not
         // bridge yet (ADR 042 §2); until then a guest's methods are JSON.
