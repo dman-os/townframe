@@ -1,14 +1,13 @@
 //! The serving half: [`ReplayService`] answers the three methods of [`ReplayProtocol`] and the
 //! three of its sibling [`SyncRpcProtocol`] from a part store, and [`boot`] hosts both the way
-//! `big_blobs` hosts its service. It sits on `service_utils_rs`'s host and a tokio timer, so it
-//! is a native serving host: the `serve` feature, which a browser build turns off.
+//! `big_blobs` hosts its service. It sits on `service_utils_rs`'s host and builds for the browser too.
 //!
-//! `Instant` is std's: `big_automata` takes its `web_time::Instant`, which is std's on every
-//! native target.
+//! `Instant` is `web_time`'s, as `big_automata` takes: std's on native targets and a clock a
+//! browser has.
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Instant;
+use web_time::Instant;
 
 use big_automata::PeerKey;
 use big_automata::long_poll::RuntimeTimer;

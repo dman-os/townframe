@@ -19,10 +19,11 @@ pub use service_core_rs::xrpc::error_name;
 #[cfg(feature = "iroh-http")]
 mod iroh;
 mod router;
+#[cfg(feature = "net")]
 mod serve;
 #[cfg(test)]
 mod tests;
-#[cfg(unix)]
+#[cfg(all(feature = "net", unix))]
 mod unix;
 
 #[cfg(feature = "iroh-http")]
@@ -32,15 +33,31 @@ pub use iroh::iroh_protocol_handler;
 pub use router::XrpcMethodHandler;
 pub use router::XrpcRegistrationError;
 pub use router::XrpcRouter;
+#[cfg(feature = "net")]
 pub use serve::AcceptFuture;
+#[cfg(feature = "net")]
 pub use serve::ConnectionAcceptor;
+#[cfg(feature = "net")]
 pub use serve::serve;
+#[cfg(feature = "net")]
 pub use serve::serve_with_acceptor;
+#[cfg(feature = "net")]
 pub use serve::serve_with_connection_limit;
-#[cfg(unix)]
+#[cfg(all(feature = "net", unix))]
 pub use unix::PeerCredentials;
-#[cfg(unix)]
+#[cfg(all(feature = "net", unix))]
 pub use unix::UnixConnectionAcceptor;
+
+/// Whether a connection error is the peer going away (a reset, a close mid-message) rather than
+/// a fault of ours.
+#[cfg(any(feature = "net", feature = "iroh-http"))]
+fn expected_peer_error(error: &hyper::Error) -> bool {
+    error.is_closed()
+        || error.is_canceled()
+        || error.is_incomplete_message()
+        || error.is_body_write_aborted()
+        || error.is_shutdown()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XrpcRequest {

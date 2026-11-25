@@ -1,6 +1,7 @@
 //! Bounded HTTP/1 serving over TCP: a connection limit, per-connection tasks,
 //! and a shutdown that aborts and joins rather than leaking.
 
+use super::expected_peer_error;
 use axum::Router;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
@@ -209,14 +210,6 @@ fn observe_connection(
         Err(error) if error.is_cancelled() => None,
         Err(error) => panic!("XRPC connection task failed: {error}"),
     }
-}
-
-pub(super) fn expected_peer_error(error: &hyper::Error) -> bool {
-    error.is_closed()
-        || error.is_canceled()
-        || error.is_incomplete_message()
-        || error.is_body_write_aborted()
-        || error.is_shutdown()
 }
 
 async fn reap_shutdown_connections(
