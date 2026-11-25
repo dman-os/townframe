@@ -26,7 +26,7 @@ pub struct big_blobs_core::protocol::BlobStat  { info: Option < BlobInfo > }
 pub struct big_blobs_core::protocol::BlobsScope  { put: bool, read: BTreeSet < BlobId >, drawers: BTreeMap < DocId , DrawerAccess > }
 pub struct big_blobs_core::protocol::ImportFile  { capability: CapId }
 pub struct big_blobs_core::protocol::ImportFileOutput  { results: Vec < ImportFileResult > }
-pub struct big_blobs_core::protocol::MintBlobsCapability  { scope: BlobsScope, rights: Rights, subject: Option < Uuid7 > }
+pub struct big_blobs_core::protocol::MintBlobsCapability  { capability: Option < CapId >, scope: BlobsScope, rights: Rights, subject: Option < Uuid7 > }
 pub struct big_blobs_core::protocol::PutBlob  { capability: CapId }
 pub struct big_blobs_core::protocol::ReadBlob  { capability: CapId, blob_id: BlobId }
 pub struct big_blobs_core::protocol::StatBlob  { capability: CapId, blob_id: BlobId }

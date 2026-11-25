@@ -3,6 +3,7 @@
 # configuration: {"target":"x86_64-unknown-linux-gnu","default_features":true,"features":[]}
 # exposed_external_crates: []
 
+impl Handler < MintDispatchCapability > for big_dispatch::DispatchService
 pub big_dispatch::fn boot (config : DispatchConfig) -> (Dispatch , StopToken)
 pub const big_dispatch::MAX_JSON_BODY_OCTETS: u64
 pub struct big_dispatch::Dispatch  { host: Arc < Host < DispatchHandler > >, client: Client < DispatchProtocol >, router: Arc < Router > }

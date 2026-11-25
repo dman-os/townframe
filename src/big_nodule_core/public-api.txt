@@ -14,6 +14,7 @@ pub big_nodule_core::config::fn artifact_key (cartridge_id : & CartridgeId , art
 pub big_nodule_core::config::fn config_universe () -> big_cabinet_core :: datum :: Universe
 pub big_nodule_core::config::fn dev_takeover_key (cartridge_id : & CartridgeId) -> DatumKey
 pub big_nodule_core::config::fn route_key (pattern : & str) -> DatumKey
+pub big_nodule_core::fn actor_segment (name : & str , id : & str) -> String
 pub const big_nodule_core::AUTHORITY: & str
 pub enum big_nodule_core::NoduleError { # [error ("nodule description invalid at `{path}`: {reason}")] Invalid { path : String , reason : String } }
 pub enum big_nodule_core::config::Admission { Admitted { version : Version , revision : Revision , resolved : ResolvedCartridge , nodule : Nodule , admitted : crate :: Admitted , artifacts : BTreeMap < String , (crate :: inventory :: Artifact , crate :: inventory :: ArtifactState) > , }, # [doc = " The version cannot be installed as a nodule, or could not be read; `version` and `revision`"] # [doc = " are what is known of it for the refusal record."] Refused { version : Option < Version > , revision : Option < Revision > , reason : String , } }
@@ -58,9 +59,11 @@ pub impl big_nodule_core::config::NoduleConfig::fn set_enabled (& mut self , cac
 pub impl big_nodule_core::config::NoduleConfig::fn set_route (& mut self , pattern : & str , provider : Option < String > ,) -> std :: result :: Result < () , InventoryError >
 pub impl big_nodule_core::config::NoduleConfig::fn uninstall (& mut self , cartridge_id : & CartridgeId) -> Result < () , InventoryError >
 pub impl big_nodule_core::config::NoduleEntry::fn is_empty (& self) -> bool
+pub impl big_nodule_core::config::ResolvedGrants::fn from_grants < 'a > (grants : impl IntoIterator < Item = (& 'a GrantKey , & 'a GrantBody) > ,) -> Result < Self , String >
 pub impl big_nodule_core::inventory::InstalledNodule::fn artifact_states (& self) -> BTreeMap < String , ArtifactState >
 pub impl big_nodule_core::inventory::InstalledNodule::fn readiness (& self) -> Readiness
 pub impl big_nodule_core::inventory::InstalledNodule::fn routine_scopes (& self , desired_grants : & BTreeMap < DrawerId , DrawerAccess > , effective_operations : & DispatchScope , builtin_handle_need : impl Fn (& str) -> Option < HandleNeed > ,) -> BTreeMap < String , RoutineScopes >
+pub impl big_nodule_core::inventory::RoutineScopes::fn lower (resolved : & ResolvedCartridge , config_doc : & DocId , uses : & BTreeMap < String , RoutineUse > , desired_grants : & BTreeMap < DrawerId , DrawerAccess > , effective_operations : & DispatchScope , builtin_handle_need : & impl Fn (& str) -> Option < HandleNeed > ,) -> Self
 pub impl big_nodule_core::protocol::NoduleScope::fn covers (& self , other : & Self) -> bool
 pub impl big_nodule_core::providers::ProviderIndex::fn is_routed (& self , nsid : & str) -> bool
 pub impl big_nodule_core::providers::ProviderIndex::fn new (resolved : & BTreeMap < CartridgeId , NoduleResolution > , routes : BTreeMap < String , Route > ,) -> Self

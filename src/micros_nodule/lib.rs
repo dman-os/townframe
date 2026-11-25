@@ -327,8 +327,16 @@ impl Micros {
         Ok(())
     }
 
-    async fn retract(cx: &Cx, via: CapId, capability: CapId) -> Result<(), MicrosError> {
-        match cx.call(RetractCapability { via, capability }).await {
+    /// Retracts `capability`, a handle this nodule minted, with itself as the `via` the authority
+    /// checks it descends from (what the node's own services do for the handles they mint).
+    async fn retract(cx: &Cx, capability: CapId) -> Result<(), MicrosError> {
+        match cx
+            .call(RetractCapability {
+                via: capability,
+                capability,
+            })
+            .await
+        {
             Ok(()) => Ok(()),
             // A handle that is already dead is retracted.
             Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => Ok(()),
@@ -363,7 +371,7 @@ impl Micros {
             .micro()
             .filter(|_| install.micro.as_ref().is_some_and(|micro| micro.enabled));
         let Some(micro) = micro else {
-            Self::retract_all(cx, parents, held).await?;
+            Self::retract_all(cx, held).await?;
             return Ok(minted);
         };
         let granted = ResolvedGrants::from_grants(
@@ -395,7 +403,7 @@ impl Micros {
             return Ok(minted);
         }
         let actor = Self::open_micro_actor(cx, parents, &record.cartridge_id).await?;
-        Self::retract_all(cx, parents, held).await?;
+        Self::retract_all(cx, held).await?;
         let subject = Some(actor.actor.actor_id);
         let dispatch = cx
             .call(MintDispatchCapability {
@@ -494,25 +502,20 @@ impl Micros {
         .map_err(upstream("opening the micro's actor"))
     }
 
-    /// Retracts what `held` minted: each handle from the parent it was minted from.
-    async fn retract_all(
-        cx: &Cx,
-        parents: &Parents,
-        held: Option<Minted>,
-    ) -> Result<(), MicrosError> {
+    /// Retracts what `held` minted.
+    async fn retract_all(cx: &Cx, held: Option<Minted>) -> Result<(), MicrosError> {
         for micro in held.into_iter().flat_map(|held| held.micros) {
-            let MintedHandles {
-                dispatch,
-                docs,
-                blobs,
-                drawers,
-            } = micro.handles;
-            Self::retract(cx, parents.dispatch, dispatch).await?;
-            for handle in [docs, drawers].into_iter().flatten() {
-                Self::retract(cx, parents.actor, handle).await?;
-            }
-            if let (Some(handle), Some(parent)) = (blobs, parents.blobs) {
-                Self::retract(cx, parent, handle).await?;
+            let handles = micro.handles;
+            for handle in [
+                Some(handles.dispatch),
+                handles.docs,
+                handles.blobs,
+                handles.drawers,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                Self::retract(cx, handle).await?;
             }
         }
         Ok(())
