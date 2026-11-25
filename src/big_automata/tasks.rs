@@ -5,7 +5,10 @@ use decide_peer_strat::*;
 mod set_peer_part_cursor;
 use set_peer_part_cursor::*;
 
-use crate::{mpsc, rpc::BigSyncRpcClient, scheduler::TaskId, store::PartStore};
+use crate::mpsc;
+use crate::rpc::BigSyncRpcClient;
+use crate::scheduler::TaskId;
+use crate::store::PartStore;
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug)]]

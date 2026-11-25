@@ -34,11 +34,7 @@ fn removed(cursor: CursorIndex, obj_key: &ObjKey, part_key: &PartKey) -> CursorE
     })
 }
 
-fn sync_obj(
-    obj_key: &ObjKey,
-    cursor: CursorIndex,
-    parts: Vec<PartKey>,
-) -> CursorMachineCommand {
+fn sync_obj(obj_key: &ObjKey, cursor: CursorIndex, parts: Vec<PartKey>) -> CursorMachineCommand {
     CursorMachineCommand::SyncObj {
         obj_key: obj_key.clone(),
         remote_payload: serde_json::json!({ "k": cursor }),

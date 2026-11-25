@@ -1,10 +1,9 @@
 use crate::interlude::*;
 
-use crate::{
-    rpc::BigSyncRpcClient,
-    store::PartStore,
-    tasks::{TaskCtx, TaskResultDeets},
-};
+use crate::rpc::BigSyncRpcClient;
+use crate::store::PartStore;
+use crate::tasks::TaskCtx;
+use crate::tasks::TaskResultDeets;
 
 #[derive(Debug, Clone)]
 pub struct SetPeerPartCursorTask {

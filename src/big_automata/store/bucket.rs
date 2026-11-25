@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
-use crate::fingerprint::{Fingerprint, FingerprintSeed};
+use crate::fingerprint::Fingerprint;
+use crate::fingerprint::FingerprintSeed;
 use crate::store::ObjPayload;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

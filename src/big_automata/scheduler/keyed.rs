@@ -12,7 +12,12 @@ use std::collections::BTreeMap;
 
 use crate::interlude::*;
 
-use super::{Instant, Retry, Scheduler, SchedulerCounts, TaskId, TaskSeed};
+use super::Instant;
+use super::Retry;
+use super::Scheduler;
+use super::SchedulerCounts;
+use super::TaskId;
+use super::TaskSeed;
 
 strike! {
     #[structstruck::each[derive(Debug)]]
@@ -87,7 +92,11 @@ where
     pub fn complete(&mut self, task: TaskId) -> Option<(Key, Seed)> {
         let key = self.key_by_task.remove(&task)?;
         let current = self.active_by_key.remove(&key);
-        assert_eq!(current, Some(task), "a keyed task was not its key's current task");
+        assert_eq!(
+            current,
+            Some(task),
+            "a keyed task was not its key's current task"
+        );
         self.tasks.complete(task).expect(ERROR_IMPOSSIBLE);
         let seed = self.seed_by_key.remove(&key).expect(ERROR_IMPOSSIBLE);
         Some((key, seed))
@@ -104,7 +113,11 @@ where
             .retry(task, seed, min_delay, now)
             .expect(ERROR_IMPOSSIBLE);
         let old = self.active_by_key.insert(key.clone(), retried);
-        assert_eq!(old, Some(task), "a keyed task was not its key's current task");
+        assert_eq!(
+            old,
+            Some(task),
+            "a keyed task was not its key's current task"
+        );
         self.key_by_task.insert(retried, key);
         Some(retried)
     }

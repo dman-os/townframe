@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
-use crate::fingerprint::{Fingerprint, FingerprintSeed};
+use crate::fingerprint::Fingerprint;
+use crate::fingerprint::FingerprintSeed;
 use crate::ids::BuckId;
 use crate::store::ObjPayload;
 use crate::store::bucket::BucketSummary;

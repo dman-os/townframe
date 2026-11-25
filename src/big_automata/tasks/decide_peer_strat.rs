@@ -1,18 +1,18 @@
 use crate::interlude::*;
 
+use crate::AllowedStrat;
+use crate::rpc::BigSyncRpcClient;
+use crate::rpc::RpcError;
+use crate::rpc::bucket::GetChangedBucketsError;
+use crate::rpc::bucket::GetChangedBucketsRequest;
+use crate::rpc::summary::PeerPartStratSummary;
+use crate::rpc::summary::PeerPartSummary;
+use crate::rpc::summary::PeerPartsSummaryError;
+use crate::rpc::summary::PeerPartsSummaryRequest;
+use crate::store::PartStoreReadOnly;
 use crate::store::bucket::BucketSummary;
-use crate::{
-    AllowedStrat,
-    rpc::{
-        BigSyncRpcClient, RpcError,
-        bucket::{GetChangedBucketsError, GetChangedBucketsRequest},
-        summary::{
-            PeerPartStratSummary, PeerPartSummary, PeerPartsSummaryError, PeerPartsSummaryRequest,
-        },
-    },
-    store::PartStoreReadOnly,
-    tasks::{TaskCtx, TaskResultDeets},
-};
+use crate::tasks::TaskCtx;
+use crate::tasks::TaskResultDeets;
 
 #[derive(Debug, Clone)]
 pub struct DecidePeerStrategyTask {

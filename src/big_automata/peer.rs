@@ -1,4 +1,5 @@
-use crate::tasks::{MachineTaskDeets, decide_peer_strat::DecidePeerStrategyTask};
+use crate::tasks::MachineTaskDeets;
+use crate::tasks::decide_peer_strat::DecidePeerStrategyTask;
 
 use super::*;
 

@@ -5,7 +5,8 @@
 //! backoff. Delayed tasks reach the spawn queue only when the driver calls [`Scheduler::tick`]
 //! with a clock reading, so the scheduler never reads a clock itself.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use crate::interlude::*;
 

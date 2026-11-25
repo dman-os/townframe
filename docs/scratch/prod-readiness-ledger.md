@@ -329,6 +329,35 @@ dropped.
   Litestream or LiteFS for relays and node-side scaling. See H13 (the `wal_checkpoint`
   conflict) and H16 (the state inventory).
 
+### SQLite multi-process blockers (opened 2026-11-18)
+
+Goal: several processes share one checkout's SQLite database (log.md §Multiprocessing; the
+transaction reshape makes storage the coordination point). Anything that keeps correctness or
+liveness in one process's memory blocks it. Found so far:
+
+1. **Process-local wakeups.** Keyed frontier and part-store readers wait on a `tokio::sync::Notify`
+   that only same-process commits fire (`big_sync/keyed_frontier/sqlite_*`,
+   `big_sync/part_store/sqlite*`). Another process's commit never wakes them, so live tails
+   stall until an unrelated local commit. The same pattern appears in
+   `big_repo/store/sqlite.rs` (`local_revision_wakeups`, and admission tailers parking on
+   `admitted_head`), and in big_blobs (`admission`, `projection`, `work_queue`, `service`) and
+   big_cabinet (`datum_set`, `drawer/state`, `authority`, `datum_store`). This needs a per-site
+   audit.
+2. **Manual `notify_changed()` after `apply_in_context`.** Same root, and it is correctness by
+   convention.
+3. **In-memory state that must match disk:**
+   - in-memory keyhive and CGKA state mutated before persistence;
+   - subduction's resident tree cache;
+   - `SqliteBigRepoStore`'s `tree_cache`;
+   - `admitted_head` kept in memory.
+
+   Another process's writes make these stale.
+4. **Single-writer-by-actor assumptions:** doc workers, the hub, and the per-checkout lock file
+   (log.md).
+
+Candidate fix for wakeups: fire from the transaction's commit hook in-process, and poll
+`PRAGMA data_version` (O(1)) on the waiting side to see other processes' commits.
+
 ### Read-path scale: hydrating many docs (operator, 2026-11-17; deferred)
 
 - UIs scroll past thousands of entries. Examples: a drawer of photos sorted by update time; the

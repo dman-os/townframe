@@ -8,7 +8,8 @@
 //! compact (`u64`) [`Fingerprint<T>`] values. This is especially
 //! useful for bandwidth-efficient sync.
 
-use core::{hash::Hasher, marker::PhantomData};
+use core::hash::Hasher;
+use core::marker::PhantomData;
 
 use siphasher::sip::SipHasher24;
 
