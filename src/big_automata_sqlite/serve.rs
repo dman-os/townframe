@@ -194,6 +194,7 @@ pub async fn part_summaries(
     principal: &PeerKey,
     parts: &[(PartKey, Rev)],
 ) -> Res<Vec<Option<PartSummary>>> {
+    let generation = read::generation(x).await?;
     let mut summaries = Vec::with_capacity(parts.len());
     for (part, since) in parts {
         if !permits(x, principal, part).await? {
@@ -204,6 +205,7 @@ pub async fn part_summaries(
         let member_changes = queries::part_member_changes(x, part.blob(), since).await?;
         let access_rev = queries::access_rev(x, part.blob(), principal.blob()).await?;
         summaries.push(Some(PartSummary {
+            generation,
             latest_cursor: sql::rev_from_sql(
                 queries::part_latest_cursor(x, part.blob())
                     .await?

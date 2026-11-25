@@ -4,6 +4,7 @@
 use big_automata::BuckLevel;
 use big_automata::part_store::AccessLevel;
 use big_automata::part_store::AuthorizedPage;
+use big_automata::part_store::Generation;
 use big_automata::part_store::LeafEntry;
 use big_automata::part_store::LogEntry;
 use big_automata::part_store::LogKey;
@@ -170,6 +171,17 @@ impl<D: PartDb> PartStoreWrite for SqlitePartStore<D> {
         write::drop_payloads(&tx.tx, objs).await
     }
 
+    /// Its own write transaction, taken and committed here: the store's one writer, so it waits
+    /// for an open [`SqlitePartTx`] and must not be called while holding one. It sets the meta
+    /// row's generation and nothing else, so no rev is consumed and the watch stays put.
+    async fn mint_generation(&self) -> Res<Generation> {
+        let minted = Generation::mint();
+        let tx = self.db.begin_write().await?;
+        queries::set_meta_generation(&tx, sql::generation_to_sql(minted)).await?;
+        D::commit(tx).await?;
+        Ok(minted)
+    }
+
     async fn grant_access(
         &self,
         tx: &mut SqlitePartTx<D>,
@@ -259,6 +271,10 @@ impl<D: PartDb> PartStoreServe for SqlitePartStore<D> {
     /// The log's own watch: the one [`RevSource::watch`] hands out.
     fn watch(&self) -> RevWatch {
         RevSource::watch(self)
+    }
+
+    async fn generation(&self) -> Res<Generation> {
+        Ok(snapshot!(self, reader => read::generation(&reader).await?))
     }
 
     async fn read_authorized(

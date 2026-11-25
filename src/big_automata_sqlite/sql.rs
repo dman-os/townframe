@@ -2,6 +2,7 @@
 //! lists, split to stay under SQLite's bound-variable limit.
 
 use big_automata::part_store::AccessLevel;
+use big_automata::part_store::Generation;
 use big_automata::rev::Rev;
 use sqlite_rs::BindTuple;
 use sqlite_rs::Executor;
@@ -63,6 +64,16 @@ pub fn rev_to_sql(rev: Rev) -> i64 {
 
 pub fn rev_from_sql(rev: i64) -> Rev {
     Rev::try_from(rev).expect("a stored rev is not negative")
+}
+
+/// A generation is stored as the 16 bytes of its UUID: fixed width and compact, with no case or
+/// hyphenation to normalize, and what `randomblob(16)` in the migration produces.
+pub fn generation_to_sql(generation: Generation) -> Vec<u8> {
+    generation.0.as_bytes().to_vec()
+}
+
+pub fn generation_from_sql(generation: &[u8]) -> Generation {
+    Generation(Uuid::from_slice(generation).expect("a stored generation is 16 bytes"))
 }
 
 pub fn level_to_sql(level: AccessLevel) -> i64 {

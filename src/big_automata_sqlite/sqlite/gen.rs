@@ -6,6 +6,7 @@ pub const MIGRATION_TABLE: &str = "_big_automata_sqlite_migrations";
 
 pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_init.sql", sql: include_str!("migrations/001_init.sql") },
+    Migration { version: 2, name: "002_generation.sql", sql: include_str!("migrations/002_generation.sql") },
 ];
 
 pub const ACCESS_PERMITS_SQL: &str = include_str!("queries/access_permits.sql");
@@ -115,6 +116,12 @@ pub async fn member_count(db: &impl crate::sqlite_rs_alias::QueryExecutor, part_
     set.optional()
 }
 
+pub const META_GENERATION_SQL: &str = include_str!("queries/meta_generation.sql");
+pub async fn meta_generation(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<u8>> {
+    let set = db.query(META_GENERATION_SQL, &[]).await?;
+    set.one()
+}
+
 pub const META_REV_SQL: &str = include_str!("queries/meta_rev.sql");
 pub async fn meta_rev(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<i64> {
     let set = db.query(META_REV_SQL, &[]).await?;
@@ -197,6 +204,11 @@ pub const ROUTE_READABLE_OBJECT_ROWS_SQL: &str = include_str!("queries/route_rea
 pub async fn route_readable_object_rows(db: &impl crate::sqlite_rs_alias::QueryExecutor, principal: Vec<u8>, obj_key: Vec<u8>, lo: i64, hi: i64, limit: i64) -> SqlResult<Vec<RouteReadableObjectRowsRow>> {
     let set = db.query(ROUTE_READABLE_OBJECT_ROWS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(principal), crate::sqlite_rs_alias::IntoValue::into_value(obj_key), crate::sqlite_rs_alias::IntoValue::into_value(lo), crate::sqlite_rs_alias::IntoValue::into_value(hi), crate::sqlite_rs_alias::IntoValue::into_value(limit)]).await?;
     set.all()
+}
+
+pub const SET_META_GENERATION_SQL: &str = include_str!("queries/set_meta_generation.sql");
+pub async fn set_meta_generation(db: &impl crate::sqlite_rs_alias::Executor, generation: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(SET_META_GENERATION_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(generation)]).await
 }
 
 pub const SET_META_REV_SQL: &str = include_str!("queries/set_meta_rev.sql");

@@ -92,6 +92,7 @@ store_laws!(
     removing_then_dropping_in_one_transaction_is_valid,
     a_partless_object_is_listed_until_its_payload_is_dropped,
     dropping_is_atomic_with_its_transaction,
+    generations_identify_the_log,
 );
 
 #[test]

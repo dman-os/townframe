@@ -1,72 +1,54 @@
 //! The peer cursor contract over the SQLite table, and what reopening adds.
 
 use big_automata::driver::PeerCursors;
-use big_automata::driver::cursor_laws::CursorBackend;
-use big_automata::driver::cursor_laws::{self};
+use big_automata::driver::table_laws::peer_cursor_table_laws;
+use big_automata::part_store::Generation;
+use big_automata::sync::PeerCursor;
 use futures::executor::block_on;
-use sqlite_rs::Database;
 
 use super::RUNTIME;
 use crate::interlude::*;
 use crate::*;
 
-struct Sqlite;
-
-#[async_trait]
-impl CursorBackend for Sqlite {
-    type Cursors = SqlitePeerCursors<Database>;
-
-    async fn open(&self) -> Res<Self::Cursors> {
-        Ok(SqlitePeerCursors::new(RUNTIME.ephemeral(MIGRATIONS)?))
-    }
+#[test]
+fn the_table_obeys_the_peer_cursor_table_laws() -> Res<()> {
+    block_on(async {
+        let cursors = SqlitePeerCursors::new(RUNTIME.ephemeral(MIGRATIONS)?);
+        peer_cursor_table_laws(&cursors).await
+    })
 }
 
-macro_rules! cursor_laws {
-    ($($law:ident),+ $(,)?) => {$(
-        #[test]
-        fn $law() -> Res<()> {
-            block_on(cursor_laws::$law(&Sqlite))
-        }
-    )+};
-}
-
-cursor_laws!(
-    unknown_parts_read_zero,
-    writes_read_back_in_asked_order,
-    cursors_never_lower,
-    repeats_coalesce_to_the_highest,
-    cursors_are_scoped,
-    empty_calls_are_fine,
-);
-
-/// Cursors are on disk: a reopened file reads what was written, and a lower write after the
-/// reopen still does not lower it.
+/// Cursors are on disk: a reopened file reads what was written, generation included, and the
+/// last write still wins after the reopen, a lower rev and another generation alike.
 #[test]
 fn cursors_survive_reopening() -> Res<()> {
     block_on(async {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("cursors.sqlite");
         let (peer, part) = (PeerKey::new(&[1]), PartKey::new(&[2]));
+        let (old, new) = (Generation::mint(), Generation::mint());
+        let at = |generation, rev| PeerCursor { generation, rev };
         let cursors = SqlitePeerCursors::new(RUNTIME.database(&path, MIGRATIONS, MIGRATION_TABLE));
-        cursors.write(&peer, "main", &[(part.clone(), 7)]).await?;
+        cursors
+            .write(&peer, "main", &[(part.clone(), at(old, 7))])
+            .await?;
         drop(cursors);
 
         let cursors = SqlitePeerCursors::new(RUNTIME.database(&path, MIGRATIONS, MIGRATION_TABLE));
-        assert_eq!(
+        let read = async || {
             cursors
                 .read(&peer, "main", std::slice::from_ref(&part))
-                .await?,
-            vec![7]
-        );
-        cursors.write(&peer, "main", &[(part.clone(), 3)]).await?;
-        assert_eq!(
-            cursors
-                .read(&peer, "main", std::slice::from_ref(&part))
-                .await?,
-            vec![7]
-        );
-        cursors.write(&peer, "main", &[(part.clone(), 8)]).await?;
-        assert_eq!(cursors.read(&peer, "main", &[part]).await?, vec![8]);
+                .await
+        };
+        assert_eq!(read().await?, vec![Some(at(old, 7))]);
+        cursors
+            .write(&peer, "main", &[(part.clone(), at(old, 3))])
+            .await?;
+        assert_eq!(read().await?, vec![Some(at(old, 3))]);
+        cursors
+            .write(&peer, "main", &[(part.clone(), at(new, 1))])
+            .await?;
+        assert_eq!(read().await?, vec![Some(at(new, 1))]);
         Ok(())
     })
 }
@@ -80,7 +62,13 @@ fn cursors_share_a_database_with_the_part_store() -> Res<()> {
         let store = SqlitePartStore::open(db.clone()).await?;
         let cursors = SqlitePeerCursors::new(db);
         let (peer, part) = (PeerKey::new(&[1]), PartKey::new(&[2]));
-        cursors.write(&peer, "main", &[(part.clone(), 5)]).await?;
+        let cursor = PeerCursor {
+            generation: Generation::mint(),
+            rev: 5,
+        };
+        cursors
+            .write(&peer, "main", &[(part.clone(), cursor)])
+            .await?;
         let mut tx = store.begin().await?;
         big_automata::part_store::laws::stage(
             &store,
@@ -89,7 +77,10 @@ fn cursors_share_a_database_with_the_part_store() -> Res<()> {
         )
         .await?;
         tx.commit().await?;
-        assert_eq!(cursors.read(&peer, "main", &[part]).await?, vec![5]);
+        assert_eq!(
+            cursors.read(&peer, "main", &[part]).await?,
+            vec![Some(cursor)]
+        );
         Ok(())
     })
 }

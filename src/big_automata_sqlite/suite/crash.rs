@@ -1,11 +1,16 @@
 //! What SQLite adds to the laws: interrupted writes, reopening a file, migrations.
 
+use big_automata::driver::PeerCursors;
+use big_automata::part_store::Generation;
 use big_automata::part_store::LogSelector;
 use big_automata::part_store::PartStoreRead;
+use big_automata::part_store::PartStoreServe;
+use big_automata::part_store::PartStoreWrite;
 use big_automata::part_store::laws::add;
 use big_automata::part_store::laws::grant;
 use big_automata::part_store::laws::obj;
 use big_automata::part_store::laws::part;
+use big_automata::part_store::laws::principal;
 use big_automata::part_store::laws::remove;
 use big_automata::part_store::laws::set;
 use big_automata::part_store::laws::stage;
@@ -181,6 +186,82 @@ fn a_transaction_reads_its_own_writes_and_readers_wait() -> Res<()> {
         assert_eq!(store.member_count(&part(0)).await?, 0);
         tx.commit().await?;
         assert_eq!(store.member_count(&part(0)).await?, 1);
+        Ok(())
+    })
+}
+
+/// The generation is in the file: a reopen (a restart over the same files) keeps it, a mint
+/// is durable across the next reopen, and neither moves the rev.
+#[test]
+fn the_generation_and_its_mints_survive_reopening() -> Res<()> {
+    block_on(async {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("parts.sqlite");
+        let summarized = async |store: &Store| -> Res<Generation> {
+            let summaries = store.part_summaries(&principal(0), &[(part(0), 0)]).await?;
+            Ok(summaries[0].expect("the part is readable").generation)
+        };
+        let store = Store::open(open_file(&path)).await?;
+        commit(
+            &store,
+            vec![set(&[(0, 1)]), add(&[(0, 0)]), grant(&[(0, 0)])],
+        )
+        .await?;
+        let created = store.generation().await?;
+        assert_ne!(created, Generation::default());
+        drop(store);
+
+        let store = Store::open(open_file(&path)).await?;
+        assert_eq!(store.generation().await?, created, "a reopen keeps it");
+        assert_eq!(summarized(&store).await?, created);
+        let minted = store.mint_generation().await?;
+        assert_ne!(minted, created);
+        assert_eq!(
+            RevSource::latest_rev(&store).await?,
+            1,
+            "a mint stamps no rev"
+        );
+        drop(store);
+
+        let store = Store::open(open_file(&path)).await?;
+        assert_eq!(store.generation().await?, minted, "a mint is durable");
+        assert_eq!(summarized(&store).await?, minted);
+        Ok(())
+    })
+}
+
+/// A file made before generations (001 alone, with a log and an old-shape cursor row) is
+/// upgraded in place: the log is kept, the store is given a generation that then survives
+/// reopening, and the cursor rows without a generation are dropped.
+#[test]
+fn a_file_from_before_generations_is_upgraded_in_place() -> Res<()> {
+    block_on(async {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("parts.sqlite");
+        let old = RUNTIME.database(&path, &MIGRATIONS[..1], MIGRATION_TABLE);
+        old.migrate().await?;
+        let tx = old.begin_write().await?;
+        tx.execute_batch(
+            "UPDATE big_automata_meta SET rev = 7;
+             INSERT INTO big_automata_peer_cursors (peer, backend, part_key, cursor)
+             VALUES (x'01', 'main', x'02', 5);",
+        )
+        .await?;
+        tx.commit().await?;
+        drop(old);
+
+        let store = Store::open(open_file(&path)).await?;
+        assert_eq!(RevSource::latest_rev(&store).await?, 7, "the log is kept");
+        let upgraded = store.generation().await?;
+        assert_ne!(upgraded, Generation::default());
+        drop(store);
+        let store = Store::open(open_file(&path)).await?;
+        assert_eq!(store.generation().await?, upgraded);
+        let cursors = SqlitePeerCursors::new(open_file(&path));
+        let read = cursors
+            .read(&PeerKey::new(&[1]), "main", &[PartKey::new(&[2])])
+            .await?;
+        assert_eq!(read, vec![None], "an old cursor row is dropped");
         Ok(())
     })
 }

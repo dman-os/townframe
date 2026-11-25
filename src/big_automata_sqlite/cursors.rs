@@ -1,7 +1,7 @@
 //! The driver's peer cursors in the same database as the part store.
 
 use big_automata::driver::PeerCursors;
-use big_automata::rev::Rev;
+use big_automata::sync::PeerCursor;
 use sqlite_rs::Sql;
 
 use crate::db::PartDb;
@@ -24,13 +24,19 @@ impl<D: PartDb> SqlitePeerCursors<D> {
 }
 
 impl<D: PartDb> PeerCursors for SqlitePeerCursors<D> {
-    async fn read(&self, peer: &PeerKey, backend: &str, parts: &[PartKey]) -> Res<Vec<Rev>> {
+    async fn read(
+        &self,
+        peer: &PeerKey,
+        backend: &str,
+        parts: &[PartKey],
+    ) -> Res<Vec<Option<PeerCursor>>> {
         let reader = self.db.begin_read().await?;
         let mut found = BTreeMap::new();
         for chunk in sql::chunk_rows(parts.to_vec(), 1, 2) {
             let mut query = Sql::new(
                 "SELECT part_key
                       , cursor
+                      , generation
                    FROM big_automata_peer_cursors
                   WHERE peer = ",
             );
@@ -40,47 +46,59 @@ impl<D: PartDb> PeerCursors for SqlitePeerCursors<D> {
                 .bind(backend);
             query.push(" AND part_key IN ");
             query.bind_list(chunk.iter().map(|part| part.blob()));
-            for (part, cursor) in query.query(&reader).await?.all::<(Vec<u8>, i64)>()? {
-                found.insert(PartKey::from_blob(&part), sql::rev_from_sql(cursor));
+            for (part, cursor, generation) in query
+                .query(&reader)
+                .await?
+                .all::<(Vec<u8>, i64, Vec<u8>)>()?
+            {
+                found.insert(
+                    PartKey::from_blob(&part),
+                    PeerCursor {
+                        generation: sql::generation_from_sql(&generation),
+                        rev: sql::rev_from_sql(cursor),
+                    },
+                );
             }
         }
         D::end_read(reader).await?;
-        Ok(parts
-            .iter()
-            .map(|part| found.get(part).copied().unwrap_or(0))
-            .collect())
+        Ok(parts.iter().map(|part| found.get(part).copied()).collect())
     }
 
-    /// One statement, so one atomic write: repeats of a part are coalesced to the highest
-    /// first, and the upsert keeps the stored cursor when it is higher.
-    async fn write(&self, peer: &PeerKey, backend: &str, writes: &[(PartKey, Rev)]) -> Res<()> {
-        let mut coalesced = BTreeMap::<&PartKey, Rev>::new();
-        for (part, cursor) in writes {
-            let slot = coalesced.entry(part).or_default();
-            *slot = (*slot).max(*cursor);
-        }
-        if coalesced.is_empty() {
+    /// Last write wins: the upsert replaces the row whatever its rev or generation, and the
+    /// batch's entries are applied in order, so the last entry for a part is the one stored.
+    /// SQLite applies the rows of one `INSERT ... VALUES` in order, but a statement is capped
+    /// in size, so a long batch is several statements in order, in one transaction (one atomic
+    /// write).
+    async fn write(
+        &self,
+        peer: &PeerKey,
+        backend: &str,
+        writes: &[(PartKey, PeerCursor)],
+    ) -> Res<()> {
+        if writes.is_empty() {
             return Ok(());
         }
         let tx = self.db.begin_write().await?;
-        let rows = coalesced
-            .into_iter()
+        let rows = writes
+            .iter()
             .map(|(part, cursor)| {
                 (
                     peer.blob(),
                     backend.to_owned(),
                     part.blob(),
-                    sql::rev_to_sql(cursor),
+                    sql::rev_to_sql(cursor.rev),
+                    sql::generation_to_sql(cursor.generation),
                 )
             })
             .collect();
         sql::execute_values(
             &tx,
-            "INSERT INTO big_automata_peer_cursors (peer, backend, part_key, cursor) ",
+            "INSERT INTO big_automata_peer_cursors (peer, backend, part_key, cursor, generation) ",
             rows,
-            4,
+            5,
             " ON CONFLICT (peer, backend, part_key) DO UPDATE SET
-                  cursor = MAX(cursor, excluded.cursor)",
+                  cursor = excluded.cursor
+                , generation = excluded.generation",
         )
         .await?;
         D::commit(tx).await?;

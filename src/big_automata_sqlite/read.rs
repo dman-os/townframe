@@ -1,5 +1,6 @@
 //! The reads that need no authorization question, and the object states both audiences share.
 
+use big_automata::part_store::Generation;
 use big_automata::part_store::ObjPayload;
 use big_automata::part_store::ObjState;
 use big_automata::part_store::PayloadDigest;
@@ -14,6 +15,12 @@ use crate::sqlite::queries;
 
 pub async fn latest_rev(x: &impl QueryExecutor) -> Res<Rev> {
     Ok(sql::rev_from_sql(queries::meta_rev(x).await?))
+}
+
+pub async fn generation(x: &impl QueryExecutor) -> Res<Generation> {
+    Ok(sql::generation_from_sql(
+        &queries::meta_generation(x).await?,
+    ))
 }
 
 pub async fn member_count(x: &impl QueryExecutor, part: &PartKey) -> Res<u64> {
