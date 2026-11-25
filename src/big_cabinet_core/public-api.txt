@@ -87,6 +87,8 @@ impl std :: fmt :: Display for big_cabinet_core::doc::CommandId
 impl std :: ops :: BitOr for big_cabinet_core::authority::Rights
 pub big_cabinet_core::datum::lexicon::fn project_datum (id : & str , document : & Value) -> Result < Value , String >
 pub big_cabinet_core::datum::lexicon::fn project_position (schema : & Value , definitions : & Map < String , Value >) -> Result < Value , String >
+pub big_cabinet_core::datum::lexicon::stability::fn object_revision (object : & Map < String , Value > , skip : & [& str]) -> Result < Option < u64 > , String >
+pub big_cabinet_core::datum::lexicon::stability::fn revision (value : & Value) -> Result < Option < u64 > , String >
 pub big_cabinet_core::datum::operation::fn validate < 'a > (kind : OperationKind , defs : & 'a Map < String , Value > , path : & str ,) -> Result < Vec < SchemaRef < 'a > > >
 pub big_cabinet_core::dmeta::fn cid_of (bytes : & [u8]) -> Cid
 pub big_cabinet_core::drawer::protocol::fn drawer_object (access : Access , drawer : & DrawerId) -> String
@@ -99,6 +101,9 @@ pub big_cabinet_core::schema_compat::fn compare (old : & SchemaBundle , new : & 
 pub big_cabinet_core::schema_compat::fn compare_datum_bundles (old : & crate :: datum :: Bundle < '_ > , old_datum : & str , new : & crate :: datum :: Bundle < '_ > , new_datum : & str ,) -> Option < CompatibilityReport >
 pub big_cabinet_core::schema_compat::fn compare_schemas (old : & Value , new : & Value) -> CompatibilityReport
 pub const big_cabinet_core::authority::OPERATOR_OBJECT: & str
+pub const big_cabinet_core::datum::lexicon::stability::DEPRECATED: & str
+pub const big_cabinet_core::datum::lexicon::stability::SINCE: & str
+pub const big_cabinet_core::datum::lexicon::stability::UNSTABLE: & str
 pub const big_cabinet_core::drawer::protocol::CREATE_DRAWER_OBJECT: & str
 pub const big_cabinet_core::reference::CANONICAL_REFERENCE_UNICODE_VERSION: (u64 , u64 , u64)
 pub const big_cabinet_core::reference::REFERENCE_SCHEME: & str
@@ -150,6 +155,9 @@ pub impl big_cabinet_core::authority::Rights::const fn is_empty (self) -> bool
 pub impl big_cabinet_core::authority::Rights::const fn is_subset_of (self , other : Self) -> bool
 pub impl big_cabinet_core::authority::Rights::fn bits_i64 (self) -> i64
 pub impl big_cabinet_core::authority::Rights::fn from_bits (bits : i64) -> Option < Self >
+pub impl big_cabinet_core::datum::lexicon::stability::Declared::fn is_stable (& self) -> bool
+pub impl big_cabinet_core::datum::lexicon::stability::Declared::fn read (object : & Map < String , Value >) -> Result < Self , String >
+pub impl big_cabinet_core::datum::lexicon::stability::Declared::fn revision (& self) -> Option < u64 >
 pub impl big_cabinet_core::datum::operation::OperationKind::fn as_str (self) -> & 'static str
 pub impl big_cabinet_core::datum::operation::OperationKind::fn parse (kind : & str) -> Option < Self >
 pub impl big_cabinet_core::dmeta::Bytes::fn as_slice (& self) -> & [u8]
@@ -235,6 +243,7 @@ pub impl big_cabinet_core::schema_compat::SchemaBundle::fn with_definitions (roo
 pub mod big_cabinet_core::authority
 pub mod big_cabinet_core::datum
 pub mod big_cabinet_core::datum::lexicon
+pub mod big_cabinet_core::datum::lexicon::stability
 pub mod big_cabinet_core::datum::operation
 pub mod big_cabinet_core::dmeta
 pub mod big_cabinet_core::doc
@@ -263,6 +272,7 @@ pub struct big_cabinet_core::authority::ResolvedAuthority  { capability: Capabil
 pub struct big_cabinet_core::authority::RetractCapability  { via: CapId, capability: CapId }
 pub struct big_cabinet_core::authority::Rights  {  }
 pub struct big_cabinet_core::authority::SignDatumClaim  { via: CapId, claim: DatumClaim }
+pub struct big_cabinet_core::datum::lexicon::stability::Declared  { since: Option < u64 >, deprecated: Option < (u64 , String) >, unstable: Option < String > }
 pub struct big_cabinet_core::datum::operation::SchemaRef< 'a >  { path: String, target: & 'a str }
 pub struct big_cabinet_core::dmeta::ActorMetadata  { created_at: Vec < Timestamp >, pubkey: MultibaseKey, actor_url: String, delegation: Option < Bytes >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::BranchPath  { path: String, from: Option < crate :: DatumPin >, extra: crate :: datum :: Extra }
