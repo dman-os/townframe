@@ -62,7 +62,7 @@ impl DocsService {
                 let verdicts: Vec<_> = verdicts
                     .into_iter()
                     .map(|(key, verdict)| {
-                        let version = match &verdict {
+                        let version = crate::doc::gate::instr(crate::doc::gate::VERSION, || match &verdict { // INSTR
                             Verdict::Accepted { datum_heads, .. }
                             | Verdict::Pending { datum_heads, .. } => {
                                 datum_version(doc, datum_heads.clone())
@@ -71,7 +71,7 @@ impl DocsService {
                                 heads: Vec::new(),
                                 clock: 0,
                             },
-                        };
+                        }); // INSTR
                         (key, verdict, version)
                     })
                     .collect();
@@ -94,7 +94,7 @@ impl DocsService {
                         Verdict::Accepted { native: None, .. } => DatumRead::Absent { version },
                         Verdict::Accepted { authors, .. } => {
                             let datums = present(&key).expect("an accepted value is present");
-                            match self.json(&tx, datums, &key) {
+                            match crate::doc::gate::instr(crate::doc::gate::HYDRATE_READ, || self.json(&tx, datums, &key)) { // INSTR
                                 Ok(value) => DatumRead::Accepted {
                                     value,
                                     version,

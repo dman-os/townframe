@@ -172,7 +172,7 @@ pub fn reconstruct_current_claims(
 ) -> Result<Vec<ClaimHistoryEntry>, ClaimHistoryError> {
     let mut state = Reconstruction::new(doc, datum_key, budget);
     state.check_heads(heads)?;
-    let entries = state.entries(heads)?;
+    let entries = super::gate::instr(super::gate::ENTRIES_CURRENT, || state.entries(heads))?; // INSTR
     let mut results = Vec::with_capacity(entries.len());
     for entry in entries {
         let result = (|| {
@@ -183,7 +183,7 @@ pub fn reconstruct_current_claims(
                 ));
             }
             let claim = state.claim_for_entry(hash, entry.marker.clone())?;
-            if state.read_signature(&entry, heads)? != claim.signature {
+            if super::gate::instr(super::gate::READ_SIGNATURE, || state.read_signature(&entry, heads))? != claim.signature { // INSTR
                 return Err(ClaimHistoryError::MalformedWitness(
                     "signature entry changed after introduction",
                 ));
@@ -255,12 +255,12 @@ impl<'a> Reconstruction<'a> {
 
     fn verdict(&self, result: Result<ReconstructedClaim, ClaimHistoryError>) -> ClaimHistoryResult {
         let result = result.and_then(|claim| {
-            SignedDatumClaim {
+            super::gate::instr(super::gate::SIG_VERIFY, || SignedDatumClaim { // INSTR
                 claim: claim.claim.clone(),
                 actor_public_key: claim.actor_public_key.clone(),
                 signature: claim.signature.signature.clone(),
             }
-            .verify()
+            .verify())
             .map_err(|_| ClaimHistoryError::InvalidSignature)?;
             Ok(claim)
         });
@@ -344,8 +344,7 @@ impl Reconstruction<'_> {
         let parents = change.deps;
         let automerge_actor = change.actor.into_owned();
         let resulting_heads = vec![hash];
-        let entry = self
-            .entries(&resulting_heads)?
+        let entry = super::gate::instr(super::gate::ENTRIES, || self.entries(&resulting_heads))? // INSTR
             .into_iter()
             .find(|entry| entry.marker == marker)
             .ok_or(ClaimHistoryError::MalformedWitness(
@@ -356,10 +355,9 @@ impl Reconstruction<'_> {
                 "signature marker introduction",
             ));
         }
-        let signature = self.read_signature(&entry, &resulting_heads)?;
-        let (actor_public_key, actor_url, certificate) =
-            self.actor_binding(signature.actor_uuid, &resulting_heads)?;
-        let aliases = self.aliases(&resulting_heads)?;
+        let signature = super::gate::instr(super::gate::READ_SIGNATURE, || self.read_signature(&entry, &resulting_heads))?; // INSTR
+        let (actor_public_key, actor_url, certificate) = super::gate::instr(super::gate::ACTOR_BINDING, || self.actor_binding(signature.actor_uuid, &resulting_heads))?; // INSTR
+        let aliases = super::gate::instr(super::gate::ALIASES, || self.aliases(&resulting_heads))?; // INSTR
         let (claim, native) = if let Some(witness) = &signature.inherited {
             if signature.message.is_some() {
                 return Err(ClaimHistoryError::MalformedWitness(
@@ -378,8 +376,7 @@ impl Reconstruction<'_> {
             }
             (claim, None)
         } else {
-            let encoded = self
-                .datum_value(&resulting_heads)?
+            let encoded = super::gate::instr(super::gate::DATUM_VALUE, || self.datum_value(&resulting_heads))? // INSTR
                 .map(|value| encode_native(&value));
             let claim = DatumClaim {
                 // A signature reaches other documents unchanged through branches and merges, so
@@ -397,7 +394,7 @@ impl Reconstruction<'_> {
                     ClaimOperation::Remove
                 },
                 value_cid: encoded.as_deref().map(cid_of),
-                predecessors: self.predecessor_ids(&parents)?,
+                predecessors: super::gate::instr(super::gate::PREDECESSORS, || self.predecessor_ids(&parents))?, // INSTR
             };
             if let Some(message) = &signature.message
                 && claim
