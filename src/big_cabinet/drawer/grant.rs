@@ -19,7 +19,9 @@ impl DrawerService {
             context,
             params.subject_id,
             drawer_object(params.access, &params.drawer_id),
-            Some(params.capability),
+            // No source makes it a standing grant, stored beside the owner's, instead of a
+            // delegation that lives only as long as the granter's capability.
+            (!params.durable).then_some(params.capability),
         )
         .await
     }
@@ -46,6 +48,7 @@ mod tests {
             drawer_id: DocId::new([2; 32]),
             subject_id: subject,
             access: Access::Write,
+            durable: true,
         };
         let value = serde_json::to_value(&request).expect("serialize");
         assert_eq!(
@@ -55,6 +58,7 @@ mod tests {
                 "drawerId": DocId::new([2; 32]).to_string(),
                 "subjectId": subject.to_string(),
                 "access": "Write",
+                "durable": true,
             })
         );
         assert_eq!(

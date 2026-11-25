@@ -586,6 +586,7 @@ async fn grant_drawer(
                 drawer_id: drawer_id.clone(),
                 subject_id,
                 access,
+                durable: false,
             },
         )
         .await
@@ -1717,14 +1718,6 @@ async fn an_upgrade_that_fails_admission_is_rejected_and_a_good_one_keeps_actor_
     let node = node().await;
     let operator = node.operator();
     let present = node.drawers.local().present_id.clone();
-    grant_drawer(
-        &node.drawers,
-        &node.drawers_actor,
-        &present,
-        node.nodules_actor.actor.actor_id,
-        DrawerAccess::Admin,
-    )
-    .await;
     let installed = node
         .admit(
             operator,
@@ -1781,35 +1774,14 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
     let placement = format!("drawer {present}");
     let note_key: DatumKey = format!("{NOTE}/main").parse().unwrap();
 
-    // Grant on `present` before `nodules_actor` has Admin on `present`: the desired grant is
-    // persisted in the cartridge's config document, but the binding is reported as blocked.
+    // The grant call itself grants `present` to the service's actor on the operator's authority,
+    // so nothing is staged before it.
     node.admit(
         operator,
         cartridge(example_cartridge!("photos"), "1.0.0", true),
     )
     .await
     .unwrap();
-    let blocked = node
-        .set_drawers(
-            example_cartridge!("photos"),
-            BTreeMap::from([(present.clone(), DrawerAccess::Write)]),
-        )
-        .await;
-    assert_ne!(
-        blocked.applied_heads.as_ref(),
-        Some(&blocked.observed_heads)
-    );
-    assert!(blocked.error.is_some());
-    assert_eq!(
-        blocked.drawers.get(&present),
-        Some(&NoduleGrantStatus {
-            desired: DrawerAccess::Write,
-            granted: false,
-            error: blocked.drawers[&present].error.clone(),
-        })
-    );
-    assert!(blocked.drawers[&present].error.is_some());
-
     let actor = node.actor_at(&id(example_cartridge!("photos"))).await;
     assert!(matches!(
         node.docs
@@ -1830,20 +1802,13 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
         Err(ClientError::Method(DocsError::Denied))
     ));
 
-    // Once the operator grants `nodules_actor` Admin on `present`, reconciliation applies the
-    // desired grant and the nodule actor can mint doc capabilities on `present`.
-    grant_drawer(
-        &node.drawers,
-        &node.drawers_actor,
-        &present,
-        node.nodules_actor.actor.actor_id,
-        DrawerAccess::Admin,
-    )
-    .await;
+    // Once the operator grants the drawer, the nodule actor can mint doc capabilities on it.
     let applied = node
-        .get(operator, example_cartridge!("photos"))
-        .await
-        .unwrap();
+        .set_drawers(
+            example_cartridge!("photos"),
+            BTreeMap::from([(present.clone(), DrawerAccess::Write)]),
+        )
+        .await;
     assert_eq!(applied.error, None);
     assert_eq!(
         applied.applied_heads.as_ref(),
@@ -2332,16 +2297,6 @@ async fn grants_are_separate_datums_so_two_made_separately_both_apply() {
     let photos = example_cartridge!("photos");
     let present = node.drawers.local().present_id.clone();
     let originated = node.drawers.local().originated_id.clone();
-    for drawer in [&present, &originated] {
-        grant_drawer(
-            &node.drawers,
-            &node.drawers_actor,
-            drawer,
-            node.nodules_actor.actor.actor_id,
-            DrawerAccess::Admin,
-        )
-        .await;
-    }
     node.admit(operator, cartridge(photos, "1.0.0", true))
         .await
         .unwrap();

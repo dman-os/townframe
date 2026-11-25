@@ -6,8 +6,10 @@
 //! through the [`watch`] receiver [`GrantRequests::new`] hands out, for its list and its long
 //! polls.
 
+use crate::state::Command;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Permbind;
@@ -27,11 +29,14 @@ use big_nodule_core::config::NoduleResolution;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesError;
 use method_core::ContextError;
+use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 
 type Res<T> = Result<T, NodulesError>;
@@ -79,6 +84,11 @@ pub(crate) struct RoutineUses {
     pub(crate) ungranted: BTreeMap<String, String>,
     /// Every `#net` permbind it takes.
     pub(crate) nets: Vec<NetUse>,
+    /// The access to a drawer this routine creates that its `#drawers` permbinds declare: the
+    /// most of `read`, `write` and `delete` it uses on a permbind that also declares `create`.
+    /// `None` for a routine that only creates, which declares no access to what it makes and so
+    /// is granted none.
+    pub(crate) create_access: Option<DrawerAccess>,
 }
 
 /// One `#net` permbind a routine takes, and whether the cartridge holds a matching `grant/net`.
@@ -99,6 +109,9 @@ pub(crate) struct NetUse {
 #[derive(Clone)]
 pub struct MissingAuthorityLookup {
     cartridge_id: CartridgeId,
+    /// The state actor's inbox, which a drawer a routine created is reported to
+    /// ([`Self::drawer_created`]). Weak: the executors that hold this outlive the service.
+    commands: mpsc::WeakSender<Command>,
     /// Per routine, by the dispatch handle it was delivered: what its `uses` leave refused for
     /// want of a grant, as of the last reconcile.
     routines: Arc<RwLock<HashMap<CapId, RoutineUses>>>,
@@ -108,6 +121,48 @@ pub struct MissingAuthorityLookup {
 impl MissingAuthorityLookup {
     pub(crate) fn set(&self, routines: HashMap<CapId, RoutineUses>) {
         *self.routines.write().expect("routine uses lock") = routines;
+    }
+
+    /// Reports that the routine holding the dispatch handle `capability` created `drawer` through
+    /// its own call, which the service's actor therefore owns (ADR 049 §6.1). Answers once the
+    /// runtime has written the cartridge's grant datum for it at the access the routine's
+    /// `#drawers` permbind declares, and re-minted the cartridge's handles to include it, so the
+    /// routine's next invocation reaches the drawer. `Ok(false)` when the service has shut down.
+    pub async fn drawer_created(
+        &self,
+        context: &RequestContext,
+        capability: CapId,
+        drawer: DrawerId,
+    ) -> Result<bool, NodulesError> {
+        let access = self
+            .routines
+            .read()
+            .expect("routine uses lock")
+            .get(&capability)
+            .and_then(|uses| uses.create_access);
+        let Some(commands) = self.commands.upgrade() else {
+            return Ok(false);
+        };
+        let (reply, answer) = oneshot::channel();
+        // A closed inbox, or a reply dropped unanswered, is the service shutting down under a
+        // routine's call: the closure is the signal here, not an invariant break.
+        if commands
+            .send(Command::DrawerCreated {
+                context: context.clone(),
+                cartridge_id: self.cartridge_id.clone(),
+                drawer,
+                access,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Ok(false);
+        }
+        match answer.await {
+            Ok(result) => result.map(|()| true),
+            Err(_) => Ok(false),
+        }
     }
 
     /// The pending request filed for `permbind` of this cartridge, if any (nothing files one
@@ -197,9 +252,14 @@ impl MissingAuthorityLookup {
 
 impl GrantRequests {
     /// The attribution of refusals for `cartridge_id`, which starts out knowing nothing.
-    pub(crate) fn lookup(&self, cartridge_id: CartridgeId) -> MissingAuthorityLookup {
+    pub(crate) fn lookup(
+        &self,
+        cartridge_id: CartridgeId,
+        commands: mpsc::WeakSender<Command>,
+    ) -> MissingAuthorityLookup {
         MissingAuthorityLookup {
             cartridge_id,
+            commands,
             routines: Arc::default(),
             requests: self.queue.subscribe(),
         }
