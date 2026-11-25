@@ -1587,6 +1587,13 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
     use crate::cmds::intxt::package::Packaging;
     use big_cabinet_core::DocId;
     use big_cabinet_core::datum::DatumMember;
+    use big_cabinet_core::authority::Rights;
+    use big_cabinet_core::drawer::DrawerAccess;
+    use big_cabinet_core::drawer::listing::KnownDrawers;
+    use big_cabinet_core::drawer::protocol::{
+        DrawerScope, ListKnownDrawers, MintDrawerCapability,
+    };
+    use method_core::Method;
     use intxt_core::client::Caller;
     use intxt_core::generic;
     use intxt_core::work;
@@ -1698,6 +1705,45 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
             serde_json::from_slice(&std::fs::read(node_root.join("intxt/github.json")).unwrap())
                 .unwrap();
         let doc: DocId = state["pulls"]["o/r#12"].as_str().unwrap().parse().unwrap();
+        let github_drawer: DocId = state["drawer"].as_str().unwrap().parse().unwrap();
+        let info = crate::cmds::status::node_info(client).await.unwrap();
+        let minted = client
+            .call(
+                MintDrawerCapability::XRPC.nsid,
+                MintDrawerCapability::XRPC.method,
+                &serde_json::to_value(MintDrawerCapability {
+                    scope: DrawerScope {
+                        drawers: [(info.known_drawers_id, DrawerAccess::Admin)].into(),
+                        create: false,
+                    },
+                    rights: Rights::USE,
+                    subject: None,
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(minted.is_success(), "{}", minted.body);
+        let capability: big_cabinet_core::authority::CapId =
+            serde_json::from_value(minted.body["capabilityId"].clone()).unwrap();
+        let listed = client
+            .call(
+                ListKnownDrawers::XRPC.nsid,
+                ListKnownDrawers::XRPC.method,
+                &serde_json::to_value(ListKnownDrawers { capability }).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(listed.is_success(), "{}", listed.body);
+        let known: KnownDrawers = serde_json::from_value(listed.body).unwrap();
+        assert!(
+            known
+                .drawers
+                .iter()
+                .any(|entry| entry.drawer_id == github_drawer && entry.mirror),
+            "{known:?}"
+        );
+
         let caller = Caller::new(
             client,
             RequestContext::root(),

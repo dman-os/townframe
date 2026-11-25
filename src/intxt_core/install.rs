@@ -106,9 +106,8 @@ pub async fn install<H: HttpTransport>(
         caller
             .call(SetCartridgeGrant {
                 cartridge_id: cartridge_id.clone(),
-                component: Component::Nodule,
                 grant: GrantKey::Method(operation.to_owned()),
-                value: Some(GrantBody::method(false)),
+                value: Some(GrantBody::present()),
             })
             .await?;
     }
@@ -164,9 +163,6 @@ pub async fn put_blob<H: HttpTransport>(
         .await?
         .capability_id;
     caller
-        .call_with_bytes(
-            PutBlob { capability },
-            ByteBody::from_bytes(bytes.to_vec()),
-        )
+        .call_with_bytes(PutBlob { capability }, ByteBody::from_bytes(bytes.to_vec()))
         .await
 }

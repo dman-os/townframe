@@ -192,36 +192,41 @@ impl Packaging<'_> {
     /// The GitHub drawer, made if this node has none yet: a single-group drawer owned by the
     /// operator, like the capture drawer.
     async fn github_node(&self) -> Res<GithubNode> {
-        if let Some(node) = self.load_github()? {
-            return Ok(node);
-        }
-        let creating = self
-            .caller
-            .call(MintDrawerCapability {
-                scope: DrawerScope {
-                    drawers: Default::default(),
-                    create: true,
-                },
-                rights: Rights::USE,
-                subject: None,
-            })
-            .await?
-            .capability_id;
-        let layout = CreateLayout::SingleGroup;
-        let drawer = self
-            .caller
-            .call(CreateDrawer {
-                capability: creating,
-                command: self.caller.command("github-drawer", &layout)?,
-                layout,
-            })
-            .await?
-            .drawer_id;
-        let node = GithubNode {
-            drawer,
-            pulls: BTreeMap::new(),
+        let node = if let Some(node) = self.load_github()? {
+            node
+        } else {
+            let creating = self
+                .caller
+                .call(MintDrawerCapability {
+                    scope: DrawerScope {
+                        drawers: Default::default(),
+                        create: true,
+                    },
+                    rights: Rights::USE,
+                    subject: None,
+                })
+                .await?
+                .capability_id;
+            let layout = CreateLayout::SingleGroup;
+            let drawer = self
+                .caller
+                .call(CreateDrawer {
+                    capability: creating,
+                    command: self.caller.command("github-drawer", &layout)?,
+                    layout,
+                })
+                .await?
+                .drawer_id;
+            let node = GithubNode {
+                drawer,
+                pulls: BTreeMap::new(),
+            };
+            self.save_github(&node)?;
+            node
         };
-        self.save_github(&node)?;
+        // Replaying this idempotent write repairs nodes whose github.json predates the
+        // drawer's known-drawers entry.
+        self.remember(&node.drawer, true).await?;
         Ok(node)
     }
 
