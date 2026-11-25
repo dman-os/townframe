@@ -14,7 +14,7 @@ pub enum intxt_capture::git_hooks::HookState { # [doc = " The hook is capture's 
 pub enum intxt_capture::git_hooks::Install { # [doc = " Wrote the hook (none was there, or ours was out of date)."] Installed (PathBuf), # [doc = " Ours was already in place; nothing changed."] AlreadyInstalled (PathBuf), # [doc = " A `post-rewrite` that is not ours is at the path; nothing was written."] Foreign (PathBuf) }
 pub enum intxt_capture::git_hooks::PostRewrite { Absent (PathBuf), # [doc = " A hook carrying [`MARKER`]: capture's."] Ours (PathBuf), # [doc = " A hook that is not capture's, which capture never overwrites."] Foreign (PathBuf) }
 pub enum intxt_capture::hook::Event { SessionStart, PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, Stop, SubagentStop, PreCompact, SessionEnd, Other (String) }
-pub enum intxt_capture::transcript::ImportError { # [error ("reading the transcript: {0}")] Io (# [from] std :: io :: Error), # [error ("the transcript is {len} bytes, shorter than the offset {offset} already imported")] Shrank { len : u64 , offset : u64 }, # [error ("transcript line at byte {at}: {reason}")] Line { at : u64 , reason : String }, # [error ("transcript record {uuid}: {reason}")] Record { uuid : String , reason : String } }
+pub enum intxt_capture::transcript::ImportError { # [error ("reading the transcript: {0}")] Io (# [from] std :: io :: Error), # [error ("the transcript is {len} bytes, shorter than the offset {offset} already imported")] Shrank { len : u64 , offset : u64 }, # [error ("transcript record {uuid}: {reason}")] Record { uuid : String , reason : String } }
 pub impl intxt_capture::acp::Recorder::fn feed (& mut self , direction : Direction , at : Timestamp , bytes : & [u8] ,) -> Result < Vec < Emit > , Error >
 pub impl intxt_capture::acp::Recorder::fn finish (& mut self) -> Vec < Emit >
 pub impl intxt_capture::acp::Recorder::fn new (sessions_dir : PathBuf) -> Self
@@ -102,5 +102,6 @@ pub struct intxt_capture::pack::PackRequest  { tips: Vec < String >, bases: Vec 
 pub struct intxt_capture::revisions::JjChange  { change_id: String, commits: Vec < String >, bases: Vec < String >, git_dir: PathBuf }
 pub struct intxt_capture::revisions::Revisions  { tip: String, base: Option < String > }
 pub struct intxt_capture::snapshot::Snapshot  {  }
-pub struct intxt_capture::transcript::Imported  { offset: u64, session: Option < AgentSession >, turns: BTreeMap < String , PromptTurn >, plan: Option < Plan >, spawned: Vec < String > }
+pub struct intxt_capture::transcript::Imported  { offset: u64, session: Option < AgentSession >, turns: BTreeMap < String , PromptTurn >, plan: Option < Plan >, spawned: Vec < String >, skipped: Vec < SkippedLine > }
+pub struct intxt_capture::transcript::SkippedLine  { at: u64, reason: String }
 pub struct intxt_capture::transcript::TranscriptImporter  {  }
