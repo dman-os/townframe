@@ -26,11 +26,11 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use big_automata::PeerKey;
-use big_automata::driver::memory::LwwPayload;
 use big_automata::driver::DriverConfig;
 use big_automata::driver::Facts;
 use big_automata::driver::PeerDriver;
 use big_automata::driver::RouteUpdate;
+use big_automata::driver::memory::LwwPayload;
 use big_automata::driver::memory::MemoryBackend;
 use big_automata::driver::memory::MemoryPeerCursors;
 use big_automata::part_store::PartStoreRead;

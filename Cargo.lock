@@ -1461,7 +1461,6 @@ dependencies = [
  "iroh",
  "iroh-relay",
  "method_core",
- "n0-future",
  "serde_json",
  "service_client_core_rs",
  "service_client_iroh_rs",
@@ -7798,8 +7797,7 @@ dependencies = [
 [[package]]
 name = "hyper"
 version = "1.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c"
+source = "git+https://github.com/dman-os/hyper?rev=388ad2634fe3a61d350690e02826ef021ced7458#388ad2634fe3a61d350690e02826ef021ced7458"
 dependencies = [
  "atomic-waker",
  "bytes",

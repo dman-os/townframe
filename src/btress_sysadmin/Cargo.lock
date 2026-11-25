@@ -1018,9 +1018,8 @@ dependencies = [
 
 [[package]]
 name = "hyper"
-version = "1.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d22053281f852e11534f5198498373cbb59295120a20771d90f7ed1897490a72"
+version = "1.12.0"
+source = "git+https://github.com/dman-os/hyper?rev=388ad2634fe3a61d350690e02826ef021ced7458#388ad2634fe3a61d350690e02826ef021ced7458"
 dependencies = [
  "bytes",
  "http",
