@@ -32,6 +32,7 @@ use crate::interlude::*;
 
 use clap::builder::styling::AnsiColor;
 use clap::*;
+use std::ffi::OsString;
 
 mod client;
 mod cmds;
@@ -63,7 +64,7 @@ fn main() -> ExitCode {
 
 fn run() -> Res<ExitCode> {
     // dotenv_flow::dotenv_flow().ok();
-    let parsed = Cli::try_parse();
+    let parsed = parse_cli(std::env::args_os().collect());
     // Tracing is the server's log: only the foreground server, which `node start --bg` runs and
     // whose stderr is its log file, narrates at `info`. Every other command prints its results
     // through `out` and shows only warnings on stderr; an explicit `RUST_LOG` overrides both.
@@ -132,6 +133,56 @@ fn run() -> Res<ExitCode> {
     }
 }
 
+/// Parses `args` as `day`'s command line, or as `day x intxt`'s when `args[0]` is named `intxt`
+/// or `day-intxt`.
+///
+/// `intxt` is `day` linked under another name (`ln -s "$(command -v day)" ~/.local/bin/intxt`),
+/// so that the hooks recording agent sessions call a command whose name outlives how `day`'s
+/// commands are arranged. It is temporary: a stable `intxt` now, until the platform and product
+/// command line settle. `intxt <args>` is exactly `day x intxt <args>`. Parsing is `day`'s, whose
+/// usage lines would say `day exec intxt`, so a help or failed parse is redone on [`IntxtCli`],
+/// which has the same arguments and says `intxt`.
+fn parse_cli(args: Vec<std::ffi::OsString>) -> Result<Cli, clap::Error> {
+    let (rewritten, invoked_as_intxt) = multicall(args.clone());
+    match (Cli::try_parse_from(rewritten), invoked_as_intxt) {
+        (Err(day_error), true) => Err(IntxtCli::try_parse_from(args).err().unwrap_or(day_error)),
+        (parsed, _) => parsed,
+    }
+}
+
+// The command line of `intxt`, for the help and errors of [`parse_cli`]. A plain comment: clap
+// would show a doc comment as the program's description.
+#[derive(Debug, clap::Parser)]
+#[clap(
+    name = "intxt",
+    version,
+    about = "intxt: what was done, why, and how to review it",
+    styles = CLAP_STYLE
+)]
+struct IntxtCli {
+    /// The node's directory
+    #[arg(long = "node", global = true, env = "DAY_NODE", value_name = "DIR")]
+    _node: Option<PathBuf>,
+    #[clap(subcommand)]
+    _command: cmds::intxt::IntxtCommands,
+}
+
+/// When `args[0]`'s file name is `intxt` or `day-intxt` (the name `day intxt` finds among the
+/// `PATH` plugins), the arguments of `day x intxt <rest>`, and true. The program name becomes
+/// `day` and `x intxt` goes before the rest, so the global `--node` is read wherever the caller
+/// put it.
+fn multicall(mut args: Vec<std::ffi::OsString>) -> (Vec<std::ffi::OsString>, bool) {
+    let invoked_as_intxt = args.first().is_some_and(|arg0| {
+        Path::new(arg0)
+            .file_name()
+            .is_some_and(|name| name == "intxt" || name == "day-intxt")
+    });
+    if invoked_as_intxt {
+        args.splice(0..1, ["day", "x", "intxt"].map(Into::into));
+    }
+    (args, invoked_as_intxt)
+}
+
 fn try_static_cli(parsed: Result<Cli, clap::Error>) -> Res<StaticCliResult> {
     let cli = match parsed {
         Err(err) => {
@@ -187,6 +238,20 @@ fn try_static_cli(parsed: Result<Cli, clap::Error>) -> Res<StaticCliResult> {
 }
 
 async fn static_cli(cli: Cli) -> Res<ExitCode> {
+    if let StaticCommands::Plugin(args) = &cli.command {
+        // On success the plugin replaces this process; only a missing plugin returns.
+        cmds::plugin::exec(args).await?;
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::InvalidSubcommand,
+                format!(
+                    "unrecognized subcommand '{name}', and no `day-{name}` executable was found on PATH",
+                    name = args[0].to_string_lossy()
+                ),
+            )
+            .print()?;
+        return Ok(ExitCode::from(2));
+    }
     if let StaticCommands::Exec {
         nsid: None,
         command: None,
@@ -224,7 +289,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     }
 
     match cli.command {
-        StaticCommands::Completions { .. } => unreachable!(),
+        StaticCommands::Completions { .. } | StaticCommands::Plugin(_) => unreachable!(),
         #[cfg(feature = "docs")]
         StaticCommands::Docs { .. } => unreachable!("handled before the node is looked up"),
         StaticCommands::Node { command } => cmds::node::run(command).await,
@@ -281,6 +346,7 @@ terminal unless NO_COLOR is set.";
     name = "day",
     version,
     long_version = build::CLAP_LONG_VERSION,
+    allow_external_subcommands = true,
     about,
     after_long_help = EXIT_CODES,
     styles = CLAP_STYLE
@@ -370,6 +436,10 @@ enum StaticCommands {
         #[clap(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// `day <name> <args…>` runs the plugin `day-<name>` found on `PATH`, with the node's
+    /// directory as `DAY_NODE`. Only a name no subcommand above has comes here.
+    #[clap(external_subcommand)]
+    Plugin(Vec<OsString>),
 }
 
 /// The commands of `day x`, one per cartridge.
@@ -456,8 +526,73 @@ mod tests {
         assert_eq!((nsid.as_str(), input.as_str()), ("org.example.a.b", "{}"));
     }
 
+    fn os(args: &[&str]) -> Vec<std::ffi::OsString> {
+        args.iter().map(Into::into).collect()
+    }
+
     #[test]
-    fn intxt_is_no_top_level_command() {
-        assert!(Cli::try_parse_from(["day", "intxt", "install"]).is_err());
+    fn invoked_as_intxt_is_day_x_intxt() {
+        for (argv, expected) in [
+            (&["intxt", "show"][..], &["day", "x", "intxt", "show"][..]),
+            (
+                &["/home/o/.local/bin/intxt", "--node", "d", "show"],
+                &["day", "x", "intxt", "--node", "d", "show"],
+            ),
+            (&["intxt"], &["day", "x", "intxt"]),
+            (
+                &["/usr/bin/day-intxt", "show"],
+                &["day", "x", "intxt", "show"],
+            ),
+        ] {
+            assert_eq!(multicall(os(argv)), (os(expected), true));
+        }
+        for argv in [
+            &["day", "x", "intxt", "show"][..],
+            &["day", "node", "status"],
+            &["intxt-old"],
+        ] {
+            assert_eq!(multicall(os(argv)), (os(argv), false));
+        }
+    }
+
+    #[test]
+    fn intxt_parses_as_the_intxt_command_with_its_own_program_name() {
+        let cli = parse_cli(os(&[
+            "intxt",
+            "--node",
+            "d",
+            "record",
+            "install",
+            "claude-code",
+        ]))
+        .unwrap();
+        assert_eq!(cli.node, Some(PathBuf::from("d")));
+        let StaticCommands::Exec {
+            command:
+                Some(ExecCommands::Intxt {
+                    command: cmds::intxt::IntxtCommands::Record { .. },
+                }),
+            ..
+        } = cli.command
+        else {
+            panic!("`intxt record ..` is `day x intxt record ..`");
+        };
+        let help = parse_cli(os(&["intxt", "--help"])).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = help.to_string();
+        assert!(help.contains("Usage: intxt "), "{help}");
+        assert!(!help.contains("day x intxt"), "{help}");
+    }
+
+    #[test]
+    fn intxt_is_no_built_in_but_a_plugin_name_and_built_ins_win() {
+        let StaticCommands::Plugin(args) = parse(&["intxt", "install"]) else {
+            panic!("`day intxt` is the plugin `day-intxt`, not a built-in");
+        };
+        assert_eq!(args, os(&["intxt", "install"]));
+        assert!(matches!(
+            parse(&["node", "run"]),
+            StaticCommands::Node { .. }
+        ));
     }
 }
