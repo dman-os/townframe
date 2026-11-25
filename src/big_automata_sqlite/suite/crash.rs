@@ -82,7 +82,7 @@ fn an_interrupted_write_leaves_nothing_and_reopening_sees_the_committed_state() 
         let path = dir.path().join("parts.sqlite");
         let mut oracle = PartOracle::default();
 
-        let store = Store::open(open_file(&path)).await?;
+        let store = Store::open(open_file(&path), super::clock()).await?;
         let committed = vec![
             vec![set(&[(0, 1), (1, 2)]), add(&[(0, 0), (1, 0), (1, 1)])],
             vec![grant(&[(0, 0)]), remove(&[(1, 0)])],
@@ -106,7 +106,7 @@ fn an_interrupted_write_leaves_nothing_and_reopening_sees_the_committed_state() 
         assert_state(&store, &oracle).await?;
         drop(store);
 
-        let reopened = Store::open(open_file(&path)).await?;
+        let reopened = Store::open(open_file(&path), super::clock()).await?;
         assert_state(&reopened, &oracle).await?;
         // And it carries on from the committed rev.
         let writes = vec![set(&[(2, 3)]), add(&[(2, 2)])];
@@ -161,12 +161,12 @@ fn migrations_apply_from_empty_and_are_idempotent() -> Res<()> {
 
         // Data survives a second registration of the same file, and its seed row is not
         // inserted again.
-        let store = Store::open(db).await?;
+        let store = Store::open(db, super::clock()).await?;
         commit(&store, vec![set(&[(0, 1)]), add(&[(0, 0)])]).await?;
         drop(store);
         let again = open_file(&path);
         again.migrate().await?;
-        let store = Store::open(again).await?;
+        let store = Store::open(again, super::clock()).await?;
         assert_eq!(RevSource::latest_rev(&store).await?, 1);
         Ok(())
     })
@@ -200,7 +200,7 @@ fn the_generation_and_its_mints_survive_reopening() -> Res<()> {
             let summaries = store.part_summaries(&principal(0), &[(part(0), 0)]).await?;
             Ok(summaries[0].expect("the part is readable").generation)
         };
-        let store = Store::open(open_file(&path)).await?;
+        let store = Store::open(open_file(&path), super::clock()).await?;
         commit(
             &store,
             vec![set(&[(0, 1)]), add(&[(0, 0)]), grant(&[(0, 0)])],
@@ -210,7 +210,7 @@ fn the_generation_and_its_mints_survive_reopening() -> Res<()> {
         assert_ne!(created, Generation::default());
         drop(store);
 
-        let store = Store::open(open_file(&path)).await?;
+        let store = Store::open(open_file(&path), super::clock()).await?;
         assert_eq!(store.generation().await?, created, "a reopen keeps it");
         assert_eq!(summarized(&store).await?, created);
         let minted = store.mint_generation().await?;
@@ -222,7 +222,7 @@ fn the_generation_and_its_mints_survive_reopening() -> Res<()> {
         );
         drop(store);
 
-        let store = Store::open(open_file(&path)).await?;
+        let store = Store::open(open_file(&path), super::clock()).await?;
         assert_eq!(store.generation().await?, minted, "a mint is durable");
         assert_eq!(summarized(&store).await?, minted);
         Ok(())

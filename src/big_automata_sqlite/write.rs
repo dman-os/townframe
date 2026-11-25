@@ -3,9 +3,11 @@
 //! Each batch loads what it needs, decides exactly as `big_automata`'s memory store does (the
 //! overlay maps below stand for its `State`, so a batch sees its own earlier effects), collects
 //! the row changes in a [`Flush`], and writes them with multi-row upserts. Every batch returns
-//! whether it stamped a log row; the transaction ORs them.
+//! the log rows it stamped; the transaction collects them, and the store's long-poll hub is told
+//! them after the commit.
 
 use big_automata::part_store::AccessLevel;
+use big_automata::part_store::LogKey;
 use big_automata::part_store::ObjPayload;
 use big_automata::part_store::PayloadDigest;
 use big_automata::part_store::bucket_summary::BucketMemberKind;
@@ -60,8 +62,15 @@ impl Flush {
         *self.counts.entry(obj.clone()).or_default() += delta;
     }
 
-    fn stamped(&self) -> bool {
-        !self.members.is_empty()
+    /// The log rows this flush stamps: one member row per key of `members`.
+    fn stamped(&self) -> Vec<LogKey> {
+        self.members
+            .keys()
+            .map(|(obj, part)| LogKey::Member {
+                obj: obj.clone(),
+                part: part.clone(),
+            })
+            .collect()
     }
 
     async fn run(self, x: &impl Executor, rev: Rev) -> Res<()> {
@@ -290,7 +299,7 @@ pub async fn set_payloads(
     x: &impl Executor,
     rev: Rev,
     payloads: Vec<(ObjKey, ObjPayload, PayloadDigest)>,
-) -> Res<bool> {
+) -> Res<Vec<LogKey>> {
     let objs = payloads
         .iter()
         .map(|(obj, _, _)| obj.clone())
@@ -373,7 +382,11 @@ pub async fn set_payloads(
     Ok(stamped)
 }
 
-pub async fn add_members(x: &impl Executor, rev: Rev, members: &[(ObjKey, PartKey)]) -> Res<bool> {
+pub async fn add_members(
+    x: &impl Executor,
+    rev: Rev,
+    members: &[(ObjKey, PartKey)],
+) -> Res<Vec<LogKey>> {
     // Adding creates the part, live or pending.
     ensure_parts(
         x,
@@ -437,7 +450,7 @@ pub async fn remove_members(
     x: &impl Executor,
     rev: Rev,
     members: &[(ObjKey, PartKey)],
-) -> Res<bool> {
+) -> Res<Vec<LogKey>> {
     let pairs = members.iter().cloned().collect::<BTreeSet<_>>();
     let objs = members
         .iter()
@@ -560,7 +573,7 @@ pub async fn grant_access(
     x: &impl Executor,
     rev: Rev,
     grants: &[(PartKey, PeerKey, AccessLevel)],
-) -> Res<bool> {
+) -> Res<Vec<LogKey>> {
     let pairs = grants
         .iter()
         .map(|(part, principal, _)| (part.clone(), principal.clone()))
@@ -575,7 +588,13 @@ pub async fn grant_access(
         rows.insert(key.clone(), Some(*level));
         writes.insert(key, Some(*level));
     }
-    let stamped = !writes.is_empty();
+    let stamped = writes
+        .keys()
+        .map(|(part, principal)| LogKey::Access {
+            part: part.clone(),
+            principal: principal.clone(),
+        })
+        .collect();
     write_access(x, rev, writes).await?;
     Ok(stamped)
 }
@@ -584,7 +603,7 @@ pub async fn revoke_access(
     x: &impl Executor,
     rev: Rev,
     revokes: &[(PartKey, PeerKey)],
-) -> Res<bool> {
+) -> Res<Vec<LogKey>> {
     let pairs = revokes.iter().cloned().collect::<BTreeSet<_>>();
     let mut rows = load_access(x, &pairs).await?;
     let mut writes = BTreeMap::new();
@@ -594,7 +613,13 @@ pub async fn revoke_access(
             writes.insert(key.clone(), None);
         }
     }
-    let stamped = !writes.is_empty();
+    let stamped = writes
+        .keys()
+        .map(|(part, principal)| LogKey::Access {
+            part: part.clone(),
+            principal: principal.clone(),
+        })
+        .collect();
     write_access(x, rev, writes).await?;
     Ok(stamped)
 }

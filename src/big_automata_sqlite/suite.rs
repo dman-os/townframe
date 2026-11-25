@@ -3,6 +3,7 @@
 
 use std::sync::LazyLock;
 
+use big_automata::Clock;
 use big_automata::part_store::laws::Backend;
 use big_automata::part_store::laws::LogStreams;
 use big_automata::part_store::laws::{self};
@@ -32,10 +33,15 @@ pub(crate) static RUNTIME: LazyLock<SqliteRuntime> = LazyLock::new(|| {
     })
 });
 
+/// The wall clock, as an embedder injects it.
+pub(crate) fn clock() -> Clock {
+    Arc::new(web_time::Instant::now)
+}
+
 /// A new, empty store on its own ephemeral database file.
 pub(crate) async fn fresh() -> Res<Store> {
     let db = RUNTIME.ephemeral(MIGRATIONS)?;
-    Store::open(db).await
+    Store::open(db, clock()).await
 }
 
 #[derive(Clone)]

@@ -129,7 +129,7 @@ impl Backend for RecordingBackend {
             db: RUNTIME.ephemeral(MIGRATIONS)?,
             log: Arc::clone(&self.log),
         };
-        SqlitePartStore::open(db).await
+        SqlitePartStore::open(db, super::clock()).await
     }
 
     async fn begin(&self, store: &Self::Store) -> Res<SqlitePartTx<Recording>> {
@@ -163,7 +163,7 @@ impl OkvBackend for RecordingOkvBackend {
             db: RUNTIME.ephemeral(MIGRATIONS)?,
             log: Arc::clone(&self.log),
         };
-        SqlitePartStore::open(db).await
+        SqlitePartStore::open(db, super::clock()).await
     }
 
     async fn table(&self, db: &Self::Db) -> Res<Self::Store> {

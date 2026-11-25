@@ -2,11 +2,14 @@
 //! `read.rs`, `serve.rs` and `log.rs`.
 
 use big_automata::BuckLevel;
+use big_automata::Clock;
+use big_automata::long_poll::LongPollHub;
 use big_automata::part_store::AccessLevel;
 use big_automata::part_store::AuthorizedPage;
 use big_automata::part_store::Generation;
 use big_automata::part_store::LeafPage;
 use big_automata::part_store::LogEntry;
+use big_automata::part_store::LogInterest;
 use big_automata::part_store::LogKey;
 use big_automata::part_store::LogRoutes;
 use big_automata::part_store::LogSelector;
@@ -44,6 +47,9 @@ pub struct SqlitePartStore<D: PartDb> {
     pub(crate) db: D,
     /// The log's watch, moved after each stamping commit is visible to readers.
     wakeups: Arc<watch::Sender<Rev>>,
+    /// The long-poll hub, told after each stamping commit is visible, with what the commit
+    /// stamped.
+    polls: LongPollHub<LogInterest>,
 }
 
 impl<D: PartDb> Clone for SqlitePartStore<D> {
@@ -51,6 +57,7 @@ impl<D: PartDb> Clone for SqlitePartStore<D> {
         Self {
             db: self.db.clone(),
             wakeups: Arc::clone(&self.wakeups),
+            polls: self.polls.clone(),
         }
     }
 }
@@ -62,7 +69,9 @@ pub struct SqlitePartTx<D: PartDb> {
     pub(crate) tx: D::Write,
     /// The rev every row this transaction stamps gets: the log's rev at `begin`, plus one.
     rev: Rev,
-    stamped: bool,
+    /// The log rows this transaction has stamped, which the hub is told of at commit. A
+    /// transaction can stamp one key twice (an add then a remove): the log keeps one row.
+    stamped: BTreeSet<LogKey>,
     /// The okv tables this transaction has written, by namespace: their watches move after the
     /// commit, and never for a rollback (the map is dropped with the transaction).
     pub(crate) okv: BTreeMap<i64, Staged>,
@@ -71,8 +80,9 @@ pub struct SqlitePartTx<D: PartDb> {
 impl<D: PartDb> SqlitePartStore<D> {
     /// Attach to `db`, applying its migrations if it has not run them. `db` must have been
     /// registered with [`MIGRATIONS`](crate::MIGRATIONS) under
-    /// [`MIGRATION_TABLE`](crate::MIGRATION_TABLE).
-    pub async fn open(db: D) -> Res<Self> {
+    /// [`MIGRATION_TABLE`](crate::MIGRATION_TABLE). The long-poll hub reads `clock`, the
+    /// embedder's injected time.
+    pub async fn open(db: D, clock: Clock) -> Res<Self> {
         let reader = db.begin_read().await?;
         let rev = queries::meta_rev(&reader).await?;
         D::end_read(reader).await?;
@@ -80,6 +90,7 @@ impl<D: PartDb> SqlitePartStore<D> {
         Ok(Self {
             db,
             wakeups: Arc::new(wakeups),
+            polls: LongPollHub::new(clock),
         })
     }
 
@@ -91,7 +102,7 @@ impl<D: PartDb> SqlitePartStore<D> {
             store: self.clone(),
             tx,
             rev,
-            stamped: false,
+            stamped: BTreeSet::new(),
             okv: BTreeMap::new(),
         })
     }
@@ -113,18 +124,25 @@ impl<D: PartDb> SqlitePartTx<D> {
             stamped,
             okv,
         } = self;
-        if stamped {
+        if !stamped.is_empty() {
             queries::set_meta_rev(&tx, sql::rev_to_sql(rev)).await?;
         }
         D::commit(tx).await?;
-        // After the commit is visible: a woken reader must find it in place.
-        if stamped {
+        if !stamped.is_empty() {
+            // After the commit is visible: a woken reader must find it in place.
             store.wakeups.send_replace(rev);
+            let mut changes = BTreeMap::<LogInterest, u64>::new();
+            for key in &stamped {
+                for interest in key.interests() {
+                    *changes.entry(interest).or_default() += 1;
+                }
+            }
+            store.polls.committed(rev, changes);
         }
         for staged in okv.into_values() {
             staged.publish();
         }
-        Ok(stamped.then_some(rev))
+        Ok((!stamped.is_empty()).then_some(rev))
     }
 
     pub async fn rollback(self) -> Res<()> {
@@ -154,7 +172,8 @@ impl<D: PartDb> PartStoreWrite for SqlitePartStore<D> {
                 Ok((obj, payload, digest))
             })
             .collect::<Res<Vec<_>>>()?;
-        tx.stamped |= write::set_payloads(&tx.tx, tx.rev, digested).await?;
+        tx.stamped
+            .extend(write::set_payloads(&tx.tx, tx.rev, digested).await?);
         Ok(())
     }
 
@@ -163,7 +182,8 @@ impl<D: PartDb> PartStoreWrite for SqlitePartStore<D> {
         tx: &mut SqlitePartTx<D>,
         members: &[(ObjKey, PartKey)],
     ) -> Res<()> {
-        tx.stamped |= write::add_members(&tx.tx, tx.rev, members).await?;
+        tx.stamped
+            .extend(write::add_members(&tx.tx, tx.rev, members).await?);
         Ok(())
     }
 
@@ -172,7 +192,8 @@ impl<D: PartDb> PartStoreWrite for SqlitePartStore<D> {
         tx: &mut SqlitePartTx<D>,
         members: &[(ObjKey, PartKey)],
     ) -> Res<()> {
-        tx.stamped |= write::remove_members(&tx.tx, tx.rev, members).await?;
+        tx.stamped
+            .extend(write::remove_members(&tx.tx, tx.rev, members).await?);
         Ok(())
     }
 
@@ -196,7 +217,8 @@ impl<D: PartDb> PartStoreWrite for SqlitePartStore<D> {
         tx: &mut SqlitePartTx<D>,
         grants: &[(PartKey, PeerKey, AccessLevel)],
     ) -> Res<()> {
-        tx.stamped |= write::grant_access(&tx.tx, tx.rev, grants).await?;
+        tx.stamped
+            .extend(write::grant_access(&tx.tx, tx.rev, grants).await?);
         Ok(())
     }
 
@@ -205,7 +227,8 @@ impl<D: PartDb> PartStoreWrite for SqlitePartStore<D> {
         tx: &mut SqlitePartTx<D>,
         revokes: &[(PartKey, PeerKey)],
     ) -> Res<()> {
-        tx.stamped |= write::revoke_access(&tx.tx, tx.rev, revokes).await?;
+        tx.stamped
+            .extend(write::revoke_access(&tx.tx, tx.rev, revokes).await?);
         Ok(())
     }
 }
@@ -280,6 +303,10 @@ impl<D: PartDb> PartStoreServe for SqlitePartStore<D> {
     /// The log's own watch: the one [`RevSource::watch`] hands out.
     fn watch(&self) -> RevWatch {
         RevSource::watch(self)
+    }
+
+    fn long_poll(&self) -> LongPollHub<LogInterest> {
+        self.polls.clone()
     }
 
     async fn generation(&self) -> Res<Generation> {

@@ -59,7 +59,7 @@ fn cursors_survive_reopening() -> Res<()> {
 fn cursors_share_a_database_with_the_part_store() -> Res<()> {
     block_on(async {
         let db = RUNTIME.ephemeral(MIGRATIONS)?;
-        let store = SqlitePartStore::open(db.clone()).await?;
+        let store = SqlitePartStore::open(db.clone(), super::clock()).await?;
         let cursors = SqlitePeerCursors::new(db);
         let (peer, part) = (PeerKey::new(&[1]), PartKey::new(&[2]));
         let cursor = PeerCursor {
