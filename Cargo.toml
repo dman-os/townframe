@@ -17,6 +17,9 @@ members = [
   "./src/big_ndk_testing/",
   "./src/big_blobs/",
   "./src/big_blobs_core/",
+  "./src/intxt_core/",
+  "./src/intxt_nodule/",
+  "./src/intxt_capture/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
@@ -36,6 +39,7 @@ members = [
   "./src/plug_dayledger_manifest",
   "./src/secrets_rs",
   "./src/method_core/",
+  "./src/short_ids",
   "./src/method_lexicon/",
   "./src/service_core_rs/",
   "./src/service_client_core_rs/",
@@ -117,6 +121,7 @@ am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 secrets_rs = { path = "./src/secrets_rs" }
 method_core = { path = "./src/method_core", default-features = false }
+short_ids = { path = "./src/short_ids" }
 service_core_rs = { path = "./src/service_core_rs", default-features = false }
 service_client_core_rs = { path = "./src/service_client_core_rs", default-features = false }
 service_client_native_rs = { path = "./src/service_client_native_rs", default-features = false }
@@ -139,6 +144,8 @@ big_cabinet = { path = "./src/big_cabinet/" }
 big_cabinet_core = { path = "./src/big_cabinet_core/", default-features = false }
 big_blobs = { path = "./src/big_blobs/" }
 big_blobs_core = { path = "./src/big_blobs_core/" }
+intxt_capture = { path = "./src/intxt_capture" }
+intxt_core = { path = "./src/intxt_core" }
 macros = { path = "./src/macros/" }
 method_lexicon = { path = "./src/method_lexicon/" }
 big_cartridges = { path = "./src/big_cartridges/" }
@@ -148,6 +155,7 @@ big_nodule_core = { path = "./src/big_nodule_core/", default-features = false }
 big_nodule = { path = "./src/big_nodule/" }
 big_nodule_wasm = { path = "./src/big_nodule_wasm/" }
 big_ndk = { path = "./src/big_ndk/" }
+big_ndk_testing = { path = "./src/big_ndk_testing/" }
 test_nodule_handlers = { path = "./src/test_nodule_handlers/" }
 big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
