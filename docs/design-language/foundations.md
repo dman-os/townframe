@@ -29,7 +29,7 @@ The unit policy separates scalable design relationships from values that represe
 - **FOUND-008** Borders, hairlines, and explicit renderer or layout boundaries MUST use `px` unless a documented component contract requires a different unit. Border width MUST NOT be made font-relative merely for consistency with spacing.
 - **FOUND-017** The pill radius MUST use the `999px` sentinel. This is a maximum-radius shape sentinel rather than a scalable radius value, so it is the explicit exception to the rem radius policy.
 - **FOUND-013** `em` MUST NOT be used as a foundation scale. It MAY be used for a component-local proportional relationship whose intentional dependence on the component's computed font size is documented.
-- **FOUND-014** Shadow offsets, blur, and spread SHOULD use `px` initially so elevation geometry remains predictable while the shadow model is being established.
+- **FOUND-014** Shadow offsets, blur, and spread SHOULD use `px` initially so elevation geometry remains predictable while the shadow model is being established. Elevation is two steps (ADR 057 section 4): `--ct-elevation-float` for what floats free and `--ct-elevation-anchored` for what is anchored to an edge, written once with `light-dark()` in the generated palette sheet; nothing in the flow casts a shadow.
 - **FOUND-015** A generator MUST preserve each authored unit unless a documented target adapter performs an explicit conversion. Unit conversion MUST NOT be implicit.
 - **FOUND-016** Native and web roots MUST establish an equivalent rem basis before the project claims that rem-based tokens have equivalent cross-platform scaling. Defining that native root behavior is an implementation concern, not a reason to change the foundation token policy.
 

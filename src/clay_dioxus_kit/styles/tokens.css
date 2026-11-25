@@ -43,9 +43,9 @@
     --ct-alert-border: none;
     --ct-chip-border: none;
 
-    --ct-sheet-shadow: var(--ct-elevation-raised);
-    --ct-drawer-shadow: var(--ct-elevation-raised);
-    --ct-scrub-bubble-shadow: var(--ct-elevation-md);
+    --ct-sheet-shadow: var(--ct-elevation-anchored);
+    --ct-drawer-shadow: var(--ct-elevation-anchored);
+    --ct-scrub-bubble-shadow: var(--ct-elevation-float);
 
     --ct-card-fill: var(--ct-color-surface);
   }

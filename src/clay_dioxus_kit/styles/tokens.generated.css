@@ -21,17 +21,12 @@
     --ct-dimension-font-size-sm: 0.875rem;
     --ct-dimension-font-size-md: 1rem;
     --ct-dimension-font-size-lg: 1.125rem;
-    --ct-color-neutral-1000: #000000;
     --ct-font-family-sans: system-ui, sans-serif;
     --ct-font-family-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     --ct-font-weight-regular: 400;
     --ct-font-weight-medium: 500;
     --ct-font-weight-semibold: 600;
     --ct-font-weight-bold: 700;
-    --ct-shadow-none: none;
-    --ct-shadow-sm: 0px 1px 2px 0px #000000;
-    --ct-shadow-md: 0px 4px 12px 0px #000000;
-    --ct-shadow-raised: 0px 8px 24px 0px #000000;
     --ct-motion-duration-short: 150ms;
     --ct-motion-duration-medium: 250ms;
     --ct-motion-easing-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
@@ -49,10 +44,6 @@
     --ct-border-width-thin: 1px;
     --ct-dimension-border-width-thick: 2px;
     --ct-border-width-thick: 2px;
-    --ct-elevation-none: none;
-    --ct-elevation-sm: 0px 1px 2px 0px #000000;
-    --ct-elevation-md: 0px 4px 12px 0px #000000;
-    --ct-elevation-raised: 0px 8px 24px 0px #000000;
     --ct-layer-content: 0;
     --ct-layer-raised: 10;
     --ct-layer-app-bar: 20;
@@ -78,10 +69,6 @@
   --border-width-hairline: var(--ct-border-width-hairline);
   --border-width-thin: var(--ct-border-width-thin);
   --border-width-thick: var(--ct-border-width-thick);
-  --shadow-none: var(--ct-shadow-none);
-  --shadow-sm: var(--ct-shadow-sm);
-  --shadow-md: var(--ct-shadow-md);
-  --shadow-raised: var(--ct-shadow-raised);
   --color-canvas: var(--ct-color-canvas);
   --color-surface-sunken: var(--ct-color-surface-sunken);
   --color-surface: var(--ct-color-surface);
@@ -129,6 +116,9 @@
   --color-destructive: var(--ct-color-danger);
   --color-destructive-foreground: var(--ct-color-on-danger);
   --color-ring: var(--ct-color-focus);
+  --shadow-*: initial;
+  --shadow-float: var(--ct-elevation-float);
+  --shadow-anchored: var(--ct-elevation-anchored);
   --font-sans: var(--ct-font-family-sans);
   --font-mono: var(--ct-font-family-mono);
 }

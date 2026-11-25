@@ -280,29 +280,23 @@ fn ShapeFoundation() -> Element {
 #[component]
 fn SurfaceFoundation() -> Element {
     let surfaces = [
-        (
-            "canvas",
-            "var(--ct-color-canvas)",
-            "var(--ct-shadow-none)",
-            "bg-background",
-        ),
-        (
-            "surface",
-            "var(--ct-color-surface)",
-            "var(--ct-shadow-none)",
-            "bg-card",
-        ),
+        ("canvas", "var(--ct-color-canvas)", "none", "bg-background"),
+        ("surface", "var(--ct-color-surface)", "none", "bg-card"),
         (
             "sunken",
             "var(--ct-color-surface-sunken)",
-            "var(--ct-shadow-none)",
+            "none",
             "bg-surface-sunken",
         ),
     ];
     let shadows = [
-        ("none", "var(--ct-shadow-none)", "shadow-none"),
-        ("sm", "var(--ct-shadow-sm)", "shadow-sm"),
-        ("md", "var(--ct-shadow-md)", "shadow-md"),
+        ("none", "none", "in the flow: nothing casts"),
+        (
+            "float",
+            "var(--ct-elevation-float)",
+            "popover, menu, scrub bubble",
+        ),
+        ("anchored", "var(--ct-elevation-anchored)", "sheet, drawer"),
     ];
 
     rsx! {
@@ -330,7 +324,7 @@ fn SurfaceFoundation() -> Element {
                             div {
                                 class: "rounded-md bg-card p-4",
                                 style: "box-shadow:{shadow};",
-                                "shadow-{name} · {utility}"
+                                "{name} · {utility}"
                             }
                         }
                     }

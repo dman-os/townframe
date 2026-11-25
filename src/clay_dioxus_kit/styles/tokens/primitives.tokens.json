@@ -30,15 +30,6 @@
       "lg": { "$value": { "value": 1.125, "unit": "rem" } }
     }
   },
-  "color": {
-    "$type": "color",
-    "$description": "The shadow ink is the only primitive colour left; every other colour is the palette (palette.tokens.json).",
-    "neutral": {
-      "1000": {
-        "$value": { "colorSpace": "srgb", "components": [0, 0, 0], "alpha": 1 }
-      }
-    }
-  },
   "font": {
     "family": {
       "$type": "fontFamily",
@@ -60,43 +51,6 @@
       "medium": { "$value": 500 },
       "semibold": { "$value": 600 },
       "bold": { "$value": 700 }
-    }
-  },
-  "shadow": {
-    "$type": "shadow",
-    "none": { "$value": [] },
-    "sm": {
-      "$value": [
-        {
-          "color": "{color.neutral.1000}",
-          "offsetX": { "value": 0, "unit": "px" },
-          "offsetY": { "value": 1, "unit": "px" },
-          "blur": { "value": 2, "unit": "px" },
-          "spread": { "value": 0, "unit": "px" }
-        }
-      ]
-    },
-    "md": {
-      "$value": [
-        {
-          "color": "{color.neutral.1000}",
-          "offsetX": { "value": 0, "unit": "px" },
-          "offsetY": { "value": 4, "unit": "px" },
-          "blur": { "value": 12, "unit": "px" },
-          "spread": { "value": 0, "unit": "px" }
-        }
-      ]
-    },
-    "raised": {
-      "$value": [
-        {
-          "color": "{color.neutral.1000}",
-          "offsetX": { "value": 0, "unit": "px" },
-          "offsetY": { "value": 8, "unit": "px" },
-          "blur": { "value": 24, "unit": "px" },
-          "spread": { "value": 0, "unit": "px" }
-        }
-      ]
     }
   },
   "motion": {
