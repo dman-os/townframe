@@ -40,7 +40,7 @@ the same building blocks, and the same read contract, so the code reads the same
 | `kit::scheduler::KeyedScheduler` | at most one task per key; replace (merging seeds), cancel, park/wake, fail with backoff, stopped-before-replaced | the hub's document wakes: frontier catch-up and materialization retry keyed by document, parked until keys arrive and woken when the document's keyhive epoch moves. A machine embeds it and its `flush` turns the spawn queue into commands (`call` = task id) and the stop queue into `Cancel`, as `Outbox::flush` does |
 | `kit::watermark` | a stream cursor that only advances past settled jobs | the durable cursor of the hub's catch-up over the change feed |
 | `rev::RevSource` / `RevStream` | the one read contract for revisioned sources (`latest_rev`, a bounded `read`, `watch`) and its single consumer | the sedimentree change feed implements `RevSource` (the bespoke `ChangeFeed` on branch 24 is converted); keyhive epoch changes as a second source |
-| `okv` | one row per key with a store-wide rev, written in the caller's transaction, tombstones pruned by consumer cursors | the automerge frontier table `(doc → heads, frontier_rev)`, written in the write plan; big_cabinet, big_blobs and daybook_core follow it with `RevStream`, replacing `AutomergeFrontierRevisionStore` |
+| `okv` | one row per key with a store-wide rev, written in the caller's transaction, tombstones pruned by consumer cursors | small local tables that need no part membership. **Not** the automerge frontier, which needs group parts (below) |
 | `durable_outbox` (and `HeldTable`) | durable fetch wants written with the admission; held wants until membership | content fetches in the sync backend; held wants are the parked-notification design from the 2026-11-26 membership work |
 | `part_store` | big_automata's part store | big_hive's, in the same database and transaction |
 | `long_poll` | the long-poll serving machine | browser serving, unchanged |
@@ -118,8 +118,17 @@ they follow a change stream and do idempotent per-key work. The automerge fronti
 `(doc, heads)`, the primary signal downstream work runs on) needs no worker of its own
 (operator, 2026-11-26):
 
-- **Local writes:** the heads after the change are known before commit, so the frontier row goes
-  into the same write plan and commits with the change.
+- **It is a part-store scope, not a plain table** (operator, 2026-11-26). Today the frontier
+  worker writes each document's frontier object into a separate frontier part store, with the
+  heads as its payload, **and makes it a member of the same group parts as the document**
+  (`automerge_frontier_worker.rs`, `publish_heads`: `desired_parts` from the document's parts,
+  filtered by the frontier scope). Downstream consumers follow the frontier per group part,
+  through `AutomergeFrontierRevisionStore`. big_hive keeps that: a frontier scope in
+  big_automata's part store, in the same database. Its membership is written in the same
+  transaction as the document's group-part membership (the Keyhive boundary's locked path), so the
+  two never diverge. Consumers follow it through the part store's rev stream.
+- **Local writes:** the heads after the change are known before commit, so the frontier payload
+  goes into the same write plan and commits with the change.
 - **Remote content:** the Document machine already hydrates to materialize it. After applying,
   it publishes the new heads in a transaction.
 - **Catch-up:** each document keeps `frontier_rev`, the tree `rev` its published heads reflect.
@@ -142,7 +151,48 @@ storage in the commit transaction (`big_repo/store/sqlite/sedimentree.rs:787-803
 so it works on relays without keys. big_repo only encodes them through automerge's `ChangeHash`
 type, a pun to remove in big_hive.
 
+## 4a. Every state machine, named
+
+Implicit state machines (phases hidden in flags and `Option`s) are what made runtime2 hard to
+reason about. Every machine in big_hive is listed here with its states, and each one is
+explicit in code: one enum, its transitions in one place, its laws in its module docs.
+
+| Machine | Owner | States | Notes |
+|---|---|---|---|
+| Document phase | Document | `Cold → Hydrating → Live`, `Parked` | section 11 |
+| Document writes | Document | `Idle`, `Committing(call)`, `HeldForPlan(plan)`, with a queue of held writes | law 2 and 4 |
+| Remote materialization | Document | `UpToDate`, `Behind(known_rev)`, `Applying(call)`, `Blocked(refs)` | replaces runtime2's materialization retry protocol |
+| Frontier publication | Document | `Current`, `Stale(rev)`, `Publishing(call)` | `frontier_rev ≤ applied_rev` |
+| Plan lifecycle | Write coordinator | `Queued → Preparing → Encrypting → Committing → Applying`, or `Aborting` | section 12 |
+| Document lifetime | Hub | `Absent → Running(generation) → Draining → Absent` | refcounts and idle deadline |
+| Catch-up per document | Hub (`KeyedScheduler`) | `Queued`, `Running`, `Backoff`, `Parked(epoch)` | big_automata's scheduler states |
+| Keyhive round per peer | Hub | `Idle → Active → Deferred` | from runtime2 `hub.rs:2808` |
+| Connection per peer | Hub | `Dialing`, `Connected(conn)`, `Closing` | starts and stops the sync backend's drivers |
+| Hub lifecycle | Hub | `Running → Draining → Stopped` | replaces `cmd_closed` |
+| Hydration per document | Keyhive boundary | `NotLoaded → Loading → Loaded`, `Evicted` | the fork's explicit `hydrate`/`evict` |
+| Locked operation | Keyhive boundary | `Waiting(lock) → InTransaction → Committed` or `RolledBack → Reopening` | membership and ingest path |
+| Prepared encryption | Keyhive boundary | `Prepared → Applied`, or `Dropped` (re-prepare on stale) | |
+| Interest and demand | Hub | `Wanted`, `Grace(deadline)`, `Released` | the 30 s sync grace from `interest.rs` |
+| Peer sync | big_automata `PeerSync` | its own (part lifecycle, walk, cursor) | unchanged |
+| Durable outbox | big_automata `Outbox` | its own (want phases, held wants) | unchanged |
+| Tree store generation | storage | per-tree `rev`, populate compare-and-set | upstream's rules 1-8, implemented in SQL |
+
+Derived-state maintenance is **not** a state machine and does not get one: following a change
+stream and doing idempotent per-key work is the keyed scheduler plus a watermark.
+
 ## 5. Messages between actors
+
+**Mailboxes** live in `kit`, as an improved version of `big_sync_core::mpsc`. That module named
+both ends of a channel (its errors say which actor's mailbox closed), offered `recv_many` for
+batching, and left a TODO to tag messages with send and receive counters for deterministic
+replay. The kit version keeps the naming and batching, is bounded with `try_send` only, and in a
+simulation records `(sender, sequence)` per message for replay and `SIM_TRACE`.
+
+**Windows.** A window is the most requests one actor may have outstanding toward another. For
+example, a Document may have at most N encryptions in flight at the Keyhive boundary, as
+`ObjectJobs` caps its record and fetch calls. The machine enforces it by not issuing more, so
+each mailbox's capacity is known: the sum of the windows of the actors that send to it. Sizes
+come from measurement (likely tens).
 
 - A machine talks to another actor through a command (`Send { to, input }`). The receiving
   driver delivers it as an input. Requests carry a `CallId`, and the answer is an input to the
@@ -270,6 +320,15 @@ Law zero is the same: **a seed replays**, or a failure the simulation finds cann
 - **Oracle:** the set of committed plans and Keyline's answers at each point, giving what each
   hive's readers may see.
 
+### Subduction and keyhive in the simulation
+We use subduction as the serving layer, and keyhive's sync protocol is a serving layer too:
+both receive what other nodes send. Our machines see their results only at two boundaries:
+remote commits arriving through `Storage`, and remote keyhive events arriving at the Keyhive
+boundary's ingest path. So tier 2 can start by **modelling remote hives at those two
+boundaries**, like the peer simulation's remote: a simulated remote produces commits and keyhive
+events, and the network ops reorder, drop and duplicate them. Running real subduction and the
+keyhive protocol between simulated hives is a later step, once the clock reads below are settled.
+
 ### To verify before building tier 2
 `subduction_core` still reads `std::time::Instant::now` in `connection/manager.rs:459,471` and
 `metrics.rs`, and `multiplexer.rs` uses `tokio::time::timeout`. If those only feed metrics or
@@ -307,7 +366,8 @@ One per document with a handle, an interest, or catch-up work. It replaces runti
   boundary, and returns automerge changes. Only for documents we can read.
 - `PrepareEncrypt { change }` to the Keyhive boundary.
 - `Commit { plan }` for a single-document write: commit rows, content key, any CGKA rows, and
-  **the frontier row** (the heads after the change are known before commit).
+  **the frontier payload** in the frontier part-store scope (the heads after the change are
+  known before commit).
 - `Prepared { plan, change }` to the coordinator.
 - `Reply { call, result }` to a handle; `Notify` to change listeners after an apply.
 - `PublishFrontier { heads, rev }` after materializing remote content.
