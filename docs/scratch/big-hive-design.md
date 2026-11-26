@@ -206,3 +206,24 @@ interested.
   whether a node can sign a change a client created with the node as author, and whether unsigned
   live changes over ephemeral remain possible.
 - **Process:** drafts without CI; only the stack tip is greened, when the operator names it.
+
+## Decisions, 2026-11-26 late (operator)
+
+- **automerge stays in unsigned mode.** Trust lives on the sedimentree commit, signed by the node
+  that commits it. The automerge author footer is a claim checked at read time against the commit
+  signer and Keyline. The ingest path accepts change bytes plus an optional signature chunk, so
+  automerge attestation (upstream #1742, unreleased, heading for 0.13) can be adopted later
+  without an API change. Required mode is not adopted: it fixes a document's mode at creation,
+  forbids mixing, and disables `fork_at` (used by the cabinet's branch, list and merge) and
+  `bundle` (used by the doc worker), and a required-mode watcher cannot apply the unsigned live
+  changes streamed over ephemeral.
+- **Upstream proposal:** require signatures only on published, served history, not on local
+  copies.
+- **Drawers need a new architecture** with roles that support Keyline's admin-rotation rule
+  ("The Ex-Admin Sharp Edge"). Cabinet-level, above big_hive.
+- **Identity and interest (being researched):** one hive holds N local principals (our own plus
+  invite/app principals whose keys we hold); a big_automata peer is the remote node's identity;
+  a session is (peer, the local principal the subduction handshake authenticates as). Fetching
+  document D uses sessions (P, L) where both P and L stand at Relay or above on D. Interest in a
+  document that does not exist yet is a durable want with no provider, held until a peer
+  advertises it. Keyhive needs extra secret-only local principals for this.
