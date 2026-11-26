@@ -120,6 +120,7 @@ impl Harness {
                     priority,
                     identity: identity(id),
                     version: self.next_version,
+                    parts: default(),
                 };
                 self.next_version += 1;
                 if let Some((row, _)) = Want::record(self.table.get(&n), advert, self.ms) {

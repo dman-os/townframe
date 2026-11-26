@@ -36,6 +36,7 @@ impl Fixture {
             priority,
             identity: identity(identity_n),
             version,
+            parts: default(),
         };
         let recorded = block_on(self.wants.record(&mut tx, &obj(n), advert, now_ms)).unwrap();
         tx.commit().unwrap();
@@ -79,6 +80,7 @@ fn law_1_a_want_is_atomic_with_the_callers_writes() {
             priority: 0,
             identity: identity(1),
             version: 1,
+            parts: default(),
         };
         block_on(fixture.wants.record(&mut tx, &obj(1), advert, 0)).unwrap();
         block_on(crate::okv::OkvStore::apply(

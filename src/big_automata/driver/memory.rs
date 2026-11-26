@@ -336,7 +336,7 @@ impl MemoryBackend {
             part.clone(),
         )])])
         .await?;
-        self.fetch_parked(obj).await
+        self.fetch_parked(obj, part).await
     }
 
     /// The membership source says `obj` is no longer a member of `part`.
@@ -348,12 +348,17 @@ impl MemoryBackend {
         .await
     }
 
-    /// Fetch the want parked for `obj` from its providers, in order, and release it.
-    async fn fetch_parked(&self, obj: &ObjKey) -> Res<()> {
+    /// A membership was added to `part`: if a notification named it for `obj`, fetch the want
+    /// parked for `obj` from its providers and release it. A want nobody named `part` for
+    /// stays parked.
+    async fn fetch_parked(&self, obj: &ObjKey, part: &PartKey) -> Res<()> {
         let held = &self.node.held;
         let Some(want) = held.get(&mut self.node.db.begin(), obj).await? else {
             return Ok(());
         };
+        if !want.named.values().any(|named| named.contains(part)) {
+            return Ok(());
+        }
         let sources = want
             .providers
             .iter()
@@ -374,27 +379,33 @@ impl MemoryBackend {
             self.download(&source, obj).await?;
         }
         let mut tx = self.node.db.begin();
-        held.release(&mut tx, obj).await?;
+        held.release(&mut tx, obj, part).await?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Whether `obj` is a member of any of `parts`, pending memberships included.
-    async fn is_member(&self, obj: &ObjKey, parts: &[PartKey]) -> Res<bool> {
+    /// The first of `parts` that `obj` is a member of, pending memberships included.
+    async fn member_part(&self, obj: &ObjKey, parts: &[PartKey]) -> Res<Option<PartKey>> {
         Ok(self
             .node
             .local
             .obj_states(std::slice::from_ref(obj))
             .await?
             .remove(0)
-            .is_some_and(|state| parts.iter().any(|part| state.parts.contains(part))))
+            .and_then(|state| {
+                parts
+                    .iter()
+                    .find(|part| state.parts.contains(*part))
+                    .cloned()
+            }))
     }
 
     /// Park a notification for an object that is not a member (law 9).
     async fn park(&self, job: &ObjJob) -> Res<()> {
         // What a parked want is for is the object's current payload, whichever peer holds it:
         // one identity for every advert of an object, so the providers union.
-        let advert = Advert::new(self.peer.clone(), 0, ByteKey::new(&[]));
+        let advert =
+            Advert::new(self.peer.clone(), 0, ByteKey::new(&[])).naming(job.add.iter().cloned());
         let now_ms = self.node.now_ms.load(AtomicOrdering::SeqCst);
         let mut tx = self.node.db.begin();
         let held = self
@@ -476,14 +487,14 @@ impl SyncBackend for MemoryBackend {
                 Settle::Done
             });
         }
-        if self.is_member(&job.obj, &job.add).await? {
+        if self.member_part(&job.obj, &job.add).await?.is_some() {
             return Ok(Settle::Fetch);
         }
         self.park(&job).await?;
         // The source may have added the object between the check and the park, and its hook
         // found nothing to release: look again, now that the want is visible to it.
-        if self.is_member(&job.obj, &job.add).await? {
-            self.fetch_parked(&job.obj).await?;
+        if let Some(part) = self.member_part(&job.obj, &job.add).await? {
+            self.fetch_parked(&job.obj, &part).await?;
         }
         Ok(Settle::Done)
     }

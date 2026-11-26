@@ -11,6 +11,10 @@ type Table = MemoryOkv<Vec<u8>, Vec<u8>>;
 
 const SECOND: u64 = 1000;
 
+fn part(n: u8) -> PartKey {
+    PartKey::new(&[n])
+}
+
 struct Fixture {
     db: MemoryDb,
     held: HeldTable<Table>,
@@ -37,8 +41,13 @@ impl Fixture {
         HeldTable::new(self.held.store().clone(), self.held.config())
     }
 
+    /// A hold whose notification names part 1.
     fn hold(&self, n: u8, provider: u8, identity_n: u8, now_ms: u64) -> Held {
-        self.hold_at(&self.held, n, provider, identity_n, now_ms)
+        self.hold_at(&self.held, n, provider, identity_n, &[1], now_ms)
+    }
+
+    fn hold_naming(&self, n: u8, provider: u8, parts: &[u8], now_ms: u64) -> Held {
+        self.hold_at(&self.held, n, provider, n, parts, now_ms)
     }
 
     fn hold_at(
@@ -47,18 +56,20 @@ impl Fixture {
         n: u8,
         provider: u8,
         identity_n: u8,
+        parts: &[u8],
         now_ms: u64,
     ) -> Held {
         let mut tx = self.db.begin();
-        let advert = Advert::new(peer(provider), 0, identity(identity_n));
+        let advert = Advert::new(peer(provider), 0, identity(identity_n))
+            .naming(parts.iter().map(|&n| part(n)));
         let outcome = block_on(held.hold(&mut tx, &obj(n), advert, now_ms)).unwrap();
         tx.commit().unwrap();
         outcome
     }
 
-    fn release(&self, n: u8) -> Option<Want> {
+    fn release(&self, n: u8, part_n: u8) -> Option<Want> {
         let mut tx = self.db.begin();
-        let want = block_on(self.held.release(&mut tx, &obj(n))).unwrap();
+        let want = block_on(self.held.release(&mut tx, &obj(n), &part(part_n))).unwrap();
         tx.commit().unwrap();
         want
     }
@@ -246,15 +257,19 @@ fn law_19_a_release_hands_the_want_over_once_and_frees_the_peers_room() {
     fixture.hold(1, 1, 1, 0);
     fixture.hold(2, 1, 2, SECOND);
     let held = fixture.row(1).unwrap();
-    assert_eq!(fixture.release(1), Some(held));
-    assert_eq!(fixture.release(1), None, "a second release finds nothing");
+    assert_eq!(fixture.release(1, 1), Some(held));
+    assert_eq!(
+        fixture.release(1, 1),
+        None,
+        "a second release finds nothing"
+    );
     assert_eq!(fixture.row(1), None);
     assert_eq!(fixture.held_by(1), 1);
     // the room is the peer's again: no drop for a want that fits
     assert!(fixture.hold(3, 1, 3, 2 * SECOND).dropped.is_empty());
     // the released want is handed to the wants table in the caller's transaction
     let mut tx = fixture.db.begin();
-    let want = block_on(fixture.held.release(&mut tx, &obj(2)))
+    let want = block_on(fixture.held.release(&mut tx, &obj(2), &part(1)))
         .unwrap()
         .unwrap();
     for provider in &want.providers {
@@ -263,6 +278,7 @@ fn law_19_a_release_hands_the_want_over_once_and_frees_the_peers_room() {
             priority: want.priority,
             identity: want.identity.clone(),
             version: want.version,
+            parts: default(),
         };
         block_on(
             fixture
@@ -308,7 +324,7 @@ fn a_restart_rebuilds_the_index_from_the_table() {
     let reopened = fixture.reopened();
     assert_eq!(block_on(reopened.held_by(&peer(1))).unwrap(), 2);
     // the reopened table enforces the cap and the TTL over what it found
-    let held = fixture.hold_at(&reopened, 3, 1, 3, 12 * SECOND);
+    let held = fixture.hold_at(&reopened, 3, 1, 3, &[1], 12 * SECOND);
     assert_eq!(
         held.dropped,
         vec![Dropped::Cap {
@@ -316,29 +332,95 @@ fn a_restart_rebuilds_the_index_from_the_table() {
             peer: peer(1)
         }]
     );
-    let held = fixture.hold_at(&reopened, 4, 2, 4, 25 * SECOND);
+    let held = fixture.hold_at(&reopened, 4, 2, 4, &[1], 25 * SECOND);
     assert_eq!(held.dropped, vec![Dropped::Ttl { obj: obj(2) }]);
 }
 
 #[test]
-fn a_rolled_back_hold_leaves_a_stale_entry_that_never_costs_a_real_want() {
-    let fixture = Fixture::new(2, 3600);
-    {
-        let mut tx = fixture.db.begin();
-        let advert = Advert::new(peer(1), 0, identity(1));
-        block_on(fixture.held.hold(&mut tx, &obj(1), advert, 0)).unwrap();
-        // dropped without a commit
-    }
-    fixture.hold(2, 1, 2, SECOND);
-    let held = fixture.hold(3, 1, 3, 2 * SECOND);
-    assert!(
-        held.dropped.is_empty(),
-        "the stale entry was dropped, not a want"
+fn law_19_a_membership_to_an_unrelated_part_releases_nothing() {
+    let fixture = Fixture::new(8, 3600);
+    // peer 1's notification names part 1; peer 2's, of the same object, names part 2
+    fixture.hold_naming(1, 1, &[1], 0);
+    fixture.hold_naming(1, 2, &[2], SECOND);
+    let held = fixture.row(1).unwrap();
+    assert_eq!(held.providers.len(), 2);
+    assert_eq!(held.named.len(), 2);
+    assert_eq!(
+        fixture.release(1, 3),
+        None,
+        "an unrelated part released the want"
     );
+    assert_eq!(fixture.row(1), Some(held.clone()), "the row was touched");
+    // each named part releases it, whoever named it
+    assert_eq!(fixture.release(1, 2), Some(held));
+    assert_eq!(fixture.row(1), None);
+}
+
+#[test]
+fn law_19_the_parts_a_peer_named_leave_with_the_peer() {
+    // cap 1: peer 2's second want costs it its first, and the part it named with it
+    let fixture = Fixture::new(1, 3600);
+    fixture.hold_naming(1, 1, &[1], 0);
+    fixture.hold_naming(1, 2, &[2], SECOND);
+    fixture.hold_naming(2, 2, &[2], 2 * SECOND);
+    let want = fixture.row(1).unwrap();
+    assert_eq!(want.providers, [peer(1)].into());
+    assert_eq!(want.named, [(peer(1), [part(1)].into())].into());
+    assert_eq!(
+        fixture.release(1, 2),
+        None,
+        "a dropped peer's part still releases"
+    );
+    assert!(fixture.release(1, 1).is_some());
+    // repeated notifications of one peer union their parts
+    fixture.hold_naming(3, 1, &[1], 3 * SECOND);
+    fixture.hold_naming(3, 1, &[2], 4 * SECOND);
+    assert_eq!(
+        fixture.row(3).unwrap().named,
+        [(peer(1), [part(1), part(2)].into())].into()
+    );
+}
+
+#[test]
+fn law_21_a_rolled_back_transaction_leaves_the_index_as_it_was() {
+    let fixture = Fixture::new(2, 15);
+    fixture.hold(1, 1, 1, 0);
+    fixture.hold(2, 1, 2, SECOND);
+    // the index has folded every commit so far
+    assert_eq!(fixture.held_by(1), 2);
+    let before = fixture.held.index_snapshot();
+    {
+        // a hold that finds both wants expired, dropped uncommitted
+        let mut tx = fixture.db.begin();
+        let advert = Advert::new(peer(1), 0, identity(3)).naming([part(1)]);
+        let held = block_on(fixture.held.hold(&mut tx, &obj(3), advert, 20 * SECOND)).unwrap();
+        assert_eq!(held.dropped.len(), 2, "both expired in the staged view");
+    }
+    assert_eq!(fixture.held.index_snapshot(), before, "the index moved");
+    assert_eq!(fixture.held_by(1), 2);
     assert_eq!(
         fixture.rows(3).iter().map(|(n, _)| *n).collect::<Vec<_>>(),
-        [2, 3]
+        [1, 2]
     );
+    {
+        let mut tx = fixture.db.begin();
+        block_on(fixture.held.release(&mut tx, &obj(1), &part(1))).unwrap();
+    }
+    assert_eq!(
+        fixture.held.index_snapshot(),
+        before,
+        "a rolled back release moved it"
+    );
+    // a commit moves it, and a second handle on the table agrees without being told
+    fixture.hold(3, 1, 3, 2 * SECOND);
+    assert_eq!(fixture.held_by(1), 2);
+    assert_ne!(fixture.held.index_snapshot(), before);
+    let other = fixture.reopened();
+    assert_eq!(block_on(other.held_by(&peer(1))).unwrap(), 2);
+    fixture.hold_at(&fixture.held, 4, 1, 4, &[1], 3 * SECOND);
+    assert_eq!(block_on(other.held_by(&peer(1))).unwrap(), 2);
+    assert_eq!(fixture.held_by(1), 2);
+    assert_eq!(other.index_snapshot(), fixture.held.index_snapshot());
 }
 
 // # The naive model
@@ -348,8 +430,16 @@ const TTL_SECS: u64 = 20;
 
 #[derive(Debug, Clone)]
 enum Op {
-    Hold { obj: u8, peer: u8, identity: u8 },
-    Release { obj: u8 },
+    Hold {
+        obj: u8,
+        peer: u8,
+        identity: u8,
+        parts: Vec<u8>,
+    },
+    Release {
+        obj: u8,
+        part: u8,
+    },
     Expire,
 }
 
@@ -384,10 +474,22 @@ impl Model {
             let (_, victim) = oldest.first().cloned().unwrap();
             let want = self.rows.get_mut(&victim).unwrap();
             want.providers.remove(&provider);
+            want.named.remove(&provider);
             if want.providers.is_empty() {
                 self.rows.remove(&victim);
             }
         }
+    }
+
+    /// Whether a provider named `part`, which releases the want.
+    fn release(&mut self, obj: &ObjKey, part: &PartKey) -> Option<Want> {
+        let named = self
+            .rows
+            .get(obj)?
+            .named
+            .values()
+            .any(|parts| parts.contains(part));
+        named.then(|| self.rows.remove(obj)).flatten()
     }
 
     fn held_by(&self, provider: &PeerKey) -> usize {
@@ -400,9 +502,9 @@ impl Model {
 
 fn ops() -> impl Strategy<Value = Vec<(Op, u64)>> {
     let op = prop_oneof![
-        8 => (0..6u8, 0..3u8, 0..2u8)
-            .prop_map(|(obj, peer, identity)| Op::Hold { obj, peer, identity }),
-        2 => (0..6u8).prop_map(|obj| Op::Release { obj }),
+        8 => (0..6u8, 0..3u8, 0..2u8, proptest::collection::vec(0..3u8, 1..3))
+            .prop_map(|(obj, peer, identity, parts)| Op::Hold { obj, peer, identity, parts }),
+        2 => (0..6u8, 0..3u8).prop_map(|(obj, part)| Op::Release { obj, part }),
         1 => Just(Op::Expire),
     ];
     proptest::collection::vec((op, 0..8u64), 1..60)
@@ -417,7 +519,7 @@ proptest! {
         for (step, (op, advance)) in ops.into_iter().enumerate() {
             now_ms += advance * SECOND;
             match op {
-                Op::Hold { obj: n, peer: p, identity: i } => {
+                Op::Hold { obj: n, peer: p, identity: i, parts } => {
                     // the version the want gets if the advert changes its identity
                     let version = step as u64 + 1;
                     let advert = Advert {
@@ -425,15 +527,16 @@ proptest! {
                         priority: 0,
                         identity: identity(i),
                         version,
+                        parts: parts.iter().map(|&at| part(at)).collect(),
                     };
                     model.hold(&obj(n), advert.clone(), now_ms);
                     let mut tx = fixture.db.begin();
                     block_on(fixture.held.hold(&mut tx, &obj(n), advert, now_ms)).unwrap();
                     tx.commit().unwrap();
                 }
-                Op::Release { obj: n } => {
-                    let expected = model.rows.remove(&obj(n));
-                    prop_assert_eq!(fixture.release(n), expected);
+                Op::Release { obj: n, part: at } => {
+                    let expected = model.release(&obj(n), &part(at));
+                    prop_assert_eq!(fixture.release(n, at), expected);
                 }
                 Op::Expire => {
                     model.expire(now_ms);

@@ -235,3 +235,51 @@ async fn the_parked_notifications_of_a_peer_are_capped_and_expire() -> Res<()> {
     assert_eq!(payload_of(4).await?, Some(LwwPayload::at(4)));
     Ok(())
 }
+
+/// Two peers of one node notify the same object in different parts. A membership added to
+/// either part releases the want and merges what both advertised; one added to a third part
+/// releases nothing.
+#[tokio::test]
+async fn notifications_of_two_peers_naming_different_parts_release_by_part() -> Res<()> {
+    use crate::driver::ObjJob;
+    use crate::driver::SyncBackend;
+    use crate::part_store::laws::obj;
+    use crate::part_store::laws::part;
+
+    let (from_a, from_b) = (MemoryPartStore::default(), MemoryPartStore::default());
+    let a = MemoryBackend::new(
+        PeerKey::new(&[1]),
+        MemoryPartStore::default(),
+        from_a.clone(),
+    );
+    let b = a.sibling(PeerKey::new(&[2]), from_b.clone());
+    for (store, value) in [(&from_a, 10), (&from_b, 11)] {
+        let mut tx = store.begin();
+        stage(
+            store,
+            &mut tx,
+            PartWrite::SetPayloads(vec![(obj(1), LwwPayload::at(value))]),
+        )
+        .await?;
+        tx.commit();
+    }
+    let job = |at: u8, value: u8| ObjJob {
+        obj: obj(1),
+        add: vec![part(at)],
+        remove: vec![],
+        payload: Some(LwwPayload::at(value)),
+    };
+    a.record(job(1, 10)).await?;
+    b.record(job(2, 11)).await?;
+    let payload_of = async || -> Res<Option<ObjPayload>> {
+        Ok(observe(&a, &obj(1))
+            .await?
+            .and_then(|state| state.content.map(|(p, _)| p)))
+    };
+    a.member_added(&obj(1), &part(3)).await?;
+    assert_eq!(payload_of().await?, None, "a part nobody named released it");
+    // part 2 was named by peer B alone; the release merges both providers' payloads
+    a.member_added(&obj(1), &part(2)).await?;
+    assert_eq!(payload_of().await?, Some(LwwPayload::at(11)));
+    Ok(())
+}

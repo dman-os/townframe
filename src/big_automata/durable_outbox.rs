@@ -42,8 +42,10 @@
 //!    the `identity` does (every row is written with a fresh version, never reused, so a
 //!    landing cannot mistake a later want for the one it fetched); under an equal identity the
 //!    providers union and the newest record's priority wins; under a new identity the providers
-//!    are the new advertiser alone, since the others advertised the old one. A record that
-//!    changes nothing writes nothing (a rev wakes every follower).
+//!    are the new advertiser alone, since the others advertised the old one. The parts each
+//!    provider `named` (held wants only, laws 16 to 21) follow their provider: they union per
+//!    provider under an equal identity, and restart with the new advertiser alone under a new
+//!    one. A record that changes nothing writes nothing (a rev wakes every follower).
 //! 3. **Withdrawal is a tombstone**, written only if the row is live. A tombstone is also what
 //!    a landing leaves. Dropping one provider ([`WantsTable::drop_provider`]) rewrites the row
 //!    without it (the same version and identity, so a running fetch is untouched, law 6), and
@@ -122,6 +124,7 @@
 //! between record, fetch and land, providers connecting and leaving, and withdrawals and
 //! supersessions racing fetches.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use crate::interlude::*;
@@ -170,6 +173,10 @@ pub struct Want {
     pub identity: ByteKey,
     /// The peers that advertised the object at this identity.
     pub providers: BTreeSet<PeerKey>,
+    /// Held wants only: the parts each provider's notifications named. The wants table's rows
+    /// leave it empty.
+    #[serde(default)]
+    pub named: BTreeMap<PeerKey, BTreeSet<PartKey>>,
 }
 
 impl Want {
@@ -187,6 +194,11 @@ impl Want {
             queued_at,
             priority: advert.priority,
             identity: advert.identity,
+            named: if advert.parts.is_empty() {
+                default()
+            } else {
+                [(advert.provider.clone(), advert.parts)].into()
+            },
             providers: [advert.provider].into(),
         };
         match old {
@@ -194,6 +206,12 @@ impl Want {
             Some(old) if old.identity == advert.identity => {
                 let mut want = old.clone();
                 want.priority = advert.priority;
+                if !advert.parts.is_empty() {
+                    want.named
+                        .entry(advert.provider.clone())
+                        .or_default()
+                        .extend(advert.parts);
+                }
                 want.providers.insert(advert.provider);
                 (want != *old).then_some((want, Recorded::Updated))
             }
@@ -218,6 +236,8 @@ pub struct Advert {
     pub identity: ByteKey,
     /// The version the want gets if this advert changes its identity (law 2).
     pub version: Version,
+    /// The parts the notification named, for a held want; empty for a want to fetch.
+    pub parts: BTreeSet<PartKey>,
 }
 
 impl Advert {
@@ -228,7 +248,14 @@ impl Advert {
             priority,
             identity,
             version: rand::random(),
+            parts: default(),
         }
+    }
+
+    /// The same advert, naming `parts` (a held want's gate, law 19).
+    pub fn naming(mut self, parts: impl IntoIterator<Item = PartKey>) -> Self {
+        self.parts = parts.into_iter().collect();
+        self
     }
 }
 
@@ -313,6 +340,7 @@ where
         if !want.providers.remove(peer) {
             return Ok(false);
         }
+        want.named.remove(peer);
         let mutation = if want.providers.is_empty() {
             Mutation::Delete { key }
         } else {
