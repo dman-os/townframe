@@ -55,6 +55,7 @@ Scope: what lands on main, in what order, and what the operator reviews next, ac
 | 2026-11-25 ~19:00 | #106–#199 (node-10…55), one squash per PR | ee20c626 | every step tree-checked; main tree a36abd5e == reviewed #199. #112 was closed by GitHub (see pitfalls); its change landed inside #113's squash. #399 was a replacement that GitHub marked "merged" into node-15 (a no-op). Stack #101 unstacked; the rest re-linked as **stack #408** (#233 → #352, 38 PRs). |
 | 2026-11-26 | #423 mbx 1.30.0 → 1.31.0 (claytxt; flake.nix + flake.lock only) | 44f575a6 | operator OK'd it once CI was green |
 | 2026-11-26 | #422 iroh-blobs fork on upstream 0.104.1 + bao-tree 0.17 | 5fea6f19 | big_blobs 189/189. The blob_discovery flake didn't reproduce in 20/20 runs (main and #422) once alpha had disk; seen only while alpha's disk was full. |
+| 2026-11-26 | #384 → #385 → #386, claytxt's CI cuts (rebased onto 5fea6f19, plus clippy fixes and a pruned Cargo.lock) | 3623e2af, 81c4451d, fff2be53 | tree-checked per PR |
 
 ## Queue
 
