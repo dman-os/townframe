@@ -2,7 +2,7 @@
 //! [`crate::model`] decides what a row is and says; this file only lays it out, in the styling
 //! contract's vocabulary (`docs/design-language/styling-contract.md`): the kit's `Button`,
 //! `Alert`, `Chip`, `Card` and `Separator` where they fit, and for the rest a root class
-//! (`micro-review`) with `data-part` and `data-*` names that [`STYLE`] (`review.css`) and any
+//! (`micro-review`) with `part` and `data-*` names that [`STYLE`] (`review.css`) and any
 //! theme key on. No class here but the root, and no inline style.
 use crate::model::Changes;
 use crate::model::Content;
@@ -59,7 +59,7 @@ pub(crate) fn Frame(app_bar: Element, children: Element) -> Element {
         section { class: "micro-review", "aria-label": "Review",
             Stylesheet { css: STYLE }
             PanelPage { app_bar,
-                div { "data-part": "page", {children} }
+                div { "part": "review-page", {children} }
             }
         }
     }
@@ -146,7 +146,7 @@ pub(crate) fn screens<C: NodeCalls>(node: C) -> Element {
 #[component]
 fn Loading(what: String) -> Element {
     rsx! {
-        p { role: "status", "aria-busy": "true", "data-part": "placeholder",
+        p { role: "status", "aria-busy": "true", "part": "review-placeholder",
             "Loading {what}…"
         }
     }
@@ -158,7 +158,7 @@ fn Loading(what: String) -> Element {
 pub(crate) fn Failure(heading: String, detail: String) -> Element {
     rsx! {
         Alert { status: Status::Danger, title: heading,
-            span { "data-part": "detail", "{detail}" }
+            span { "part": "review-detail", "{detail}" }
         }
     }
 }
@@ -190,8 +190,8 @@ fn StateChip(state: PullState) -> Element {
 #[component]
 fn PullMeta(reference: String, state: PullState) -> Element {
     rsx! {
-        div { "data-part": "meta",
-            span { "data-part": "secondary", "{reference}" }
+        div { "part": "review-meta",
+            span { "part": "review-secondary", "{reference}" }
             StateChip { state }
         }
     }
@@ -209,18 +209,18 @@ pub(crate) fn PullList(
     };
     if pulls.is_empty() {
         return rsx! {
-            div { "data-part": "empty",
-                p { "data-part": "name", "No pull requests yet" }
-                p { "data-part": "secondary",
+            div { "part": "review-empty",
+                p { "part": "review-name", "No pull requests yet" }
+                p { "part": "review-secondary",
                     "They arrive with "
-                    code { "data-part": "code", "day x intxt github pull" }
+                    code { "part": "review-code", "day x intxt github pull" }
                     "."
                 }
             }
         };
     }
     rsx! {
-        ul { "data-part": "items", "aria-label": "Pull requests",
+        ul { "part": "review-items", "aria-label": "Pull requests",
             for read in pulls {
                 li {
                     {pull_row(read, on_open)}
@@ -242,13 +242,13 @@ fn pull_row(read: Read<Pull>, on_open: EventHandler<Screen>) -> Element {
             );
             rsx! {
                 button {
-                    "data-part": "row",
+                    "part": "review-row",
                     "aria-label": "{label}",
                     onclick: {
                         let pull = pull.clone();
                         move |_| on_open.call(Screen::Pull(pull.clone()))
                     },
-                    span { "data-part": "name", "{pull.title}" }
+                    span { "part": "review-name", "{pull.title}" }
                     PullMeta { reference: pull.repo_ref(), state: pull.state.clone() }
                 }
             }
@@ -268,14 +268,14 @@ fn Unreadable(what: String, name: String, reason: String) -> Element {
         div {
             role: "group",
             "aria-label": "{what} cannot be read",
-            "data-part": "unreadable",
+            "part": "review-unreadable",
             Card { status: Some(Status::Danger),
                 CardContent {
                     if !name.is_empty() {
-                        p { "data-part": "id", "{name}" }
+                        p { "part": "review-id", "{name}" }
                     }
-                    p { "data-part": "failure", "{what} cannot be read" }
-                    p { "data-part": "secondary", "{reason}" }
+                    p { "part": "review-failure", "{what} cannot be read" }
+                    p { "part": "review-secondary", "{reason}" }
                 }
             }
         }
@@ -288,21 +288,21 @@ fn Unreadable(what: String, name: String, reason: String) -> Element {
 fn PullHeader(pull: Pull) -> Element {
     let reading = pull.reading();
     rsx! {
-        header { "data-part": "section",
-            h2 { "data-part": "headline", "{pull.title}" }
+        header { "part": "review-section",
+            h2 { "part": "review-headline", "{pull.title}" }
             PullMeta { reference: pull.repo_ref(), state: pull.state.clone() }
             // Shown as text: the shell has no way to open a link from a micro.
-            p { "data-part": "id", "{pull.url}" }
+            p { "part": "review-id", "{pull.url}" }
         }
-        section { "data-part": "section", "aria-label": "Description",
+        section { "part": "review-section", "aria-label": "Description",
             for paragraph in reading.paragraphs.iter() {
-                p { "data-part": "prose", "{paragraph}" }
+                p { "part": "review-prose", "{paragraph}" }
             }
             if reading.paragraphs.is_empty() {
-                p { "data-part": "secondary", "No description." }
+                p { "part": "review-secondary", "No description." }
             }
             if let Some(line) = reading.names_line() {
-                p { "data-part": "secondary", "{line}" }
+                p { "part": "review-secondary", "{line}" }
             }
         }
     }
@@ -323,12 +323,12 @@ fn PullIntxts(links: Result<Links, CallError>, on_open: EventHandler<Screen>) ->
         Ok(Links::Named(rows)) => rows,
     };
     if rows.is_empty() {
-        return rsx! { p { "data-part": "secondary", "This pull request names no intxts." } };
+        return rsx! { p { "part": "review-secondary", "This pull request names no intxts." } };
     }
     rsx! {
-        section { "data-part": "section", "aria-label": "Intxts",
-            h3 { "data-part": "heading", "Intxts" }
-            ul { "data-part": "items", "data-variant": "spaced",
+        section { "part": "review-section", "aria-label": "Intxts",
+            h3 { "part": "review-heading", "Intxts" }
+            ul { "part": "review-items", "data-variant": "spaced",
                 for row in rows {
                     li { {link_row(row, on_open)} }
                 }
@@ -349,7 +349,7 @@ fn link_row(row: LinkRow, on_open: EventHandler<Screen>) -> Element {
             entries,
         } => rsx! {
             button {
-                "data-part": "row",
+                "part": "review-row",
                 "data-variant": "outline",
                 "aria-label": "Open intxt {title}",
                 onclick: {
@@ -357,19 +357,19 @@ fn link_row(row: LinkRow, on_open: EventHandler<Screen>) -> Element {
                     let title = title.clone();
                     move |_| on_open.call(Screen::Intxt { drawer: drawer.clone(), title: title.clone() })
                 },
-                span { "data-part": "name", "{title}" }
+                span { "part": "review-name", "{title}" }
                 if let Some(description) = description {
-                    span { "data-part": "secondary", "{teaser(&description)}" }
+                    span { "part": "review-secondary", "{teaser(&description)}" }
                 }
-                span { "data-part": "secondary", "{entries_label(entries)}" }
+                span { "part": "review-secondary", "{entries_label(entries)}" }
             }
         },
         LinkOutcome::NotFound => rsx! {
-            div { role: "group", "aria-label": "Not an intxt", "data-part": "unlisted",
+            div { role: "group", "aria-label": "Not an intxt", "part": "review-unlisted",
                 Card {
                     CardContent {
-                        p { "data-part": "id", "{name}" }
-                        p { "data-part": "secondary", "Not an intxt" }
+                        p { "part": "review-id", "{name}" }
+                        p { "part": "review-secondary", "Not an intxt" }
                     }
                 }
             }
@@ -391,21 +391,21 @@ fn IntxtPage<C: NodeCalls>(intxt: Result<Read<Intxt>, CallError>, node: C) -> El
         Err(error) => return rsx! { Failed { error } },
     };
     rsx! {
-        header { "data-part": "section",
-            h2 { "data-part": "headline", "{intxt.title}" }
+        header { "part": "review-section",
+            h2 { "part": "review-headline", "{intxt.title}" }
             if let Some(description) = &intxt.description {
                 for paragraph in paragraphs(description) {
-                    p { "data-part": "prose", "{paragraph}" }
+                    p { "part": "review-prose", "{paragraph}" }
                 }
             }
         }
         if intxt.entries.is_empty() {
-            p { "data-part": "secondary", "Nothing in it yet." }
+            p { "part": "review-secondary", "Nothing in it yet." }
         }
         for group in intxt.groups() {
-            section { key: "{group.heading}", "data-part": "group", "aria-label": "{group.heading}",
-                h3 { "data-part": "heading", "{group.heading} · {group.entries.len()}" }
-                ul { "data-part": "items",
+            section { key: "{group.heading}", "part": "review-group", "aria-label": "{group.heading}",
+                h3 { "part": "review-heading", "{group.heading} · {group.entries.len()}" }
+                ul { "part": "review-items",
                     for entry in group.entries {
                         li {
                             EntryRow { entry: entry.clone(), node: node.clone() }
@@ -423,23 +423,23 @@ fn IntxtPage<C: NodeCalls>(intxt: Result<Read<Intxt>, CallError>, node: C) -> El
 #[component]
 fn EntryRow<C: NodeCalls>(entry: Entry, node: C) -> Element {
     rsx! {
-        div { "data-part": "entry",
-            span { "data-part": "id", "{entry.label}" }
+        div { "part": "review-entry",
+            span { "part": "review-id", "{entry.label}" }
             match &entry.kind {
                 EntryKind::Unreadable(reason) => rsx! {
                     Alert { status: Status::Danger, "{reason}" }
                 },
-                EntryKind::Other(tag) => rsx! { span { "data-part": "secondary", "{tag}" } },
+                EntryKind::Other(tag) => rsx! { span { "part": "review-secondary", "{tag}" } },
                 _ => rsx! {},
             }
             match entry.changes {
                 Changes::Absent => rsx! {},
                 Changes::TooLarge => rsx! {
-                    h4 { "data-part": "heading", "Changes" }
-                    p { "data-part": "secondary", "No diff is shown: it was too large to carry with this entry." }
+                    h4 { "part": "review-heading", "Changes" }
+                    p { "part": "review-secondary", "No diff is shown: it was too large to carry with this entry." }
                 },
                 Changes::Blob(source) => rsx! {
-                    h4 { "data-part": "heading", "Changes" }
+                    h4 { "part": "review-heading", "Changes" }
                     PatchLoader { source, node }
                 },
             }
@@ -506,7 +506,7 @@ fn Patch<C: NodeCalls>(patch: String, node: C) -> Element {
     });
     match files {
         Ok(files) => rsx! {
-            div { "data-part": "diff",
+            div { "part": "review-diff",
                 CodeViewView::<()> {
                     files,
                     scroll: ScrollMode::Own {
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn a_patch_renders_as_a_code_view() {
         let html = render(SAMPLE_PATCH);
-        assert!(html.contains("data-part=\"diff\""), "{html}");
+        assert!(html.contains("part=\"review-diff\""), "{html}");
         assert!(!html.contains("The patch cannot be read"), "{html}");
         // The code view's own scroller (`ScrollMode::Own`) with its slab inside. The files'
         // rows are not there yet: the viewer mounts them from the scroller's measured
@@ -569,6 +569,6 @@ mod tests {
     fn an_empty_patch_is_the_failure_alert_not_an_empty_view() {
         let html = render("");
         assert!(html.contains("The patch cannot be read"), "{html}");
-        assert!(!html.contains("data-part=\"diff\""), "{html}");
+        assert!(!html.contains("part=\"review-diff\""), "{html}");
     }
 }

@@ -23,17 +23,17 @@ pub fn Alert(
     };
     rsx! {
         div { class: "ct-alert", role, "data-status": status.as_str(),
-            span { "data-part": "icon", "aria-hidden": "true" }
-            div { "data-part": "content",
+            span { "part": "alert-icon", "aria-hidden": "true" }
+            div { "part": "alert-content",
                 if let Some(title) = title {
-                    p { "data-part": "title", "{title}" }
+                    p { "part": "alert-title", "{title}" }
                 }
-                div { "data-part": "body", {children} }
+                div { "part": "alert-body", {children} }
             }
             if let Some(on_dismiss) = on_dismiss {
                 button {
                     r#type: "button",
-                    "data-part": "dismiss",
+                    "part": "alert-dismiss",
                     "aria-label": "Dismiss",
                     onclick: move |_| on_dismiss.call(()),
                 }
@@ -109,9 +109,9 @@ mod tests {
         let parts: Vec<_> = page
             .children(alert)
             .into_iter()
-            .map(|part| page.attr(part, "data-part").expect("every child is a part"))
+            .map(|part| page.attr(part, "part").expect("every child is a part"))
             .collect();
-        assert_eq!(parts, ["icon", "content"]);
+        assert_eq!(parts, ["alert-icon", "alert-content"]);
         let icon = page.children(alert)[0];
         assert_eq!(page.attr(icon, "aria-hidden").as_deref(), Some("true"));
         assert!(!page.has_role("button", "Dismiss"));
@@ -128,7 +128,7 @@ mod tests {
             },
         );
         let dismiss = page.by_role("button", "Dismiss");
-        assert_eq!(page.attr(dismiss, "data-part").as_deref(), Some("dismiss"));
+        assert_eq!(page.attr(dismiss, "part").as_deref(), Some("alert-dismiss"));
         page.click(dismiss);
         assert_eq!(*dismissals.borrow(), 1);
     }

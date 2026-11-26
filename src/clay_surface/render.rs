@@ -259,7 +259,7 @@ pub(crate) fn static_attribute(
             "stroke-width", "stroke-linecap", "stroke-linejoin", "stroke-dasharray",
             "stroke-dashoffset", "stroke-opacity", "opacity", "transform", "cx", "cy", "r",
             "rx", "ry", "x", "y", "x1", "y1", "x2", "y2", "points", "xmlns", "clip-path", "clip-rule",
-            "slot"
+            "slot", "part"
         ],
         Some("style") => Some("style") => [
             "display", "position", "top", "right", "bottom", "left", "inset", "z-index",
@@ -321,6 +321,27 @@ pub(crate) fn attribute_value_policy(
         }
     };
     match (name, namespace) {
+        // A part name list (`::part()` selects by these tokens, ADR 059): kebab-case tokens
+        // separated by single spaces, bounded so a guest cannot grow the host's selector space
+        // or its attribute with an unbounded list.
+        ("part", None) => {
+            const MAX_TOKENS: usize = 8;
+            const MAX_BYTES: usize = 128;
+            let well_formed = !text.is_empty()
+                && text.len() <= MAX_BYTES
+                && text.split(' ').count() <= MAX_TOKENS
+                && text.split(' ').all(|token| {
+                    !token.is_empty()
+                        && token
+                            .bytes()
+                            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+                });
+            if !well_formed {
+                return Err(
+                    "part must be at most 8 space-separated [a-z0-9-] tokens, 128 bytes".into(),
+                );
+            }
+        }
         // The sheet a shadow host adopts is applied as a constructable sheet, never as an element,
         // so it is held to the same no-fetch rule as a guest's own stylesheet.
         ("data-dioxus-shadow-sheet", None) => {

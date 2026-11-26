@@ -435,7 +435,7 @@ pub fn Sections(
                 if let Some(view) = handles.get(index).filter(|_| index > 0 || first_shown) {
                     div {
                         key: "handle-{index}",
-                        "data-part": "handle",
+                        "part": "sections-handle",
                         role: "separator",
                         "aria-orientation": "vertical",
                         "aria-label": "{view.label}",
@@ -461,13 +461,13 @@ pub fn Sections(
                                 on_resize.call(split.dragged(index, step));
                             }
                         },
-                        div { "data-part": "grip" }
+                        div { "part": "sections-grip" }
                     }
                 }
             }
             if folded {
                 div {
-                    "data-part": "handle",
+                    "part": "sections-handle",
                     "data-edge": "",
                     role: "separator",
                     "aria-orientation": "vertical",
@@ -493,12 +493,12 @@ pub fn Sections(
                             on_expand.call(());
                         }
                     },
-                    div { "data-part": "grip" }
+                    div { "part": "sections-grip" }
                 }
             }
             if drag().is_some() {
                 div {
-                    "data-part": "gesture",
+                    "part": "sections-gesture",
                     role: "presentation",
                     onpointermove: move |event| track.call(event),
                     onpointerup: move |_| release.call(()),
@@ -526,7 +526,7 @@ fn PaneView(pane: SectionPane, weight: f64, rule: SizeRule, collapsed: bool) -> 
     };
     rsx! {
         div {
-            "data-part": "pane",
+            "part": "sections-pane",
             "data-state": if collapsed { "collapsed" } else { "open" },
             role: "region",
             "aria-label": "{pane.name}",
@@ -725,7 +725,7 @@ mod collapse_tests {
         assert!(!page.has_role("separator", "Resize Sidebar and Content"));
         let strip = page.by_role("separator", "Open Sidebar");
         assert_eq!(page.attr(strip, "data-edge").as_deref(), Some(""));
-        assert_eq!(page.attr(strip, "data-part").as_deref(), Some("handle"));
+        assert_eq!(page.attr(strip, "part").as_deref(), Some("sections-handle"));
         page.pointer(strip, "pointerdown", 2.0);
         assert_eq!(page.attr(strip, "data-state").as_deref(), Some("dragging"));
         let overlay = page.by_role("presentation", "");

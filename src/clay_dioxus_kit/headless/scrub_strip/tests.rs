@@ -625,7 +625,7 @@ mod rendered {
         let root = page.by_class("ct-scrub-strip");
         page.children(root)
             .into_iter()
-            .filter(|part| page.attr(*part, "data-part").as_deref() == Some("marker"))
+            .filter(|part| page.attr(*part, "part").as_deref() == Some("scrub-strip-marker"))
             .map(|marker| page.text(marker))
             .collect()
     }
@@ -636,7 +636,7 @@ mod rendered {
         let root = page.by_class("ct-scrub-strip");
         assert_eq!(page.attr(root, "data-state").as_deref(), Some("idle"));
         // Every child is a part (`parts` fails on one that is not), in paint order.
-        assert_eq!(page.parts(root), ["scrim", "marker", "grab-band", "status"]);
+        assert_eq!(page.parts(root), ["scrub-strip-scrim", "scrub-strip-marker", "scrub-strip-grab-band", "scrub-strip-status"]);
         for property in [
             "--ct-strip-cell",
             "--ct-strip-inset",
@@ -655,7 +655,7 @@ mod rendered {
             page.custom_property(marker, "--ct-strip-push").as_deref(),
             Some("0px")
         );
-        assert_eq!(page.parts(marker), ["tick", "label"]);
+        assert_eq!(page.parts(marker), ["scrub-strip-tick", "scrub-strip-label"]);
     }
 
     #[test]
@@ -768,18 +768,18 @@ mod rendered {
             Some("0px")
         );
         let parts = page.parts(root);
-        assert!(parts.contains(&"bubble".to_string()), "{parts:?}");
+        assert!(parts.contains(&"scrub-strip-bubble".to_string()), "{parts:?}");
         page.pointer_at(root, "pointerup", (1050.0, 430.0));
         assert_eq!(page.attr(root, "data-state").as_deref(), Some("idle"));
         assert_eq!(
             page.custom_property(root, "--ct-strip-limit").as_deref(),
             Some("0px")
         );
-        assert!(!page.parts(root).contains(&"bubble".to_string()));
+        assert!(!page.parts(root).contains(&"scrub-strip-bubble".to_string()));
         for marker in page
             .children(root)
             .into_iter()
-            .filter(|part| page.attr(*part, "data-part").as_deref() == Some("marker"))
+            .filter(|part| page.attr(*part, "part").as_deref() == Some("scrub-strip-marker"))
         {
             assert_eq!(
                 page.custom_property(marker, "--ct-strip-push").as_deref(),

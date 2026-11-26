@@ -1,7 +1,7 @@
 /*
  * The layout's own stylesheet (a micro's rules sit above the kit and the user's theme, so this
  * sets layout only and names no colour). Parts are local to this micro: `.ct-layout` and its
- * `data-part`s. The panel toggles are kit buttons and each panel sits in a kit card.
+ * `part`s. The panel toggles are kit buttons and each panel sits in a kit card.
  */
 .ct-layout {
   display: flex;
@@ -9,14 +9,14 @@
   gap: var(--ct-dimension-spacing-4);
 }
 
-.ct-layout [data-part="toggles"] {
+.ct-layout [part~="layout-toggles"] {
   display: flex;
   flex-wrap: wrap;
   gap: var(--ct-dimension-spacing-2);
   margin: 0 var(--ct-dimension-spacing-4);
 }
 
-.ct-layout [data-part="problem"],
-.ct-layout [data-part="slot"] {
+.ct-layout [part~="layout-problem"],
+.ct-layout [part~="layout-slot"] {
   margin: 0 var(--ct-dimension-spacing-4);
 }

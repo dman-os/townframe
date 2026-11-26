@@ -69,9 +69,9 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                             },
                             if config.enabled { "Configuration flag: enabled — click to disable" } else { "Configuration flag: disabled — click to enable" }
                         }
-                        label { "data-part": "field", "Greeting",
+                        label { "part": "sample-field", "Greeting",
                             input {
-                                "data-part": "input",
+                                "part": "sample-input",
                                 "aria-label": "Greeting",
                                 value: "{config.greeting}",
                                 oninput: move |event| {
@@ -95,7 +95,7 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
             if snapshot.refreshing {
                 p { role: "status", "Refreshing sample configuration." }
             }
-            div { "data-part": "actions",
+            div { "part": "sample-actions",
                 Button {
                     variant: ButtonVariant::Outline,
                     label: "Refresh configuration".to_owned(),
@@ -110,7 +110,7 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                 }
             }
             p { role: "status", "{status}" }
-            p { "data-part": "detail", "Mirror revision {snapshot.revision} · pending writes: {snapshot.pending}" }
+            p { "part": "sample-detail", "Mirror revision {snapshot.revision} · pending writes: {snapshot.pending}" }
             if let Some(receipt) = receipt() {
                 p { role: "status", "Operation {receipt.id}: {receipt.status:?}" }
             }

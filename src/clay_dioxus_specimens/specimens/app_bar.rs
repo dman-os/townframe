@@ -16,7 +16,7 @@ pub fn AppBarSpecimens() -> Element {
         FoundationSection {
             id: "app-bar-slots".to_string(),
             title: "Slots".to_string(),
-            description: "data-state leading|bare; data-part leading, title, trailing. A bare bar insets its title to the page gutter.".to_string(),
+            description: "data-state leading|bare; part app-bar-leading, app-bar-title, app-bar-trailing. A bare bar insets its title to the page gutter.".to_string(),
             div { class: "flex flex-wrap items-start gap-8",
                 Frame { title: "AppBar".to_string(), width_px: COMPACT_PX,
                     AppBar {

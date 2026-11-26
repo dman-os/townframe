@@ -54,21 +54,21 @@ pub fn Card(
 #[component]
 pub fn CardHeader(children: Element) -> Element {
     rsx! {
-        div { "data-part": "header", {children} }
+        div { "part": "card-header", {children} }
     }
 }
 
 #[component]
 pub fn CardContent(children: Element) -> Element {
     rsx! {
-        div { "data-part": "content", {children} }
+        div { "part": "card-content", {children} }
     }
 }
 
 #[component]
 pub fn CardFooter(children: Element) -> Element {
     rsx! {
-        div { "data-part": "footer", {children} }
+        div { "part": "card-footer", {children} }
     }
 }
 
@@ -98,9 +98,9 @@ mod tests {
         let parts: Vec<_> = page
             .children(card)
             .into_iter()
-            .map(|part| page.attr(part, "data-part").expect("every child is a part"))
+            .map(|part| page.attr(part, "part").expect("every child is a part"))
             .collect();
-        assert_eq!(parts, ["header", "content", "footer"]);
+        assert_eq!(parts, ["card-header", "card-content", "card-footer"]);
     }
 
     #[test]

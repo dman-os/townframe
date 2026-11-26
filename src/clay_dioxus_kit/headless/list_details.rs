@@ -100,13 +100,13 @@ pub fn ListDetails(
         };
         let mut panes = vec![SectionPane {
             name: list_name.clone(),
-            content: rsx! { div { "data-part": "list", {list} } },
+            content: rsx! { div { "part": "list-details-list", {list} } },
         }];
         let (label, split) = match details {
             Some(details) => {
                 panes.push(SectionPane {
                     name: details_name.clone(),
-                    content: rsx! { div { "data-part": "details", {details} } },
+                    content: rsx! { div { "part": "list-details-details", {details} } },
                 });
                 (format!("{list_name} and {details_name}"), split)
             }
@@ -122,7 +122,7 @@ pub fn ListDetails(
     rsx! {
         div { class: "ct-list-details", "data-state": "stacked",
             div {
-                "data-part": "list",
+                "part": "list-details-list",
                 "data-state": if covered { "covered" } else { "idle" },
                 role: "region",
                 "aria-label": "{list_name}",
@@ -132,7 +132,7 @@ pub fn ListDetails(
             }
             if let Some(details) = details {
                 div {
-                    "data-part": "details",
+                    "part": "list-details-details",
                     role: "region",
                     "aria-label": "{details_name}",
                     {details}
@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn the_scaffold_names_its_arrangement_and_parts() {
         for (width, state, parts) in [
-            (WidthClass::Compact, "stacked", vec!["list", "details"]),
+            (WidthClass::Compact, "stacked", vec!["list-details-list", "list-details-details"]),
             (WidthClass::Expanded, "split", vec![]),
         ] {
             let (page, _) = render(width, true);
@@ -218,17 +218,17 @@ mod tests {
                 // Side by side the parts are in the panes of the one `ct-sections` it holds.
                 let sections = page.by_class("ct-sections");
                 assert_eq!(page.parent(sections), root);
-                for part in ["list", "details"] {
+                for part in ["list-details-list", "list-details-details"] {
                     let region = page.by_role(
                         "region",
-                        if part == "list" {
+                        if part == "list-details-list" {
                             "Settings"
                         } else {
                             "Inbox settings"
                         },
                     );
                     let inner = page.children(region)[0];
-                    assert_eq!(page.attr(inner, "data-part").as_deref(), Some(part));
+                    assert_eq!(page.attr(inner, "part").as_deref(), Some(part));
                 }
             } else {
                 assert_eq!(page.parts(root), parts);

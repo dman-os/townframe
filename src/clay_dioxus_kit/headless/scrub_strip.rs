@@ -640,25 +640,25 @@ pub fn ScrubStrip(
                 }
             },
 
-            div { "data-part": "scrim", "aria-hidden": "true" }
+            div { "part": "scrub-strip-scrim", "aria-hidden": "true" }
 
             for (index , item) in placed.iter().enumerate() {
                 span {
                     key: "{item.label}",
-                    "data-part": "marker",
+                    "part": "scrub-strip-marker",
                     "data-state": if index == active { "active" } else { "inactive" },
                     "data-hover": if view.hovered == Some(index) { Some("") } else { None },
                     "aria-hidden": "true",
                     style: "--ct-strip-push: {item.push}px; --ct-strip-dy: {item.dy}px",
-                    span { "data-part": "tick" }
-                    span { "data-part": "label", "{item.label}" }
+                    span { "part": "scrub-strip-tick" }
+                    span { "part": "scrub-strip-label", "{item.label}" }
                 }
             }
 
             // Where the thumb is picking, left of the strip: the furthest from the thumb.
             if pressed {
                 div {
-                    "data-part": "bubble",
+                    "part": "scrub-strip-bubble",
                     "aria-hidden": "true",
                     style: "--ct-strip-push: {bubble_push}px; --ct-strip-dy: {active_dy}px",
                     "{active_label}"
@@ -669,7 +669,7 @@ pub fn ScrubStrip(
             // want one stable target for the whole gesture, and it lets a drag start anywhere
             // along the edge. It is also the slider: one value, the breakpoint.
             div {
-                "data-part": "grab-band",
+                "part": "scrub-strip-grab-band",
                 role: "slider",
                 "aria-label": "{label}",
                 "aria-orientation": "vertical",
@@ -696,7 +696,7 @@ pub fn ScrubStrip(
             }
 
             // Pressing does not focus the slider, so crossing a breakpoint is spoken here.
-            div { "data-part": "status", "aria-live": "polite", "{live}" }
+            div { "part": "scrub-strip-status", "aria-live": "polite", "{live}" }
         }
     }
 }

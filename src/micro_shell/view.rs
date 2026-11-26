@@ -551,7 +551,7 @@ fn Sidebar(shell: Shell) -> Element {
                 .map(|row| row.key.clone())
         });
     rsx! {
-        nav { "data-part": "sidebar", "aria-label": "Sidebar",
+        nav { "part": "shell-sidebar", "aria-label": "Sidebar",
             AppBar { title: "daytxt" }
             if wide {
                 Button {
@@ -579,10 +579,10 @@ fn Sidebar(shell: Shell) -> Element {
                 }
             }
             if let Some(problem) = failure() {
-                p { "data-part": "problem", role: "alert", "{problem}" }
+                p { "part": "shell-problem", role: "alert", "{problem}" }
             }
             for row in panels.iter().filter(|row| row.value.sockets.contains(&Socket::Sidebar)) {
-                div { key: "sidebar-{row.key}", "data-part": "slot", {panel_slot(row, row.value.content)} }
+                div { key: "sidebar-{row.key}", "part": "shell-slot", {panel_slot(row, row.value.content)} }
             }
         }
     }
@@ -603,8 +603,8 @@ fn Home(shell: Shell) -> Element {
                     leading: rsx! { NavigationButton { shell: shell.clone() } },
                 }
             },
-        div { "data-part": "home",
-            nav { "data-part": "entries", "aria-label": "Entry points",
+        div { "part": "shell-home",
+            nav { "part": "shell-entries", "aria-label": "Entry points",
                 for row in destinations(&panels).into_iter().filter(|row| !row.value.home) {
                     Button {
                         key: "{row.key}",
@@ -620,7 +620,7 @@ fn Home(shell: Shell) -> Element {
                 }
             }
             if let Some(problem) = failure() {
-                p { "data-part": "problem", role: "alert", "{problem}" }
+                p { "part": "shell-problem", role: "alert", "{problem}" }
             }
         }
         }

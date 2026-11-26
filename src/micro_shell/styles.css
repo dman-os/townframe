@@ -1,7 +1,7 @@
 /*
  * The shell's own stylesheet (a micro's rules sit above the kit and the user's theme, so this
  * sets layout only and names no colour). Parts are local to this micro: `.ct-shell` and its
- * `data-part`s. The sidebar entries and the home entries are kit buttons, left-aligned here.
+ * `part`s. The sidebar entries and the home entries are kit buttons, left-aligned here.
  */
 .ct-shell {
   position: relative;
@@ -11,41 +11,41 @@
   min-height: 0;
 }
 
-.ct-shell [data-part="sidebar"] {
+.ct-shell [part~="shell-sidebar"] {
   display: flex;
   flex-direction: column;
   gap: var(--ct-dimension-spacing-2);
 }
 
-.ct-shell [data-part="sidebar"] > .ct-button {
+.ct-shell [part~="shell-sidebar"] > .ct-button {
   justify-content: flex-start;
   margin: 0 var(--ct-dimension-spacing-2);
 }
 
-.ct-shell [data-part="sidebar"] > [data-part="problem"],
-.ct-shell [data-part="sidebar"] > [data-part="slot"] {
+.ct-shell [part~="shell-sidebar"] > [part~="shell-problem"],
+.ct-shell [part~="shell-sidebar"] > [part~="shell-slot"] {
   margin: 0;
   padding: 0 var(--ct-dimension-spacing-2);
 }
 
-.ct-shell [data-part="home"] {
+.ct-shell [part~="shell-home"] {
   display: flex;
   flex-direction: column;
   gap: var(--ct-dimension-spacing-4);
 }
 
-.ct-shell [data-part="entries"] {
+.ct-shell [part~="shell-entries"] {
   display: flex;
   flex-direction: column;
   gap: var(--ct-dimension-spacing-2);
   padding: 0 var(--ct-dimension-spacing-4);
 }
 
-.ct-shell [data-part="entries"] > .ct-button {
+.ct-shell [part~="shell-entries"] > .ct-button {
   justify-content: flex-start;
 }
 
-.ct-shell [data-part="home"] > [data-part="problem"] {
+.ct-shell [part~="shell-home"] > [part~="shell-problem"] {
   margin: 0;
   padding: 0 var(--ct-dimension-spacing-4);
 }

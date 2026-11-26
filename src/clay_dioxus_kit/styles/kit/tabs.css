@@ -14,7 +14,7 @@
   align-items: flex-start;
 }
 
-.ct-tabs [data-part="list"] {
+.ct-tabs [part~="tabs-list"] {
   display: flex;
   gap: var(--ct-dimension-spacing-1);
   width: fit-content;
@@ -25,12 +25,12 @@
   background: var(--ct-color-surface-sunken);
 }
 
-.ct-tabs[data-orientation="vertical"] [data-part="list"] {
+.ct-tabs[data-orientation="vertical"] [part~="tabs-list"] {
   flex-direction: column;
   overflow-x: visible;
 }
 
-.ct-tabs [data-part="tab"] {
+.ct-tabs [part~="tabs-tab"] {
   box-sizing: border-box;
   display: inline-flex;
   align-items: center;
@@ -55,7 +55,7 @@
 }
 
 @media (pointer: coarse) {
-  .ct-tabs [data-part="tab"] {
+  .ct-tabs [part~="tabs-tab"] {
     min-height: var(--ct-dimension-target-coarse);
   }
 }
@@ -64,50 +64,50 @@
    selected rule used to win by coming first in the cascade of specificity, so hovering the selected
    tab repainted it as an unselected one. The selected tab, a filled surface like a button's, takes
    the button's brightness steps instead. */
-.ct-tabs [data-part="tab"][data-state="inactive"]:hover:not(:disabled) {
+.ct-tabs [part~="tabs-tab"][data-state="inactive"]:hover:not(:disabled) {
   background: var(--ct-color-canvas);
   color: var(--ct-color-text);
 }
 
-.ct-tabs [data-part="tab"][data-state="inactive"]:active:not(:disabled) {
+.ct-tabs [part~="tabs-tab"][data-state="inactive"]:active:not(:disabled) {
   background: var(--ct-color-surface-raised);
   color: var(--ct-color-text);
 }
 
-.ct-tabs [data-part="tab"][data-state="active"] {
+.ct-tabs [part~="tabs-tab"][data-state="active"] {
   background: var(--ct-color-accent-container);
   color: var(--ct-color-on-accent-container);
 }
 
-.ct-tabs [data-part="tab"][data-state="active"]:hover:not(:disabled) {
+.ct-tabs [part~="tabs-tab"][data-state="active"]:hover:not(:disabled) {
   filter: brightness(1.08);
 }
 
-.ct-tabs [data-part="tab"][data-state="active"]:active:not(:disabled) {
+.ct-tabs [part~="tabs-tab"][data-state="active"]:active:not(:disabled) {
   filter: brightness(0.94);
 }
 
-.ct-tabs [data-part="tab"]:focus-visible {
+.ct-tabs [part~="tabs-tab"]:focus-visible {
   outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
   outline-offset: 1px;
 }
 
-.ct-tabs [data-part="tab"][data-disabled] {
+.ct-tabs [part~="tabs-tab"][data-disabled] {
   opacity: 0.4;
   cursor: not-allowed;
 }
 
-.ct-tabs [data-part="panel"] {
+.ct-tabs [part~="tabs-panel"] {
   min-width: 0;
   flex: 1;
 }
 
-.ct-tabs [data-part="panel"][hidden] {
+.ct-tabs [part~="tabs-panel"][hidden] {
   display: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ct-tabs [data-part="tab"] {
+  .ct-tabs [part~="tabs-tab"] {
     transition: none;
   }
 }

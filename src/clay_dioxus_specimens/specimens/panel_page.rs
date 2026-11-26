@@ -15,7 +15,7 @@ pub fn PanelPageSpecimens() -> Element {
         FoundationSection {
             id: "panel-page-scroll".to_string(),
             title: "Pinned bar, scrolling body".to_string(),
-            description: "data-part bar, body. The page fills its mount, the bar is pinned and the body takes the height the bar leaves.".to_string(),
+            description: "part panel-page-bar, panel-page-body. The page fills its mount, the bar is pinned and the body takes the height the bar leaves.".to_string(),
             div { class: "flex flex-wrap items-start gap-8",
                 for width_px in [COMPACT_PX, EXPANDED_PX] {
                     Frame { key: "{width_px}", title: "PanelPage".to_string(), width_px,

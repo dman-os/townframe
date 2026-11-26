@@ -12,8 +12,8 @@ use dioxus::prelude::*;
 pub fn PanelPage(app_bar: Element, children: Element) -> Element {
     rsx! {
         div { class: "ct-panel-page",
-            div { "data-part": "bar", {app_bar} }
-            div { "data-part": "body", {children} }
+            div { "part": "panel-page-bar", {app_bar} }
+            div { "part": "panel-page-body", {children} }
         }
     }
 }
@@ -35,7 +35,7 @@ mod tests {
     fn the_bar_sits_beside_the_scrolling_body_not_inside_it() {
         let page = Page::with_props(app, ());
         let root = page.by_class("ct-panel-page");
-        assert_eq!(page.parts(root), ["bar", "body"]);
+        assert_eq!(page.parts(root), ["panel-page-bar", "panel-page-body"]);
         let [bar, body] = page.children(root)[..] else {
             panic!("the page is its bar and its body");
         };

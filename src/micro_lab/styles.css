@@ -1,6 +1,6 @@
 /*
  * The lab's own stylesheet (a micro's rules sit above the kit and the user's theme). Parts are
- * local to this micro: `.ct-lab` and its `data-part`s. An experiment's row is a block button with
+ * local to this micro: `.ct-lab` and its `part`s. An experiment's row is a block button with
  * a title and a summary, which the kit has no component for, so its look is built from kit tokens.
  */
 .ct-lab {
@@ -9,7 +9,7 @@
   gap: var(--ct-dimension-spacing-4);
 }
 
-.ct-lab [data-part="experiments"] {
+.ct-lab [part~="lab-experiments"] {
   display: flex;
   flex-direction: column;
   gap: var(--ct-dimension-spacing-2);
@@ -18,7 +18,7 @@
   list-style: none;
 }
 
-.ct-lab [data-part="experiment"] {
+.ct-lab [part~="lab-experiment"] {
   display: block;
   box-sizing: border-box;
   width: 100%;
@@ -33,10 +33,10 @@
   cursor: pointer;
 }
 
-.ct-lab [data-part="experiment"]:hover {
+.ct-lab [part~="lab-experiment"]:hover {
   background: var(--ct-color-surface-sunken);
 }
 
-.ct-lab [data-part="experiment"]:focus-visible {
+.ct-lab [part~="lab-experiment"]:focus-visible {
   outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
 }

@@ -21,7 +21,7 @@ pub fn ListDetailsSpecimens() -> Element {
         FoundationSection {
             id: "list-details-widths".to_string(),
             title: "Width classes".to_string(),
-            description: "data-state stacked|split on the root, covered|idle on a stacked list; data-part list, details.".to_string(),
+            description: "data-state stacked|split on the root, covered|idle on a stacked list; part list-details-list, list-details-details.".to_string(),
             div { class: "flex flex-wrap items-start gap-8",
                 Frame { title: "ListDetails, list".to_string(), width_px: COMPACT_PX,
                     ListDetailsSpecimen { width_px: COMPACT_PX, initially_open: None }
