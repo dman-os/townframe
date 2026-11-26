@@ -49,7 +49,7 @@
 <!--FIXME: rewrite this in CONTRIBUTING.md -->
 - The Kotlin app (`./src/daybook_compose`) is off the validation path: don't type check or lint it as part of a change. It stays in the tree until its remaining claytext concerns are settled; `./x/check-dayb.ts` still type checks it when asked.
 - Source-only checks (nixfmt/statix/deadnix, rustfmt on every `.rs` file, deno fmt/lint/check of `x/`, biome, JSON/TOML/YAML validity) are hermetic Nix checks: run `nix flake check`, fix formatting with `nix fmt`. New files are invisible to the flake until tracked.
-- xtask groups its subcommands: `cargo x sql check|gen|migrate`, `cargo x plug build-oci`, `cargo x guardrails lint|api|doctor|check-matrix|plan|overlap|bless|...`.
+- xtask groups its subcommands: `cargo x sql check|gen|migrate`, `cargo x guardrails lint|api|doctor|check-matrix|plan|overlap|bless|...`.
 - Prefer `cargo clippy --all-targets --all-features -p myCrate` over `cargo check`.
 - When working with rust, in addition to `cargo clippy`, small tests can be used to validate ideas.
 - Run `cargo x guardrails lint` (and `cargo x guardrails api --all --check`, `cargo x guardrails doctor`) to verify module/symbol budgets, crate-local `guardrails.toml` dependency & exemption policies, migration-history identities, documentation links/metadata, and public-API contracts.

@@ -34,30 +34,6 @@ env:
   GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
 jobs:
-  nix-packages:
-    # Draft PRs skip CI; marking one ready for review runs it.
-    if: github.event.pull_request.draft != true
-    name: Nix CLI package
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    permissions:
-      contents: read
-    env:
-      OLLAMA_URL: ""
-      OLLAMA_USERNAME: ""
-      OLLAMA_PASSWORD: ""
-      GEMINI_API_KEY: ""
-    steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-        with:
-          extra-conf: |
-            sandbox = true
-      - uses: DeterminateSystems/flakehub-cache-action@v3
-      # Source-only lint is not repeated here: `nix flake check` runs as a
-      # pre-commit hook in the lint job. This job owns the package outputs.
-      - name: Build CLI and run its packaged round-trip test
-        run: nix build --print-build-logs --no-link .#daybook-cli.tests.round-trip
   rust-target-matrix:
     # Draft PRs skip CI; marking one ready for review runs it.
     if: github.event.pull_request.draft != true
@@ -152,14 +128,11 @@ jobs:
       - name: fetch WIT dependencies
         run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
 
-      - name: build test plug OCI artifact
-        run: nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_test_manifest
-
-      - name: build daybook_cli and day_cli
-        run: nix develop .#ci-rust --command cargo --color=always build -p daybook_cli -p day_cli
+      - name: build day_cli
+        run: nix develop .#ci-rust --command cargo --color=always build -p day_cli
 
       - name: CLI E2E tests
-        run: nix develop .#ci-rust --command cargo nextest run --color=always --profile "$NEXTEST_PROFILE" -p daybook_cli -p day_cli
+        run: nix develop .#ci-rust --command cargo nextest run --color=always --profile "$NEXTEST_PROFILE" -p day_cli
         env:
           UTILS_RS_TIMEOUT_MULTIPLIER: 3
 
@@ -222,17 +195,11 @@ jobs:
           nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p test_wflows --target wasm32-wasip3 --release
           nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p test_nodule_guest --target wasm32-wasip3 --release
 
-      - name: build plug OCI artifacts
-        run: |
-          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_test_manifest
-          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_plabels_manifest
-          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_dayledger_manifest
-
 
       - name: rust tests
         run: |
-          # Plug crates are excluded while automatic triage is broken. `daybook_cli` and `day_cli` are excluded
-          # because their e2e tests need the built binary (found at target/debug) and run in the dedicated CLI job.
+          # `day_cli` is excluded
+          # because its e2e tests need the built binary (found at target/debug) and run in the dedicated CLI job.
           # This lane runs in `ci-desktop` because the Dayframe Dioxus crates link the Linux GUI
           # stack (glib/wayland/wgpu) through the workspace, and `ci-rust` does not carry it.
           #
@@ -251,11 +218,11 @@ jobs:
           nix develop .#ci-desktop --command cargo llvm-cov --no-report nextest \
             --color=always --workspace --all-targets --profile "$NEXTEST_PROFILE" \
             --user-config-file .config/nextest-user-ci.toml \
-            --exclude daybook_cli --exclude day_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
+            --exclude day_cli
           # nextest cannot run doctests, so they go through `cargo test --doc`. `--doc` implies
           # `--doctests`, which persists the doctest binaries the coverage report needs.
           nix develop .#ci-desktop --command cargo llvm-cov --no-report --doc --workspace \
-            --exclude daybook_cli --exclude day_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
+            --exclude day_cli
           # `report` only merges the collected profile data and writes lcov; it runs no tests.
           # `--doctests` is what lets the persisted doctest binaries be attributed to their sources.
           nix develop .#ci-rust --command cargo llvm-cov report --doctests --lcov --output-path lcov.info
@@ -309,120 +276,6 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           files: lcov.info
-
-  e2e-sysadmin-chromium:
-    name: E2E (sysadmin / chromium)
-    if: ${{ false }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      CI: "true"
-      DOCKER_CMD: docker
-      SMTP_HOST: 127.0.0.1
-      SMTP_PORT: "2500"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: DeterminateSystems/nix-installer-action@v16
-
-      - uses: DeterminateSystems/flakehub-cache-action@v3
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Setup wash CLI
-        uses: wasmCloud/setup-wash-action@v2.1.0
-        with:
-          wash-version: v2.6.1
-      - name: Resolve pnpm store path
-        id: pnpm-store
-        run: echo "path=$(nix develop .#default --command pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-      - name: Restore pnpm store
-        id: pnpm-store-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ steps.pnpm-store.outputs.path }}
-          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: |
-            pnpm-store-${{ runner.os }}-
-      - name: Install dependencies
-        run: nix develop .#default --command pnpm install --frozen-lockfile
-      - name: fetch WIT dependencies
-        run: nix develop .#default --command deno run -A ./x/wit-fetch.ts --clean --generate-auth-types
-      - name: Save pnpm store
-        if: github.ref == 'refs/heads/main' && steps.pnpm-store-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ steps.pnpm-store.outputs.path }}
-          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-      - name: Build workloads and host
-        run: |
-          nix develop .#default --command bash -lc '
-            set -euo pipefail
-            pnpm -C src/btress_auth run build
-            cd src/btress_sysadmin
-            cargo leptos build --release
-            cd ../..
-            cargo build --locked -p daybook_cli
-          '
-
-      - name: Run sysadmin e2e
-        run: |
-          nix develop .#default --command bash -lc '
-            set -euo pipefail
-
-            server_pid=""
-            static_pid=""
-            cleanup() {
-              status=$?
-              set +e
-              if [ -n "$static_pid" ]; then kill "$static_pid" 2>/dev/null || true; fi
-              if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; fi
-              docker compose -f tools/compose.yml --profile mail down -v
-              exit "$status"
-            }
-            trap cleanup EXIT
-
-            ./x/compose-up.ts mail
-            setsid env SMTP_HOST="$SMTP_HOST" SMTP_PORT="$SMTP_PORT" ./target/debug/daybook_cli server \
-              >/tmp/btress-server.log 2>&1 </dev/null &
-            server_pid=$!
-            setsid deno run --allow-all x/dev-btress-static.ts \
-              >/tmp/btress-static.log 2>&1 </dev/null &
-            static_pid=$!
-
-            wait_for() {
-              name="$1"
-              url="$2"
-              for _ in $(seq 1 90); do
-                if curl -fsS --max-time 5 -o /dev/null "$url"; then return 0; fi
-                sleep 2
-              done
-              echo "Timed out waiting for $name at $url"
-              tail -100 /tmp/btress-server.log /tmp/btress-static.log 2>/dev/null || true
-              return 1
-            }
-
-            wait_for Inbucket http://localhost:9020/
-            wait_for btress-auth http://localhost:8071/healthz
-            wait_for btress-sysadmin http://localhost:3000/
-            wait_for static-assets http://localhost:3001/pkg/btress_sysadmin.js
-            pnpm -C src/btress_sysadmin run e2e -- --project=chromium
-          '
-
-      - name: Upload e2e artifacts
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: btress-sysadmin-e2e-artifacts
-          path: |
-            src/btress_sysadmin/test-results/
-            src/btress_sysadmin/playwright-report/
-            /tmp/btress-server.log
-            /tmp/btress-static.log
-          retention-days: 14
 
   e2e-dayframe-web-chromium:
     name: E2E (dayframe web / chromium)

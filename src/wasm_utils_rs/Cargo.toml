@@ -18,14 +18,11 @@ wit-bindgen = { workspace = true, features = ["async", "macros", "realloc"] }
 resolver = "3"
 members = [
     ".",
-    "../plug_test_routines",
-    "../plug_plabels_routines",
-    "../plug_dayledger_routines",
     "../test_wflows",
     "../test_nodule_guest",
     "../clay_rt_wcmp_web",
 ]
-default-members = [".", "../plug_test_routines", "../plug_plabels_routines", "../plug_dayledger_routines", "../test_wflows", "../test_nodule_guest"]
+default-members = [".", "../test_wflows", "../test_nodule_guest"]
 
 [workspace.package]
 version = "0.1.0"
@@ -42,15 +39,9 @@ service_client_core_rs = { path = "../service_client_core_rs", default-features 
 clay_rt_wcmp = { path = "../clay_rt_wcmp" }
 wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "da35a9b4e4cc71dacb57323b906093f9e18e78b6" }
 wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "da35a9b4e4cc71dacb57323b906093f9e18e78b6" }
-plug_test_manifest = { path = "../plug_test_manifest" }
-plug_plabels_manifest = { path = "../plug_plabels_manifest" }
-plug_dayledger_manifest = { path = "../plug_dayledger_manifest" }
 utils_rs = { path = "../utils_rs", default-features = false }
 am_utils_rs = { path = "../am_utils_rs", default-features = false }
-daybook_types = { path = "../daybook_types", default-features = false }
-daybook_pdk = { path = "../daybook_pdk", default-features = false }
 wflow_sdk = { path = "../wflow_sdk", default-features = false }
-daybook_core = { path = "../daybook_core", default-features = false }
 sqlite_rs = { path = "../sqlite_rs", default-features = false }
 automerge = "0.11.0"
 serde = { version = "1", features = ["derive", "rc"] }

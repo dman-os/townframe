@@ -14,16 +14,9 @@ nix flake show
 ./x/dev-d-dayb.ts
 # build and install to connected android device
 ./x/build-a-dayb.ts
-# run the daybook cli
-DAYB_REPO_PATH=/tmp/repo1 cargo r -p daybook_cli -- --help
 # run the xtask CLI
 cargo x --help
 
-# build the daybook CLI as a sandboxed Nix package (no devshell, no .env)
-nix build .#daybook-cli
-./result/bin/daybook_cli --help
-# packaged CLI end-to-end test (init, documents, persistence) in an empty env
-nix build .#daybook-cli.tests.round-trip
 # hermetic source-only checks: nixfmt, statix/deadnix, rustfmt (every .rs
 # file), deno fmt/lint/check for ./x, biome, JSON/TOML/YAML validity. Runs as a
 # pre-commit hook; cache hits make an unchanged tree free. clippy, nextest and
@@ -46,10 +39,6 @@ cargo x guardrails check-matrix --target wasm32-wasip3
 cargo x guardrails check-matrix --target wasm32-unknown-unknown
 # run pre commit hooks
 prek -a
-
-# build a plug OCI package
-# goes into ./target/oci
-cargo x plug build-oci --plug-root ./src/plug_test_manifest/
 ```
 
 ## Dual targets: host vs guest
@@ -107,12 +96,6 @@ optimization level 3. `src/btress_sysadmin` is a separate single-crate
 workspace: cargo-leptos assumes each package lives under its workspace root and
 failed with "Could not remove base" when the crate was a member of
 `src/wasm_utils_rs`, whose root is a sibling directory.
-
-Each manifest crate declares
-`[package.metadata.townframe] routines = "../plug_name_routines"`.
-`cargo x plug build-oci --plug-root src/plug_name_manifest` runs its native
-`manifest` binary, builds the sibling routines component, and packages both
-under the existing logical plug ID. Wasmtime is not a dependency of xtask.
 
 ## Build directories and feature resolution
 
