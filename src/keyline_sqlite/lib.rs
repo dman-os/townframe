@@ -47,6 +47,7 @@
 
 mod closure;
 mod error;
+mod evaluations;
 mod memo;
 mod rows;
 mod store;

@@ -29,6 +29,7 @@ use sqlite_rs::Executor;
 
 use crate::closure;
 use crate::closure::Evaluated;
+use crate::evaluations::Evaluations;
 use crate::memo::Memo;
 use crate::error::Error;
 use crate::rows;
@@ -46,6 +47,7 @@ use sqlite_rs::SqliteDb;
 pub struct SqliteKeyline<W, D: SqliteDb> {
     db: D,
     memo: Arc<Memo<W>>,
+    evaluations: Arc<Evaluations<W>>,
 }
 
 impl<W, D: SqliteDb> Clone for SqliteKeyline<W, D> {
@@ -53,6 +55,7 @@ impl<W, D: SqliteDb> Clone for SqliteKeyline<W, D> {
         Self {
             db: self.db.clone(),
             memo: Arc::clone(&self.memo),
+            evaluations: Arc::clone(&self.evaluations),
         }
     }
 }
@@ -83,6 +86,7 @@ impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
         Self {
             db,
             memo: Arc::default(),
+            evaluations: Arc::default(),
         }
     }
 
@@ -126,6 +130,26 @@ impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
         Ok(Snapshot { tx, version })
     }
 
+    /// The closure of `subject` evaluated at the version `snapshot` read: the one a query of this
+    /// handle evaluated at that version if it is still held, else loaded through the snapshot.
+    async fn state_at(
+        &self,
+        snapshot: &Snapshot<D>,
+        subject: Identifier,
+    ) -> Result<Arc<State<W>>, Error> {
+        if let Some(state) = self.evaluations.at(subject, snapshot.version) {
+            return Ok(state);
+        }
+        let state = Arc::new(
+            closure::load(&snapshot.tx, subject, &self.memo)
+                .await?
+                .into_state(),
+        );
+        self.evaluations
+            .keep(subject, snapshot.version, Arc::clone(&state));
+        Ok(state)
+    }
+
     /// Answer `query` from the closure of `subject`, at the version one snapshot read.
     async fn evaluated<T>(
         &self,
@@ -133,11 +157,11 @@ impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
         query: impl FnOnce(&State<W>) -> T,
     ) -> Result<Versioned<T>, Error> {
         let snapshot = self.snapshot().await?;
-        let evaluated = closure::load(&snapshot.tx, subject, &self.memo).await?;
+        let state = self.state_at(&snapshot, subject).await?;
         let version = snapshot.finish().await?;
         Ok(Versioned {
             version,
-            value: query(evaluated.state()),
+            value: query(&state),
         })
     }
 
@@ -151,19 +175,17 @@ impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
         let snapshot = self.snapshot().await?;
         let subject =
             queries::delegation_subject(&snapshot.tx, delegation.as_slice().to_vec()).await?;
-        let state = match subject {
+        let value = match subject {
             Some(subject) => {
-                closure::load(&snapshot.tx, rows::identifier_from_sql(&subject), &self.memo)
-                    .await?
-                    .into_state()
+                let state = self
+                    .state_at(&snapshot, rows::identifier_from_sql(&subject))
+                    .await?;
+                query(&state)
             }
-            None => State::new(),
+            None => query(&State::new()),
         };
         let version = snapshot.finish().await?;
-        Ok(Versioned {
-            version,
-            value: query(&state),
-        })
+        Ok(Versioned { version, value })
     }
 }
 
