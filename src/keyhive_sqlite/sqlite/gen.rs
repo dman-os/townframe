@@ -9,24 +9,6 @@ pub const MIGRATIONS: &[Migration<'static>] = &[
 ];
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct CgkaOpCountsRow {
-    pub doc_id: Vec<u8>,
-    pub ops: i64,
-}
-impl crate::sqlite_rs_alias::FromRow for CgkaOpCountsRow {
-    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
-        row.require_width(2)?;
-        Ok(CgkaOpCountsRow { doc_id: row.get::<Vec<u8>>("doc_id")?, ops: row.get::<i64>("ops")? })
-    }
-}
-
-pub const CGKA_OP_COUNTS_SQL: &str = include_str!("queries/cgka_op_counts.sql");
-pub async fn cgka_op_counts(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<CgkaOpCountsRow>> {
-    let set = db.query(CGKA_OP_COUNTS_SQL, &[]).await?;
-    set.all()
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct CgkaOpIndexOfRow {
     pub digest: Vec<u8>,
     pub predecessor: Option<Vec<u8>>,
@@ -222,24 +204,6 @@ pub async fn pending_events_all(db: &impl crate::sqlite_rs_alias::QueryExecutor)
     set.all()
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct PrekeyOpCountsRow {
-    pub individual_id: Vec<u8>,
-    pub ops: i64,
-}
-impl crate::sqlite_rs_alias::FromRow for PrekeyOpCountsRow {
-    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
-        row.require_width(2)?;
-        Ok(PrekeyOpCountsRow { individual_id: row.get::<Vec<u8>>("individual_id")?, ops: row.get::<i64>("ops")? })
-    }
-}
-
-pub const PREKEY_OP_COUNTS_SQL: &str = include_str!("queries/prekey_op_counts.sql");
-pub async fn prekey_op_counts(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<PrekeyOpCountsRow>> {
-    let set = db.query(PREKEY_OP_COUNTS_SQL, &[]).await?;
-    set.all()
-}
-
 pub const PREKEY_OP_DIGESTS_OF_SQL: &str = include_str!("queries/prekey_op_digests_of.sql");
 pub async fn prekey_op_digests_of(db: &impl crate::sqlite_rs_alias::QueryExecutor, individual_id: Vec<u8>) -> SqlResult<Vec<Vec<u8>>> {
     let set = db.query(PREKEY_OP_DIGESTS_OF_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(individual_id)]).await?;
@@ -262,4 +226,10 @@ pub const PREKEY_OPS_OF_SQL: &str = include_str!("queries/prekey_ops_of.sql");
 pub async fn prekey_ops_of(db: &impl crate::sqlite_rs_alias::QueryExecutor, individual_id: Vec<u8>) -> SqlResult<Vec<PrekeyOpsOfRow>> {
     let set = db.query(PREKEY_OPS_OF_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(individual_id)]).await?;
     set.all()
+}
+
+pub const TOTAL_OP_COUNT_SQL: &str = include_str!("queries/total_op_count.sql");
+pub async fn total_op_count(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Option<i64>> {
+    let set = db.query(TOTAL_OP_COUNT_SQL, &[]).await?;
+    set.optional()
 }

@@ -143,8 +143,8 @@ impl<F: FutureForm, T: ContentRef, D: SqliteDb> KeyhiveStore<F, T> for SqliteKey
         F::from_future(async move { read!(self, s => s.list_prekey_op_digests(who)) })
     }
 
-    fn count_prekey_ops(&self) -> F::Future<'_, Result<BTreeMap<IndividualId, u64>, Self::Error>> {
-        F::from_future(async move { read!(self, s => s.count_prekey_ops()) })
+    fn total_op_count(&self) -> F::Future<'_, Result<u64, Self::Error>> {
+        F::from_future(async move { read!(self, s => s.total_op_count()) })
     }
 
     fn list_individuals(&self) -> F::Future<'_, Result<Vec<IndividualId>, Self::Error>> {
@@ -171,10 +171,6 @@ impl<F: FutureForm, T: ContentRef, D: SqliteDb> KeyhiveStore<F, T> for SqliteKey
         doc: DocumentId,
     ) -> F::Future<'_, Result<Vec<CgkaOpIndexRow>, Self::Error>> {
         F::from_future(async move { read!(self, s => s.list_cgka_op_index(doc)) })
-    }
-
-    fn count_cgka_ops(&self) -> F::Future<'_, Result<BTreeMap<DocumentId, u64>, Self::Error>> {
-        F::from_future(async move { read!(self, s => s.count_cgka_ops()) })
     }
 
     fn append_cgka_ops<'a>(

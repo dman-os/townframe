@@ -257,6 +257,15 @@ impl<T: ContentRef, E: QueryExecutor> Session<'_, T, E> {
         Ok(rows.iter().map(|digest| digest_of(digest)).collect())
     }
 
+    /// The store-wide count of prekey and CGKA operations: one row, which the insert of each
+    /// operation that was not held bumps (a trigger, so a duplicate that is ignored does not).
+    pub async fn total_op_count(&self) -> Result<u64, Error> {
+        let ops = queries::total_op_count(self.tx)
+            .await?
+            .expect("the migration inserts the counter's row");
+        Ok(count(ops))
+    }
+
     pub async fn list_individuals(&self) -> Result<Vec<IndividualId>, Error> {
         queries::individuals(self.tx)
             .await?
@@ -265,19 +274,6 @@ impl<T: ContentRef, E: QueryExecutor> Session<'_, T, E> {
                 Identifier::decode_field(id, "individual_id")
                     .map(IndividualId::from)
                     .map_err(|e| stored(PREKEY_OP, id, e))
-            })
-            .collect()
-    }
-
-    pub async fn count_prekey_ops(&self) -> Result<BTreeMap<IndividualId, u64>, Error> {
-        queries::prekey_op_counts(self.tx)
-            .await?
-            .iter()
-            .map(|row| {
-                let who = Identifier::decode_field(&row.individual_id, "individual_id")
-                    .map(IndividualId::from)
-                    .map_err(|e| stored(PREKEY_OP, &row.individual_id, e))?;
-                Ok((who, count(row.ops)))
             })
             .collect()
     }
@@ -337,19 +333,6 @@ impl<T: ContentRef, E: QueryExecutor> Session<'_, T, E> {
             }
         }
         Ok(index)
-    }
-
-    pub async fn count_cgka_ops(&self) -> Result<BTreeMap<DocumentId, u64>, Error> {
-        queries::cgka_op_counts(self.tx)
-            .await?
-            .iter()
-            .map(|row| {
-                let doc = Identifier::decode_field(&row.doc_id, "doc_id")
-                    .map(DocumentId::from)
-                    .map_err(|e| stored(CGKA_OP, &row.doc_id, e))?;
-                Ok((doc, count(row.ops)))
-            })
-            .collect()
     }
 
     pub async fn list_documents(&self) -> Result<Vec<DocumentId>, Error> {

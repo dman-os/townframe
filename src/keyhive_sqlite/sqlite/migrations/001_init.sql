@@ -46,6 +46,27 @@ CREATE TABLE kh_cgka_op (
     , UNIQUE (doc_id, digest)
 ) STRICT;
 
+-- How many prekey and CGKA operations the store holds, in one row that the insert of each
+-- operation bumps: reading the count is a point read however many operations there are, where
+-- counting the rows would scan an index on every sync request. A trigger fires only for a row that
+-- was inserted, so an `INSERT OR IGNORE` of an operation already held does not count it again, and
+-- it runs in the appending statement's transaction.
+CREATE TABLE kh_op_count (
+      one INTEGER PRIMARY KEY CHECK (one = 1)
+    , ops INTEGER NOT NULL CHECK (ops >= 0)
+) STRICT;
+INSERT INTO kh_op_count (one, ops) VALUES (1, 0);
+
+CREATE TRIGGER kh_prekey_op_counted AFTER INSERT ON kh_prekey_op
+BEGIN
+    UPDATE kh_op_count SET ops = ops + 1 WHERE one = 1;
+END;
+
+CREATE TRIGGER kh_cgka_op_counted AFTER INSERT ON kh_cgka_op
+BEGIN
+    UPDATE kh_op_count SET ops = ops + 1 WHERE one = 1;
+END;
+
 -- The dependency graph of a document's operations: one row per (operation, predecessor), copied out
 -- of the operation by the insert that adds it. A predecessor need not be held: an operation can
 -- arrive before the ones it names.

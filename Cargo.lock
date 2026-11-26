@@ -1451,7 +1451,7 @@ dependencies = [
 [[package]]
 name = "beekem"
 version = "0.9.0"
-source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
+source = "git+https://github.com/dman-os/keyhive?rev=a41afc079b000a09ac07c93c655d90b736207eb5#a41afc079b000a09ac07c93c655d90b736207eb5"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -9220,7 +9220,7 @@ dependencies = [
 [[package]]
 name = "keyhive_codec"
 version = "0.1.0"
-source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
+source = "git+https://github.com/dman-os/keyhive?rev=a41afc079b000a09ac07c93c655d90b736207eb5#a41afc079b000a09ac07c93c655d90b736207eb5"
 dependencies = [
  "bijoux",
  "thiserror 2.0.21",
@@ -9229,7 +9229,7 @@ dependencies = [
 [[package]]
 name = "keyhive_content"
 version = "0.4.0"
-source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
+source = "git+https://github.com/dman-os/keyhive?rev=a41afc079b000a09ac07c93c655d90b736207eb5#a41afc079b000a09ac07c93c655d90b736207eb5"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -9272,7 +9272,7 @@ dependencies = [
 [[package]]
 name = "keyhive_core"
 version = "0.12.3"
-source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
+source = "git+https://github.com/dman-os/keyhive?rev=a41afc079b000a09ac07c93c655d90b736207eb5#a41afc079b000a09ac07c93c655d90b736207eb5"
 dependencies = [
  "arbitrary",
  "async-lock",
@@ -9322,7 +9322,7 @@ dependencies = [
 [[package]]
 name = "keyhive_crypto"
 version = "0.6.0"
-source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
+source = "git+https://github.com/dman-os/keyhive?rev=a41afc079b000a09ac07c93c655d90b736207eb5#a41afc079b000a09ac07c93c655d90b736207eb5"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -9369,7 +9369,7 @@ dependencies = [
 [[package]]
 name = "keyline"
 version = "0.4.0"
-source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
+source = "git+https://github.com/dman-os/keyhive?rev=a41afc079b000a09ac07c93c655d90b736207eb5#a41afc079b000a09ac07c93c655d90b736207eb5"
 dependencies = [
  "arbitrary",
  "bijoux",
@@ -9386,7 +9386,7 @@ dependencies = [
 [[package]]
 name = "keyline_memory"
 version = "0.4.0"
-source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
+source = "git+https://github.com/dman-os/keyhive?rev=a41afc079b000a09ac07c93c655d90b736207eb5#a41afc079b000a09ac07c93c655d90b736207eb5"
 dependencies = [
  "async-lock",
  "future_form",

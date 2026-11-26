@@ -20,10 +20,10 @@ keyline_sqlite = { path = "../keyline_sqlite" }
 # `big_repo`. The workspace root's `[patch.crates-io]` points keyhive's registry names at the same
 # keyhive rev, so `keyline_sqlite` and subduction's own registry-named keyhive dependencies resolve
 # to the very crates declared here.
-keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469" }
-keyhive_crypto = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469", default-features = false, features = ["std"] }
-keyhive_codec = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469", default-features = false, features = ["std"] }
-keyline = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469", default-features = false, features = ["std"] }
+keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+keyhive_crypto = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5", default-features = false, features = ["std"] }
+keyhive_codec = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5", default-features = false, features = ["std"] }
+keyline = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5", default-features = false, features = ["std"] }
 sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "f34d5a914add15562c60f42c48b8f8cc00e16261" }
 subduction_core = { git = "https://github.com/dman-os/subduction", rev = "f34d5a914add15562c60f42c48b8f8cc00e16261" }
 subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "f34d5a914add15562c60f42c48b8f8cc00e16261" }

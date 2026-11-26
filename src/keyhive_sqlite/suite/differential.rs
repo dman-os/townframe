@@ -144,9 +144,8 @@ struct Answers {
     /// Per individual: all, the digests, and the by-digest probe.
     prekey_ops: Vec<PrekeyAnswers>,
     documents: Vec<DocumentId>,
-    /// How many operations each individual and each document has, from the counting reads.
-    prekey_counts: BTreeMap<IndividualId, u64>,
-    cgka_counts: BTreeMap<DocumentId, u64>,
+    /// How many prekey and CGKA operations the store holds, from its counter.
+    total_ops: u64,
     /// Per document: all, the by-digest probe, and the index.
     cgka: Vec<(CgkaOps, CgkaOps, Vec<IndexEntry>)>,
     heads: Vec<Option<Vec<Ref>>>,
@@ -251,8 +250,7 @@ where
         individuals,
         prekey_ops,
         documents,
-        prekey_counts: store.count_prekey_ops().await.expect("the store answers"),
-        cgka_counts: store.count_cgka_ops().await.expect("the store answers"),
+        total_ops: store.total_op_count().await.expect("the store answers"),
         cgka,
         heads,
         keys,

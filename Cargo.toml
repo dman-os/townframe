@@ -400,13 +400,13 @@ ui = { path = "./src/ui" }
 # version) resolve to the fork's `townframe-changes` tip, which `big_hive` names directly. One
 # source per crate is what makes `SqliteKeyline` satisfy the fork's `Keyline` bound. `big_repo`
 # takes the older keyhive by git rev and is unaffected.
-keyline = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469" }
-keyline_memory = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469" }
-keyhive_codec = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469" }
-keyhive_crypto = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469" }
-keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469" }
-keyhive_content = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469" }
-beekem = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469" }
+keyline = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+keyline_memory = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+keyhive_codec = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+keyhive_crypto = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+keyhive_content = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
+beekem = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5" }
 # hyper 1.12.0 plus a fix: the h1 server refreshed its cached Date value on every connection even
 # with `auto_date_header(false)`, and the refresh reads `SystemTime::now()`, which panics on
 # wasm32-unknown-unknown, so a browser node could not serve HTTP/1. The fix skips the refresh when
