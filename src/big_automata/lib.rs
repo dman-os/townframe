@@ -27,9 +27,9 @@ pub mod okv;
 pub mod part_store;
 pub mod replay;
 pub mod rev;
-pub mod sessions;
 #[cfg(test)]
 mod scaling;
+pub mod sessions;
 pub mod sync;
 
 #[derive(Default, Debug, Clone, Copy)]

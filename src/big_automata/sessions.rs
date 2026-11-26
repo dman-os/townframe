@@ -25,8 +25,18 @@
 //! that know nothing about peers (the scheduler, the watermark), while these are policy machines
 //! with their own laws, like `durable_outbox` and `replay`.
 
+use crate::kit::Instant;
+
 pub mod interest;
 pub mod session;
+
+/// A grace period. Inputs never read the clock, so the deadline of a grace that an input starts
+/// is stamped by the next flush; until then the grace is `Starting`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grace {
+    Starting,
+    Until(Instant),
+}
 
 #[cfg(test)]
 mod sim;

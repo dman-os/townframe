@@ -3,8 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use web_time::Instant;
-
+use super::Grace;
 use super::interest::Command as IC;
 use super::interest::Interest;
 use super::interest::Phase as IPhase;
@@ -14,6 +13,7 @@ use super::session::Config;
 use super::session::Phase;
 use super::session::Sessions;
 use crate::interlude::*;
+use crate::kit::Instant;
 
 const GRACE: Duration = Duration::from_secs(30);
 
@@ -59,15 +59,27 @@ fn law_1_routes_only_on_open_eligible_sessions() {
     i.session_opened((2, 0));
     i.session_opened((1, 0));
     let out = iflush(&mut i, now);
-    assert!(out.contains(&IC::AddRoute { object: 1, session: (1, 0) }));
-    assert!(!out.iter().any(|c| matches!(c, IC::AddRoute { session: (2, 0), .. })));
+    assert!(out.contains(&IC::AddRoute {
+        object: 1,
+        session: (1, 0)
+    }));
+    assert!(!out.iter().any(|c| matches!(
+        c,
+        IC::AddRoute {
+            session: (2, 0),
+            ..
+        }
+    )));
     // a revoke removes the route and releases the session at the next flush
     i.standing(&1, eligible(&[]));
     let out = iflush(&mut i, now);
     assert_eq!(
         out,
         vec![
-            IC::RemoveRoute { object: 1, session: (1, 0) },
+            IC::RemoveRoute {
+                object: 1,
+                session: (1, 0)
+            },
             IC::ReleaseSession { session: (1, 0) },
         ]
     );
@@ -83,11 +95,17 @@ fn law_2_default_before_on_demand() {
     i.standing(&1, eligible(&[SHARED]));
     let out = iflush(&mut i, now);
     assert!(out.contains(&IC::NeedSession { session: (1, 7) }));
-    assert!(out.contains(&IC::AddRoute { object: 1, session: (1, 7) }));
+    assert!(out.contains(&IC::AddRoute {
+        object: 1,
+        session: (1, 7)
+    }));
     // a default session becomes eligible: the shared route and need go
     i.standing(&1, eligible(&[OWN, SHARED]));
     let out = iflush(&mut i, now);
-    assert!(out.contains(&IC::RemoveRoute { object: 1, session: (1, 7) }));
+    assert!(out.contains(&IC::RemoveRoute {
+        object: 1,
+        session: (1, 7)
+    }));
     assert!(out.contains(&IC::ReleaseSession { session: (1, 7) }));
     assert!(out.contains(&IC::NeedSession { session: (1, 0) }));
     assert!(!i.needed(&(1, 7)));
@@ -99,12 +117,18 @@ fn law_3_routed_within_one_flush_of_the_session_opening() {
     let mut i = Interest::new(GRACE);
     i.lease_acquired(1u8);
     i.standing(&1, eligible(&[OWN]));
-    assert_eq!(iflush(&mut i, now), vec![IC::NeedSession { session: (1, 0) }]);
+    assert_eq!(
+        iflush(&mut i, now),
+        vec![IC::NeedSession { session: (1, 0) }]
+    );
     assert_eq!(i.phase(&1), Some(IPhase::Wanted));
     i.session_opened((1, 0));
     assert_eq!(
         iflush(&mut i, now),
-        vec![IC::AddRoute { object: 1, session: (1, 0) }]
+        vec![IC::AddRoute {
+            object: 1,
+            session: (1, 0)
+        }]
     );
     assert_eq!(i.phase(&1), Some(IPhase::Routed));
     // the session is lost: routes go silently, the need stays
@@ -122,8 +146,10 @@ fn law_4_and_5_idle_keeps_routes_then_releases_at_the_deadline() {
     i.standing(&1, eligible(&[OWN]));
     i.session_opened((1, 0));
     iflush(&mut i, now);
-    i.lease_dropped(&1, now);
+    i.lease_dropped(&1);
+    assert_eq!(i.phase(&1), Some(IPhase::Idle(Grace::Starting)));
     assert!(iflush(&mut i, now).is_empty());
+    assert_eq!(i.phase(&1), Some(IPhase::Idle(Grace::Until(now + GRACE))));
     assert_eq!(i.next_due(), Some(now + GRACE));
     // standing grows while idle: nothing is added
     i.standing(&1, eligible(&[OWN, ((2, 0), Tier::Default)]));
@@ -133,8 +159,18 @@ fn law_4_and_5_idle_keeps_routes_then_releases_at_the_deadline() {
     // a lease inside the grace cancels the release and keeps the routes
     i.lease_acquired(1);
     let out = iflush(&mut i, now + secs(29));
-    assert_eq!(out, vec![IC::AddRoute { object: 1, session: (2, 0) }, IC::NeedSession { session: (2, 0) }]);
-    i.lease_dropped(&1, now + secs(29));
+    assert_eq!(
+        out,
+        vec![
+            IC::AddRoute {
+                object: 1,
+                session: (2, 0)
+            },
+            IC::NeedSession { session: (2, 0) }
+        ]
+    );
+    i.lease_dropped(&1);
+    iflush(&mut i, now + secs(29));
     let out = iflush(&mut i, now + secs(59));
     assert_eq!(out.len(), 4, "{out:?}");
     assert!(i.is_empty());
@@ -150,12 +186,12 @@ fn law_6_need_edges_are_reported_once() {
     }
     let out = iflush(&mut i, now);
     assert_eq!(out, vec![IC::NeedSession { session: (1, 0) }]);
-    i.lease_dropped(&1, now);
-    i.lease_dropped(&2, now);
-    i.standing(&1, eligible(&[]));
-    i.standing(&2, eligible(&[]));
-    let out = iflush(&mut i, now + GRACE);
+    i.lease_dropped(&1);
+    // idle objects hold no routes, so they need nothing: the one release, once
+    i.lease_dropped(&2);
+    let out = iflush(&mut i, now);
     assert_eq!(out, vec![IC::ReleaseSession { session: (1, 0) }]);
+    assert!(iflush(&mut i, now + GRACE).is_empty());
     assert!(i.is_empty());
 }
 
@@ -167,12 +203,14 @@ fn sessions_dial_back_off_and_redial_only_while_wanted() {
     let SC::Dial { call, .. } = sflush(&mut s, now)[0].clone() else {
         panic!("the default session is dialed");
     };
-    s.dialed(call, false, now);
+    s.dialed(now, call, false);
     assert!(sflush(&mut s, now).is_empty());
     assert_eq!(s.next_due(), Some(now + secs(1)));
     let out = sflush(&mut s, now + secs(1));
-    let [SC::Dial { call, .. }] = out[..] else { panic!("{out:?}") };
-    s.dialed(call, false, now + secs(1));
+    let [SC::Dial { call, .. }] = out[..] else {
+        panic!("{out:?}")
+    };
+    s.dialed(now + secs(1), call, false);
     assert_eq!(s.next_due(), Some(now + secs(3)), "the backoff doubles");
     // the peer leaves while the retry waits: no more dials
     s.peer_disconnected(&1);
@@ -189,19 +227,33 @@ fn sessions_default_is_never_idle_and_shared_closes_after_the_grace() {
     let out = sflush(&mut s, now);
     assert_eq!(out.len(), 2);
     for command in out {
-        let SC::Dial { call, .. } = command else { panic!() };
-        s.dialed(call, true, now);
+        let SC::Dial { call, .. } = command else {
+            panic!()
+        };
+        s.dialed(now, call, true);
     }
-    s.release(1, 0, now);
-    s.release(1, 7, now);
+    s.release(1, 0);
+    s.release(1, 7);
     assert_eq!(s.phase(&1, &0), Some(Phase::Open));
-    assert_eq!(s.phase(&1, &7), Some(Phase::Idle { until: now + secs(20) }));
+    assert_eq!(s.phase(&1, &7), Some(Phase::Idle(Grace::Starting)));
+    assert!(sflush(&mut s, now).is_empty());
+    assert_eq!(
+        s.phase(&1, &7),
+        Some(Phase::Idle(Grace::Until(now + secs(20))))
+    );
     assert!(sflush(&mut s, now + secs(19)).is_empty());
     // a need inside the grace keeps it
     s.need(1, 7);
     assert!(sflush(&mut s, now + secs(25)).is_empty());
-    s.release(1, 7, now + secs(25));
-    assert_eq!(sflush(&mut s, now + secs(45)), vec![SC::Close { peer: 1, principal: 7 }]);
+    s.release(1, 7);
+    assert!(sflush(&mut s, now + secs(25)).is_empty());
+    assert_eq!(
+        sflush(&mut s, now + secs(45)),
+        vec![SC::Close {
+            peer: 1,
+            principal: 7
+        }]
+    );
     assert_eq!(s.phase(&1, &7), None);
 }
 
@@ -217,15 +269,29 @@ fn sessions_caps_hold_and_defaults_come_first() {
         s.peer_connected(peer, 0);
     }
     let out = sflush(&mut s, now);
-    let dials: Vec<_> = out.iter().map(|c| match c { SC::Dial { peer, principal, .. } => (*peer, *principal), _ => panic!() }).collect();
-    assert_eq!(dials, vec![(1, 0), (2, 0), (3, 0)], "total is 3 and the defaults won it");
+    let dials: Vec<_> = out
+        .iter()
+        .map(|c| match c {
+            SC::Dial {
+                peer, principal, ..
+            } => (*peer, *principal),
+            _ => panic!(),
+        })
+        .collect();
+    assert_eq!(
+        dials,
+        vec![(1, 0), (2, 0), (3, 0)],
+        "total is 3 and the defaults won it"
+    );
     for command in out {
-        let SC::Dial { call, .. } = command else { panic!() };
-        s.dialed(call, true, now);
+        let SC::Dial { call, .. } = command else {
+            panic!()
+        };
+        s.dialed(now, call, true);
     }
     assert_eq!(s.phase(&1, &7), Some(Phase::Wanted { admitted: false }));
     // releasing a session that never held a slot frees nothing
-    s.release(1, 7, now);
+    s.release(1, 7);
     assert!(sflush(&mut s, now).is_empty());
 }
 
@@ -236,21 +302,81 @@ fn sessions_lost_connection_is_dialed_again_only_while_wanted() {
     s.peer_connected(1u8, 0u8);
     s.need(1, 7);
     for command in sflush(&mut s, now) {
-        let SC::Dial { call, .. } = command else { panic!() };
-        s.dialed(call, true, now);
+        let SC::Dial { call, .. } = command else {
+            panic!()
+        };
+        s.dialed(now, call, true);
     }
-    s.closed(1, 7);
-    s.closed(1, 0);
-    let out = sflush(&mut s, now);
+    s.closed(now, 1, 7);
+    s.closed(now, 1, 0);
+    assert!(
+        sflush(&mut s, now).is_empty(),
+        "a lost session waits out its backoff"
+    );
+    assert_eq!(s.next_due(), Some(now + secs(1)));
+    let out = sflush(&mut s, now + secs(1));
     assert_eq!(out.len(), 2, "both are wanted and dialed afresh");
+    let t = now + secs(1);
     for command in out {
-        let SC::Dial { call, .. } = command else { panic!() };
-        s.dialed(call, true, now);
+        let SC::Dial { call, .. } = command else {
+            panic!()
+        };
+        s.dialed(t, call, true);
     }
-    s.release(1, 7, now);
-    s.closed(1, 7);
-    assert!(sflush(&mut s, now).is_empty());
+    // it flaps: the second loss within the maximum backoff doubles the delay
+    s.closed(t, 1, 7);
+    assert_eq!(s.next_due(), Some(t + secs(2)));
+    // it is no longer wanted, so it is not dialed again
+    s.release(1, 7);
+    s.closed(t, 1, 7);
+    assert!(
+        sflush(&mut s, t + secs(60))
+            .iter()
+            .all(|c| !matches!(c, SC::Dial { principal: 7, .. }))
+    );
     assert_eq!(s.phase(&1, &7), None);
+}
+
+#[test]
+fn law_2_on_demand_only_after_our_own_session_is_refused_one_at_a_time() {
+    let now = Instant::now();
+    let shared_a = ((1u8, 7u8), Tier::OnDemand);
+    let shared_b = ((2u8, 7u8), Tier::OnDemand);
+    let mut i = Interest::new(GRACE);
+    i.lease_acquired(1u8);
+    for s in [(1, 0), (1, 7), (2, 7)] {
+        i.session_opened(s);
+    }
+    i.standing(&1, eligible(&[OWN, shared_a, shared_b]));
+    // a dial that failed is not a refusal, and silence is not either: no shared session
+    let out = iflush(&mut i, now);
+    assert!(!i.needed(&(1, 7)) && !i.needed(&(2, 7)), "{out:?}");
+    // our own session is refused: one shared session, the first open one, and the own route stays
+    i.refused(&1, &(1, 0));
+    iflush(&mut i, now);
+    assert_eq!(i.routes(&1).unwrap(), &[(1, 0), (1, 7)].into());
+    assert!(i.needed(&(1, 7)) && !i.needed(&(2, 7)));
+    // it refuses too: the next one is tried, and the first is dropped
+    i.refused(&1, &(1, 7));
+    let out = iflush(&mut i, now);
+    assert_eq!(i.routes(&1).unwrap(), &[(1, 0), (2, 7)].into(), "{out:?}");
+    assert!(!i.needed(&(1, 7)) && i.needed(&(2, 7)));
+    // every candidate has refused: nothing more is asked
+    i.refused(&1, &(2, 7));
+    iflush(&mut i, now);
+    assert_eq!(i.routes(&1).unwrap(), &[(1, 0)].into());
+    // standing changes: the refusals were about the old standing and are forgotten
+    i.standing(&1, eligible(&[OWN, shared_a]));
+    iflush(&mut i, now);
+    assert_eq!(
+        i.routes(&1).unwrap(),
+        &[(1, 0)].into(),
+        "own session is wanted first again"
+    );
+    // with no default session eligible at all, the shared one is used without any refusal
+    i.standing(&1, eligible(&[shared_a]));
+    iflush(&mut i, now);
+    assert_eq!(i.routes(&1).unwrap(), &[(1, 7)].into());
 }
 
 /// The machines are generic: here an object is a blob hash and a peer and a principal are
@@ -262,8 +388,8 @@ fn instantiated_for_blob_hashes_and_public_keys() {
 
     let now = Instant::now();
     let hash = ByteKey::new(&[7u8; 32]);
-    let peer = PeerKey::new([1u8; 32]);
-    let node = PeerKey::new([2u8; 32]);
+    let peer = PeerKey::new(&[1u8; 32]);
+    let node = PeerKey::new(&[2u8; 32]);
     let session = (peer.clone(), node.clone());
     let mut interest = Interest::new(GRACE);
     let mut sessions = Sessions::new(cfg());
@@ -276,8 +402,13 @@ fn instantiated_for_blob_hashes_and_public_keys() {
     assert_eq!(
         out,
         vec![
-            IC::AddRoute { object: hash.clone(), session: session.clone() },
-            IC::NeedSession { session: session.clone() },
+            IC::AddRoute {
+                object: hash.clone(),
+                session: session.clone()
+            },
+            IC::NeedSession {
+                session: session.clone()
+            },
         ]
     );
     sessions.need(peer.clone(), node.clone());

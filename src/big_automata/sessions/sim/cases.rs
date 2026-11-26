@@ -3,7 +3,6 @@
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 
-use proptest::prelude::*;
 use proptest::strategy::ValueTree;
 use proptest::test_runner::Config as RunnerConfig;
 use proptest::test_runner::RngAlgorithm;
@@ -56,9 +55,9 @@ fn a_seed_replays() {
 
 /// The planted bug is caught by some case of a fixed seed.
 fn caught(plant: Plant) {
-    let caught = (0..4u8).flat_map(|seed| cases(seed, 64)).any(|ops| {
-        catch_unwind(AssertUnwindSafe(|| run(&ops, Some(plant)))).is_err()
-    });
+    let caught = (0..4u8)
+        .flat_map(|seed| cases(seed, 64))
+        .any(|ops| catch_unwind(AssertUnwindSafe(|| run(&ops, Some(plant)))).is_err());
     assert!(caught, "{plant:?} was not caught");
 }
 

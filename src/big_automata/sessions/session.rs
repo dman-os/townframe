@@ -22,7 +22,8 @@
 //!   peer is not connected), or admitted: queued, or backing off after a failed dial.
 //! - `Dialing { call }`: a [`Command::Dial`] is out.
 //! - `Open`: the driver reports it up. The Interest machine routes objects on open sessions only.
-//! - `Idle { until }`: an open session nobody wants. Closed at `until`, unless wanted again.
+//! - `Idle(grace)`: an open session nobody wants. Closed at the end of the grace, unless wanted
+//!   again. As in the Interest machine the deadline is stamped by the next flush.
 //! - `Closed`: no entry at all.
 //!
 //! The dial attempts of one session are one task of an embedded
@@ -36,7 +37,10 @@
 //!
 //! Inputs: [`Sessions::need`], [`Sessions::release`], [`Sessions::peer_connected`],
 //! [`Sessions::peer_disconnected`], [`Sessions::dialed`] and [`Sessions::closed`] (an open
-//! session was lost; it is dialed again, if still wanted, after the same backoff).
+//! session was lost; it is dialed again, if still wanted, after a backoff that doubles with each
+//! loss that follows an open shorter than the maximum backoff, so a connection that flaps is not
+//! dialed in a loop). The outcome inputs take `now`, as `Outbox::fetch_ended` does, because they
+//! start a backoff.
 //!
 //! Commands: [`Command::Dial`] (a [`CallId`] names the attempt) and [`Command::Close`].
 //!
@@ -52,8 +56,8 @@
 //!    not before; a need before then makes it open again.
 //! 4. **Defaults stay.** A connected peer's default session is never idle and never closed
 //!    for idleness.
-//! 5. **Re-dial only while wanted.** A lost or failed session is dialed again only if it is
-//!    still wanted and its peer connected.
+//! 5. **Re-dial only while wanted, and not at once.** A lost or failed session is dialed again
+//!    only if it is still wanted and its peer connected, and a lost one not before its backoff.
 //! 6. **One dial per session**, and none to a peer that is not connected.
 //! 7. **Admitted promptly.** A wanted session whose peer is connected and which fits under
 //!    the caps is admitted at the next flush, defaults first.
@@ -62,11 +66,11 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 
-use web_time::Instant;
-
-use crate::interlude::*;
+use super::Grace;
 #[cfg(test)]
 use super::Plant;
+use crate::interlude::*;
+use crate::kit::Instant;
 use crate::kit::scheduler::keyed::KeyedScheduler;
 
 pub type CallId = u64;
@@ -86,15 +90,8 @@ pub struct Config {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command<P, L> {
-    Dial {
-        call: CallId,
-        peer: P,
-        principal: L,
-    },
-    Close {
-        peer: P,
-        principal: L,
-    },
+    Dial { call: CallId, peer: P, principal: L },
+    Close { peer: P, principal: L },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +99,7 @@ pub enum Phase {
     Wanted { admitted: bool },
     Dialing { call: CallId },
     Open,
-    Idle { until: Instant },
+    Idle(Grace),
 }
 
 #[derive(Debug)]
@@ -111,6 +108,11 @@ struct Entry {
     needed: bool,
     /// The default session of a connected peer.
     default: bool,
+    /// Losses in a row, for the re-dial backoff.
+    lost: u32,
+    /// Not admitted before this: the backoff of a lost session.
+    retry_at: Option<Instant>,
+    opened_at: Option<Instant>,
 }
 
 impl Entry {
@@ -166,17 +168,17 @@ where
     pub fn need(&mut self, peer: P, principal: L) {
         let entry = self.entry(peer, principal);
         entry.needed = true;
-        if matches!(entry.phase, Phase::Idle { .. }) {
+        if matches!(entry.phase, Phase::Idle(_)) {
             entry.phase = Phase::Open;
         }
     }
 
     /// Nothing needs the session any more.
-    pub fn release(&mut self, peer: P, principal: L, now: Instant) {
+    pub fn release(&mut self, peer: P, principal: L) {
         let key = (peer, principal);
         if let Some(entry) = self.entries.get_mut(&key) {
             entry.needed = false;
-            self.settle(&key, now);
+            self.settle(&key);
         }
     }
 
@@ -187,7 +189,7 @@ where
         assert!(previous.is_none(), "a peer was connected twice");
         let entry = self.entry(peer, default);
         entry.default = true;
-        if matches!(entry.phase, Phase::Idle { .. }) {
+        if matches!(entry.phase, Phase::Idle(_)) {
             entry.phase = Phase::Open;
         }
     }
@@ -195,7 +197,9 @@ where
     /// The peer's connection is gone, and its sessions with it. What is still needed waits for
     /// the peer to connect again.
     pub fn peer_disconnected(&mut self, peer: &P) {
-        self.peers.remove(peer).expect("a peer that was not connected");
+        self.peers
+            .remove(peer)
+            .expect("a peer that was not connected");
         let keys: Vec<_> = self
             .entries
             .keys()
@@ -206,15 +210,15 @@ where
             let entry = self.entries.get_mut(&key).expect(ERROR_IMPOSSIBLE);
             entry.default = false;
             match entry.phase {
-                Phase::Open | Phase::Idle { .. } => {
+                Phase::Open | Phase::Idle(_) => {
                     self.to_close.push(key.clone());
-                    self.lose(&key);
+                    self.lose(&key, None);
                 }
                 Phase::Wanted { admitted } => {
                     if admitted {
                         self.dials.cancel(&key);
                     }
-                    self.lose(&key);
+                    self.lose(&key, None);
                 }
                 // The dial ends in `dialed`, which finds the peer gone.
                 Phase::Dialing { .. } => {}
@@ -223,7 +227,7 @@ where
     }
 
     /// The outcome of a dial.
-    pub fn dialed(&mut self, call: CallId, ok: bool, now: Instant) {
+    pub fn dialed(&mut self, now: Instant, call: CallId, ok: bool) {
         let Some(key) = self.dials.key_of(call).cloned() else {
             panic!("a dial outcome for a call that is not in flight");
         };
@@ -234,11 +238,12 @@ where
             self.dials.complete(call).expect(ERROR_IMPOSSIBLE);
             if connected {
                 entry.phase = Phase::Open;
-                self.settle(&key, now);
+                entry.opened_at = Some(now);
+                self.settle(&key);
             } else {
                 // The peer left while the dial was out: the session is not wanted any more.
                 self.to_close.push(key.clone());
-                self.lose(&key);
+                self.lose(&key, None);
             }
         } else if connected && entry.wanted() {
             self.dials
@@ -247,37 +252,55 @@ where
             entry.phase = Phase::Wanted { admitted: true };
         } else {
             self.dials.complete(call).expect(ERROR_IMPOSSIBLE);
-            self.lose(&key);
+            self.lose(&key, None);
         }
     }
 
     /// An open or idle session was lost without being closed by us.
-    pub fn closed(&mut self, peer: P, principal: L) {
+    pub fn closed(&mut self, now: Instant, peer: P, principal: L) {
         let key = (peer, principal);
-        let Some(entry) = self.entries.get(&key) else {
+        let Some(entry) = self.entries.get_mut(&key) else {
             return;
         };
-        if matches!(entry.phase, Phase::Open | Phase::Idle { .. }) {
-            self.lose(&key);
+        if matches!(entry.phase, Phase::Open | Phase::Idle(_)) {
+            if entry
+                .opened_at
+                .is_some_and(|at| now - at >= self.cfg.max_backoff)
+            {
+                entry.lost = 0;
+            }
+            let delay = self
+                .cfg
+                .backoff
+                .saturating_mul(1u32 << entry.lost.min(16))
+                .min(self.cfg.max_backoff);
+            entry.lost += 1;
+            self.lose(&key, Some(now + delay));
         }
     }
 
     pub fn next_due(&self) -> Option<Instant> {
-        let idle = self.entries.values().filter_map(|entry| match entry.phase {
-            Phase::Idle { until } => Some(until),
+        let deadlines = self.entries.values().filter_map(|entry| match entry.phase {
+            Phase::Idle(Grace::Until(until)) => Some(until),
+            Phase::Wanted { admitted: false } => entry.retry_at,
             _ => None,
         });
-        idle.chain(self.dials.next_due()).min()
+        deadlines.chain(self.dials.next_due()).min()
     }
 
     pub fn flush(&mut self, now: Instant, out: &mut Vec<Command<P, L>>) {
         for (peer, principal) in std::mem::take(&mut self.to_close) {
             out.push(Command::Close { peer, principal });
         }
+        for entry in self.entries.values_mut() {
+            if entry.phase == Phase::Idle(Grace::Starting) {
+                entry.phase = Phase::Idle(Grace::Until(now + self.cfg.grace));
+            }
+        }
         let expired: Vec<_> = self
             .entries
             .iter()
-            .filter(|(_, e)| matches!(e.phase, Phase::Idle { until } if until <= now))
+            .filter(|(_, e)| matches!(e.phase, Phase::Idle(Grace::Until(until)) if until <= now))
             .map(|(key, _)| key.clone())
             .collect();
         #[cfg(test)]
@@ -295,8 +318,13 @@ where
         }
         self.admit(now);
         self.dials.tick(now);
-        assert_eq!(self.dials.drain_stop_queue().count(), 0, "a dial was stopped");
-        for task in self.dials.drain_spawn_queue() {
+        assert_eq!(
+            self.dials.drain_stop_queue().count(),
+            0,
+            "a dial was stopped"
+        );
+        let spawned: Vec<_> = self.dials.drain_spawn_queue().collect();
+        for task in spawned {
             let key = self.dials.key_of(task.id).expect(ERROR_IMPOSSIBLE);
             let entry = self.entries.get_mut(key).expect(ERROR_IMPOSSIBLE);
             assert_eq!(entry.phase, Phase::Wanted { admitted: true });
@@ -331,12 +359,15 @@ where
             phase: Phase::Wanted { admitted: false },
             needed: false,
             default: false,
+            lost: 0,
+            retry_at: None,
+            opened_at: None,
         })
     }
 
     /// An unwanted session winds down: a queued or backing-off one is dropped, an open one goes
     /// idle, and one that is dialing is left to finish.
-    fn settle(&mut self, key: &(P, L), now: Instant) {
+    fn settle(&mut self, key: &(P, L)) {
         let entry = self.entries.get_mut(key).expect(ERROR_IMPOSSIBLE);
         if entry.wanted() {
             return;
@@ -349,20 +380,19 @@ where
                 self.entries.remove(key);
             }
             Phase::Open => {
-                entry.phase = Phase::Idle {
-                    until: now + self.cfg.grace,
-                };
+                entry.phase = Phase::Idle(Grace::Starting);
             }
-            Phase::Dialing { .. } | Phase::Idle { .. } => {}
+            Phase::Dialing { .. } | Phase::Idle(_) => {}
         }
     }
 
     /// The session is gone (lost, or closed by us): it is wanted again, to be dialed afresh
     /// when admitted, or it ceases to exist.
-    fn lose(&mut self, key: &(P, L)) {
+    fn lose(&mut self, key: &(P, L), retry_at: Option<Instant>) {
         let entry = self.entries.get_mut(key).expect(ERROR_IMPOSSIBLE);
         if entry.wanted() {
             entry.phase = Phase::Wanted { admitted: false };
+            entry.retry_at = retry_at;
         } else {
             self.entries.remove(key);
         }
@@ -381,7 +411,9 @@ where
             .entries
             .iter()
             .filter(|((peer, _), e)| {
-                e.phase == (Phase::Wanted { admitted: false }) && self.peers.contains_key(peer)
+                e.phase == (Phase::Wanted { admitted: false })
+                    && self.peers.contains_key(peer)
+                    && e.retry_at.is_none_or(|at| at <= now)
             })
             .map(|(key, e)| (!e.default, key.clone()))
             .collect();
@@ -389,12 +421,10 @@ where
         let mut admitted = vec![];
         for (_, key) in candidates {
             let held = per_peer.entry(key.0.clone()).or_default();
-            #[allow(unused_mut)]
-            let mut full = total >= self.cfg.total || *held >= self.cfg.per_peer;
+            let full = total >= self.cfg.total || *held >= self.cfg.per_peer;
+            // planted: the caps are not enforced
             #[cfg(test)]
-            if self.plant == Some(Plant::NoCaps) {
-                full = false;
-            }
+            let full = full && self.plant != Some(Plant::NoCaps);
             if full {
                 continue;
             }
@@ -405,8 +435,9 @@ where
         for key in admitted {
             let task = self.dials.replace(now, key.clone(), ());
             debug_assert!(task.is_some());
-            self.entries.get_mut(&key).expect(ERROR_IMPOSSIBLE).phase =
-                Phase::Wanted { admitted: true };
+            let entry = self.entries.get_mut(&key).expect(ERROR_IMPOSSIBLE);
+            entry.phase = Phase::Wanted { admitted: true };
+            entry.retry_at = None;
         }
     }
 
@@ -421,7 +452,7 @@ where
             assert!(entry.wanted() || !matches!(entry.phase, Phase::Wanted { .. }));
             if entry.default {
                 assert!(self.peers.contains_key(peer));
-                assert!(!matches!(entry.phase, Phase::Idle { .. }));
+                assert!(!matches!(entry.phase, Phase::Idle(_)));
             }
         }
         assert!(per_peer.values().all(|n| *n <= self.cfg.per_peer));

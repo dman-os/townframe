@@ -13,20 +13,26 @@
 //! - `Wanted`: somebody holds a lease and no route is installed yet (no eligible session is
 //!   open).
 //! - `Routed`: somebody holds a lease and at least one route is installed.
-//! - `Idle { until }`: the last lease was dropped. The routes stay, so a lease taken again
+//! - `Idle(grace)`: the last lease was dropped. The routes stay, so a lease taken again
 //!   inside the grace keeps its subscriptions instead of tearing them down and adding them
-//!   again, but nothing new is asked for. At `until` the object is `Released`: its routes are
-//!   removed and the object is forgotten.
+//!   again, but nothing new is asked for. The deadline is stamped by the next flush
+//!   (`Grace::Starting` until then, as inputs never read the clock), and at it the object is
+//!   `Released`: its routes are removed and the object is forgotten.
 //!
 //! # Which sessions an object is routed to
 //!
 //! The caller gives, per object, the sessions that may serve it, each with a [`Tier`]. A
 //! [`Tier::Default`] session is one that exists anyway (our own principal toward a connected
 //! peer); a [`Tier::OnDemand`] session is one that is opened only because an object needs it (a
-//! shared principal). The machine's policy is:
+//! shared principal). A remote that will not serve the object on a session says so
+//! ([`Interest::refused`]); a dial that merely failed says nothing here. The machine's policy is:
 //!
-//! - the *desired* sessions of an object are its default eligible sessions, or, only when it has
-//!   none, its on-demand eligible sessions;
+//! - the *desired* sessions of an object are all its default eligible sessions, plus **one**
+//!   on-demand eligible session while every default eligible session has refused the object (or
+//!   there is none, so our own principal cannot serve it). The one is the session already routed,
+//!   else an open one, else the first; when it refuses, the next is tried. A refusal is forgotten
+//!   when the object's standing changes (the keyhive pull the refusal was waiting for may have
+//!   landed) or when the session closes;
 //! - the object is routed on its desired sessions that are open, and on no other session, so it
 //!   is never routed to a peer without standing, nor to every peer;
 //! - while the object is leased, every desired session is *needed* ([`Command::NeedSession`]);
@@ -38,8 +44,9 @@
 //! Inputs: [`Interest::lease_acquired`], [`Interest::lease_dropped`], [`Interest::standing`]
 //! (the full replacement of an object's eligible sessions, empty when standing is revoked; it
 //! is ignored for an object nobody holds, so the caller computes it after the lease),
-//! [`Interest::session_opened`] and [`Interest::session_closed`] (a session that is lost loses
-//! its routes with it, silently; if it is still needed the session machine dials it again).
+//! [`Interest::refused`], [`Interest::session_opened`] and [`Interest::session_closed`] (a
+//! session that is lost loses its routes with it, silently; if it is still needed the session
+//! machine dials it again).
 //!
 //! Commands: [`Command::AddRoute`] and [`Command::RemoveRoute`] for an object on an open
 //! session, [`Command::NeedSession`] when a session goes from unneeded to needed, and
@@ -51,8 +58,9 @@
 //!
 //! 1. **Standing bounds routes.** An object is routed only on sessions the caller named
 //!    eligible, and only on open ones. A revoke removes the routes at the next flush.
-//! 2. **Default before on-demand.** An object with an eligible default session has no on-demand
-//!    route and needs no on-demand session.
+//! 2. **Default before on-demand.** An object has an on-demand route or need only when every
+//!    eligible default session has refused it (or none is eligible), and then on exactly one
+//!    session, never one that refused.
 //! 3. **Routed promptly.** A leased object is routed on every desired session that is open.
 //! 4. **Idle adds nothing.** An idle object's routes only shrink.
 //! 5. **Grace.** An object is released at the first flush at or after its deadline, and not
@@ -65,11 +73,11 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 
-use web_time::Instant;
-
-use crate::interlude::*;
+use super::Grace;
 #[cfg(test)]
 use super::Plant;
+use crate::interlude::*;
+use crate::kit::Instant;
 
 /// How a session that may serve an object comes into being.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -93,7 +101,7 @@ pub enum Command<K, S> {
 pub enum Phase {
     Wanted,
     Routed,
-    Idle { until: Instant },
+    Idle(Grace),
 }
 
 #[derive(Debug)]
@@ -104,6 +112,8 @@ struct Object<S> {
     routed: BTreeSet<S>,
     /// The sessions this object currently counts towards in `Interest::demand`.
     needs: BTreeSet<S>,
+    /// Sessions that refused this object since its standing last changed.
+    refused: BTreeSet<S>,
 }
 
 #[derive(Debug)]
@@ -147,32 +157,36 @@ where
     }
 
     pub fn lease_acquired(&mut self, object: K) {
-        let obj = self.objects.entry(object.clone()).or_insert_with(|| Object {
-            leases: 0,
-            phase: Phase::Wanted,
-            eligible: default(),
-            routed: default(),
-            needs: default(),
-        });
-        if let Phase::Idle { until } = obj.phase {
-            self.deadlines.remove(&(until, object.clone()));
+        let obj = self
+            .objects
+            .entry(object.clone())
+            .or_insert_with(|| Object {
+                leases: 0,
+                phase: Phase::Wanted,
+                eligible: default(),
+                routed: default(),
+                needs: default(),
+                refused: default(),
+            });
+        if let Phase::Idle(grace) = obj.phase {
+            if let Grace::Until(until) = grace {
+                self.deadlines.remove(&(until, object.clone()));
+            }
             obj.phase = Phase::Wanted;
         }
         obj.leases += 1;
         self.dirty.insert(object);
     }
 
-    /// A lease was dropped. The last one starts the grace.
-    pub fn lease_dropped(&mut self, object: &K, now: Instant) {
+    /// A lease was dropped. The last one starts the grace, which the next flush stamps.
+    pub fn lease_dropped(&mut self, object: &K) {
         let obj = self
             .objects
             .get_mut(object)
             .expect("a lease was dropped that was never acquired");
         obj.leases = obj.leases.checked_sub(1).expect(ERROR_IMPOSSIBLE);
         if obj.leases == 0 {
-            let until = now + self.grace;
-            obj.phase = Phase::Idle { until };
-            self.deadlines.insert((until, object.clone()));
+            obj.phase = Phase::Idle(Grace::Starting);
             self.dirty.insert(object.clone());
         }
     }
@@ -196,15 +210,33 @@ where
                 .or_default()
                 .insert(object.clone());
         }
+        if obj.eligible != eligible {
+            obj.refused.clear();
+        }
         #[cfg(test)]
         let eligible = if self.plant == Some(Plant::IgnoreRevoke) {
             // planted: a revoke is never applied, only grants are
-            obj.eligible.iter().map(|(s, t)| (s.clone(), *t)).chain(eligible).collect()
+            obj.eligible
+                .iter()
+                .map(|(s, t)| (s.clone(), *t))
+                .chain(eligible)
+                .collect()
         } else {
             eligible
         };
         obj.eligible = eligible;
         self.dirty.insert(object.clone());
+    }
+
+    /// The remote will not serve `object` on `session`. Ignored for a session that is not
+    /// eligible for it.
+    pub fn refused(&mut self, object: &K, session: &S) {
+        if let Some(obj) = self.objects.get_mut(object)
+            && obj.eligible.contains_key(session)
+            && obj.refused.insert(session.clone())
+        {
+            self.dirty.insert(object.clone());
+        }
     }
 
     pub fn session_opened(&mut self, session: S) {
@@ -220,7 +252,7 @@ where
         // A scan, not an index: a session is lost rarely, and an index of routes by session
         // would be one more table to keep equal to `routed`.
         for (key, obj) in &mut self.objects {
-            if obj.routed.remove(session) {
+            if obj.routed.remove(session) | obj.refused.remove(session) {
                 self.dirty.insert(key.clone());
             }
         }
@@ -241,7 +273,7 @@ where
         let mut edges = vec![];
         for object in std::mem::take(&mut self.dirty) {
             if self.objects.contains_key(&object) {
-                self.reconcile(&object, out, &mut edges);
+                self.reconcile(&object, now, out, &mut edges);
             }
         }
         out.extend(edges);
@@ -253,6 +285,10 @@ where
 
     pub fn phase(&self, object: &K) -> Option<Phase> {
         self.objects.get(object).map(|obj| obj.phase)
+    }
+
+    pub fn needs(&self, object: &K) -> Option<&BTreeSet<S>> {
+        self.objects.get(object).map(|obj| &obj.needs)
     }
 
     pub fn routes(&self, object: &K) -> Option<&BTreeSet<S>> {
@@ -296,28 +332,50 @@ where
     fn reconcile(
         &mut self,
         object: &K,
+        now: Instant,
         out: &mut Vec<Command<K, S>>,
         edges: &mut Vec<Command<K, S>>,
     ) {
         let obj = self.objects.get_mut(object).expect(ERROR_IMPOSSIBLE);
-        #[allow(unused_mut)]
-        let mut has_default = obj.eligible.values().any(|tier| *tier == Tier::Default);
-        #[cfg(test)]
-        if self.plant == Some(Plant::EagerShared) {
-            // planted: on-demand sessions are asked for even when a default one can serve
-            has_default = false;
+        if obj.phase == Phase::Idle(Grace::Starting) {
+            let until = now + self.grace;
+            obj.phase = Phase::Idle(Grace::Until(until));
+            self.deadlines.insert((until, object.clone()));
         }
-        #[allow(unused_mut)]
-        let mut desired: BTreeSet<S> = obj
+        let defaults: BTreeSet<S> = obj
             .eligible
             .iter()
-            .filter(|(_, tier)| !has_default || **tier == Tier::Default)
+            .filter(|(_, tier)| **tier == Tier::Default)
             .map(|(session, _)| session.clone())
             .collect();
+        let mut desired = defaults.clone();
+        if defaults.iter().all(|session| obj.refused.contains(session)) {
+            let candidates: Vec<&S> = obj
+                .eligible
+                .iter()
+                .filter(|(session, tier)| {
+                    **tier == Tier::OnDemand && !obj.refused.contains(*session)
+                })
+                .map(|(session, _)| session)
+                .collect();
+            let pick = candidates
+                .iter()
+                .find(|session| obj.routed.contains(**session))
+                .or_else(|| {
+                    candidates
+                        .iter()
+                        .find(|session| self.open.contains(**session))
+                })
+                .or_else(|| candidates.first());
+            desired.extend(pick.map(|session| (*session).clone()));
+        }
         #[cfg(test)]
-        if self.plant == Some(Plant::RouteEverywhere) {
+        match self.plant {
+            // planted: on-demand sessions are asked for whatever the defaults said
+            Some(Plant::EagerShared) => desired = obj.eligible.keys().cloned().collect(),
             // planted: every open session, whoever stands where
-            desired = self.open.clone();
+            Some(Plant::RouteEverywhere) => desired = self.open.clone(),
+            _ => {}
         }
         let removed: Vec<S> = obj.routed.difference(&desired).cloned().collect();
         for session in removed {
@@ -327,7 +385,7 @@ where
                 session,
             });
         }
-        let idle = matches!(obj.phase, Phase::Idle { .. });
+        let idle = matches!(obj.phase, Phase::Idle(_));
         if !idle {
             for session in desired.iter().filter(|s| self.open.contains(*s)) {
                 if obj.routed.insert(session.clone()) {
@@ -387,18 +445,24 @@ where
             assert!(obj.routed.is_subset(&obj.needs), "a route without a need");
             for session in &obj.routed {
                 assert!(self.open.contains(session), "a route on a closed session");
-                assert!(obj.eligible.contains_key(session), "a route without standing");
+                assert!(
+                    obj.eligible.contains_key(session),
+                    "a route without standing"
+                );
             }
         }
         assert_eq!(
             demand,
-            self.demand.iter().map(|(s, n)| (s, *n)).collect::<BTreeMap<_, _>>()
+            self.demand
+                .iter()
+                .map(|(s, n)| (s, *n))
+                .collect::<BTreeMap<_, _>>()
         );
         assert_eq!(
             self.deadlines.len(),
             self.objects
                 .values()
-                .filter(|obj| matches!(obj.phase, Phase::Idle { .. }))
+                .filter(|obj| matches!(obj.phase, Phase::Idle(Grace::Until(_))))
                 .count()
         );
     }
