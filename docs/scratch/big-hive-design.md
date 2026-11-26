@@ -227,3 +227,20 @@ interested.
   document D uses sessions (P, L) where both P and L stand at Relay or above on D. Interest in a
   document that does not exist yet is a durable want with no provider, held until a peer
   advertises it. Keyhive needs extra secret-only local principals for this.
+
+## Shared principals: connection and identity are separate (operator, 2026-11-26 late)
+
+- **Name:** a *shared principal* is a keyhive principal whose private key is deliberately shared:
+  an invite link, or a well-known key that gives public access to some resources. "Invite
+  principal" was one example, not the concept. The invite and public-access systems built on it
+  are the backbone of the "get a link, open a document" experience, and are designed later. The
+  layers below must support them efficiently now.
+- **It reaches big_automata too.** Partition visibility in big_hive depends on group parts, keyed
+  by principal, so replay must be able to serve the parts visible to a shared principal a node
+  holds. Both protocols (subduction and big_automata) separate **connection** from
+  **identity**: a connection can present N principals.
+- Being compared: one session per (connection, principal), or one session per connection
+  carrying a proven set of principals with visibility as the union, including a principal added
+  mid-session.
+- Keyhive accepts the two follow-ups from the serving fix: `receive_prekey_op` hydrates first,
+  and serving store ops that eager loading would keep pending is accepted, pinned by a test.
