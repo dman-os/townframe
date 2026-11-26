@@ -9,6 +9,11 @@ workspace = true
 [lib]
 path = "lib.rs"
 
+[features]
+# The fixture and bodies the instruction bench shares with the scaling checks (`workloads.rs`);
+# the crate's own tests compile them without the feature. A bench target cannot see test code.
+bench-support = ["dep:ed25519-dalek", "keyline/test_utils"]
+
 [dependencies]
 sqlite_rs.workspace = true
 futures.workspace = true
@@ -21,6 +26,7 @@ keyline_memory = { version = "0.4.0", default-features = false, features = ["std
 keyhive_codec = { version = "0.1.0", default-features = false, features = ["std"] }
 keyhive_crypto = { version = "0.6.0", default-features = false, features = ["std"] }
 future_form.workspace = true
+ed25519-dalek = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]
@@ -38,6 +44,7 @@ tokio = { workspace = true, features = ["sync"] }
 [[bench]]
 name = "instr"
 harness = false
+required-features = ["bench-support"]
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 gungraun = "0.20.0"
@@ -46,4 +53,4 @@ gungraun = "0.20.0"
 # print `BENCH_RECORD` lines; `instr` names the bench target.
 [package.metadata.bench]
 counts = { filter = "test(/scaling::/)" }
-instr = { bench = "instr" }
+instr = { bench = "instr", features = ["bench-support"] }

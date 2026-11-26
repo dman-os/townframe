@@ -28,23 +28,23 @@ use keyline_memory::state::State;
 use sqlite_rs::Executor;
 
 use crate::cache::Cache;
-use crate::db::KeylineDb;
 use crate::error::Error;
 use crate::rows;
 use crate::sqlite::queries;
 use crate::write;
 use crate::write::Staged;
+use sqlite_rs::SqliteDb;
 
 /// The Keyline certificate set in a SQLite database.
 ///
 /// Clones share the database handle and the evaluation cache. The database's own transactions
 /// are the concurrency control: a query reads one snapshot, an insert holds the writer.
-pub struct SqliteKeyline<W, D: KeylineDb> {
+pub struct SqliteKeyline<W, D: SqliteDb> {
     db: D,
     cache: Arc<Cache<W>>,
 }
 
-impl<W, D: KeylineDb> Clone for SqliteKeyline<W, D> {
+impl<W, D: SqliteDb> Clone for SqliteKeyline<W, D> {
     fn clone(&self) -> Self {
         Self {
             db: self.db.clone(),
@@ -54,12 +54,12 @@ impl<W, D: KeylineDb> Clone for SqliteKeyline<W, D> {
 }
 
 /// A read snapshot and the version it was read at.
-struct Snapshot<D: KeylineDb> {
+struct Snapshot<D: SqliteDb> {
     tx: D::Read,
     version: i64,
 }
 
-impl<D: KeylineDb> Snapshot<D> {
+impl<D: SqliteDb> Snapshot<D> {
     /// End the snapshot, and return the version its answers carry. An error before this drops
     /// the snapshot, which releases it.
     async fn finish(self) -> Result<Version, Error> {
@@ -72,7 +72,7 @@ fn version_from_sql(version: i64) -> Version {
     Version::new(u64::try_from(version).expect("a stored version is not negative"))
 }
 
-impl<W: Encode + Decode, D: KeylineDb> SqliteKeyline<W, D> {
+impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
     /// Attach to `db`, which must have been registered with [`MIGRATIONS`](crate::MIGRATIONS)
     /// under [`MIGRATION_TABLE`](crate::MIGRATION_TABLE).
     pub fn new(db: D) -> Self {
@@ -126,7 +126,7 @@ impl<W: Encode + Decode, D: KeylineDb> SqliteKeyline<W, D> {
 }
 
 #[future_form(Sendable where W: Send + Sync, Local)]
-impl<F: FutureForm, W: Encode + Decode, D: KeylineDb> Keyline<F> for SqliteKeyline<W, D> {
+impl<F: FutureForm, W: Encode + Decode, D: SqliteDb> Keyline<F> for SqliteKeyline<W, D> {
     type RetentionWatermark = W;
     type Error = Error;
 

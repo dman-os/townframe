@@ -37,9 +37,9 @@ use sqlite_rs::Tx;
 
 use super::fresh_db;
 use super::sign;
-use crate::KeylineDb;
 use crate::SqliteKeyline;
 use crate::sqlite::queries;
+use sqlite_rs::SqliteDb;
 
 type Log = Arc<Mutex<BTreeMap<String, Vec<SqlValue>>>>;
 
@@ -90,7 +90,7 @@ impl QueryExecutor for RecordingRead {
     }
 }
 
-impl KeylineDb for Recording {
+impl SqliteDb for Recording {
     type Write = RecordingWrite;
     type Read = RecordingRead;
 

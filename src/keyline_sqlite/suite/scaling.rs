@@ -5,13 +5,12 @@
 //! verifying them, the evaluation), not what SQLite's worker thread allocates.
 //!
 //! Allocation counts miss a loop that allocates nothing: the instruction bench
-//! (`benches/instr.rs`) covers those. Both run the workloads in `benches/workloads`.
+//! (`benches/instr.rs`) covers those. Both run the workloads in `workloads.rs`.
 
+use crate::workloads;
 use utils_rs::testing::alloc_count::Counted;
 use utils_rs::testing::alloc_count::CountingAllocator;
 use utils_rs::testing::alloc_count::measure;
-
-mod workloads;
 
 #[global_allocator]
 static HEAP: CountingAllocator = CountingAllocator;

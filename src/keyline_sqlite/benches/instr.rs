@@ -7,16 +7,15 @@
 #![cfg_attr(target_family = "wasm", no_main)]
 #![cfg(not(target_family = "wasm"))]
 
-mod workloads;
-
 use std::hint::black_box;
 
 use gungraun::library_benchmark;
 use gungraun::library_benchmark_group;
 use gungraun::main;
+use keyline_sqlite::workloads;
+use keyline_sqlite::workloads::Fixture;
+use keyline_sqlite::workloads::Store;
 use sqlite_rs::Database;
-use workloads::Fixture;
-use workloads::Store;
 
 #[library_benchmark]
 #[bench::n200(args = (200), setup = workloads::to_insert)]

@@ -41,17 +41,12 @@
 //!
 //! # Platforms
 //!
-//! Generic over [`KeylineDb`], the three things the backend needs of a handle (the same three
-//! `big_automata_sqlite` asks of its `PartDb`). `sqlite_rs`'s native `Database` implements it;
-//! a component guest implements it over its `townframe:sqlite` connection. There is no browser
-//! build: `sqlite_rs` has none.
-
-// So the workloads shared with `benches/` name the crate the way a bench does.
-#[cfg(test)]
-extern crate self as keyline_sqlite;
+//! Generic over [`sqlite_rs::SqliteDb`], the handle that opens read snapshots and the writer
+//! transaction (`big_automata_sqlite` runs on the same trait). `sqlite_rs`'s native `Database`
+//! implements it; a component guest implements it over its `townframe:sqlite` connection. There
+//! is no browser build: `sqlite_rs` has none.
 
 mod cache;
-mod db;
 mod error;
 mod rows;
 mod store;
@@ -65,7 +60,6 @@ mod sqlite {
 
 use sqlite_rs as sqlite_rs_alias;
 
-pub use db::KeylineDb;
 pub use error::Error;
 pub use error::StoredFault;
 pub use sqlite::queries::MIGRATION_TABLE;
@@ -75,3 +69,7 @@ pub use write::Staged;
 
 #[cfg(test)]
 mod suite;
+
+// Not on wasm: the workloads open a native `sqlite_rs::Database`.
+#[cfg(all(any(test, feature = "bench-support"), not(target_family = "wasm")))]
+pub mod workloads;

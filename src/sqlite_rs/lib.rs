@@ -47,6 +47,9 @@ pub use native::test_support;
 #[cfg(test)]
 pub mod gen_tests;
 
+mod handle;
+pub use handle::SqliteDb;
+
 mod query;
 pub use query::BackendRef;
 pub use query::BindTuple;

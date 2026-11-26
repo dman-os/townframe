@@ -24,9 +24,9 @@ use sqlite_rs::QueryExecutor;
 use super::fresh_db;
 use super::sign;
 use crate::Error;
-use crate::KeylineDb;
 use crate::SqliteKeyline;
 use crate::StoredFault;
+use sqlite_rs::SqliteDb;
 
 type Store = SqliteKeyline<(), Database>;
 
