@@ -735,11 +735,17 @@ async fn a_driver_syncs_a_part_between_two_nodes_over_iroh() {
     let local = MemoryPartStore::default();
     let peer = principal(5);
     let facts = Facts::new();
+    // the local node's own membership source: objects 1 and 2 are members of part 1, whatever
+    // the peer's jobs say
+    let backend = MemoryBackend::new(peer.clone(), local.clone(), store.clone());
+    for at in [1, 2] {
+        backend.member_added(&obj(at), &part(1)).await.unwrap();
+    }
     let (driver, driver_loop) = PeerDriver::start(
         DriverConfig::new(peer.clone(), "memory"),
         Arc::new(std::time::Instant::now),
         facts.clone(),
-        MemoryBackend::new(local.clone(), store.clone()),
+        backend,
         MemoryPeerCursors::default(),
         local.clone(),
     );

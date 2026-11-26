@@ -317,6 +317,27 @@ pub async fn sync_once(
     let source = serving_store(objects).await;
     let peer = MeteredPeer::new(source.clone(), rtt);
     let local = MemoryPartStore::default();
+    // The node's own membership source says every object is a member of the part: a peer's
+    // jobs never change membership, and the sync is about the payloads.
+    {
+        let mut tx = local.begin();
+        for start in (0..objects).step_by(WRITE_BATCH) {
+            let chunk = start..(start + WRITE_BATCH).min(objects);
+            local
+                .add_members(
+                    &mut tx,
+                    &chunk
+                        .map(|row| {
+                            let row = u32::try_from(row).expect("rows fit u32");
+                            (ObjKey::new(&row.to_be_bytes()), part())
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .await
+                .expect("members");
+        }
+        tx.commit();
+    }
     let pulled_into = local.clone();
     let facts = Facts::new();
     let mut driver_config = DriverConfig::new(PeerKey::new(&[9]), "bench");
@@ -326,7 +347,7 @@ pub async fn sync_once(
         driver_config,
         Arc::clone(&clock),
         facts.clone(),
-        MemoryBackend::new(local.clone(), source),
+        MemoryBackend::new(peer_key.clone(), local.clone(), source),
         MemoryPeerCursors::default(),
         local,
     );

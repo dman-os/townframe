@@ -7,12 +7,18 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering as AtomicOrdering;
 
 use super::ObjJob;
 use super::PeerCursors;
 use super::Settle;
 use super::SyncBackend;
+use crate::durable_outbox::Advert;
+use crate::durable_outbox::HeldConfig;
+use crate::durable_outbox::HeldTable;
+use crate::okv::memory::MemoryDb;
+use crate::okv::memory::MemoryOkv;
 use crate::part_store::ObjPayload;
 use crate::part_store::PartStoreRead;
 use crate::part_store::laws;
@@ -184,45 +190,113 @@ enum Payloads {
     Hint,
 }
 
-/// A [`SyncBackend`] over a local [`MemoryPartStore`], in one of two modes.
+type HeldWants = HeldTable<MemoryOkv<Vec<u8>, Vec<u8>>>;
+
+/// What the backends of one node share: its store, its held wants, its clock and the stores
+/// that stand in for its peers.
+struct Node {
+    local: MemoryPartStore,
+    db: MemoryDb,
+    held: HeldWants,
+    /// The stores a parked want is fetched from once its object is a member, by peer.
+    sources: Mutex<BTreeMap<PeerKey, MemoryPartStore>>,
+    /// The clock that stamps held wants, in milliseconds: moved by the test alone.
+    now_ms: AtomicU64,
+}
+
+/// A [`SyncBackend`] over a local [`MemoryPartStore`], in one of two modes. A backend serves
+/// one peer, the provider of what it parks.
 ///
-/// [`new`](Self::new) **downloads**: `record` applies the job's removals and adds (an add is
-/// pending until the object has a payload) and answers `Done` when the job needs no payload,
-/// `Fetch` otherwise; `fetch` copies the payload from a second store standing in for the peer,
-/// and errors when that store no longer has it (the peer dropped the content).
+/// **Membership is the backend's own** (see [`SyncBackend`]): `record` never touches it, and
+/// the test stands in for the node's membership source by calling
+/// [`member_added`](Self::member_added) and [`member_removed`](Self::member_removed), the
+/// simulated local keyhive stream.
 ///
-/// [`hinted`](Self::hinted) **takes the payload from the job**: `record` applies the removals,
-/// the job's payload hint and the adds in one transaction and answers `Done`; `fetch` has
-/// nothing to do.
+/// [`new`](Self::new) **downloads**: `record` answers `Fetch` for a job that needs a payload
+/// and names a part the object is a member of, `Done` for one that needs none; a job whose
+/// object is a member of none of its parts is parked in the held wants and answers `Done` (a
+/// notification before membership). `fetch` copies the payload from a second store standing
+/// in for the peer, and errors when that store no longer has it (the peer dropped the
+/// content). [`member_added`](Self::member_added) fetches what was parked.
+///
+/// [`hinted`](Self::hinted) **takes the payload from the job**: `record` merges the job's
+/// payload hint and answers `Done`, whether or not the object is a member (the bytes are
+/// here; a payload is not membership, and a partless payload is the store's own to collect);
+/// `fetch` has nothing to do, and nothing is ever parked.
 ///
 /// Both merge a peer's payload instead of overwriting with it: see [`LwwPayload`].
 ///
 /// Both run [`backend_laws`](super::backend_laws).
 pub struct MemoryBackend {
-    local: MemoryPartStore,
+    node: Arc<Node>,
+    peer: PeerKey,
     payloads: Payloads,
     fail_next_write: AtomicBool,
 }
 
 impl MemoryBackend {
-    pub fn new(local: MemoryPartStore, source: MemoryPartStore) -> Self {
-        Self {
+    /// A backend of the node whose store is `local`, pulling from the peer `peer`, whose store
+    /// is `source`.
+    pub fn new(peer: PeerKey, local: MemoryPartStore, source: MemoryPartStore) -> Self {
+        let db = MemoryDb::default();
+        let node = Node {
+            held: HeldTable::new(db.table(), HeldConfig::default()),
+            sources: Mutex::new([(peer.clone(), source.clone())].into()),
             local,
+            db,
+            now_ms: AtomicU64::new(0),
+        };
+        Self {
+            node: Arc::new(node),
+            peer,
             payloads: Payloads::Download(source),
             fail_next_write: AtomicBool::new(false),
         }
     }
 
     pub fn hinted(local: MemoryPartStore) -> Self {
-        Self {
+        let db = MemoryDb::default();
+        let node = Node {
+            held: HeldTable::new(db.table(), HeldConfig::default()),
+            sources: default(),
             local,
+            db,
+            now_ms: AtomicU64::new(0),
+        };
+        Self {
+            node: Arc::new(node),
+            peer: PeerKey::new(&[]),
             payloads: Payloads::Hint,
             fail_next_write: AtomicBool::new(false),
         }
     }
 
+    /// Bound the held wants. Called before the backend is shared with a sibling.
+    pub fn with_held_config(mut self, config: HeldConfig) -> Self {
+        let node = Arc::get_mut(&mut self.node).expect("configured before it is shared");
+        node.held = HeldTable::new(node.db.table(), config);
+        self
+    }
+
+    /// A backend of the same node for another peer, `peer`, whose store is `source`: one
+    /// store, one set of held wants and one clock, so a want advertised by either peer is
+    /// released by one membership.
+    pub fn sibling(&self, peer: PeerKey, source: MemoryPartStore) -> Self {
+        self.node
+            .sources
+            .lock()
+            .expect("sources lock poisoned")
+            .insert(peer.clone(), source.clone());
+        Self {
+            node: Arc::clone(&self.node),
+            peer,
+            payloads: Payloads::Download(source),
+            fail_next_write: AtomicBool::new(false),
+        }
+    }
+
     pub fn local(&self) -> &MemoryPartStore {
-        &self.local
+        &self.node.local
     }
 
     /// The store standing in for the peer; `None` for a [`hinted`](Self::hinted) backend.
@@ -233,10 +307,36 @@ impl MemoryBackend {
         }
     }
 
-    /// The membership source says `obj` is now a member of `part`.
+    /// The next write fails after staging everything, before it commits: a transaction that
+    /// is atomic leaves the store as it was.
+    pub fn fail_next_write(&self) {
+        self.fail_next_write.store(true, AtomicOrdering::SeqCst);
+    }
+
+    /// Move the clock that stamps held wants (their first-seen time, and so their TTL).
+    pub fn advance_clock(&self, by: Duration) {
+        let by = u64::try_from(by.as_millis()).expect("a short step");
+        self.node.now_ms.fetch_add(by, AtomicOrdering::SeqCst);
+    }
+
+    /// How many wants `peer` has parked.
+    pub async fn parked_by(&self, peer: &PeerKey) -> Res<usize> {
+        self.node.held.held_by(peer).await
+    }
+
+    /// The membership source says `obj` is now a member of `part`; a notification that was
+    /// parked for the object is fetched from the peers that advertised it (law 9).
+    ///
+    /// The want is released only once its payload is durable: when the peer is gone, the
+    /// error reaches the source, which retries, and the want stays parked. A want no known
+    /// peer advertised stays parked too.
     pub async fn member_added(&self, obj: &ObjKey, part: &PartKey) -> Res<()> {
-        self.write(vec![PartWrite::AddMembers(vec![(obj.clone(), part.clone())])])
-            .await
+        self.write(vec![PartWrite::AddMembers(vec![(
+            obj.clone(),
+            part.clone(),
+        )])])
+        .await?;
+        self.fetch_parked(obj).await
     }
 
     /// The membership source says `obj` is no longer a member of `part`.
@@ -248,22 +348,72 @@ impl MemoryBackend {
         .await
     }
 
-    /// The next write fails after staging everything, before it commits: a transaction that
-    /// is atomic leaves the store as it was.
-    pub fn fail_next_write(&self) {
-        self.fail_next_write.store(true, AtomicOrdering::SeqCst);
+    /// Fetch the want parked for `obj` from its providers, in order, and release it.
+    async fn fetch_parked(&self, obj: &ObjKey) -> Res<()> {
+        let held = &self.node.held;
+        let Some(want) = held.get(&mut self.node.db.begin(), obj).await? else {
+            return Ok(());
+        };
+        let sources = want
+            .providers
+            .iter()
+            .filter_map(|provider| {
+                self.node
+                    .sources
+                    .lock()
+                    .expect("sources lock poisoned")
+                    .get(provider)
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        // Every provider's payload is merged, not the first that answers: the want says the
+        // object changed, and a provider that is behind another must not hide the newer
+        // payload the other advertised (the payloads merge, so the order is free). One that
+        // fails leaves the want parked for a retry.
+        for source in sources {
+            self.download(&source, obj).await?;
+        }
+        let mut tx = self.node.db.begin();
+        held.release(&mut tx, obj).await?;
+        tx.commit()?;
+        Ok(())
     }
 
-    /// Whether a job moves the payload: any job that adds, and a content job (no parts at
-    /// all). A removal alone does not.
-    fn wants_payload(job: &ObjJob) -> bool {
-        !job.add.is_empty() || job.remove.is_empty()
+    /// Whether `obj` is a member of any of `parts`, pending memberships included.
+    async fn is_member(&self, obj: &ObjKey, parts: &[PartKey]) -> Res<bool> {
+        Ok(self
+            .node
+            .local
+            .obj_states(std::slice::from_ref(obj))
+            .await?
+            .remove(0)
+            .is_some_and(|state| parts.iter().any(|part| state.parts.contains(part))))
+    }
+
+    /// Park a notification for an object that is not a member (law 9).
+    async fn park(&self, job: &ObjJob) -> Res<()> {
+        // What a parked want is for is the object's current payload, whichever peer holds it:
+        // one identity for every advert of an object, so the providers union.
+        let advert = Advert::new(self.peer.clone(), 0, ByteKey::new(&[]));
+        let now_ms = self.node.now_ms.load(AtomicOrdering::SeqCst);
+        let mut tx = self.node.db.begin();
+        let held = self
+            .node
+            .held
+            .hold(&mut tx, &job.obj, advert, now_ms)
+            .await?;
+        tx.commit()?;
+        if !held.dropped.is_empty() {
+            tracing::debug!(dropped = ?held.dropped, "held wants were dropped");
+        }
+        Ok(())
     }
 
     /// Whether a peer's payload for `obj` replaces what the backend holds: when it holds none,
     /// or the peer's wins under [`LwwPayload`]'s order.
     async fn adopts(&self, obj: &ObjKey, incoming: &ObjPayload) -> Res<bool> {
         let held = self
+            .node
             .local
             .obj_states(std::slice::from_ref(obj))
             .await?
@@ -273,9 +423,10 @@ impl MemoryBackend {
     }
 
     async fn write(&self, writes: Vec<PartWrite>) -> Res<()> {
-        let mut tx = self.local.begin();
+        let local = &self.node.local;
+        let mut tx = local.begin();
         for write in writes {
-            laws::stage(&self.local, &mut tx, write).await?;
+            laws::stage(local, &mut tx, write).await?;
         }
         if self.fail_next_write.swap(false, AtomicOrdering::SeqCst) {
             // dropped uncommitted: rolled back
@@ -284,56 +435,66 @@ impl MemoryBackend {
         tx.commit();
         Ok(())
     }
+
+    /// Copy `obj`'s payload from `source`, merging.
+    async fn download(&self, source: &MemoryPartStore, obj: &ObjKey) -> Res<()> {
+        let state = source
+            .obj_states(std::slice::from_ref(obj))
+            .await?
+            .remove(0);
+        let Some((payload, _)) = state.and_then(|state| state.content) else {
+            eyre::bail!("the peer no longer holds the payload of {obj:?}");
+        };
+        if !self.adopts(obj, &payload).await? {
+            return Ok(());
+        }
+        self.write(vec![PartWrite::SetPayloads(vec![(obj.clone(), payload)])])
+            .await
+    }
 }
 
 impl SyncBackend for MemoryBackend {
     async fn record(&self, job: ObjJob) -> Res<Settle> {
-        let members = |parts: &[PartKey]| {
-            parts
-                .iter()
-                .map(|part| (job.obj.clone(), part.clone()))
-                .collect::<Vec<_>>()
-        };
-        let mut writes = vec![];
-        if !job.remove.is_empty() {
-            writes.push(PartWrite::RemoveMembers(members(&job.remove)));
-        }
+        // The job's parts are a notification: nothing below changes membership (law 8).
         if let (Payloads::Hint, Some(payload)) = (&self.payloads, &job.payload)
             && self.adopts(&job.obj, payload).await?
         {
-            writes.push(PartWrite::SetPayloads(vec![(
+            self.write(vec![PartWrite::SetPayloads(vec![(
                 job.obj.clone(),
                 payload.clone(),
-            )]));
+            )])])
+            .await?;
         }
-        if !job.add.is_empty() {
-            writes.push(PartWrite::AddMembers(members(&job.add)));
+        if matches!(self.payloads, Payloads::Hint) {
+            return Ok(Settle::Done);
         }
-        self.write(writes).await?;
-        Ok(match self.payloads {
-            Payloads::Download(_) if Self::wants_payload(&job) => Settle::Fetch,
-            _ => Settle::Done,
-        })
+        if job.add.is_empty() {
+            // a removal moves no payload; a job with no parts at all is content
+            return Ok(if job.remove.is_empty() {
+                Settle::Fetch
+            } else {
+                Settle::Done
+            });
+        }
+        if self.is_member(&job.obj, &job.add).await? {
+            return Ok(Settle::Fetch);
+        }
+        self.park(&job).await?;
+        // The source may have added the object between the check and the park, and its hook
+        // found nothing to release: look again, now that the want is visible to it.
+        if self.is_member(&job.obj, &job.add).await? {
+            self.fetch_parked(&job.obj).await?;
+        }
+        Ok(Settle::Done)
     }
 
     async fn fetch(&self, job: ObjJob) -> Res<()> {
         let Payloads::Download(source) = &self.payloads else {
             return Ok(());
         };
-        if !Self::wants_payload(&job) {
+        if job.add.is_empty() && !job.remove.is_empty() {
             return Ok(());
         }
-        let state = source
-            .obj_states(std::slice::from_ref(&job.obj))
-            .await?
-            .remove(0);
-        let Some((payload, _)) = state.and_then(|state| state.content) else {
-            eyre::bail!("the peer no longer holds the payload of {:?}", job.obj);
-        };
-        if !self.adopts(&job.obj, &payload).await? {
-            return Ok(());
-        }
-        self.write(vec![PartWrite::SetPayloads(vec![(job.obj, payload)])])
-            .await
+        self.download(source, &job.obj).await
     }
 }

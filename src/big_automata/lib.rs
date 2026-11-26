@@ -10,6 +10,7 @@ mod interlude {
 
 pub use ids::BuckId;
 pub use ids::BuckLevel;
+pub use ids::ByteKey;
 pub use ids::ObjKey;
 pub use ids::PartKey;
 pub use ids::PeerKey;

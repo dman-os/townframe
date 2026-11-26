@@ -202,6 +202,7 @@ async fn law_5_cursor_writes_land_in_order_and_never_go_back() {
     let peer = ScriptedPeer::new();
     let local = MemoryPartStore::default();
     let backend = ScriptedBackend::new(local.clone(), peer.store().clone());
+    peer.follow(&local);
     let config = DriverConfig::new(principal(LOCAL_PEER), "memory");
     let (driver, driver_loop) = PeerDriver::start(
         config.clone(),
@@ -282,11 +283,16 @@ async fn law_1_the_loop_runs_locally_over_a_backend_that_is_not_send() {
             let local = MemoryPartStore::default();
             let facts = Facts::new();
             let config = DriverConfig::new(principal(LOCAL_PEER), "memory");
+            peer.follow(&local);
             let (driver, driver_loop) = PeerDriver::start(
                 config.clone(),
                 clock(),
                 facts.clone(),
-                LocalBackend(MemoryBackend::new(local.clone(), peer.store().clone())),
+                LocalBackend(MemoryBackend::new(
+                    PeerKey::new(&[1]),
+                    local.clone(),
+                    peer.store().clone(),
+                )),
                 MemoryPeerCursors::default(),
                 local.clone(),
             );

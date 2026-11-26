@@ -100,6 +100,7 @@ async fn a_call_holding_what_the_cursor_write_needs_is_polled_while_the_loop_wai
     peer.publish(1, &[1], 10).await;
     peer.publish(1, &[2], 10).await;
     let local = MemoryPartStore::default();
+    peer.follow(&local);
     let writer = Writer::new(tokio::sync::Semaphore::new(1));
     let (asked_tx, asked_rx) = tokio::sync::watch::channel(false);
     let (driver, driver_loop) = PeerDriver::start(
@@ -107,7 +108,7 @@ async fn a_call_holding_what_the_cursor_write_needs_is_polled_while_the_loop_wai
         clock(),
         Facts::new(),
         HoldingBackend {
-            memory: MemoryBackend::new(local.clone(), peer.store().clone()),
+            memory: MemoryBackend::new(PeerKey::new(&[1]), local.clone(), peer.store().clone()),
             writer: Arc::clone(&writer),
             held: obj(2),
             cursor_write_asked: asked_rx,

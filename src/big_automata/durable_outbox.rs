@@ -19,6 +19,7 @@
 //! | [`WantsTable`] | the writer: `record`, `withdraw` and `land` inside the caller's okv transaction |
 //! | [`Outbox`] | the sans-IO machine: the index of every live want, what to fetch, from whom, when |
 //! | [`OutboxHandle::start`] | the loop that follows the table, runs the machine's commands and lands wants |
+//! | [`HeldTable`] | wants parked until the node is a member of the object's part (laws 16 to 20) |
 //!
 //! # The row
 //!
@@ -44,7 +45,9 @@
 //!    are the new advertiser alone, since the others advertised the old one. A record that
 //!    changes nothing writes nothing (a rev wakes every follower).
 //! 3. **Withdrawal is a tombstone**, written only if the row is live. A tombstone is also what
-//!    a landing leaves.
+//!    a landing leaves. Dropping one provider ([`WantsTable::drop_provider`]) rewrites the row
+//!    without it (the same version and identity, so a running fetch is untouched, law 6), and
+//!    is a withdrawal when it was the last.
 //!
 //! **The machine**
 //!
@@ -106,6 +109,10 @@
 //! 15. **Errors.** A fetch error is a network error and backs off (law 10). A store error, a
 //!     row that does not decode, or a call the driver never issued is a bug and crashes.
 //!
+//! **Held wants** (laws 16 to 20, in [`held`]): a notification of an object the node is not yet
+//! a member of waits in a table of its own, bounded per peer and by a TTL, until the node's own
+//! membership source adds the object.
+//!
 //! # Testing
 //!
 //! Each law above has a `law_N_...` test. `oracle` is a naive machine that
@@ -122,6 +129,7 @@ use crate::okv::Mutation;
 use crate::okv::OkvStore;
 
 pub mod driver;
+pub mod held;
 mod machine;
 #[cfg(test)]
 mod oracle;
@@ -131,6 +139,10 @@ mod tests;
 pub use driver::DriverConfig;
 pub use driver::OutboxBackend;
 pub use driver::OutboxHandle;
+pub use held::Dropped;
+pub use held::Held;
+pub use held::HeldConfig;
+pub use held::HeldTable;
 pub use machine::CallId;
 pub use machine::Command;
 pub use machine::Config;
@@ -287,6 +299,29 @@ where
             return Ok(false);
         }
         self.store.apply(tx, vec![Mutation::Delete { key }]).await?;
+        Ok(true)
+    }
+
+    /// Law 3: take `peer` out of the row's providers, keeping its version and identity; the
+    /// last provider's removal is a withdrawal. Whether the row held the peer.
+    pub async fn drop_provider(&self, tx: &mut S::Tx, obj: &ObjKey, peer: &PeerKey) -> Res<bool> {
+        let key = obj.as_bytes().to_vec();
+        let Some(row) = self.store.get(tx, &key).await? else {
+            return Ok(false);
+        };
+        let mut want = Want::decode(&row);
+        if !want.providers.remove(peer) {
+            return Ok(false);
+        }
+        let mutation = if want.providers.is_empty() {
+            Mutation::Delete { key }
+        } else {
+            Mutation::Put {
+                key,
+                value: want.encode(),
+            }
+        };
+        self.store.apply(tx, vec![mutation]).await?;
         Ok(true)
     }
 

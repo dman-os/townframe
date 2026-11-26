@@ -392,13 +392,25 @@ async fn a_peer_never_changes_membership<R: BackendRig>(rig: &R) -> Res<()> {
     rig.member_added(&p.backend, &obj(1), &part(3)).await?;
     // an add of parts the source never delivered
     p.pass(&Probe::<R>::job(1, &[1, 2], &[], 10)).await?;
-    assert_eq!(parts(&p).await?, [part(3)].into(), "a peer's add was applied");
+    assert_eq!(
+        parts(&p).await?,
+        [part(3)].into(),
+        "a peer's add was applied"
+    );
     // a removal of a part the source still has
     p.pass(&Probe::<R>::job(1, &[], &[3], 10)).await?;
-    assert_eq!(parts(&p).await?, [part(3)].into(), "a peer's removal was applied");
+    assert_eq!(
+        parts(&p).await?,
+        [part(3)].into(),
+        "a peer's removal was applied"
+    );
     // both at once
     p.pass(&Probe::<R>::job(1, &[1], &[3], 10)).await?;
-    assert_eq!(parts(&p).await?, [part(3)].into(), "a peer's add and remove were applied");
+    assert_eq!(
+        parts(&p).await?,
+        [part(3)].into(),
+        "a peer's add and remove were applied"
+    );
     // the source removes it, then a stale echo of the peer's add comes back
     rig.member_removed(&p.backend, &obj(1), &part(3)).await?;
     assert_eq!(parts(&p).await?, BTreeSet::new(), "the source's removal");
@@ -434,12 +446,21 @@ async fn notification_before_membership<R: BackendRig>(rig: &R) -> Res<()> {
         );
     }
     rig.member_added(&p.backend, &obj(1), &part(1)).await?;
-    p.expect(1, Some(10), &[1], "the membership did not fetch what was parked")
-        .await?;
+    p.expect(
+        1,
+        Some(10),
+        &[1],
+        "the membership did not fetch what was parked",
+    )
+    .await?;
     // an object the notification never named is not fetched by another's membership
     rig.member_added(&p.backend, &obj(2), &part(1)).await?;
-    p.expect(2, None, &[], "a membership fetched an object nobody advertised")
-        .await
+    assert_eq!(
+        p.held(&obj(2)).await?.0,
+        None,
+        "a membership fetched an object nobody advertised"
+    );
+    Ok(())
 }
 
 /// Law 10: a member that the source removed and re-adds catches up with what the peer

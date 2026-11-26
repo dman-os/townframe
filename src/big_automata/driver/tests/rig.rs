@@ -96,6 +96,12 @@ struct PeerInner {
     /// The next this many calls fail as transport failures.
     fail_next: AtomicUsize,
     log: Mutex<PeerLog>,
+    /// What `publish` made members, in order.
+    published: Mutex<Vec<(u8, u8)>>,
+    /// The local stores whose membership source follows this peer's: the simulated local
+    /// keyhive stream. A peer's job never changes membership, so a test that expects an
+    /// object to land says so here, by making the local store a follower.
+    followers: Mutex<Vec<MemoryPartStore>>,
 }
 
 /// A peer's side of the transport: the real replay and sync responders over a memory store, as
@@ -116,12 +122,36 @@ impl ScriptedPeer {
                 down: AtomicBool::new(false),
                 fail_next: AtomicUsize::new(0),
                 log: default(),
+                published: default(),
+                followers: default(),
             }),
         }
     }
 
     pub(super) fn store(&self) -> &MemoryPartStore {
         &self.inner.store
+    }
+
+    /// `local`'s membership follows what this peer publishes, from now on and for everything
+    /// published so far: the local keyhive stream agrees with the group.
+    pub(super) fn follow(&self, local: &MemoryPartStore) {
+        let published = self.inner.published.lock().unwrap().clone();
+        futures::executor::block_on(Self::deliver(local, &published));
+        self.inner.followers.lock().unwrap().push(local.clone());
+    }
+
+    async fn deliver(local: &MemoryPartStore, members: &[(u8, u8)]) {
+        let mut tx = local.begin();
+        for &(at, index) in members {
+            stage(
+                local,
+                &mut tx,
+                PartWrite::AddMembers(vec![(obj(at), part(index))]),
+            )
+            .await
+            .expect("stage");
+        }
+        tx.commit();
     }
 
     pub(super) async fn commit(&self, writes: Vec<PartWrite>) -> Option<u64> {
@@ -142,6 +172,15 @@ impl ScriptedPeer {
         let sets: Vec<_> = objs.iter().map(|obj| (*obj, value)).collect();
         let adds: Vec<_> = objs.iter().map(|obj| (*obj, index)).collect();
         self.commit(vec![LwwPayload::set(&sets), add(&adds)]).await;
+        self.inner
+            .published
+            .lock()
+            .unwrap()
+            .extend(adds.iter().copied());
+        let followers = self.inner.followers.lock().unwrap().clone();
+        for local in followers {
+            Self::deliver(&local, &adds).await;
+        }
     }
 
     pub(super) fn set_down(&self, down: bool) {
@@ -374,7 +413,7 @@ impl ScriptedBackend {
     pub(super) fn new(local: MemoryPartStore, source: MemoryPartStore) -> Self {
         Self {
             inner: Arc::new(BackendInner {
-                memory: MemoryBackend::new(local, source),
+                memory: MemoryBackend::new(PeerKey::new(&[1]), local, source),
                 state: default(),
                 hold_fetches: tokio::sync::watch::channel(false).0,
                 fail_records: AtomicUsize::new(0),
@@ -479,6 +518,7 @@ impl Rig {
         let scripted = ScriptedPeer::new();
         let local = MemoryPartStore::default();
         let backend = ScriptedBackend::new(local.clone(), scripted.store().clone());
+        scripted.follow(&local);
         let cursors = MemoryPeerCursors::default();
         let mut config = DriverConfig::new(principal(peer), "memory");
         config.window = 8;

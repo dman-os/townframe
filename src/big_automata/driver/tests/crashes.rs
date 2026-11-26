@@ -93,7 +93,12 @@ fn start(
     cursors: MemoryPeerCursors,
     local: FlakyStore,
 ) -> tokio::task::JoinHandle<()> {
-    let backend = MemoryBackend::new(local.inner.clone(), peer.store().clone());
+    peer.follow(&local.inner);
+    let backend = MemoryBackend::new(
+        PeerKey::new(&[1]),
+        local.inner.clone(),
+        peer.store().clone(),
+    );
     let (driver, driver_loop) = PeerDriver::start(
         DriverConfig::new(principal(LOCAL_PEER), "memory"),
         clock(),

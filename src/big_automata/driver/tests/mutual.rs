@@ -114,12 +114,17 @@ impl Node {
     /// Start a driver pulling both parts from `from`; it connects when asked to.
     async fn pull_from(&mut self, from: &Node) {
         let config = DriverConfig::new(Self::key_of(from), "memory");
+        from.peer.follow(self.store());
         let (driver, driver_loop) = PeerDriver::start(
             config,
             clock(),
             self.facts.clone(),
             Budgeted {
-                inner: MemoryBackend::new(self.store().clone(), from.store().clone()),
+                inner: MemoryBackend::new(
+                    Self::key_of(from),
+                    self.store().clone(),
+                    from.store().clone(),
+                ),
                 calls: Arc::clone(&self.calls),
             },
             MemoryPeerCursors::default(),
