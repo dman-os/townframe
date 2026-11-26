@@ -24,10 +24,10 @@ keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b00
 keyhive_crypto = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5", default-features = false, features = ["std"] }
 keyhive_codec = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5", default-features = false, features = ["std"] }
 keyline = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5", default-features = false, features = ["std"] }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "f34d5a914add15562c60f42c48b8f8cc00e16261" }
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "f34d5a914add15562c60f42c48b8f8cc00e16261" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "f34d5a914add15562c60f42c48b8f8cc00e16261" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "f34d5a914add15562c60f42c48b8f8cc00e16261" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "d5d4e2424fb176af2b9c053df22a19d75f0dfc97" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "d5d4e2424fb176af2b9c053df22a19d75f0dfc97" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "d5d4e2424fb176af2b9c053df22a19d75f0dfc97" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "d5d4e2424fb176af2b9c053df22a19d75f0dfc97" }
 automerge = "0.12.0"
 future_form.workspace = true
 thiserror.workspace = true
@@ -48,4 +48,4 @@ async-trait.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 # The upstream `MinimizedTreeStore` conformance checks, and the fork's signer for sealing fixtures.
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27", features = ["conformance", "test_utils"] }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "d5d4e2424fb176af2b9c053df22a19d75f0dfc97", features = ["conformance", "test_utils"] }

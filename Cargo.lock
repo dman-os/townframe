@@ -14876,7 +14876,7 @@ dependencies = [
 [[package]]
 name = "sedimentree_core"
 version = "0.17.0"
-source = "git+https://github.com/dman-os/subduction?rev=f34d5a914add15562c60f42c48b8f8cc00e16261#f34d5a914add15562c60f42c48b8f8cc00e16261"
+source = "git+https://github.com/dman-os/subduction?rev=d5d4e2424fb176af2b9c053df22a19d75f0dfc97#d5d4e2424fb176af2b9c053df22a19d75f0dfc97"
 dependencies = [
  "arbitrary",
  "async-lock",
@@ -16204,7 +16204,7 @@ dependencies = [
 [[package]]
 name = "subduction_core"
 version = "0.21.0"
-source = "git+https://github.com/dman-os/subduction?rev=f34d5a914add15562c60f42c48b8f8cc00e16261#f34d5a914add15562c60f42c48b8f8cc00e16261"
+source = "git+https://github.com/dman-os/subduction?rev=d5d4e2424fb176af2b9c053df22a19d75f0dfc97#d5d4e2424fb176af2b9c053df22a19d75f0dfc97"
 dependencies = [
  "arbitrary",
  "async-channel",
@@ -16243,7 +16243,7 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.12.0"
-source = "git+https://github.com/dman-os/subduction?rev=f34d5a914add15562c60f42c48b8f8cc00e16261#f34d5a914add15562c60f42c48b8f8cc00e16261"
+source = "git+https://github.com/dman-os/subduction?rev=d5d4e2424fb176af2b9c053df22a19d75f0dfc97#d5d4e2424fb176af2b9c053df22a19d75f0dfc97"
 dependencies = [
  "arbitrary",
  "ed25519-dalek 2.2.0",
@@ -16325,7 +16325,7 @@ dependencies = [
 [[package]]
 name = "subduction_keyhive"
 version = "0.13.0"
-source = "git+https://github.com/dman-os/subduction?rev=f34d5a914add15562c60f42c48b8f8cc00e16261#f34d5a914add15562c60f42c48b8f8cc00e16261"
+source = "git+https://github.com/dman-os/subduction?rev=d5d4e2424fb176af2b9c053df22a19d75f0dfc97#d5d4e2424fb176af2b9c053df22a19d75f0dfc97"
 dependencies = [
  "async-lock",
  "base64 0.22.1",
