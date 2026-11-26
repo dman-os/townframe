@@ -15,7 +15,7 @@ use keyhive_crypto::identifier::Identifier;
 use keyline_memory::state::State;
 
 /// Closures held before the cache empties itself.
-const CAPACITY: usize = 16;
+const CAPACITY: usize = 64;
 
 const ERROR_MUTEX: &str = "the evaluations mutex is not poisoned: nothing panics under it";
 

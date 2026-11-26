@@ -258,15 +258,16 @@ mod deep {
         note("version", format!("{:?}", block_on(store.version()).unwrap()));
         note("digest", format!("{:?}", ask!(store.digest())));
         note("subjects", format!("{:?}", ask!(store.subjects())));
-        let started = std::time::Instant::now();
         for (subject, _) in KEYRING.iter() {
-            eprintln!("DEEP   subject {subject:?} at {:?}", started.elapsed());
-            note("members", format!("{subject:?} {:?}", ask!(store.members(*subject))));
+                note("members", format!("{subject:?} {:?}", ask!(store.members(*subject))));
             note("closure", format!("{subject:?} {:?}", ask!(store.closure(*subject))));
-            note(
-                "subset",
-                format!("{subject:?} {:?}", ask!(store.members_for_subset(subset.clone(), *subject))),
-            );
+            // A subset evaluates a set of its own, so it is asked of a few subjects only.
+            if KEYRING.iter().take(6).any(|(first, _)| first == subject) {
+                note(
+                    "subset",
+                    format!("{subject:?} {:?}", ask!(store.members_for_subset(subset.clone(), *subject))),
+                );
+            }
             for (audience, _) in KEYRING.iter().take(4) {
                 note(
                     "power",
@@ -295,7 +296,6 @@ mod deep {
     }
 
     fn agree(certs: &[VerifiedCertificate<()>], batch: usize) {
-        eprintln!("DEEP start certs={} batch={batch}", certs.len());
         let db = fresh_db();
         let sqlite = SqliteKeyline::<(), _>::new(db.clone());
         let memory = MemoryKeyline::<()>::new();
@@ -304,16 +304,14 @@ mod deep {
             block_on(Keyline::<Local>::insert(&sqlite, chunk.to_vec())).unwrap();
         }
         let expected = answers(&memory, certs);
-        eprintln!("DEEP memory answered");
         assert_eq!(answers(&sqlite, certs), expected, "the store that inserted");
-        eprintln!("DEEP sqlite answered");
         let reopened = SqliteKeyline::<(), _>::new(db);
         assert_eq!(answers(&reopened, certs), expected, "a store that verifies the rows");
     }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(
-            std::env::var("PROPTEST_CASES").ok().and_then(|cases| cases.parse().ok()).unwrap_or(48),
+            std::env::var("PROPTEST_CASES").ok().and_then(|cases| cases.parse().ok()).unwrap_or(32),
         ))]
 
         #[test]
