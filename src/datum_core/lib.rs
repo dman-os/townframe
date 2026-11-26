@@ -8,6 +8,7 @@
 //! `big_cabinet_core::datum`. The `datum` macro in the `macros` crate emits against this API
 //! through the path it is given with `runtime = …`.
 
+mod dpath;
 mod member;
 mod nsid;
 mod shape;
@@ -17,6 +18,8 @@ mod wire;
 /// For the `datum` macro, which joins a const authority to a member's name at compile time.
 #[doc(hidden)]
 pub use const_format;
+pub use dpath::Dpath;
+pub use dpath::InvalidDpath;
 pub use member::DatumMember;
 pub use member::is_nsid;
 pub use member::is_nsid_authority;
