@@ -1,5 +1,6 @@
 # Upstream study: keyhive integration, checkpoints, author filtering, automerge 0.12
 
+Status: Findings (facts marked [F], inferences [I], unverified [?]); no decisions.
 Owner: the automata lane (prod-readiness).
 Scope: how upstream (keyhive, subduction `keyline-take-2`, automerge-repo-keyhive and its
 successor, automerge) handles what `big_repo::runtime` must decide. Read-only study.

@@ -1,5 +1,6 @@
 # big_repo::runtime: high-level design
 
+Status: Direction and decisions so far (operator-approved); designs per machine are proposals until the file-by-file pass settles them.
 Owner: the automata lane (prod-readiness).
 Scope: the replacement for `big_repo::runtime2`, captured as discussed with the operator. This
 is not a full design. It records the direction and the decisions so far. Each part gets designed

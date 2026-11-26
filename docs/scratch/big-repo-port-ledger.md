@@ -3,6 +3,7 @@
 Status: Living ledger for the file-by-file port of `src/big_repo` into the new `big_repo::runtime`
 module (replacing `runtime2`). Companion to `prod-readiness-ledger.md` (Phase 0, W2, W3) and
 `big-automata-port-ledger.md` (same table format).
+Owner: the automata lane (prod-readiness).
 Scope: `src/big_repo` (62,317 lines of Rust in 77 files, as of `abc4f999`), plus the cabinet-side
 automerge usage in the last section.
 Updated: 2026-11-26. Read-only mapping: nothing here was built or run. Every claim is a `file:line`
