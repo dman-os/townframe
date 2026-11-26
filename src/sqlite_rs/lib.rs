@@ -1,8 +1,9 @@
 //! Portable SQLite query and result abstractions.
 //!
-//! Native builds additionally expose the threaded `SqliteRuntime`; WASM builds
-//! use the same values, row decoding, cardinality checks, and executor traits
-//! over the `townframe:sqlite` component interface.
+//! Native builds additionally expose `SqliteRuntime`, which runs SQLite either on a pool of
+//! worker threads or inline on the calling task (`Execution`). WASM builds use the same
+//! values, row decoding, cardinality checks, and executor traits over the `townframe:sqlite`
+//! component interface, and `WitDb` is the `SqliteDb` a guest gets from its host connection.
 
 mod portable;
 pub use portable::ExecuteResult;
@@ -19,6 +20,8 @@ pub use portable::SqlValue;
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::Database;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::Execution;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::INSTR_SQL; // INSTR
 #[cfg(not(target_arch = "wasm32"))]
@@ -48,7 +51,14 @@ pub use native::test_support;
 pub mod gen_tests;
 
 mod handle;
+pub use handle::ScopedFuture;
 pub use handle::SqliteDb;
+
+mod wit;
+pub use wit::WitConnection;
+pub use wit::WitDb;
+pub use wit::WitRead;
+pub use wit::WitWrite;
 
 mod query;
 pub use query::BackendRef;
@@ -60,6 +70,7 @@ pub use query::Json;
 pub use query::QueryExecutor;
 pub use query::Sql;
 pub use query::SqliteBackend;
+pub use query::SqliteReadBackend;
 
 #[cfg(test)]
 pub use crate as sqlite_rs_alias;

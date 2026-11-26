@@ -109,8 +109,14 @@ impl SqliteDb for Recording {
     type Write = RecordingWrite;
     type Read = RecordingRead;
 
+    fn supports_concurrent_readers(&self) -> bool {
+        self.db.supports_concurrent_readers()
+    }
+
     async fn begin_write(&self) -> SqlResult<RecordingWrite> {
-        self.counts.write_transactions.fetch_add(1, Ordering::SeqCst);
+        self.counts
+            .write_transactions
+            .fetch_add(1, Ordering::SeqCst);
         Ok(RecordingWrite {
             tx: self.db.begin_write().await?,
             log: Arc::clone(&self.log),
@@ -138,4 +144,3 @@ impl SqliteDb for Recording {
         tx.tx.rollback().await
     }
 }
-

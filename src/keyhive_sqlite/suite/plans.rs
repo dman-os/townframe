@@ -89,6 +89,10 @@ impl SqliteDb for Recording {
     type Write = RecordingWrite;
     type Read = RecordingRead;
 
+    fn supports_concurrent_readers(&self) -> bool {
+        self.db.supports_concurrent_readers()
+    }
+
     async fn begin_write(&self) -> SqlResult<RecordingWrite> {
         Ok(RecordingWrite {
             tx: self.db.begin_write().await?,
@@ -306,7 +310,10 @@ fn every_statement_is_served_by_an_index() {
             );
         }
         // The counter is a read of one row by its key, however many operations are held.
-        has(queries::TOTAL_OP_COUNT_SQL, "SEARCH kh_op_count USING INTEGER PRIMARY KEY");
+        has(
+            queries::TOTAL_OP_COUNT_SQL,
+            "SEARCH kh_op_count USING INTEGER PRIMARY KEY",
+        );
         // The loose index scans step with a search, never a scan of the operations.
         for sql in [queries::INDIVIDUALS_SQL, queries::DOCUMENTS_SQL] {
             let lines = plan_of(sql);

@@ -88,6 +88,10 @@ impl SqliteDb for Recording {
     type Write = RecordingWrite;
     type Read = RecordingRead;
 
+    fn supports_concurrent_readers(&self) -> bool {
+        self.db.supports_concurrent_readers()
+    }
+
     async fn begin_write(&self) -> SqlResult<RecordingWrite> {
         Ok(RecordingWrite {
             tx: self.db.begin_write().await?,

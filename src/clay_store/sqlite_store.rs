@@ -12,7 +12,7 @@ pub struct SqliteStore {
     db: Database,
 }
 
-/// Splits `SqlError` at the edge: `Closed` and `Unexpected` are runtime/I/O
+/// Splits `SqlError` at the edge: `Closed`, `Busy` and `Unexpected` are runtime/I/O
 /// failures and become `StoreError`; the rest mean our own generated queries
 /// are wrong, an invariant break, so they panic.
 trait SqlResultExt<T> {
@@ -22,7 +22,9 @@ trait SqlResultExt<T> {
 impl<T> SqlResultExt<T> for Result<T, SqlError> {
     fn or_store_error(self) -> Result<T, StoreError> {
         self.map_err(|error| match error {
-            SqlError::Closed | SqlError::Unexpected(_) => StoreError::backend(error),
+            SqlError::Closed | SqlError::Busy(_) | SqlError::Unexpected(_) => {
+                StoreError::backend(error)
+            }
             SqlError::InvalidParams(_)
             | SqlError::InvalidQuery(_)
             | SqlError::Decode { .. }

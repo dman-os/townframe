@@ -1,48 +1,6 @@
+use super::exec::SerialQueue;
 use super::*;
 use std::sync::atomic::AtomicBool;
-
-#[derive(Default)]
-pub(crate) struct SerialQueue {
-    state: StdMutex<(bool, VecDeque<Job>)>,
-}
-
-impl SerialQueue {
-    pub(crate) fn enqueue(
-        self: &Arc<Self>,
-        sender: &std::sync::mpsc::Sender<Job>,
-        job: Job,
-    ) -> SqlResult<()> {
-        let mut state = self.state.lock().expect(ERROR_MUTEX);
-        state.1.push_back(job);
-        if !state.0 {
-            state.0 = true;
-            let queue = Arc::clone(self);
-            if sender
-                .send(Box::new(move || {
-                    loop {
-                        let job = {
-                            let mut state = queue.state.lock().expect(ERROR_MUTEX);
-                            match state.1.pop_front() {
-                                Some(job) => job,
-                                None => {
-                                    state.0 = false;
-                                    return;
-                                }
-                            }
-                        };
-                        job();
-                    }
-                }))
-                .is_err()
-            {
-                state.0 = false;
-                state.1.clear();
-                return Err(SqlError::Closed);
-            }
-        }
-        Ok(())
-    }
-}
 
 /// An owned write transaction. Dropping an unfinished transaction
 /// schedules a rollback on the shared workers; the connection is not
@@ -51,7 +9,7 @@ impl SerialQueue {
 pub struct Tx {
     pub(crate) db: Database,
     pub(crate) lease: Option<Lease>,
-    pub(crate) queue: Arc<SerialQueue>,
+    pub(super) queue: Option<Arc<SerialQueue>>,
     pub(crate) next_savepoint: u64,
 }
 
@@ -118,37 +76,41 @@ impl Tx {
         let conn = self.lease.as_ref().expect("tx lease").slot();
         self.db
             .runtime
-            .call_on(Some(&self.queue), move || {
+            .exec
+            .call_on(self.queue.as_ref(), move || {
                 let mut conn = conn.lock().expect(ERROR_MUTEX);
                 operation(&mut conn)
             })
             .await
     }
 
+    /// One statement of this transaction, run in submission order with the others.
+    async fn run_statement<T: Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<SqlValue>,
+        statement: StatementFn<T>,
+    ) -> SqlResult<T> {
+        let connection = self.lease.as_ref().expect("tx lease").connection();
+        self.db
+            .runtime
+            .exec
+            .statement(self.queue.as_ref(), connection, sql, params, statement)
+            .await
+    }
+
     pub async fn query(&self, sql: &str, params: impl IntoParams) -> SqlResult<ResultSet> {
-        let sql = sql.to_string();
-        let params = params.into_params();
-        self.run(move |conn| run_query(conn, &sql, &params)).await
+        self.run_statement(sql, params.into_params(), run_query)
+            .await
     }
 
     pub async fn execute(&self, sql: &str, params: impl IntoParams) -> SqlResult<ExecuteResult> {
-        let sql = sql.to_string();
-        let params = params.into_params();
-        self.run(move |conn| run_execute(conn, &sql, &params)).await
+        self.run_statement(sql, params.into_params(), run_execute)
+            .await
     }
 
     pub async fn execute_batch(&self, sql: &str) -> SqlResult<ExecuteResult> {
-        let sql = sql.to_string();
-        self.run(move |conn| {
-            let changes_before = conn.total_changes();
-            conn.execute_batch(&sql).map_err(SqlError::from)?;
-            Ok(ExecuteResult {
-                rows_affected: conn.total_changes() - changes_before,
-                last_insert_rowid: conn.last_insert_rowid(),
-                result_set: ResultSet::default(),
-            })
-        })
-        .await
+        self.run_statement(sql, Vec::new(), run_execute_batch).await
     }
 
     pub async fn commit(mut self) -> SqlResult<()> {
@@ -157,7 +119,8 @@ impl Tx {
         };
         self.db
             .runtime
-            .call_on(Some(&self.queue), move || pending.commit())
+            .exec
+            .call_on(self.queue.as_ref(), move || pending.commit())
             .await
     }
 
@@ -167,7 +130,8 @@ impl Tx {
         };
         self.db
             .runtime
-            .call_on(Some(&self.queue), move || pending.rollback())
+            .exec
+            .call_on(self.queue.as_ref(), move || pending.rollback())
             .await
     }
 }
@@ -176,9 +140,11 @@ impl Drop for Tx {
     fn drop(&mut self) {
         if let Some(lease) = self.lease.take() {
             let pending = PendingRollback { lease: Some(lease) };
-            self.queue
-                .enqueue(
-                    &self.db.runtime.tx,
+            self.db
+                .runtime
+                .exec
+                .defer(
+                    self.queue.as_ref(),
                     Box::new(move || {
                         pending
                             .rollback()
@@ -194,10 +160,8 @@ pub struct ReadTx(pub(crate) Tx);
 
 impl ReadTx {
     pub async fn query(&self, sql: &str, params: impl IntoParams) -> SqlResult<ResultSet> {
-        let sql = sql.to_owned();
-        let params = params.into_params();
         self.0
-            .run(move |connection| run_read_query(connection, &sql, &params))
+            .run_statement(sql, params.into_params(), run_read_query)
             .await
     }
 
@@ -298,9 +262,11 @@ impl Drop for Savepoint<'_> {
         let name = self.name.clone();
         let active = Arc::clone(&self.active);
         self.parent
-            .queue
-            .enqueue(
-                &self.parent.db.runtime.tx,
+            .db
+            .runtime
+            .exec
+            .defer(
+                self.parent.queue.as_ref(),
                 Box::new(move || {
                     if active.swap(false, Ordering::SeqCst) {
                         let connection = connection.lock().expect(ERROR_MUTEX);

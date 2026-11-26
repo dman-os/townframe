@@ -297,16 +297,20 @@ impl<T: serde::de::DeserializeOwned> FromRow for Json<T> {
     }
 }
 
-/// Async backend used by component guests. Native and WASM callers share the
-/// same parameter conversion, result decoding, and cardinality APIs through
-/// `BackendRef`; only the transport is backend-specific.
-pub trait SqliteBackend: Sync {
+/// A query destination a component guest reaches over the `townframe:sqlite` interface: a
+/// connection, a transaction or a read snapshot. Native and WASM callers share the same
+/// parameter conversion, result decoding, and cardinality APIs through `BackendRef`; only the
+/// transport is backend-specific.
+pub trait SqliteReadBackend: Sync {
     fn query(
         &self,
         sql: String,
         params: Vec<SqlValue>,
     ) -> impl std::future::Future<Output = SqlResult<ResultSet>> + Send;
+}
 
+/// A [`SqliteReadBackend`] that can also write. A read snapshot is only the former.
+pub trait SqliteBackend: SqliteReadBackend {
     fn execute(
         &self,
         sql: String,
@@ -318,7 +322,6 @@ pub trait SqliteBackend: Sync {
         sql: String,
     ) -> impl std::future::Future<Output = SqlResult<ExecuteResult>> + Send;
 }
-
 #[derive(Clone, Copy)]
 pub struct BackendRef<'a, B: ?Sized>(&'a B);
 
@@ -333,7 +336,7 @@ impl<'a, B: ?Sized> BackendRef<'a, B> {
         params: impl IntoParams,
     ) -> SqlResult<ResultSet>
     where
-        B: SqliteBackend,
+        B: SqliteReadBackend,
     {
         self.0.query(sql.into(), params.into_params()).await
     }
@@ -357,7 +360,7 @@ impl<'a, B: ?Sized> BackendRef<'a, B> {
     }
 }
 
-impl<B: SqliteBackend + ?Sized> QueryExecutor for BackendRef<'_, B> {
+impl<B: SqliteReadBackend + ?Sized> QueryExecutor for BackendRef<'_, B> {
     fn query(
         &self,
         sql: &str,
@@ -377,15 +380,179 @@ impl<B: SqliteBackend + ?Sized> Executor for BackendRef<'_, B> {
     }
 }
 
-/// Implement `SqliteBackend` for the generated `townframe:sqlite` resources.
+/// Implement the backend traits for the generated `townframe:sqlite` resources.
 ///
-/// The guest supplies its generated `Connection` and `Transaction` types and
-/// their generated `types` module. Keeping the conversion here prevents each
-/// guest from growing a second SQL value/result model.
+/// The guest names its generated `Connection`, `Transaction` and `ReadTransaction` resources
+/// and their generated `types` module. For each it gets the conversion to and from the
+/// portable [`SqlValue`], [`ResultSet`] and [`SqlError`]: [`SqliteBackend`] for the connection
+/// and the transaction, [`SqliteReadBackend`] for the read transaction, and [`WitConnection`]
+/// on the connection, which is what lets [`WitDb`] be a [`SqliteDb`](crate::SqliteDb) over it.
+/// Keeping the conversion here prevents each guest from growing a second SQL value/result
+/// model.
+///
+/// ```ignore
+/// use crate::wit::townframe::sqlite::sqlite_connection as wit_sqlite;
+/// use crate::wit::townframe::sqlite::types as sqlite_types;
+/// sqlite_rs::impl_wit_sqlite_backend!(
+///     wit_sqlite::Connection,
+///     wit_sqlite::Transaction,
+///     wit_sqlite::ReadTransaction,
+///     sqlite_types,
+/// );
+/// let db = sqlite_rs::WitDb::new(connection);
+/// ```
 #[macro_export]
 macro_rules! impl_wit_sqlite_backend {
-    ($resource:ty, $types:ident $(,)?) => {
-        impl $crate::SqliteBackend for $resource {
+    ($connection:ty, $transaction:ty, $read_transaction:ty, $types:ident $(,)?) => {
+        const _: () = {
+            fn to_wit_params(params: Vec<$crate::SqlValue>) -> Vec<$types::SqlValue> {
+                params
+                    .into_iter()
+                    .map(|value| match value {
+                        $crate::SqlValue::Null => $types::SqlValue::Null,
+                        $crate::SqlValue::Integer(value) => $types::SqlValue::Integer(value),
+                        $crate::SqlValue::Real(value) => $types::SqlValue::Real(value),
+                        $crate::SqlValue::Text(value) => $types::SqlValue::Text(value),
+                        $crate::SqlValue::Blob(value) => $types::SqlValue::Blob(value),
+                    })
+                    .collect()
+            }
+
+            fn from_wit_set(set: $types::ResultSet) -> $crate::ResultSet {
+                let columns: std::sync::Arc<[String]> = set.columns.into();
+                let rows = set
+                    .rows
+                    .into_iter()
+                    .map(|row| {
+                        $crate::Row::from_values(
+                            columns.clone(),
+                            row.into_iter()
+                                .map(|value| match value {
+                                    $types::SqlValue::Null => $crate::SqlValue::Null,
+                                    $types::SqlValue::Integer(value) => {
+                                        $crate::SqlValue::Integer(value)
+                                    }
+                                    $types::SqlValue::Real(value) => $crate::SqlValue::Real(value),
+                                    $types::SqlValue::Text(value) => $crate::SqlValue::Text(value),
+                                    $types::SqlValue::Blob(value) => $crate::SqlValue::Blob(value),
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                $crate::ResultSet { columns, rows }
+            }
+
+            fn from_wit_execute(result: $types::ExecuteResult) -> $crate::ExecuteResult {
+                $crate::ExecuteResult {
+                    rows_affected: result.rows_affected,
+                    last_insert_rowid: result.last_insert_rowid,
+                    result_set: from_wit_set(result.result_set),
+                }
+            }
+
+            fn from_wit_error(error: $types::QueryError) -> $crate::SqlError {
+                match error {
+                    $types::QueryError::InvalidParams(message) => {
+                        $crate::SqlError::InvalidParams(message)
+                    }
+                    $types::QueryError::InvalidQuery(message) => {
+                        $crate::SqlError::InvalidQuery(message)
+                    }
+                    $types::QueryError::Busy(message) => $crate::SqlError::Busy(message),
+                    $types::QueryError::Unexpected(message) => {
+                        $crate::SqlError::Unexpected(message)
+                    }
+                }
+            }
+
+    $crate::impl_wit_sqlite_backend!(@statements $connection);
+    $crate::impl_wit_sqlite_backend!(@statements $transaction);
+
+            impl $crate::SqliteReadBackend for $read_transaction {
+                fn query(
+                    &self,
+                    sql: String,
+                    params: Vec<$crate::SqlValue>,
+                ) -> impl std::future::Future<Output = $crate::SqlResult<$crate::ResultSet>> + Send
+                {
+                    async move {
+                        <$read_transaction>::query(self, sql, to_wit_params(params))
+                            .await
+                            .map(from_wit_set)
+                            .map_err(from_wit_error)
+                    }
+                }
+            }
+
+            impl $crate::WitConnection for $connection {
+                type Transaction = $transaction;
+                type ReadTransaction = $read_transaction;
+
+                fn begin_transaction(
+                    &self,
+                ) -> impl std::future::Future<Output = $crate::SqlResult<$transaction>> + Send
+                {
+                    async move {
+                        <$connection>::begin_transaction(self)
+                            .await
+                            .map_err(from_wit_error)
+                    }
+                }
+
+                fn begin_read_transaction(
+                    &self,
+                ) -> impl std::future::Future<Output = $crate::SqlResult<$read_transaction>> + Send
+                {
+                    async move {
+                        <$connection>::begin_read_transaction(self)
+                            .await
+                            .map_err(from_wit_error)
+                    }
+                }
+
+                fn commit(
+                    transaction: $transaction,
+                ) -> impl std::future::Future<Output = $crate::SqlResult<()>> + Send {
+                    async move {
+                        let result = <$transaction>::commit(&transaction)
+                            .await
+                            .map_err(from_wit_error);
+                        drop(transaction);
+                        result
+                    }
+                }
+
+                fn rollback(
+                    transaction: $transaction,
+                ) -> impl std::future::Future<Output = $crate::SqlResult<()>> + Send {
+                    async move {
+                        let result = <$transaction>::rollback(&transaction)
+                            .await
+                            .map_err(from_wit_error);
+                        drop(transaction);
+                        result
+                    }
+                }
+
+                fn end_read(
+                    transaction: $read_transaction,
+                ) -> impl std::future::Future<Output = $crate::SqlResult<()>> + Send {
+                    async move {
+                        let result = <$read_transaction>::end(&transaction)
+                            .await
+                            .map_err(from_wit_error);
+                        drop(transaction);
+                        result
+                    }
+                }
+            }
+        };
+    };
+    // The statements a connection and a transaction have in common. Expanded inside the block
+    // above, so it finds the conversion functions defined there.
+    (@statements $resource:ty) => {
+        impl $crate::SqliteReadBackend for $resource {
             fn query(
                 &self,
                 sql: String,
@@ -393,62 +560,15 @@ macro_rules! impl_wit_sqlite_backend {
             ) -> impl std::future::Future<Output = $crate::SqlResult<$crate::ResultSet>> + Send
             {
                 async move {
-                    let params = params
-                        .into_iter()
-                        .map(|value| match value {
-                            $crate::SqlValue::Null => $types::SqlValue::Null,
-                            $crate::SqlValue::Integer(value) => $types::SqlValue::Integer(value),
-                            $crate::SqlValue::Real(value) => $types::SqlValue::Real(value),
-                            $crate::SqlValue::Text(value) => $types::SqlValue::Text(value),
-                            $crate::SqlValue::Blob(value) => $types::SqlValue::Blob(value),
-                        })
-                        .collect();
-                    let result = <$resource>::query(self, sql, params).await;
-                    result
-                        .map(|set| {
-                            let columns: std::sync::Arc<[String]> = set.columns.into();
-                            let rows = set
-                                .rows
-                                .into_iter()
-                                .map(|row| {
-                                    $crate::Row::from_values(
-                                        columns.clone(),
-                                        row.into_iter()
-                                            .map(|value| match value {
-                                                $types::SqlValue::Null => $crate::SqlValue::Null,
-                                                $types::SqlValue::Integer(value) => {
-                                                    $crate::SqlValue::Integer(value)
-                                                }
-                                                $types::SqlValue::Real(value) => {
-                                                    $crate::SqlValue::Real(value)
-                                                }
-                                                $types::SqlValue::Text(value) => {
-                                                    $crate::SqlValue::Text(value)
-                                                }
-                                                $types::SqlValue::Blob(value) => {
-                                                    $crate::SqlValue::Blob(value)
-                                                }
-                                            })
-                                            .collect(),
-                                    )
-                                })
-                                .collect();
-                            $crate::ResultSet { columns, rows }
-                        })
-                        .map_err(|error| match error {
-                            $types::QueryError::InvalidParams(message) => {
-                                $crate::SqlError::InvalidParams(message)
-                            }
-                            $types::QueryError::InvalidQuery(message) => {
-                                $crate::SqlError::InvalidQuery(message)
-                            }
-                            $types::QueryError::Unexpected(message) => {
-                                $crate::SqlError::Unexpected(message)
-                            }
-                        })
+                    <$resource>::query(self, sql, to_wit_params(params))
+                        .await
+                        .map(from_wit_set)
+                        .map_err(from_wit_error)
                 }
             }
+        }
 
+        impl $crate::SqliteBackend for $resource {
             fn execute(
                 &self,
                 sql: String,
@@ -456,65 +576,10 @@ macro_rules! impl_wit_sqlite_backend {
             ) -> impl std::future::Future<Output = $crate::SqlResult<$crate::ExecuteResult>> + Send
             {
                 async move {
-                    let params = params
-                        .into_iter()
-                        .map(|value| match value {
-                            $crate::SqlValue::Null => $types::SqlValue::Null,
-                            $crate::SqlValue::Integer(value) => $types::SqlValue::Integer(value),
-                            $crate::SqlValue::Real(value) => $types::SqlValue::Real(value),
-                            $crate::SqlValue::Text(value) => $types::SqlValue::Text(value),
-                            $crate::SqlValue::Blob(value) => $types::SqlValue::Blob(value),
-                        })
-                        .collect();
-                    let result = <$resource>::execute(self, sql, params).await;
-                    result
-                        .map(|result| {
-                            let columns: std::sync::Arc<[String]> =
-                                result.result_set.columns.into();
-                            let rows = result
-                                .result_set
-                                .rows
-                                .into_iter()
-                                .map(|row| {
-                                    $crate::Row::from_values(
-                                        columns.clone(),
-                                        row.into_iter()
-                                            .map(|value| match value {
-                                                $types::SqlValue::Null => $crate::SqlValue::Null,
-                                                $types::SqlValue::Integer(value) => {
-                                                    $crate::SqlValue::Integer(value)
-                                                }
-                                                $types::SqlValue::Real(value) => {
-                                                    $crate::SqlValue::Real(value)
-                                                }
-                                                $types::SqlValue::Text(value) => {
-                                                    $crate::SqlValue::Text(value)
-                                                }
-                                                $types::SqlValue::Blob(value) => {
-                                                    $crate::SqlValue::Blob(value)
-                                                }
-                                            })
-                                            .collect(),
-                                    )
-                                })
-                                .collect();
-                            $crate::ExecuteResult {
-                                rows_affected: result.rows_affected,
-                                last_insert_rowid: result.last_insert_rowid,
-                                result_set: $crate::ResultSet { columns, rows },
-                            }
-                        })
-                        .map_err(|error| match error {
-                            $types::QueryError::InvalidParams(message) => {
-                                $crate::SqlError::InvalidParams(message)
-                            }
-                            $types::QueryError::InvalidQuery(message) => {
-                                $crate::SqlError::InvalidQuery(message)
-                            }
-                            $types::QueryError::Unexpected(message) => {
-                                $crate::SqlError::Unexpected(message)
-                            }
-                        })
+                    <$resource>::execute(self, sql, to_wit_params(params))
+                        .await
+                        .map(from_wit_execute)
+                        .map_err(from_wit_error)
                 }
             }
 
@@ -527,21 +592,10 @@ macro_rules! impl_wit_sqlite_backend {
                     <$resource>::execute_batch(self, sql)
                         .await
                         .map(|result| $crate::ExecuteResult {
-                            rows_affected: result.rows_affected,
-                            last_insert_rowid: result.last_insert_rowid,
                             result_set: $crate::ResultSet::default(),
+                            ..from_wit_execute(result)
                         })
-                        .map_err(|error| match error {
-                            $types::QueryError::InvalidParams(message) => {
-                                $crate::SqlError::InvalidParams(message)
-                            }
-                            $types::QueryError::InvalidQuery(message) => {
-                                $crate::SqlError::InvalidQuery(message)
-                            }
-                            $types::QueryError::Unexpected(message) => {
-                                $crate::SqlError::Unexpected(message)
-                            }
-                        })
+                        .map_err(from_wit_error)
                 }
             }
         }
@@ -555,7 +609,7 @@ mod tests {
 
     struct FakeBackend;
 
-    impl SqliteBackend for FakeBackend {
+    impl SqliteReadBackend for FakeBackend {
         fn query(
             &self,
             _sql: String,
@@ -569,7 +623,9 @@ mod tests {
                 )],
             }))
         }
+    }
 
+    impl SqliteBackend for FakeBackend {
         fn execute(
             &self,
             _sql: String,
