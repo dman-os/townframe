@@ -588,10 +588,49 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
         }
         changes.next(RevisionReadLimits::default()).await.unwrap();
     }
+    // The inventory membership above and the pin datum are separate worker outputs, so the pin
+    // is awaited on its own: a held poll of the sensitive inventory returns when it lands.
+    let pin_key =
+        DatumKey::from_text(big_blobs_core::BlobPin::ID, info.blob_id.digest_str()).unwrap();
+    let poll_capability = capability(
+        &node,
+        DocScope {
+            read: DocScope::read_all([sensitive.clone()]),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut after = 0;
+    'pinned: loop {
+        let page = node
+            .docs
+            .client
+            .call(
+                RequestContext::root(),
+                big_cabinet_core::doc::PollDatums {
+                    capability: poll_capability,
+                    predicate: big_cabinet_core::query::Predicate::IsDoc {
+                        doc_id: sensitive.clone(),
+                    },
+                    datums: big_cabinet_core::query::DatumSelection::All,
+                    after,
+                    limit: 0,
+                    hold_ms: 5_000,
+                },
+            )
+            .await
+            .unwrap();
+        after = page.through;
+        for event in page.events {
+            if let big_cabinet_core::doc::DatumEvent::Datum { datum_key, .. } = event
+                && datum_key == pin_key
+            {
+                break 'pinned;
+            }
+        }
+    }
     let pins = all_datums(&node, &sensitive).await;
-    assert!(pins.datums.contains_key(
-        &DatumKey::from_text(big_blobs_core::BlobPin::ID, info.blob_id.digest_str()).unwrap()
-    ));
+    assert!(pins.datums.contains_key(&pin_key));
     let view = node
         .drawers
         .client
