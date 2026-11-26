@@ -12,6 +12,7 @@
 //! | `kh_key_pair` | public key | the secret keys this identity holds: its prekeys and the leaf keys it sampled for CGKA groups. **Sealed.** |
 //! | `kh_prekey_op` | `(individual, digest)` | each individual's signed prekey operations |
 //! | `kh_cgka_op` | `(doc, digest)` | each document's signed CGKA operations, in a rowid table so the digest index carries no operation bytes |
+//! | `kh_doc_epoch` | doc | the document's key epoch: how many CGKA operations it holds, bumped by a trigger on each insert |
 //! | `kh_cgka_op_pred` | `(doc, digest, predecessor)` | the CGKA dependency graph without the operations, with a reverse index `(doc, predecessor, digest)` |
 //! | `kh_content_heads` | doc | the content heads the application last set, replaced on each set |
 //! | `kh_content_key` | `(doc, content ref)` | the key of each piece of content this replica wrote or read. **Sealed.** |

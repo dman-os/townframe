@@ -153,6 +153,12 @@ pub async fn deks_stale(db: &impl crate::sqlite_rs_alias::QueryExecutor, kek_ver
     set.all()
 }
 
+pub const DOC_EPOCH_SQL: &str = include_str!("queries/doc_epoch.sql");
+pub async fn doc_epoch(db: &impl crate::sqlite_rs_alias::QueryExecutor, doc_id: Vec<u8>) -> SqlResult<Option<i64>> {
+    let set = db.query(DOC_EPOCH_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(doc_id)]).await?;
+    set.optional()
+}
+
 pub const DOCUMENTS_SQL: &str = include_str!("queries/documents.sql");
 pub async fn documents(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<Vec<u8>>> {
     let set = db.query(DOCUMENTS_SQL, &[]).await?;

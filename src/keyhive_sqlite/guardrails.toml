@@ -21,4 +21,4 @@ required_features = []
 default_features = true
 
 [migrations]
-"src/keyhive_sqlite/sqlite/migrations/001_init.sql" = "5ac052915958a6815e9868daf52c27c44a097d039c7327f31ca5a4e86f6e60ba"
+"src/keyhive_sqlite/sqlite/migrations/001_init.sql" = "42c166784a8c649679aaa426ba05c325bde8069f351f59f3d8b5aff3b15c754b"
