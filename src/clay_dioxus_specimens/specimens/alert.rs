@@ -18,7 +18,7 @@ pub fn AlertSpecimens() -> Element {
         FoundationSection {
             id: "alert-statuses".to_string(),
             title: "Statuses".to_string(),
-            description: "data-status info|success|warning|danger. Danger and warning are role=alert, info and success role=status. The tint is the status colour role mixed into the surface.".to_string(),
+            description: "data-status info|success|warning|danger. Danger and warning are role=alert, info and success role=status. The fill is the status's container role, with no border; the icon carries the status.".to_string(),
             div { class: "grid gap-3",
                 for (status , name) in STATUSES {
                     Alert { key: "{name}", status, title: Some(format!("{name} with a title")),

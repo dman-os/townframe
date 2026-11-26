@@ -1449,7 +1449,7 @@
     padding-inline: var(--ct-dimension-spacing-3);
     border: var(--ct-chip-border);
     border-radius: var(--ct-chip-radius);
-    background: var(--ct-color-surface-sunken);
+    background: var(--ct-color-surface-raised);
     color: var(--ct-color-text);
     font-family: var(--ct-font-family);
     font-size: var(--ct-dimension-font-size-sm);
