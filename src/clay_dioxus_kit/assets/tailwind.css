@@ -1198,7 +1198,7 @@
     }
   }
   .ct-tabs [data-part="tab"][data-state="inactive"]:hover:not(:disabled) {
-    background: var(--ct-color-canvas);
+    background: var(--ct-color-surface);
     color: var(--ct-color-text);
   }
   .ct-tabs [data-part="tab"][data-state="inactive"]:active:not(:disabled) {
