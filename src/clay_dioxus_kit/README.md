@@ -160,7 +160,7 @@ enforces them. They apply to every component.
   no `inert` and no focus events for programmatic focus (K7 ledger notes); `Sheet` is not
   web-shippable until it is.
 - **KIT-053** A headless part uses only the tags, attributes and style properties a Wasm guest's
-  tree may name (`clay_surface::render`'s vocabulary). Checked: the test harness mirrors the lists
+  tree may name (`clay_surface::render`'s vocabulary). Checked: the test harness asks `clay_surface`'s own admission (a dev-dependency)
   and panics on anything else. Inline `style` strings are passed whole and are not checked
   property by property.
 
