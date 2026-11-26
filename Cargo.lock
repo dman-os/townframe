@@ -593,6 +593,9 @@ name = "arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
+dependencies = [
+ "derive_arbitrary",
+]
 
 [[package]]
 name = "arboard"
@@ -648,6 +651,9 @@ name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "as-raw-xcb-connection"
@@ -1410,7 +1416,7 @@ dependencies = [
  "dupe",
  "ed25519-dalek 2.2.0",
  "future_form",
- "keyhive_crypto",
+ "keyhive_crypto 0.2.1",
  "nonempty",
  "rand 0.8.8",
  "serde",
@@ -1933,7 +1939,7 @@ dependencies = [
  "irpc",
  "irpc-iroh",
  "keyhive_core",
- "keyhive_crypto",
+ "keyhive_crypto 0.2.1",
  "nonempty",
  "pretty_assertions",
  "rand 0.8.8",
@@ -2189,6 +2195,7 @@ dependencies = [
  "cfg-if 1.0.5",
  "constant_time_eq",
  "cpufeatures 0.3.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -2387,6 +2394,99 @@ dependencies = [
  "futures-io",
  "futures-lite",
  "piper",
+]
+
+[[package]]
+name = "bolero"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "449a08ce58d0325f2a1df902aa326a84ab49c6aa2844f1a88fe5e0fc23c75010"
+dependencies = [
+ "bolero-afl",
+ "bolero-engine",
+ "bolero-generator",
+ "bolero-honggfuzz",
+ "bolero-kani",
+ "bolero-libfuzzer",
+ "cfg-if 1.0.5",
+ "rand 0.8.8",
+]
+
+[[package]]
+name = "bolero-afl"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73c04ea97df540ec2224453cb006f4ab6cacc99636f9f6660b381970448bbaac"
+dependencies = [
+ "bolero-engine",
+ "cc",
+]
+
+[[package]]
+name = "bolero-engine"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2558810916445396d4fa12415183c96cfeac7c9e84ef230dc33e2e1f8beca41e"
+dependencies = [
+ "anyhow",
+ "backtrace",
+ "bolero-generator",
+ "lazy_static",
+ "pretty-hex",
+ "rand 0.8.8",
+ "rand_xoshiro 0.6.0",
+]
+
+[[package]]
+name = "bolero-generator"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c6b00e768523c6e13397f1e5e6cef7f8dbd01621ffd7aa6dec74b5ba3e1cf94"
+dependencies = [
+ "arbitrary",
+ "bolero-generator-derive",
+ "either",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "bolero-generator-derive"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bea8182a94fa5c6d0db1666969d0094e79d6b93eb68689325a375b1d8804a12b"
+dependencies = [
+ "proc-macro-crate 2.0.2",
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
+name = "bolero-honggfuzz"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b744c6bda3711a1c88ab7cbd5053b53daca1c7380d05cfa3af39c99d0ec52c0"
+dependencies = [
+ "bolero-engine",
+]
+
+[[package]]
+name = "bolero-kani"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aee97a8044096c7b4a6fb4f5f5003544ad98277ebc7a65567a6c4ea912393388"
+dependencies = [
+ "bolero-engine",
+]
+
+[[package]]
+name = "bolero-libfuzzer"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aae3b3751a4b0dc94696063eace32fd9d3ddea904ae9e18d87c81de787023508"
+dependencies = [
+ "bolero-engine",
+ "cc",
 ]
 
 [[package]]
@@ -4781,6 +4881,17 @@ name = "derive-where"
 version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e2b94854e8576378ccda7c8de8a66ed8b4e8acbd2c50ec3418ea6c8aaf4b567"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
+name = "derive_arbitrary"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b034bd7d5f032402a2479444dcc6f74e36a03f31854d41680fb240ef682a1ac"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8209,7 +8320,7 @@ dependencies = [
  "equivalent",
  "imbl-sized-chunks",
  "rand_core 0.9.5",
- "rand_xoshiro",
+ "rand_xoshiro 0.7.0",
  "version_check",
  "wide 0.7.33",
 ]
@@ -9034,6 +9145,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyhive_codec"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88bb801be05f13783d02b1814e4b3ec6e72daf7a8b8fd8dd71c26f646acd4403"
+dependencies = [
+ "bijoux",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "keyhive_core"
 version = "0.6.0"
 source = "git+https://github.com/dman-os/keyhive?rev=a84137d1f2bdd81cc6c883253a534cc3f0380b5e#a84137d1f2bdd81cc6c883253a534cc3f0380b5e"
@@ -9049,7 +9170,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
  "futures",
- "keyhive_crypto",
+ "keyhive_crypto 0.2.1",
  "nonempty",
  "rand 0.8.8",
  "serde",
@@ -9078,6 +9199,87 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "x25519-dalek",
+]
+
+[[package]]
+name = "keyhive_crypto"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b8199171b69cd29ebba2e8aa693aee0cd537849d7fd232231b4011811e76415"
+dependencies = [
+ "arbitrary",
+ "blake3",
+ "chacha20 0.9.1",
+ "chacha20poly1305",
+ "derive_more 1.0.0",
+ "dupe",
+ "ed25519-dalek 2.2.0",
+ "future_form",
+ "futures",
+ "keyhive_codec",
+ "poly1305",
+ "rand 0.8.8",
+ "signature 2.2.0",
+ "subtle",
+ "thiserror 2.0.21",
+ "tracing",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "keyline"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95b3bbe4dcec19ca9e5cf858b0d13c6a174ca84059dfc1146791e6cb8d143476"
+dependencies = [
+ "arbitrary",
+ "bijoux",
+ "bolero",
+ "ed25519-dalek 2.2.0",
+ "future_form",
+ "keyhive_codec",
+ "keyhive_crypto 0.6.0",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "keyline_memory"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90e41b34e154407341f207983feeb1997e2a4e1cd50c71a7e5f0caa933163596"
+dependencies = [
+ "async-lock",
+ "future_form",
+ "futures",
+ "keyhive_codec",
+ "keyhive_crypto 0.6.0",
+ "keyline",
+ "once_cell",
+ "tracing",
+]
+
+[[package]]
+name = "keyline_sqlite"
+version = "0.1.0"
+dependencies = [
+ "arbitrary",
+ "ed25519-dalek 2.2.0",
+ "future_form",
+ "futures",
+ "gungraun",
+ "keyhive_codec",
+ "keyhive_crypto 0.6.0",
+ "keyline",
+ "keyline_memory",
+ "proptest",
+ "serde_json",
+ "sqlite_rs",
+ "thiserror 2.0.21",
+ "tokio",
+ "utils_rs",
 ]
 
 [[package]]
@@ -12698,6 +12900,7 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -12840,6 +13043,12 @@ name = "presser"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
+
+[[package]]
+name = "pretty-hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4f0ef5907a6369b0ab657be63621a651e2c2c9d2eb4f0ea43b4b91bab4c9c58"
 
 [[package]]
 name = "pretty_assertions"
@@ -13427,6 +13636,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
 dependencies = [
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rand_xoshiro"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f97cdb2a36ed4183de61b2f824cc45c9f1037f28afe0a322e9fff4c108b5aaa"
+dependencies = [
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -15890,7 +16108,7 @@ dependencies = [
  "future_form",
  "futures",
  "keyhive_core",
- "keyhive_crypto",
+ "keyhive_crypto 0.2.1",
  "rand 0.8.8",
  "sedimentree_core",
  "serde",

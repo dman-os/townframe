@@ -1,0 +1,19 @@
+version = 1
+role = "runtime"
+dependency_reason = "The SQLite Keyline backend implements keyline's authority-graph contract over sqlite_rs, in transactions it shares with other stores of one database; utils_rs supplies the allocation counter of the scaling checks."
+allowed_dependencies = ["sqlite_rs", "utils_rs"]
+allow_external_api_types = true
+
+# No `wasm32-unknown-unknown` build: sqlite_rs does not target the browser.
+[builds.native]
+features = []
+required_features = []
+default_features = true
+
+[builds.wasm32-wasip3]
+features = []
+required_features = []
+default_features = true
+
+[migrations]
+"src/keyline_sqlite/sqlite/migrations/001_init.sql" = "d0e5da6763dc5cdefc7dec6cd48375ec550f171972639adca54d315aa42aec1b"

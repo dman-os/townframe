@@ -1,0 +1,49 @@
+[package]
+name = "keyline_sqlite"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+sqlite_rs.workspace = true
+futures.workspace = true
+
+# The registry releases of keyhive (upstream main), not the workspace's `keyhive_*` git pins: the
+# `Keyline` trait names `keyhive_crypto` 0.6 types, which a different release would not unify
+# with.
+keyline = { version = "0.4.0", default-features = false, features = ["std"] }
+keyline_memory = { version = "0.4.0", default-features = false, features = ["std"] }
+keyhive_codec = { version = "0.1.0", default-features = false, features = ["std"] }
+keyhive_crypto = { version = "0.6.0", default-features = false, features = ["std"] }
+future_form.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+keyline = { version = "0.4.0", features = ["test_utils"] }
+keyline_memory = { version = "0.4.0", features = ["test_utils"] }
+proptest.workspace = true
+ed25519-dalek.workspace = true
+arbitrary = "1.4.1"
+utils_rs.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+# Instruction-count benches (see `benches/instr.rs` and the benchmarking skill). Valgrind has no
+# wasm build, so the dependency is native only and the target is empty on wasm.
+[[bench]]
+name = "instr"
+harness = false
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+gungraun = "0.20.0"
+
+# Which tiers `x/bench.ts` runs for this crate: `counts` is a nextest filter over the tests that
+# print `BENCH_RECORD` lines; `instr` names the bench target.
+[package.metadata.bench]
+counts = { filter = "test(/scaling::/)" }
+instr = { bench = "instr" }
