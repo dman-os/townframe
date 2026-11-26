@@ -24,13 +24,15 @@ use crate::rows;
 /// Entries held before the memo empties itself. Several hundred bytes each.
 const CAPACITY: usize = 65_536;
 
+type Key = (i64, [u8; 32]);
+
 struct Entry<W> {
     signed: Vec<u8>,
     certificate: VerifiedCertificate<W>,
 }
 
 pub struct Memo<W> {
-    entries: Mutex<HashMap<(i64, [u8; 32]), Entry<W>>>,
+    entries: Mutex<HashMap<Key, Entry<W>>>,
 }
 
 impl<W> Default for Memo<W> {
@@ -43,7 +45,7 @@ impl<W> Default for Memo<W> {
 
 const ERROR_MUTEX: &str = "the memo mutex is not poisoned: nothing panics under it";
 
-fn key(id: CertificateId) -> (i64, [u8; 32]) {
+fn key(id: CertificateId) -> Key {
     let (kind, digest) = rows::kind_and_digest(id);
     (
         kind,
@@ -79,7 +81,7 @@ impl<W: Encode + Decode> Memo<W> {
         }
     }
 
-    fn remember(&self, key: (i64, [u8; 32]), signed: Vec<u8>, certificate: VerifiedCertificate<W>) {
+    fn remember(&self, key: Key, signed: Vec<u8>, certificate: VerifiedCertificate<W>) {
         let mut entries = self.entries.lock().expect(ERROR_MUTEX);
         if entries.len() >= CAPACITY {
             entries.clear();

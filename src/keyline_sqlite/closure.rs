@@ -141,6 +141,27 @@ pub async fn load<W: Encode + Decode>(
     Ok(evaluated(certificates, rows_read))
 }
 
+/// Bugs the suite plants to prove its checks can fail (`suite/demand.rs`): a loader that never
+/// composes membership, and one that explores a node whose issuer has no standing. Thread-local,
+/// so a test that sets one cannot disturb another.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Planted {
+    None,
+    NoComposition,
+    Ungrounded,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PLANTED: std::cell::Cell<Planted> = const { std::cell::Cell::new(Planted::None) };
+}
+
+#[cfg(test)]
+fn planted() -> Planted {
+    PLANTED.with(std::cell::Cell::get)
+}
+
 /// Run the positive reach to its fixed point over the edges loaded, and make every node it names a
 /// key of `reach`.
 fn grow(
@@ -152,12 +173,21 @@ fn grow(
         let mut changed = false;
         let nodes: Vec<Identifier> = reach.keys().copied().collect();
         for node in nodes {
+            #[cfg(test)]
+            let composed = planted() != Planted::NoComposition;
+            #[cfg(not(test))]
+            let composed = true;
             let standing: Vec<Identifier> = std::iter::once(node)
-                .chain(reach[&node].iter().copied())
+                .chain(reach[&node].iter().copied().filter(|_| composed))
                 .collect();
             for sub in standing {
                 for &(issuer, audience) in edges.get(&sub).into_iter().flatten() {
-                    let grounded = issuer == sub
+                    #[cfg(test)]
+                    let ungrounded = planted() == Planted::Ungrounded;
+                    #[cfg(not(test))]
+                    let ungrounded = false;
+                    let grounded = ungrounded
+                        || issuer == sub
                         || reach
                             .get(&sub)
                             .is_some_and(|standing| standing.contains(&issuer));
