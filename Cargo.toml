@@ -23,7 +23,6 @@ members = [
   "./src/big_node/",
   "./src/day_cli",
   "./src/macros",
-  "./src/mltools/",
   "./src/pauperfuse/",
   "./src/native_utils_rs",
   "./src/secrets_rs",
@@ -89,6 +88,8 @@ exclude = [
   "src/daybook_pdk",
   "src/daybook_sdk",
   "src/daybook_types",
+  # Only the legacy daybook crates above use it, and its live tests call paid cloud APIs.
+  "src/mltools",
   "src/plug_dayledger_manifest",
   "src/plug_dayledger_routines",
   "src/plug_plabels_manifest",
@@ -124,7 +125,6 @@ service_client_core_rs = { path = "./src/service_client_core_rs", default-featur
 service_client_native_rs = { path = "./src/service_client_native_rs", default-features = false }
 service_utils_rs = { path = "./src/service_utils_rs", default-features = false }
 # daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
-mltools = { path = "./src/mltools", default-features = false }
 wflow = { path = "./src/wflow", default-features = false }
 wflow_core = { path = "./src/wflow_core", default-features = false }
 wflow_tokio = { path = "./src/wflow_tokio", default-features = false }
