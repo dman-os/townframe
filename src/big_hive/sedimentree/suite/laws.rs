@@ -12,12 +12,14 @@ use subduction_core::storage::traits::Storage;
 
 use super::Spec;
 use super::Store;
+use super::entries_after;
 use super::fresh_db;
 use super::pooled;
 use super::seal;
 use super::store_on;
 use super::tree_id;
 use crate::sedimentree::Mutation;
+use big_automata::rev::RevSource;
 
 /// Heads of the pool by role: commits 0, 1 and 3 are ordinary, 2 is a boundary (depth 1), 4 is
 /// deeper (depth 2).
@@ -46,17 +48,18 @@ fn fragment(head: u8, boundary: &[u8], checkpoints: &[u8], blob: u8) -> Spec {
     }
 }
 
-async fn save(store: &Store, tree: u8, specs: &[Spec]) -> (usize, Option<i64>) {
+async fn save(store: &Store, tree: u8, specs: &[Spec]) -> (usize, Option<u64>) {
     let id = tree_id(tree);
     let (commits, fragments) = seal(id, specs).await;
     let tx = store.db.begin_write().await.expect("begin");
-    let staged = store
-        .apply_in(&tx, id, Mutation::Save { commits, fragments })
+    let mut batch = store.batch();
+    let applied = store
+        .apply_in(&tx, &mut batch, id, Mutation::Save { commits, fragments })
         .await
         .expect("save");
     Database::commit(tx).await.expect("commit");
-    let outcome = (staged.saved(), staged.rev());
-    store.committed(staged);
+    let outcome = (applied.saved, batch.rev());
+    store.committed(batch);
     outcome
 }
 
@@ -281,19 +284,23 @@ fn law_3_a_rolled_back_mutation_leaves_no_row_no_rev_and_no_feed_entry() {
     block_on(async {
         let db = fresh_db();
         let store = store_on(&db);
-        let mut feed = store.changes_after(0);
         save(&store, 1, &[commit(C0, &[], 0)]).await;
-        feed.poll().await.unwrap();
         let rev = store.latest_rev().await.unwrap();
 
         let tx = db.begin_write().await.unwrap();
+        let mut batch = store.batch();
         for tree in [1, 2] {
             let (commits, fragments) = seal(tree_id(tree), &[commit(C1, &[C0], 0)]).await;
-            let staged = store
-                .apply_in(&tx, tree_id(tree), Mutation::Save { commits, fragments })
+            let applied = store
+                .apply_in(
+                    &tx,
+                    &mut batch,
+                    tree_id(tree),
+                    Mutation::Save { commits, fragments },
+                )
                 .await
                 .unwrap();
-            assert!(staged.changed());
+            assert!(applied.changed);
         }
         // The transaction reads its own writes; nobody else does.
         assert_eq!(store.latest_rev().await.unwrap(), rev);
@@ -306,7 +313,7 @@ fn law_3_a_rolled_back_mutation_leaves_no_row_no_rev_and_no_feed_entry() {
                 .await
                 .unwrap()
         );
-        assert!(feed.poll().await.unwrap().is_empty());
+        assert!(entries_after(&store, rev).await.is_empty());
         // The next commit reuses the revs the rollback never consumed.
         save(&store, 1, &[commit(C1, &[C0], 0)]).await;
         assert_eq!(store.latest_rev().await.unwrap(), rev + 1);
@@ -314,32 +321,39 @@ fn law_3_a_rolled_back_mutation_leaves_no_row_no_rev_and_no_feed_entry() {
 }
 
 #[test]
-fn law_3_two_trees_in_one_transaction_commit_together() {
+fn law_3_the_trees_of_one_batch_share_a_rev_and_two_batches_of_one_transaction_do_not() {
     block_on(async {
         let db = fresh_db();
         let store = store_on(&db);
-        let mut feed = store.changes_after(0);
         let tx = db.begin_write().await.unwrap();
-        let mut staged = Vec::new();
-        for tree in [1, 2] {
-            let (commits, fragments) = seal(tree_id(tree), &[commit(C0, &[], 0)]).await;
-            staged.push(
+        let mut first = store.batch();
+        let mut second = store.batch();
+        for (batch, trees) in [(&mut first, [1, 2]), (&mut second, [3, 3])] {
+            for tree in trees {
+                let (commits, fragments) = seal(tree_id(tree), &[commit(C0, &[], 0)]).await;
                 store
-                    .apply_in(&tx, tree_id(tree), Mutation::Save { commits, fragments })
+                    .apply_in(
+                        &tx,
+                        batch,
+                        tree_id(tree),
+                        Mutation::Save { commits, fragments },
+                    )
                     .await
-                    .unwrap(),
-            );
+                    .unwrap();
+            }
         }
         Database::commit(tx).await.unwrap();
-        for staged in staged {
-            store.committed(staged);
-        }
-        let changes = feed.poll().await.unwrap();
+        assert_eq!((first.rev(), second.rev()), (Some(1), Some(2)));
+        store.committed(first);
+        store.committed(second);
+        let entries = entries_after(&store, 0).await;
         assert_eq!(
-            changes.iter().map(|c| c.tree_id).collect::<Vec<_>>(),
-            vec![tree_id(1), tree_id(2)]
+            entries
+                .iter()
+                .map(|entry| (entry.key, entry.rev))
+                .collect::<Vec<_>>(),
+            vec![(tree_id(1), 1), (tree_id(2), 1), (tree_id(3), 2)]
         );
-        assert!(changes[0].rev < changes[1].rev);
     });
 }
 

@@ -11,6 +11,8 @@ path = "lib.rs"
 
 [dependencies]
 sqlite_rs.workspace = true
+big_automata = { path = "../big_automata", default-features = false }
+utils_rs.workspace = true
 keyline_sqlite = { path = "../keyline_sqlite" }
 
 # This crate runs on the newer keyhive and subduction forks (branch `townframe-changes`), not on
@@ -41,6 +43,8 @@ getrandom03 = { workspace = true, features = ["wasm_js"] }
 getrandom = { workspace = true, features = ["wasm_js"] }
 
 [dev-dependencies]
+big_automata = { path = "../big_automata", default-features = false, features = ["test-support"] }
+async-trait.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 # The upstream `MinimizedTreeStore` conformance checks, and the fork's signer for sealing fixtures.

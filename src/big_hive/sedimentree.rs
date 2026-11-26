@@ -12,16 +12,16 @@
 //!    Memory-only minimization would re-send, on every sync, the commits a concurrent fragment
 //!    hides until storage pruned them (subduction discussion 284); here nothing is left to
 //!    prune later. A commit already covered when it arrives is never stored.
-//! 2. **A tree's `rev` moves exactly when its rows or its liveness do.** It is drawn from one
-//!    sequence for the hive, inside the changing transaction, never repeats and never goes
-//!    down, deleted trees included. A save that changes nothing (a duplicate, a covered
+//! 2. **A tree's `rev` moves exactly when its rows or its liveness do.** A `rev` is one [`Batch`]:
+//!    drawn from one sequence for the hive inside the changing transaction, shared by the trees
+//!    the batch changes, never repeating and never going down, deleted trees included. A save that changes nothing (a duplicate, a covered
 //!    commit) writes nothing, so it moves nothing.
 //! 3. **Every mutation is atomic with the caller's transaction.** [`SedimentreeStore::apply_in`]
 //!    writes through a transaction the caller owns and shares with other stores of the
-//!    database (keyhive rows, Keyline certificates, part-store rows), and returns a [`Staged`]
+//!    database (keyhive rows, Keyline certificates, part-store rows), and fills a [`Batch`]
 //!    for [`SedimentreeStore::committed`] once the transaction commits. A rollback leaves no
-//!    row, no `rev` and no feed entry; nothing outside the transaction ever saw them.
-//!    [`SedimentreeStore::committed`] only warms the cache and wakes the feed: skipping it is
+//!    row, no `rev` and no stream entry; nothing outside the transaction ever saw them.
+//!    [`SedimentreeStore::committed`] only warms the cache and moves the watch: skipping it is
 //!    safe, only slower.
 //! 4. **Every read is one snapshot.** A tree and its `rev` are read together.
 //! 5. **One writer per database.** Writers serialize on `BEGIN IMMEDIATE` (`SqliteDb::begin_write`),
@@ -29,7 +29,8 @@
 //! 6. **The `MinimizedTreeStore` never holds a tree the database does not.** A hit is read from
 //!    the database, or from a cache entry whose `rev` the same snapshot just read (see
 //!    [`tree`]).
-//! 7. **Nothing a feed reader needs is in memory.** [`ChangeFeed`] is a cursor over `rev`.
+//! 7. **Nothing a reader needs is in memory.** The trees are a `big_automata` `RevSource`
+//!    (`rev.rs`), one entry per tree at its latest `rev`; consumers use `RevStream`.
 //!
 //! # What a mutation costs
 //!
@@ -42,7 +43,7 @@
 //! Generic over [`sqlite_rs::SqliteDb`] like `keyline_sqlite` and `big_automata_sqlite`, with no
 //! timers or threads of its own.
 
-mod feed;
+mod rev;
 mod storage;
 mod tree;
 mod write;
@@ -52,18 +53,18 @@ mod suite;
 
 use std::sync::Arc;
 
+use big_automata::rev::Rev;
 use sedimentree_core::codec::error::DecodeError;
 use sedimentree_core::depth::DepthMetric;
 use sqlite_rs::SqlError;
 use sqlite_rs::SqliteDb;
 use tokio::sync::watch;
 
-pub use feed::Change;
-pub use feed::ChangeFeed;
 pub use tree::Generation;
+pub use write::Applied;
+pub use write::Batch;
 pub use write::Mutation;
 pub use write::Save;
-pub use write::Staged;
 
 /// How many minimized trees the cache keeps. A tree is small by construction (it is minimal),
 /// and every entry is validated against the database before it is served.
@@ -82,7 +83,7 @@ pub enum Error {
 
 /// The sedimentree tables of one hive's database.
 ///
-/// Clones share the database handle, the cache and the change feed's wakeups. Attach to a
+/// Clones share the database handle, the cache and the watch. Attach to a
 /// database registered with [`MIGRATIONS`](crate::MIGRATIONS) under
 /// [`MIGRATION_TABLE`](crate::MIGRATION_TABLE).
 pub struct SedimentreeStore<D: SqliteDb, M> {
@@ -106,7 +107,7 @@ struct Shared<M> {
     cache: tree::Cache,
     /// The highest `rev` this process has committed, for wakeups. Not a source of truth: a
     /// reader always asks the database what changed.
-    committed: Arc<watch::Sender<i64>>,
+    committed: Arc<watch::Sender<Rev>>,
 }
 
 impl<D: SqliteDb, M: DepthMetric> SedimentreeStore<D, M> {

@@ -6,14 +6,16 @@
 -- and at most one payload per head: when two payloads share a head, the lowest digest is kept,
 -- as `Sedimentree` itself decides.
 
--- One row per tree id ever written. `rev` is drawn from one sequence for the whole hive (the
--- next value is the table's maximum plus one, which is safe because there is one writer) and
--- moves in every transaction that changes the tree, inside that transaction. A rollback leaves
--- it where it was, and every snapshot reads it together with the rows it describes. It never
--- repeats and never goes down, which is what makes it the tree's generation (subduction's
--- `MinimizedTreeStore` rule 3) and what lets a reader tail "which trees changed since rev N".
+-- One row per tree id ever written, at the `rev` of its latest change. A `rev` is one atomic
+-- batch of the hive (a `Batch` in the code): the next value is the table's maximum plus one,
+-- which is safe because there is one writer, and every tree the batch changes carries it. It is
+-- written inside the changing transaction, so a rollback leaves it where it was and every
+-- snapshot reads it together with the rows it describes. It never repeats for a batch and never
+-- goes down, deleted trees included, which is what makes it the tree's generation (subduction's
+-- `MinimizedTreeStore` rule 3) and what makes the table a `big_automata` `RevSource`: one row per
+-- key at its latest rev, a deleted tree a kept tombstone.
 --
--- `live` is 0 for a deleted tree. The row stays as a tombstone: deleting it would let a later
+-- `live` is 0 for a deleted tree. The row stays as that tombstone: deleting it would let a later
 -- registration start the tree's revs over, and a reader that held the old rev would match it.
 -- The rows accumulate, one per tree id ever written, like the keys of the tables below.
 CREATE TABLE sedimentree_trees (
@@ -22,9 +24,10 @@ CREATE TABLE sedimentree_trees (
     , live INTEGER NOT NULL CHECK (live IN (0, 1))
 ) STRICT, WITHOUT ROWID;
 
--- The change feed and the next rev both read this index: `rev > N ORDER BY rev` and `MAX(rev)`.
-CREATE UNIQUE INDEX sedimentree_trees_by_rev
-    ON sedimentree_trees (rev);
+-- The `RevSource` reads `(after, until]` in `(rev, tree_id)` order, and the next rev reads
+-- `MAX(rev)`. Not unique: the trees of one batch share a rev.
+CREATE INDEX sedimentree_trees_by_rev
+    ON sedimentree_trees (rev, tree_id);
 
 -- Column order is a contract. A row is stored in the order of its columns, and SQLite (like
 -- Postgres TOAST) only follows a large value off the page when a query reads it. The metadata

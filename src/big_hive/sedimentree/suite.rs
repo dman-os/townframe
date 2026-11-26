@@ -20,6 +20,11 @@ use sqlite_rs::SqliteRuntime;
 use subduction_crypto::signer::memory::MemorySigner;
 use subduction_crypto::verified_meta::VerifiedMeta;
 
+use big_automata::rev::Entry;
+use big_automata::rev::Limits;
+use big_automata::rev::Page;
+use big_automata::rev::RevSource;
+
 use super::Save;
 use super::SedimentreeStore;
 use crate::MIGRATIONS;
@@ -27,11 +32,11 @@ use crate::MIGRATIONS;
 mod conformance;
 mod crash;
 mod differential;
-mod feed;
 mod invariants;
 mod laws;
 mod oracle;
 mod plans;
+mod rev;
 
 pub(crate) type Store = SedimentreeStore<Database, CountLeadingZeroBytes>;
 
@@ -179,4 +184,23 @@ pub(crate) async fn seal(
         }
     }
     (commits, fragments)
+}
+
+/// Every entry of the window `(after, latest]`, read in one page.
+pub(crate) async fn entries_after(store: &Store, after: u64) -> Vec<Entry<SedimentreeId, ()>> {
+    let until = store.latest_rev().await.unwrap();
+    if until <= after {
+        return Vec::new();
+    }
+    let mut page = Page::default();
+    let limits = Limits {
+        max_entries: std::num::NonZeroUsize::MAX,
+        max_bytes: None,
+    };
+    store
+        .read(&(), after, until, limits, &mut page)
+        .await
+        .unwrap();
+    assert_eq!(page.through, until);
+    page.entries
 }

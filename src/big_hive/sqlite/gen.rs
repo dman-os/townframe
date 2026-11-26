@@ -8,22 +8,28 @@ pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_init.sql", sql: include_str!("migrations/001_init.sql") },
 ];
 
+pub const CHANGES_BEYOND_SQL: &str = include_str!("queries/changes_beyond.sql");
+pub async fn changes_beyond(db: &impl crate::sqlite_rs_alias::QueryExecutor, after: i64, until: i64) -> SqlResult<bool> {
+    let set = db.query(CHANGES_BEYOND_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(after), crate::sqlite_rs_alias::IntoValue::into_value(until)]).await?;
+    set.one()
+}
+
 #[derive(Clone, Debug, PartialEq)]
-pub struct ChangesAfterRow {
+pub struct ChangesWindowRow {
     pub tree_id: Vec<u8>,
     pub rev: i64,
     pub live: bool,
 }
-impl crate::sqlite_rs_alias::FromRow for ChangesAfterRow {
+impl crate::sqlite_rs_alias::FromRow for ChangesWindowRow {
     fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
         row.require_width(3)?;
-        Ok(ChangesAfterRow { tree_id: row.get::<Vec<u8>>("tree_id")?, rev: row.get::<i64>("rev")?, live: row.get::<bool>("live")? })
+        Ok(ChangesWindowRow { tree_id: row.get::<Vec<u8>>("tree_id")?, rev: row.get::<i64>("rev")?, live: row.get::<bool>("live")? })
     }
 }
 
-pub const CHANGES_AFTER_SQL: &str = include_str!("queries/changes_after.sql");
-pub async fn changes_after(db: &impl crate::sqlite_rs_alias::QueryExecutor, after: i64, limit: i64) -> SqlResult<Vec<ChangesAfterRow>> {
-    let set = db.query(CHANGES_AFTER_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(after), crate::sqlite_rs_alias::IntoValue::into_value(limit)]).await?;
+pub const CHANGES_WINDOW_SQL: &str = include_str!("queries/changes_window.sql");
+pub async fn changes_window(db: &impl crate::sqlite_rs_alias::QueryExecutor, after: i64, until: i64, limit: i64) -> SqlResult<Vec<ChangesWindowRow>> {
+    let set = db.query(CHANGES_WINDOW_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(after), crate::sqlite_rs_alias::IntoValue::into_value(until), crate::sqlite_rs_alias::IntoValue::into_value(limit)]).await?;
     set.all()
 }
 
@@ -168,20 +174,20 @@ pub async fn live_tree_ids(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> S
 }
 
 pub const REGISTER_TREE_SQL: &str = include_str!("queries/register_tree.sql");
-pub async fn register_tree(db: &impl crate::sqlite_rs_alias::Executor, tree_id: Vec<u8>) -> SqlResult<Option<i64>> {
-    let set = db.execute(REGISTER_TREE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(tree_id)]).await?.result_set;
+pub async fn register_tree(db: &impl crate::sqlite_rs_alias::Executor, tree_id: Vec<u8>, rev: Option<i64>) -> SqlResult<Option<i64>> {
+    let set = db.execute(REGISTER_TREE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(tree_id), crate::sqlite_rs_alias::IntoValue::into_value(rev)]).await?.result_set;
     set.optional()
 }
 
 pub const RETIRE_TREE_SQL: &str = include_str!("queries/retire_tree.sql");
-pub async fn retire_tree(db: &impl crate::sqlite_rs_alias::Executor, tree_id: Vec<u8>) -> SqlResult<Option<i64>> {
-    let set = db.execute(RETIRE_TREE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(tree_id)]).await?.result_set;
+pub async fn retire_tree(db: &impl crate::sqlite_rs_alias::Executor, rev: Option<i64>, tree_id: Vec<u8>) -> SqlResult<Option<i64>> {
+    let set = db.execute(RETIRE_TREE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(rev), crate::sqlite_rs_alias::IntoValue::into_value(tree_id)]).await?.result_set;
     set.optional()
 }
 
 pub const TOUCH_TREE_SQL: &str = include_str!("queries/touch_tree.sql");
-pub async fn touch_tree(db: &impl crate::sqlite_rs_alias::Executor, tree_id: Vec<u8>) -> SqlResult<i64> {
-    let set = db.execute(TOUCH_TREE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(tree_id)]).await?.result_set;
+pub async fn touch_tree(db: &impl crate::sqlite_rs_alias::Executor, tree_id: Vec<u8>, rev: Option<i64>) -> SqlResult<i64> {
+    let set = db.execute(TOUCH_TREE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(tree_id), crate::sqlite_rs_alias::IntoValue::into_value(rev)]).await?.result_set;
     set.one()
 }
 

@@ -5,6 +5,12 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::panic::AssertUnwindSafe;
 
+use big_automata::rev::Entry;
+use big_automata::rev::Limits;
+use big_automata::rev::Page;
+use big_automata::rev::Rev;
+use big_automata::rev::RevSource;
+use big_automata::rev::RevStream;
 use futures::executor::block_on;
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -30,8 +36,6 @@ use super::pooled;
 use super::seal;
 use super::store_on;
 use super::tree_id;
-use crate::sedimentree::Change;
-use crate::sedimentree::ChangeFeed;
 use crate::sedimentree::Mutation;
 use crate::sedimentree::write::PLANT;
 use crate::sedimentree::write::Plant;
@@ -116,15 +120,15 @@ pub(crate) fn op() -> impl Strategy<Value = Op> {
 }
 
 /// A store, the oracle it must equal, a second store over the same file that holds its own
-/// cache (what another process reading the file sees), and a feed from the start.
+/// cache (what another process reading the file sees), and a `RevStream` from the start.
 struct Harness {
     db: Database,
     store: Store,
     reader: Store,
     oracle: Oracle,
-    feed: ChangeFeed<Database>,
+    stream: RevStream<Store>,
     /// The `rev` each tree had when it last changed.
-    revs: BTreeMap<SedimentreeId, i64>,
+    revs: BTreeMap<SedimentreeId, Rev>,
     step: usize,
 }
 
@@ -133,7 +137,7 @@ impl Harness {
         let db = fresh_db();
         let store = store_on(&db);
         Self {
-            feed: store.changes_after(0),
+            stream: RevStream::new(store.clone(), (), 0),
             reader: store_on(&db),
             store,
             db,
@@ -166,16 +170,18 @@ impl Harness {
         };
 
         let before = self.store.latest_rev().await.expect("latest rev");
-        if self.step % 3 == 2 {
+        let skipped = self.step % 3 == 2;
+        if skipped {
             // Through a transaction of the caller's, and never told it committed: skipping
-            // `committed` is only slower.
+            // `committed` is only slower, and the watch does not move.
             let tx = self.db.begin_write().await.expect("begin");
-            let staged = self
+            let mut batch = self.store.batch();
+            let applied = self
                 .store
-                .apply_in(&tx, id, mutation)
+                .apply_in(&tx, &mut batch, id, mutation)
                 .await
                 .expect("apply_in");
-            assert_eq!(staged.changed(), changed, "step {}: {op:?}", self.step);
+            assert_eq!(applied.changed, changed, "step {}: {op:?}", self.step);
             Database::commit(tx).await.expect("commit");
         } else {
             self.store.apply(id, mutation).await.expect("apply");
@@ -183,35 +189,49 @@ impl Harness {
         self.step += 1;
 
         let after = self.store.latest_rev().await.expect("latest rev");
-        let changes = self.feed.poll().await.expect("poll");
+        let limits = Limits {
+            max_entries: std::num::NonZeroUsize::MAX,
+            max_bytes: None,
+        };
         if changed {
             assert!(
                 after > before,
                 "step {}: {op:?} changed nothing visible to the rev",
                 self.step
             );
+            // The stream sees it: through the watch when the commit reported itself, and by a
+            // new stream's replay (another process's way) when it did not.
+            let mut stream = if skipped {
+                RevStream::new(self.store.clone(), (), before)
+            } else {
+                // Every earlier skipped commit was caught up by the rebuild below.
+                std::mem::replace(&mut self.stream, RevStream::new(self.store.clone(), (), 0))
+            };
+            let mut page = Page::default();
+            stream.next_into(&mut page, limits).await.expect("next");
             let live = self.oracle.trees[&id].live;
             assert_eq!(
-                changes,
-                vec![Change {
-                    tree_id: id,
+                page.entries,
+                vec![Entry {
+                    key: id,
                     rev: after,
-                    live
+                    value: live.then_some(())
                 }],
                 "step {}: {op:?}",
                 self.step
             );
+            assert_eq!(page.through, after);
             assert!(self.revs.get(&id).is_none_or(|old| *old < after));
             self.revs.insert(id, after);
+            self.stream = if skipped {
+                RevStream::new(self.store.clone(), (), after)
+            } else {
+                stream
+            };
         } else {
             assert_eq!(
                 after, before,
                 "step {}: {op:?} moved the rev without changing",
-                self.step
-            );
-            assert!(
-                changes.is_empty(),
-                "step {}: {op:?}: {changes:?}",
                 self.step
             );
         }
@@ -416,8 +436,8 @@ proptest! {
 
     /// After every operation of a generated history, every read of the store, through the
     /// handle that wrote and through one over the same file that never saw the write, is the
-    /// oracle's; the `rev` moves exactly when the oracle changed; and the feed names that tree
-    /// at that `rev`.
+    /// oracle's; the `rev` moves exactly when the oracle changed; and a `RevStream` delivers that
+    /// tree at that `rev`.
     #[test]
     fn the_store_equals_the_oracle_after_every_operation(ops in vec(op(), 1..20)) {
         block_on(run(&ops));

@@ -1,7 +1,7 @@
 version = 1
 role = "runtime"
 dependency_reason = "The replacement for big_repo's runtime: one SQLite database holds the keyhive and sedimentree state, so it composes sqlite_rs and keyline_sqlite."
-allowed_dependencies = ["sqlite_rs", "keyline_sqlite"]
+allowed_dependencies = ["sqlite_rs", "keyline_sqlite", "big_automata", "utils_rs"]
 allow_external_api_types = true
 
 [builds.native]
@@ -20,4 +20,4 @@ required_features = []
 default_features = true
 
 [migrations]
-"src/big_hive/sqlite/migrations/001_init.sql" = "916aea1cf4450e1bc10fbd5234997d00865ef7cfc4a39654089c22b41a9d9103"
+"src/big_hive/sqlite/migrations/001_init.sql" = "f5a701df42cb8029734dabc4c941fe78485042d014b0284f3908ea1ccb30ae22"

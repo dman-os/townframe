@@ -22,6 +22,8 @@ use sqlite_rs::SqliteDb;
 use subduction_crypto::signed::Signed;
 use subduction_crypto::verified_meta::VerifiedMeta;
 
+use big_automata::rev::Rev;
+
 use super::Error;
 use super::SedimentreeStore;
 use crate::sqlite::queries;
@@ -99,52 +101,65 @@ pub enum Mutation {
     DeleteFragments,
 }
 
-/// What a mutation did inside a transaction that has not ended: the rows and the `rev` are in
-/// it, for whoever reads through that transaction until it commits.
+/// One atomic revision of the hive under construction: every tree its mutations change gets the
+/// same `rev` (the next one, taken at the first change), and the mutations join the caller's
+/// transaction. Several batches may share a transaction; each is its own revision.
 ///
 /// Hand it to [`SedimentreeStore::committed`] after the transaction commits. Drop it after a
 /// rollback: nothing outside the transaction ever saw the change.
 #[must_use = "pass it to `SedimentreeStore::committed` once the transaction commits, or drop it after a rollback"]
-pub struct Staged {
-    pub(super) tree_id: SedimentreeId,
-    /// The tree's new `rev`, if the mutation changed it.
-    pub(super) rev: Option<i64>,
+#[derive(Default)]
+pub struct Batch {
+    rev: Option<i64>,
+    staged: Vec<Staged>,
+}
+
+impl Batch {
+    /// The revision, once a mutation of the batch changed something.
+    pub fn rev(&self) -> Option<Rev> {
+        self.rev.map(rev_from_sql)
+    }
+}
+
+/// What one mutation of a batch did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Applied {
+    /// Whether the tree changed (and so took the batch's `rev`).
+    pub changed: bool,
+    /// How many rows a save inserted: the new items that were not covered on arrival.
+    pub saved: usize,
+}
+
+pub(super) fn rev_from_sql(rev: i64) -> Rev {
+    Rev::try_from(rev).expect("a stored rev is positive")
+}
+
+/// One changed tree of a batch, for the cache once the transaction commits.
+pub(super) struct Staged {
+    tree_id: SedimentreeId,
     /// The tree after a save, which the cache can carry forward.
-    pub(super) tree: Option<MinimizedSedimentree>,
-    pub(super) saved: usize,
+    tree: Option<MinimizedSedimentree>,
+    saved: usize,
+    /// The `rev` the tree took, if it changed.
+    rev: Option<i64>,
 }
 
 impl Staged {
-    /// Whether the tree changed, and so whether its `rev` moved.
-    pub fn changed(&self) -> bool {
-        self.rev.is_some()
-    }
-
-    /// The tree's `rev` after the transaction commits, if it changed.
-    pub fn rev(&self) -> Option<i64> {
-        self.rev
-    }
-
-    /// How many rows a save inserted: the new items that were not covered on arrival.
-    pub fn saved(&self) -> usize {
-        self.saved
-    }
-
     fn unchanged(tree_id: SedimentreeId) -> Self {
         Self {
             tree_id,
-            rev: None,
             tree: None,
             saved: 0,
+            rev: None,
         }
     }
 
-    fn changed_to(tree_id: SedimentreeId, rev: i64) -> Self {
+    fn changed(tree_id: SedimentreeId, rev: i64) -> Self {
         Self {
             tree_id,
-            rev: Some(rev),
             tree: None,
             saved: 0,
+            rev: Some(rev),
         }
     }
 }
@@ -351,12 +366,17 @@ impl<T: Kind> Plan<T> {
 }
 
 impl<D: SqliteDb, M: DepthMetric> SedimentreeStore<D, M> {
-    /// Do `mutation` to the tree `id` through `tx`, a write transaction the caller owns and may
-    /// share with other stores of the same database: the change joins that transaction's
-    /// commit or rollback.
+    /// A batch with nothing in it yet.
+    pub fn batch(&self) -> Batch {
+        Batch::default()
+    }
+
+    /// Do `mutation` to the tree `id` as part of `batch`, through `tx`, a write transaction the
+    /// caller owns and may share with other stores of the same database: the change joins that
+    /// transaction's commit or rollback.
     ///
-    /// The rows are in the tables, and the tree's `rev` has moved, for whoever reads through
-    /// `tx`, and for everyone else only once `tx` commits. After a commit, pass the result to
+    /// The rows are in the tables, and the tree has the batch's `rev`, for whoever reads through
+    /// `tx`, and for everyone else only once `tx` commits. After a commit, pass the batch to
     /// [`committed`](Self::committed); after a rollback, drop it.
     ///
     /// # Errors
@@ -365,43 +385,63 @@ impl<D: SqliteDb, M: DepthMetric> SedimentreeStore<D, M> {
     pub async fn apply_in(
         &self,
         tx: &impl Executor,
+        batch: &mut Batch,
+        id: SedimentreeId,
+        mutation: Mutation,
+    ) -> Result<Applied, Error> {
+        let staged = self.stage(tx, batch.rev, id, mutation).await?;
+        let applied = Applied {
+            changed: staged.rev.is_some(),
+            saved: staged.saved,
+        };
+        if staged.rev.is_some() {
+            batch.rev = staged.rev;
+            batch.staged.push(staged);
+        }
+        Ok(applied)
+    }
+
+    async fn stage(
+        &self,
+        tx: &impl Executor,
+        rev: Option<i64>,
         id: SedimentreeId,
         mutation: Mutation,
     ) -> Result<Staged, Error> {
         let tree_id = id.as_bytes().to_vec();
         match mutation {
             Mutation::Register => {
-                let rev = queries::register_tree(tx, tree_id).await?;
-                Ok(rev.map_or_else(|| Staged::unchanged(id), |rev| Staged::changed_to(id, rev)))
+                let moved = queries::register_tree(tx, tree_id, rev).await?;
+                Ok(moved.map_or_else(|| Staged::unchanged(id), |rev| Staged::changed(id, rev)))
             }
             Mutation::Retire => {
-                let Some(rev) = queries::retire_tree(tx, tree_id.clone()).await? else {
+                let Some(rev) = queries::retire_tree(tx, rev, tree_id.clone()).await? else {
                     return Ok(Staged::unchanged(id));
                 };
                 queries::delete_commits(tx, tree_id.clone()).await?;
                 queries::delete_fragments(tx, tree_id).await?;
-                Ok(Staged::changed_to(id, rev))
+                Ok(Staged::changed(id, rev))
             }
             Mutation::Save { commits, fragments } => {
-                self.save_in(tx, id, tree_id, commits, fragments).await
+                self.save_in(tx, rev, id, tree_id, commits, fragments).await
             }
             Mutation::DeleteCommit(head) => {
                 let deleted =
                     queries::delete_commit(tx, tree_id.clone(), head.as_bytes().to_vec()).await?;
-                Self::touched(tx, id, tree_id, deleted.rows_affected).await
+                Self::touched(tx, rev, id, tree_id, deleted.rows_affected).await
             }
             Mutation::DeleteCommits => {
                 let deleted = queries::delete_commits(tx, tree_id.clone()).await?;
-                Self::touched(tx, id, tree_id, deleted.rows_affected).await
+                Self::touched(tx, rev, id, tree_id, deleted.rows_affected).await
             }
             Mutation::DeleteFragment(head) => {
                 let deleted =
                     queries::delete_fragment(tx, tree_id.clone(), head.as_bytes().to_vec()).await?;
-                Self::touched(tx, id, tree_id, deleted.rows_affected).await
+                Self::touched(tx, rev, id, tree_id, deleted.rows_affected).await
             }
             Mutation::DeleteFragments => {
                 let deleted = queries::delete_fragments(tx, tree_id.clone()).await?;
-                Self::touched(tx, id, tree_id, deleted.rows_affected).await
+                Self::touched(tx, rev, id, tree_id, deleted.rows_affected).await
             }
         }
     }
@@ -410,6 +450,7 @@ impl<D: SqliteDb, M: DepthMetric> SedimentreeStore<D, M> {
     /// minimal form after it, so no minimizing follows.
     async fn touched(
         tx: &impl Executor,
+        rev: Option<i64>,
         id: SedimentreeId,
         tree_id: Vec<u8>,
         deleted: u64,
@@ -417,15 +458,16 @@ impl<D: SqliteDb, M: DepthMetric> SedimentreeStore<D, M> {
         if deleted == 0 || planted(Plant::SilentDelete) {
             return Ok(Staged::unchanged(id));
         }
-        Ok(Staged::changed_to(
+        Ok(Staged::changed(
             id,
-            queries::touch_tree(tx, tree_id).await?,
+            queries::touch_tree(tx, tree_id, rev).await?,
         ))
     }
 
     async fn save_in(
         &self,
         tx: &impl Executor,
+        rev: Option<i64>,
         id: SedimentreeId,
         tree_id: Vec<u8>,
         commits: Vec<Save<LooseCommit>>,
@@ -477,46 +519,50 @@ impl<D: SqliteDb, M: DepthMetric> SedimentreeStore<D, M> {
         if live && commit_plan.is_empty() && fragment_plan.is_empty() {
             return Ok(Staged::unchanged(id));
         }
-        let rev = queries::touch_tree(tx, tree_id.clone()).await?;
+        let rev = queries::touch_tree(tx, tree_id.clone(), rev).await?;
         let saved =
             commit_plan.execute(tx, &tree_id).await? + fragment_plan.execute(tx, &tree_id).await?;
         Ok(Staged {
             tree_id: id,
-            rev: Some(rev),
             tree: Some(MinimizedSedimentree::already_minimal(tree)),
             saved,
+            rev: Some(rev),
         })
     }
 
     /// The commit half of [`apply_in`](Self::apply_in): bring the cache up to the transaction's
-    /// result and wake the change feed. It is only a cache and a wakeup: a store that is never
-    /// told still answers correctly, by rebuilding from the tables on the next read, and a
-    /// feed reader that is not woken finds the change on its next poll.
-    pub fn committed(&self, staged: Staged) {
-        let Some(rev) = staged.rev else {
+    /// result and move the [`RevSource`](big_automata::rev::RevSource) watch to the batch's rev.
+    /// It is only a cache and a wakeup: a store that is never told still answers correctly, by
+    /// rebuilding from the tables on the next read, and a stream that is not woken finds the
+    /// change when it next reads `latest_rev` (which is how another process learns).
+    pub fn committed(&self, batch: Batch) {
+        let Some(rev) = batch.rev else {
             return;
         };
-        match staged.tree {
-            Some(tree) => self
-                .shared
-                .cache
-                .insert(staged.tree_id, rev, Arc::new(tree)),
-            None => self.shared.cache.evict(staged.tree_id),
+        for staged in batch.staged {
+            let rev = staged.rev.expect("a staged tree changed");
+            match staged.tree {
+                Some(tree) => self
+                    .shared
+                    .cache
+                    .insert(staged.tree_id, rev, Arc::new(tree)),
+                None => self.shared.cache.evict(staged.tree_id),
+            }
         }
         self.shared
             .committed
-            .send_modify(|latest| *latest = (*latest).max(rev));
+            .send_modify(|latest| *latest = (*latest).max(rev_from_sql(rev)));
     }
 
     /// Do `mutation` in a transaction of its own and commit it. Returns the number of rows a
     /// save inserted.
     pub async fn apply(&self, id: SedimentreeId, mutation: Mutation) -> Result<usize, Error> {
         let tx = self.db.begin_write().await?;
+        let mut batch = self.batch();
         // An error drops `tx`, which rolls it back.
-        let staged = self.apply_in(&tx, id, mutation).await?;
+        let applied = self.apply_in(&tx, &mut batch, id, mutation).await?;
         D::commit(tx).await?;
-        let saved = staged.saved;
-        self.committed(staged);
-        Ok(saved)
+        self.committed(batch);
+        Ok(applied.saved)
     }
 }

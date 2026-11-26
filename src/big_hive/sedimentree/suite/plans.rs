@@ -31,6 +31,10 @@ use super::fresh_db;
 use super::pcs_hash;
 use super::seal;
 use super::tree_id;
+use big_automata::rev::Limits;
+use big_automata::rev::Page;
+use big_automata::rev::RevSource;
+
 use crate::sedimentree::Mutation;
 use crate::sedimentree::SedimentreeStore;
 
@@ -258,9 +262,25 @@ fn every_statement_is_served_by_an_index() {
         MinimizedTreeStore::<future_form::Sendable>::get(&store, id)
             .await
             .unwrap();
-        let mut feed = store.changes_after(0);
-        feed.poll().await.unwrap();
-        store.latest_rev().await.unwrap();
+        let latest = store.latest_rev().await.unwrap();
+        let mut page = Page::default();
+        let limits = |entries| Limits {
+            max_entries: std::num::NonZeroUsize::new(entries).unwrap(),
+            max_bytes: None,
+        };
+        store
+            .read(&(), 0, latest, limits(1000), &mut page)
+            .await
+            .unwrap();
+        // A window with a revision over the bound, and one cut mid-window.
+        store
+            .read(&(), 0, latest, limits(1), &mut page)
+            .await
+            .unwrap();
+        store
+            .read(&(), 0, latest, limits(2), &mut page)
+            .await
+            .unwrap();
 
         let mut statements = BTreeMap::new();
         for (sql, params) in log.lock().unwrap().iter() {

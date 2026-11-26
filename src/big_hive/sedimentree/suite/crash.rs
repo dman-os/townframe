@@ -7,6 +7,8 @@ use futures::executor::block_on;
 use sqlite_rs::Database;
 use sqlite_rs::MigrationState;
 
+use big_automata::rev::RevSource;
+
 use super::RUNTIME;
 use super::Spec;
 use super::Store;
@@ -71,6 +73,7 @@ fn an_interrupted_write_leaves_nothing_and_reopening_sees_the_committed_state() 
         // Applied inside the transaction, and the transaction abandoned: a fragment that
         // prunes, a retire, a new tree.
         let tx = db.begin_write().await.unwrap();
+        let mut batch = store.batch();
         for (tree, mutation) in [
             (1, Mutation::Retire),
             (2, {
@@ -80,8 +83,11 @@ fn an_interrupted_write_leaves_nothing_and_reopening_sees_the_committed_state() 
             }),
             (3, Mutation::Register),
         ] {
-            let staged = store.apply_in(&tx, tree_id(tree), mutation).await.unwrap();
-            assert!(staged.changed());
+            let applied = store
+                .apply_in(&tx, &mut batch, tree_id(tree), mutation)
+                .await
+                .unwrap();
+            assert!(applied.changed);
         }
         drop(tx);
         assert_eq!(dump(&db).await, committed);
