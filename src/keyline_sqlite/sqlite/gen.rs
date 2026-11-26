@@ -148,12 +148,6 @@ pub async fn delegation_row(db: &impl crate::sqlite_rs_alias::QueryExecutor, dig
     set.optional()
 }
 
-pub const DELEGATION_SUBJECT_SQL: &str = include_str!("queries/delegation_subject.sql");
-pub async fn delegation_subject(db: &impl crate::sqlite_rs_alias::QueryExecutor, digest: Vec<u8>) -> SqlResult<Option<Vec<u8>>> {
-    let set = db.query(DELEGATION_SUBJECT_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(digest)]).await?;
-    set.optional()
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct DelegationsToRow {
     pub digest: Vec<u8>,

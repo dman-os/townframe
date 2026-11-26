@@ -1,9 +1,10 @@
 //! Stratum 2 for one disputed subject: the live set, by SQL rounds.
 //!
 //! Only a subject whose closure holds a delegation some revocation names can have a live set that
-//! differs from its positive reach (`keyline_disputed`); every other subject answers from stratum
-//! 1. For a disputed subject the live set is computed here, in a write transaction, and stored
-//! with the version it was computed at (`keyline_live_at`); a query reads it only at that version.
+//! differs from its positive reach (`keyline_disputed`); every other subject answers from
+//! stratum 1. For a disputed subject the live set is computed here, in a write transaction, and
+//! stored with the version it was computed at (`keyline_live_at`); a query reads it only at that
+//! version.
 //!
 //! What is computed, for the *roots* of the subject (the nodes in its closure that are the
 //! subject of some delegation; each hop is judged in its own subject's graph, the daisy-chain

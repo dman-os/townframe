@@ -169,7 +169,7 @@ fn every_statement_is_served_by_an_index() {
             "{revocations}"
         );
         // The access paths the evaluation's statements are for: a round reads only its delta, by
-        // epoch; a delegation's subject is a primary-key lookup; a subset is by primary key.
+        // epoch; a delegation's row is a primary-key lookup; a subset is by primary key.
         for sql in [queries::REACH_ROUND_SQL, queries::LIVE_ROUND_SQL] {
             let rounds = plan_of(sql);
             assert!(
@@ -177,7 +177,7 @@ fn every_statement_is_served_by_an_index() {
                 "a round must start from its delta:\n{rounds}"
             );
         }
-        let subject = plan_of(queries::DELEGATION_SUBJECT_SQL);
+        let subject = plan_of(queries::DELEGATION_ROW_SQL);
         assert!(
             subject.contains("PRIMARY KEY (kind=? AND digest=?)"),
             "{subject}"
