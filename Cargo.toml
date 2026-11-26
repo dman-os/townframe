@@ -269,7 +269,7 @@ fs4 = "0.13.1"
 # crypto
 chacha20poly1305 = "0.10"
 aes-gcm = "0.10"
-bao-tree = { version = "0.16", default-features = false, features = ["experimental-mixed", "tokio_fsm", "validate", "serde"] }
+bao-tree = { version = "0.17", default-features = false, features = ["experimental-mixed", "tokio_fsm", "validate", "serde"] }
 hkdf = "0.12"
 sha2 = "0.10"
 
@@ -367,7 +367,7 @@ clap_complete = "4.5"
 iroh = "1"
 iroh-tickets = "1"
 # iroh-blobs = "0.103.0"
-iroh-blobs = { git = "https://github.com/dman-os/iroh-blobs", rev = "b3d641036c807b30d9fc62fd22a83801a38386d3" }
+iroh-blobs = { git = "https://github.com/dman-os/iroh-blobs", rev = "8e077111e91f818af22cc549b52b7369110e59bb" }
 
 
 #
