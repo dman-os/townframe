@@ -7,6 +7,12 @@
 //! under the thumb move furthest; distant ones barely move. (The "arc" the strip
 //! draws while pressed is only that pressed look.)
 //!
+//! Only a touch gesture bends the strip. The press records the pointer's type and the whole
+//! gesture follows it, so a touchscreen laptop arcs under a finger and stays flat under the
+//! mouse: for mouse and pen the labels stay on the resting column and horizontal movement is
+//! ignored, while the vertical drag still moves the selection and the bubble still shows on it.
+//! Hover labels, the wheel and the keyboard are the same for every pointer.
+//!
 //! Niagara fires haptics each time a breakpoint is crossed. Desktop has no
 //! haptic channel, so the bubble under the thumb is the place to pulse instead.
 //!
@@ -313,7 +319,9 @@ impl Geometry {
         // The list is the caller's and may shrink between renders; a focus left past its
         // end would place the strip off the list.
         let focus = state.focus.min((count - 1) as f64);
-        let engaged = state.engaged();
+        // Only a touch gesture arcs; any other pointer scrubs flat, so for it every push below
+        // stays at rest while the selection still follows the pointer.
+        let engaged = state.arcing();
         let active = focus.round().clamp(0.0, (count - 1) as f64) as usize;
         let Metrics { spacing, top, .. } = Metrics::of(viewport, count, engaged);
         let width = viewport.0;
@@ -405,11 +413,41 @@ struct StripState {
     /// Where the owner said the list currently is while a gesture held the strip (a scroll
     /// the gesture itself set off reports back mid-drag): the strip goes there once it rests.
     follow: Option<usize>,
+    /// Whether the gesture in progress is a touch one, decided once at the press from the
+    /// pointer's type: only touch gets the arc (the push displacement and the wider spacing),
+    /// whatever else the device can do, so a touchscreen laptop arcs under a finger and stays
+    /// flat under the mouse. Meaningless at rest.
+    arcs: bool,
 }
 
 impl StripState {
     fn engaged(&self) -> bool {
         self.thumb_x.is_some()
+    }
+
+    /// Whether the strip is bent around the thumb: a gesture is on and it is a touch one.
+    fn arcing(&self) -> bool {
+        self.engaged() && self.arcs
+    }
+}
+
+/// The kind of pointer a gesture started with, from the press's `pointer_type`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Pointer {
+    Touch,
+    Mouse,
+    Pen,
+}
+
+impl Pointer {
+    /// Pointer Events name the type `"mouse"`, `"pen"` or `"touch"`; a type a browser leaves
+    /// empty or invents is treated as the mouse, the pointer every device can fall back to.
+    fn of(pointer_type: &str) -> Self {
+        match pointer_type {
+            "touch" => Self::Touch,
+            "pen" => Self::Pen,
+            _ => Self::Mouse,
+        }
     }
 }
 
@@ -420,6 +458,7 @@ enum StripEvent {
     Press {
         x: f64,
         y: f64,
+        pointer: Pointer,
     },
     /// A pointer move over the overlay; only continues a gesture this strip started.
     Drag {
@@ -468,13 +507,14 @@ impl StripState {
             height,
             spacing,
             top,
-        } = Metrics::of(viewport, count, state.engaged());
+        } = Metrics::of(viewport, count, state.arcing());
         match event {
-            StripEvent::Press { x, y } => {
+            StripEvent::Press { x, y, pointer } => {
                 // Start from the breakpoint actually under the finger, and leave the list
                 // exactly where it is: only a drag past an end moves it.
                 selected = state.commit(focus_at(y, top, spacing, count), count);
                 state.thumb_x = Some(x);
+                state.arcs = pointer == Pointer::Touch;
                 state.pull = pull_for(y, top, spacing, count, height);
                 state.hovered = None;
             }
@@ -491,6 +531,7 @@ impl StripState {
             StripEvent::Release => {
                 if state.engaged() {
                     state.thumb_x = None;
+                    state.arcs = false;
                     state.pull = 0.0;
                     if let Some(index) = state.follow.take() {
                         state.focus = index.min(count - 1) as f64;
@@ -726,7 +767,8 @@ pub fn ScrubStrip(
                 onpointerdown: move |event| {
                     event.prevent_default();
                     let point = local(event.data().client_coordinates(), *bounds.peek());
-                    send.call(StripEvent::Press { x: point.x, y: point.y });
+                    let pointer = Pointer::of(&event.data().pointer_type());
+                    send.call(StripEvent::Press { x: point.x, y: point.y, pointer });
                 },
                 onkeydown: move |event| {
                     if let Some(step) = key_step(&event.key(), count) {

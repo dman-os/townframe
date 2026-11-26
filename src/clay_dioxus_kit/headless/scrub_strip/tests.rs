@@ -129,6 +129,7 @@ fn a_thumb_at_the_far_left_of_a_wide_box_pushes_to_the_far_edge() {
     let items = breakpoints();
     let state = StripState {
         thumb_x: Some(12.0),
+        arcs: true,
         ..StripState::default()
     };
     let geometry = Geometry::new((width, height), &items, &state);
@@ -447,6 +448,7 @@ mod transitions {
             &[StripEvent::Press {
                 x: 1050.0,
                 y: y_of(index),
+                pointer: Pointer::Touch,
             }],
         )
         .0
@@ -459,6 +461,7 @@ mod transitions {
             &[StripEvent::Press {
                 x: 1050.0,
                 y: y_of(5),
+                pointer: Pointer::Touch,
             }],
         );
         assert!(state.engaged());
@@ -519,6 +522,7 @@ mod transitions {
             &[StripEvent::Press {
                 x: 1050.0,
                 y: y_of(7),
+                pointer: Pointer::Touch,
             }],
         );
         assert_eq!(pressed.hovered, None);
@@ -615,6 +619,104 @@ mod transitions {
         };
         let (state, _) = far.next(VIEW, 3, StripEvent::Nudge(1.0));
         assert_eq!(state.focus, 2.0);
+    }
+
+    /// The geometry of a gesture that pressed on breakpoint 5 with `pointer` and dragged
+    /// far inboard and down to breakpoint 12, and the breakpoints it reported.
+    fn far_drag(pointer: Pointer) -> (Geometry, Vec<usize>) {
+        let items = breakpoints();
+        let (state, selected) = run(
+            &StripState::default(),
+            &[
+                StripEvent::Press {
+                    x: 1050.0,
+                    y: y_of(5),
+                    pointer,
+                },
+                StripEvent::Drag {
+                    x: 200.0,
+                    y: y_of(12),
+                },
+            ],
+        );
+        (Geometry::new(VIEW, &items, &state), selected)
+    }
+
+    #[test]
+    fn a_touch_gesture_pushes_the_label_inboard_following_the_thumb() {
+        let (geometry, selected) = far_drag(Pointer::Touch);
+        assert!(geometry.limit > 600.0, "pushed only {}", geometry.limit);
+        assert_eq!(geometry.bubble_push, geometry.limit);
+        assert_eq!(
+            geometry
+                .placed
+                .iter()
+                .map(|placed| placed.push)
+                .fold(f64::MIN, f64::max),
+            geometry.limit
+        );
+        assert_eq!(selected, [5, 12]);
+    }
+
+    /// A flat gesture still moves the selection with the vertical drag but leaves every label on
+    /// the resting column, whatever the horizontal travel.
+    fn assert_flat(pointer: Pointer) {
+        let (geometry, selected) = far_drag(pointer);
+        assert_eq!(geometry.limit, 0.0);
+        assert_eq!(geometry.bubble_push, 0.0);
+        assert!(geometry.placed.iter().all(|placed| placed.push == 0.0));
+        assert_eq!(geometry.active, 12);
+        assert_eq!(selected, [5, 12]);
+    }
+
+    #[test]
+    fn a_mouse_gesture_scrubs_flat() {
+        assert_flat(Pointer::Mouse);
+    }
+
+    #[test]
+    fn a_pen_gesture_scrubs_flat_like_a_mouse() {
+        assert_flat(Pointer::Pen);
+        assert_eq!(
+            far_drag(Pointer::Pen).0.active,
+            far_drag(Pointer::Mouse).0.active
+        );
+    }
+
+    #[test]
+    fn pointer_types_map_to_kinds_with_the_mouse_as_the_fallback() {
+        assert_eq!(Pointer::of("touch"), Pointer::Touch);
+        assert_eq!(Pointer::of("pen"), Pointer::Pen);
+        assert_eq!(Pointer::of("mouse"), Pointer::Mouse);
+        assert_eq!(Pointer::of(""), Pointer::Mouse);
+    }
+
+    #[test]
+    fn the_gesture_kind_is_decided_at_the_press_and_cleared_on_release() {
+        let flat = run(
+            &StripState::default(),
+            &[StripEvent::Press {
+                x: 1050.0,
+                y: y_of(5),
+                pointer: Pointer::Mouse,
+            }],
+        )
+        .0;
+        assert!(!flat.arcing());
+        let touched = run(
+            &flat,
+            &[
+                StripEvent::Release,
+                StripEvent::Press {
+                    x: 1050.0,
+                    y: y_of(5),
+                    pointer: Pointer::Touch,
+                },
+            ],
+        )
+        .0;
+        assert!(touched.arcing());
+        assert!(!run(&touched, &[StripEvent::Release]).0.arcing());
     }
 }
 
