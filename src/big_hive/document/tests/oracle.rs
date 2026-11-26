@@ -123,8 +123,11 @@ impl World {
         let before: BTreeSet<String> = load(all()).keys(ROOT).collect();
         let after: BTreeSet<String> = load(all().chain([change])).keys(ROOT).collect();
         let added: Vec<_> = after.difference(&before).collect();
-        assert_eq!(added.len(), 1, "a write adds one key");
-        added[0]
+        // (a change that is already committed, which a commit that was reported failed can
+        // leave behind, adds none)
+        assert!(added.len() <= 1, "a write adds one key");
+        added
+            .first()?
             .strip_prefix('l')
             .map(|tag| tag.parse().expect("a tag"))
     }
@@ -191,6 +194,15 @@ impl World {
         for (doc, change, row) in batch {
             let model = &mut self.docs[doc];
             let prior_rev = model.tree_rev;
+            assert!(
+                !model
+                    .changes
+                    .iter()
+                    .any(|stored| stored.change.actor_id() == change.actor_id()
+                        && stored.change.seq() == change.seq()
+                        && stored.change.hash() != change.hash()),
+                "doc {doc}: a duplicate SeqNumber: two different changes by one actor with one sequence number"
+            );
             model.changes.push(Stored {
                 change,
                 rev,
@@ -255,6 +267,7 @@ impl World {
                 .map(|stored| stored.change.clone())
                 .collect(),
             rev: model.tree_rev,
+            frontier_rev: self.frontier_rev(doc),
             blocked: model.keyless(),
         }
     }

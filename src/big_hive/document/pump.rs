@@ -32,6 +32,7 @@ impl<O> Document<O> {
             && self.queue.is_empty()
             && self.reads.is_empty()
             && self.stopping.is_empty()
+            && self.awaiting_actor.is_none()
             && self.pending.is_empty()
             && !matches!(self.frontier, Frontier::Publishing { .. })
             && !matches!(self.phase, Phase::Hydrating { .. })
@@ -125,7 +126,7 @@ impl<O> Document<O> {
         loop {
             match &self.phase {
                 Phase::Cold => {
-                    if self.wanted() && !self.backing_off() {
+                    if self.wanted() && !self.backing_off() && self.awaiting_actor.is_none() {
                         let call = self.fresh_call();
                         self.phase = Phase::Hydrating { call };
                         self.pending.push(Command::Hydrate { call });
@@ -198,9 +199,18 @@ impl<O> Document<O> {
 
     /// A write ended without a commit: forget its change by throwing the live document away, and
     /// tell the listeners again once the new one is there.
-    pub(super) fn forget_write(&mut self) {
+    pub(super) fn forget_write(&mut self, undecided: bool) {
         self.renotify = true;
         self.go_cold();
+        #[cfg(test)]
+        let ask = undecided && self.plant != Some(Plant::ReuseActor);
+        #[cfg(not(test))]
+        let ask = undecided;
+        if ask && self.awaiting_actor.is_none() {
+            let call = self.fresh_call();
+            self.awaiting_actor = Some(call);
+            self.pending.push(Command::NewActor { call });
+        }
     }
 
     /// Throw the live document away. It is hydrated again when somebody wants it, from

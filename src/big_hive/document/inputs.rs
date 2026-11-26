@@ -75,6 +75,14 @@ impl<O> Document<O> {
         }
     }
 
+    /// The Hub's answer to [`Command::NewActor`].
+    pub fn actor_assigned(&mut self, call: CallId, actor: ActorId) {
+        if self.awaiting_actor == Some(call) {
+            self.awaiting_actor = None;
+            self.actor = actor;
+        }
+    }
+
     pub(super) fn reply(&mut self, ticket: Ticket, result: Result<O, Rejected>) {
         self.pending.push(Command::Reply { ticket, result });
     }
@@ -203,7 +211,8 @@ impl<O> Document<O> {
         match &self.writes {
             Writes::HeldForPlan { plan: held, .. } if *held == plan => {
                 self.writes = Writes::Idle;
-                self.forget_write();
+                // the coordinator may have sent the commit before it gave up on the plan
+                self.forget_write(true);
             }
             _ => self
                 .queue
@@ -233,6 +242,7 @@ impl<O> Document<O> {
                 doc.apply_changes(found.changes)
                     .expect("committed changes apply");
                 self.known_rev = self.known_rev.max(found.rev);
+                self.frontier_rev = self.frontier_rev.max(found.frontier_rev);
                 // (a publication still out settles itself when it reports)
                 if !matches!(self.frontier, Frontier::Publishing { .. }) {
                     self.frontier = if self.frontier_rev >= found.rev {
@@ -333,7 +343,7 @@ impl<O> Document<O> {
             unreachable!("matched above");
         };
         let Outcome::Done(enc) = outcome else {
-            self.forget_write();
+            self.forget_write(false);
             self.answer(ticket, built.out.is_none(), Err(Rejected::Failed));
             return;
         };
@@ -382,7 +392,8 @@ impl<O> Document<O> {
                     token,
                     applied: false,
                 });
-                self.forget_write();
+                // a commit that failed may have landed: the next change takes a fresh actor
+                self.forget_write(true);
                 self.answer(ticket, built.out.is_none(), Err(Rejected::Failed));
             }
         }

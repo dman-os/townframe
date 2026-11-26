@@ -173,10 +173,13 @@ impl Sim {
             };
             // the machine's idea of the frontier is the row in the store: both change only when
             // a publication or a commit lands, in the same step
-            assert_eq!(
-                machine.doc.frontier_rev, revs.0,
+            let behind_by_a_lost_answer =
+                self.undecided.contains(&doc) && !matches!(machine.doc.phase, Phase::Live(_));
+            assert!(
+                behind_by_a_lost_answer || machine.doc.frontier_rev == revs.0,
                 "doc {doc}: the machine thinks the frontier is at {}, the store has it at {} (law 5)",
-                machine.doc.frontier_rev, revs.0
+                machine.doc.frontier_rev,
+                revs.0
             );
             if let Phase::Live(live) = &machine.doc.phase {
                 // law 1: the live document holds only committed changes, besides the one change

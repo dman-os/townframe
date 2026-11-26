@@ -62,6 +62,26 @@ impl Sim {
         self.plan_prepare_kind(mask, Some(false));
     }
 
+    /// As `complete_kind`, for a commit that lands and is reported failed.
+    pub(in crate::document) fn complete_undecided(&mut self, doc: usize, now: bool) -> bool {
+        let Some(at) = self
+            .flights
+            .iter()
+            .position(|f| f.doc == doc && f.ask.kind() == "commit")
+        else {
+            return false;
+        };
+        self.complete_as(at, false, Some(now));
+        self.check();
+        true
+    }
+
+    pub(in crate::document) fn land_zombies(&mut self) {
+        while !self.zombies.is_empty() {
+            self.land_zombie(0);
+        }
+    }
+
     pub(in crate::document) fn deliver_all(&mut self) {
         while !self.mail.is_empty() {
             self.deliver(0);

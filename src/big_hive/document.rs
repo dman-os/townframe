@@ -287,6 +287,9 @@ pub struct Start {
     /// The automerge actor this machine's changes are made under. It must be fresh for every
     /// machine: a restarted machine reusing an actor whose last change it has not seen would
     /// repeat a sequence number. (The machine takes no randomness, so a simulation replays.)
+    /// After a commit that failed or was left undecided the machine asks for another
+    /// ([`Command::NewActor`]), for the same reason: the commit may have landed after all, and
+    /// the next change must not collide with it.
     pub actor: ActorId,
     pub readable: bool,
     /// The tree's revision now.
@@ -321,6 +324,10 @@ pub struct ContentRef(pub [u8; 32]);
 pub struct Materialized {
     pub changes: Vec<Change>,
     pub rev: Rev,
+    /// The revision the published frontier row reflects, read in the same snapshot. After a
+    /// commit that was left undecided this is how the machine learns whether its frontier row
+    /// was written.
+    pub frontier_rev: Rev,
     pub blocked: Vec<ContentRef>,
 }
 
@@ -443,6 +450,12 @@ pub enum Command<O> {
     Cancel {
         call: CallId,
     },
+    /// Ask the Hub for a fresh automerge actor, answered by [`Document::actor_assigned`]. The
+    /// machine asks after a commit that failed or was left undecided, and waits for the answer
+    /// before it hydrates again.
+    NewActor {
+        call: CallId,
+    },
     /// The machine has been idle for the configured time and may be stopped.
     Evictable,
 }
@@ -563,6 +576,9 @@ pub(crate) enum Plant {
     /// A remote change applied during a write notifies listeners of heads that include the
     /// write's uncommitted change (law 1).
     NotifyDuringWrite,
+    /// The machine keeps its actor after a failed commit, so the next change reuses the failed
+    /// one's sequence number (laws 1 and 2).
+    ReuseActor,
     /// A commit's frontier row is taken to be written when the tree is at the machine's current
     /// applied revision, not at the revision the row expected: remote content applied during
     /// the write makes the two differ (law 5).
@@ -597,6 +613,8 @@ pub struct Document<O> {
     /// Commands decided by an input, ahead of the next flush's.
     pending: Vec<Command<O>>,
     retry: Retry,
+    /// A call out for a fresh actor: nothing is hydrated until it is answered.
+    awaiting_actor: Option<CallId>,
     /// A failed write threw away the live document, and remote changes applied since the last
     /// notification may have gone with it: the next hydration notifies.
     renotify: bool,
@@ -634,6 +652,7 @@ impl<O> Document<O> {
             stopping: BTreeSet::new(),
             pending: Vec::new(),
             retry: Retry::default(),
+            awaiting_actor: None,
             renotify: false,
             #[cfg(test)]
             plant: None,

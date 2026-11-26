@@ -54,6 +54,10 @@ pub(in crate::document) enum Op {
         pick: u8,
         fail: bool,
     },
+    /// The driver finishes a call, and a commit lands though it is reported failed.
+    CompleteUndecided(u8),
+    /// A commit that was reported failed runs after all.
+    LandZombie(u8),
     Deliver(u8),
     Duplicate(u8),
     Advance(u8),
@@ -97,6 +101,11 @@ impl Sim {
             Op::PlanPrepare { mask } => self.plan_prepare(usize::from(mask)),
             Op::PlanFinish { pick, commit } => self.plan_finish(usize::from(pick), commit),
             Op::Complete { pick, fail } => self.complete(usize::from(pick), fail),
+            Op::CompleteUndecided(pick) => {
+                let now = self.draw(2) == 0;
+                self.complete_as(usize::from(pick), false, Some(now));
+            }
+            Op::LandZombie(pick) => self.land_zombie(usize::from(pick)),
             Op::Deliver(pick) => self.deliver(usize::from(pick)),
             Op::Duplicate(pick) => self.duplicate(usize::from(pick)),
             Op::Advance(by) => self.advance(Duration::from_millis(250 * u64::from(by))),
@@ -128,6 +137,8 @@ pub(in crate::document) fn op() -> impl Strategy<Value = Op> {
         4 => any::<u8>().prop_map(|mask| Op::PlanPrepare { mask: mask & 3 }),
         4 => (any::<u8>(), any::<bool>()).prop_map(|(pick, commit)| Op::PlanFinish { pick, commit }),
         20 => (any::<u8>(), proptest::bool::weighted(0.1)).prop_map(|(pick, fail)| Op::Complete { pick, fail }),
+        3 => any::<u8>().prop_map(Op::CompleteUndecided),
+        2 => any::<u8>().prop_map(Op::LandZombie),
         8 => any::<u8>().prop_map(Op::Deliver),
         2 => any::<u8>().prop_map(Op::Duplicate),
         2 => any::<u8>().prop_map(Op::Advance),

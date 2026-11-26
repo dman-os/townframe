@@ -207,6 +207,11 @@ fn without_the_compare_and_set_a_frontier_row_claims_unapplied_content() {
 }
 
 #[test]
+fn planted_reuse_of_the_actor_after_a_failed_commit_is_caught() {
+    caught(Plant::ReuseActor, "SeqNumber");
+}
+
+#[test]
 fn planted_trust_in_the_landed_revision_is_caught() {
     caught(Plant::TrustLandedRev, "frontier");
 }

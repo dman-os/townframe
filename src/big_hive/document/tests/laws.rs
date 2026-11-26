@@ -49,6 +49,8 @@ fn law_1_a_failed_commit_leaves_readers_with_committed_state_only() {
     assert!(sim.complete_kind(0, "commit", true));
     // the document with the uncommitted change is gone, and the read waits for a new one
     assert_eq!(sim.live(0), None);
+    // a commit that failed may have landed: a fresh actor first
+    assert!(sim.complete_kind(0, "actor", false));
     assert_eq!(sim.in_flight(0), ["hydrate"]);
     assert_eq!(
         sim.unanswered(),
@@ -68,6 +70,56 @@ fn law_1_a_failed_commit_leaves_readers_with_committed_state_only() {
     assert!(sim.complete_kind(0, "encrypt", false));
     assert!(sim.complete_kind(0, "commit", false));
     assert_eq!(sim.live(0), Some(keys(&["l2"])));
+}
+
+/// A commit that landed but was reported failed: the new document shows it, and the next write
+/// takes a fresh actor.
+#[test]
+fn law_2_a_commit_that_landed_but_was_reported_failed() {
+    let mut sim = live();
+    sim.write(0, WriteKind::Normal);
+    assert!(sim.complete_kind(0, "encrypt", false));
+    assert!(sim.complete_undecided(0, true));
+    assert_eq!(sim.live(0), None);
+    assert_eq!(
+        sim.in_flight(0),
+        ["actor"],
+        "waits for a fresh actor before it hydrates"
+    );
+    sim.write(0, WriteKind::Normal);
+    assert!(sim.complete_kind(0, "actor", false));
+    assert!(sim.complete_kind(0, "hydrate", false));
+    // the write that was reported failed is there: it landed. The next one is being made on it.
+    assert_eq!(sim.world.visible(0), keys(&["l1"]));
+    assert_eq!(sim.live(0), Some(keys(&["l1", "l2"])));
+    assert!(sim.complete_kind(0, "encrypt", false));
+    assert!(sim.complete_kind(0, "commit", false));
+    assert_eq!(sim.world.visible(0), keys(&["l1", "l2"]));
+}
+
+/// A commit reported failed that only runs later: the next write was made after a hydration
+/// that did not have it. Under the old actor the two would share a sequence number; under the
+/// fresh one they sit side by side.
+#[test]
+fn law_2_a_commit_that_was_reported_failed_runs_later() {
+    let mut sim = live();
+    sim.write(0, WriteKind::Normal);
+    assert!(sim.complete_kind(0, "encrypt", false));
+    assert!(sim.complete_undecided(0, false));
+    sim.write(0, WriteKind::Normal);
+    assert!(sim.complete_kind(0, "actor", false));
+    assert!(sim.complete_kind(0, "hydrate", false));
+    assert_eq!(
+        sim.live(0),
+        Some(keys(&["l2"])),
+        "the first has not run yet"
+    );
+    assert!(sim.complete_kind(0, "encrypt", false));
+    assert!(sim.complete_kind(0, "commit", false));
+    sim.land_zombies();
+    sim.quiesce();
+    assert_eq!(sim.world.visible(0), keys(&["l1", "l2"]));
+    assert_eq!(sim.live(0), Some(keys(&["l1", "l2"])));
 }
 
 #[test]
@@ -91,6 +143,7 @@ fn law_1_an_aborted_plan_is_forgotten() {
         None,
         "the document with the plan's change is gone"
     );
+    assert!(sim.complete_kind(0, "actor", false));
     assert!(sim.complete_kind(0, "hydrate", false));
     assert_eq!(sim.live(0), Some(keys(&[])));
     assert_eq!(sim.world.visible(0), keys(&[]));
@@ -111,6 +164,7 @@ fn law_1_an_ingested_change_is_visible_only_once_committed() {
     assert!(sim.complete_kind(0, "encrypt", false));
     assert!(sim.complete_kind(0, "commit", true));
     assert_eq!(sim.live(0), None);
+    assert!(sim.complete_kind(0, "actor", false));
     assert!(sim.complete_kind(0, "hydrate", false));
     assert_eq!(sim.live(0), Some(keys(&[])));
     // sent again, it lands
@@ -143,6 +197,7 @@ fn law_1_remote_changes_are_applied_during_a_write_and_survive_its_failure() {
     assert_eq!(sim.unanswered(), 2, "the read still waits");
     assert!(sim.complete_kind(0, "encrypt", false));
     assert!(sim.complete_kind(0, "commit", true));
+    assert!(sim.complete_kind(0, "actor", false));
     assert!(sim.complete_kind(0, "hydrate", false));
     assert_eq!(sim.live(0), Some(keys(&["r1"])));
     assert_eq!(sim.unanswered(), 0);

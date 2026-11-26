@@ -73,7 +73,7 @@ impl<O> Document<O> {
             }
             if matches!(self.phase, Phase::Cold) {
                 assert!(
-                    !self.wanted() || self.backing_off(),
+                    !self.wanted() || self.backing_off() || self.awaiting_actor.is_some(),
                     "a wanted cold document is hydrating"
                 );
             }

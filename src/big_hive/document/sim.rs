@@ -87,6 +87,7 @@ enum Ask {
     Encrypt(Vec<u8>),
     Commit(Plan),
     Publish { heads: Vec<ChangeHash>, rev: Rev },
+    Actor,
 }
 
 struct Flight {
@@ -163,8 +164,14 @@ pub(super) struct Sim {
     /// The last change an external author sent for each document, and the key it adds.
     last_ingest: Vec<Option<(Change, String)>>,
     next_author: Vec<u64>,
+    /// Documents whose last commit was left undecided and landed: the machine's frontier may be
+    /// behind the store's until it hydrates.
+    undecided: BTreeSet<usize>,
+    /// Commits reported failed whose transactions have not run yet.
+    zombies: Vec<(usize, Change)>,
     settled: BTreeSet<u64>,
     next_token: u64,
+    next_actor: u64,
     generation: u64,
     now: Instant,
     start: Instant,
@@ -185,6 +192,7 @@ impl Ask {
             Ask::Encrypt(_) => "encrypt",
             Ask::Commit(_) => "commit",
             Ask::Publish { .. } => "publish",
+            Ask::Actor => "actor",
         }
     }
 }
@@ -209,8 +217,11 @@ impl Sim {
             stale_handles: vec![],
             last_ingest: vec![None; DOCS],
             next_author: vec![0; DOCS],
+            undecided: BTreeSet::new(),
+            zombies: vec![],
             settled: BTreeSet::new(),
             next_token: 0,
+            next_actor: 0,
             generation: 0,
             now,
             start: now,
@@ -331,6 +342,7 @@ impl Sim {
                 self.check_publish(doc, rev);
                 self.fly(doc, call, Ask::Publish { heads, rev });
             }
+            Command::NewActor { call } => self.fly(doc, call, Ask::Actor),
             Command::Cancel { call } => {
                 let flight = self
                     .flights
@@ -579,12 +591,37 @@ impl Sim {
 
     /// The driver finishes the call at `pick` among those in flight, failing it if `fail`.
     pub fn complete(&mut self, pick: usize, fail: bool) {
+        self.complete_as(pick, fail, None);
+    }
+
+    /// As [`Sim::complete`]; `undecided` makes a commit be reported failed though its
+    /// transaction runs: now (`Some(true)`), or only later (`Some(false)`), as a driver that
+    /// lost the connection would leave it.
+    pub fn complete_as(&mut self, pick: usize, fail: bool, undecided: Option<bool>) {
         if self.flights.is_empty() {
             return;
         }
         let at = pick % self.flights.len();
         let flight = self.flights.remove(at);
         let doc = flight.doc;
+        if let (Some(now), Ask::Commit(plan)) = (undecided, &flight.ask) {
+            let change = Change::from_bytes(plan.change.ciphertext.clone()).expect("a change");
+            if now {
+                self.land(vec![(doc, change, plan.frontier.clone())]);
+                self.undecided.insert(doc);
+            } else {
+                self.zombies.push((doc, change));
+            }
+            // An undecided commit breaks the order a write can be held to: the monitor of law 2
+            // starts again from the next write that lands.
+            self.last_landed[doc] = None;
+            let machine = self.machines[doc]
+                .as_mut()
+                .expect("a call's machine is there");
+            machine.doc.committed(flight.call, Outcome::Failed);
+            self.flush(doc);
+            return;
+        }
         let cancelled = flight.cancelled && self.draw(2) == 0;
         let readable = self.world.docs[doc].readable;
         let call = flight.call;
@@ -667,6 +704,13 @@ impl Sim {
                 self.world.publish(doc, heads, rev);
                 machine.doc.published(call, Outcome::Done(()));
             }
+            Ask::Actor => {
+                // a fresh actor, which no earlier machine of the document used
+                self.next_actor += 1;
+                let mut actor = vec![0xa1, doc as u8];
+                actor.extend(self.next_actor.to_be_bytes());
+                machine.doc.actor_assigned(call, ActorId::from(actor));
+            }
         }
         self.flush(doc);
     }
@@ -697,6 +741,18 @@ impl Sim {
             self.mail.push(Mail::Tree(doc, landed.rev));
         }
         landed
+    }
+
+    /// A commit reported failed earlier now runs. It carries no frontier row (the machine was
+    /// told it failed), and keeps no order: it is the anomaly the fresh actor guards against.
+    pub fn land_zombie(&mut self, pick: usize) {
+        if self.zombies.is_empty() {
+            return;
+        }
+        let (doc, change) = self.zombies.remove(pick % self.zombies.len());
+        self.last_landed[doc] = None;
+        let landed = self.world.commit(vec![(doc, change, None)]);
+        self.mail.push(Mail::Tree(doc, landed[0].rev));
     }
 
     // ── plans ───────────────────────────────────────────────────────────────────────────────
@@ -859,6 +915,7 @@ impl Sim {
             }
         }
         self.flights.clear();
+        self.zombies.clear();
         self.mail.clear();
         self.plans.clear();
         self.held.clear();
@@ -906,6 +963,8 @@ impl Sim {
                 self.deliver(0);
             } else if !self.finishable().is_empty() {
                 self.plan_finish(0, true);
+            } else if !self.zombies.is_empty() {
+                self.land_zombie(0);
             } else if !self.flights.is_empty() {
                 self.complete(0, false);
             } else if self.hub() {
