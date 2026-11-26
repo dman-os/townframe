@@ -939,9 +939,9 @@
     --ct-palette-warning-contrast: light-dark(#1f1f29, #1f1f29);
     --ct-palette-info-1: light-dark(#f1f1f9, #14151a);
     --ct-palette-info-2: light-dark(#ececf7, #22232b);
-    --ct-palette-info-3: light-dark(#e0e1f9, #434559);
-    --ct-palette-info-4: light-dark(#c8cae1, #57596d);
-    --ct-palette-info-5: light-dark(#b1b3ca, #6b6d83);
+    --ct-palette-info-3: light-dark(#e0e1f9, #1e2b3f);
+    --ct-palette-info-4: light-dark(#c8cae1, #25364e);
+    --ct-palette-info-5: light-dark(#b1b3ca, #2d425f);
     --ct-palette-info-6: light-dark(#9b9cb3, #808298);
     --ct-palette-info-7: light-dark(#85879d, #9698af);
     --ct-palette-info-8: light-dark(#707187, #acaec6);
