@@ -124,6 +124,7 @@ fn every_statement_is_served_by_an_index() {
                     });
                 let scan = line.starts_with("SCAN")
                     && !bounded
+                    && !line.starts_with("SCAN (subquery")
                     && !line.contains("VALUES CLAUSE")
                     && !line.contains("CONSTANT ROW");
                 if (scan && !whole_set) || (kind_range && !whole_set) {
@@ -160,12 +161,12 @@ fn every_statement_is_served_by_an_index() {
         );
         let edges = plan_of(queries::DELEGATIONS_TO_SQL);
         assert!(
-            edges.contains("keyline_delegations_by_subject_audience (subject=? AND audience=?"),
+            edges.contains("keyline_delegations_by_subject_audience (kind=? AND subject=? AND audience=?"),
             "{edges}"
         );
         let revocations = plan_of(queries::REVOCATIONS_OF_SQL);
         assert!(
-            revocations.contains("keyline_revocations_by_target (revoke=?"),
+            revocations.contains("keyline_revocations_by_target (kind=? AND revoke=?"),
             "{revocations}"
         );
         // The access paths the evaluation's statements are for: a round reads only its delta, by

@@ -13,10 +13,9 @@ SELECT s
          SELECT d.subject AS s
               , d.audience AS n
               , lv.lvl AS lvl
-           FROM keyline_new nw
-           JOIN keyline_certificates d ON d.kind = 0 AND d.digest = nw.digest
+           FROM keyline_new d
            JOIN keyline_level lv ON lv.lvl <= d.power
-          WHERE nw.kind = 0
+          WHERE d.kind = 0
             AND d.audience <> d.subject
             AND /*GROUND*/ (d.issuer = d.subject
                             OR EXISTS (SELECT 1
@@ -28,11 +27,10 @@ SELECT s
          SELECT f1.s
               , d.audience
               , lv.lvl
-           FROM keyline_new nw
-           JOIN keyline_certificates d ON d.kind = 0 AND d.digest = nw.digest
+           FROM keyline_new d
            JOIN keyline_level lv ON lv.lvl <= d.power
            JOIN keyline_reach f1 ON f1.n = d.subject AND f1.lvl = lv.lvl
-          WHERE nw.kind = 0
+          WHERE d.kind = 0
             AND /*COMPOSE*/ 1 = 1
             AND d.audience <> f1.s
             AND /*GROUND*/ (d.issuer = d.subject

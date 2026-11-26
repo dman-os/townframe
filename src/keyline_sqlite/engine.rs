@@ -17,11 +17,12 @@ use sqlite_rs::Executor;
 use sqlite_rs::Sql;
 
 use crate::error::Error;
+use crate::rows::NewRow;
 use crate::planted::Checked;
 use crate::sqlite::queries;
 
-/// Rows per statement when staging the batch: well under the bound-variable limit.
-const CHUNK: usize = 400;
+/// Bound variables per statement when staging the batch: well under SQLite's limit.
+const MAX_PARAMS: usize = 30_000;
 
 /// What extending the reach cost.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -34,10 +35,12 @@ pub struct Extension {
 
 /// Extend stratum 1 by the certificates `batch` (kind and digest of each), which are already in
 /// the tables of `tx`.
-pub async fn extend(tx: &impl Executor, batch: &[(i64, Vec<u8>)]) -> Result<Extension, Error> {
+pub async fn extend(tx: &impl Executor, batch: Vec<NewRow>) -> Result<Extension, Error> {
     let tx = &Checked(tx);
-    for chunk in batch.chunks(CHUNK) {
-        let mut sql = Sql::new("INSERT INTO keyline_new (kind, digest) VALUES ");
+    for chunk in batch.chunks(MAX_PARAMS / NewRow::WIDTH) {
+        let mut sql = Sql::new(
+            "INSERT INTO keyline_new (kind, digest, issuer, audience, subject, power, revoke) VALUES ",
+        );
         for (index, row) in chunk.iter().enumerate() {
             if index != 0 {
                 sql.push(", ");

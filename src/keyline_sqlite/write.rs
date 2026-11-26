@@ -9,7 +9,6 @@ use sqlite_rs::Sql;
 use crate::engine;
 use crate::engine::Extension;
 use crate::error::Error;
-use crate::rows;
 use crate::rows::CertificateRow;
 use crate::sqlite::queries;
 
@@ -65,6 +64,7 @@ pub async fn insert_in<W: Encode>(
     let base = queries::meta_version(tx).await?;
     let mut inserted = 0;
     let mut warm = Vec::with_capacity(batch.len());
+    let mut staged_rows = Vec::with_capacity(batch.len());
     for chunk in batch.chunks(MAX_PARAMS / CertificateRow::WIDTH) {
         let mut sql = Sql::new(
             "INSERT INTO keyline_certificates\n     ( kind\n     , digest\n     , issuer\n     , audience\n     , subject\n     , power\n     , citation\n     , revoke\n     , retain\n     , signed\n     )\nVALUES ",
@@ -75,6 +75,7 @@ pub async fn insert_in<W: Encode>(
             }
             let row = CertificateRow::of(cert);
             warm.push((row.signed().to_vec(), cert.clone()));
+            staged_rows.push(row.staged());
             sqlite_rs::BindTuple::bind_tuple(row, &mut sql);
         }
         sql.push("\n    ON CONFLICT DO NOTHING");
@@ -90,8 +91,7 @@ pub async fn insert_in<W: Encode>(
     }
     queries::bump_version(tx).await?;
     // The set grew: extend the stored reach by the batch (duplicates among it derive nothing new).
-    let ids: Vec<(i64, Vec<u8>)> = batch.iter().map(|cert| rows::kind_and_digest(cert.id())).collect();
-    let extension = engine::extend(tx, &ids).await?;
+    let extension = engine::extend(tx, staged_rows).await?;
     Ok(Staged {
         base,
         version: base + 1,

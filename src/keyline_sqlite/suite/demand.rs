@@ -142,34 +142,44 @@ fn a_query_does_not_read_what_is_not_in_its_closure() {
     assert!(small_rows <= 24, "{small_rows} rows");
 }
 
-/// A point query about a member of a large document, which is not disputed, is a few indexed
-/// reads however many members the document has; `members` is as large as its answer.
+/// A point query about a member of a large document is a few indexed reads however many members
+/// the document has; `members` is as large as its answer. A document some revocation disputes pays
+/// once, at the first question after an insert, to compute its live set.
 #[test]
 fn a_point_query_is_constant_and_members_is_its_output() {
-    let measure = |members: usize| {
+    let measure = |members: usize, disputed: bool| {
         let mut certs = unrelated(members);
+        if !disputed {
+            certs.retain(|cert| matches!(cert.id(), CertificateId::Delegation(_)));
+        }
         certs.extend(small_doc());
         let (store, recording) = store_with(certs);
         let doc = identifier(&key(0));
         let member = identifier(&key(3));
         block_on(Keyline::<Local>::effective_power(&store, doc, member)).unwrap();
+        let first = recording.counts.take();
+        block_on(Keyline::<Local>::effective_power(&store, doc, member)).unwrap();
         let point = recording.counts.take();
         let answer = block_on(Keyline::<Local>::members(&store, doc)).unwrap().value;
         let all = recording.counts.take();
-        (point, all, answer.len())
+        (first, point, all, answer.len())
     };
-    let (point_small, all_small, size_small) = measure(200);
-    let (point_large, all_large, size_large) = measure(2000);
-    println!(
-        "DEMAND large document: point query {point_small:?} / {point_large:?} (statements, rows) at \
-         200 / 2000 members; members {all_small:?} / {all_large:?} for {size_small} / {size_large} members"
-    );
-    assert_eq!(point_small, point_large, "a point query grew with the document");
-    assert!(point_small.0 <= 5 && point_small.1 <= 3, "{point_small:?}");
-    // The document is disputed (revocations), so the first question computes its live set; the
-    // answer after that is one indexed range read of the members.
-    assert!(all_large.1 >= size_large, "members reads at least its answer");
-    assert!(all_large.1 <= 2 * size_large, "{all_large:?} for {size_large} members");
+    for disputed in [false, true] {
+        let (first_small, point_small, all_small, size_small) = measure(200, disputed);
+        let (first_large, point_large, all_large, size_large) = measure(2000, disputed);
+        println!(
+            "DEMAND large document, disputed={disputed}: first question {first_small:?} / {first_large:?}, \
+             then a point query {point_small:?} / {point_large:?} (statements, rows) at 200 / 2000 members; \
+             members {all_small:?} / {all_large:?} for {size_small} / {size_large} members"
+        );
+        assert_eq!(point_small, point_large, "a point query grew with the document");
+        assert!(point_small.0 <= 5 && point_small.1 <= 3, "{point_small:?}");
+        if !disputed {
+            assert_eq!(first_small, first_large, "an undisputed document's first question was not a point query");
+        }
+        assert!(all_large.1 >= size_large, "members reads at least its answer");
+        assert!(all_large.1 <= 2 * size_large, "{all_large:?} for {size_large} members");
+    }
 }
 
 /// What inserting costs: statements per batch (rounds of the fixpoint, not certificates) and
@@ -289,7 +299,12 @@ fn deep_revocation() -> Vec<VerifiedCertificate<()>> {
     const EVE: u8 = 5;
     const FRANK: u8 = 6;
     let frank = d(EVE, FRANK, DOC, Power::Admin);
+    // The role itself issues a delegation, which Dan revokes: its route to its own issuer runs
+    // through the node the revocation covers, and so it must not conduct.
+    let by_role = d(MODS, 7, DOC, Power::Edit);
     vec![
+        sign(by_role),
+        sign(r::<()>(DAN, &by_role)),
         sign(d(DOC, OWNERS, DOC, Power::Admin)),
         sign(d(MODS, DAN, MODS, Power::Admin)),
         sign(d(DOC, MODS, DOC, Power::Edit)),
@@ -307,6 +322,7 @@ fn the_loader_agrees_with_the_reference_on_roles_and_on_a_deep_revocation() {
     let (store, _) = store_with(deep_revocation());
     let members = block_on(Keyline::<Local>::members(&store, id(DOC))).unwrap().value;
     assert_eq!(members.get(&id(6)), Some(&Power::Read), "{members:?}");
+    assert_eq!(members.get(&id(7)), None, "{members:?}");
 }
 
 /// The checks above can fail: plant each bug in the evaluation's statements and the answer

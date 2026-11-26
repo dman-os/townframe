@@ -14,10 +14,16 @@ INSERT INTO keyline_level (lvl) VALUES (0), (1), (2), (3);
 -- stamped with the previous round's number.
 ALTER TABLE keyline_meta ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0;
 
--- Certificates of the batch being inserted: the delta of round zero. Empty outside a transaction.
+-- Certificates of the batch being inserted, with the columns the rounds read: the delta of round
+-- zero, scanned as the batch it is. Empty outside a transaction.
 CREATE TABLE keyline_new (
       kind INTEGER NOT NULL
     , digest BLOB NOT NULL
+    , issuer BLOB NOT NULL
+    , audience BLOB
+    , subject BLOB
+    , power INTEGER
+    , revoke BLOB
     , PRIMARY KEY (kind, digest)
 ) STRICT, WITHOUT ROWID;
 
@@ -43,10 +49,20 @@ CREATE INDEX keyline_reach_by_target
 CREATE INDEX keyline_reach_by_epoch
     ON keyline_reach (epoch);
 
--- The round that finds the delegations a node issued about one subject: feed 2 of a round.
+-- The indexes over certificates lead with `kind`, so that an equality on `kind` and one more
+-- column is a longer key prefix than the primary key's `kind` alone and a planner without
+-- statistics prefers them (the partial indexes of `001` lost to the primary key's `kind` range).
+DROP INDEX keyline_delegations_by_subject_audience;
+CREATE INDEX keyline_delegations_by_subject_audience
+    ON keyline_certificates (kind, subject, audience);
+
+DROP INDEX keyline_revocations_by_target;
+CREATE INDEX keyline_revocations_by_target
+    ON keyline_certificates (kind, revoke, issuer);
+
+-- The delegations a node issued about one subject: feed 2 of a round.
 CREATE INDEX keyline_delegations_by_subject_issuer
-    ON keyline_certificates (subject, issuer)
- WHERE kind = 0;
+    ON keyline_certificates (kind, subject, issuer);
 
 -- Subjects with a delegation some revocation names. A revocation that names a delegation not yet
 -- in the set marks its subject when the delegation arrives.
@@ -54,6 +70,9 @@ CREATE TABLE keyline_dsubject (
       subject BLOB PRIMARY KEY CHECK (length(subject) = 32)
     , epoch INTEGER NOT NULL
 ) STRICT, WITHOUT ROWID;
+
+CREATE INDEX keyline_dsubject_by_epoch
+    ON keyline_dsubject (epoch);
 
 -- Subjects whose closure holds such a delegation: the only subjects whose live set can differ
 -- from their positive reach. Monotone like `keyline_reach`.
@@ -108,7 +127,7 @@ CREATE TABLE keyline_live (
 ) STRICT, WITHOUT ROWID;
 
 CREATE INDEX keyline_live_by_target
-    ON keyline_live (ctx, n, lvl, s);
+    ON keyline_live (n, lvl, ctx, s);
 
 CREATE INDEX keyline_live_by_epoch
     ON keyline_live (epoch);
