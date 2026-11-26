@@ -9,22 +9,17 @@
 //!   copied beside the signed bytes; `keyline_meta` holds the version. The set-shaped queries
 //!   (`contains`, `get`, `certificates`, `revocations_of`, `delegations_to`, `subjects`,
 //!   `digest`) are SQL, each served by an index (`suite/plans.rs` checks it).
-//! - **Evaluation runs over the subject's closure, loaded on demand.** A query about `S` reads
-//!   `closure(S)` (`S`, every node with standing over it in the positive graph, every certificate
-//!   about those nodes and every revocation naming them) through indexed statements, one round
-//!   per level of derivation depth, and hands exactly those rows to `keyline_memory::State`, the
-//!   reference evaluator. The model document proves nothing outside the closure can change the
-//!   answer, so the backend agrees with the reference by construction; the differential in
-//!   `suite/differential.rs` checks it on random sets. Nothing is held between queries but a
-//!   bounded verification memo. See [`closure`] for the rounds and why a certificate that names a
-//!   node without standing costs one row, and `docs/scratch/hive-store-design.md` for the
-//!   alternatives (materializing the monotone stratum at insert is the next step if closure
-//!   loading shows up in a profile).
-//! - **A read verifies.** `insert` takes `VerifiedCertificate`s, but the rows are not a witness.
-//!   Each row a query reads is decoded, its signature checked and its identity compared with its
-//!   key's ([`Error::Stored`]), so a file edited outside the backend fails the query that reads
-//!   it instead of lending its rows authority. A memo of verified rows, trusted only for the exact
-//!   bytes it verified, keeps that to one check per row per handle.
+//! - **Stratum 1 is a table, extended at insert.** `keyline_reach` holds the positive reach in the
+//!   threshold encoding, append-only. `insert_in` extends it inside the caller's transaction by
+//!   semi-naive rounds, one SQL statement each, until a round inserts nothing ([`engine`]).
+//! - **Stratum 2 is computed per disputed subject.** A subject whose closure holds a delegation some
+//!   revocation names has a live set that can differ from its reach; it is computed by SQL rounds
+//!   over exclusion contexts keyed by the excluded set's signature, and stored with the version it
+//!   was computed at ([`stratum2`]). Every other subject answers from stratum 1.
+//! - **Point queries are indexed reads**, a handful of rows however large the set. `members_for_subset`
+//!   is the one question defined over an arbitrary subset, and runs `keyline_memory::State` over it.
+//!   See `docs/scratch/hive-store-design.md` for the design, the measured costs and where it differs
+//!   from the SQL sketch upstream publishes.
 //! - **Every query is one snapshot.** The version is read in the same read transaction as the
 //!   rows, so an answer carries the version of the set it read.
 //!
@@ -33,10 +28,11 @@
 //! A grant that must commit with other rows (a document's sedimentree rows and part store, in
 //! one database) goes through [`SqliteKeyline::insert_in`], which writes through a transaction
 //! the caller owns and returns a [`Staged`]; after the caller commits, [`SqliteKeyline::committed`]
-//! tells the verification memo. A rollback drops the transaction, which drops the rows and the
-//! version bump with it, and the `Staged` is simply dropped. Skipping `committed` after a commit
+//! tells the verification memo. A rollback drops the transaction, which drops the rows, the derived reach
+//! and the version bump with it, and the `Staged` is simply dropped. Skipping `committed` after a commit
 //! is safe, only slower: the first read verifies. A caller that answers several questions in a
-//! snapshot of its own, beside reads of other stores, uses [`SqliteKeyline::evaluate_in`].
+//! transaction of its own, beside writes of other stores, uses [`SqliteKeyline::members_in`] and
+//! [`SqliteKeyline::effective_power_in`].
 //!
 //! # Platforms
 //!

@@ -3,131 +3,196 @@
 Owner: the automata lane (keyline-eval).
 Scope: `src/keyline_sqlite` (implemented) and the non-Keyline keyhive tables (proposal only).
 Updated: 2026-11-26.
-Status: design for `keyline_sqlite` (implemented on this branch) and for the non-Keyline tables (not
+Status: design for `keyline_sqlite` (implemented on this branch, revised to the materialized shape) and for the non-Keyline tables (not
 implemented; sketched so the Keyline tables and a follow-up crate share one database and one
 transaction). Sources: keyhive fork `origin/townframe-changes` (`design/keyline/implementation.md`,
 `evaluation-notes.md` section 7, `keyline_memory::state`), `origin/keyline/hive-store` at `4053d96`
 (`keyhive_core/src/store.rs`, the `KeyhiveStore` trait), and the kh-archive report.
 
-## 1. The problem
+## 1. The problem, and how the design changed
 
-Today `keyline_sqlite` stores certificates in SQL but answers every evaluated query from a
-`keyline_memory::State` over the **whole** set (`cache.rs`): a cache miss reads every row and verifies
-every signature; the cache is one set per process. A relay holding many documents pays for all of them to
-answer one point query, memory grows with the set, and a second process rebuilds after every foreign
-commit. The goal: answer from SQL on demand, hold no whole-set state.
+The first version of `keyline_sqlite` stored certificates in SQL but answered every evaluated query
+from a `keyline_memory::State` over the **whole** set: a cache miss re-read and re-verified every row,
+and the cache was one set per process. A second attempt loaded `closure(S)` into the same reference
+evaluator per query. Both run the evaluator in Rust over rows pulled out of the database, which is not
+the shape the Keyline design recommends: `design/keyline/evaluation-notes.md` section 5 ("An SQL
+Sketch") and section 6 ("The Split That Matters") say to **materialize the monotone stratum and
+evaluate the negated stratum only where it is disputed**. The crate now does that. The closure-in-Rust
+evaluation survives in exactly one place, `members_for_subset`, whose answer is defined over an
+arbitrary subset and so cannot come from tables derived from the whole set.
 
-## 2. Evaluation strategies considered
+## 2. The design
 
-The evaluation program (implementation.md "Evaluation") has two strata. Stratum 1 (`reaches`, admin
-reach, coverage) is monotone and its membership rule is non-linear recursion, so it is not a single
-`WITH RECURSIVE`. Stratum 2 (live set, caps) negates over stratum 1 and needs a fixed point per exclusion
-context.
+### 2.1 Stratum 1 is a table, extended at insert
 
-| | A. Materialize at insert | B. Demand-driven closure + reference evaluator (chosen) | C. SQL-only demand-driven |
-|---|---|---|---|
-| Insert cost | semi-naive delta of `reaches` (up to k^2 facts for a role ladder), coverage, then retraction-capable maintenance of stratum 2 (DRed or Z-sets) inside the writer's transaction | O(batch log n): one multi-row insert and a version bump | same as B |
-| Query cost | one indexed read per question, for the materialized answers | O(closure(S)) rows read, plus the reference evaluation over those rows | O(route) per round in SQL, but stratum 2's contexts need a statement loop in SQL, per context |
-| State | tables as large as the derived facts (Omega(output)) | none beyond the certificate table | none |
-| Agreement with the reference | by a second implementation of both strata, held to the differential | by construction: the reference evaluator runs, over a set that provably contains everything the answer depends on | by a second implementation of both strata |
-| Write contention | long write tx (round loop) holding the single writer | short | short |
+`keyline_reach(s, n, lvl, epoch)` is the threshold form of `reaches`: a row means "node `n` has standing
+of at least `lvl` over subject `s`, every revocation ignored". Four boolean passes, no aggregates. A
+node's standing over itself is implicit (no row), which costs four join cases instead of four stored
+rows per node; `s <> n` is a table check. It is append-only: nothing is ever deleted, so extending it is
+incremental by construction ("incremental for a monotone relation is just never delete").
 
-**Chosen: B.** The model document proves (README "What a Replica Must Hold") that "no certificate outside
-`closure(S)` can change any answer about `S`", where `closure(S)` is `S`, every node with standing over `S`
-in the *positive* graph (revocations ignored), every certificate about those nodes, and every revocation
-naming one of those certificates. So a query about `S` loads `closure(S)` from SQL and hands it to
-`keyline_memory::State`, the reference evaluator, which therefore answers exactly as it would over the
-whole set. Nothing is re-implemented but the positive reach (monotone, existence only), and that is what
-`closure` returns, so the differential checks it directly.
+`insert_in` extends it **inside the caller's transaction**, after the certificate rows and before the
+version bump returns:
 
-How the closure is fetched (the `Closure` loader):
+1. The batch's columns are staged in `keyline_new` (one multi-row statement per ~4000 certificates).
+2. **Round zero** (`reach_seed.sql`): one statement joins the batch's delegations against the stored
+   reach. The rule has two recursive premises, so each of its cases is one join over a stored relation:
+   `s = Sub` (feed 1 is the subject itself) or `reach(L, s, Sub)`; `Iss = Sub` or `reach(L, Sub, Iss)`.
+3. **Round k** (`reach_round.sql`): one statement, three cases, each joining only the previous round's
+   rows (`epoch = :prev`, found through `keyline_reach_by_epoch`) against the delegations and the
+   stored reach: feed 1 new; feed 2 new with feed 1 the subject itself; feed 2 new with feed 1 stored.
+4. The application loop runs rounds until one inserts nothing. A round's number is a counter in
+   `keyline_meta.epoch` that never repeats, so "the previous round's rows" is an index range, not a
+   temp table, and the same statements would run unchanged inside a PL/pgSQL `LOOP`.
 
-1. `T = {S}`. Fetch every delegation whose `subject` is in `T` (index `keyline_delegations_by_subject_audience`,
-   prefix `subject`) and the revocations naming them (index `keyline_revocations_by_target`).
-2. Compute `R(n)` for every `n` in `T` from the fetched edges, as the threshold program's stratum 1 at its
-   lowest level (positive existence): `x in R(n)` iff some delegation `iss -> x` about `Sub` with
-   `Sub in {n} u R(n)` and `iss in {Sub} u R(Sub)`.
-3. `T' = {S} u R(S)`. If `T'` has nodes not yet fetched, fetch them and repeat; else stop.
+Late binding falls out: a delegation inserted before its issuer has standing derives nothing, and the
+batch that gives the issuer standing derives it, because the new reach rows are the delta of the next
+round and join against *all* delegations. Insertion order never matters.
 
-Each round is two statements (delegations, then revocations), bound in chunks. Rounds are derivation depth
-(single digits on real graphs). The query is read through one `begin_read` snapshot, so every round and the
-version row agree.
+### 2.2 Admin reach and coverage are joins over it
 
-### Obligations of evaluation-notes section 7
+`admin_reach(k)` is `SELECT s FROM keyline_reach WHERE n = k AND lvl = 3` (index
+`keyline_reach_by_target`) plus `k`; coverage is the join of a delegation's revocations with their
+issuers' admin reach. No stored view: stratum 2's refresh computes what it needs.
 
-- **1 and 2** (contexts keyed by exclusion-set signature; inert revocations exit early) live inside
-  `State`; B runs it unchanged.
-- **3** (demand the subject-side feed first; never explore role internals before the role's standing over
-  the queried subject is established): a node enters `T` only when it is *grounded* in `R(S)`, that is,
-  reached through an edge whose issuer already has standing. An attacker's self-grounded ladder that is
-  only *named* (gift certificate: `attacker -> victim`, subject = ladder bottom, attacker without
-  standing over the queried subject) contributes the gift's row and nothing else: the ladder bottom is not
-  in `R(S)`, so its rows are never fetched. Outsider structure rooted at their own keys is never fetched
-  (Tier 0). The residual is the section 7 floor: a member with standing can inflate the closure of the
-  documents they belong to, attributably, and the cost follows liveness only for stratum 2 (the positive
-  closure includes ex-members, as the model requires, since coverage is computed on the positive graph).
-- Memoizing failed demands per set state: not needed, since a failed demand costs nothing here (a node
-  that does not ground is never fetched).
+### 2.3 Which subjects need stratum 2
 
-### Costs, honestly
+A subject's live set can differ from its positive reach only if its closure holds a delegation some
+revocation names. At insert, in the same transaction, `keyline_dsubject` records the subjects of
+delegations named by a revocation (whichever of the two arrives first), and `keyline_disputed` the
+subjects that stand in the positive graph over such a subject or are one (two statements: from new
+dispute marks over the stored reach; from new reach rows over the stored marks). Both are monotone.
+The flag is conservative: a revocation that covers nothing (an outsider's) still marks the subject, so
+it pays the slow path without changing the answer. An undisputed subject answers entirely from stratum 1.
 
-- A point query costs O(closure(S)) rows and an in-memory evaluation of that closure, not O(route). The
-  README argues closure is near the floor for exact answers; narrower is approximate in the fail-open
-  direction. What is gained: unrelated documents cost nothing, cold start is not O(set), there is no
-  whole-set memory, and every process reads the same rows.
-- `members(S)` is Omega(output) regardless.
-- The signature check on read ("a rebuild verifies again", `Error::Stored`) now happens per closure row
-  per query. A **verification memo** keeps it affordable: a bounded map from `(kind, digest)` to the
-  verified certificate and the exact row bytes it was verified from. A row is trusted without
-  re-verification only if its bytes equal the memo's. It is content-addressed and checked against the row
-  itself, so it needs no version; it is a cache of a pure function. It is bounded and cleared when full.
-- Evaluating a closure is the expensive step (about 40 ms in a debug build for a 77-certificate, 22-node
-  closure), and several questions about one subject would each repeat it. Measured: with no sharing, the
-  deeper-graph differential spent about 0.8 s per subject and a dense case took over a minute (not a hang:
-  the reference answered, then 24 subjects x ~19 queries each re-evaluated). So an **evaluation cache**
-  keeps up to 64 evaluated closures, each tagged with the version its snapshot read, and a query uses an
-  entry only if the tag equals the version *its own* snapshot just read. A commit by this process or any
-  other moves the version and invalidates every entry; an entry is never stale for the snapshot that takes
-  it. It is the "small per-process cache validated against a version row" the brief allows. The price of
-  that coarseness: any insert invalidates every subject's evaluation. Per-subject validity (a version per
-  closure) would need the closure's reach to be monotone-tracked; not built.
-- Whole-set operations stay whole-set by their definition: `certificates()` (archives) and `digest()`
-  (`set_digest` over every id). Follow-up if `digest` becomes hot: an incrementally maintained set
-  accumulator in `keyline_meta`.
+### 2.4 Stratum 2, per disputed subject
 
-### What we deliberately did not build (yet)
+For a disputed subject `S` the live relation `keyline_live(s, ctx, n, lvl)` is computed by SQL rounds:
 
-A materialized, append-only `keyline_reach(subject, node)` table (stratum 1 only). It is monotone ("never
-delete"), so it needs no retraction machinery, and would turn the round loop into one indexed range scan.
-It is the first thing to add if closure loading rounds show up in profiles; the loader's `R` computation
-is exactly its definition. Stratum 2 stays demand-driven.
+- **Roots**: the nodes in `S`'s closure that are the subject of some delegation. Each hop is judged
+  rooted at its own subject (the daisy-chain rule), so the rounds read rows of every root in the
+  closure, and the roots are closed under what the rounds read.
+- **Contexts, keyed by the canonical excluded-set signature**: for each delegation about a root that a
+  revocation names, the covered set is the union of the third-party revokers' admin reach; a revoker
+  that is the delegation's issuer or audience kills it outright (`total`). Delegations with the same
+  covered set share one context (`keyline_ctx`, signature = the sorted node ids concatenated), so a
+  one-key spree of `k` revocations costs one context: obligation 1, k^3 to k^2. A delegation whose
+  covered set is empty gets context 0 and no row: obligation 2, an inert dispute costs a lookup.
+- **Rounds** (`live_seed.sql`, `live_round.sql`): seeded by root edges in every context in use, then five
+  semi-naive branches per round (feed 1, feed 2 with feed 1 reflexive or stored, the hop's own-context
+  premise with feed 1 reflexive or stored), until a round inserts nothing. A hop conducts `s -> aud` in
+  context X when feed 1 and feed 2 hold in X, it is live in its *own* context rooted at its own subject,
+  it is not killed outright, and X does not exclude the audience.
 
-## 3. Versioning
+Uncovered delegations take the fast path: they have no `keyline_dispute` row, context 0, and their own
+check is satisfied by the same facts.
 
-Unchanged in spirit and stronger in mechanism: `keyline_meta.version` moves by one in every transaction
-that adds a certificate; every query opens a read snapshot, reads the version first, loads its closure
-through that snapshot, and returns the version it read with the answer. There is no cache that has to be
-brought to a version. A rollback leaves no row and no bump. `insert_in(tx, batch)` / `Staged` /
-`committed()` keep their roles: `committed` only warms the verification memo with the batch just verified
-(skipping it is safe and only slower).
+**Cached per subject, validated by version.** The rows are stored with the version they were computed
+at (`keyline_live_at`) and answer a query only at that version; otherwise the query computes them in a
+write transaction (a cache fill any process may do) and answers there. I chose caching over recomputing
+because a read snapshot cannot write (`sqlite_rs` rejects non-read statements on the read path), so
+per-query recomputation would need a write transaction per question, and measurement says a refresh
+costs 26 statements and rows read in proportion to the disputes in the closure (29 rows for 20 disputed
+delegations, 209 for 200) while a cached question costs 4 statements and 4 rows. The cost of the
+coarse validity: any insert, to any subject, invalidates every disputed subject's rows. Per-subject
+validity (stamping with the version of the last insert that touched the closure) is possible and not
+built.
 
-## 4. Revocation cascades
+### 2.5 Point queries
 
-There is nothing to cascade at insert time: a revocation is a row. Its effect (inert, partial, total) is
-decided by the evaluator at the next query over a closure that contains its target. This also gives the
-section "Insert" property of the contract for free: out-of-order certificates are stored and contribute
-nothing until their target arrives, so no pending state exists in Keyline.
+| Question | Undisputed subject | Disputed subject (cache current) |
+|---|---|---|
+| `effective_power(s, a)` | `is_disputed`, `reach_standing`: 3 statements, 3 rows | + `live_stamp`, `live_standing`: 4, 4 |
+| `positive_power(s, a)` | `reach_standing` | same |
+| `members(s)` | `reach_members`: one range read, rows = the answer (x levels) | `live_members`: same |
+| `is_live(h)` / `conveyed_power(h)` | `delegation_row` + `reach_standing` | + `dispute_of`, `live_standing` |
+| `closure(s)` | one statement over the reach and the delegation indexes | same |
 
-## 5. Schema (Keyline), unchanged tables
+`members` returns `max(lvl)` per node by a group over the stored threshold rows: up to four rows per
+member. That is O(output), not the O(route) §6 aims for a point query, and a point query is O(1).
 
-`keyline_meta(id, version)` and `keyline_certificates` as in `001_init.sql`: `(kind, digest)` primary
-key (`WITHOUT ROWID`), `issuer/audience/subject/power/citation/revoke/retain` copied beside `signed`,
-partial indexes `(subject, audience) WHERE kind = 0` and `(revoke, issuer) WHERE kind = 1`. The closure
-loader needs no new index: both of its statements are index searches (`suite/plans.rs`).
-New statement: `delegation_subject(digest)`, for `is_live` and `conveyed_power`, which are rooted at the
-delegation's own subject.
+### 2.6 Obligations of evaluation-notes section 7
 
-## 6. The rest of keyhive's state: tables to back `KeyhiveStore`
+- **Grounding, never optimistic seeding.** Both fixpoints are least fixed points from root edges.
+  `suite/demand.rs` plants an optimistic seed (the grounding condition removed) and the gift test fails.
+- **A gift certificate costs its own row.** A key with no standing over `DOC` gifts the top of a ladder
+  (10 and 60 rungs): inserting the gift derives **0** facts and `members(DOC)` is unchanged. The ladder's
+  own certificates are grounded in the rungs' own graphs, so they *are* derived at insert (k^2/2 facts
+  for the club ladder, the semantic floor of section 7) whether or not anyone gifts them. That is the
+  "eagerness inverts the cost model" point of section 6: a replica pays for grounded junk at ingest.
+- **Obligations 1 and 2**: section 2.4.
+
+## 3. Measured costs
+
+Debug build, mothership, counted at the database wrapper:
+
+| | Statements | Rows |
+|---|---|---|
+| Insert of 111 / 1101 certificates (star with revocations) | 14 / 14 (2 rounds after round zero) | 204 / 2004 facts derived, about 1.8 per certificate |
+| Undisputed point query, 200 / 2000 members | 3 / 3 | 3 / 3 |
+| Disputed point query, cache current | 4 / 4 | 4 / 4 |
+| First question after an insert on a disputed document | 26 / 26 | 29 / 209 (the disputes in the closure) |
+| `members`, 201 / 2001 members | 3 / 3 | 203 / 2003 (about one row per member) |
+| Query about a small document beside 50 / 500 unrelated members | 12 / 12 | 16 / 16 |
+
+Differential against `MemoryKeyline`: 64 cases over the conformance pool (8 keys) in 28 s, 20 cases over
+16 keys with nesting and revocations in 20 s (the closure-in-Rust version took 46 s and 61 s); the deep
+differential also passed at 300 cases (below). Fewer statements per insert, not more: the fixpoint cost
+moved from every query to the insert.
+
+## 4. SQLite-only constructs, and what a PL/pgSQL backend needs
+
+- `INDEXED BY keyline_delegations_by_subject_audience` in `subjects.sql` (existing). Nothing in the
+  evaluation uses `INDEXED BY`.
+- **Planner dependence instead**: without statistics SQLite scans the primary key's `kind` range whenever
+  `kind = 0` is spelled out, so the evaluation's statements never mention `kind` for delegations and
+  revocations (a subject or target equality implies it) and the indexes are partial on the keyed column
+  (`WHERE subject IS NOT NULL`, `WHERE revoke IS NOT NULL`). Scratch-bounded statements are driven by
+  `d.subject IN (SELECT s FROM keyline_root)` so the planner probes by index. `suite/plans.rs` fails on
+  any scan outside the four small driver tables (levels, batch, roots, contexts). PostgreSQL's planner
+  with statistics needs none of this; the statements are valid there as written.
+- DDL: `STRICT`, `WITHOUT ROWID`, `INTEGER PRIMARY KEY` (the context id, a rowid alias), the blob
+  literal `x''`, `ALTER TABLE ... ADD COLUMN` (portable).
+- `INSERT ... SELECT ... WHERE true ON CONFLICT DO NOTHING`: the `WHERE true` is SQLite's parsing
+  ambiguity workaround and harmless elsewhere; `ON CONFLICT DO NOTHING` replaced the `INSERT OR IGNORE`
+  in `write.rs`, and its inserted-row count is what both engines report.
+- Named parameters `:epoch`, `:prev`, in first-appearance order (a translator to `$n` must do the same).
+- The round loop is Rust here; in PL/pgSQL it is `LOOP ... GET DIAGNOSTICS ... EXIT WHEN 0` around the
+  same static statements. The single-writer assumption (the epoch counter is a hot row in
+  `keyline_meta`) holds for both with an advisory lock per hive.
+
+## 5. Where the SQL sketch and the reference differ
+
+The sketch "is not in the repository, and nothing tests it", so I implemented from the threshold program
+in `implementation.md`, which the conformance suite's second oracle transcribes, and let the differential
+decide. No answer disagreed with the reference once implemented, but the implementation differs from the
+sketch's text in these ways (each is answer-preserving, and the planted-bug tests show the parts that
+matter):
+
+1. The sketch seeds `reaches(lvl, p, p)` for every principal at every level. The reflexive facts are
+   implicit here, and each rule has the join cases for "the subject itself" explicit.
+2. The sketch's conduct statement has no `aud <> s`; here `n <> s` is a table check and the statements
+   exclude it.
+3. Stratum 2 in the sketch is prose. The conditions `not excl(X, Iss)` and `not excl(O, Iss)` of the
+   threshold program are dropped where an explicit row already implies them and kept for the reflexive
+   case; the audience check (`not excl(X, Aud)`) is the one the deep-revocation scenario depends on.
+4. Contexts are materialized for every root in the closure, not per queried subject, because the hop's
+   own check reads rows rooted elsewhere.
+5. "Disputed" is conservative (any delegation a revocation names), where the sketch says "covered".
+
+## 6. Insert path, as it stands
+
+`insert_in` writes the certificate rows (`ON CONFLICT DO NOTHING`), bumps the version, stages the batch,
+runs the stratum 1 rounds and the dispute marking, and clears the staging table, all in the caller's
+transaction. A rollback leaves no row, no reach and no version bump. `Staged::extension()` reports rounds
+and facts. `committed()` only warms the verification memo, which now serves `members_for_subset` alone.
+
+**What reads no longer verify.** Evaluated answers come from tables derived from certificates verified at
+insert, so a row edited outside the backend changes `get`/`closure` bytes but not the derived tables,
+and only `members_for_subset` (which loads certificates to evaluate them) re-verifies. An audit that
+rebuilds the reach from the certificates is the way to detect or repair such an edit; not built.
+
+## 7. The rest of keyhive's state: tables to back `KeyhiveStore`
 
 Not implemented here (a follow-up crate over the same `SqliteDb`, composing in one transaction with
 `keyline_sqlite`'s `insert_in`). The trait is `origin/keyline/hive-store:keyhive_core/src/store.rs`;
@@ -166,10 +231,17 @@ type, not a refactor. For Keyline this branch adds `SqliteKeyline::closure_in(sn
 returning an `Evaluated` whose methods are the evaluated queries, so a keyhive operation (a CGKA
 authorization check, say) can read ops and Keyline answers in the same snapshot.
 
-## 7. Schema decisions that need an operator answer
+## 8. Decisions that need an operator answer
 
-1. Is `scope_id` (one database, several hives) wanted? Both stores here assume one hive per database.
-2. Whether `digest()` should be maintained incrementally (section 2).
-3. Whether to materialize `keyline_reach` now (section 2) for relay deployments holding many documents.
-4. Encrypt `kh_cgka_op`'s secrets? They are already encrypted to leaf keys inside the ops; only
-   `kh_key_pair` and `kh_content_key` hold plaintext secrets, so only those get the DEK.
+1. **Per-subject validity of stratum 2 rows.** Today any insert invalidates every disputed subject's
+   live rows (section 2.4). Finer validity needs a version per closure; worth it only if disputed
+   subjects are queried between frequent inserts.
+2. **Refreshes write.** A question about a disputed subject whose rows are stale computes them in a
+   write transaction, so an inert process that only reads takes the single writer for a refresh. The
+   alternative is a read-path temp table, which `sqlite_rs` forbids on read snapshots.
+3. **Eager cost of grounded junk.** Stratum 1 is derived at insert, so a member's grounded ladder costs
+   k^2/2 facts on every replica that holds it, asked about or not (section 2.6). A per-issuer quota at
+   sync admission (mitigation 4 of section 7) is the lever; it is not in this crate.
+4. **No re-verification on evaluated reads** (section 6). An audit/rebuild function is the remedy.
+5. `scope_id`: one hive per database is assumed.
+6. Whether the non-Keyline `kh_*` tables become a follow-up crate over the same `SqliteDb` (assumed yes).
