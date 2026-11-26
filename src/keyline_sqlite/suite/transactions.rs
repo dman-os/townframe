@@ -175,6 +175,7 @@ fn a_commit_the_store_was_never_told_of_is_still_answered_correctly() {
         let after = members(&store, DOC).await;
         assert_ne!(after, warmed);
         assert_eq!(after, members(&Store::new(db), DOC).await);
+        assert_eq!(after, reference(&[root(), grants()]).await);
     });
 }
 
@@ -194,10 +195,9 @@ fn commits_reported_out_of_order_leave_the_cache_correct() {
         let first = staged.remove(0);
         store.committed(staged.remove(0));
         store.committed(first);
-        assert_eq!(
-            members(&store, DOC).await,
-            members(&Store::new(db), DOC).await
-        );
+        let expected = reference(&[root(), grants()]).await;
+        assert_eq!(members(&store, DOC).await, expected);
+        assert_eq!(members(&Store::new(db), DOC).await, expected);
     });
 }
 
@@ -303,4 +303,21 @@ fn a_row_modified_outside_the_backend_fails_the_rebuild_that_reads_it() {
             2
         );
     });
+}
+
+/// `members(DOC)` of `MemoryKeyline` over the same batches: what a store must answer however
+/// it got there.
+async fn reference(
+    batches: &[Vec<keyline::certificate::VerifiedCertificate<()>>],
+) -> BTreeMap<Identifier, Power> {
+    let memory = keyline_memory::MemoryKeyline::<()>::new();
+    for batch in batches {
+        Keyline::<Local>::insert(&memory, batch.clone())
+            .await
+            .unwrap();
+    }
+    Keyline::<Local>::members(&memory, id(DOC))
+        .await
+        .unwrap()
+        .value
 }

@@ -29,9 +29,6 @@ use super::fresh_db;
 use super::sign;
 use crate::SqliteKeyline;
 
-type Delegated = (bool, Option<Power>, BTreeSet<Digest<RevocationId>>);
-type Edges = BTreeMap<Digest<Delegation>, (Identifier, Delegation)>;
-
 /// Every observable answer of a store holding `certs`, each read at one version.
 #[derive(Debug, PartialEq)]
 struct Answers {
@@ -42,9 +39,11 @@ struct Answers {
     powers: BTreeMap<(Identifier, Identifier), (Option<Power>, Option<Power>)>,
     members: BTreeMap<Identifier, BTreeMap<Identifier, Power>>,
     closures: BTreeMap<Identifier, Vec<Certificate<()>>>,
-    delegations_to: BTreeMap<(Identifier, Identifier), Edges>,
+    delegations_to:
+        BTreeMap<(Identifier, Identifier), BTreeMap<Digest<Delegation>, (Identifier, Delegation)>>,
     per_certificate: BTreeMap<CertificateId, (bool, Option<Certificate<()>>)>,
-    per_delegation: BTreeMap<Digest<Delegation>, Delegated>,
+    per_delegation:
+        BTreeMap<Digest<Delegation>, (bool, Option<Power>, BTreeSet<Digest<RevocationId>>)>,
     subset_members: BTreeMap<Identifier, BTreeMap<Identifier, Power>>,
 }
 
