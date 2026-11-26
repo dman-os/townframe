@@ -34,3 +34,6 @@ tokio = { workspace = true, features = ["sync"] }
 #
 # log
 tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

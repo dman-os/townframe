@@ -20,6 +20,7 @@ mod binds_auth {
         with: {
             "townframe:sqlite/sqlite-connection.connection": wash_plugin_sqlite::SqliteConnectionToken,
             "townframe:sqlite/sqlite-connection.transaction": wash_plugin_sqlite::SqliteTransactionToken,
+            "townframe:sqlite/sqlite-connection.read-transaction": wash_plugin_sqlite::SqliteReadTransactionToken,
         }
     });
 }
