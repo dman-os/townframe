@@ -276,3 +276,20 @@ on `automata-26-kit-driver`.
   policy (which sessions, when to release, via `NeedSession`/`ReleaseSession`); big_node owns the
   mechanism (dialing on the same endpoint, reporting open and closed).
 - **Open:** binding the subduction handshake signer to the iroh identity; today nothing checks it.
+
+## Decision, 2026-11-27: optimistic epoch validation (operator)
+
+Replaces "encryption takes the lock only around apply" and the shared-lock-until-settle variant.
+- Each document has a **key epoch**: a monotone per-document CGKA version, bumped by the store
+  whenever a CGKA op for that document is appended (`kh_doc_epoch`, by trigger).
+- Encryption holds the keyhive shared lock only for the keyhive call itself, and its answer
+  carries the epoch the content was encrypted under. A plan records it per document as
+  `if_epoch`.
+- The commit transaction checks each of the plan's own documents' epochs before writing. A moved
+  epoch rolls the plan back as `Stale { doc }`, and the machines re-encrypt and retry, bounded.
+  **Only the plan's own documents are checked**, so a change to any other document never rolls a
+  plan back.
+- Membership changes no longer wait for in-flight writes. In database terms this is optimistic
+  concurrency control with validation at commit, per document.
+- The per-document epoch is also useful elsewhere, e.g. validating a read-only process's cached
+  keyhive state per document.
