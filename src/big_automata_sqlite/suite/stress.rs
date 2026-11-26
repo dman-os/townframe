@@ -9,18 +9,26 @@
 //!   fingerprint) and member counts agree too;
 //! - **quiet**: once converged, nothing commits and the backends are not called any more.
 //!
-//! # What the writers do
+//! # Membership is each node's own
 //!
-//! The sync protocol carries membership as per-key log rows with no last-writer-wins on
-//! membership (only payloads are merged), so two nodes adding and removing one membership
-//! concurrently is a conflict the layer above resolves, not something the store converges.
-//! The workload therefore partitions authority, as an embedder's policy would:
+//! A peer's job never changes a node's membership (`SyncBackend`'s contract): the replay of a
+//! part is only a notification that an object changed. Who is a member of which part comes
+//! from a simulated keyhive stream the script owns. The model is the truth; an object's owner
+//! changes its own store's memberships as it writes, and tells every other node's stream, which
+//! delivers its pending changes in order at random moments, so that a membership reaches a
+//! node before, with or after the notification of its object. A notification that arrives
+//! first is parked in the node's held wants and fetched when the membership is delivered. A
+//! removal is delivered the same way while the sync is running, and a peer's stale echo of an
+//! old add can only be parked, never resurrect the member.
+//!
+//! The workload partitions authority, as an embedder's policy would:
 //!
 //! - an object's **owner** (`obj % nodes`) is the only node that adds or removes its
 //!   memberships, and overwrites its payload;
 //! - a **stable** object is never removed, so any node that holds it also overwrites its
 //!   payload: concurrent last-writer-wins payloads, the old suite's `LwwPayload` workload;
-//! - a **churn** object (one in three) is removed and re-added by its owner alone.
+//! - a **churn** object (one in three) is removed and re-added by its owner alone, at any
+//!   point of the run.
 //!
 //! Every payload is stamped from one counter in the order the script issues the writes, so
 //! the greatest stamp of an object is the last write issued and the model is exact.
@@ -52,11 +60,13 @@
 //! (it takes the same environment variable, and `AUTOMATA_SQLITE_STRESS_SEEDS` is how many
 //! consecutive seeds it sweeps from it).
 
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
+use big_automata::ByteKey;
 use big_automata::driver::DriverConfig;
 use big_automata::driver::Facts;
 use big_automata::driver::ObjJob;
@@ -66,6 +76,9 @@ use big_automata::driver::RouteUpdate;
 use big_automata::driver::Settle;
 use big_automata::driver::SyncBackend;
 use big_automata::driver::memory::LwwPayload;
+use big_automata::durable_outbox::Advert;
+use big_automata::durable_outbox::HeldConfig;
+use big_automata::durable_outbox::HeldTable;
 use big_automata::long_poll::Timer;
 use big_automata::part_store::AccessLevel;
 use big_automata::part_store::ObjPayload;
@@ -183,6 +196,10 @@ impl Time {
 
     fn now(&self) -> web_time::Instant {
         self.0.start + Duration::from_millis(self.0.elapsed_ms.load(Ordering::SeqCst))
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.0.elapsed_ms.load(Ordering::SeqCst)
     }
 
     fn clock(&self) -> big_automata::Clock {
@@ -342,18 +359,36 @@ impl BigSyncRpcClient for Wire {
 
 // # The backend
 
-/// The driver's backend over a node's SQLite store: applies a peer's removals and adds, and
-/// downloads the payload from the peer's store, merging last-writer-wins (the memory
-/// backend's download mode, over SQLite). A peer that is down fails the fetch, which the
-/// machine retries on its backoff.
-struct LwwBackend {
+type Held = HeldTable<SqliteOkv<Database>>;
+
+/// What one node's backends share: its store, its held wants (an okv table of the same
+/// database, so a membership, a payload and a release commit together), the links to the peers
+/// a parked want is fetched from, and its clock.
+///
+/// Membership is the node's own (`SyncBackend`'s contract): a peer's job never changes it. The
+/// script stands in for the node's keyhive stream by calling [`member_added`](Self::member_added)
+/// and [`member_removed`](Self::member_removed).
+struct NodeBackend {
     local: Store,
-    source: Arc<Link>,
-    /// Calls made, to tell a quiet cluster from a busy one.
-    calls: Arc<AtomicU64>,
+    held: Held,
+    links: BTreeMap<PeerKey, Arc<Link>>,
+    time: Time,
 }
 
-impl LwwBackend {
+impl NodeBackend {
+    async fn new(local: Store, links: BTreeMap<PeerKey, Arc<Link>>, time: Time) -> Res<Self> {
+        let held = HeldTable::new(
+            SqliteOkv::open(&local, "held").await?,
+            HeldConfig::default(),
+        );
+        Ok(Self {
+            local,
+            held,
+            links,
+            time,
+        })
+    }
+
     async fn write(&self, writes: Vec<PartWrite>) -> Res<()> {
         let mut tx = self.local.begin().await?;
         for write in writes {
@@ -362,60 +397,68 @@ impl LwwBackend {
         tx.commit().await?;
         Ok(())
     }
-}
 
-impl SyncBackend for LwwBackend {
-    async fn record(&self, job: ObjJob) -> Res<Settle> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        let members = |parts: &[PartKey]| {
-            parts
-                .iter()
-                .map(|part| (job.obj.clone(), part.clone()))
-                .collect::<Vec<_>>()
-        };
-        let mut writes = vec![];
-        if !job.remove.is_empty() {
-            writes.push(PartWrite::RemoveMembers(members(&job.remove)));
-        }
-        if !job.add.is_empty() {
-            writes.push(PartWrite::AddMembers(members(&job.add)));
-        }
-        self.write(writes).await?;
-        // an add is pending until the object has a payload, and a content job (no parts) is
-        // only its payload
-        Ok(if !job.add.is_empty() || job.remove.is_empty() {
-            Settle::Fetch
-        } else {
-            Settle::Done
-        })
+    /// The membership source says `obj` is now a member of `part`: the want parked for the
+    /// object, if any, is fetched from every peer that advertised it and released.
+    async fn member_added(&self, obj: &ObjKey, part: &PartKey) -> Res<()> {
+        self.write(vec![PartWrite::AddMembers(vec![(
+            obj.clone(),
+            part.clone(),
+        )])])
+        .await?;
+        self.fetch_parked(obj).await
     }
 
-    async fn fetch(&self, job: ObjJob) -> Res<()> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        if job.add.is_empty() && !job.remove.is_empty() {
+    async fn member_removed(&self, obj: &ObjKey, part: &PartKey) -> Res<()> {
+        self.write(vec![PartWrite::RemoveMembers(vec![(
+            obj.clone(),
+            part.clone(),
+        )])])
+        .await
+    }
+
+    /// Merge the payload every provider of the parked want holds, then release the want in the
+    /// transaction of the last landing. One provider that cannot answer leaves the want
+    /// parked: the error reaches the source, which retries.
+    async fn fetch_parked(&self, obj: &ObjKey) -> Res<()> {
+        let mut tx = self.local.begin().await?;
+        let want = self.held.get(&mut tx, obj).await?;
+        tx.rollback().await?;
+        let Some(want) = want else {
             return Ok(());
+        };
+        for provider in &want.providers {
+            let link = self.links.get(provider).expect("a provider is a peer");
+            self.land(obj, Self::payload_of(link, obj).await?).await?;
         }
-        let source = self
-            .source
+        self.land_release(obj).await
+    }
+
+    /// `obj`'s payload at the peer behind `link`. A peer that is down fails the call, which
+    /// the machine retries on its backoff.
+    async fn payload_of(link: &Link, obj: &ObjKey) -> Res<ObjPayload> {
+        let source = link
             .serving()
             .ok_or_else(|| eyre::eyre!("the peer is down"))?;
-        let Some((payload, _)) = source
+        source
             .store
-            .obj_states(std::slice::from_ref(&job.obj))
+            .obj_states(std::slice::from_ref(obj))
             .await?
             .remove(0)
             .and_then(|state| state.content)
-        else {
-            eyre::bail!("the peer no longer holds the payload of {:?}", job.obj);
-        };
-        drop(source);
-        // The comparison and the write are one transaction: the writer lease is taken first, so
-        // no payload can land between the read of the held one and the write that replaces it
-        // (a newer local overwrite would otherwise be replaced by the older peer payload).
+            .map(|(payload, _)| payload)
+            .ok_or_else(|| eyre::eyre!("the peer no longer holds the payload of {obj:?}"))
+    }
+
+    /// Merge `payload` into `obj`. The comparison and the write are one transaction: the
+    /// writer lease is taken first, so no payload can land between the read of the held one
+    /// and the write that replaces it (a newer local overwrite would otherwise be replaced by
+    /// the older peer payload).
+    async fn land(&self, obj: &ObjKey, payload: ObjPayload) -> Res<()> {
         let mut tx = self.local.begin().await?;
         let held = self
             .local
-            .obj_states(std::slice::from_ref(&job.obj))
+            .obj_states(std::slice::from_ref(obj))
             .await?
             .remove(0)
             .and_then(|state| state.content);
@@ -423,7 +466,7 @@ impl SyncBackend for LwwBackend {
             stage(
                 &self.local,
                 &mut tx,
-                PartWrite::SetPayloads(vec![(job.obj, payload)]),
+                PartWrite::SetPayloads(vec![(obj.clone(), payload)]),
             )
             .await?;
             tx.commit().await?;
@@ -431,6 +474,77 @@ impl SyncBackend for LwwBackend {
             tx.rollback().await?;
         }
         Ok(())
+    }
+
+    async fn land_release(&self, obj: &ObjKey) -> Res<()> {
+        let mut tx = self.local.begin().await?;
+        self.held.release(&mut tx, obj).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Whether `obj` is a member of any of `parts`, pending memberships included.
+    async fn is_member(&self, obj: &ObjKey, parts: &[PartKey]) -> Res<bool> {
+        Ok(self
+            .local
+            .obj_states(std::slice::from_ref(obj))
+            .await?
+            .remove(0)
+            .is_some_and(|state| parts.iter().any(|part| state.parts.contains(part))))
+    }
+}
+
+/// The driver's backend over a node's SQLite store, for the pull from one peer: downloads the
+/// payload from the peer's store, merging last-writer-wins (the memory backend's download mode,
+/// over SQLite). A peer that is down fails the fetch, which the machine retries on its backoff.
+/// A job whose object is not yet a member is parked in the node's held wants (the node's
+/// [`NodeBackend::member_added`] fetches it).
+struct LwwBackend {
+    node: Arc<NodeBackend>,
+    peer: PeerKey,
+    source: Arc<Link>,
+    /// Calls made, to tell a quiet cluster from a busy one.
+    calls: Arc<AtomicU64>,
+}
+
+impl SyncBackend for LwwBackend {
+    async fn record(&self, job: ObjJob) -> Res<Settle> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        // the job's parts are a notification: nothing here changes membership
+        if job.add.is_empty() {
+            // a removal moves no payload, and a job with no parts is content
+            return Ok(if job.remove.is_empty() {
+                Settle::Fetch
+            } else {
+                Settle::Done
+            });
+        }
+        if self.node.is_member(&job.obj, &job.add).await? {
+            return Ok(Settle::Fetch);
+        }
+        let advert = Advert::new(self.peer.clone(), 0, ByteKey::new(&[]));
+        let mut tx = self.node.local.begin().await?;
+        let now_ms = self.node.time.now_ms();
+        self.node
+            .held
+            .hold(&mut tx, &job.obj, advert, now_ms)
+            .await?;
+        tx.commit().await?;
+        // the source may have added the object between the check and the park, finding
+        // nothing to release: look again, now that the want is visible to it
+        if self.node.is_member(&job.obj, &job.add).await? {
+            self.node.fetch_parked(&job.obj).await?;
+        }
+        Ok(Settle::Done)
+    }
+
+    async fn fetch(&self, job: ObjJob) -> Res<()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if job.add.is_empty() && !job.remove.is_empty() {
+            return Ok(());
+        }
+        let payload = NodeBackend::payload_of(&self.source, &job.obj).await?;
+        self.node.land(&job.obj, payload).await
     }
 }
 
@@ -497,7 +611,14 @@ struct Node {
     calls: Arc<AtomicU64>,
     /// By the node pulled from.
     pulls: BTreeMap<usize, Pull>,
+    /// What the node's drivers share, rebuilt by a restart.
+    backend: Option<Arc<NodeBackend>>,
+    /// The membership changes the node's keyhive stream has yet to deliver, in order.
+    inbox: VecDeque<Member>,
 }
+
+/// One change of the simulated keyhive stream: `(object, part, added)`.
+type Member = (usize, usize, bool);
 
 struct Cluster {
     plan: Plan,
@@ -546,6 +667,8 @@ impl Cluster {
                 link,
                 calls: default(),
                 pulls: default(),
+                backend: None,
+                inbox: default(),
             });
         }
         let mut cluster = Self {
@@ -569,6 +692,12 @@ impl Cluster {
     async fn start_pulls(&mut self, at: usize) -> Res<()> {
         let node = &self.nodes[at];
         let serving = node.link.serving().expect("the node is up");
+        let links = (0..self.plan.nodes)
+            .filter(|&from| from != at)
+            .map(|from| (node_key(from), Arc::clone(&self.nodes[from].link)))
+            .collect();
+        let backend =
+            Arc::new(NodeBackend::new(serving.store.clone(), links, self.time.clone()).await?);
         let mut pulls = BTreeMap::new();
         for from in (0..self.plan.nodes).filter(|&from| from != at) {
             let mut config = DriverConfig::new(node_key(from), BACKEND);
@@ -579,7 +708,8 @@ impl Cluster {
                 self.time.clock(),
                 self.facts.clone(),
                 LwwBackend {
-                    local: serving.store.clone(),
+                    node: Arc::clone(&backend),
+                    peer: node_key(from),
                     source: Arc::clone(&self.nodes[from].link),
                     calls: Arc::clone(&node.calls),
                 },
@@ -596,6 +726,7 @@ impl Cluster {
             pulls.insert(from, Pull { driver, task });
         }
         self.nodes[at].pulls = pulls;
+        self.nodes[at].backend = Some(backend);
         Ok(())
     }
 
@@ -630,11 +761,10 @@ impl Cluster {
 
     // # Writes
 
-    /// One node's transaction of `plan.writes` writes, then the model's account of it.
-    ///
-    /// With `removing`, the round is the owner removing every part of each churn object it
-    /// owns, and nothing else.
-    async fn write_round(&mut self, at: usize, round: usize, removing: bool) -> Res<()> {
+    /// One node's transaction of `plan.writes` writes, then the model's account of it. The
+    /// node's own store takes the memberships it changes (its own keyhive), and every other
+    /// node's keyhive stream is told, to deliver whenever it gets to it.
+    async fn write_round(&mut self, at: usize, round: usize) -> Res<()> {
         let Plan {
             nodes,
             parts,
@@ -647,30 +777,14 @@ impl Cluster {
         let serving = self.serving(at).await;
         let mut next = self.model.clone();
         let mut writes = vec![];
-        if removing {
-            for own in (at..objects).step_by(nodes).filter(|own| churn(*own)) {
-                let held = next
-                    .members
-                    .range((own, 0)..(own + 1, 0))
-                    .map(|&(_, of)| of)
-                    .collect::<Vec<_>>();
-                for of in held {
-                    writes.push(PartWrite::RemoveMembers(vec![(obj(own), part(of))]));
-                    next.members.remove(&(own, of));
-                }
-            }
-        }
-        let ops = match (removing, round) {
-            (true, _) => 0,
-            (false, 0) => owned,
-            (false, _) => self.plan.writes,
-        };
+        let mut events = vec![];
+        let ops = if round == 0 { owned } else { self.plan.writes };
         for op in 0..ops {
             // the first round adds every owned object to one part, in order
             let kind = if round == 0 {
                 0
             } else {
-                self.rng.random_range(0..10)
+                self.rng.random_range(0..12)
             };
             let own = if round == 0 {
                 at + nodes * op
@@ -684,6 +798,22 @@ impl Cluster {
                     next.stamped(own, at, &mut writes);
                     writes.push(PartWrite::AddMembers(vec![(obj(own), part(of))]));
                     next.members.insert((own, of));
+                    events.push((own, of, true));
+                }
+                // remove a churn object from every part, while the others sync it
+                10..=11 => {
+                    if churn(own) {
+                        let held = next
+                            .members
+                            .range((own, 0)..(own + 1, 0))
+                            .map(|&(_, of)| of)
+                            .collect::<Vec<_>>();
+                        for of in held {
+                            writes.push(PartWrite::RemoveMembers(vec![(obj(own), part(of))]));
+                            next.members.remove(&(own, of));
+                            events.push((own, of, false));
+                        }
+                    }
                 }
                 // overwrite one's own member
                 4..=5 => {
@@ -709,6 +839,43 @@ impl Cluster {
         }
         tx.commit().await?;
         self.model = next;
+        for (other, node) in self.nodes.iter_mut().enumerate() {
+            if other != at {
+                node.inbox.extend(events.iter().copied());
+            }
+        }
+        Ok(())
+    }
+
+    /// The keyhive stream of node `at` delivers up to `limit` of its pending changes, in order.
+    /// A change that fails (the peer a parked want is fetched from is down) stays first in line
+    /// and is retried by the next delivery.
+    async fn deliver(&mut self, at: usize, limit: usize) -> Res<()> {
+        let backend = Arc::clone(self.nodes[at].backend.as_ref().expect("the node is up"));
+        for _ in 0..limit {
+            let Some(&(own, of, added)) = self.nodes[at].inbox.front() else {
+                break;
+            };
+            let delivered = if added {
+                backend.member_added(&obj(own), &part(of)).await
+            } else {
+                backend.member_removed(&obj(own), &part(of)).await
+            };
+            if delivered.is_err() {
+                break;
+            }
+            self.nodes[at].inbox.pop_front();
+        }
+        Ok(())
+    }
+
+    /// Every node's keyhive stream delivers a random share of what it is behind on, so a
+    /// membership reaches a node before, with or after the notification of its object.
+    async fn deliver_some(&mut self) -> Res<()> {
+        for at in 0..self.plan.nodes {
+            let limit = self.rng.random_range(0..=self.nodes[at].inbox.len());
+            self.deliver(at, limit).await?;
+        }
         Ok(())
     }
 
@@ -818,6 +985,7 @@ impl Cluster {
         for _ in 0..MAX_LOOKS {
             last.clear();
             for at in 0..self.plan.nodes {
+                self.deliver(at, usize::MAX).await?;
                 last.push(self.observe(at).await?);
             }
             if last.iter().all(|held| *held == expected) {
@@ -957,7 +1125,7 @@ async fn run(plan: Plan) -> Res<()> {
     let mut cluster = Cluster::start(plan).await?;
     for round in 0..=plan.rounds {
         for at in 0..plan.nodes {
-            cluster.write_round(at, round, false).await?;
+            cluster.write_round(at, round).await?;
         }
         if round == 0 {
             continue;
@@ -975,21 +1143,11 @@ async fn run(plan: Plan) -> Res<()> {
         }
         for _ in 0..cluster.rng.random_range(1..8) {
             cluster.look().await;
+            cluster.deliver_some().await?;
         }
     }
-    // Removals come in their own phase, after everything settled. Membership is a log row per
-    // key with no last-writer-wins: while a removal races a replica's older live row for the
-    // same key, that row (a stale echo of the owner's own add) can come back and resurrect it.
-    // The owner's policy layer resolves that in an embedder, so the workload avoids it, and
-    // the re-adds that follow are plain adds again.
-    cluster.converge().await?;
-    for at in 0..plan.nodes {
-        cluster.write_round(at, 1, true).await?;
-    }
-    cluster.converge().await?;
-    for at in 0..plan.nodes {
-        cluster.write_round(at, 1, false).await?;
-    }
+    // Removals and re-adds interleave with the sync all along: a peer's stale echo of an old
+    // add is only a notification, and cannot resurrect what the node's own keyhive removed.
     cluster.converge().await?;
     cluster.assert_aligned().await?;
     cluster.assert_cursors_persisted().await?;

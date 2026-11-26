@@ -121,6 +121,27 @@ use crate::sync::PeerCursor;
 /// backoff, so an implementation reports it and keeps no retry of its own. Both calls take a
 /// job they have seen before (replays repeat after a reconnect).
 ///
+/// # A peer never modifies the backend's membership
+///
+/// A job's `add` and `remove` name the parts the peer says the object is in, and they are a
+/// **notification**, an object changed in these parts, never membership. A backend never
+/// applies them as membership: who is a member of which part comes from the backend's own
+/// source, in production the group-part worker walking the node's own keyhive change stream
+/// (a remote re-add of a member shows up there), and in tests a simulated stream the scenario
+/// owns. Applying a peer's membership would let a stale echo of an old add resurrect a member
+/// the node removed.
+///
+/// The notification can overtake the source: it arrives for an object the source has not yet
+/// added to the part. Discarding it would leave the object in the part, once the source adds
+/// it, with nothing to fetch it. So `record` of a job whose object is a member of none of its
+/// parts **parks** it and answers `Done` (the cursor passes it), in the backend's
+/// [held wants](crate::durable_outbox::HeldTable): keyed by object, with the peer the backend
+/// syncs from as provider, bounded per peer and by a TTL, so a peer cannot grow them without
+/// limit and a dropped one is just dropped. The source's "membership added" hook is the other
+/// half: it adds the object to the part and releases the parked want, which is then fetched
+/// from its recorded providers. A job whose object is a member is fetched as usual; a removal
+/// changes nothing.
+///
 /// A job that keeps failing waits out its backoff outside the receive window (law 7 of
 /// `ObjectJobs`), so it does not stop the peer's other objects, but it still owes its cursors:
 /// its part's cursor does not advance past it. Cursor liveness is therefore the backend's

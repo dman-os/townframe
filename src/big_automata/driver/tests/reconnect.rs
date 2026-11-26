@@ -281,6 +281,7 @@ async fn law_6_a_peer_that_lost_its_data_is_synced_again_from_zero() {
     );
 
     // A driver over the same local store and cursor table, as after the process restarts.
+    reborn.follow(&first.local);
     let second = Rig::start(
         Facts::new(),
         reborn.clone(),

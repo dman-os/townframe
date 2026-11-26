@@ -36,6 +36,7 @@ use big_automata::driver::memory::MemoryPeerCursors;
 use big_automata::part_store::PartStoreRead;
 use big_automata::part_store::laws::add;
 use big_automata::part_store::laws::grant;
+use big_automata::part_store::laws::obj;
 use big_automata::part_store::laws::part;
 use big_automata::part_store::laws::principal;
 use big_automata::part_store::laws::stage;
@@ -107,11 +108,20 @@ async fn pull_part(
     let local = MemoryPartStore::default();
     let peer = PeerKey::new(target.as_bytes());
     let facts = Facts::new();
+    // The page's own membership source (its keyhive stream) makes the published objects
+    // members: a peer's jobs only notify, they never change membership.
+    let backend = MemoryBackend::hinted(local.clone());
+    for at in 1..=OBJECTS {
+        backend
+            .member_added(&obj(at), &part(1))
+            .await
+            .map_err(|err| format!("member_added: {err:?}"))?;
+    }
     let (driver, driver_loop) = PeerDriver::start(
         DriverConfig::new(peer.clone(), "memory"),
         Arc::new(std::time::Instant::now),
         facts.clone(),
-        MemoryBackend::hinted(local.clone()),
+        backend,
         MemoryPeerCursors::default(),
         local.clone(),
     );

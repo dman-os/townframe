@@ -24,6 +24,7 @@ use big_automata::driver::memory::MemoryPeerCursors;
 use big_automata::part_store::PartStoreRead;
 use big_automata::part_store::laws::add;
 use big_automata::part_store::laws::grant;
+use big_automata::part_store::laws::obj;
 use big_automata::part_store::laws::principal;
 use big_automata::part_store::laws::set;
 use big_automata::part_store::laws::stage;
@@ -97,11 +98,20 @@ async fn run() {
     let local = MemoryPartStore::default();
     let peer = PeerKey::new(fixture.node_id.as_bytes());
     let facts = Facts::new();
+    // The page's own membership source (its keyhive stream) makes the published objects
+    // members: a peer's jobs only notify, they never change membership.
+    let backend = MemoryBackend::hinted(local.clone());
+    for at in 1..=u8::try_from(fixture.objects).expect("the fixture publishes few objects") {
+        backend
+            .member_added(&obj(at), &fixture.part)
+            .await
+            .expect("the memory store cannot fail");
+    }
     let (driver, driver_loop) = PeerDriver::start(
         DriverConfig::new(peer.clone(), "memory"),
         Arc::new(web_time::Instant::now),
         facts.clone(),
-        MemoryBackend::hinted(local.clone()),
+        backend,
         MemoryPeerCursors::default(),
         local.clone(),
     );
