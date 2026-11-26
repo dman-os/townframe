@@ -406,7 +406,7 @@ impl NodeBackend {
             part.clone(),
         )])])
         .await?;
-        self.fetch_parked(obj).await
+        self.fetch_parked(obj, part).await
     }
 
     async fn member_removed(&self, obj: &ObjKey, part: &PartKey) -> Res<()> {
@@ -420,18 +420,20 @@ impl NodeBackend {
     /// Merge the payload every provider of the parked want holds, then release the want in the
     /// transaction of the last landing. One provider that cannot answer leaves the want
     /// parked: the error reaches the source, which retries.
-    async fn fetch_parked(&self, obj: &ObjKey) -> Res<()> {
+    async fn fetch_parked(&self, obj: &ObjKey, part: &PartKey) -> Res<()> {
         let mut tx = self.local.begin().await?;
         let want = self.held.get(&mut tx, obj).await?;
         tx.rollback().await?;
-        let Some(want) = want else {
+        // a want that no notification named `part` for stays parked
+        let Some(want) = want.filter(|want| want.named.values().any(|named| named.contains(part)))
+        else {
             return Ok(());
         };
         for provider in &want.providers {
             let link = self.links.get(provider).expect("a provider is a peer");
             self.land(obj, Self::payload_of(link, obj).await?).await?;
         }
-        self.land_release(obj).await
+        self.land_release(obj, part).await
     }
 
     /// `obj`'s payload at the peer behind `link`. A peer that is down fails the call, which
@@ -476,21 +478,26 @@ impl NodeBackend {
         Ok(())
     }
 
-    async fn land_release(&self, obj: &ObjKey) -> Res<()> {
+    async fn land_release(&self, obj: &ObjKey, part: &PartKey) -> Res<()> {
         let mut tx = self.local.begin().await?;
-        self.held.release(&mut tx, obj).await?;
+        self.held.release(&mut tx, obj, part).await?;
         tx.commit().await?;
         Ok(())
     }
 
-    /// Whether `obj` is a member of any of `parts`, pending memberships included.
-    async fn is_member(&self, obj: &ObjKey, parts: &[PartKey]) -> Res<bool> {
+    /// The first of `parts` that `obj` is a member of, pending memberships included.
+    async fn member_part(&self, obj: &ObjKey, parts: &[PartKey]) -> Res<Option<PartKey>> {
         Ok(self
             .local
             .obj_states(std::slice::from_ref(obj))
             .await?
             .remove(0)
-            .is_some_and(|state| parts.iter().any(|part| state.parts.contains(part))))
+            .and_then(|state| {
+                parts
+                    .iter()
+                    .find(|part| state.parts.contains(*part))
+                    .cloned()
+            }))
     }
 }
 
@@ -519,10 +526,11 @@ impl SyncBackend for LwwBackend {
                 Settle::Done
             });
         }
-        if self.node.is_member(&job.obj, &job.add).await? {
+        if self.node.member_part(&job.obj, &job.add).await?.is_some() {
             return Ok(Settle::Fetch);
         }
-        let advert = Advert::new(self.peer.clone(), 0, ByteKey::new(&[]));
+        let advert =
+            Advert::new(self.peer.clone(), 0, ByteKey::new(&[])).naming(job.add.iter().cloned());
         let mut tx = self.node.local.begin().await?;
         let now_ms = self.node.time.now_ms();
         self.node
@@ -532,8 +540,8 @@ impl SyncBackend for LwwBackend {
         tx.commit().await?;
         // the source may have added the object between the check and the park, finding
         // nothing to release: look again, now that the want is visible to it
-        if self.node.is_member(&job.obj, &job.add).await? {
-            self.node.fetch_parked(&job.obj).await?;
+        if let Some(part) = self.node.member_part(&job.obj, &job.add).await? {
+            self.node.fetch_parked(&job.obj, &part).await?;
         }
         Ok(Settle::Done)
     }

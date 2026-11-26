@@ -36,6 +36,7 @@ pub(super) fn want(version: u64, queued_at: u64, priority: u8, providers: &[u8])
         priority,
         identity: identity(version as u8),
         providers: providers.iter().map(|&p| peer(p)).collect(),
+        named: default(),
     }
 }
 

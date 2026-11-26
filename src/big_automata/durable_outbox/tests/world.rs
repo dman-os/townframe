@@ -120,6 +120,7 @@ impl World {
             priority,
             identity: identity(id),
             version,
+            parts: default(),
         };
         block_on(self.wants.record(&mut tx, &obj(n), advert, now_ms)).unwrap();
         block_on(self.membership.apply(

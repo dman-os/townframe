@@ -224,6 +224,7 @@ pub fn wants(rows: usize) -> (usize, Outbox) {
             priority: (row % 5) as u8,
             identity: obj.0.clone(),
             providers: [provider.clone()].into(),
+            named: Default::default(),
         };
         (obj, Some(want))
     }));

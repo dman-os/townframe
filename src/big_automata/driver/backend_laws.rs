@@ -28,6 +28,19 @@
 //!    payloads, and taking them again changes nothing on either. The peer's payload is merged
 //!    (commutative and idempotent), never written over: a blind overwrite swaps the two
 //!    payloads on every exchange and the nodes never settle.
+//! 8. **A peer never changes membership.** A job's `add` and `remove` are a notification. Whatever
+//!    they name, however stale, the object's parts are exactly what the backend's own source
+//!    set (the rig's `member_added` and `member_removed`); a stale echo of an old add cannot
+//!    resurrect a removed member. Laws 1 to 7 deliver a job's membership through the source
+//!    first.
+//! 9. **A notification before the membership is not lost.** A job for an object that is not
+//!    yet a member of its parts changes no membership (a downloading backend has not even
+//!    fetched it); the source's addition then leaves the object fetched, and an object nobody
+//!    advertised is not.
+//! 10. **A member that was away catches up.** A removed member whose peer advertised a newer
+//!     payload meanwhile ends with it once the source re-adds it.
+//! 11. **Release is by part.** A membership added to a part the notification did not name
+//!     fetches nothing; the addition to a named part does.
 //!
 //! A rig supplies a fresh backend per law and the handful of operations the laws need that the
 //! trait cannot express: what the peer holds, what the backend holds, and how to make its next
@@ -377,7 +390,35 @@ pub async fn sync_backend_laws<R: BackendRig>(rig: &R) -> Res<()> {
     // 8 to 10: membership is the backend's own
     a_peer_never_changes_membership(rig).await?;
     notification_before_membership(rig).await?;
-    a_notification_while_away_is_caught_up(rig).await
+    a_notification_while_away_is_caught_up(rig).await?;
+    a_membership_elsewhere_releases_nothing(rig).await
+}
+
+/// Law 11: the notification names part 1; the source adds the object to part 2, which is not
+/// its release, and then to part 1, which is.
+async fn a_membership_elsewhere_releases_nothing<R: BackendRig>(rig: &R) -> Res<()> {
+    let p = Probe {
+        rig,
+        backend: rig.fresh(),
+    };
+    p.peer(1, Some(10)).await?;
+    p.pass(&Probe::<R>::job(1, &[1], &[], 10)).await?;
+    rig.member_added(&p.backend, &obj(1), &part(2)).await?;
+    if R::DOWNLOADS {
+        assert_eq!(
+            p.held(&obj(1)).await?.0,
+            None,
+            "a membership to a part the notification did not name fetched it"
+        );
+    }
+    rig.member_added(&p.backend, &obj(1), &part(1)).await?;
+    p.expect(
+        1,
+        Some(10),
+        &[1, 2],
+        "the named part did not release the want",
+    )
+    .await
 }
 
 /// Law 8: a job's `add` and `remove` change nothing about membership, whatever they name and
