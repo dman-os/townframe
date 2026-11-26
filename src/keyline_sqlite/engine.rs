@@ -18,6 +18,8 @@ use sqlite_rs::Sql;
 
 use crate::error::Error;
 use crate::rows::NewRow;
+use crate::stratum2;
+use crate::stratum2::Refresh;
 use crate::planted::Checked;
 use crate::sqlite::queries;
 
@@ -31,6 +33,8 @@ pub struct Extension {
     pub rounds: usize,
     /// Rows of `keyline_reach` the batch added.
     pub facts: u64,
+    /// What recomputing the live sets of the disputed subjects the batch touched cost.
+    pub refresh: Refresh,
 }
 
 /// Extend stratum 1 by the certificates `batch` (kind and digest of each), which are already in
@@ -71,6 +75,7 @@ pub async fn extend(tx: &impl Executor, batch: Vec<NewRow>) -> Result<Extension,
     queries::disputed_from_dsubjects(tx, epoch).await?;
     queries::disputed_from_reach(tx, first).await?;
     queries::set_epoch(tx, epoch).await?;
+    extension.refresh = stratum2::refresh_affected(tx, first).await?;
     queries::clear_new(tx).await?;
     Ok(extension)
 }

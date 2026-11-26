@@ -27,6 +27,8 @@ pub(crate) enum Planted {
     IgnoreOwnContext,
     /// An exclusion context does not exclude the hop's audience.
     IgnoreExclusion,
+    /// An insert does not recompute the live sets of the disputed subjects it touched.
+    SkipRefresh,
 }
 
 #[cfg(test)]
@@ -42,6 +44,7 @@ fn rewrite(sql: &str) -> Cow<'_, str> {
         Planted::Ungrounded => ("/*GROUND*/ (", "/*GROUND*/ (1 = 1 OR "),
         Planted::IgnoreOwnContext => ("/*OWN*/ (", "/*OWN*/ (1 = 1 OR "),
         Planted::IgnoreExclusion => ("/*EXCL*/ (", "/*EXCL*/ (1 = 1 OR "),
+        Planted::SkipRefresh => return Cow::Borrowed(sql),
     };
     Cow::Owned(sql.replace(marker, with))
 }
@@ -64,4 +67,16 @@ impl<E: Executor> Executor for Checked<'_, E> {
     async fn execute(&self, sql: &str, params: impl IntoParams) -> SqlResult<ExecuteResult> {
         self.0.execute(&rewrite(sql), params).await
     }
+}
+
+/// Whether the planted bug is "skip the refresh" (the refresh is Rust control flow, not a
+/// statement, so it is checked here rather than by rewriting SQL).
+#[cfg(test)]
+pub(crate) fn skips_refresh() -> bool {
+    PLANTED.with(std::cell::Cell::get) == Planted::SkipRefresh
+}
+
+#[cfg(not(test))]
+pub(crate) fn skips_refresh() -> bool {
+    false
 }

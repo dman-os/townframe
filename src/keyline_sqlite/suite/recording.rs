@@ -26,6 +26,8 @@ pub(super) type Log = Arc<Mutex<BTreeMap<String, Vec<SqlValue>>>>;
 pub(super) struct Counts {
     pub statements: AtomicUsize,
     pub rows: AtomicUsize,
+    /// Write transactions begun: a read-only handle must leave this at zero.
+    pub write_transactions: AtomicUsize,
 }
 
 impl Counts {
@@ -108,6 +110,7 @@ impl SqliteDb for Recording {
     type Read = RecordingRead;
 
     async fn begin_write(&self) -> SqlResult<RecordingWrite> {
+        self.counts.write_transactions.fetch_add(1, Ordering::SeqCst);
         Ok(RecordingWrite {
             tx: self.db.begin_write().await?,
             log: Arc::clone(&self.log),

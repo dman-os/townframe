@@ -119,7 +119,8 @@ CREATE TABLE keyline_ctx_use (
       ctx INTEGER PRIMARY KEY
 ) STRICT, WITHOUT ROWID;
 
--- Stratum 2. `(ctx, s, n, lvl)` means `n` has live standing of at least `lvl` over `s` on routes
+-- Stratum 2, maintained at insert for every disputed subject the insert can change (so a read
+-- never computes it). `(ctx, s, n, lvl)` means `n` has live standing of at least `lvl` over `s` on routes
 -- that avoid the nodes of context `ctx`. `n <> s`; a root's standing over itself is implicit
 -- unless the context excludes it. Rows for a root are replaced whenever it is recomputed.
 CREATE TABLE keyline_live (
@@ -137,9 +138,17 @@ CREATE INDEX keyline_live_by_target
 CREATE INDEX keyline_live_by_epoch
     ON keyline_live (epoch);
 
--- The version a subject's rows in `keyline_live` were computed at. They answer a query only at
--- that version.
-CREATE TABLE keyline_live_at (
+-- Scratch of the insert in progress: the subjects the batch touched, and the disputed subjects
+-- whose live set it can change. Empty outside a transaction.
+CREATE TABLE keyline_touched (
       subject BLOB PRIMARY KEY
-    , version INTEGER NOT NULL
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE keyline_affected (
+      subject BLOB PRIMARY KEY
+) STRICT, WITHOUT ROWID;
+
+-- The revocations a node issued: a node that gains admin reach extends their coverage.
+CREATE INDEX keyline_revocations_by_issuer
+    ON keyline_certificates (issuer)
+ WHERE revoke IS NOT NULL;

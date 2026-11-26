@@ -1,9 +1,9 @@
 //! Answering the evaluated queries from the tables, by indexed reads.
 //!
 //! A subject that is not disputed has a live set equal to its positive reach, so its questions
-//! are reads of `keyline_reach`. A disputed subject's are reads of `keyline_live`, valid only at
-//! the version they were computed at; at any other version the question is [`Stale`], and the
-//! caller computes them (`stratum2::refresh`, in a write transaction) and asks again.
+//! are reads of `keyline_reach`. A disputed subject's are reads of `keyline_live`, which every
+//! insert that could change it has already brought up to date inside its own transaction
+//! (`stratum2::refresh_affected`): a read never computes anything and never writes.
 
 use std::collections::BTreeMap;
 
@@ -34,35 +34,23 @@ pub enum Reply {
     Live(bool),
 }
 
-/// The subject whose live set must be computed before the question can be answered.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Stale(pub Identifier);
-
-pub type Answer = Result<Reply, Stale>;
-
 const ADMIN: i64 = 3;
 
 fn bytes(identifier: Identifier) -> Vec<u8> {
     identifier.to_bytes().to_vec()
 }
 
-/// Where a subject's standing is stored at `version`.
+/// Where a subject's standing is stored.
 enum Source {
     Reach,
     Live,
 }
 
-async fn source(
-    q: &impl QueryExecutor,
-    version: i64,
-    subject: Identifier,
-) -> Result<Result<Source, Stale>, Error> {
-    if !queries::is_disputed(q, bytes(subject)).await? {
-        return Ok(Ok(Source::Reach));
-    }
-    Ok(match queries::live_stamp(q, bytes(subject)).await? {
-        Some(stamp) if stamp == version => Ok(Source::Live),
-        _ => Err(Stale(subject)),
+async fn source(q: &impl QueryExecutor, subject: Identifier) -> Result<Source, Error> {
+    Ok(if queries::is_disputed(q, bytes(subject)).await? {
+        Source::Live
+    } else {
+        Source::Reach
     })
 }
 
@@ -84,40 +72,32 @@ async fn live_standing(
     Ok(queries::live_standing(q, bytes(subject), ctx, bytes(node)).await?)
 }
 
-pub async fn ask(
-    q: &impl QueryExecutor,
-    version: i64,
-    question: &Question,
-) -> Result<Answer, Error> {
+pub async fn ask(q: &impl QueryExecutor, question: &Question) -> Result<Reply, Error> {
     match *question {
         Question::EffectivePower(subject, audience) => {
             if subject == audience {
-                return Ok(Ok(Reply::Power(Some(Power::Admin))));
+                return Ok(Reply::Power(Some(Power::Admin)));
             }
-            let level = match source(q, version, subject).await? {
-                Ok(Source::Reach) => {
-                    queries::reach_standing(q, bytes(subject), bytes(audience)).await?
-                }
-                Ok(Source::Live) => live_standing(q, subject, 0, audience).await?,
-                Err(stale) => return Ok(Err(stale)),
+            let level = match source(q, subject).await? {
+                Source::Reach => queries::reach_standing(q, bytes(subject), bytes(audience)).await?,
+                Source::Live => live_standing(q, subject, 0, audience).await?,
             };
-            Ok(Ok(Reply::Power(level.map(rows::power_from_sql))))
+            Ok(Reply::Power(level.map(rows::power_from_sql)))
         }
         Question::Members(subject) => {
-            let members = match source(q, version, subject).await? {
-                Ok(Source::Reach) => queries::reach_members(q, bytes(subject))
+            let members = match source(q, subject).await? {
+                Source::Reach => queries::reach_members(q, bytes(subject))
                     .await?
                     .into_iter()
                     .map(|row| (row.n, row.lvl))
                     .collect::<Vec<_>>(),
-                Ok(Source::Live) => queries::live_members(q, bytes(subject))
+                Source::Live => queries::live_members(q, bytes(subject))
                     .await?
                     .into_iter()
                     .map(|row| (row.n, row.lvl))
                     .collect::<Vec<_>>(),
-                Err(stale) => return Ok(Err(stale)),
             };
-            Ok(Ok(Reply::Members(
+            Ok(Reply::Members(
                 members
                     .into_iter()
                     .map(|(node, level)| {
@@ -127,15 +107,15 @@ pub async fn ask(
                         )
                     })
                     .collect(),
-            )))
+            ))
         }
         Question::IsLive(delegation) | Question::ConveyedPower(delegation) => {
             let conveyed = matches!(question, Question::ConveyedPower(_));
-            let none = Ok(Ok(if conveyed {
+            let none = Ok(if conveyed {
                 Reply::Power(None)
             } else {
                 Reply::Live(false)
-            }));
+            });
             let Some(row) = queries::delegation_row(q, delegation.as_slice().to_vec()).await?
             else {
                 return none;
@@ -144,12 +124,10 @@ pub async fn ask(
             let issuer = rows::identifier_from_sql(&row.issuer);
             // The issuer's standing over the subject on routes that avoid what the delegation's
             // own revocations cover.
-            let standing = match source(q, version, subject).await? {
-                Ok(Source::Reach) if issuer == subject => Some(ADMIN),
-                Ok(Source::Reach) => {
-                    queries::reach_standing(q, bytes(subject), bytes(issuer)).await?
-                }
-                Ok(Source::Live) => {
+            let standing = match source(q, subject).await? {
+                Source::Reach if issuer == subject => Some(ADMIN),
+                Source::Reach => queries::reach_standing(q, bytes(subject), bytes(issuer)).await?,
+                Source::Live => {
                     let (ctx, total) =
                         match queries::dispute_of(q, delegation.as_slice().to_vec()).await? {
                             Some(row) => (row.ctx, row.total == 1),
@@ -161,13 +139,12 @@ pub async fn ask(
                         live_standing(q, subject, ctx, issuer).await?
                     }
                 }
-                Err(stale) => return Ok(Err(stale)),
             };
-            Ok(Ok(match standing {
+            Ok(match standing {
                 None => return none,
                 Some(_) if !conveyed => Reply::Live(true),
                 Some(level) => Reply::Power(Some(rows::power_from_sql(level.min(row.power)))),
-            }))
+            })
         }
     }
 }

@@ -3,7 +3,7 @@
 Owner: the automata lane (keyline-eval).
 Scope: `src/keyline_sqlite` (implemented) and the non-Keyline keyhive tables (proposal only).
 Updated: 2026-11-26.
-Status: design for `keyline_sqlite` (implemented on this branch, revised to the materialized shape) and for the non-Keyline tables (not
+Status: design for `keyline_sqlite` (implemented on this branch: materialized stratum 1, stratum 2 maintained at insert) and for the non-Keyline tables (not
 implemented; sketched so the Keyline tables and a follow-up crate share one database and one
 transaction). Sources: keyhive fork `origin/townframe-changes` (`design/keyline/implementation.md`,
 `evaluation-notes.md` section 7, `keyline_memory::state`), `origin/keyline/hive-store` at `4053d96`
@@ -65,7 +65,7 @@ dispute marks over the stored reach; from new reach rows over the stored marks).
 The flag is conservative: a revocation that covers nothing (an outsider's) still marks the subject, so
 it pays the slow path without changing the answer. An undisputed subject answers entirely from stratum 1.
 
-### 2.4 Stratum 2, per disputed subject
+### 2.4 Stratum 2, per disputed subject, maintained at insert
 
 For a disputed subject `S` the live relation `keyline_live(s, ctx, n, lvl)` is computed by SQL rounds:
 
@@ -87,22 +87,36 @@ For a disputed subject `S` the live relation `keyline_live(s, ctx, n, lvl)` is c
 Uncovered delegations take the fast path: they have no `keyline_dispute` row, context 0, and their own
 check is satisfied by the same facts.
 
-**Cached per subject, validated by version.** The rows are stored with the version they were computed
-at (`keyline_live_at`) and answer a query only at that version; otherwise the query computes them in a
-write transaction (a cache fill any process may do) and answers there. I chose caching over recomputing
-because a read snapshot cannot write (`sqlite_rs` rejects non-read statements on the read path), so
-per-query recomputation would need a write transaction per question, and measurement says a refresh
-costs 26 statements and rows read in proportion to the disputes in the closure (29 rows for 20 disputed
-delegations, 209 for 200) while a cached question costs 4 statements and 4 rows. The cost of the
-coarse validity: any insert, to any subject, invalidates every disputed subject's rows. Per-subject
-validity (stamping with the version of the last insert that touched the closure) is possible and not
-built.
+**Maintained eagerly, in the writer's transaction.** Reads never write (other processes may be
+read-only), so the insert that can change a disputed subject's live set recomputes it, in the same
+caller transaction, after stratum 1 is extended (`stratum2::refresh_affected`). Which subjects:
+
+1. *Touched* subjects (`keyline_touched`, four statements): the subjects of the batch's delegations; the
+   subjects of the delegations the batch's revocations name; every subject over which the batch gave some
+   node standing (new `keyline_reach` rows, found by epoch); and the subjects of the delegations named
+   by revocations issued by a node that newly holds Admin over something (coverage grew).
+2. *Affected* subjects (`keyline_affected`, one statement): the disputed subjects that are touched, or
+   that stand over a touched subject (their closure holds it). A subject newly disputed by this batch is
+   among them, because the revocation touched the subject of the delegation it names.
+3. One computation over the roots of all affected subjects together (shared roots are computed once):
+   disputes and contexts, `clear_live` for the roots, seed, rounds.
+
+A batch with no disputed subject anywhere costs one extra statement (`has_disputed`); one that touches
+none costs the six that find that out. The stored live set is therefore current at every committed
+version, so there is **no version stamp, no staleness check and no refresh on the read path**: the lazy
+`keyline_live_at` of the previous revision is gone. A rollback takes the recomputation with it. The
+disputed marking stays conservative.
+
+The price is paid at the writer: a revocation (or any grant) into a large disputed closure recomputes the
+whole closure's live set (about two rows per member, in 37 statements for 1001 members; section 3). A
+live set maintained incrementally (retracting only what a new revocation covers) is the way to make that
+proportional to the change; it is the Z-set problem section 6 of the evaluation notes names, and not built.
 
 ### 2.5 Point queries
 
-| Question | Undisputed subject | Disputed subject (cache current) |
+| Question | Undisputed subject | Disputed subject |
 |---|---|---|
-| `effective_power(s, a)` | `is_disputed`, `reach_standing`: 3 statements, 3 rows | + `live_stamp`, `live_standing`: 4, 4 |
+| `effective_power(s, a)` | `is_disputed`, `reach_standing`: 3 statements, 3 rows | `is_disputed`, `live_standing`: the same 3 statements, 3 rows (it is the stored read) |
 | `positive_power(s, a)` | `reach_standing` | same |
 | `members(s)` | `reach_members`: one range read, rows = the answer (x levels) | `live_members`: same |
 | `is_live(h)` / `conveyed_power(h)` | `delegation_row` + `reach_standing` | + `dispute_of`, `live_standing` |
@@ -124,21 +138,24 @@ member. That is O(output), not the O(route) §6 aims for a point query, and a po
 
 ## 3. Measured costs
 
-Debug build, mothership, counted at the database wrapper:
+Debug build, mothership, counted at the database wrapper (statements; rows read for queries, facts
+derived for inserts):
 
-| | Statements | Rows |
+| | Statements | Rows / facts |
 |---|---|---|
-| Insert of 111 / 1101 certificates (star with revocations) | 14 / 14 (2 rounds after round zero) | 204 / 2004 facts derived, about 1.8 per certificate |
+| Insert, grants only, 101 / 1001 | 15 / 15 (2 rounds after round zero) | 204 / 2004 reach facts, about 2 per grant; no live recompute |
+| Insert with revocations (every tenth grant), 111 / 1101 certificates | 39 / 39 | 204 / 2004 reach facts + live 184 / 1804 facts (1 subject, 2 rounds, 1 context) |
+| One revocation into a 1001-member **undisputed** closure | 37 | 0 reach facts + live 2002 facts (the closure becomes disputed and is computed) |
+| One revocation into a 1001-member **disputed** closure | 37 | 0 reach facts + live 1802 facts (recomputed) |
+| One grant to an unrelated document beside a disputed 1001-member one | 22 | live: 0 subjects (nothing recomputed; the 22 are the stratum 1 rounds, six scratch statements to find the touched set, and staging) |
 | Undisputed point query, 200 / 2000 members | 3 / 3 | 3 / 3 |
-| Disputed point query, cache current | 4 / 4 | 4 / 4 |
-| First question after an insert on a disputed document | 26 / 26 | 29 / 209 (the disputes in the closure) |
-| `members`, 201 / 2001 members | 3 / 3 | 203 / 2003 (about one row per member) |
-| Query about a small document beside 50 / 500 unrelated members | 12 / 12 | 16 / 16 |
+| **Disputed** point query, first question after the insert, 200 / 2000 members | 3 / 3 | 3 / 3 (was 26 statements and 29 / 209 rows when computed lazily) |
+| `members`, 201 / 2001 members (undisputed) | 3 / 3 | 203 / 2003 |
+| `members`, 181 / 1801 members (disputed) | 3 / 3 | 183 / 1803 |
+| Query about a small document beside 50 / 500 unrelated members | 10 / 10 | 14 / 14 |
 
-Differential against `MemoryKeyline`: 64 cases over the conformance pool (8 keys) in 28 s, 20 cases over
-16 keys with nesting and revocations in 20 s (the closure-in-Rust version took 46 s and 61 s); the deep
-differential also passed at 300 cases (below). Fewer statements per insert, not more: the fixpoint cost
-moved from every query to the insert.
+The no-revocation insert is one statement dearer than before the eager refresh (the `has_disputed`
+probe). The revocation-into-large-closure insert is the cost the lazy design deferred to the first read.
 
 ## 4. SQLite-only constructs, and what a PL/pgSQL backend needs
 
@@ -183,14 +200,22 @@ matter):
 ## 6. Insert path, as it stands
 
 `insert_in` writes the certificate rows (`ON CONFLICT DO NOTHING`), bumps the version, stages the batch,
-runs the stratum 1 rounds and the dispute marking, and clears the staging table, all in the caller's
-transaction. A rollback leaves no row, no reach and no version bump. `Staged::extension()` reports rounds
-and facts. `committed()` only warms the verification memo, which now serves `members_for_subset` alone.
+runs the stratum 1 rounds and the dispute marking, recomputes the live sets of the disputed subjects the
+batch touched, and clears the staging tables, all in the caller's transaction. A rollback leaves no row,
+no reach, no live set and no version bump. `Staged::extension()` reports rounds, facts and the refresh
+(subjects, rounds, contexts, facts). `committed()` only warms the verification memo, which now serves
+`members_for_subset` alone.
+
+**Reads never write.** `suite/demand.rs` has a handle that attached before another handle's inserts
+(a document disputed by the second batch) answer `members`, `effective_power`, `is_live` and
+`conveyed_power` over a database wrapper that counts `begin_write`: zero write transactions, and the
+reference's answers.
 
 **What reads no longer verify.** Evaluated answers come from tables derived from certificates verified at
 insert, so a row edited outside the backend changes `get`/`closure` bytes but not the derived tables,
 and only `members_for_subset` (which loads certificates to evaluate them) re-verifies. An audit that
-rebuilds the reach from the certificates is the way to detect or repair such an edit; not built.
+rebuilds the reach and live sets from the certificates is the way to detect or repair such an edit; not
+built.
 
 ## 7. The rest of keyhive's state: tables to back `KeyhiveStore`
 
@@ -233,15 +258,16 @@ authorization check, say) can read ops and Keyline answers in the same snapshot.
 
 ## 8. Decisions that need an operator answer
 
-1. **Per-subject validity of stratum 2 rows.** Today any insert invalidates every disputed subject's
-   live rows (section 2.4). Finer validity needs a version per closure; worth it only if disputed
-   subjects are queried between frequent inserts.
-2. **Refreshes write.** A question about a disputed subject whose rows are stale computes them in a
-   write transaction, so an inert process that only reads takes the single writer for a refresh. The
-   alternative is a read-path temp table, which `sqlite_rs` forbids on read snapshots.
+1. **The writer pays for disputes.** A revocation or grant into a large disputed closure recomputes
+   its live set at insert (section 2.4: 37 statements, about 2 rows per member at 1001 members). An
+   incremental live set (retraction through the fixpoint) would make it proportional to the change.
+2. **Coarse touched set.** Any new reach row over a subject marks it touched, and every disputed subject
+   standing over it is recomputed; a grant that touches a disputed subject's closure without changing
+   its live set still recomputes. Finer filtering needs the old and new live rows compared.
 3. **Eager cost of grounded junk.** Stratum 1 is derived at insert, so a member's grounded ladder costs
    k^2/2 facts on every replica that holds it, asked about or not (section 2.6). A per-issuer quota at
-   sync admission (mitigation 4 of section 7) is the lever; it is not in this crate.
-4. **No re-verification on evaluated reads** (section 6). An audit/rebuild function is the remedy.
+   sync admission (mitigation 4 of section 7 of the notes) is the lever; it is not in this crate.
+4. **No re-verification on evaluated reads** (section 6). An audit/rebuild function is the remedy, and
+   would also serve a database that already holds certificates (migration 002 assumes empty tables).
 5. `scope_id`: one hive per database is assumed.
 6. Whether the non-Keyline `kh_*` tables become a follow-up crate over the same `SqliteDb` (assumed yes).

@@ -73,9 +73,9 @@ fn every_statement_is_served_by_an_index() {
         Keyline::<Local>::subjects(k).await.unwrap();
         Keyline::<Local>::digest(k).await.unwrap();
         Keyline::<Local>::certificates(k).await.unwrap();
-        // The evaluated queries, each through a store that has not seen the inserts; the document is
-        // disputed by the revocation, so the first one computes its live set; the delegation's
-        // liveness, rooted at its own subject; and a subset.
+        // The evaluated queries, each through a store that has not seen the inserts (the insert
+        // computed the disputed document's live set); the delegation's liveness, rooted at its own
+        // subject; and a subset.
         let cold = SqliteKeyline::<(), _>::new(recording);
         Keyline::<Local>::members(&cold, id(DOC)).await.unwrap();
         // `OWNERS` is not disputed: its answers are reads of the stored reach.
@@ -110,6 +110,7 @@ fn every_statement_is_served_by_an_index() {
         for (sql, params) in &statements {
             let lines = plan(&db, sql, params).await;
             let whole_set = [
+                queries::HAS_DISPUTED_SQL,
                 queries::ALL_CERTIFICATES_SQL,
                 queries::ALL_CERTIFICATE_IDS_SQL,
                 queries::SUBJECTS_SQL,
@@ -123,7 +124,7 @@ fn every_statement_is_served_by_an_index() {
                     && !line.starts_with("SEARCH keyline_new ");
                 // The tables a scan is allowed to drive: the four levels, and the batch, the roots
                 // and the contexts of a computation in progress, each bounded by the work at hand.
-                let bounded = ["lv", "nw", "rt", "x", "keyline_new", "keyline_root", "keyline_ctx_use", "keyline_level"]
+                let bounded = ["lv", "nw", "rt", "x", "t", "a", "keyline_new", "keyline_root", "keyline_ctx_use", "keyline_level", "keyline_touched", "keyline_affected"]
                     .iter()
                     .any(|table| {
                         line.strip_prefix("SCAN ")

@@ -1,13 +1,15 @@
-//! Stratum 2 for one disputed subject: the live set, by SQL rounds.
+//! Stratum 2: the live set of the disputed subjects an insert can change, by SQL rounds.
 //!
 //! Only a subject whose closure holds a delegation some revocation names can have a live set that
 //! differs from its positive reach (`keyline_disputed`); every other subject answers from
-//! stratum 1. For a disputed subject the live set is computed here, in a write transaction, and
-//! stored with the version it was computed at (`keyline_live_at`); a query reads it only at that
-//! version.
+//! stratum 1. The live set of a disputed subject is **maintained at insert**, in the inserting
+//! transaction: after stratum 1 is extended, [`refresh_affected`] recomputes the live set of every
+//! disputed subject the batch touched (a subject that gained a certificate or a standing node, or
+//! one that stands over such a subject), so a stored live set is current at every committed
+//! version and a read never computes it. A rollback takes the recomputation with it.
 //!
-//! What is computed, for the *roots* of the subject (the nodes in its closure that are the
-//! subject of some delegation; each hop is judged in its own subject's graph, the daisy-chain
+//! What is computed, for the *roots* of the affected subjects (the nodes in their closures that are
+//! the subject of some delegation; each hop is judged in its own subject's graph, the daisy-chain
 //! rule, so the roots are closed under what the rounds read):
 //!
 //! 1. For each delegation about a root that a revocation names: whether its issuer's or
@@ -29,7 +31,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
-use keyhive_crypto::identifier::Identifier;
 use sqlite_rs::BindTuple;
 use sqlite_rs::Executor;
 use sqlite_rs::Sql;
@@ -41,9 +42,11 @@ use crate::sqlite::queries;
 /// Rows per statement when writing exclusion sets and disputes.
 const CHUNK: usize = 300;
 
-/// What a refresh cost.
+/// What recomputing the live sets of the affected subjects cost.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Refresh {
+    /// Disputed subjects whose live set was recomputed.
+    pub subjects: usize,
     /// Rounds that inserted anything, plus the final one that did not.
     pub rounds: usize,
     /// Contexts in use: the empty one and each distinct covered set.
@@ -58,18 +61,37 @@ struct Disputed {
     revokers: Vec<Vec<u8>>,
 }
 
-/// Compute and store the live set of `subject` and its roots at `version`.
-pub async fn refresh(
-    tx: &impl Executor,
-    subject: Identifier,
-    version: i64,
-) -> Result<Refresh, Error> {
+/// Recompute the live set of the disputed subjects the batch touched.
+///
+/// `first` is the first round of stratum 1 for this batch: the reach rows from it on are the batch's.
+/// A batch that touches no disputed subject costs the statements that find that out; a database
+/// with no disputed subject, one.
+pub async fn refresh_affected(tx: &impl Executor, first: i64) -> Result<Refresh, Error> {
     let tx = &Checked(tx);
-    let subject_bytes = subject.to_bytes().to_vec();
+    if !queries::has_disputed(tx).await? || crate::planted::skips_refresh() {
+        return Ok(Refresh::default());
+    }
+    queries::touched_delegations(tx).await?;
+    queries::touched_named(tx).await?;
+    queries::touched_reach(tx, first).await?;
+    queries::touched_admin(tx, first).await?;
+    queries::affected_disputed(tx).await?;
+    queries::clear_touched(tx).await?;
+    if !queries::has_affected(tx).await? {
+        return Ok(Refresh::default());
+    }
+    let subjects = queries::count_affected(tx).await?;
+    let mut refresh = compute(tx).await?;
+    refresh.subjects = usize::try_from(subjects).expect("a count is not negative");
+    queries::clear_affected(tx).await?;
+    Ok(refresh)
+}
+
+/// The live sets of the roots of the subjects in `keyline_affected`.
+async fn compute(tx: &impl Executor) -> Result<Refresh, Error> {
     queries::clear_roots(tx).await?;
     queries::clear_ctx_use(tx).await?;
-    queries::claim_roots(tx, subject_bytes.clone()).await?;
-
+    queries::claim_roots(tx).await?;
     // What revocations do to each delegation about a root.
     let mut disputed: BTreeMap<Vec<u8>, Disputed> = BTreeMap::new();
     for row in queries::disputed_delegations(tx).await? {
@@ -165,7 +187,6 @@ pub async fn refresh(
     }
     refresh.facts = facts;
     queries::set_epoch(tx, epoch).await?;
-    queries::put_stamps(tx, version, subject_bytes).await?;
     queries::clear_roots(tx).await?;
     queries::clear_ctx_use(tx).await?;
     Ok(refresh)

@@ -23,4 +23,4 @@ default_features = true
 
 [migrations]
 "src/keyline_sqlite/sqlite/migrations/001_init.sql" = "d0e5da6763dc5cdefc7dec6cd48375ec550f171972639adca54d315aa42aec1b"
-"src/keyline_sqlite/sqlite/migrations/002_materialized_evaluation.sql" = "c1c675736cd8a561bdbced73ef18873f2d3c272de4d2fba7209fc5c2bc689587"
+"src/keyline_sqlite/sqlite/migrations/002_materialized_evaluation.sql" = "ea622a1e13587fb6a754359384a4d95ba03a0436e768d0b7c6c415f22ac99dc3"

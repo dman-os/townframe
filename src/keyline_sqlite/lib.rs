@@ -12,10 +12,11 @@
 //! - **Stratum 1 is a table, extended at insert.** `keyline_reach` holds the positive reach in the
 //!   threshold encoding, append-only. `insert_in` extends it inside the caller's transaction by
 //!   semi-naive rounds, one SQL statement each, until a round inserts nothing ([`engine`]).
-//! - **Stratum 2 is computed per disputed subject.** A subject whose closure holds a delegation some
-//!   revocation names has a live set that can differ from its reach; it is computed by SQL rounds
-//!   over exclusion contexts keyed by the excluded set's signature, and stored with the version it
-//!   was computed at ([`stratum2`]). Every other subject answers from stratum 1.
+//! - **Stratum 2 is maintained at insert for the disputed subjects.** A subject whose closure holds a
+//!   delegation some revocation names has a live set that can differ from its reach; the insert that
+//!   changes it recomputes it, in its own transaction, by SQL rounds over exclusion contexts keyed by
+//!   the excluded set's signature ([`stratum2`]). Every other subject answers from stratum 1, and a
+//!   read never computes anything or writes.
 //! - **Point queries are indexed reads**, a handful of rows however large the set. `members_for_subset`
 //!   is the one question defined over an arbitrary subset, and runs `keyline_memory::State` over it.
 //!   See `docs/scratch/hive-store-design.md` for the design, the measured costs and where it differs

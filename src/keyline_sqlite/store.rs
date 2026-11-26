@@ -32,7 +32,6 @@ use crate::memo::Memo;
 use crate::read;
 use crate::read::Question;
 use crate::read::Reply;
-use crate::stratum2;
 use crate::rows;
 use crate::sqlite::queries;
 use crate::write;
@@ -109,9 +108,8 @@ impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
         self.memo.warm(staged.warm);
     }
 
-    /// `members(subject)` through `tx`, a write transaction the caller owns: for a caller that
-    /// combines the answer with writes of other stores in one transaction. A disputed subject's
-    /// live set is computed in `tx` if it is not current, and commits with it.
+    /// `members(subject)` through `tx`, a transaction the caller owns: for a caller that combines
+    /// the answer with writes of other stores in one transaction.
     pub async fn members_in(
         &self,
         tx: &impl Executor,
@@ -139,19 +137,9 @@ impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
         }
     }
 
-    /// Answer `question` through the write transaction `tx`, computing the live set of a
-    /// disputed subject first if it is not current at the version `tx` reads.
+    /// Answer `question` through `tx`: the answer is a read, and sees what `tx` sees.
     async fn ask_in(&self, tx: &impl Executor, question: Question) -> Result<Reply, Error> {
-        let version = queries::meta_version(tx).await?;
-        match read::ask(tx, version, &question).await? {
-            Ok(reply) => Ok(reply),
-            Err(read::Stale(subject)) => {
-                stratum2::refresh(tx, subject, version).await?;
-                read::ask(tx, version, &question)
-                    .await?
-                    .map_err(|stale| unreachable!("{stale:?} is stale right after a refresh"))
-            }
-        }
+        read::ask(tx, &question).await
     }
 
     async fn snapshot(&self) -> Result<Snapshot<D>, Error> {
@@ -160,23 +148,13 @@ impl<W: Encode + Decode, D: SqliteDb> SqliteKeyline<W, D> {
         Ok(Snapshot { tx, version })
     }
 
-    /// Answer `question` at the version one snapshot read; if it needs a live set that is not
-    /// current, compute it in a write transaction (a refresh is a cache fill, and any process
-    /// that needs it may do it) and answer there.
+    /// Answer `question` at the version one snapshot read. Every answer is a read: the stored
+    /// reach and live set are current at every committed version, because the insert that changed
+    /// them updated them in its own transaction.
     async fn ask(&self, question: Question) -> Result<Versioned<Reply>, Error> {
         let snapshot = self.snapshot().await?;
-        if let Ok(reply) = read::ask(&snapshot.tx, snapshot.version, &question).await? {
-            let version = snapshot.finish().await?;
-            return Ok(Versioned {
-                version,
-                value: reply,
-            });
-        }
-        snapshot.finish().await?;
-        let tx = self.db.begin_write().await?;
-        let reply = self.ask_in(&tx, question).await?;
-        let version = version_from_sql(queries::meta_version(&tx).await?);
-        D::commit(tx).await?;
+        let reply = read::ask(&snapshot.tx, &question).await?;
+        let version = snapshot.finish().await?;
         Ok(Versioned {
             version,
             value: reply,

@@ -31,6 +31,8 @@ use super::fresh_db;
 use super::recording::Recording;
 use super::sign;
 use crate::SqliteKeyline;
+use crate::Extension;
+use crate::Refresh;
 use crate::planted::PLANTED;
 use crate::planted::Planted;
 
@@ -143,8 +145,8 @@ fn a_query_does_not_read_what_is_not_in_its_closure() {
 }
 
 /// A point query about a member of a large document is a few indexed reads however many members
-/// the document has; `members` is as large as its answer. A document some revocation disputes pays
-/// once, at the first question after an insert, to compute its live set.
+/// the document has, whether or not a revocation disputes it: the live set was computed by the
+/// insert, so the first question is already the cached read. `members` is as large as its answer.
 #[test]
 fn a_point_query_is_constant_and_members_is_its_output() {
     let measure = |members: usize, disputed: bool| {
@@ -169,49 +171,163 @@ fn a_point_query_is_constant_and_members_is_its_output() {
         let (first_large, point_large, all_large, size_large) = measure(2000, disputed);
         println!(
             "DEMAND large document, disputed={disputed}: first question {first_small:?} / {first_large:?}, \
-             then a point query {point_small:?} / {point_large:?} (statements, rows) at 200 / 2000 members; \
+             second {point_small:?} / {point_large:?} (statements, rows) at 200 / 2000 members; \
              members {all_small:?} / {all_large:?} for {size_small} / {size_large} members"
         );
         assert_eq!(point_small, point_large, "a point query grew with the document");
         assert!(point_small.0 <= 5 && point_small.1 <= 5, "{point_small:?}");
-        if !disputed {
-            assert_eq!(first_small, first_large, "an undisputed document's first question was not a point query");
-        }
+        assert_eq!(first_small, point_small, "the first question paid to compute something");
+        assert_eq!(first_large, point_large, "the first question paid to compute something");
         assert!(all_large.1 >= size_large, "members reads at least its answer");
         assert!(all_large.1 <= 2 * size_large, "{all_large:?} for {size_large} members");
     }
 }
 
-/// What inserting costs: statements per batch (rounds of the fixpoint, not certificates) and
-/// facts derived.
-#[test]
-fn an_insert_costs_its_rounds_and_its_facts() {
-    let cost = |members: usize| {
-        let certs = unrelated(members);
-        let count = certs.len();
-        let recording = Recording::new(fresh_db());
-        let store = Store::new(recording.clone());
+/// Run `batch` through `insert_in` on `store` and return what it cost: statements, extension.
+fn insert_cost(
+    store: &Store,
+    recording: &Recording,
+    batch: Vec<VerifiedCertificate<()>>,
+) -> (usize, Extension) {
+    block_on(async {
         let db = recording.clone();
-        let (staged, statements) = block_on(async {
-            let tx = SqliteDb::begin_write(&db).await.unwrap();
-            let staged = store.insert_in(&tx, certs).await.unwrap();
-            <Recording as SqliteDb>::commit(tx).await.unwrap();
-            (staged, recording.counts.take().0)
-        });
+        let tx = SqliteDb::begin_write(&db).await.unwrap();
+        let staged = store.insert_in(&tx, batch).await.unwrap();
+        <Recording as SqliteDb>::commit(tx).await.unwrap();
         let extension = staged.extension();
         store.committed(staged);
-        (count, statements, extension)
+        (recording.counts.take().0, extension)
+    })
+}
+
+/// What inserting costs. A batch of grants with no revocation: statements follow rounds, not
+/// certificates, and the live sets are not touched. A batch with revocations disputes the
+/// document and computes its live set. A revocation into a large closure recomputes it.
+#[test]
+fn an_insert_costs_its_rounds_and_its_facts() {
+    let grants = |members: usize| -> Vec<VerifiedCertificate<()>> {
+        unrelated(members)
+            .into_iter()
+            .filter(|cert| matches!(cert.id(), CertificateId::Delegation(_)))
+            .collect()
     };
-    let (n1, statements1, small) = cost(100);
-    let (n2, statements2, large) = cost(1000);
+    let fresh = || {
+        let recording = Recording::new(fresh_db());
+        (Store::new(recording.clone()), recording)
+    };
+
+    // No revocation.
+    let (store, recording) = fresh();
+    let (statements1, small) = insert_cost(&store, &recording, grants(100));
+    let (store, recording) = fresh();
+    let (statements2, large) = insert_cost(&store, &recording, grants(1000));
     println!(
-        "DEMAND insert of {n1} certificates: {statements1} statements, {} rounds, {} facts; of {n2}: \
-         {statements2} statements, {} rounds, {} facts",
-        small.rounds, small.facts, large.rounds, large.facts
+        "DEMAND insert, no revocation: 101 grants: {statements1} statements, {} rounds, {} facts, \
+         {} live subjects; 1001 grants: {statements2} statements, {} rounds, {} facts, {} live subjects",
+        small.rounds, small.facts, small.refresh.subjects, large.rounds, large.facts, large.refresh.subjects
     );
     assert_eq!(statements1, statements2, "statements follow rounds, not certificates");
     assert_eq!(small.rounds, large.rounds);
+    assert_eq!(small.refresh, Refresh::default(), "nothing is disputed, nothing to refresh");
     assert!(large.facts < 12 * small.facts, "{small:?} {large:?}");
+
+    // Revocations in the batch: the document is disputed and its live set computed.
+    let (store, recording) = fresh();
+    let (statements_r1, small) = insert_cost(&store, &recording, unrelated(100));
+    let (store, recording) = fresh();
+    let (statements_r2, large) = insert_cost(&store, &recording, unrelated(1000));
+    println!(
+        "DEMAND insert with revocations (every tenth grant): 111 certificates: {statements_r1} statements, \
+         {} rounds, {} facts, live {:?}; 1101: {statements_r2} statements, {} rounds, {} facts, live {:?}",
+        small.rounds, small.facts, small.refresh, large.rounds, large.facts, large.refresh
+    );
+    assert_eq!(small.refresh.subjects, 1);
+    assert_eq!(statements_r1, statements_r2, "statements follow rounds, not certificates");
+
+    // One revocation into a large, already disputed closure, and into an undisputed one.
+    for (label, base) in [("undisputed", grants(1000)), ("disputed", unrelated(1000))] {
+        let (store, recording) = fresh();
+        let _: (usize, Extension) = insert_cost(&store, &recording, base.clone());
+        let admin = key(1);
+        let target = base
+            .iter()
+            .find_map(|cert| match cert.id() {
+                CertificateId::Delegation(digest) if cert.issuer() == identifier(&admin) => Some(digest),
+                _ => None,
+            })
+            .expect("the admin issued a grant");
+        let revocation = Verified::sign_sync(&Revocation::<()>::new(target), &admin)
+            .expect("a key signs")
+            .into();
+        let (statements, one) = insert_cost(&store, &recording, vec![revocation]);
+        println!(
+            "DEMAND one revocation into a 1001-member {label} closure: {statements} statements, {} rounds, \
+             {} reach facts, live {:?}",
+            one.rounds, one.facts, one.refresh
+        );
+        assert_eq!(one.refresh.subjects, 1, "the touched disputed subject is refreshed");
+    }
+
+    // One grant to an unrelated document, with the large one disputed: nothing recomputed.
+    let (store, recording) = fresh();
+    let _: (usize, Extension) = insert_cost(&store, &recording, unrelated(1000));
+    let (statements, unrelated_grant) = insert_cost(&store, &recording, small_doc().into_iter().take(2).collect());
+    println!(
+        "DEMAND an unrelated grant beside a disputed 1001-member document: {statements} statements, \
+         live {:?}",
+        unrelated_grant.refresh
+    );
+    assert_eq!(unrelated_grant.refresh, Refresh::default());
+}
+
+/// Another handle over the same database answers a disputed subject right after an insert it did
+/// not make, from a read-only snapshot: no write transaction, and the reference's answers.
+#[test]
+fn a_read_only_handle_answers_a_disputed_subject_right_after_another_handles_insert() {
+    let recording = Recording::new(fresh_db());
+    let writer = Store::new(recording.clone());
+    let reader = Store::new(recording.clone());
+    let memory = MemoryKeyline::<()>::new();
+    let certs = deep_revocation();
+    let (before, after) = certs.split_at(certs.len() / 2);
+    for batch in [before, after] {
+        block_on(Keyline::<Local>::insert(&writer, batch.to_vec())).unwrap();
+        block_on(Keyline::<Local>::insert(&memory, batch.to_vec())).unwrap();
+    }
+    recording.counts.take();
+    let writes_before = recording
+        .counts
+        .write_transactions
+        .load(std::sync::atomic::Ordering::SeqCst);
+
+    let sqlite = block_on(Keyline::<Local>::members(&reader, id(DOC))).unwrap().value;
+    let reference = block_on(Keyline::<Local>::members(&memory, id(DOC))).unwrap().value;
+    assert_eq!(sqlite, reference);
+    for cert in &certs {
+        if let CertificateId::Delegation(digest) = cert.id() {
+            assert_eq!(
+                block_on(Keyline::<Local>::is_live(&reader, digest)).unwrap().value,
+                block_on(Keyline::<Local>::is_live(&memory, digest)).unwrap().value,
+            );
+            assert_eq!(
+                block_on(Keyline::<Local>::conveyed_power(&reader, digest)).unwrap().value,
+                block_on(Keyline::<Local>::conveyed_power(&memory, digest)).unwrap().value,
+            );
+        }
+    }
+    for audience in 1..=8 {
+        assert_eq!(
+            block_on(Keyline::<Local>::effective_power(&reader, id(DOC), id(audience))).unwrap().value,
+            block_on(Keyline::<Local>::effective_power(&memory, id(DOC), id(audience))).unwrap().value,
+        );
+    }
+    let writes = recording
+        .counts
+        .write_transactions
+        .load(std::sync::atomic::Ordering::SeqCst)
+        - writes_before;
+    // The writer's inserts begin write transactions; the reader's questions do not.
+    assert_eq!(writes, 0, "answering a disputed subject began a write transaction");
 }
 
 /// The ladder: rung `i` is the root of its own graph and supplies rung `i + 1`, which has a member.
@@ -277,6 +393,19 @@ fn agree_on_members(certs: &[VerifiedCertificate<()>], subject: Identifier) -> b
     sqlite == reference
 }
 
+/// As [`agree_on_members`], with the certificates inserted in these batches, in order.
+fn agree_in_batches(batches: &[Vec<VerifiedCertificate<()>>], subject: Identifier) -> bool {
+    let recording = Recording::new(fresh_db());
+    let store = Store::new(recording);
+    let memory = MemoryKeyline::<()>::new();
+    for batch in batches {
+        block_on(Keyline::<Local>::insert(&store, batch.clone())).unwrap();
+        block_on(Keyline::<Local>::insert(&memory, batch.clone())).unwrap();
+    }
+    block_on(Keyline::<Local>::members(&store, subject)).unwrap().value
+        == block_on(Keyline::<Local>::members(&memory, subject)).unwrap().value
+}
+
 /// Roles nested two deep: `ALICE` stands over the document only as a member of `OWNERS`, and is a
 /// role herself, whose member (4) delegates to a fifth (5).
 fn role_with_member() -> Vec<VerifiedCertificate<()>> {
@@ -338,6 +467,20 @@ fn the_checks_fail_when_the_evaluation_is_wrong() {
     plant(Planted::NoComposition, &|| agree_on_members(&role_with_member(), id(DOC)));
     plant(Planted::IgnoreOwnContext, &|| agree_on_members(&deep_revocation(), id(DOC)));
     plant(Planted::IgnoreExclusion, &|| agree_on_members(&deep_revocation(), id(DOC)));
+    // An insert that does not refresh the live set of a disputed subject it touched: once when a
+    // revocation newly disputes the document, once when a later grant touches the disputed one.
+    let (delegations, revocations): (Vec<_>, Vec<_>) = deep_revocation()
+        .into_iter()
+        .partition(|cert| matches!(cert.id(), CertificateId::Delegation(_)));
+    plant(Planted::SkipRefresh, &|| {
+        agree_in_batches(&[delegations.clone(), revocations.clone()], id(DOC))
+    });
+    plant(Planted::SkipRefresh, &|| {
+        agree_in_batches(
+            &[deep_revocation(), vec![sign(d(OWNERS, 8, DOC, Power::Read))]],
+            id(DOC),
+        )
+    });
     // Optimistic seeding: the gift derives facts it must not.
     PLANTED.set(Planted::Ungrounded);
     let (facts, _) = gift_facts(10);
