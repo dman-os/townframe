@@ -1,5 +1,8 @@
 # Hive store: Keyline from SQL on demand, and the rest of keyhive's state beside it
 
+Owner: the automata lane (keyline-eval).
+Scope: `src/keyline_sqlite` (implemented) and the non-Keyline keyhive tables (proposal only).
+Updated: 2026-11-26.
 Status: design for `keyline_sqlite` (implemented on this branch) and for the non-Keyline tables (not
 implemented; sketched so the Keyline tables and a follow-up crate share one database and one
 transaction). Sources: keyhive fork `origin/townframe-changes` (`design/keyline/implementation.md`,
