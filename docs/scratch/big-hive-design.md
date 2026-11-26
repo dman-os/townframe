@@ -170,3 +170,39 @@ interested.
 - Later: the keyhive boundary machine (the two write paths above), the `sqlite_rs` executor
   split and browser backend (the JS host implements the `townframe:sqlite` operations in the
   node's dedicated worker), and multi-principal identities.
+
+## Decisions, 2026-11-26 evening (operator)
+
+- **No per-write clone.** Our lane introduced it: persist-then-apply plus automerge exposing a
+  change's bytes only after commit. The fix: commit the user's transaction on the live document,
+  take the bytes, persist. Reads are held while the local change is not yet durable; on a failed
+  persist the document is re-hydrated. Remote changes may still be applied during an in-flight
+  local write (automerge merges in any order).
+- **Multi-document writes:** a surelock-style handle that locks N documents at the
+  `BigDocHandle` level, over one back-end ingest path taking `(document, change bytes)` for N
+  documents. Local handles and external authors (clients holding their own automerge document)
+  feed the same path.
+- **No `ensure_causal_coverage`.** Checkpoints exist only for the concurrent-epoch gap, checked
+  on the write path: a local write checks before encrypting and puts any checkpoint in the same
+  plan; arriving remote writes are checked as they come in. No public method, no checkpoint
+  machine, no reaction to membership changes.
+- **Sync:** the big_automata approach stays (part replay, heads comparison, subduction pull per
+  sedimentree, durable outbox and held wants). Ephemeral is not used for change notification.
+- **Keyhive notifications** are rebuilt in the Keyhive boundary: after a keyhive event commits,
+  notify directly connected peers who may see it, never gossip, with no echo to the source (the
+  source is a column on the event row). Not yet implemented in the new stack.
+- **Invite keys** (a link carrying a principal's private key): option (a), a second subduction
+  session signed by the invite principal over the same iroh endpoint and node identity, opened
+  explicitly by the layer above (big_node). Sessions above the connection, upstream, if that
+  proves awkward. To check: whether subduction can run a second handshake on an existing iroh
+  connection.
+- **Read-only open** is deliverable (reads need commit rows and content-key rows, not keyhive's
+  memory) but deferred until the main path works.
+- **Author filtering** needs nothing from whoever holds the automerge struct. It is decided where
+  the Document machine hydrates, from the sedimentree commit signer, the automerge footer author
+  and Keyline. Backdating is handled by Keyline's rule to rotate a role after removing an admin
+  (`design/keyline/README.md`, "The Ex-Admin Sharp Edge").
+- **Attestation (automerge #1742):** build around it. Being researched: where signatures live,
+  whether a node can sign a change a client created with the node as author, and whether unsigned
+  live changes over ephemeral remain possible.
+- **Process:** drafts without CI; only the stack tip is greened, when the operator names it.
