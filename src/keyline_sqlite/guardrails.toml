@@ -4,13 +4,19 @@ dependency_reason = "The SQLite Keyline backend implements keyline's authority-g
 allowed_dependencies = ["sqlite_rs", "utils_rs"]
 allow_external_api_types = true
 
-# No `wasm32-unknown-unknown` build: sqlite_rs does not target the browser.
 [builds.native]
 features = ["bench-support"]
 required_features = []
 default_features = true
 
 [builds.wasm32-wasip3]
+features = []
+required_features = []
+default_features = true
+
+# Generic over `sqlite_rs::SqliteDb`, so it builds for the browser without a browser backend; the
+# workloads that open a native `Database` are not compiled there.
+[builds.wasm32-unknown-unknown]
 features = []
 required_features = []
 default_features = true

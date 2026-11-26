@@ -25,6 +25,7 @@ members = [
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
+  "./src/big_hive/",
   "./src/big_node/",
   "./src/day_cli",
   "./src/daybook_cli",
@@ -394,6 +395,17 @@ ui = { path = "./src/ui" }
 #
 
 [patch.crates-io]
+# The keyhive registry releases (`keyline_sqlite` and the newer subduction fork name them by
+# version) resolve to the fork's `townframe-changes` tip, which `big_hive` names directly. One
+# source per crate is what makes `SqliteKeyline` satisfy the fork's `Keyline` bound. `big_repo`
+# takes the older keyhive by git rev and is unaffected.
+keyline = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
+keyline_memory = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
+keyhive_codec = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
+keyhive_crypto = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
+keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
+keyhive_content = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
+beekem = { git = "https://github.com/dman-os/keyhive", rev = "6b3370c14166833f450214328e137728a72edbdd" }
 # hyper 1.12.0 plus a fix: the h1 server refreshed its cached Date value on every connection even
 # with `auto_date_header(false)`, and the refresh reads `SystemTime::now()`, which panics on
 # wasm32-unknown-unknown, so a browser node could not serve HTTP/1. The fix skips the refresh when

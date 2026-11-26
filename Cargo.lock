@@ -260,7 +260,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 name = "am_utils_rs"
 version = "0.1.0"
 dependencies = [
- "automerge",
+ "automerge 0.11.0",
  "autosurgeon",
  "camino",
  "data-encoding",
@@ -1151,11 +1151,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "automerge"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fb849130973a7808a167887f56b1e8bdc36b9b541542602dcb337f34aecf47b"
+dependencies = [
+ "cfg-if 1.0.5",
+ "flate2",
+ "getrandom 0.4.3",
+ "hex",
+ "hexane",
+ "itertools 0.15.0",
+ "leb128",
+ "rand 0.10.3",
+ "rustc-hash 2.1.3",
+ "serde",
+ "sha2 0.11.1",
+ "smol_str",
+ "thiserror 2.0.21",
+ "tinyvec",
+ "tracing",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "autosurgeon"
 version = "0.13.0"
 source = "git+https://github.com/dman-os/autosurgeon?rev=6a1df66f667667f1d14bc2272c4d426815de66b8#6a1df66f667667f1d14bc2272c4d426815de66b8"
 dependencies = [
- "automerge",
+ "automerge 0.11.0",
  "autosurgeon-derive",
  "pastey 0.1.1",
  "similar 2.7.0",
@@ -1425,6 +1449,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "beekem"
+version = "0.9.0"
+source = "git+https://github.com/dman-os/keyhive?rev=6b3370c14166833f450214328e137728a72edbdd#6b3370c14166833f450214328e137728a72edbdd"
+dependencies = [
+ "blake3",
+ "chacha20poly1305",
+ "dupe",
+ "ed25519-dalek 2.2.0",
+ "future_form",
+ "keyhive_codec",
+ "keyhive_crypto 0.6.0",
+ "nonempty",
+ "rand 0.8.8",
+ "thiserror 2.0.21",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "big_automata"
 version = "0.1.0"
 dependencies = [
@@ -1521,7 +1564,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
- "automerge",
+ "automerge 0.11.0",
  "bao-tree",
  "big_blobs_core",
  "big_cabinet",
@@ -1562,7 +1605,7 @@ dependencies = [
 name = "big_blobs_core"
 version = "0.1.0"
 dependencies = [
- "automerge",
+ "automerge 0.11.0",
  "big_cabinet_core",
  "big_sync_core",
  "bs58",
@@ -1583,7 +1626,7 @@ name = "big_cabinet"
 version = "0.1.0"
 dependencies = [
  "atproto-dasl",
- "automerge",
+ "automerge 0.11.0",
  "big_cabinet_core",
  "big_repo",
  "big_sync",
@@ -1622,7 +1665,7 @@ dependencies = [
 name = "big_cabinet_core"
 version = "0.1.0"
 dependencies = [
- "automerge",
+ "automerge 0.11.0",
  "autosurgeon",
  "big_sync_core",
  "blake3",
@@ -1743,6 +1786,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "big_hive"
+version = "0.1.0"
+dependencies = [
+ "automerge 0.12.0",
+ "future_form",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
+ "keyhive_codec",
+ "keyhive_core 0.12.3",
+ "keyhive_crypto 0.6.0",
+ "keyline",
+ "keyline_sqlite",
+ "sedimentree_core 0.17.0",
+ "sqlite_rs",
+ "subduction_core 0.21.0",
+ "subduction_crypto 0.12.0",
+ "subduction_keyhive 0.13.0",
+]
+
+[[package]]
 name = "big_ndk"
 version = "0.1.0"
 dependencies = [
@@ -1836,7 +1900,7 @@ name = "big_nodule"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "automerge",
+ "automerge 0.11.0",
  "big_blobs_core",
  "big_cabinet",
  "big_cabinet_core",
@@ -1924,9 +1988,9 @@ dependencies = [
  "async-lock",
  "async-trait",
  "atproto-dasl",
- "automerge",
+ "automerge 0.11.0",
  "autosurgeon",
- "beekem",
+ "beekem 0.4.0",
  "big_sync",
  "big_sync_core",
  "bincode",
@@ -1938,22 +2002,22 @@ dependencies = [
  "iroh",
  "irpc",
  "irpc-iroh",
- "keyhive_core",
+ "keyhive_core 0.6.0",
  "keyhive_crypto 0.2.1",
  "nonempty",
  "pretty_assertions",
  "rand 0.8.8",
  "rand 0.9.5",
  "secrets_rs",
- "sedimentree_core",
+ "sedimentree_core 0.14.2",
  "serde",
  "serde_json",
  "sqlite_rs",
- "subduction_core",
- "subduction_crypto",
+ "subduction_core 0.18.2",
+ "subduction_crypto 0.9.2",
  "subduction_ephemeral",
  "subduction_iroh",
- "subduction_keyhive",
+ "subduction_keyhive 0.9.0",
  "subduction_websocket",
  "surelock",
  "tempfile",
@@ -1975,7 +2039,7 @@ dependencies = [
  "iroh",
  "irpc",
  "irpc-iroh",
- "keyhive_core",
+ "keyhive_core 0.6.0",
  "rand 0.9.5",
  "serde",
  "sqlite_rs",
@@ -4375,7 +4439,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 name = "datum_core"
 version = "0.1.0"
 dependencies = [
- "automerge",
+ "automerge 0.11.0",
  "const_format",
  "displaydoc",
  "indexmap 2.14.2",
@@ -4462,7 +4526,7 @@ dependencies = [
  "async-channel",
  "async-trait",
  "atproto-dasl",
- "automerge",
+ "automerge 0.11.0",
  "autosurgeon",
  "big_blobs",
  "big_repo",
@@ -4488,7 +4552,7 @@ dependencies = [
  "irpc",
  "irpc-iroh",
  "jsonschema",
- "keyhive_core",
+ "keyhive_core 0.6.0",
  "loom",
  "mltools",
  "native_utils_rs",
@@ -4566,7 +4630,7 @@ version = "0.1.0"
 dependencies = [
  "addr",
  "am_utils_rs",
- "automerge",
+ "automerge 0.11.0",
  "autosurgeon",
  "blake3",
  "camino",
@@ -9147,11 +9211,27 @@ dependencies = [
 [[package]]
 name = "keyhive_codec"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88bb801be05f13783d02b1814e4b3ec6e72daf7a8b8fd8dd71c26f646acd4403"
+source = "git+https://github.com/dman-os/keyhive?rev=6b3370c14166833f450214328e137728a72edbdd#6b3370c14166833f450214328e137728a72edbdd"
 dependencies = [
  "bijoux",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "keyhive_content"
+version = "0.4.0"
+source = "git+https://github.com/dman-os/keyhive?rev=6b3370c14166833f450214328e137728a72edbdd#6b3370c14166833f450214328e137728a72edbdd"
+dependencies = [
+ "blake3",
+ "chacha20poly1305",
+ "dupe",
+ "future_form",
+ "futures",
+ "keyhive_codec",
+ "keyhive_crypto 0.6.0",
+ "thiserror 2.0.21",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -9159,7 +9239,7 @@ name = "keyhive_core"
 version = "0.6.0"
 source = "git+https://github.com/dman-os/keyhive?rev=a84137d1f2bdd81cc6c883253a534cc3f0380b5e#a84137d1f2bdd81cc6c883253a534cc3f0380b5e"
 dependencies = [
- "beekem",
+ "beekem 0.4.0",
  "bincode",
  "blake3",
  "chacha20poly1305",
@@ -9178,6 +9258,34 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "x25519-dalek",
+]
+
+[[package]]
+name = "keyhive_core"
+version = "0.12.3"
+source = "git+https://github.com/dman-os/keyhive?rev=6b3370c14166833f450214328e137728a72edbdd#6b3370c14166833f450214328e137728a72edbdd"
+dependencies = [
+ "async-lock",
+ "beekem 0.9.0",
+ "blake3",
+ "chacha20poly1305",
+ "derive_more 1.0.0",
+ "dupe",
+ "ed25519-dalek 2.2.0",
+ "future_form",
+ "futures",
+ "imbl",
+ "keyhive_codec",
+ "keyhive_content",
+ "keyhive_crypto 0.6.0",
+ "keyline",
+ "nonempty",
+ "rand 0.8.8",
+ "signature 2.2.0",
+ "thiserror 2.0.21",
+ "tracing",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -9204,8 +9312,7 @@ dependencies = [
 [[package]]
 name = "keyhive_crypto"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b8199171b69cd29ebba2e8aa693aee0cd537849d7fd232231b4011811e76415"
+source = "git+https://github.com/dman-os/keyhive?rev=6b3370c14166833f450214328e137728a72edbdd#6b3370c14166833f450214328e137728a72edbdd"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -9230,8 +9337,7 @@ dependencies = [
 [[package]]
 name = "keyline"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95b3bbe4dcec19ca9e5cf858b0d13c6a174ca84059dfc1146791e6cb8d143476"
+source = "git+https://github.com/dman-os/keyhive?rev=6b3370c14166833f450214328e137728a72edbdd#6b3370c14166833f450214328e137728a72edbdd"
 dependencies = [
  "arbitrary",
  "bijoux",
@@ -9248,8 +9354,7 @@ dependencies = [
 [[package]]
 name = "keyline_memory"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90e41b34e154407341f207983feeb1997e2a4e1cd50c71a7e5f0caa933163596"
+source = "git+https://github.com/dman-os/keyhive?rev=6b3370c14166833f450214328e137728a72edbdd#6b3370c14166833f450214328e137728a72edbdd"
 dependencies = [
  "async-lock",
  "future_form",
@@ -9269,6 +9374,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
  "futures",
+ "getrandom 0.2.17",
  "gungraun",
  "keyhive_codec",
  "keyhive_crypto 0.6.0",
@@ -12816,7 +12922,7 @@ dependencies = [
 name = "plug_dayledger_manifest"
 version = "0.1.0"
 dependencies = [
- "automerge",
+ "automerge 0.11.0",
  "blake3",
  "chumsky",
  "daybook_core",
@@ -14736,6 +14842,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "sedimentree_core"
+version = "0.17.0"
+source = "git+https://github.com/dman-os/subduction?rev=2b3276f18c50d8b17a8ca523ae6b19f773aadd27#2b3276f18c50d8b17a8ca523ae6b19f773aadd27"
+dependencies = [
+ "async-lock",
+ "bijoux",
+ "blake3",
+ "future_form",
+ "futures",
+ "futures-util",
+ "getrandom 0.2.17",
+ "nonempty",
+ "num-bigint",
+ "siphasher",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "seize"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -16034,9 +16159,32 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "nonempty",
- "sedimentree_core",
+ "sedimentree_core 0.14.2",
  "siphasher",
- "subduction_crypto",
+ "subduction_crypto 0.9.2",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "subduction_core"
+version = "0.21.0"
+source = "git+https://github.com/dman-os/subduction?rev=2b3276f18c50d8b17a8ca523ae6b19f773aadd27#2b3276f18c50d8b17a8ca523ae6b19f773aadd27"
+dependencies = [
+ "async-channel",
+ "async-lock",
+ "bijoux",
+ "blake3",
+ "ed25519-dalek 2.2.0",
+ "event-listener",
+ "future_form",
+ "futures",
+ "getrandom 0.2.17",
+ "nonempty",
+ "sedimentree_core 0.17.0",
+ "siphasher",
+ "spin 0.10.1",
+ "subduction_crypto 0.12.0",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -16050,8 +16198,21 @@ dependencies = [
  "future_form",
  "futures",
  "getrandom 0.2.17",
- "sedimentree_core",
+ "sedimentree_core 0.14.2",
  "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "subduction_crypto"
+version = "0.12.0"
+source = "git+https://github.com/dman-os/subduction?rev=2b3276f18c50d8b17a8ca523ae6b19f773aadd27#2b3276f18c50d8b17a8ca523ae6b19f773aadd27"
+dependencies = [
+ "ed25519-dalek 2.2.0",
+ "future_form",
+ "futures",
+ "getrandom 0.2.17",
+ "sedimentree_core 0.17.0",
  "thiserror 2.0.21",
 ]
 
@@ -16066,9 +16227,9 @@ dependencies = [
  "future_form",
  "futures",
  "nonempty",
- "sedimentree_core",
- "subduction_core",
- "subduction_crypto",
+ "sedimentree_core 0.14.2",
+ "subduction_core 0.18.2",
+ "subduction_crypto 0.9.2",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -16084,9 +16245,9 @@ dependencies = [
  "futures",
  "iroh",
  "rand 0.8.8",
- "sedimentree_core",
- "subduction_core",
- "subduction_crypto",
+ "sedimentree_core 0.14.2",
+ "subduction_core 0.18.2",
+ "subduction_crypto 0.9.2",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -16107,18 +16268,43 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
  "futures",
- "keyhive_core",
+ "keyhive_core 0.6.0",
  "keyhive_crypto 0.2.1",
  "rand 0.8.8",
- "sedimentree_core",
+ "sedimentree_core 0.14.2",
  "serde",
  "serde_bytes",
  "serde_json",
- "subduction_core",
- "subduction_crypto",
+ "subduction_core 0.18.2",
+ "subduction_crypto 0.9.2",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "subduction_keyhive"
+version = "0.13.0"
+source = "git+https://github.com/dman-os/subduction?rev=2b3276f18c50d8b17a8ca523ae6b19f773aadd27#2b3276f18c50d8b17a8ca523ae6b19f773aadd27"
+dependencies = [
+ "async-lock",
+ "base64 0.22.1",
+ "bijoux",
+ "blake3",
+ "dupe",
+ "future_form",
+ "futures",
+ "keyhive_codec",
+ "keyhive_content",
+ "keyhive_core 0.12.3",
+ "keyhive_crypto 0.6.0",
+ "keyline",
+ "nonempty",
+ "rand 0.8.8",
+ "sedimentree_core 0.17.0",
+ "subduction_core 0.21.0",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -16136,9 +16322,9 @@ dependencies = [
  "futures-timer",
  "futures-util",
  "rand 0.8.8",
- "sedimentree_core",
- "subduction_core",
- "subduction_crypto",
+ "sedimentree_core 0.14.2",
+ "subduction_core 0.18.2",
+ "subduction_crypto 0.9.2",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
