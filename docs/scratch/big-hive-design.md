@@ -119,6 +119,19 @@ Later, as an upstream proposal: make the transaction itself the "what if". If ke
 ran against a Keyline view bound to the caller's transaction, membership changes could become
 real prepare/apply. That is a Keyline contract change.
 
+### Pruning decisions (operator, 2026-11-26)
+- **Pruning a commit we could decrypt is accepted** before checkpoints exist. It follows
+  upstream's "only the latest heads" stance. The checkpoint machine must account for it: after
+  pruning, the content we can decrypt may sit only inside a covering fragment.
+- **Library minimization semantics stay.** A pruned commit that arrives again is stored again.
+  A stronger local rule would make our fingerprints differ from a peer's, and the peer would
+  resend the commit on every sync (the loop in subduction discussion #284). Upstream's eager
+  pruning is the real fix.
+- **Two payloads for one head** keep only the lowest digest, so the result can depend on arrival
+  order. Pinned by a test. It goes upstream as a note on #284, not as a local fix.
+- Untested so far: whether fragment domination is order-independent when fragments arrive
+  before their commits.
+
 ### Remote content commits
 Subduction calls `Storage`: one transaction for the commit rows, the `rev` bump, pruning and the
 part store. The change feed fires. A document is hydrated only if someone has it open or
