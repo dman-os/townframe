@@ -185,7 +185,7 @@ fn an_insert_costs_its_rounds_and_its_facts() {
         let (staged, statements) = block_on(async {
             let tx = SqliteDb::begin_write(&db).await.unwrap();
             let staged = store.insert_in(&tx, certs).await.unwrap();
-            SqliteDb::commit(tx).await.unwrap();
+            <Recording as SqliteDb>::commit(tx).await.unwrap();
             (staged, recording.counts.take().0)
         });
         let extension = staged.extension();
@@ -236,7 +236,7 @@ fn gift_facts(rungs: usize) -> (u64, usize) {
         let db = recording.clone();
         let tx = SqliteDb::begin_write(&db).await.unwrap();
         let staged = store.insert_in(&tx, vec![gift]).await.unwrap();
-        SqliteDb::commit(tx).await.unwrap();
+        <Recording as SqliteDb>::commit(tx).await.unwrap();
         staged.extension().facts
     });
     recording.counts.take();

@@ -279,7 +279,10 @@ fn a_row_modified_outside_the_backend_fails_the_query_that_reads_it() {
         .await
         .unwrap();
         let reopened = Store::new(db);
-        let failure = Keyline::<Local>::members(&reopened, id(DOC))
+        // The materialized evaluation is trusted (it was derived from verified certificates at
+        // insert); a query that evaluates certificates it reads, as a subset must, verifies them.
+        let all: std::collections::BTreeSet<_> = root().iter().map(|cert| cert.id()).collect();
+        let failure = Keyline::<Local>::members_for_subset(&reopened, all, id(DOC))
             .await
             .unwrap_err();
         assert!(

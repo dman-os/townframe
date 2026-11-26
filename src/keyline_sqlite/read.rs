@@ -105,17 +105,25 @@ pub async fn ask(
         }
         Question::Members(subject) => {
             let members = match source(q, version, subject).await? {
-                Ok(Source::Reach) => queries::reach_members(q, bytes(subject)).await?,
-                Ok(Source::Live) => queries::live_members(q, bytes(subject)).await?,
+                Ok(Source::Reach) => queries::reach_members(q, bytes(subject))
+                    .await?
+                    .into_iter()
+                    .map(|row| (row.n, row.lvl))
+                    .collect::<Vec<_>>(),
+                Ok(Source::Live) => queries::live_members(q, bytes(subject))
+                    .await?
+                    .into_iter()
+                    .map(|row| (row.n, row.lvl))
+                    .collect::<Vec<_>>(),
                 Err(stale) => return Ok(Err(stale)),
             };
             Ok(Ok(Reply::Members(
                 members
                     .into_iter()
-                    .map(|row| {
+                    .map(|(node, level)| {
                         (
-                            rows::identifier_from_sql(&row.n),
-                            rows::power_from_sql(row.lvl),
+                            rows::identifier_from_sql(&node),
+                            rows::power_from_sql(level),
                         )
                     })
                     .collect(),

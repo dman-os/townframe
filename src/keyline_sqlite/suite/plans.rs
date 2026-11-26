@@ -73,8 +73,9 @@ fn every_statement_is_served_by_an_index() {
         Keyline::<Local>::subjects(k).await.unwrap();
         Keyline::<Local>::digest(k).await.unwrap();
         Keyline::<Local>::certificates(k).await.unwrap();
-        // The evaluated queries, each through a store that has not seen the inserts, so every row
-        // is read and verified; the delegation's liveness, rooted at its own subject; and a subset.
+        // The evaluated queries, each through a store that has not seen the inserts; the document is
+        // disputed by the revocation, so the first one computes its live set; the delegation's
+        // liveness, rooted at its own subject; and a subset.
         let cold = SqliteKeyline::<(), _>::new(recording);
         Keyline::<Local>::members(&cold, id(DOC)).await.unwrap();
         Keyline::<Local>::effective_power(&cold, id(DOC), id(BOB))
@@ -94,7 +95,7 @@ fn every_statement_is_served_by_an_index() {
 
         let statements = log.lock().unwrap().clone();
         assert!(
-            statements.len() >= 14,
+            statements.len() >= 40,
             "the workload ran {} distinct statements",
             statements.len()
         );
@@ -113,7 +114,16 @@ fn every_statement_is_served_by_an_index() {
                 // A search bounded only by `kind` walks every certificate of that kind: a scan that
                 // looks like an index search.
                 let kind_range = line.ends_with("PRIMARY KEY (kind=?)");
+                // The tables a scan is allowed to drive: the four levels, and the batch, the roots
+                // and the contexts of a computation in progress, each bounded by the work at hand.
+                let bounded = ["lv", "nw", "rt", "x", "keyline_new", "keyline_root", "keyline_ctx_use", "keyline_level"]
+                    .iter()
+                    .any(|table| {
+                        line.strip_prefix("SCAN ")
+                            .is_some_and(|rest| rest.split_whitespace().next() == Some(table))
+                    });
                 let scan = line.starts_with("SCAN")
+                    && !bounded
                     && !line.contains("VALUES CLAUSE")
                     && !line.contains("CONSTANT ROW");
                 if (scan && !whole_set) || (kind_range && !whole_set) {
@@ -158,39 +168,41 @@ fn every_statement_is_served_by_an_index() {
             revocations.contains("keyline_revocations_by_target (revoke=?"),
             "{revocations}"
         );
-        // The closure loader: the delegations about a set of nodes by the narrow index on
-        // `subject`, the revocations naming a set of delegations by the index on `revoke`, a
-        // subset by primary key, and a delegation's own subject by primary key.
-        let plan_prefix = |prefix: &str| {
-            let (sql, lines) = plans
-                .iter()
-                .find(|(sql, _)| sql.starts_with(prefix))
-                .unwrap_or_else(|| panic!("never ran: {prefix}"));
-            (sql.to_string(), lines.join("\n"))
-        };
-        let (_, about) = plan_prefix(
-            "SELECT kind, digest, signed FROM keyline_certificates INDEXED BY keyline_delegations_by_subject_audience WHERE kind = 0 AND subject IN",
-        );
-        assert!(
-            about.contains("keyline_delegations_by_subject_audience (subject=?"),
-            "{about}"
-        );
-        let (_, naming) = plan_prefix(
-            "SELECT kind, digest, signed FROM keyline_certificates INDEXED BY keyline_revocations_by_target WHERE kind = 1 AND revoke IN",
-        );
-        assert!(
-            naming.contains("keyline_revocations_by_target (revoke=?"),
-            "{naming}"
-        );
-        let (_, ids) = plan_prefix(
-            "SELECT kind, digest, signed FROM keyline_certificates WHERE (kind, digest) IN",
-        );
-        assert!(ids.contains("PRIMARY KEY (kind=? AND digest=?)"), "{ids}");
+        // The access paths the evaluation's statements are for: a round reads only its delta, by
+        // epoch; a delegation's subject is a primary-key lookup; a subset is by primary key.
+        for sql in [queries::REACH_ROUND_SQL, queries::LIVE_ROUND_SQL] {
+            let rounds = plan_of(sql);
+            assert!(
+                rounds.contains("_by_epoch (epoch=?)"),
+                "a round must start from its delta:\n{rounds}"
+            );
+        }
         let subject = plan_of(queries::DELEGATION_SUBJECT_SQL);
         assert!(
             subject.contains("PRIMARY KEY (kind=? AND digest=?)"),
             "{subject}"
         );
+        let plan_prefix = |prefix: &str| {
+            plans
+                .iter()
+                .find(|(sql, _)| sql.starts_with(prefix))
+                .map(|(_, lines)| lines.join("\n"))
+                .unwrap_or_else(|| panic!("never ran: {prefix}"))
+        };
+        let ids = plan_prefix(
+            "SELECT kind, digest, signed FROM keyline_certificates WHERE (kind, digest) IN",
+        );
+        assert!(ids.contains("PRIMARY KEY (kind=? AND digest=?)"), "{ids}");
+        for (name, sql) in [
+            ("is_disputed", queries::IS_DISPUTED_SQL),
+            ("reach_standing", queries::REACH_STANDING_SQL),
+            ("reach_members", queries::REACH_MEMBERS_SQL),
+            ("live_members", queries::LIVE_MEMBERS_SQL),
+            ("live_standing", queries::LIVE_STANDING_SQL),
+        ] {
+            let lines = plan_of(sql);
+            assert!(lines.contains("PRIMARY KEY"), "{name} must be a key search:\n{lines}");
+        }
         // The whole-set reads scan, and in the order they return: no sort.
         for sql in [
             queries::ALL_CERTIFICATES_SQL,
