@@ -24,8 +24,16 @@
 //! in keyhive. The asker commits the change with its other rows and then reports the result with
 //! [`KeyhiveBoundary::settle_encrypt`]: `applied` (the commit landed, so keyhive applies the
 //! preparation) or dropped. Encryptions for different documents run at the same time. A
-//! preparation holds the shared lock from `Encrypt` until it is settled, because a membership
-//! change that landed in between would make the prepared key stale.
+//! preparation holds the shared lock from `Encrypt` until it is settled, and not only around
+//! the apply. The reason is the exclusive path: a membership change that landed between the
+//! preparation and the commit (a removal, say) would leave the prepared key stale, and applying
+//! it afterwards would encrypt for a reader who is no longer one. So a locked operation waits
+//! for every preparation to commit and settle, and new preparations wait behind it.
+//!
+//! **Decryption** (shared lock) is the same kind of keyhive call: [`KeyhiveBoundary::decrypt`]
+//! hydrates the document if it is not loaded, issues [`Command::Decrypt`] and answers
+//! [`Command::Decrypted`]. It holds the shared lock only while the call is out, because it
+//! prepares nothing that a later commit settles.
 //!
 //! **The locked path** (exclusive lock), for membership changes and for keyhive events that
 //! arrive from a peer. In this order:
@@ -75,8 +83,11 @@
 //! and every `ran` report). Below [`Config::prekey_floor`] the next locked operation's `Run`
 //! carries `refill`, so the refill commits in that operation's transaction. If none is queued
 //! the machine queues a refill-only operation. This replaces runtime2's janitor loop. A refused
-//! refill-only operation is not retried by itself: the next input or operation carries the
-//! refill instead, so a refusal cannot loop.
+//! operation that carried the refill is retried on a backoff deadline
+//! ([`Config::refill_backoff_min`], doubling up to [`Config::refill_backoff_max`]), exposed
+//! through [`KeyhiveBoundary::next_due`], so an idle node does not stay below the floor. Any
+//! operation that runs before the deadline carries the refill too, and a successful refill
+//! resets the backoff.
 //!
 //! # Errors
 //!
@@ -95,24 +106,33 @@
 //!    land with its commit or not at all, and after a failure no keyhive call is issued before
 //!    the instance has been reopened.
 //! 3. **The lock is exclusive.** [`Command::AcquireLock`] is issued with no encryption in flight
-//!    (prepared and unsettled counts) and no hydration in flight, and no keyhive call other than
-//!    the operation's own is issued until [`Command::ReleaseLock`].
+//!    (prepared and unsettled counts), no decryption and no hydration in flight, and no keyhive
+//!    call other than the operation's own is issued until [`Command::ReleaseLock`].
 //! 4. **Notifications are targeted and once.** A [`Command::Notify`] goes only to a connected
 //!    session, only with events the latest Keyline answer granted it, never with an event from
 //!    that session, and no event goes to a session twice.
-//! 5. **Hydrate before use.** Every [`Command::Encrypt`] and [`Command::ApplyEncrypt`] names a
-//!    document that is loaded.
+//! 5. **Hydrate before use.** Every [`Command::Encrypt`], [`Command::Decrypt`] and
+//!    [`Command::ApplyEncrypt`] names a document that is loaded.
 //! 6. **The prekey floor is restored.** A `Run` issued with the level below the floor carries
 //!    `refill`, so the next locked operation restores the floor.
 //! 7. **A trap stops everything.** No command follows [`Command::Trap`].
+//! 8. **A refused refill is retried.** After a refused operation that carried the refill, the
+//!    machine has a deadline ([`KeyhiveBoundary::next_due`]) at which it runs another, and the
+//!    floor is restored once the driver lets it.
 //!
 //! # Where its neighbours come in
 //!
 //! The Document machine's `PrepareEncrypt` and `SettleEncrypt` commands and the coordinator's are
 //! this machine's [`KeyhiveBoundary::prepare_encrypt`] and [`KeyhiveBoundary::settle_encrypt`];
 //! [`Command::Encrypted`] is their `encrypted`. The Hub feeds [`KeyhiveBoundary::evict`] and the
-//! sessions, and computes eligibility. Decrypting for a Document is a keyhive call too and
-//! belongs under the shared lock; it is not modelled here yet.
+//! sessions, and computes eligibility.
+//!
+//! **Change needed in the Document machine (not made here):** its `Decrypt { call, heads, rev }`
+//! command goes to the driver directly today. It must go through [`KeyhiveBoundary::decrypt`]
+//! instead, so that the decryption is hydrated for and excluded from locked operations like
+//! every other keyhive call. The driver forwards the Document's `Decrypt` as the boundary's
+//! request (the payload is whatever the driver reads to decrypt: the commits behind `heads` at
+//! `rev`) and routes [`Command::Decrypted`] back to the Document's `decrypted`.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -148,6 +168,9 @@ pub struct Config {
     pub max_delay: Duration,
     /// Below this many prekeys the next locked operation refills.
     pub prekey_floor: usize,
+    /// The first wait before a refused refill is tried again, doubling up to the maximum.
+    pub refill_backoff_min: Duration,
+    pub refill_backoff_max: Duration,
 }
 
 impl Default for Config {
@@ -156,6 +179,8 @@ impl Default for Config {
             debounce: Duration::from_millis(100),
             max_delay: Duration::from_secs(1),
             prekey_floor: 8,
+            refill_backoff_min: Duration::from_secs(1),
+            refill_backoff_max: Duration::from_secs(60),
         }
     }
 }
@@ -217,6 +242,7 @@ pub struct Refused;
 pub enum Step {
     Hydrate,
     Encrypt,
+    Decrypt,
     Apply,
     Begin,
     Run,
@@ -236,6 +262,13 @@ pub enum Command {
         call: CallId,
         doc: DocId,
         change: Vec<u8>,
+    },
+    /// Decrypt a payload for a document. Holds the shared lock while out. Answer:
+    /// [`KeyhiveBoundary::decrypted`].
+    Decrypt {
+        call: CallId,
+        doc: DocId,
+        payload: Vec<u8>,
     },
     /// Apply a preparation whose commit landed. Answer: [`KeyhiveBoundary::applied`].
     ApplyEncrypt { call: CallId, token: u64 },
@@ -282,6 +315,12 @@ pub enum Command {
         call: CallId,
         outcome: Outcome<EncryptedChange>,
     },
+    /// The answer to a [`KeyhiveBoundary::decrypt`].
+    Decrypted {
+        to: Asker,
+        call: CallId,
+        outcome: Outcome<Vec<u8>>,
+    },
     /// The answer to a [`KeyhiveBoundary::locked`].
     Reply {
         ticket: Ticket,
@@ -315,6 +354,10 @@ pub(crate) enum Plant {
     SkipRefill,
     /// The machine keeps issuing commands after a trap (law 7).
     ContinueAfterTrap,
+    /// A decryption is issued on a document that is not loaded (law 5).
+    DecryptWithoutHydrate,
+    /// A refused refill is never retried (law 8).
+    NoRefillRetry,
 }
 
 /// What the machine knows of a document in the keyhive instance. Absent means not loaded.
@@ -338,11 +381,17 @@ struct Token {
     state: TokenState,
 }
 
+/// What a held request wants done to its document.
+enum Work {
+    Encrypt(Vec<u8>),
+    Decrypt(Vec<u8>),
+}
+
 struct Request {
     asker: Asker,
     call: CallId,
     doc: DocId,
-    change: Vec<u8>,
+    work: Work,
 }
 
 struct Queued {
@@ -363,6 +412,8 @@ enum Phase {
 struct Active {
     ticket: Option<Ticket>,
     op: Option<LockedOp>,
+    /// The run carried the prekey refill.
+    refill: bool,
     phase: Phase,
 }
 
@@ -387,11 +438,18 @@ pub struct KeyhiveBoundary {
     evict_wanted: BTreeSet<DocId>,
     tokens: BTreeMap<u64, Token>,
     held: VecDeque<Request>,
+    /// Decryptions out, by their call: who asked, under which call, for which document.
+    decrypting: BTreeMap<CallId, (Asker, CallId, DocId)>,
     queue: VecDeque<Queued>,
     active: Option<Active>,
     /// Our prekeys left, as last reported.
     prekeys: usize,
     refill_wanted: bool,
+    /// Refused refills in a row, which set the backoff.
+    refill_failures: u32,
+    /// A refusal waits for the next flush to stamp its retry deadline.
+    refill_stamp: bool,
+    refill_due: Option<Instant>,
     peers: BTreeMap<SessionId, Peer>,
     /// Eligibility queries of sessions that closed: their answers are ignored.
     cancelled: BTreeSet<CallId>,
@@ -411,9 +469,13 @@ impl KeyhiveBoundary {
             evict_wanted: BTreeSet::new(),
             tokens: BTreeMap::new(),
             held: VecDeque::new(),
+            decrypting: BTreeMap::new(),
             queue: VecDeque::new(),
             active: None,
             refill_wanted: false,
+            refill_failures: 0,
+            refill_stamp: false,
+            refill_due: None,
             peers: BTreeMap::new(),
             cancelled: BTreeSet::new(),
             pending: Vec::new(),
@@ -433,7 +495,20 @@ impl KeyhiveBoundary {
             asker,
             call,
             doc,
-            change,
+            work: Work::Encrypt(change),
+        });
+    }
+
+    /// Decrypt `payload` of `doc` for `asker`, whose `call` the [`Command::Decrypted`] echoes.
+    pub fn decrypt(&mut self, asker: Asker, call: CallId, doc: DocId, payload: Vec<u8>) {
+        if self.trapped {
+            return;
+        }
+        self.held.push_back(Request {
+            asker,
+            call,
+            doc,
+            work: Work::Decrypt(payload),
         });
     }
 
@@ -516,6 +591,8 @@ impl KeyhiveBoundary {
         self.prekeys = left;
         if left < self.config.prekey_floor {
             self.refill_wanted = true;
+        } else {
+            self.refill_restored();
         }
     }
 
@@ -530,12 +607,17 @@ impl KeyhiveBoundary {
         out.append(&mut self.pending);
     }
 
-    /// When time must pass for the machine to act: the next debounce expiring.
+    /// When time must pass for the machine to act: the next debounce expiring, or a refused
+    /// refill's retry.
     pub fn next_due(&self) -> Option<Instant> {
         if self.trapped {
             return None;
         }
-        self.peers.values().filter_map(|peer| self.due(peer)).min()
+        self.peers
+            .values()
+            .filter_map(|peer| self.due(peer))
+            .chain(self.refill_due)
+            .min()
     }
 
     /// Whether nothing is queued, in flight or waiting.
@@ -544,6 +626,8 @@ impl KeyhiveBoundary {
             && self.queue.is_empty()
             && self.active.is_none()
             && self.tokens.is_empty()
+            && self.decrypting.is_empty()
+            && self.refill_due.is_none()
             && !self
                 .docs
                 .values()

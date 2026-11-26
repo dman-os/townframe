@@ -5,6 +5,8 @@
 //!
 //! # What is modelled
 //!
+//! - **Decryptions**, which hold the shared lock while out, and refills that are refused and
+//!   retried on a backoff deadline.
 //! - **Encryptions** from three documents and the coordinator, which finish in any order, fail
 //!   (refused by keyhive, or the store failing), and are then settled: the commit landed and the
 //!   preparation is applied, the commit failed and it is dropped, or the commit landed and the
@@ -45,6 +47,7 @@ pub(super) const CLASSES: u64 = 3;
 enum Ask {
     Hydrate(DocId),
     Encrypt,
+    Decrypt,
     Apply(u64),
     Lock,
     Begin,
@@ -170,6 +173,7 @@ impl Sim {
         match command {
             Command::Hydrate { call, doc } => self.fly(call, Ask::Hydrate(doc)),
             Command::Encrypt { call, .. } => self.fly(call, Ask::Encrypt),
+            Command::Decrypt { call, .. } => self.fly(call, Ask::Decrypt),
             Command::ApplyEncrypt { call, token } => self.fly(call, Ask::Apply(token)),
             Command::AcquireLock { call } => self.fly(call, Ask::Lock),
             Command::Begin { call } => self.fly(call, Ask::Begin),
@@ -204,6 +208,7 @@ impl Sim {
                 self.notified.entry(session).or_default().extend(events);
             }
             Command::DropEncrypt { .. }
+            | Command::Decrypted { .. }
             | Command::Evict { .. }
             | Command::ReleaseLock
             | Command::Trap { .. } => {}
@@ -222,6 +227,20 @@ impl Sim {
         };
         self.m
             .prepare_encrypt(asker, self.next_ask, doc % DOCS, vec![1, 2, 3]);
+        self.pump();
+        self.next_ask
+    }
+
+    /// A decryption asked by document `doc` (the coordinator when `doc >= DOCS`).
+    pub fn decrypt(&mut self, doc: u64) -> CallId {
+        self.next_ask += 1;
+        let asker = if doc < DOCS {
+            Asker::Document(doc)
+        } else {
+            Asker::Coordinator
+        };
+        self.m
+            .decrypt(asker, self.next_ask, doc % DOCS, vec![4, 5, 6]);
         self.pump();
         self.next_ask
     }
@@ -350,6 +369,15 @@ impl Sim {
                 };
                 self.o.encrypted(call, &ended);
                 self.m.encrypted(call, ended);
+            }
+            Ask::Decrypt => {
+                let ended = if refuse && !cancelled {
+                    Ended::Refused
+                } else {
+                    ended!(Ended::Done(vec![7]))
+                };
+                self.o.decrypted(call, &ended);
+                self.m.decrypted(call, ended);
             }
             Ask::Apply(token) => {
                 let ended = ended!(Ended::Done(()));
@@ -513,6 +541,7 @@ impl Sim {
             .map(|flight| match flight.ask {
                 Ask::Hydrate(_) => "hydrate",
                 Ask::Encrypt => "encrypt",
+                Ask::Decrypt => "decrypt",
                 Ask::Apply(_) => "apply",
                 Ask::Lock => "lock",
                 Ask::Begin => "begin",
@@ -545,6 +574,10 @@ impl Sim {
 
     pub fn notified(&self, session: SessionId) -> Vec<EventId> {
         self.notified.get(&session).cloned().unwrap_or_default()
+    }
+
+    pub fn now(&self) -> Instant {
+        self.now
     }
 
     pub fn prepared_count(&self) -> usize {

@@ -6,6 +6,10 @@ use super::*;
 impl KeyhiveBoundary {
     pub(super) fn advance(&mut self, now: Instant) {
         self.stamp(now);
+        if self.refill_due.is_some_and(|due| due <= now) {
+            self.refill_due = None;
+            self.refill_wanted = self.prekeys < self.config.prekey_floor;
+        }
         if self.refill_wanted && self.active.is_none() && self.queue.is_empty() {
             self.refill_wanted = false;
             self.queue.push_back(Queued {
@@ -29,9 +33,11 @@ impl KeyhiveBoundary {
         self.ask_due(now);
     }
 
-    /// How many calls hold the shared lock: hydrations, and every preparation until settled.
+    /// How many calls hold the shared lock: hydrations and decryptions while out, and every
+    /// preparation until settled.
     pub(super) fn shared(&self) -> usize {
         self.tokens.len()
+            + self.decrypting.len()
             + self
                 .docs
                 .values()
@@ -58,26 +64,42 @@ impl KeyhiveBoundary {
             let load = self.docs.get(&request.doc).copied();
             let ready = match load {
                 Some(Load::Loaded) => !self.evict_wanted.contains(&request.doc),
-                None => self.planted_skip_hydrate(),
+                None => match request.work {
+                    Work::Encrypt(_) => self.planted_skip_hydrate(),
+                    Work::Decrypt(_) => self.planted_decrypt_without_hydrate(),
+                },
                 Some(Load::Loading(_)) => false,
             };
             if ready {
                 let call = self.fresh_call();
-                self.tokens.insert(
-                    call,
-                    Token {
-                        doc: request.doc,
-                        state: TokenState::Encrypting {
-                            asker: request.asker,
-                            call: request.call,
-                        },
-                    },
-                );
-                self.pending.push(Command::Encrypt {
-                    call,
-                    doc: request.doc,
-                    change: request.change,
-                });
+                match request.work {
+                    Work::Encrypt(change) => {
+                        self.tokens.insert(
+                            call,
+                            Token {
+                                doc: request.doc,
+                                state: TokenState::Encrypting {
+                                    asker: request.asker,
+                                    call: request.call,
+                                },
+                            },
+                        );
+                        self.pending.push(Command::Encrypt {
+                            call,
+                            doc: request.doc,
+                            change,
+                        });
+                    }
+                    Work::Decrypt(payload) => {
+                        self.decrypting
+                            .insert(call, (request.asker, request.call, request.doc));
+                        self.pending.push(Command::Decrypt {
+                            call,
+                            doc: request.doc,
+                            payload,
+                        });
+                    }
+                }
                 continue;
             }
             if load.is_none() {
@@ -102,7 +124,10 @@ impl KeyhiveBoundary {
                 Some(Load::Loading(_)) => {
                     self.evict_wanted.insert(doc);
                 }
-                Some(Load::Loaded) if self.tokens.values().any(|token| token.doc == doc) => {
+                Some(Load::Loaded)
+                    if self.tokens.values().any(|token| token.doc == doc)
+                        || self.decrypting.values().any(|(_, _, d)| *d == doc) =>
+                {
                     self.evict_wanted.insert(doc);
                 }
                 Some(Load::Loaded) => {
@@ -119,6 +144,7 @@ impl KeyhiveBoundary {
         self.active = Some(Active {
             ticket,
             op,
+            refill: false,
             phase: Phase::Locking(call),
         });
         self.pending.push(Command::AcquireLock { call });
@@ -127,7 +153,13 @@ impl KeyhiveBoundary {
     /// The operation failed after keyhive may have changed its memory: roll back, then reopen.
     pub(super) fn roll_back(&mut self) {
         let call = self.fresh_call();
-        self.active.as_mut().expect("active").phase = Phase::RollingBack(call);
+        let active = self.active.as_mut().expect("active");
+        active.phase = Phase::RollingBack(call);
+        if active.refill && !self.planted_no_refill_retry() {
+            // the refill was refused with the operation: try again after a growing wait
+            self.refill_failures += 1;
+            self.refill_stamp = true;
+        }
         self.pending.push(Command::Rollback { call });
     }
 
@@ -161,7 +193,20 @@ impl KeyhiveBoundary {
         }
     }
 
+    /// The floor is back: forget the refusals.
+    pub(super) fn refill_restored(&mut self) {
+        self.refill_failures = 0;
+        self.refill_stamp = false;
+        self.refill_due = None;
+    }
+
     pub(super) fn stamp(&mut self, now: Instant) {
+        if std::mem::take(&mut self.refill_stamp) {
+            let doublings = (self.refill_failures - 1).min(16);
+            let wait = (self.config.refill_backoff_min * 2u32.pow(doublings))
+                .min(self.config.refill_backoff_max);
+            self.refill_due = Some(now + wait);
+        }
         for peer in self.peers.values_mut().filter(|peer| peer.dirty) {
             peer.dirty = false;
             peer.first.get_or_insert(now);
@@ -254,6 +299,22 @@ impl KeyhiveBoundary {
     }
     #[cfg(not(test))]
     pub(super) fn planted_skip_hydrate(&self) -> bool {
+        false
+    }
+    #[cfg(test)]
+    pub(super) fn planted_decrypt_without_hydrate(&self) -> bool {
+        self.plant == Some(Plant::DecryptWithoutHydrate)
+    }
+    #[cfg(not(test))]
+    pub(super) fn planted_decrypt_without_hydrate(&self) -> bool {
+        false
+    }
+    #[cfg(test)]
+    pub(super) fn planted_no_refill_retry(&self) -> bool {
+        self.plant == Some(Plant::NoRefillRetry)
+    }
+    #[cfg(not(test))]
+    pub(super) fn planted_no_refill_retry(&self) -> bool {
         false
     }
     #[cfg(test)]

@@ -68,6 +68,28 @@ impl KeyhiveBoundary {
         }
     }
 
+    /// A [`Command::Decrypt`] ended. It reports `Done`, `Refused` or `StoreFailed`.
+    pub fn decrypted(&mut self, call: CallId, ended: Ended<Vec<u8>>) {
+        if self.trapped {
+            return;
+        }
+        let (to, ask, _) = self
+            .decrypting
+            .remove(&call)
+            .expect("an answer to a decryption in flight");
+        let outcome = match ended {
+            Ended::Done(plain) => Outcome::Done(plain),
+            Ended::Refused => Outcome::Failed,
+            Ended::StoreFailed => return self.trap(Step::Decrypt),
+            Ended::Cancelled => panic!("a decryption is not cancelled"),
+        };
+        self.pending.push(Command::Decrypted {
+            to,
+            call: ask,
+            outcome,
+        });
+    }
+
     /// A [`Command::ApplyEncrypt`] ended. It reports `Done` or `StoreFailed`.
     pub fn applied(&mut self, call: CallId, ended: Ended<()>) {
         if self.trapped {
@@ -127,7 +149,9 @@ impl KeyhiveBoundary {
                     self.refill_wanted = false;
                 }
                 let call = self.fresh_call();
-                self.active.as_mut().expect("active").phase = Phase::Running(call);
+                let active = self.active.as_mut().expect("active");
+                active.refill = refill;
+                active.phase = Phase::Running(call);
                 self.pending.push(Command::Run { call, op, refill });
             }
             Ended::StoreFailed => self.trap(Step::Begin),
@@ -174,6 +198,8 @@ impl KeyhiveBoundary {
                 self.prekeys = report.prekeys;
                 if report.prekeys < self.config.prekey_floor {
                     self.refill_wanted = true;
+                } else {
+                    self.refill_restored();
                 }
                 self.pending.push(Command::ReleaseLock);
                 if let Some(ticket) = active.ticket {

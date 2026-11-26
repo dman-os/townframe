@@ -32,6 +32,8 @@ pub(super) struct Oracle {
     hydrating: BTreeSet<DocId>,
     /// Preparations holding the shared lock, with their document.
     enc: BTreeMap<u64, DocId>,
+    /// Decryptions out, with their document: they hold the shared lock while out.
+    dec: BTreeMap<u64, DocId>,
     token_events: BTreeMap<u64, Vec<EventId>>,
     landed: BTreeSet<u64>,
     connected: BTreeSet<SessionId>,
@@ -41,7 +43,6 @@ pub(super) struct Oracle {
     /// Sessions that were connected when an event committed and still owe an answer for it.
     owed: BTreeSet<(SessionId, EventId)>,
     committed_tickets: BTreeSet<Ticket>,
-    refill_refused: bool,
 }
 
 impl Oracle {
@@ -58,6 +59,7 @@ impl Oracle {
             loaded: BTreeSet::new(),
             hydrating: BTreeSet::new(),
             enc: BTreeMap::new(),
+            dec: BTreeMap::new(),
             token_events: BTreeMap::new(),
             landed: BTreeSet::new(),
             connected: BTreeSet::new(),
@@ -66,7 +68,6 @@ impl Oracle {
             delivered: BTreeSet::new(),
             owed: BTreeSet::new(),
             committed_tickets: BTreeSet::new(),
-            refill_refused: false,
         }
     }
 
@@ -76,7 +77,6 @@ impl Oracle {
 
     pub fn set_level(&mut self, level: usize) {
         self.level = level;
-        self.refill_refused = false;
     }
 
     pub fn landed(&mut self, token: u64) {
@@ -123,6 +123,14 @@ impl Oracle {
                 );
                 self.enc.insert(*call, *doc);
             }
+            Command::Decrypt { call, doc, .. } => {
+                keyhive_call(self, "a decryption");
+                assert!(
+                    self.loaded.contains(doc),
+                    "a decryption on document {doc} that was not hydrated (law 5)"
+                );
+                self.dec.insert(*call, *doc);
+            }
             Command::ApplyEncrypt { token, .. } => {
                 keyhive_call(self, "an apply");
                 assert!(
@@ -144,7 +152,7 @@ impl Oracle {
             Command::Evict { doc } => {
                 keyhive_call(self, "an eviction");
                 assert!(
-                    !self.enc.values().any(|d| d == doc),
+                    !self.enc.values().any(|d| d == doc) && !self.dec.values().any(|d| d == doc),
                     "a document with a preparation is evicted"
                 );
                 self.loaded.remove(doc);
@@ -152,8 +160,8 @@ impl Oracle {
             Command::AcquireLock { .. } => {
                 assert!(!self.exclusive, "a lock taken twice");
                 assert!(
-                    self.enc.is_empty() && self.hydrating.is_empty(),
-                    "the lock is taken exclusively with encryptions or hydrations in flight (law 3)"
+                    self.enc.is_empty() && self.dec.is_empty() && self.hydrating.is_empty(),
+                    "the lock is taken exclusively with encryptions, decryptions or hydrations in flight (law 3)"
                 );
                 self.exclusive = true;
             }
@@ -232,7 +240,7 @@ impl Oracle {
                 );
             }
             Command::Trap { .. } => self.trapped = true,
-            Command::Cancel { .. } | Command::Encrypted { .. } => {}
+            Command::Cancel { .. } | Command::Encrypted { .. } | Command::Decrypted { .. } => {}
         }
     }
 
@@ -255,6 +263,10 @@ impl Oracle {
             }
             _ => {}
         }
+    }
+
+    pub fn decrypted(&mut self, call: u64, _ended: &Ended<Vec<u8>>) {
+        self.dec.remove(&call);
     }
 
     pub fn applied(&mut self, token: u64, ended: &Ended<()>) {
@@ -295,31 +307,21 @@ impl Oracle {
             }
             Ended::Refused => {
                 self.dirty = true;
-                if refill {
-                    self.refill_refused = true;
-                }
             }
             _ => {}
         }
     }
 
     pub fn committed(&mut self, ended: &Ended<()>) {
-        match ended {
-            Ended::Done(()) => {
-                let tx = self.tx.take().expect("a transaction");
-                self.tx_open = false;
-                self.dirty = false;
-                self.level = tx.prekeys;
-                self.refill_refused = false;
-                if let Some(ticket) = tx.ticket {
-                    self.committed_tickets.insert(ticket);
-                }
-                self.commit_events(tx.events);
+        if *ended == Ended::Done(()) {
+            let tx = self.tx.take().expect("a transaction");
+            self.tx_open = false;
+            self.dirty = false;
+            self.level = tx.prekeys;
+            if let Some(ticket) = tx.ticket {
+                self.committed_tickets.insert(ticket);
             }
-            Ended::Refused => {
-                self.refill_refused = self.level < self.floor;
-            }
-            _ => {}
+            self.commit_events(tx.events);
         }
     }
 
@@ -382,7 +384,7 @@ impl Oracle {
             !self.exclusive && !self.tx_open && !self.dirty,
             "a drain ends outside a locked operation"
         );
-        assert!(self.enc.is_empty() && self.hydrating.is_empty());
+        assert!(self.enc.is_empty() && self.dec.is_empty() && self.hydrating.is_empty());
         assert_eq!(
             replies.len() as u64,
             tickets,
@@ -394,8 +396,8 @@ impl Oracle {
             self.owed
         );
         assert!(
-            self.level >= self.floor || self.refill_refused,
-            "the prekeys are below the floor after a drain (law 6)"
+            self.level >= self.floor,
+            "the prekeys are below the floor after a drain, so a refused refill was not retried (law 8)"
         );
         assert_eq!(
             loaded, &self.loaded,

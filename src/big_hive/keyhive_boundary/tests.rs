@@ -375,22 +375,6 @@ fn run_locked_tail(sim: &mut Sim) {
 }
 
 #[test]
-fn law_6_a_refused_refill_does_not_loop() {
-    let mut sim = Sim::new(1, None);
-    sim.prekeys(1);
-    for kind in ["lock", "begin"] {
-        assert!(sim.complete_kind(kind, 0));
-    }
-    assert!(sim.complete_kind("run", 1));
-    assert!(sim.complete_kind("rollback", 0));
-    assert!(sim.complete_kind("reopen", 0));
-    assert!(sim.kinds().is_empty(), "nothing retries on its own");
-    // the next operation carries it
-    run_locked(&mut sim, None);
-    sim.quiesce();
-}
-
-#[test]
 fn law_7_a_store_failure_traps_and_nothing_follows() {
     let mut sim = Sim::new(1, None);
     sim.connect(0).unwrap();
@@ -419,4 +403,142 @@ fn law_7_a_store_failure_inside_a_locked_operation_traps_without_a_rollback() {
     assert!(sim.complete_kind("run", 2));
     assert!(sim.log.last().unwrap().starts_with("Trap"));
     assert!(!sim.log.iter().any(|c| c.starts_with("Rollback")));
+}
+
+/// Refuse the refill-bearing operation that is next to run, all the way through the reopen.
+fn refuse_refill(sim: &mut Sim) {
+    for kind in ["lock", "begin"] {
+        assert!(sim.complete_kind(kind, 0));
+    }
+    assert!(sim.complete_kind("run", 1));
+    assert!(sim.complete_kind("rollback", 0));
+    assert!(sim.complete_kind("reopen", 0));
+}
+
+#[test]
+fn law_8_a_refused_refill_is_retried_on_a_growing_backoff() {
+    let mut sim = Sim::new(1, None);
+    let config = Config::default();
+    sim.prekeys(1);
+    refuse_refill(&mut sim);
+    assert!(sim.kinds().is_empty(), "the retry waits for its deadline");
+    let first = sim.m.next_due().expect("a retry deadline");
+    sim.advance(config.refill_backoff_min / 2);
+    assert!(sim.kinds().is_empty());
+    sim.tick();
+    assert_eq!(sim.kinds(), ["lock"], "the retry runs at the deadline");
+    // refused again: the wait doubles
+    let before = sim.m.next_due();
+    assert_eq!(before, None);
+    refuse_refill(&mut sim);
+    let second = sim.m.next_due().expect("a second deadline");
+    assert!(
+        second - first >= config.refill_backoff_min * 2,
+        "the second wait is twice the first"
+    );
+    sim.tick();
+    // and a refill that succeeds resets it
+    for kind in ["lock", "begin", "run", "commit"] {
+        assert!(sim.complete_kind(kind, 0));
+    }
+    assert_eq!(sim.m.next_due(), None);
+    sim.quiesce();
+}
+
+#[test]
+fn law_8_the_backoff_is_capped() {
+    let mut sim = Sim::new(1, None);
+    let config = Config::default();
+    sim.prekeys(1);
+    for _ in 0..12 {
+        refuse_refill(&mut sim);
+        sim.tick();
+    }
+    refuse_refill(&mut sim);
+    let due = sim.m.next_due().expect("a deadline");
+    let wait = due - sim.now();
+    assert!(wait <= config.refill_backoff_max, "{wait:?}");
+    sim.quiesce();
+}
+
+#[test]
+fn law_8_an_operation_before_the_deadline_carries_the_refill_and_resets_the_backoff() {
+    let mut sim = Sim::new(1, None);
+    sim.prekeys(1);
+    refuse_refill(&mut sim);
+    assert!(sim.m.next_due().is_some());
+    let ticket = run_locked(&mut sim, None);
+    assert_eq!(sim.reply(ticket), Some(&Ok(())));
+    assert_eq!(
+        sim.m.next_due(),
+        None,
+        "the floor is back, so no retry is due"
+    );
+    sim.quiesce();
+}
+
+#[test]
+fn decryption_hydrates_first_and_answers_the_asker() {
+    let mut sim = Sim::new(1, None);
+    sim.decrypt(1);
+    assert_eq!(sim.kinds(), ["hydrate"]);
+    sim.complete_all("hydrate");
+    assert_eq!(sim.kinds(), ["decrypt"]);
+    sim.complete_all("decrypt");
+    assert!(sim.log.iter().any(|c| c.starts_with("Decrypted")));
+    // loaded now: the next one goes straight out
+    sim.decrypt(1);
+    assert_eq!(sim.kinds(), ["decrypt"]);
+    sim.quiesce();
+}
+
+#[test]
+fn a_refused_decryption_is_answered_failed() {
+    let mut sim = Sim::new(1, None);
+    sim.decrypt(0);
+    sim.complete_all("hydrate");
+    assert!(sim.complete_kind("decrypt", 1));
+    assert!(
+        sim.log
+            .iter()
+            .any(|c| c.starts_with("Decrypted") && c.contains("Failed"))
+    );
+    sim.quiesce();
+}
+
+#[test]
+fn law_3_a_decryption_in_flight_holds_the_lock_off_and_a_locked_operation_holds_decryptions_back() {
+    let mut sim = Sim::new(1, None);
+    sim.decrypt(0);
+    sim.complete_all("hydrate");
+    assert_eq!(sim.kinds(), ["decrypt"]);
+    let ticket = sim.locked(None);
+    assert_eq!(
+        sim.kinds(),
+        ["decrypt"],
+        "the lock waits for the decryption"
+    );
+    // another decryption asked for meanwhile waits behind the locked operation
+    sim.decrypt(0);
+    assert_eq!(sim.kinds(), ["decrypt"]);
+    sim.complete_all("decrypt");
+    assert_eq!(sim.kinds(), ["lock"]);
+    sim.complete_all("lock");
+    assert_eq!(sim.kinds(), ["begin"]);
+    sim.complete_all("begin");
+    sim.decrypt(0);
+    assert_eq!(sim.kinds(), ["run"], "nothing starts during the operation");
+    sim.complete_all("run");
+    sim.complete_all("commit");
+    assert_eq!(sim.reply(ticket), Some(&Ok(())));
+    sim.quiesce();
+}
+
+#[test]
+fn law_7_a_store_failure_in_a_decryption_traps() {
+    let mut sim = Sim::new(1, None);
+    sim.decrypt(0);
+    sim.complete_all("hydrate");
+    assert!(sim.complete_kind("decrypt", 2));
+    assert!(sim.m.is_trapped());
 }

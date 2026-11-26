@@ -36,6 +36,7 @@ pub(in crate::keyhive_boundary) enum Op {
     },
     Prekeys(u8),
     Evict(u8),
+    Decrypt(u8),
     Advance(u8),
     Tick,
     /// A jump of the clock past every debounce.
@@ -71,6 +72,9 @@ impl Sim {
             Op::Standing { slot: s, class, on } => self.set_standing(slot(s), u64::from(class), on),
             Op::Prekeys(left) => self.prekeys(usize::from(left % 12)),
             Op::Evict(doc) => self.evict(u64::from(doc)),
+            Op::Decrypt(doc) => {
+                self.decrypt(u64::from(doc) % (DOCS + 1));
+            }
             Op::Advance(by) => self.advance(Duration::from_millis(40 * u64::from(by))),
             Op::Tick => self.tick(),
             Op::Jump => self.advance(Duration::from_secs(30)),
@@ -90,6 +94,7 @@ pub(in crate::keyhive_boundary) fn op() -> impl Strategy<Value = Op> {
             .prop_map(|(slot, class, on)| Op::Standing { slot, class, on }),
         2 => any::<u8>().prop_map(Op::Prekeys),
         2 => any::<u8>().prop_map(Op::Evict),
+        6 => any::<u8>().prop_map(Op::Decrypt),
         4 => any::<u8>().prop_map(Op::Advance),
         3 => Just(Op::Tick),
         1 => Just(Op::Jump),
@@ -262,4 +267,14 @@ fn planted_skipped_refill_is_caught() {
 #[test]
 fn planted_commands_after_a_trap_are_caught() {
     caught(Plant::ContinueAfterTrap, "law 7");
+}
+
+#[test]
+fn planted_decryption_without_a_hydration_is_caught() {
+    caught(Plant::DecryptWithoutHydrate, "law 5");
+}
+
+#[test]
+fn planted_refill_that_is_never_retried_is_caught() {
+    caught(Plant::NoRefillRetry, "law 8");
 }
