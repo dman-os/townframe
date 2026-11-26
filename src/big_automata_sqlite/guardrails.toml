@@ -4,13 +4,18 @@ dependency_reason = "The SQLite part store implements big_automata's part store 
 allowed_dependencies = ["big_automata", "sqlite_rs", "utils_rs"]
 allow_external_api_types = false
 
-# No `wasm32-unknown-unknown` build: sqlite_rs does not target the browser.
 [builds.native]
 features = []
 required_features = []
 default_features = true
 
 [builds.wasm32-wasip3]
+features = []
+required_features = []
+default_features = true
+
+# Generic over `sqlite_rs::SqliteDb`, so it builds for the browser without a browser backend.
+[builds.wasm32-unknown-unknown]
 features = []
 required_features = []
 default_features = true
