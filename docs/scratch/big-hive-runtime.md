@@ -28,6 +28,28 @@ singletons, and short-lived work. What changes is what each actor is made of.
 | Unbounded channels | Bounded mailboxes sized from the machines' own windows (section 5) |
 | `FutureForm` throughout | `Send` and native `async fn` in our code; `FutureForm` only where we implement upstream traits (`Storage`, `Keyline`, `KeyhiveStore`) |
 
+## 1a. What we reuse from big_automata
+
+big_hive is built to be isomorphic with big_automata: the same machine and driver conventions,
+the same building blocks, and the same read contract, so the code reads the same everywhere.
+
+| big_automata piece | What it is | big_hive use |
+|---|---|---|
+| Machine convention (`sync::peer::PeerSync`, `durable_outbox::Outbox`) | typed input methods, `flush(now, &mut Vec<Command>)`, `next_due`, a `CallId` per call, `Cancel` commands whose calls still report | every big_hive machine |
+| Driver laws (`driver.rs`, `durable_outbox/driver.rs`) | one loop owns the machine, calls polled in sets, the embedder spawns the loop | every big_hive driver (section 3) |
+| `kit::scheduler::KeyedScheduler` | at most one task per key; replace (merging seeds), cancel, park/wake, fail with backoff, stopped-before-replaced | the hub's document wakes: frontier catch-up and materialization retry keyed by document, parked until keys arrive and woken when the document's keyhive epoch moves. A machine embeds it and its `flush` turns the spawn queue into commands (`call` = task id) and the stop queue into `Cancel`, as `Outbox::flush` does |
+| `kit::watermark` | a stream cursor that only advances past settled jobs | the durable cursor of the hub's catch-up over the change feed |
+| `rev::RevSource` / `RevStream` | the one read contract for revisioned sources (`latest_rev`, a bounded `read`, `watch`) and its single consumer | the sedimentree change feed implements `RevSource` (the bespoke `ChangeFeed` on branch 24 is converted); keyhive epoch changes as a second source |
+| `okv` | one row per key with a store-wide rev, written in the caller's transaction, tombstones pruned by consumer cursors | the automerge frontier table `(doc → heads, frontier_rev)`, written in the write plan; big_cabinet, big_blobs and daybook_core follow it with `RevStream`, replacing `AutomergeFrontierRevisionStore` |
+| `durable_outbox` (and `HeldTable`) | durable fetch wants written with the admission; held wants until membership | content fetches in the sync backend; held wants are the parked-notification design from the 2026-11-26 membership work |
+| `part_store` | big_automata's part store | big_hive's, in the same database and transaction |
+| `long_poll` | the long-poll serving machine | browser serving, unchanged |
+| `sync::peer::sim` | whole-machine simulation: fake backend, network ops, virtual clock, crashes, determinism checks | the template for big_hive's simulation harness |
+
+New in big_hive: the Hub, Document, Write coordinator and Keyhive boundary machines. If three or
+more drivers end up repeating the same loop skeleton (mailbox, call set, timer, flush), extract it
+into `kit` once, rather than copying it a fourth time.
+
 ## 2. A machine
 
 The conventions are big_automata's (`PeerSync`):
