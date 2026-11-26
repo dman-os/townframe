@@ -456,3 +456,39 @@ to its driver, and plain reads leave it entirely.
 4. **Automerge heads for consumers:** settled (operator, 2026-11-26). The Document machine
    publishes them, hydrating only documents we can read (section 4). big_sync already uses
    sedimentree heads.
+
+## 14. The machines through database theory
+
+The write paths map onto textbook concurrency control. Use this vocabulary when reasoning about
+correctness, throughput and latency, and measure against it.
+
+| Our mechanism | Database-theory name | What the theory says |
+|---|---|---|
+| A Document machine holds its document from prepare until commit or abort, and holds reads meanwhile | **Strict two-phase locking (S2PL)**, one exclusive lock per document, held to commit | No dirty reads, recoverable, conflict-serializable per document. Lock hold time = prepare + encrypt + commit, so latency of later writers to that document grows with it |
+| The coordinator admits a plan only when all its documents are free, acquiring them all at once | **Conservative (static) 2PL**: every lock taken before the transaction starts | Deadlock-free by construction: no transaction waits while holding a lock. The cost is lower concurrency than dynamic 2PL, because locks are held for the whole plan |
+| Per-document admission order (operator, 2026-11-27) | **FIFO lock queues per object** | Starvation-free and fair per document; unrelated transactions are never blocked by each other (no convoy across documents) |
+| Single-document writes | One-lock transactions | Never wait on anything but their own commit, so they cannot be part of a deadlock cycle |
+| Remote commits applied while a local write is in flight | **Commutativity-based concurrency control** (CRDT merges commute) | Commuting operations need no lock against each other; only non-commuting reads of uncommitted state need protection |
+| SQLite `BEGIN IMMEDIATE`, one writer process | A **global commit lock** | All commits serialize; commit latency, not CPU, bounds write throughput. Batching several documents' rows into one plan amortizes it (group commit) |
+| Keyhive boundary: encryption under a shared lock, membership and ingest under an exclusive one | **Reader/writer (S/X) locks** | Membership changes are rare; under load they wait for in-flight encryptions to drain and block new ones meanwhile, so their latency is the encryption tail |
+| Persist-then-apply; commit to the live doc with reads held, re-hydrate on failure | **Deferred update** with a **no-steal** buffer policy | Memory never holds uncommitted state that a reader can see, so a crash needs no undo; a failed commit is rolled back by discarding memory and reloading |
+| The change feed, `rev`, `frontier_rev` | A **commit log with log sequence numbers**; derived state tracked by its LSN | A reader is current iff its LSN equals the store's; staleness is a number |
+
+### What to measure (later, with `x/bench.ts`)
+- Per-document lock hold time, split into prepare, encrypt and commit.
+- Queue wait per document, and plan admission wait.
+- Commit latency and commits per second under one writer; the gain from grouping rows into one plan.
+- Keyhive exclusive-lock wait (membership latency) under concurrent encryption.
+
+### Levers the theory suggests, if measurements call for them
+- Shorten lock hold time by encrypting before taking the document's write slot, where the
+  prepared change does not depend on the live document's state.
+- Group commit across unrelated single-document writes.
+- Optimistic concurrency for plans (validate at commit instead of locking at admission), if plans
+  turn out to conflict rarely.
+
+## Decisions, 2026-11-27 (operator)
+- Coordinator admission uses per-document order.
+- The operator delegated the remaining detail calls to the lead: refusal clearing on standing
+  change only, backoff reset tuning, the O(objects) scan on session loss, cheaper aborts deferred,
+  single-document writes keep the Document machine's own path.
