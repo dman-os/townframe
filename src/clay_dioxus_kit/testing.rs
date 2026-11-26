@@ -58,205 +58,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-// The vocabulary a Wasm guest's tree may use, mirrored from `clay_surface::render` (the host
-// refuses a mutation batch naming anything else). The kit cannot depend on a `clay_*` crate, so
-// the harness re-states the lists and fails a test the moment a component steps outside them
-// (`KIT-053`). When `clay_surface` grows its vocabulary, grow these with it.
-const WIRE_TAGS: &[&str] = &[
-    "div",
-    "section",
-    "article",
-    "aside",
-    "header",
-    "footer",
-    "main",
-    "nav",
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    "p",
-    "span",
-    "pre",
-    "code",
-    "blockquote",
-    "strong",
-    "em",
-    "small",
-    "b",
-    "i",
-    "u",
-    "s",
-    "mark",
-    "kbd",
-    "sub",
-    "sup",
-    "br",
-    "hr",
-    "ul",
-    "ol",
-    "li",
-    "dl",
-    "dt",
-    "dd",
-    "table",
-    "thead",
-    "tbody",
-    "tfoot",
-    "tr",
-    "th",
-    "td",
-    "caption",
-    "form",
-    "label",
-    "input",
-    "textarea",
-    "button",
-    "select",
-    "option",
-    "optgroup",
-    "fieldset",
-    "legend",
-    "details",
-    "summary",
-    "dialog",
-    "a",
-    "img",
-    "figure",
-    "figcaption",
-    "progress",
-    "meter",
-    "output",
-    "time",
-    "data",
-];
-const WIRE_SVG_TAGS: &[&str] = &[
-    "svg", "g", "path", "circle", "rect", "line", "polyline", "polygon", "defs",
-];
-const WIRE_ATTRIBUTES: &[&str] = &[
-    "id",
-    "class",
-    "title",
-    "role",
-    "tabindex",
-    "hidden",
-    "lang",
-    "dir",
-    "contenteditable",
-    "draggable",
-    "spellcheck",
-    "translate",
-    "value",
-    "checked",
-    "disabled",
-    "readonly",
-    "required",
-    "multiple",
-    "selected",
-    "name",
-    "type",
-    "placeholder",
-    "autocomplete",
-    "inputmode",
-    "pattern",
-    "min",
-    "max",
-    "step",
-    "minlength",
-    "maxlength",
-    "size",
-    "rows",
-    "cols",
-    "wrap",
-    "for",
-    "novalidate",
-    "accept",
-    "href",
-    "rel",
-    "alt",
-    "width",
-    "height",
-    "loading",
-    "open",
-    "datetime",
-    "start",
-    "reversed",
-    "colspan",
-    "rowspan",
-    "scope",
-    "headers",
-    "label",
-    "low",
-    "high",
-    "optimum",
-    "data-testid",
-    "data-state",
-    "data-value",
-    "aria-label",
-    "aria-labelledby",
-    "aria-describedby",
-    "aria-hidden",
-    "aria-live",
-    "aria-atomic",
-    "aria-busy",
-    "aria-controls",
-    "aria-current",
-    "aria-disabled",
-    "aria-expanded",
-    "aria-haspopup",
-    "aria-invalid",
-    "aria-modal",
-    "aria-multiline",
-    "aria-multiselectable",
-    "aria-orientation",
-    "aria-pressed",
-    "aria-readonly",
-    "aria-required",
-    "aria-selected",
-    "aria-checked",
-    "aria-valuemin",
-    "aria-valuemax",
-    "aria-valuenow",
-    "aria-valuetext",
-    "aria-level",
-    "aria-posinset",
-    "aria-setsize",
-    "viewBox",
-    "preserveAspectRatio",
-    "d",
-    "fill",
-    "fill-rule",
-    "fill-opacity",
-    "stroke",
-    "stroke-width",
-    "stroke-linecap",
-    "stroke-linejoin",
-    "stroke-dasharray",
-    "stroke-dashoffset",
-    "stroke-opacity",
-    "opacity",
-    "transform",
-    "cx",
-    "cy",
-    "r",
-    "rx",
-    "ry",
-    "x",
-    "y",
-    "x1",
-    "y1",
-    "x2",
-    "y2",
-    "points",
-    "xmlns",
-    "clip-path",
-    "clip-rule",
-    "slot",
-    "part",
-];
-
 /// The serialized converter, except that a mounted event carries the element backing the test
 /// supplies (the serialized one has none), so a test can observe what a handler asks of the
 /// element.
@@ -466,13 +267,8 @@ impl WriteMutations for Dom {
     }
 
     fn create_element(&mut self, tag: &str, ns: Option<&str>) {
-        let known = match ns {
-            None => WIRE_TAGS.contains(&tag),
-            Some("http://www.w3.org/2000/svg") => WIRE_SVG_TAGS.contains(&tag),
-            Some(_) => false,
-        };
         assert!(
-            known,
+            clay_surface::admits_element(tag, ns),
             "<{tag}> ({ns:?}) is outside the guest wire vocabulary"
         );
         let node = self.alloc(Kind::Element {
@@ -527,18 +323,12 @@ impl WriteMutations for Dom {
         let Kind::Element { attrs, .. } = &mut self.nodes[top].kind else {
             panic!("set_attribute on a non-element");
         };
-        // The wire admits any well-formed `data-*` name and a raw `style` whose declarations
-        // pass its checks; the contract (`KIT-200`) narrows the raw `style` to custom properties.
+        // The vocabulary is `clay_surface`'s own admission (the host refuses a mutation batch
+        // naming anything else), so a component that steps outside it fails here (`KIT-053`) and
+        // the two can never disagree. The contract (`KIT-200`) narrows the raw `style` to custom
+        // properties below.
         let known = match ns {
-            None => {
-                WIRE_ATTRIBUTES.contains(&name)
-                    || name == "style"
-                    || (name.starts_with("data-")
-                        && name.len() > 5
-                        && name[5..]
-                            .bytes()
-                            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_')))
-            }
+            None => name == "style" || clay_surface::admits_attribute(name),
             // A per-property `style:` attribute is never admitted: the contract (`KIT-200`) leaves
             // layout and appearance to the stylesheet, and the only inline style is the raw
             // `style` of custom properties below.

@@ -26,6 +26,7 @@ dioxus = { git = "https://github.com/dman-os/dioxus", rev = "49e05de24022388ee0e
 [dev-dependencies]
 #
 # internal
+clay_surface.workspace = true
 dioxus_storm.workspace = true
 
 #

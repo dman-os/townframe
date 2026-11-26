@@ -18,6 +18,8 @@ mod stylesheet;
 mod tree;
 mod wire;
 
+pub use render::admits_attribute;
+pub use render::admits_element;
 pub use replay::replay;
 pub use stylesheet::refuse_fetching_stylesheet;
 pub use stylesheet::wrap_in_media_query;

@@ -2634,6 +2634,7 @@ dependencies = [
 name = "clay_dioxus_kit"
 version = "0.1.0"
 dependencies = [
+ "clay_surface",
  "dioxus",
  "dioxus-core",
  "dioxus-html",
