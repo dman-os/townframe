@@ -21,7 +21,7 @@ SELECT s
               , d.audience AS n
               , f1.lvl AS lvl
            FROM keyline_live f1
-           JOIN keyline_certificates d ON d.kind = 0 AND d.subject = f1.n AND f1.lvl <= d.power
+           JOIN keyline_certificates d ON d.subject = f1.n AND f1.lvl <= d.power
            LEFT JOIN keyline_dispute dp ON dp.delegation = d.digest
           WHERE f1.epoch = :prev
             AND /*COMPOSE*/ 1 = 1
@@ -40,7 +40,7 @@ SELECT s
               , d.audience
               , f2.lvl
            FROM keyline_live f2
-           JOIN keyline_certificates d ON d.kind = 0 AND d.subject = f2.s AND d.issuer = f2.n AND f2.lvl <= d.power
+           JOIN keyline_certificates d ON d.subject = f2.s AND d.issuer = f2.n AND f2.lvl <= d.power
            LEFT JOIN keyline_dispute dp ON dp.delegation = d.digest
           WHERE f2.epoch = :prev
             AND d.audience <> d.subject
@@ -55,7 +55,7 @@ SELECT s
               , d.audience
               , f2.lvl
            FROM keyline_live f2
-           JOIN keyline_certificates d ON d.kind = 0 AND d.subject = f2.s AND d.issuer = f2.n AND f2.lvl <= d.power
+           JOIN keyline_certificates d ON d.subject = f2.s AND d.issuer = f2.n AND f2.lvl <= d.power
            JOIN keyline_live f1 ON f1.ctx = f2.ctx AND f1.n = d.subject AND f1.lvl = f2.lvl
            JOIN keyline_root rt ON rt.s = f1.s
            LEFT JOIN keyline_dispute dp ON dp.delegation = d.digest
@@ -72,7 +72,7 @@ SELECT s
               , d.audience
               , fo.lvl
            FROM keyline_live fo
-           JOIN keyline_certificates d ON d.kind = 0 AND d.subject = fo.s AND d.issuer = fo.n AND fo.lvl <= d.power
+           JOIN keyline_certificates d ON d.subject = fo.s AND d.issuer = fo.n AND fo.lvl <= d.power
            LEFT JOIN keyline_dispute dp ON dp.delegation = d.digest
           CROSS JOIN keyline_ctx_use x
           WHERE fo.epoch = :prev
@@ -89,7 +89,7 @@ SELECT s
               , d.audience
               , fo.lvl
            FROM keyline_live fo
-           JOIN keyline_certificates d ON d.kind = 0 AND d.subject = fo.s AND d.issuer = fo.n AND fo.lvl <= d.power
+           JOIN keyline_certificates d ON d.subject = fo.s AND d.issuer = fo.n AND fo.lvl <= d.power
            LEFT JOIN keyline_dispute dp ON dp.delegation = d.digest
           CROSS JOIN keyline_ctx_use x
            JOIN keyline_live f1 ON f1.ctx = x.ctx AND f1.n = d.subject AND f1.lvl = fo.lvl

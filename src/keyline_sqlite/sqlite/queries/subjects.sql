@@ -5,4 +5,4 @@
 -- table and sorts.
 SELECT DISTINCT subject
   FROM keyline_certificates INDEXED BY keyline_delegations_by_subject_audience
- WHERE kind = 0
+ WHERE subject IS NOT NULL

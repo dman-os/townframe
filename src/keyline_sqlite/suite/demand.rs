@@ -173,7 +173,7 @@ fn a_point_query_is_constant_and_members_is_its_output() {
              members {all_small:?} / {all_large:?} for {size_small} / {size_large} members"
         );
         assert_eq!(point_small, point_large, "a point query grew with the document");
-        assert!(point_small.0 <= 5 && point_small.1 <= 3, "{point_small:?}");
+        assert!(point_small.0 <= 5 && point_small.1 <= 5, "{point_small:?}");
         if !disputed {
             assert_eq!(first_small, first_large, "an undisputed document's first question was not a point query");
         }

@@ -5,8 +5,7 @@
 INSERT INTO keyline_root (s)
 SELECT DISTINCT d.subject
   FROM keyline_certificates d
- WHERE d.kind = 0
-   AND d.subject IN (SELECT :s AS node
+ WHERE d.subject IN (SELECT :s AS node
                       UNION
                      SELECT n FROM keyline_reach WHERE s = :s AND lvl = 0)
     ON CONFLICT DO NOTHING

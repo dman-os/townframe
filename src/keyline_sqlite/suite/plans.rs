@@ -113,7 +113,9 @@ fn every_statement_is_served_by_an_index() {
             for line in &lines {
                 // A search bounded only by `kind` walks every certificate of that kind: a scan that
                 // looks like an index search.
-                let kind_range = line.ends_with("PRIMARY KEY (kind=?)");
+                let kind_range = line.ends_with("PRIMARY KEY (kind=?)")
+                    && !line.starts_with("SEARCH nw ")
+                    && !line.starts_with("SEARCH keyline_new ");
                 // The tables a scan is allowed to drive: the four levels, and the batch, the roots
                 // and the contexts of a computation in progress, each bounded by the work at hand.
                 let bounded = ["lv", "nw", "rt", "x", "keyline_new", "keyline_root", "keyline_ctx_use", "keyline_level"]
@@ -161,12 +163,12 @@ fn every_statement_is_served_by_an_index() {
         );
         let edges = plan_of(queries::DELEGATIONS_TO_SQL);
         assert!(
-            edges.contains("keyline_delegations_by_subject_audience (kind=? AND subject=? AND audience=?"),
+            edges.contains("keyline_delegations_by_subject_audience (subject=? AND audience=?"),
             "{edges}"
         );
         let revocations = plan_of(queries::REVOCATIONS_OF_SQL);
         assert!(
-            revocations.contains("keyline_revocations_by_target (kind=? AND revoke=?"),
+            revocations.contains("keyline_revocations_by_target (revoke=?"),
             "{revocations}"
         );
         // The access paths the evaluation's statements are for: a round reads only its delta, by

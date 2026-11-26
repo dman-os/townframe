@@ -7,7 +7,7 @@ SELECT ctx
           UNION
          SELECT dp.ctx
            FROM keyline_root rt
-           JOIN keyline_certificates d ON d.kind = 0 AND d.subject = rt.s
+           JOIN keyline_certificates d ON d.subject = rt.s
            JOIN keyline_dispute dp ON dp.delegation = d.digest
           WHERE dp.total = 0
        )

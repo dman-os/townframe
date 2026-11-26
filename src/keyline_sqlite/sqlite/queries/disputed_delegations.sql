@@ -6,5 +6,5 @@ SELECT d.digest AS delegation
      , d.audience AS audience
      , r.issuer AS revoker
   FROM keyline_root rt
-  JOIN keyline_certificates d ON d.kind = 0 AND d.subject = rt.s
-  JOIN keyline_certificates r ON r.kind = 1 AND r.revoke = d.digest
+  JOIN keyline_certificates d ON d.subject = rt.s
+  JOIN keyline_certificates r ON r.revoke = d.digest

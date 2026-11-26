@@ -8,6 +8,5 @@ SELECT nw.subject
  WHERE nw.kind = 0
    AND EXISTS (SELECT 1
                  FROM keyline_certificates r
-                WHERE r.kind = 1
-                  AND r.revoke = nw.digest)
+                WHERE r.revoke = nw.digest)
     ON CONFLICT DO NOTHING

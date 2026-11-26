@@ -49,20 +49,25 @@ CREATE INDEX keyline_reach_by_target
 CREATE INDEX keyline_reach_by_epoch
     ON keyline_reach (epoch);
 
--- The indexes over certificates lead with `kind`, so that an equality on `kind` and one more
--- column is a longer key prefix than the primary key's `kind` alone and a planner without
--- statistics prefers them (the partial indexes of `001` lost to the primary key's `kind` range).
+-- Indexes over certificates are partial on the column they key, not on `kind`: a query that
+-- equates `subject` (or `revoke`) implies it is not null, so the planner can use the partial index,
+-- whereas it prefers the primary key's `kind` range whenever `kind = 0` is spelled out (it scans
+-- every delegation to keep a few). Delegations are the rows with a subject; revocations the rows
+-- with a target.
 DROP INDEX keyline_delegations_by_subject_audience;
 CREATE INDEX keyline_delegations_by_subject_audience
-    ON keyline_certificates (kind, subject, audience);
+    ON keyline_certificates (subject, audience)
+ WHERE subject IS NOT NULL;
 
 DROP INDEX keyline_revocations_by_target;
 CREATE INDEX keyline_revocations_by_target
-    ON keyline_certificates (kind, revoke, issuer);
+    ON keyline_certificates (revoke, issuer)
+ WHERE revoke IS NOT NULL;
 
 -- The delegations a node issued about one subject: feed 2 of a round.
 CREATE INDEX keyline_delegations_by_subject_issuer
-    ON keyline_certificates (kind, subject, issuer);
+    ON keyline_certificates (subject, issuer)
+ WHERE subject IS NOT NULL;
 
 -- Subjects with a delegation some revocation names. A revocation that names a delegation not yet
 -- in the set marks its subject when the delegation arrives.

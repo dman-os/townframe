@@ -11,8 +11,7 @@ SELECT kind
               , d.digest AS digest
               , d.signed AS signed
            FROM keyline_certificates d
-          WHERE d.kind = 0
-            AND d.subject IN (SELECT :s AS node
+          WHERE d.subject IN (SELECT :s AS node
                                UNION
                               SELECT n FROM keyline_reach WHERE s = :s AND lvl = 0)
           UNION ALL
@@ -20,11 +19,9 @@ SELECT kind
               , r.digest
               , r.signed
            FROM keyline_certificates r
-          WHERE r.kind = 1
-            AND r.revoke IN (SELECT d.digest
+          WHERE r.revoke IN (SELECT d.digest
                                FROM keyline_certificates d
-                              WHERE d.kind = 0
-                                AND d.subject IN (SELECT :s AS node
+                              WHERE d.subject IN (SELECT :s AS node
                                                    UNION
                                                   SELECT n FROM keyline_reach WHERE s = :s AND lvl = 0))
        )

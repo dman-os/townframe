@@ -14,7 +14,7 @@ SELECT s
               , d.audience AS n
               , f1.lvl AS lvl
            FROM keyline_reach f1
-           JOIN keyline_certificates d ON d.kind = 0 AND d.subject = f1.n AND f1.lvl <= d.power
+           JOIN keyline_certificates d ON d.subject = f1.n AND f1.lvl <= d.power
           WHERE f1.epoch = :prev
             AND /*COMPOSE*/ 1 = 1
             AND d.audience <> f1.s
@@ -29,7 +29,7 @@ SELECT s
               , d.audience
               , f2.lvl
            FROM keyline_reach f2
-           JOIN keyline_certificates d ON d.kind = 0 AND d.subject = f2.s AND d.issuer = f2.n AND f2.lvl <= d.power
+           JOIN keyline_certificates d ON d.subject = f2.s AND d.issuer = f2.n AND f2.lvl <= d.power
           WHERE f2.epoch = :prev
             AND d.audience <> d.subject
           UNION ALL
@@ -37,7 +37,7 @@ SELECT s
               , d.audience
               , f2.lvl
            FROM keyline_reach f2
-           JOIN keyline_certificates d ON d.kind = 0 AND d.subject = f2.s AND d.issuer = f2.n AND f2.lvl <= d.power
+           JOIN keyline_certificates d ON d.subject = f2.s AND d.issuer = f2.n AND f2.lvl <= d.power
            JOIN keyline_reach f1 ON f1.n = d.subject AND f1.lvl = f2.lvl
           WHERE f2.epoch = :prev
             AND /*COMPOSE*/ 1 = 1

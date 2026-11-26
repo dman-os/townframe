@@ -11,7 +11,7 @@ SELECT d.subject
      , lv.lvl
      , :epoch
   FROM keyline_root rt
-  JOIN keyline_certificates d ON d.kind = 0 AND d.subject = rt.s AND d.issuer = d.subject
+  JOIN keyline_certificates d ON d.subject = rt.s AND d.issuer = d.subject
   JOIN keyline_level lv ON lv.lvl <= d.power
  CROSS JOIN keyline_ctx_use x
   LEFT JOIN keyline_dispute dp ON dp.delegation = d.digest
