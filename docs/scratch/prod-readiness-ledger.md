@@ -1271,3 +1271,16 @@ inside the transaction. This ties together:
 **Infrastructure:** the laptop drive `p3N` dropped twice (USB/UAS resets, then an ntfs3 crash),
 and chkdsk repaired it. Lanes run on the motherships. `ms-run` copies by checksum, so laptop
 mtimes can't keep stale cargo units. The lead verifies in its own mothership worktree.
+- **Late additions:**
+  - 21 #434 → `c4a33fa8`: held wants release by part, and the held index follows commits. Its
+    one-held-operation-per-transaction limit is documented; make it a debug assertion next
+    session.
+  - 22 #437 → `13d34e4c`: one `sqlite_rs::SqliteDb` trait, and shared bench workloads.
+  - subduction#2 (fork draft) → `08df1275`, with the batch-response test.
+- **Open failure, environment:** `subduction_cli::iroh_e2e::iroh_sync_between_two_cli_servers`
+  panics "CLI binary not found" under mbx's test runner. The test locates the CLI binary
+  relative to its own exe, and mbx-test-runner places exes under `debug/build/<crate>/<hash>/`.
+  It passed in an earlier run tonight, so it depends on where the CLI binary was built.
+  Reported to claytxt (mbx owner). Next: confirm the exe-path assumption and pin it.
+- **The laptop clone lost branch 21's ref file** (p3N damage). It was recreated from mothership;
+  nothing was lost.
