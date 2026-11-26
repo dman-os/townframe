@@ -78,6 +78,16 @@ version row agree.
   verified certificate and the exact row bytes it was verified from. A row is trusted without
   re-verification only if its bytes equal the memo's. It is content-addressed and checked against the row
   itself, so it needs no version; it is a cache of a pure function. It is bounded and cleared when full.
+- Evaluating a closure is the expensive step (about 40 ms in a debug build for a 77-certificate, 22-node
+  closure), and several questions about one subject would each repeat it. Measured: with no sharing, the
+  deeper-graph differential spent about 0.8 s per subject and a dense case took over a minute (not a hang:
+  the reference answered, then 24 subjects x ~19 queries each re-evaluated). So an **evaluation cache**
+  keeps up to 64 evaluated closures, each tagged with the version its snapshot read, and a query uses an
+  entry only if the tag equals the version *its own* snapshot just read. A commit by this process or any
+  other moves the version and invalidates every entry; an entry is never stale for the snapshot that takes
+  it. It is the "small per-process cache validated against a version row" the brief allows. The price of
+  that coarseness: any insert invalidates every subject's evaluation. Per-subject validity (a version per
+  closure) would need the closure's reach to be monotone-tracked; not built.
 - Whole-set operations stay whole-set by their definition: `certificates()` (archives) and `digest()`
   (`set_digest` over every id). Follow-up if `digest` becomes hot: an incrementally maintained set
   accumulator in `keyline_meta`.
