@@ -78,6 +78,11 @@ fn every_statement_is_served_by_an_index() {
         // liveness, rooted at its own subject; and a subset.
         let cold = SqliteKeyline::<(), _>::new(recording);
         Keyline::<Local>::members(&cold, id(DOC)).await.unwrap();
+        // `OWNERS` is not disputed: its answers are reads of the stored reach.
+        Keyline::<Local>::members(&cold, id(OWNERS)).await.unwrap();
+        Keyline::<Local>::effective_power(&cold, id(OWNERS), id(ALICE))
+            .await
+            .unwrap();
         Keyline::<Local>::effective_power(&cold, id(DOC), id(BOB))
             .await
             .unwrap();
