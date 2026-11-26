@@ -1,22 +1,25 @@
-//! What the backend needs of a database handle.
+//! The handle that opens read snapshots and the writer transaction.
 
 use std::future::Future;
 
-use sqlite_rs::Executor;
-use sqlite_rs::QueryExecutor;
-use sqlite_rs::SqlResult;
+use crate::Executor;
+use crate::QueryExecutor;
+use crate::SqlResult;
 
-/// A database the backend runs on: a write transaction, a read snapshot, and finishing them.
+/// A database handle: it opens a write transaction and read snapshots, and finishes them.
+///
+/// Stores (`big_automata_sqlite`, `keyline_sqlite`) are generic over this trait, not over
+/// [`Database`](crate::Database), so a platform whose SQLite is a component connection can
+/// implement it. The `Write` type is the whole contract between stores that share a database:
+/// each store runs its queries through the one `Executor` the caller holds, so rows written by
+/// different stores commit or roll back together.
 ///
 /// - `begin_write` takes the database's one writer, exclusively, until the transaction is
 ///   committed, rolled back or dropped (a drop rolls back).
 /// - `begin_read` is a snapshot: every query through it sees the database as of the moment it
 ///   began, whatever commits meanwhile.
 /// - Queries through one transaction run in submission order.
-///
-/// The same three things `big_automata_sqlite` asks of its database, so one handle can serve
-/// both stores.
-pub trait KeylineDb: Clone + Send + Sync + 'static {
+pub trait SqliteDb: Clone + Send + Sync + 'static {
     type Write: Executor + Send + 'static;
     type Read: QueryExecutor + Send + 'static;
 
@@ -28,16 +31,16 @@ pub trait KeylineDb: Clone + Send + Sync + 'static {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl KeylineDb for sqlite_rs::Database {
-    type Write = sqlite_rs::Tx;
-    type Read = sqlite_rs::ReadTx;
+impl SqliteDb for crate::Database {
+    type Write = crate::Tx;
+    type Read = crate::ReadTx;
 
     fn begin_write(&self) -> impl Future<Output = SqlResult<Self::Write>> + Send {
-        sqlite_rs::Database::begin_write(self)
+        crate::Database::begin_write(self)
     }
 
     fn begin_read(&self) -> impl Future<Output = SqlResult<Self::Read>> + Send {
-        sqlite_rs::Database::begin_read(self)
+        crate::Database::begin_read(self)
     }
 
     fn commit(tx: Self::Write) -> impl Future<Output = SqlResult<()>> + Send {

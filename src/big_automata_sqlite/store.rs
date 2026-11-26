@@ -29,7 +29,6 @@ use big_automata::rev::RevWatch;
 use tokio::sync::watch;
 
 use crate::buckets;
-use crate::db::PartDb;
 use crate::interlude::*;
 use crate::log;
 use crate::okv::Staged;
@@ -38,12 +37,13 @@ use crate::serve;
 use crate::sql;
 use crate::sqlite::queries;
 use crate::write;
+use sqlite_rs::SqliteDb;
 
 /// The SQLite part store. Clones share the database handle and the watch.
 ///
 /// Open one store per database: the watch is the store's own, moved by the commits made
 /// through it, so two stores over one file would not wake each other's readers.
-pub struct SqlitePartStore<D: PartDb> {
+pub struct SqlitePartStore<D: SqliteDb> {
     pub(crate) db: D,
     /// The log's watch, moved after each stamping commit is visible to readers.
     wakeups: Arc<watch::Sender<Rev>>,
@@ -52,7 +52,7 @@ pub struct SqlitePartStore<D: PartDb> {
     polls: LongPollHub<LogInterest>,
 }
 
-impl<D: PartDb> Clone for SqlitePartStore<D> {
+impl<D: SqliteDb> Clone for SqlitePartStore<D> {
     fn clone(&self) -> Self {
         Self {
             db: self.db.clone(),
@@ -64,7 +64,7 @@ impl<D: PartDb> Clone for SqlitePartStore<D> {
 
 /// A write transaction: the database's writer, held from [`SqlitePartStore::begin`] until
 /// [`commit`](Self::commit) or [`rollback`](Self::rollback); dropping it rolls it back.
-pub struct SqlitePartTx<D: PartDb> {
+pub struct SqlitePartTx<D: SqliteDb> {
     store: SqlitePartStore<D>,
     pub(crate) tx: D::Write,
     /// The rev every row this transaction stamps gets: the log's rev at `begin`, plus one.
@@ -77,7 +77,7 @@ pub struct SqlitePartTx<D: PartDb> {
     pub(crate) okv: BTreeMap<i64, Staged>,
 }
 
-impl<D: PartDb> SqlitePartStore<D> {
+impl<D: SqliteDb> SqlitePartStore<D> {
     /// Attach to `db`, applying its migrations if it has not run them. `db` must have been
     /// registered with [`MIGRATIONS`](crate::MIGRATIONS) under
     /// [`MIGRATION_TABLE`](crate::MIGRATION_TABLE). The long-poll hub reads `clock`, the
@@ -113,7 +113,7 @@ impl<D: PartDb> SqlitePartStore<D> {
     }
 }
 
-impl<D: PartDb> SqlitePartTx<D> {
+impl<D: SqliteDb> SqlitePartTx<D> {
     /// Commit every staged batch at once. Returns the rev that stamped the changed log rows, or
     /// `None` when no row changed (then no rev is consumed and the watch stays put).
     pub async fn commit(self) -> Res<Option<Rev>> {
@@ -151,7 +151,7 @@ impl<D: PartDb> SqlitePartTx<D> {
     }
 }
 
-impl<D: PartDb> PartStoreWrite for SqlitePartStore<D> {
+impl<D: SqliteDb> PartStoreWrite for SqlitePartStore<D> {
     type Tx = SqlitePartTx<D>;
 
     async fn ensure_parts(&self, tx: &mut SqlitePartTx<D>, parts: &[PartKey]) -> Res<()> {
@@ -244,7 +244,7 @@ macro_rules! snapshot {
     }};
 }
 
-impl<D: PartDb> PartStoreRead for SqlitePartStore<D> {
+impl<D: SqliteDb> PartStoreRead for SqlitePartStore<D> {
     async fn obj_states(&self, objs: &[ObjKey]) -> Res<Vec<Option<ObjState>>> {
         Ok(snapshot!(self, reader => read::obj_states(&reader, None, objs).await?))
     }
@@ -262,7 +262,7 @@ impl<D: PartDb> PartStoreRead for SqlitePartStore<D> {
     }
 }
 
-impl<D: PartDb> RevSource for SqlitePartStore<D> {
+impl<D: SqliteDb> RevSource for SqlitePartStore<D> {
     type Key = LogKey;
     type Value = LogEntry;
     type Selector = LogSelector;
@@ -295,7 +295,7 @@ impl<D: PartDb> RevSource for SqlitePartStore<D> {
     }
 }
 
-impl<D: PartDb> PartStoreServe for SqlitePartStore<D> {
+impl<D: SqliteDb> PartStoreServe for SqlitePartStore<D> {
     async fn latest_rev(&self) -> Res<Rev> {
         RevSource::latest_rev(self).await
     }

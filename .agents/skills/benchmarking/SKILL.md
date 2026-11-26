@@ -32,7 +32,7 @@ crate that does, so nothing in the tool is specific to big_automata.
   `#[global_allocator] static HEAP: utils_rs::testing::alloc_count::CountingAllocator` once per test
   binary; counting is per thread, so tests may share a process.
 - **Instruction bench:** put the setup and the measured body as public functions in
-  `benches/workloads/mod.rs`, then wrap them with `#[library_benchmark]` and `#[bench::nXk(args =
+  `workloads.rs` (behind a `bench-support` feature the bench target enables), then wrap them with `#[library_benchmark]` and `#[bench::nXk(args =
   (n), setup = workloads::setup_fn)]` in `benches/instr.rs`, and list the function in the group.
   Setup is outside the measured region. Give every workload two sizes ten times apart.
   Gungraun's `setup` must be a path, not a closure, and benchmark functions take no doc comments.

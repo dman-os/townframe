@@ -4,18 +4,18 @@ use big_automata::driver::PeerCursors;
 use big_automata::sync::PeerCursor;
 use sqlite_rs::Sql;
 
-use crate::db::PartDb;
 use crate::interlude::*;
 use crate::keys::BlobKey;
 use crate::sql;
+use sqlite_rs::SqliteDb;
 
 /// [`PeerCursors`] over the `big_automata_peer_cursors` table. Clones share the database.
 #[derive(Clone)]
-pub struct SqlitePeerCursors<D: PartDb> {
+pub struct SqlitePeerCursors<D: SqliteDb> {
     db: D,
 }
 
-impl<D: PartDb> SqlitePeerCursors<D> {
+impl<D: SqliteDb> SqlitePeerCursors<D> {
     /// `db` must have been registered with [`MIGRATIONS`](crate::MIGRATIONS) under
     /// [`MIGRATION_TABLE`](crate::MIGRATION_TABLE).
     pub fn new(db: D) -> Self {
@@ -23,7 +23,7 @@ impl<D: PartDb> SqlitePeerCursors<D> {
     }
 }
 
-impl<D: PartDb> PeerCursors for SqlitePeerCursors<D> {
+impl<D: SqliteDb> PeerCursors for SqlitePeerCursors<D> {
     async fn read(
         &self,
         peer: &PeerKey,

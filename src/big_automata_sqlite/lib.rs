@@ -28,7 +28,7 @@
 //!   backlog. See `log.rs`.
 //! - **Keys are stored as order-preserving blobs** ([`keys`]): the derived `Ord` of
 //!   `big_automata`'s keys is length-first for short keys, not byte order.
-//! - **Platforms.** The store is generic over [`PartDb`], the three things it needs of a
+//! - **Platforms.** The store is generic over [`sqlite_rs::SqliteDb`], the three things it needs of a
 //!   database handle (a write transaction, a read snapshot, finishing them). `sqlite_rs`'s
 //!   native [`Database`](sqlite_rs::Database) implements it; a component guest implements it
 //!   over its `townframe:sqlite` connection. There is no browser build: `sqlite_rs` has none.
@@ -55,7 +55,6 @@ mod sqlite {
 
 mod buckets;
 mod cursors;
-mod db;
 pub mod keys;
 mod log;
 mod okv;
@@ -69,7 +68,6 @@ mod write;
 mod suite;
 
 pub use cursors::SqlitePeerCursors;
-pub use db::PartDb;
 pub use okv::SqliteOkv;
 pub use sqlite::queries::MIGRATION_TABLE;
 pub use sqlite::queries::MIGRATIONS;

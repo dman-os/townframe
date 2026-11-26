@@ -6,7 +6,7 @@ allow_external_api_types = true
 
 # No `wasm32-unknown-unknown` build: sqlite_rs does not target the browser.
 [builds.native]
-features = []
+features = ["bench-support"]
 required_features = []
 default_features = true
 

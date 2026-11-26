@@ -29,6 +29,7 @@ use sqlite_rs::ReadTx;
 use sqlite_rs::ResultSet;
 use sqlite_rs::SqlResult;
 use sqlite_rs::SqlValue;
+use sqlite_rs::SqliteDb;
 use sqlite_rs::Tx;
 
 use super::RUNTIME;
@@ -84,7 +85,7 @@ impl QueryExecutor for RecordingRead {
     }
 }
 
-impl PartDb for Recording {
+impl SqliteDb for Recording {
     type Write = RecordingWrite;
     type Read = RecordingRead;
 

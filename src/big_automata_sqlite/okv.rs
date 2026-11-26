@@ -37,12 +37,12 @@ use big_automata::rev::RevWatch;
 use sqlite_rs::Sql;
 use tokio::sync::watch;
 
-use crate::db::PartDb;
 use crate::interlude::*;
 use crate::sql;
 use crate::sqlite::queries;
 use crate::store::SqlitePartStore;
 use crate::store::SqlitePartTx;
+use sqlite_rs::SqliteDb;
 
 /// Rows a read statement fetches at most, whatever the page's limit: a page that wants more
 /// than this continues from the last row it saw.
@@ -66,13 +66,13 @@ impl Staged {
 ///
 /// Open one handle per table per database, like the part store: the watch is the handle's own,
 /// moved by the commits made through it.
-pub struct SqliteOkv<D: PartDb> {
+pub struct SqliteOkv<D: SqliteDb> {
     db: D,
     namespace: i64,
     wakeups: Arc<watch::Sender<Rev>>,
 }
 
-impl<D: PartDb> Clone for SqliteOkv<D> {
+impl<D: SqliteDb> Clone for SqliteOkv<D> {
     fn clone(&self) -> Self {
         Self {
             db: self.db.clone(),
@@ -82,7 +82,7 @@ impl<D: PartDb> Clone for SqliteOkv<D> {
     }
 }
 
-impl<D: PartDb> SqliteOkv<D> {
+impl<D: SqliteDb> SqliteOkv<D> {
     /// The table called `name` in `store`'s database, created empty if there is none. Its
     /// transactions are `store`'s.
     pub async fn open(store: &SqlitePartStore<D>, name: &str) -> Res<Self> {
@@ -174,7 +174,7 @@ impl Paging<'_> {
     }
 }
 
-impl<D: PartDb> SqliteOkv<D> {
+impl<D: SqliteDb> SqliteOkv<D> {
     /// Fill `page` from `(after, until]` inside the snapshot `x`; see [`RevSource::read`].
     async fn read_page(
         &self,
@@ -267,7 +267,7 @@ impl<D: PartDb> SqliteOkv<D> {
     }
 }
 
-impl<D: PartDb> RevSource for SqliteOkv<D> {
+impl<D: SqliteDb> RevSource for SqliteOkv<D> {
     type Key = Vec<u8>;
     type Value = Vec<u8>;
     type Selector = Selector<Vec<u8>>;
@@ -305,7 +305,7 @@ impl<D: PartDb> RevSource for SqliteOkv<D> {
     }
 }
 
-impl<D: PartDb> OkvStore for SqliteOkv<D> {
+impl<D: SqliteDb> OkvStore for SqliteOkv<D> {
     type Tx = SqlitePartTx<D>;
 
     async fn apply(

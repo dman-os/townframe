@@ -1,5 +1,11 @@
-//! The same fixture and bodies as `benches/workloads/mod.rs` (a module cannot be shared between
-//! a bench target and the crate's tests without `#[path]`); keep the two in step.
+//! What the allocation-count scaling checks (`suite/scaling.rs`) and the instruction benches
+//! (`benches/instr.rs`) both measure: one fixture, built the same way for both, and the measured
+//! bodies. The module is compiled for the crate's own tests and, behind `bench-support`, for
+//! the bench target (which cannot see test code).
+//!
+//! The fixture is a star: a document key grants `Admin` to an admin key, who grants `Read` to
+//! `n` members; every tenth member's grant is revoked and every seventh member grants the next
+//! one, so the evaluation sees coverage and chains, not just a flat list.
 
 use std::sync::LazyLock;
 
