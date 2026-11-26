@@ -66,6 +66,19 @@ impl BackendRig for Download {
         Ok(())
     }
 
+    async fn member_added(&self, backend: &MemoryBackend, obj: &ObjKey, part: &PartKey) -> Res<()> {
+        backend.member_added(obj, part).await
+    }
+
+    async fn member_removed(
+        &self,
+        backend: &MemoryBackend,
+        obj: &ObjKey,
+        part: &PartKey,
+    ) -> Res<()> {
+        backend.member_removed(obj, part).await
+    }
+
     async fn observe(&self, backend: &MemoryBackend, obj: &ObjKey) -> Res<Option<ObjState>> {
         observe(backend, obj).await
     }
@@ -101,6 +114,19 @@ impl BackendRig for Hinted {
 
     async fn peer_holds(&self, _: &MemoryBackend, _: &ObjKey, _: Option<&ObjPayload>) -> Res<()> {
         Ok(())
+    }
+
+    async fn member_added(&self, backend: &MemoryBackend, obj: &ObjKey, part: &PartKey) -> Res<()> {
+        backend.member_added(obj, part).await
+    }
+
+    async fn member_removed(
+        &self,
+        backend: &MemoryBackend,
+        obj: &ObjKey,
+        part: &PartKey,
+    ) -> Res<()> {
+        backend.member_removed(obj, part).await
     }
 
     async fn observe(&self, backend: &MemoryBackend, obj: &ObjKey) -> Res<Option<ObjState>> {

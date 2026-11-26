@@ -233,6 +233,21 @@ impl MemoryBackend {
         }
     }
 
+    /// The membership source says `obj` is now a member of `part`.
+    pub async fn member_added(&self, obj: &ObjKey, part: &PartKey) -> Res<()> {
+        self.write(vec![PartWrite::AddMembers(vec![(obj.clone(), part.clone())])])
+            .await
+    }
+
+    /// The membership source says `obj` is no longer a member of `part`.
+    pub async fn member_removed(&self, obj: &ObjKey, part: &PartKey) -> Res<()> {
+        self.write(vec![PartWrite::RemoveMembers(vec![(
+            obj.clone(),
+            part.clone(),
+        )])])
+        .await
+    }
+
     /// The next write fails after staging everything, before it commits: a transaction that
     /// is atomic leaves the store as it was.
     pub fn fail_next_write(&self) {
