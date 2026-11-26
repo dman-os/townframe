@@ -1451,7 +1451,7 @@ dependencies = [
 [[package]]
 name = "beekem"
 version = "0.9.0"
-source = "git+https://github.com/dman-os/keyhive?rev=df93fc4c046ad86a01a4abe591f1b9f14628a4c8#df93fc4c046ad86a01a4abe591f1b9f14628a4c8"
+source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -9220,7 +9220,7 @@ dependencies = [
 [[package]]
 name = "keyhive_codec"
 version = "0.1.0"
-source = "git+https://github.com/dman-os/keyhive?rev=df93fc4c046ad86a01a4abe591f1b9f14628a4c8#df93fc4c046ad86a01a4abe591f1b9f14628a4c8"
+source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
 dependencies = [
  "bijoux",
  "thiserror 2.0.21",
@@ -9229,7 +9229,7 @@ dependencies = [
 [[package]]
 name = "keyhive_content"
 version = "0.4.0"
-source = "git+https://github.com/dman-os/keyhive?rev=df93fc4c046ad86a01a4abe591f1b9f14628a4c8#df93fc4c046ad86a01a4abe591f1b9f14628a4c8"
+source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -9272,7 +9272,7 @@ dependencies = [
 [[package]]
 name = "keyhive_core"
 version = "0.12.3"
-source = "git+https://github.com/dman-os/keyhive?rev=df93fc4c046ad86a01a4abe591f1b9f14628a4c8#df93fc4c046ad86a01a4abe591f1b9f14628a4c8"
+source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
 dependencies = [
  "arbitrary",
  "async-lock",
@@ -9322,7 +9322,7 @@ dependencies = [
 [[package]]
 name = "keyhive_crypto"
 version = "0.6.0"
-source = "git+https://github.com/dman-os/keyhive?rev=df93fc4c046ad86a01a4abe591f1b9f14628a4c8#df93fc4c046ad86a01a4abe591f1b9f14628a4c8"
+source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -9369,7 +9369,7 @@ dependencies = [
 [[package]]
 name = "keyline"
 version = "0.4.0"
-source = "git+https://github.com/dman-os/keyhive?rev=df93fc4c046ad86a01a4abe591f1b9f14628a4c8#df93fc4c046ad86a01a4abe591f1b9f14628a4c8"
+source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
 dependencies = [
  "arbitrary",
  "bijoux",
@@ -9386,7 +9386,7 @@ dependencies = [
 [[package]]
 name = "keyline_memory"
 version = "0.4.0"
-source = "git+https://github.com/dman-os/keyhive?rev=df93fc4c046ad86a01a4abe591f1b9f14628a4c8#df93fc4c046ad86a01a4abe591f1b9f14628a4c8"
+source = "git+https://github.com/dman-os/keyhive?rev=94ff62a124cfb8e795168e9ca60d7d528fc90469#94ff62a124cfb8e795168e9ca60d7d528fc90469"
 dependencies = [
  "async-lock",
  "future_form",
@@ -14876,7 +14876,7 @@ dependencies = [
 [[package]]
 name = "sedimentree_core"
 version = "0.17.0"
-source = "git+https://github.com/dman-os/subduction?rev=2b3276f18c50d8b17a8ca523ae6b19f773aadd27#2b3276f18c50d8b17a8ca523ae6b19f773aadd27"
+source = "git+https://github.com/dman-os/subduction?rev=f34d5a914add15562c60f42c48b8f8cc00e16261#f34d5a914add15562c60f42c48b8f8cc00e16261"
 dependencies = [
  "arbitrary",
  "async-lock",
@@ -16204,7 +16204,7 @@ dependencies = [
 [[package]]
 name = "subduction_core"
 version = "0.21.0"
-source = "git+https://github.com/dman-os/subduction?rev=2b3276f18c50d8b17a8ca523ae6b19f773aadd27#2b3276f18c50d8b17a8ca523ae6b19f773aadd27"
+source = "git+https://github.com/dman-os/subduction?rev=f34d5a914add15562c60f42c48b8f8cc00e16261#f34d5a914add15562c60f42c48b8f8cc00e16261"
 dependencies = [
  "arbitrary",
  "async-channel",
@@ -16243,7 +16243,7 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.12.0"
-source = "git+https://github.com/dman-os/subduction?rev=2b3276f18c50d8b17a8ca523ae6b19f773aadd27#2b3276f18c50d8b17a8ca523ae6b19f773aadd27"
+source = "git+https://github.com/dman-os/subduction?rev=f34d5a914add15562c60f42c48b8f8cc00e16261#f34d5a914add15562c60f42c48b8f8cc00e16261"
 dependencies = [
  "arbitrary",
  "ed25519-dalek 2.2.0",
@@ -16325,7 +16325,7 @@ dependencies = [
 [[package]]
 name = "subduction_keyhive"
 version = "0.13.0"
-source = "git+https://github.com/dman-os/subduction?rev=2b3276f18c50d8b17a8ca523ae6b19f773aadd27#2b3276f18c50d8b17a8ca523ae6b19f773aadd27"
+source = "git+https://github.com/dman-os/subduction?rev=f34d5a914add15562c60f42c48b8f8cc00e16261#f34d5a914add15562c60f42c48b8f8cc00e16261"
 dependencies = [
  "async-lock",
  "base64 0.22.1",

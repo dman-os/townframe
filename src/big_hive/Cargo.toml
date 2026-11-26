@@ -20,14 +20,14 @@ keyline_sqlite = { path = "../keyline_sqlite" }
 # `big_repo`. The workspace root's `[patch.crates-io]` points keyhive's registry names at the same
 # keyhive rev, so `keyline_sqlite` and subduction's own registry-named keyhive dependencies resolve
 # to the very crates declared here.
-keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "df93fc4c046ad86a01a4abe591f1b9f14628a4c8" }
-keyhive_crypto = { git = "https://github.com/dman-os/keyhive", rev = "df93fc4c046ad86a01a4abe591f1b9f14628a4c8", default-features = false, features = ["std"] }
-keyhive_codec = { git = "https://github.com/dman-os/keyhive", rev = "df93fc4c046ad86a01a4abe591f1b9f14628a4c8", default-features = false, features = ["std"] }
-keyline = { git = "https://github.com/dman-os/keyhive", rev = "df93fc4c046ad86a01a4abe591f1b9f14628a4c8", default-features = false, features = ["std"] }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27" }
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "2b3276f18c50d8b17a8ca523ae6b19f773aadd27" }
+keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469" }
+keyhive_crypto = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469", default-features = false, features = ["std"] }
+keyhive_codec = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469", default-features = false, features = ["std"] }
+keyline = { git = "https://github.com/dman-os/keyhive", rev = "94ff62a124cfb8e795168e9ca60d7d528fc90469", default-features = false, features = ["std"] }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "f34d5a914add15562c60f42c48b8f8cc00e16261" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "f34d5a914add15562c60f42c48b8f8cc00e16261" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "f34d5a914add15562c60f42c48b8f8cc00e16261" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "f34d5a914add15562c60f42c48b8f8cc00e16261" }
 automerge = "0.12.0"
 future_form.workspace = true
 thiserror.workspace = true
