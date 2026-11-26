@@ -1,5 +1,5 @@
 ---
-source: route.rs
-expression: "render(index_page, Origin::Node { url: \"http://127.0.0.1:8080\".to_owned() })"
+source: app.rs
+expression: "render(|origin| rsx! { IndexPage { origin } }, Origin::Node\n{ url: \"http://127.0.0.1:8080\".to_owned() })"
 ---
-<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>intxt</title><link rel="stylesheet" href="/assets/intxt_web.css"/></head><body><div class="intxt-page"><header class="intxt-bar"><h1>intxt</h1></header><main><p>A read-only viewer of intxts, served at <code>/i/&#60;drawer id&#62;?via=&#60;node key&#62;</code>.</p><p>Reading intxts from the node at <code>http://127.0.0.1:8080</code>.</p></main></div></body></html>
+<div class="intxt-page"><header class="intxt-bar"><h1>intxt</h1></header><main><p>A read-only viewer of intxts, served at <code>/i/&#60;drawer id&#62;?via=&#60;node key&#62;</code>.</p><p>Reading intxts from the node at <code>http://127.0.0.1:8080</code>.</p></main></div>

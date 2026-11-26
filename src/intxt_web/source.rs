@@ -10,6 +10,7 @@ use crate::view::CommentDatum;
 use crate::view::CommitDatum;
 use crate::view::EntryDatum;
 use crate::view::IntxtView;
+use crate::view::Origin;
 use crate::view::PatchDatum;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumReference;
@@ -60,15 +61,6 @@ impl LoadError {
             Self::Unreachable { .. } | Self::Unreadable { .. } => 502,
         }
     }
-}
-
-/// Where the pages' data comes from, as the index page says it.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Origin {
-    /// The built-in fixture, because no node is configured.
-    Fixture { example_path: String },
-    /// The node at this base URL.
-    Node { url: String },
 }
 
 /// Loads the intxt in `drawer`, reading through the nodes `via` names (a locator hint; the drawer

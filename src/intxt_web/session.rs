@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 /// are kept with their text cut at [`Self::MAX_PROMPT_OCTETS`], and at most
 /// [`Self::MAX_EDITED_TRACKED`] distinct edited paths are kept (the smallest in sort order, so
 /// what is kept does not depend on the order turns arrive in).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SessionSummary {
     /// The earliest and latest turn start.
     pub span: Option<(Timestamp, Timestamp)>,
@@ -37,7 +37,7 @@ pub struct SessionSummary {
 }
 
 /// One prompt the operator gave, as far as the page shows it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Prompt {
     /// The first non-empty line, cut to [`SessionSummary::MAX_HEADLINE_OCTETS`].
     pub headline: String,

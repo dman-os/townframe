@@ -1,6 +1,7 @@
 //! The guide tab: the author's sections in their order, each with the hunks it points at.
 
 use super::Markdown;
+use super::NavLink;
 use super::changes::diff_lines;
 use crate::files::excerpt;
 use crate::view::IntxtView;
@@ -34,7 +35,7 @@ pub(super) fn guide(view: &IntxtView) -> Element {
                     for target in section.targets.iter() {
                         if let Some(path) = &target.path {
                             p { class: "intxt-small",
-                                a { href: "{files_path}#file-{path}",
+                                NavLink { href: "{files_path}#file-{path}",
                                     code { "{target.label}" }
                                 }
                             }

@@ -1,6 +1,6 @@
 version = 1
 role = "application"
-dependency_reason = "The viewer is a wasi:http component that reads an intxt from a node over its XRPC, with the same datum types and wire envelope the CLI and the nodules use."
+dependency_reason = "The viewer is a wasi:http component that reads an intxt from a node over its XRPC, with the same datum types and wire envelope the CLI and the nodules use, and the hydrating client that navigates its pages."
 allowed_dependencies = [
     "big_blobs_core",
     "big_cabinet_core",
@@ -11,5 +11,12 @@ allowed_dependencies = [
 ]
 allow_external_api_types = false
 
+# The component. `server` is the node transport and the Dioxus server; the client build has none of it.
 [builds.wasm32-wasip3]
+required_features = ["server"]
+default_features = false
+
+# The hydrating client: no node transport (a test checks its dependency tree).
+[builds.wasm32-unknown-unknown]
+required_features = ["web"]
 default_features = false

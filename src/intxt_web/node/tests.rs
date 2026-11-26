@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::feed::FeedKind;
-use crate::route::render;
+use crate::ui::render_page;
 use crate::view::EntryKind;
 use big_cabinet_core::doc::DatumPage;
 use big_cabinet_core::doc::DatumVersion;
@@ -524,7 +524,7 @@ fn an_intxt_loads_with_its_commits_patch_comments_and_pull_request() {
     assert_eq!(view.threads[0].replies[0].body, "Because.");
 
     // The page escapes the diff and the description's raw HTML.
-    let page = render(crate::route::intxt_page, (view, crate::view::Tab::Files));
+    let page = render_page(view, crate::view::Tab::Files);
     assert!(
         page.contains("+&#60;b&#62;new&#60;/b&#62; &#38; more"),
         "{page}"

@@ -5,6 +5,7 @@ use crate::view::Tab;
 use dioxus::prelude::*;
 
 use super::At;
+use super::NavLink;
 
 /// Short id, whether work is going on, who took part and where the work lives. Active now is
 /// said in words, never marked with a dot or a colour.
@@ -68,9 +69,9 @@ pub(super) fn tabs(view: &IntxtView, current: Tab) -> Element {
     rsx! {
         nav { class: "intxt-tabs", aria_label: "Pages of this intxt",
             for tab in Tab::ALL {
-                a {
+                NavLink {
                     href: view.tab_path(tab),
-                    "aria-current": (tab == current).then_some("page"),
+                    current: tab == current,
                     "{tab.title()} "
                     span { class: "intxt-count", "{view.count(tab)}" }
                 }
@@ -94,7 +95,7 @@ pub(super) fn aside(view: &IntxtView) -> Element {
                     ul {
                         for link in related {
                             li {
-                                a { href: "{link.path}", "{link.label}" }
+                                NavLink { href: "{link.path}", "{link.label}" }
                                 " "
                                 code { "{link.drawer.get(..8).unwrap_or(&link.drawer)}" }
                             }
@@ -108,7 +109,7 @@ pub(super) fn aside(view: &IntxtView) -> Element {
                     ul {
                         for (index , thread) in view.threads.iter().enumerate() {
                             li {
-                                a {
+                                NavLink {
                                     href: "{conversation}#thread-{index}",
                                     if let Some(target) = thread.root.targets.first() {
                                         code { "{target.label}" }

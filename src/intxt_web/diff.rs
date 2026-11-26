@@ -9,7 +9,7 @@
 /// page of that size is not a page anyone reads; the rest is counted, not shown.
 pub const MAX_RENDERED_OCTETS: usize = 256 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LineKind {
     /// `diff --git`, `index`, `---`, `+++`, renames, mode lines: what precedes a file's hunks.
     File,
@@ -34,7 +34,7 @@ impl LineKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Line {
     pub kind: LineKind,
     /// The line as written, without its newline.
@@ -44,7 +44,7 @@ pub struct Line {
 }
 
 /// The lines of one file of a patch, from its `diff --git` header to the next one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiffFile {
     /// The new path (`b/` side of the header).
     pub path: String,
@@ -53,7 +53,7 @@ pub struct DiffFile {
     pub deletions: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Diff {
     pub lines: Vec<Line>,
     /// How many octets of the patch are not in `lines`: what the page cut off, plus whatever the

@@ -1,5 +1,5 @@
 ---
-source: route.rs
-expression: "render(error_page, (404, \"no page at /nope\".to_owned()))"
+source: app.rs
+expression: "render(|(status, message)| rsx! { ErrorPage { status, message } },\n(404u16, \"no page at /nope\".to_owned()))"
 ---
-<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>404</title><link rel="stylesheet" href="/assets/intxt_web.css"/></head><body><div class="intxt-page"><header class="intxt-bar"><h1>404</h1></header><main><p>no page at /nope</p><p><a href="/">intxt viewer</a></p></main></div></body></html>
+<div class="intxt-page"><header class="intxt-bar"><h1>404</h1></header><main><p>no page at /nope</p><p><a href="/">intxt viewer</a></p></main></div>

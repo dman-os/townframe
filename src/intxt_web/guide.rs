@@ -16,7 +16,7 @@ pub struct StructureDatum<'a> {
 }
 
 /// One entry of the guide, listed in reading order (a parent before its children).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GuideSection {
     /// Nesting below the guide's top level, 0 for a top-level section.
     pub depth: usize,

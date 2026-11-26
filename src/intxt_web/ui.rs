@@ -14,36 +14,15 @@ mod header;
 mod sessions;
 
 use crate::markdown;
-use crate::source::Origin;
 use crate::view::CommentView;
 use crate::view::EntryRef;
 use crate::view::IntxtView;
+use crate::view::Origin;
 use crate::view::PrLinksView;
 use crate::view::Tab;
 use crate::view::ThreadView;
 use dioxus::prelude::*;
 use jiff::Timestamp;
-
-/// Where the server serves the viewer's stylesheet (`intxt_web.css`, embedded by `route`).
-pub const STYLESHEET_PATH: &str = "/assets/intxt_web.css";
-
-/// The head and body of a document. The `<html>` element is written by `route::render`, because
-/// `html` is also the name of the element module inside rsx.
-#[component]
-pub fn Document(title: String, children: Element) -> Element {
-    rsx! {
-        head {
-            meta { charset: "utf-8" }
-            meta {
-                name: "viewport",
-                content: "width=device-width, initial-scale=1",
-            }
-            title { "{title}" }
-            link { rel: "stylesheet", href: STYLESHEET_PATH }
-        }
-        body { {children} }
-    }
-}
 
 /// The sticky top bar: the page's one `h1`.
 #[component]
@@ -159,7 +138,7 @@ fn PrLinks(links: PrLinksView) -> Element {
             ul {
                 for link in links.intxts {
                     li {
-                        a { href: "{link.path}", "{link.label}" }
+                        NavLink { href: "{link.path}", "{link.label}" }
                         for branch in link.refs {
                             " "
                             code { "{branch}" }
@@ -232,7 +211,7 @@ pub fn IndexPage(origin: Origin) -> Element {
                     Origin::Fixture { example_path } => rsx! {
                         p {
                             "No node is configured (INTXT_WEB_NODE and its capabilities are unset), so every page is the built-in fixture. Example: "
-                            a { href: "{example_path}", "{example_path}" }
+                            NavLink { href: "{example_path}", "{example_path}" }
                         }
                     },
                     Origin::Node { url } => rsx! {
@@ -255,8 +234,54 @@ pub fn ErrorPage(status: u16, message: String) -> Element {
             TopBar { title: format!("{status}") }
             main {
                 p { "{message}" }
-                p { a { href: "/", "intxt viewer" } }
+                p { NavLink { href: "/", "intxt viewer" } }
             }
         }
     }
+}
+
+/// How the host turns a click on an in-app link into navigation. A host that has a router provides
+/// it as context; without one (plain SSR, the review micro) [`NavLink`] is an ordinary anchor.
+#[derive(Clone, Copy)]
+pub struct Navigate(pub Callback<String>);
+
+/// A link to another page of the viewer. It is an anchor whose `href` always works; when the host
+/// provides [`Navigate`] a plain click navigates in place instead of loading the document. A path
+/// with a fragment stays a plain anchor: the router does not carry fragments.
+#[component]
+pub fn NavLink(href: String, #[props(default)] current: bool, children: Element) -> Element {
+    let navigate = try_use_context::<Navigate>();
+    let in_app = href.starts_with('/') && !href.contains('#');
+    rsx! {
+        a {
+            href: "{href}",
+            "aria-current": current.then_some("page"),
+            onclick: {
+                let href = href.clone();
+                move |event: MouseEvent| {
+                    if let (Some(navigate), true) = (navigate, in_app) {
+                        if event.modifiers().is_empty() {
+                            event.prevent_default();
+                            navigate.0.call(href.clone());
+                        }
+                    }
+                }
+            },
+            {children}
+        }
+    }
+}
+
+/// Renders a component once, with no event loop and no router: SSR has no interactivity to run,
+/// and a link is then a plain anchor.
+#[cfg(test)]
+pub(crate) fn render<P: Clone + 'static>(root: fn(P) -> Element, props: P) -> String {
+    let mut dom = VirtualDom::new_with_props(root, props);
+    dom.rebuild_in_place();
+    dioxus_ssr::render(&dom)
+}
+
+#[cfg(test)]
+pub(crate) fn render_page(view: IntxtView, tab: Tab) -> String {
+    render(|(view, tab)| rsx! { IntxtPage { view, tab } }, (view, tab))
 }

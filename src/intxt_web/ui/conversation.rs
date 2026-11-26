@@ -3,6 +3,7 @@
 
 use super::At;
 use super::Markdown;
+use super::NavLink;
 use super::RefList;
 use super::replies;
 use crate::feed::FeedItem;
@@ -170,7 +171,7 @@ fn entry_item(view: &IntxtView, item: &FeedItem, entry: &EntryView) -> Element {
                     })}
                     p { class: "intxt-item-preview intxt-muted",
                         "{summary.turns} prompt turns, {summary.tool_calls} tool calls. "
-                        a { href: view.tab_path(Tab::Sessions), "The session" }
+                        NavLink { href: view.tab_path(Tab::Sessions), "The session" }
                     }
                     if let Some(prompt) = first {
                         p { class: "intxt-item-preview", "First prompt: {prompt.headline}" }

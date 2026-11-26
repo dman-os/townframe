@@ -30,10 +30,11 @@ use intxt_core::work::JjChange;
 use intxt_core::work::JjChangeEntry;
 use intxt_core::work::SessionEntry;
 use jiff::Timestamp;
+use serde::Deserialize;
 use serde::Serialize;
 
 /// One intxt as a reader sees it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IntxtView {
     /// The drawer id, which names the intxt on every node it is shared with.
     pub drawer: String,
@@ -52,8 +53,17 @@ pub struct IntxtView {
     pub guide: Vec<GuideSection>,
 }
 
+/// Where the pages' data comes from, as the index page says it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Origin {
+    /// The built-in fixture, because no node is configured.
+    Fixture { example_path: String },
+    /// The node at this base URL.
+    Node { url: String },
+}
+
 /// The pages of one intxt, each its own route.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Tab {
     Conversation,
     Commits,
@@ -91,15 +101,9 @@ impl Tab {
             Self::Guide => Some("guide"),
         }
     }
-
-    pub fn from_segment(segment: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|tab| tab.segment() == Some(segment))
-    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryKind {
     Commits,
     GitRef,
@@ -127,7 +131,7 @@ impl EntryKind {
 }
 
 /// What an intxt includes, one row of its entry list.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EntryView {
     pub kind: EntryKind,
     /// The one line that names it: a commit range, a branch, a session or PR title.
@@ -157,7 +161,7 @@ pub struct EntryView {
 }
 
 /// One commit of an entry, from the `gitCommit` datum the intxt carries for it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitView {
     pub sha: String,
     /// The author's name, as the commit says. A claim of the content, not of who wrote the datum.
@@ -176,19 +180,19 @@ impl CommitView {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EntryRef {
     pub name: String,
     pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct PrLinksView {
     pub intxts: Vec<LinkedIntxt>,
     pub malformed: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinkedIntxt {
     /// The linked intxt's drawer id.
     pub drawer: String,
@@ -200,13 +204,13 @@ pub struct LinkedIntxt {
 }
 
 /// A root comment and the replies under it, oldest first as given.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadView {
     pub root: CommentView,
     pub replies: Vec<CommentView>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommentView {
     /// Who the comment says wrote it. Nothing here proves it: the viewer has no accounts.
     pub author: String,
@@ -221,7 +225,7 @@ pub struct CommentView {
     pub at: Option<Timestamp>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TargetView {
     /// `path:12-14` for code, else the datum location the comment is pinned to.
     pub label: String,

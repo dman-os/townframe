@@ -4,30 +4,40 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
 
+# The lib is the whole app. It builds two ways: with `server` (default) as the `wasi:http` component
+# for wasm32-wasip3, and with `web` as the hydrating client for wasm32-unknown-unknown, whose entry
+# point is the bin. `x/intxt-web.ts` builds both and embeds the client in the component.
 [lib]
 path = "lib.rs"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "intxt_web"
+path = "main.rs"
 
 [dependencies]
 #
-# internal
+# internal: what the view model is built from, on both sides of the wire
 intxt_core.workspace = true
 big_cabinet_core.workspace = true
-big_blobs_core.workspace = true
-method_core.workspace = true
-# The XRPC envelope (`encode_request`, `decode_response`) and the `HttpTransport` the node source
-# is generic over: the same code the CLI and the nodules speak to a node with.
-service_client_core_rs.workspace = true
-service_core_rs.workspace = true
 
 #
-# wasm component
-wit-bindgen = { version = "0.62.0", features = ["async-spawn", "futures-stream", "inter-task-wakeup"] }
-# Only the renderer-agnostic core: rsx! + html elements + hooks. No `launch`, `web`, `fullstack`,
-# `devtools`, `document`, `asset` (those pull tokio/axum/wasm-bindgen/manganis).
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "html", "hooks", "signals"] }
-dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
-dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+# internal: the node transport, server only
+big_blobs_core = { workspace = true, optional = true }
+method_core = { workspace = true, optional = true }
+# The XRPC envelope (`encode_request`, `decode_response`) and the `HttpTransport` the node source
+# is generic over: the same code the CLI and the nodules speak to a node with.
+service_client_core_rs = { workspace = true, optional = true }
+service_core_rs = { workspace = true, optional = true }
+
+#
+# dioxus: fullstack (SSR, server functions, hydration) and the router. The pin is the claytxt fork,
+# which builds its server half for wasm32-wasip3.
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "d1776fda621ac6cf951eec2cc3410435677ab89c", default-features = false, features = ["macro", "html", "hooks", "signals", "router", "fullstack", "document", "launch"] }
+
+#
+# client: the wasm-bindgen entropy backend (`.cargo/config.toml` selects it)
+getrandom03 = { package = "getrandom", version = "0.3", optional = true }
 
 #
 # http, markup, errors and encoding
@@ -36,16 +46,34 @@ http = "1"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 jiff = { version = "0.2", features = ["serde"] }
 thiserror = "2"
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# The component links getrandom's `custom` backend (`.cargo/config.toml`) and supplies the entropy.
+[features]
+default = ["server"]
+server = [
+    "dioxus/server",
+    "dep:big_blobs_core",
+    "dep:method_core",
+    "dep:service_client_core_rs",
+    "dep:service_core_rs",
+]
+web = ["dioxus/web", "dep:getrandom03", "getrandom03/wasm_js"]
+
+# The component: its wasi bindings and its http adaptation, and the getrandom `custom` backend
+# (`.cargo/config.toml`) whose entropy it supplies. They are in the lib on every target the `server`
+# feature builds for, but only the component (wasi) has the bindings to use them.
 [target.'cfg(target_os = "wasi")'.dependencies]
+wit-bindgen = { version = "0.62.0", features = ["async-spawn", "futures-stream", "inter-task-wakeup"] }
+axum = { version = "0.8", default-features = false }
+tower = { version = "0.5", features = ["util"] }
+futures-util = "0.3"
 getrandom03 = { package = "getrandom", version = "0.3" }
 
 [dev-dependencies]
 insta = { version = "1.44", features = ["yaml", "filters"] }
 pollster = "0.4"
+dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "d1776fda621ac6cf951eec2cc3410435677ab89c" }
 
 # Single-crate workspace, like btress_sysadmin: keeps the root lockfile untouched.
 [workspace]
@@ -65,3 +93,9 @@ opt-level = "s"
 codegen-units = 1
 lto = "thin"
 debug = "line-tables-only"
+
+# The client's profile (`x/intxt-web.ts`): the release profile without debug info, which wasm-bindgen
+# would carry into the shipped file.
+[profile.wasm-release]
+inherits = "release"
+debug = false

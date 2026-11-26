@@ -1,5 +1,5 @@
 ---
-source: route.rs
-expression: "render(index_page, FixtureSource.origin())"
+source: app.rs
+expression: "render(|origin| rsx! { IndexPage { origin } }, origin)"
 ---
-<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>intxt</title><link rel="stylesheet" href="/assets/intxt_web.css"/></head><body><div class="intxt-page"><header class="intxt-bar"><h1>intxt</h1></header><main><p>A read-only viewer of intxts, served at <code>/i/&#60;drawer id&#62;?via=&#60;node key&#62;</code>.</p><p>No node is configured (INTXT_WEB_NODE and its capabilities are unset), so every page is the built-in fixture. Example: <a href="/i/z11111111111111111111111111111111">/i/z11111111111111111111111111111111</a></p></main></div></body></html>
+<div class="intxt-page"><header class="intxt-bar"><h1>intxt</h1></header><main><p>A read-only viewer of intxts, served at <code>/i/&#60;drawer id&#62;?via=&#60;node key&#62;</code>.</p><p>No node is configured (INTXT_WEB_NODE and its capabilities are unset), so every page is the built-in fixture. Example: <a href="/i/z11111111111111111111111111111111">/i/z11111111111111111111111111111111</a></p></main></div>
