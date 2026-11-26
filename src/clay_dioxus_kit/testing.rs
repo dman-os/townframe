@@ -803,11 +803,33 @@ impl Page {
     /// A pointer event at client `(x, y)`, for a component that reads both axes (`ScrubStrip`).
     /// Held buttons follow [`Self::pointer`].
     pub(crate) fn pointer_at(&mut self, node: Node, name: &str, at: (f64, f64)) {
+        self.pointer_at_as(node, name, at, "mouse");
+    }
+
+    /// [`Self::pointer_at`] from a pointer of `pointer_type` (`"mouse"`, `"pen"`, `"touch"`).
+    pub(crate) fn pointer_at_as(
+        &mut self,
+        node: Node,
+        name: &str,
+        at: (f64, f64),
+        pointer_type: &str,
+    ) {
         let held = matches!(name, "pointerdown" | "pointermove");
-        self.pointer_at_holding(node, name, at, u16::from(held));
+        self.pointer_typed(node, name, at, u16::from(held), pointer_type);
     }
 
     fn pointer_at_holding(&mut self, node: Node, name: &str, at: (f64, f64), buttons: u16) {
+        self.pointer_typed(node, name, at, buttons, "mouse");
+    }
+
+    fn pointer_typed(
+        &mut self,
+        node: Node,
+        name: &str,
+        at: (f64, f64),
+        buttons: u16,
+        pointer_type: &str,
+    ) {
         let point = SerializedPointInteraction {
             page_x: at.0,
             client_x: at.0,
@@ -821,7 +843,7 @@ impl Page {
             serde_json::json!({
                 "pointer_id": 1, "width": 1.0, "height": 1.0, "pressure": 0.5,
                 "tangential_pressure": 0.0, "tilt_x": 0, "tilt_y": 0, "twist": 0,
-                "pointer_type": "mouse", "is_primary": true,
+                "pointer_type": pointer_type, "is_primary": true,
             })
             .as_object()
             .unwrap()

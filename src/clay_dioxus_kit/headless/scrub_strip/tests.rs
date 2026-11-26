@@ -921,7 +921,7 @@ mod rendered {
         on_tab(&mut page, 1);
         let root = page.by_class("ct-scrub-strip");
         let band = page.by_role("slider", "Index");
-        page.pointer_at(band, "pointerdown", (1050.0, 430.0));
+        page.pointer_at_as(band, "pointerdown", (1050.0, 430.0), "touch");
         assert_eq!(page.attr(root, "data-state").as_deref(), Some("engaged"));
         assert!(!selected.borrow().is_empty());
         // The thumb is 26 px inboard of the resting column, so something is pushed, and the
@@ -962,6 +962,38 @@ mod rendered {
         }
     }
 
+    /// The same press and a far-inboard drag under a mouse or a pen engages and selects but
+    /// pushes nothing: the rendered properties stay at the resting column.
+    #[test]
+    fn a_mouse_or_pen_press_engages_without_pushing_any_label() {
+        for pointer_type in ["mouse", "pen"] {
+            let (mut page, selected) = render(Renderer::Browser);
+            measure(&mut page, (0.0, 0.0), (1076.0, 860.0));
+            on_tab(&mut page, 1);
+            let root = page.by_class("ct-scrub-strip");
+            let band = page.by_role("slider", "Index");
+            page.pointer_at_as(band, "pointerdown", (1050.0, 430.0), pointer_type);
+            page.pointer_at_as(root, "pointermove", (100.0, 600.0), pointer_type);
+            assert_eq!(page.attr(root, "data-state").as_deref(), Some("engaged"));
+            assert!(!selected.borrow().is_empty());
+            assert_eq!(
+                page.custom_property(root, "--ct-strip-limit").as_deref(),
+                Some("0px"),
+                "{pointer_type}"
+            );
+            for marker in page
+                .children(root)
+                .into_iter()
+                .filter(|part| page.attr(*part, "data-part").as_deref() == Some("marker"))
+            {
+                assert_eq!(
+                    page.custom_property(marker, "--ct-strip-push").as_deref(),
+                    Some("0px")
+                );
+            }
+        }
+    }
+
     /// The overlay need not start at the client origin (a micro's mount may be offset): the
     /// pointer is read relative to the measured box, so a thumb 26 px inboard of the box's right
     /// edge reads the same wherever the box sits.
@@ -972,7 +1004,7 @@ mod rendered {
             measure(&mut page, (origin_x, 0.0), (1076.0, 860.0));
             let root = page.by_class("ct-scrub-strip");
             let band = page.by_role("slider", "Index");
-            page.pointer_at(band, "pointerdown", (origin_x + 1050.0, 430.0));
+            page.pointer_at_as(band, "pointerdown", (origin_x + 1050.0, 430.0), "touch");
             page.custom_property(root, "--ct-strip-limit")
         };
         assert_eq!(limit_after_press(0.0), limit_after_press(300.0));
