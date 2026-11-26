@@ -14,6 +14,11 @@ sqlite_rs.workspace = true
 big_automata = { path = "../big_automata", default-features = false }
 utils_rs.workspace = true
 keyline_sqlite = { path = "../keyline_sqlite" }
+keyhive_sqlite = { path = "../keyhive_sqlite" }
+big_automata_sqlite = { path = "../big_automata_sqlite" }
+beekem = { version = "0.9.0", default-features = false, features = ["std"] }
+keyhive_content = { version = "0.4.0", default-features = false, features = ["std"] }
+serde_json.workspace = true
 
 # This crate runs on the newer keyhive and subduction forks (branch `townframe-changes`), not on
 # the workspace's `keyhive_*` / `subduction_*` pins, which stay on the older revisions for
@@ -50,3 +55,9 @@ proptest.workspace = true
 tempfile.workspace = true
 # The upstream `MinimizedTreeStore` conformance checks, and the fork's signer for sealing fixtures.
 subduction_core = { git = "https://github.com/dman-os/subduction", rev = "d5d4e2424fb176af2b9c053df22a19d75f0dfc97", features = ["conformance", "test_utils"] }
+# The executor suite signs fixtures (certificates, CGKA operations) and builds the stores rows.
+keyline = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5", features = ["test_utils"] }
+keyhive_core = { git = "https://github.com/dman-os/keyhive", rev = "a41afc079b000a09ac07c93c655d90b736207eb5", features = ["arbitrary"] }
+beekem = { version = "0.9.0", features = ["arbitrary", "std"] }
+arbitrary = "1.4.1"
+ed25519-dalek.workspace = true
