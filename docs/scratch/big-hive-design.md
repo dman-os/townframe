@@ -244,3 +244,35 @@ interested.
   mid-session.
 - Keyhive accepts the two follow-ups from the serving fix: `receive_prekey_op` hydrates first,
   and serving store ops that eager loading would keep pending is accepted, pinned by a test.
+
+## Sessions and interest (operator, 2026-11-26 late)
+
+Research: the interest report (2026-11-26), from big_repo on `automata-18-peer` and big_automata
+on `automata-26-kit-driver`.
+
+- **A session is (connection, local principal)**, for both subduction and big_automata. The remote
+  node key stays separate as the peer key. big_automata's replay server already keys sessions by
+  principal (`replay/server.rs:62-73`) and its cursors are log positions, so per-principal sessions
+  need no server change; the client runs one driver per session and a route planner assigns each
+  part to one principal. Subduction is natively one identity per session. A second handshake
+  cannot run on an existing QUIC connection today, so a shared-principal session is a new QUIC
+  connection from the same endpoint.
+- **Subduction fork fix needed:** its connection registries are keyed by remote id alone, so two
+  sessions to one peer as different local principals are indistinguishable. Key them by (remote,
+  local principal).
+- **No eager shared-principal sessions** (privacy). Our own node principal is the default session.
+  A shared-principal session opens only for a specific need (interest in a document our own
+  principal cannot reach but the shared one can, toward a peer with standing on it) and closes
+  when the need goes. A peer learns only the principals our interests required of that peer.
+- **Interest is redesigned around the existing system.** Today `drive()` subscribes every demanded
+  document on every connected peer (`interest.rs:104-158`); that goes. Interest stays in memory
+  (leases plus the 30 s grace), re-asserted by callers after a restart. A document's interest
+  routes only to sessions (P, L) where both stand at Relay or above. For a document nobody has
+  yet, the object route stays open and the server's `Refused` answer drives backoff and retry. No
+  durable interest table. Fetch wants in the durable outbox stay as they are.
+- **Session lifecycle is a state machine:** `Wanted → Dialing → Open(routes) → Idle(grace) →
+  Closed`, with dial backoff, a concurrency cap, and own-principal preference.
+- **Proposed boundary (to confirm, and to discuss with nodules later):** big_hive's hub owns the
+  policy (which sessions, when to release, via `NeedSession`/`ReleaseSession`); big_node owns the
+  mechanism (dialing on the same endpoint, reporting open and closed).
+- **Open:** binding the subduction handshake signer to the iroh identity; today nothing checks it.
