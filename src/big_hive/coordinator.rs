@@ -26,10 +26,12 @@
 //! # The protocol, in order
 //!
 //! 1. **Admission.** [`Coordinator::submit`] queues a plan. A plan starts only when its
-//!    documents are disjoint from those of every plan in flight, and plans start in the order they
-//!    were submitted: the front of the queue waits, and nothing behind it overtakes it. Because
-//!    this is the only place plans start, two plans that overlap can never wait on each other in a
-//!    cycle. (A [`Config::max_plans`] window bounds how many are in flight, so the mailboxes
+//!    documents are disjoint from those of every plan in flight, and a plan waits behind every
+//!    earlier plan, queued or in flight, that shares a document with it: plans that share a
+//!    document start in the order they were submitted. A plan that shares nothing with the plans
+//!    ahead of it starts as soon as its documents are free, even past a plan that is blocked.
+//!    Because this is the only place plans start, two plans that overlap can never wait on each
+//!    other in a cycle. (A [`Config::max_plans`] window bounds how many are in flight, so the mailboxes
 //!    around it have a known size.)
 //! 2. **Prepare.** [`Command::Prepare`] goes to each Document, with the work. The Document runs
 //!    it on its live document, answers with the change's bytes and the frontier row the commit
@@ -74,8 +76,9 @@
 //! 3. **Every prepared Document is released exactly once.** A Document that was sent a prepare
 //!    and did not refuse gets exactly one of apply or abort, and never both. A Document that
 //!    refused gets none, because it holds nothing.
-//! 4. **Plans start in order.** A queued plan starts only after every plan submitted before it
-//!    has started.
+//! 4. **Plans that share a document start in submission order.** A queued plan starts only
+//!    after every plan submitted before it that names one of its documents has started. (Plans
+//!    that share no document are unordered: one may start while an earlier one is blocked.)
 //! 5. **A refusal aborts cleanly.** A refused prepare aborts the whole plan: nothing is
 //!    committed, every other Document is released, and the caller is told which document
 //!    refused.
@@ -232,7 +235,7 @@ struct Running<O> {
 pub(crate) enum Plant {
     /// A plan starts although a document of it is in another plan (law 1).
     AdmitOverlapping,
-    /// A plan behind one that cannot start is started (law 4).
+    /// A plan starts ahead of an earlier one that shares a document with it (law 4).
     Overtake,
     /// A failed encryption still commits the plan's other rows (law 2).
     CommitDespiteFailure,
@@ -415,38 +418,36 @@ impl<O> Coordinator<O> {
 
     // ── the stages ──────────────────────────────────────────────────────────────────────────
 
-    /// Start plans from the front of the queue while their documents are free: in order, and
-    /// within the window.
+    /// Start the plans that can start, within the window: one whose documents are free and that
+    /// shares none with a plan ahead of it in the queue (which is blocked, or it would have
+    /// started). Scanning the queue in order and remembering the documents of the plans passed
+    /// over is what keeps plans that share a document in submission order.
     fn admit(&mut self) {
-        loop {
-            #[cfg(test)]
-            let overlap_ok = self.plant == Some(Plant::AdmitOverlapping);
-            #[cfg(not(test))]
-            let overlap_ok = false;
-            #[cfg(test)]
-            let overtake = self.plant == Some(Plant::Overtake);
-            #[cfg(not(test))]
-            let overtake = false;
-            if self.running.len() >= self.config.max_plans {
-                return;
+        #[cfg(test)]
+        let overlap_ok = self.plant == Some(Plant::AdmitOverlapping);
+        #[cfg(not(test))]
+        let overlap_ok = false;
+        #[cfg(test)]
+        let overtake = self.plant == Some(Plant::Overtake);
+        #[cfg(not(test))]
+        let overtake = false;
+        while self.running.len() < self.config.max_plans {
+            let mut passed: BTreeSet<DocId> = BTreeSet::new();
+            let mut found = None;
+            for (at, queued) in self.queue.iter().enumerate() {
+                let free = overlap_ok
+                    || queued
+                        .writes
+                        .iter()
+                        .all(|(doc, _)| !self.busy.contains(doc));
+                let behind = queued.writes.iter().any(|(doc, _)| passed.contains(doc));
+                if free && (!behind || overtake) {
+                    found = Some(at);
+                    break;
+                }
+                passed.extend(queued.writes.iter().map(|(doc, _)| *doc));
             }
-            let free = |queued: &Queued<O>, busy: &BTreeSet<DocId>| {
-                overlap_ok || queued.writes.iter().all(|(doc, _)| !busy.contains(doc))
-            };
-            let at = if self
-                .queue
-                .front()
-                .is_some_and(|front| free(front, &self.busy))
-            {
-                Some(0)
-            } else if overtake {
-                self.queue
-                    .iter()
-                    .position(|queued| free(queued, &self.busy))
-            } else {
-                None
-            };
-            let Some(at) = at else {
+            let Some(at) = found else {
                 return;
             };
             let queued = self.queue.remove(at).expect("found above");

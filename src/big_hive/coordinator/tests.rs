@@ -54,15 +54,38 @@ fn law_1_documents_in_flight_are_disjoint() {
 }
 
 #[test]
-fn law_4_plans_start_in_order() {
+fn law_4_plans_that_share_a_document_start_in_submission_order() {
     let mut sim = ready();
-    sim.submit(0b011, &[Write, Write]);
+    // document 1 is busy, so the plan on {0, 1} is blocked
     sim.submit(0b010, &[Write]);
-    // disjoint from the first, but the plan before it has not started
-    sim.submit(0b100, &[Write]);
+    sim.submit(0b011, &[Write, Write]);
+    // a plan on {0} shares document 0 with the blocked plan ahead of it: it waits, though
+    // document 0 is free
+    sim.submit(0b001, &[Write]);
     assert_eq!((sim.running(), sim.queued()), (1, 2));
     finish(&mut sim);
-    assert_eq!((sim.running(), sim.queued()), (2, 0));
+    assert_eq!(
+        (sim.running(), sim.queued()),
+        (1, 1),
+        "the blocked plan first"
+    );
+    finish(&mut sim);
+    assert_eq!((sim.running(), sim.queued()), (1, 0));
+    finish(&mut sim);
+}
+
+#[test]
+fn a_plan_that_shares_nothing_overtakes_a_blocked_plan() {
+    let mut sim = ready();
+    sim.submit(0b010, &[Write]); // B, running
+    sim.submit(0b011, &[Write, Write]); // {A, B}: blocked on B
+    sim.submit(0b100, &[Write]); // {C}: shares nothing with the plans ahead
+    assert_eq!(
+        (sim.running(), sim.queued()),
+        (2, 1),
+        "{{C}} runs past the blocked {{A, B}}"
+    );
+    finish(&mut sim);
     finish(&mut sim);
 }
 

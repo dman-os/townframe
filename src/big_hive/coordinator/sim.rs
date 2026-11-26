@@ -23,7 +23,7 @@
 //! # Checks
 //!
 //! After every step: documents in flight are disjoint (law 1, from the commands the machine
-//! issues); plans start in submission order (law 4); a plan's changes are in the world all or
+//! issues); plans that share a document start in submission order (law 4); a plan's changes are in the world all or
 //! none (law 2); a Document that holds a plan is a plan in flight (law 3); the number of plans
 //! in flight is within the window. At each answer: every Document that did not refuse was
 //! released exactly once (law 3), a refusal left nothing committed and named its document (law
@@ -304,12 +304,14 @@ impl Sim {
                 let seen = self.plans.get_mut(&plan).expect("a submitted plan");
                 if !seen.started {
                     seen.started = true;
-                    // law 4: every plan submitted before it has started
+                    // law 4: every plan submitted before it that shares a document has started
+                    let mine = self.plans[&plan].docs.clone();
                     let earlier = self.order.iter().take_while(|p| **p != plan);
                     for before in earlier {
+                        let shares = self.plans[before].docs.iter().any(|d| mine.contains(d));
                         assert!(
-                            self.plans[before].started,
-                            "plan {plan} started before plan {before}, which was submitted first (law 4)"
+                            !shares || self.plans[before].started,
+                            "plan {plan} started before plan {before}, which shares a document and was submitted first (law 4)"
                         );
                     }
                     // law 1: its documents are in no plan in flight
