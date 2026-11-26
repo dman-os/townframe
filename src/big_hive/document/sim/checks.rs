@@ -159,7 +159,18 @@ impl Sim {
     }
 
     /// After every step.
-    pub(super) fn check(&self) {
+    pub(super) fn check(&mut self) {
+        // a machine that has hydrated again has learned the frontier row: nothing is excused
+        let live: Vec<usize> = (0..DOCS)
+            .filter(|doc| {
+                self.machines[*doc]
+                    .as_ref()
+                    .is_some_and(|m| matches!(m.doc.phase, Phase::Live(_)))
+            })
+            .collect();
+        for doc in live {
+            self.undecided.remove(&doc);
+        }
         for doc in 0..DOCS {
             let revs = (self.world.frontier_rev(doc), self.world.tree_rev(doc));
             assert!(
@@ -173,10 +184,11 @@ impl Sim {
             };
             // the machine's idea of the frontier is the row in the store: both change only when
             // a publication or a commit lands, in the same step
-            let behind_by_a_lost_answer =
-                self.undecided.contains(&doc) && !matches!(machine.doc.phase, Phase::Live(_));
+            // Exactly: the store's, or, until it hydrates again, what it was before a commit it
+            // was told failed wrote its row.
+            let lost = self.undecided.get(&doc).copied();
             assert!(
-                behind_by_a_lost_answer || machine.doc.frontier_rev == revs.0,
+                machine.doc.frontier_rev == revs.0 || lost == Some(machine.doc.frontier_rev),
                 "doc {doc}: the machine thinks the frontier is at {}, the store has it at {} (law 5)",
                 machine.doc.frontier_rev,
                 revs.0

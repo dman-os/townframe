@@ -132,6 +132,22 @@ impl World {
             .map(|tag| tag.parse().expect("a tag"))
     }
 
+    /// Which of `must` the document at `deps` does not contain (is not built on).
+    pub fn unreached(
+        &self,
+        doc: usize,
+        deps: &[ChangeHash],
+        must: &BTreeSet<ChangeHash>,
+    ) -> Vec<ChangeHash> {
+        let all = load(self.docs[doc].changes.iter().map(|stored| &stored.change));
+        let beyond: BTreeSet<ChangeHash> = all
+            .get_changes(deps)
+            .into_iter()
+            .map(|change| change.hash())
+            .collect();
+        must.intersection(&beyond).copied().collect()
+    }
+
     pub fn visible(&self, doc: usize) -> BTreeSet<String> {
         self.keys_at(doc, Rev::MAX)
     }

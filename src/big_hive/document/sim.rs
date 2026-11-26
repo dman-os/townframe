@@ -158,7 +158,13 @@ pub(super) struct Sim {
     waiting: BTreeMap<Ticket, Waiting>,
     next_ticket: Ticket,
     next_tag: Vec<u64>,
-    last_landed: Vec<Option<(u64, ChangeHash)>>,
+    /// The tag of the write that landed last through the machine, for each document.
+    last_landed: Vec<Option<u64>>,
+    /// The local writes that have landed through the machines, for each document.
+    landed_local: Vec<BTreeSet<ChangeHash>>,
+    /// For each change a machine has made: the local writes that had landed when it was made,
+    /// which it must be built on (law 2).
+    built_after: BTreeMap<ChangeHash, BTreeSet<ChangeHash>>,
     acked: Vec<BTreeSet<String>>,
     stale_handles: Vec<(usize, Handle)>,
     /// The last change an external author sent for each document, and the key it adds.
@@ -166,7 +172,7 @@ pub(super) struct Sim {
     next_author: Vec<u64>,
     /// Documents whose last commit was left undecided and landed: the machine's frontier may be
     /// behind the store's until it hydrates.
-    undecided: BTreeSet<usize>,
+    undecided: BTreeMap<usize, Rev>,
     /// Commits reported failed whose transactions have not run yet.
     zombies: Vec<(usize, Change)>,
     settled: BTreeSet<u64>,
@@ -213,11 +219,13 @@ impl Sim {
             next_ticket: 0,
             next_tag: vec![0; DOCS],
             last_landed: vec![None; DOCS],
+            landed_local: vec![BTreeSet::new(); DOCS],
+            built_after: BTreeMap::new(),
             acked: vec![BTreeSet::new(); DOCS],
             stale_handles: vec![],
             last_ingest: vec![None; DOCS],
             next_author: vec![0; DOCS],
-            undecided: BTreeSet::new(),
+            undecided: BTreeMap::new(),
             zombies: vec![],
             settled: BTreeSet::new(),
             next_token: 0,
@@ -318,6 +326,7 @@ impl Sim {
             }
             Command::PrepareEncrypt { call, change } => {
                 self.check_not_held(doc);
+                self.made(doc, &change);
                 self.fly(doc, call, Ask::Encrypt(change));
             }
             Command::Commit { call, plan } => {
@@ -607,14 +616,12 @@ impl Sim {
         if let (Some(now), Ask::Commit(plan)) = (undecided, &flight.ask) {
             let change = Change::from_bytes(plan.change.ciphertext.clone()).expect("a change");
             if now {
+                let before = self.world.frontier_rev(doc);
                 self.land(vec![(doc, change, plan.frontier.clone())]);
-                self.undecided.insert(doc);
+                self.undecided.insert(doc, before);
             } else {
                 self.zombies.push((doc, change));
             }
-            // An undecided commit breaks the order a write can be held to: the monitor of law 2
-            // starts again from the next write that lands.
-            self.last_landed[doc] = None;
             let machine = self.machines[doc]
                 .as_mut()
                 .expect("a call's machine is there");
@@ -723,17 +730,25 @@ impl Sim {
             let Some(tag) = self.world.new_tag(*doc, change) else {
                 continue;
             };
-            if let Some((last, last_hash)) = self.last_landed[*doc] {
+            if let Some(last) = self.last_landed[*doc] {
                 assert!(
                     tag > last,
                     "doc {doc}: write {tag} landed after write {last}: submission order broken"
                 );
-                assert!(
-                    change.deps().contains(&last_hash),
-                    "doc {doc}: write {tag} was not built on write {last}"
-                );
             }
-            self.last_landed[*doc] = Some((tag, change.hash()));
+            // Built on every write that had landed through the machine when it was made. (A commit
+            // that was reported failed and runs later is not one of them: nobody could build on
+            // it.)
+            let must = self.built_after.remove(&change.hash()).unwrap_or_default();
+            let missed = self.world.unreached(*doc, change.deps(), &must);
+            assert!(
+                missed.is_empty(),
+                "doc {doc}: write {tag} was not built on {} write(s) that had landed before it \
+                 was made",
+                missed.len()
+            );
+            self.last_landed[*doc] = Some(tag);
+            self.landed_local[*doc].insert(change.hash());
         }
         let docs: Vec<usize> = batch.iter().map(|(doc, ..)| *doc).collect();
         let landed = self.world.commit(batch);
@@ -750,7 +765,6 @@ impl Sim {
             return;
         }
         let (doc, change) = self.zombies.remove(pick % self.zombies.len());
-        self.last_landed[doc] = None;
         let landed = self.world.commit(vec![(doc, change, None)]);
         self.mail.push(Mail::Tree(doc, landed[0].rev));
     }
@@ -795,10 +809,24 @@ impl Sim {
         }
     }
 
+    /// A machine made a change: remember which local writes had landed.
+    fn made(&mut self, doc: usize, bytes: &[u8]) {
+        let hash = Change::from_bytes(bytes.to_vec()).expect("a change").hash();
+        self.built_after
+            .insert(hash, self.landed_local[doc].clone());
+    }
+
     fn prepared(&mut self, doc: usize, plan: PlanId, result: Result<PlanPrepared<Out>, Rejected>) {
         if result.is_ok() {
             // a refusal starts nothing
             self.check_not_held(doc);
+        }
+        if let Ok(PlanPrepared {
+            change: Some(change),
+            ..
+        }) = &result
+        {
+            self.made(doc, change);
         }
         let state = self
             .plans
