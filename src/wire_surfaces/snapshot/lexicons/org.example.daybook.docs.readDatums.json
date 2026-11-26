@@ -124,6 +124,10 @@
           "name": "InvalidValue"
         },
         {
+          "description": "A datum whose slot carries meaning (a dpath claim's slot is its dpath) was written under a\nslot that does not spell one.",
+          "name": "InvalidSlot"
+        },
+        {
           "name": "ValueTooLarge"
         },
         {
