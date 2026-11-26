@@ -174,6 +174,20 @@ Items are open unless noted; verify against the stack before starting.
 - Test infra: big_node's guest e2e reads `test_nodule_guest.wasm` from a mbx-managed target that gc can delete; build the guest into a path mbx does not manage or have the test build it.
 - Windows work collects in `docs/scratch/windows-todo.md` and lands as one PR on a Windows machine.
 
+### dpaths import (operator, 2026-11-26; today's focus)
+
+- Land dpaths feature by feature. First: **import** existing files from disk into documents, through **one lens**: file → Blob datum + dpath datum. No pauperfuse, no export lenses, no dtree yet. The vtree (#47's `pauperfuse`) stays the eventual engine for incremental materialization, for checkouts and for guests' custom VFS. The operator hasn't reviewed #47's pauperfuse or lens code and doubts its design.
+- Slots use ADR 035's Go string-literal escaping (decided in the 2026-10-14 session), not URL encoding.
+- Layers:
+  1. `Dpath` in `datum_core` plus the `org.example.daybook.dpath` datum (`stack/node-108-dpath`, Sonnet lane);
+  2. `day import <path…> --drawer <d> [--under /prefix]`:
+     - mint blobs `put` and docs `create` at `drawer <id>`;
+     - `blobs.importFile` over the descriptor socket (`NodeClient::import_files`, already written);
+     - `CreateDoc { placement: "drawer <id>", datums: {Blob, dpath} }`;
+     - re-import matches by dpath within the drawer (`HasKey` inside `InDrawer`): same digest → skip, different → `WriteDatums` with the new Blob;
+  3. a dpath-prefix predicate (a range scan on `big_cabinet_datum_set_entries`' key index) for permbinds.
+- The last #47 working session is atuin `01a12c3170da7a6ebba4b41f1c08dbaa` (2026-10-11/12).
+
 ## Deferred
 
 - wflow service and durable procedures (D3: durable work goes through a wflow service; convention that durable mutations default to wflow; waits for the wflow rework in `../townframe-p3N`); POSIX providers; triage/processors and big_tasks (D5: tasks decide which node, dispatch decides whether and how locally); network/XRPC exposure; single-instance services.
