@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 433b2656607f8d35023f79c85129e02788c104272632c17b1bfb4cd8f103afe7 # shrinks to ops = [Write { doc: 0, kind: 0 }, Keys { doc: 0 }, RemoteWrite { doc: 31, keyed: false }, PlanPrepare { mask: 0 }, RemoteWrite { doc: 44, keyed: true }, Write { doc: 0, kind: 0 }, Write { doc: 0, kind: 0 }, PlanPrepare { mask: 0 }, Keys { doc: 71 }, Crash { landed: 252 }, Complete { pick: 169, fail: false }, Complete { pick: 94, fail: false }, RemoteWrite { doc: 108, keyed: true }, RemoteWrite { doc: 119, keyed: false }, Complete { pick: 86, fail: false }, Deliver(51), Deliver(191), Access { doc: 194, readable: false }, Deliver(238), Complete { pick: 120, fail: false }], seed = 5205891036299963632
