@@ -1191,3 +1191,29 @@ inside the transaction. This ties together:
   the browser, not before.
 - **ARK issue draft** about the concurrent-epoch gap left by #24's nudge-edit removal: file it
   after the repro confirms the gap.
+
+### Membership and notifications (operator, 2026-11-26)
+- **The peer never modifies our membership.** The group-part worker adds documents to parts by
+  walking our own keyhive change stream, so a remote re-add appears there. The in-memory test
+  backend applying peer adds and removes is a test-backend bug; it must derive membership from
+  its own source of truth too.
+- **The real race.** A group part's replay is an update notification, not membership. If the
+  notification for D in part P arrives before the group-part worker adds D to P, discarding it
+  leaves D in P without a fetch.
+- **Design:**
+  - A notification for a non-member is recorded as a parked outbox want, keyed by object, with
+    the advertising peer as provider.
+  - When the group-part worker adds a member, it consults the outbox, and the parked want
+    becomes fetchable.
+  - Parked entries are tracked per peer, capped per peer and given a TTL.
+  - When entries are dropped, record "(peer, part) lossy since rev R" and **lazily** rewind that
+    peer's part cursor to R, only when a local membership add later lands on that part. An eager
+    rewind loops: the peer re-sends, the cap busts again. Lowering a part cursor is already a
+    defined restart (`PartLifecycle` law 10).
+  - The bucket walk remains the safety net, since a local membership change moves the part's
+    fingerprint.
+- **Upstreaming:** drafts open inside our forks (base `upstream-main`), the operator reviews
+  them, then fresh upstream PRs are opened from the same head branches. GitHub can't move a PR to
+  another repository.
+- **`townframe-changes`** in both forks now carries the Keyline commits, for our own use. The old
+  commits are kept at `townframe-changes-pre-keyline`, so townframe's rev pins stay reachable.
