@@ -53,6 +53,7 @@ Scope: what lands on main, in what order, and what the operator reviews next, ac
 |---|---|---|---|
 | 2026-11-25 ~16:00 | #105 node-09 ci-drafts | af0f9a42 (+ empty b36cfc3d) | tree == reviewed tree |
 | 2026-11-25 ~19:00 | #106–#199 (node-10…55), one squash per PR | ee20c626 | every step tree-checked; main tree a36abd5e == reviewed #199. #112 was closed by GitHub (see pitfalls); its change landed inside #113's squash. #399 was a replacement that GitHub marked "merged" into node-15 (a no-op). Stack #101 unstacked; the rest re-linked as **stack #408** (#233 → #352, 38 PRs). |
+| 2026-11-26 | #423 mbx 1.30.0 → 1.31.0 (claytxt; flake.nix + flake.lock only) | 44f575a6 | operator OK'd it once CI was green |
 
 ## Queue
 
