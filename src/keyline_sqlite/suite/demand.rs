@@ -58,7 +58,7 @@ fn grant(
 
 /// The small document every test asks about: owners, a member of the owners, and a grant revoked.
 fn small_doc() -> Vec<VerifiedCertificate<()>> {
-    let bob = d(ALICE, id(3), DOC, Power::Edit);
+    let bob = d(ALICE, 3, DOC, Power::Edit);
     vec![
         sign(d(DOC, OWNERS, DOC, Power::Admin)),
         sign(d(OWNERS, ALICE, OWNERS, Power::Admin)),
@@ -227,7 +227,7 @@ fn role_with_member() -> Vec<VerifiedCertificate<()>> {
     vec![
         sign(d(DOC, OWNERS, DOC, Power::Admin)),
         sign(d(OWNERS, ALICE, OWNERS, Power::Admin)),
-        sign(d(ALICE, id(3), DOC, Power::Edit)),
+        sign(d(ALICE, 3, DOC, Power::Edit)),
     ]
 }
 
